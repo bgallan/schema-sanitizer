@@ -216,23 +216,22 @@ class ParquetRecordBatchStreamFactory:
             _LOGGER.debug("Native Parquet reader skipped: footer info unavailable")
             return None
         blockers = list(info.get("native_reader_blockers") or [])
-        if info.get("native_reader_ready") == 1:
-            batch_size_blocker = self._native_batch_size_blocker(info)
-            if batch_size_blocker is not None:
-                _set_parquet_native_reader_diagnostics(
-                    attempted=True,
-                    ready=False,
-                    reason="not_ready",
-                    blockers=[batch_size_blocker],
-                    row_group_count=info.get("row_group_count"),
-                    num_rows=info.get("num_rows"),
-                )
-                _LOGGER.debug(
-                    "Native Parquet reader skipped; retrying input with PyArrow: %s",
-                    batch_size_blocker,
-                )
-                return None
-        if info.get("native_reader_ready") != 1:
+        batch_size_blocker = self._native_batch_size_blocker(info)
+        if batch_size_blocker is not None:
+            _set_parquet_native_reader_diagnostics(
+                attempted=True,
+                ready=False,
+                reason="not_ready",
+                blockers=[batch_size_blocker],
+                row_group_count=info.get("row_group_count"),
+                num_rows=info.get("num_rows"),
+            )
+            _LOGGER.debug(
+                "Native Parquet reader skipped; retrying input with PyArrow: %s",
+                batch_size_blocker,
+            )
+            return None
+        if info.get("native_reader_ready") != 1 and self._columns is None:
             _set_parquet_native_reader_diagnostics(
                 attempted=True,
                 ready=False,
@@ -247,25 +246,40 @@ class ParquetRecordBatchStreamFactory:
                 first_blocker,
             )
             return None
+        if info.get("native_reader_ready") != 1:
+            _LOGGER.debug(
+                "Native Parquet reader full footer was not ready; trying projected "
+                "native read before PyArrow fallback: %s",
+                blockers[0] if blockers else "unknown blocker",
+            )
         try:
             if self._columns is None:
                 capsule = native_read(self._local_path)
             else:
                 capsule = native_read(self._local_path, list(self._columns))
         except RuntimeError as exc:
+            message = str(exc)
+            reason = "not_ready" if "file is not ready" in message else "native_error"
             _set_parquet_native_reader_diagnostics(
                 attempted=True,
-                ready=True,
-                reason="native_error",
-                blockers=[],
-                error=str(exc),
+                ready=False if reason == "not_ready" else True,
+                reason=reason,
+                blockers=[message] if reason == "not_ready" else [],
+                error=message,
                 row_group_count=info.get("row_group_count"),
                 num_rows=info.get("num_rows"),
             )
-            _LOGGER.error(
-                "Native Parquet reader failed; retrying input with PyArrow",
-                exc_info=exc,
-            )
+            if reason == "not_ready":
+                _LOGGER.debug(
+                    "Native Parquet reader skipped after projected readiness "
+                    "check; retrying input with PyArrow: %s",
+                    message,
+                )
+            else:
+                _LOGGER.error(
+                    "Native Parquet reader failed; retrying input with PyArrow",
+                    exc_info=exc,
+                )
             return None
         _set_parquet_native_reader_diagnostics(
             attempted=True,

@@ -2452,6 +2452,68 @@ def test_native_parquet_stream_projects_struct_scalar_leaves(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_projects_simple_list_with_unsupported_unprojected_column(
+    tmp_path: Path,
+) -> None:
+    """Verify list projection can use native route despite unprojected blockers."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "projected-list.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("scores", pa.list_(pa.int64())),
+            pa.field("items", pa.list_(pa.struct([pa.field("score", pa.int64())]))),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"id": 1, "scores": [1, 2], "items": [{"score": 10}]},
+            {"id": 2, "scores": None, "items": []},
+            {"id": 3, "scores": [3], "items": None},
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert any("items.list.element.score" in blocker for blocker in info["native_reader_blockers"])
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["scores", "id"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    expected = table.select(["scores", "id"])
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
 def test_nested_native_parquet_reader_materializes_supported_nested_shapes(
     tmp_path: Path,
 ) -> None:
