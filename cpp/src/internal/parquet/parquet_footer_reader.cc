@@ -3700,8 +3700,15 @@ native_reader_column_buffer_bytes(const ColumnChunkInfo &column,
                           "native repeated validity buffer bytes"));
     }
   }
+  const auto value_row_count = column.repeated_level_layout_decoded
+                                   ? column.repeated_level_element_count
+                                   : row_count;
+  if (value_row_count < 0) {
+    return sanitize::Status::Invalid(
+        "Parquet native read plan: negative value row count");
+  }
   if (column.native_read_total_nulls > 0) {
-    SAN_RETURN_NOT_OK(add_i64_checked(&total, (row_count + 7) / 8,
+    SAN_RETURN_NOT_OK(add_i64_checked(&total, (value_row_count + 7) / 8,
                                       "native validity buffer bytes"));
   }
   SAN_RETURN_NOT_OK(
@@ -3785,7 +3792,8 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
     }
     const auto page_value_kind = value_buffer_kind_for_page(*column, page);
     const auto page_value_width = value_width_bytes_for_page(*column, page);
-    if (!((page_value_kind == "delta_binary_packed" && page_value_width > 0) ||
+    if (!((page_value_kind == "fixed_width" && page_value_width > 0) ||
+          (page_value_kind == "delta_binary_packed" && page_value_width > 0) ||
           page_value_kind == "delta_length_byte_array")) {
       native_plan_complete = false;
     } else if (native_value_kind.empty()) {
@@ -3873,7 +3881,8 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
   }
   column->repeated_level_layout_decoded = true;
   if (native_plan_complete && saw_data_page &&
-      (native_value_kind == "delta_binary_packed" ||
+      (native_value_kind == "fixed_width" ||
+       native_value_kind == "delta_binary_packed" ||
        native_value_kind == "delta_length_byte_array")) {
     column->native_read_plan_decoded = true;
     column->native_read_data_page_count = 0;
@@ -3896,7 +3905,8 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
       column->native_read_value_payload_bytes += page.decoded_value_bytes;
     }
     column->native_read_materialized_value_bytes =
-        native_value_kind == "delta_binary_packed"
+        (native_value_kind == "fixed_width" ||
+         native_value_kind == "delta_binary_packed")
             ? column->repeated_level_element_count * native_value_width
             : std::int64_t{0};
     column->native_read_materialized_offset_bytes =
@@ -5208,6 +5218,102 @@ sanitize::Status materialize_delta_binary_packed_column(
   return {};
 }
 
+sanitize::Status materialize_simple_list_fixed_width_column(
+    std::ifstream &file, const ColumnChunkInfo &column,
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+  if (!out || !column.repeated_level_layout_decoded ||
+      column.native_read_value_buffer_kind != "fixed_width" ||
+      column.repeated_level_element_count < 0 ||
+      column.repeated_level_element_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid list fixed-width layout");
+  }
+  const auto element_count = column.repeated_level_element_count;
+  const auto arrow_width = column.native_read_value_width_bytes;
+  const auto physical_width = fixed_width_for_plain_values(column);
+  if (!physical_width || *physical_width <= 0 || arrow_width <= 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: list fixed-width value width is invalid");
+  }
+  const auto value_bytes = static_cast<std::uint64_t>(element_count) *
+                           static_cast<std::uint64_t>(arrow_width);
+  if (value_bytes >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: list fixed-width value buffer is too large");
+  }
+  out->values.assign(static_cast<std::size_t>(value_bytes), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((element_count + 7) / 8), 0);
+  }
+
+  const auto list_defined_level =
+      column.top_level_required ? std::int16_t{0} : std::int16_t{1};
+  std::int64_t element_index = 0;
+  for (const auto &page : column.pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (!page.has_value_encoding || page.value_encoding != kEncodingPlain ||
+        page.decoded_definition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid list fixed-width page");
+    }
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid list fixed-width payload offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    std::size_t value_offset = 0;
+    for (std::int32_t row = 0; row < page.num_values; ++row) {
+      const auto definition =
+          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
+      if (definition <= list_defined_level) {
+        continue;
+      }
+      if (element_index >= element_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: list fixed-width element span exceeds row "
+            "group");
+      }
+      if (definition == column.max_definition_level) {
+        if (values.size() - value_offset <
+            static_cast<std::size_t>(*physical_width)) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: truncated list fixed-width payload");
+        }
+        auto *target =
+            out->values.data() + static_cast<std::size_t>(element_index) *
+                                     static_cast<std::size_t>(arrow_width);
+        SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
+            target, values.data() + value_offset, column, *physical_width,
+            arrow_width));
+        value_offset += static_cast<std::size_t>(*physical_width);
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, element_index);
+        }
+      }
+      ++element_index;
+    }
+    if (value_offset != values.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing list fixed-width payload bytes");
+    }
+  }
+  if (element_index != element_count) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: list fixed-width element count mismatch");
+  }
+  return {};
+}
+
 sanitize::Status materialize_simple_list_delta_binary_packed_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
@@ -6284,7 +6390,15 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     std::int64_t arrow_length = row_group.num_rows;
     std::int64_t arrow_null_count = column.native_read_total_nulls;
     if (is_simple_top_level_list_leaf(column)) {
-      if (column.native_read_value_buffer_kind == "delta_binary_packed") {
+      if (column.native_read_value_buffer_kind == "fixed_width") {
+        SAN_RETURN_NOT_OK(materialize_simple_list_fixed_width_column(
+            stream->file, column, &stream->page_scratch, &child));
+        child.buffers[0] =
+            child.validity.empty() ? nullptr : child.validity.data();
+        child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
+        child.array.n_buffers = 2;
+      } else if (column.native_read_value_buffer_kind ==
+                 "delta_binary_packed") {
         SAN_RETURN_NOT_OK(materialize_simple_list_delta_binary_packed_column(
             stream->file, column, &stream->page_scratch, &child));
         child.buffers[0] =
