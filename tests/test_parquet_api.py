@@ -1301,6 +1301,53 @@ def test_spark_int96_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
+def test_spark_flavored_nested_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
+    """Verify Spark-flavored nested Parquet remains readable through fallback."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "spark-flavored-nested.parquet"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "profile": pa.array(
+                [{"name": "a", "score": 1.5}, {"name": "b", "score": None}],
+                type=pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64()),
+                    ]
+                ),
+            ),
+            "tags": pa.array([["alpha", "beta"], ["gamma"]], type=pa.list_(pa.string())),
+        }
+    )
+    pq.write_table(table, path, flavor="spark", compression="snappy")
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert any(
+        "nested or repeated column is not yet native materializable" in blocker
+        or "unsupported compression" in blocker
+        for blocker in info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
 def test_bigquery_compatible_standard_parquet_uses_pyarrow_fallback(
     tmp_path: Path,
 ) -> None:

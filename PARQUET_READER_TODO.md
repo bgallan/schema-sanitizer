@@ -43,7 +43,8 @@ replacement. Remaining work:
    - [x] File-like objects through PyArrow fallback.
    - [x] Buffers through PyArrow fallback.
    - [x] Local `file://` filesystem URIs through the direct Arrow path.
-   - [x] Remote filesystem/cloud single-file and directory URIs through bounded local staging.
+   - [x] Remote filesystem/cloud single-file and directory URIs through
+     bounded local staging and shared Arrow-source execution.
    - [x] Directory/dataset reads through the direct Arrow path.
 
 1. Match production reader behavior:
@@ -67,6 +68,7 @@ replacement. Remaining work:
 
    - [x] PyArrow-written files through PyArrow fallback.
    - [x] Spark-compatible INT96 timestamp variants through PyArrow fallback.
+   - [x] Spark-flavored nested PyArrow fixtures through PyArrow fallback.
    - Spark-written files.
    - [x] DuckDB-written files through PyArrow fallback.
    - [x] BigQuery-compatible standard scalar/logical variants without Arrow
