@@ -1426,6 +1426,104 @@ def test_bigquery_compatible_standard_parquet_uses_pyarrow_fallback(
 
 
 @_requires_pyarrow
+def test_bigquery_export_like_nested_parquet_uses_pyarrow_fallback(
+    tmp_path: Path,
+) -> None:
+    """Verify BigQuery-export-like nested/repeated Parquet stays readable."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "bigquery-export-like.parquet"
+    table = pa.table(
+        {
+            "user_id": pa.array(["u1", "u2"], type=pa.string()),
+            "event_date": pa.array(
+                [dt.date(2024, 2, 1), dt.date(2024, 2, 2)],
+                type=pa.date32(),
+            ),
+            "event_ts": pa.array(
+                [
+                    dt.datetime(2024, 2, 1, 12, 0, 0, 123456),
+                    dt.datetime(2024, 2, 2, 12, 0, 0, 123456),
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "metrics": pa.array(
+                [
+                    {"score": Decimal("12.34"), "rank": 1},
+                    {"score": Decimal("56.78"), "rank": 2},
+                ],
+                type=pa.struct(
+                    [
+                        pa.field("score", pa.decimal128(10, 2)),
+                        pa.field("rank", pa.int64()),
+                    ]
+                ),
+            ),
+            "items": pa.array(
+                [
+                    [{"sku": "a", "quantity": 2}, {"sku": "b", "quantity": 1}],
+                    [{"sku": "c", "quantity": 3}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("sku", pa.string()),
+                            pa.field("quantity", pa.int64()),
+                        ]
+                    )
+                ),
+            ),
+        }
+    )
+    pq.write_table(
+        table,
+        path,
+        store_schema=False,
+        compression="snappy",
+        coerce_timestamps="us",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert any(
+        "file was not written by schema-sanitizer native parquet writer" in blocker
+        or "nested or repeated column is not yet native materializable" in blocker
+        or "unsupported compression" in blocker
+        for blocker in info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == [
+        {
+            "eventdate": dt.date(2024, 2, 1),
+            "eventts": dt.datetime(2024, 2, 1, 12, 0, 0, 123456),
+            "items": [{"quantity": 2, "sku": "a"}, {"quantity": 1, "sku": "b"}],
+            "metrics": {"rank": 1, "score": "12.34"},
+            "userid": "u1",
+        },
+        {
+            "eventdate": dt.date(2024, 2, 2),
+            "eventts": dt.datetime(2024, 2, 2, 12, 0, 0, 123456),
+            "items": [{"quantity": 3, "sku": "c"}],
+            "metrics": {"rank": 2, "score": "56.78"},
+            "userid": "u2",
+        },
+    ]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
 def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
     """Verify DuckDB-written Parquet stays readable through the safe fallback."""
     duckdb = pytest.importorskip("duckdb")

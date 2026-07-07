@@ -73,6 +73,8 @@ replacement. Remaining work:
    - [x] DuckDB-written files through PyArrow fallback.
    - [x] BigQuery-compatible standard scalar/logical variants without Arrow
      schema metadata through PyArrow fallback.
+   - [x] BigQuery-export-like nested/repeated fixtures without Arrow schema
+     metadata through PyArrow fallback.
    - BigQuery-exported Parquet variants.
 
 1. Keep fallback observability strong:
