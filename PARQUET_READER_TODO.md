@@ -17,7 +17,7 @@ replacement. Remaining work:
 
    - Decimal logical types.
    - Fixed-size binary details.
-   - Date and timestamp units/timezone metadata.
+   - [x] Date and timestamp units/timezone metadata.
    - Unsigned integer logical types.
    - Nullability edge cases across all supported types.
 

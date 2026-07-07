@@ -1365,7 +1365,8 @@ std::string arrow_integer_format_from_converted_type(std::int32_t converted) {
 
 std::string arrow_temporal_format(std::string_view logical_type,
                                   std::string_view unit,
-                                  std::int32_t physical_type) {
+                                  std::int32_t physical_type,
+                                  bool is_adjusted_to_utc) {
   if (logical_type == "date") {
     return "tdD";
   }
@@ -1385,14 +1386,15 @@ std::string arrow_temporal_format(std::string_view logical_type,
     return {};
   }
   if (logical_type == "timestamp") {
+    const auto timezone = is_adjusted_to_utc ? "UTC" : "";
     if (unit == "millis") {
-      return "tsm:";
+      return std::string("tsm:") + timezone;
     }
     if (unit == "micros") {
-      return "tsu:";
+      return std::string("tsu:") + timezone;
     }
     if (unit == "nanos") {
-      return "tsn:";
+      return std::string("tsn:") + timezone;
     }
     return {};
   }
@@ -1415,7 +1417,8 @@ std::string arrow_format_for_leaf(const SchemaElementInfo &element) {
       element.logical_type == "timestamp") {
     return arrow_temporal_format(element.logical_type,
                                  element.logical_type_time_unit,
-                                 element.physical_type);
+                                 element.physical_type,
+                                 element.logical_type_is_adjusted_to_utc);
   }
   if (element.logical_type == "integer" &&
       element.has_logical_type_integer_bit_width &&

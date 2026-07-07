@@ -83,6 +83,34 @@ def test_parquet_path_with_temporal_values(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
+def test_native_parquet_footer_info_maps_utc_timestamp_timezone(tmp_path: Path) -> None:
+    """Verify adjusted UTC Parquet timestamps expose an Arrow timezone."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+
+    require_native()
+    path = tmp_path / "data.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array(
+                    [dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.UTC)],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+            }
+        ),
+        path,
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["schema_elements"][1]["logical_type"] == "timestamp"
+    assert info["schema_elements"][1]["logical_type_time_unit"] == "micros"
+    assert info["schema_elements"][1]["logical_type_is_adjusted_to_utc"] == 1
+    assert info["row_groups"][0]["columns"][0]["native_arrow_format"] == "tsu:UTC"
+
+
+@_requires_pyarrow
 def test_read_parquet_path_materializes_table(tmp_path: Path) -> None:
     """Verify read parquet path materializes table."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
