@@ -1301,6 +1301,84 @@ def test_spark_int96_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
+def test_bigquery_compatible_standard_parquet_uses_pyarrow_fallback(
+    tmp_path: Path,
+) -> None:
+    """Verify BigQuery-style logical scalars without Arrow metadata stay readable."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "bigquery-compatible.parquet"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "name": pa.array(["a", "b"], type=pa.string()),
+            "active": pa.array([True, None], type=pa.bool_()),
+            "amount": pa.array(
+                [Decimal("12.34"), Decimal("56.78")],
+                type=pa.decimal128(10, 2),
+            ),
+            "event_date": pa.array(
+                [dt.date(2024, 1, 1), dt.date(2024, 1, 2)],
+                type=pa.date32(),
+            ),
+            "event_ts": pa.array(
+                [
+                    dt.datetime(2024, 1, 1, 1, 2, 3, 123456),
+                    dt.datetime(2024, 1, 2, 1, 2, 3, 123456),
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+        }
+    )
+    pq.write_table(
+        table,
+        path,
+        store_schema=False,
+        compression="snappy",
+        coerce_timestamps="us",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert info["schema_elements"][4]["logical_type"] == "decimal"
+    assert info["schema_elements"][5]["logical_type"] == "date"
+    assert info["schema_elements"][6]["logical_type"] == "timestamp"
+    assert any("unsupported compression" in blocker for blocker in info["native_reader_blockers"])
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == [
+        {
+            "active": True,
+            "amount": "12.34",
+            "eventdate": dt.date(2024, 1, 1),
+            "eventts": dt.datetime(2024, 1, 1, 1, 2, 3, 123456),
+            "id": 1,
+            "name": "a",
+        },
+        {
+            "active": None,
+            "amount": "56.78",
+            "eventdate": dt.date(2024, 1, 2),
+            "eventts": dt.datetime(2024, 1, 2, 1, 2, 3, 123456),
+            "id": 2,
+            "name": "b",
+        },
+    ]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
 def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
     """Verify DuckDB-written Parquet stays readable through the safe fallback."""
     duckdb = pytest.importorskip("duckdb")

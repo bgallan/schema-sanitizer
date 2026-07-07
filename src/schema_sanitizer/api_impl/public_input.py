@@ -787,6 +787,34 @@ def _prepare_directory(
     )
 
 
+def _prepare_single_parquet_file(
+    path: str | os.PathLike[str],
+    *,
+    source_file: str,
+    keepalive: Any,
+    memory_limit_bytes: int | None,
+) -> PreparedPublicInput:
+    """Prepare one Parquet file through the shared Arrow-source manifest path."""
+    carrier = _NativeDirectoryManifestCarrier()
+    setattr(
+        carrier,
+        "native_parquet_multisource_manifest",
+        ParquetDirectorySourceManifest(
+            [
+                ParquetDirectorySourceFile(
+                    path=os.fspath(path),
+                    source_file=source_file,
+                )
+            ],
+            memory_limit_bytes=memory_limit_bytes,
+        ),
+    )
+    retained: Any = carrier
+    if keepalive is not None:
+        retained = _ChainedKeepalive(carrier, keepalive)
+    return PreparedPublicInput(carrier, "parquet", "stream", retained)
+
+
 def _discovered_directory_input_for(
     path: str | os.PathLike[str],
     input_format: str,
@@ -937,6 +965,13 @@ def prepare_public_input(
 
     if not suffix_validated:
         _validate_suffix(path, fmt)
+    if fmt == "parquet" and keepalive is not None:
+        return _prepare_single_parquet_file(
+            path,
+            source_file=original_source_file,
+            keepalive=keepalive,
+            memory_limit_bytes=memory_limit_bytes,
+        )
     input_text_encoding = _normalize_input_text_encoding(input_text_encoding)
     is_utf8_input = is_utf8_encoding(str(input_text_encoding))
     if (

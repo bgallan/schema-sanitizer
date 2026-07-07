@@ -868,6 +868,45 @@ def test_remote_parquet_directory_public_reader_uses_staged_arrow_path(
     ]
 
 
+def test_remote_parquet_single_file_public_reader_uses_staged_arrow_path(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Verify remote Parquet single files stage locally and preserve source URI."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from schema_sanitizer.api_impl import public_input
+    from schema_sanitizer.api_impl.async_remote_io import StagedPath
+
+    require_native()
+
+    def fake_stage_remote_single_file(uri, *, memory_limit_bytes):
+        """Return a local staged Parquet file for a remote URI."""
+        assert uri == "s3://bucket/events.parquet"
+        assert memory_limit_bytes is None
+        staged_file = tmp_path / "events.parquet"
+        pq.write_table(pa.table({"id": [1, 2]}), staged_file)
+        return StagedPath(str(staged_file))
+
+    monkeypatch.setattr(
+        public_input,
+        "stage_remote_single_file",
+        fake_stage_remote_single_file,
+    )
+
+    result = ss.to_pyarrow("s3://bucket/events.parquet", input_format="parquet")
+
+    rows = result.clean_data.to_pylist()
+    assert [{key: row[key] for key in ("id",)} for row in rows] == [
+        {"id": 1},
+        {"id": 2},
+    ]
+    assert [row["source_file"] for row in rows] == [
+        "s3://bucket/events.parquet",
+        "s3://bucket/events.parquet",
+    ]
+
+
 def test_remote_text_directory_stages_child_sources_concurrently(monkeypatch) -> None:
     """Verify remote text directory staging preserves child files and source URIs."""
     from schema_sanitizer.api_impl import async_remote_io
