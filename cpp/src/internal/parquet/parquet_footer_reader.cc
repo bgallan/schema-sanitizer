@@ -3798,7 +3798,8 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
           (page_value_kind == "dictionary_fixed_width" &&
            page_value_width > 0) ||
           (page_value_kind == "delta_binary_packed" && page_value_width > 0) ||
-          page_value_kind == "delta_length_byte_array")) {
+          page_value_kind == "delta_length_byte_array" ||
+          page_value_kind == "bit_packed_boolean")) {
       native_plan_complete = false;
     } else if (native_value_kind.empty()) {
       native_value_kind = page_value_kind;
@@ -3899,7 +3900,8 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
        native_value_kind == "dictionary_byte_array" ||
        native_value_kind == "dictionary_fixed_width" ||
        native_value_kind == "delta_binary_packed" ||
-       native_value_kind == "delta_length_byte_array")) {
+       native_value_kind == "delta_length_byte_array" ||
+       native_value_kind == "bit_packed_boolean")) {
     column->native_read_plan_decoded = true;
     column->native_read_data_page_count = 0;
     column->native_read_total_rows = column->repeated_level_element_count;
@@ -3926,6 +3928,13 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
          native_value_kind == "delta_binary_packed")
             ? column->repeated_level_element_count * native_value_width
             : std::int64_t{0};
+    if (native_value_kind == "bit_packed_boolean") {
+      SAN_ASSIGN_OR_RAISE(
+          const auto boolean_value_bytes,
+          arrow_boolean_value_buffer_bytes(
+              static_cast<std::int32_t>(column->repeated_level_element_count)));
+      column->native_read_materialized_value_bytes = boolean_value_bytes;
+    }
     column->native_read_materialized_offset_bytes =
         (native_value_kind == "delta_length_byte_array" ||
          native_value_kind == "dictionary_byte_array")
@@ -5335,6 +5344,95 @@ sanitize::Status materialize_simple_list_fixed_width_column(
   return {};
 }
 
+sanitize::Status materialize_simple_list_boolean_column(
+    std::ifstream &file, const ColumnChunkInfo &column,
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+  if (!out || !column.repeated_level_layout_decoded ||
+      column.native_read_value_buffer_kind != "bit_packed_boolean" ||
+      column.physical_type != kPhysicalBoolean ||
+      column.repeated_level_element_count < 0 ||
+      column.repeated_level_element_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid list boolean layout");
+  }
+  const auto element_count = column.repeated_level_element_count;
+  SAN_ASSIGN_OR_RAISE(const auto value_buffer_bytes,
+                      arrow_boolean_value_buffer_bytes(
+                          static_cast<std::int32_t>(element_count)));
+  out->values.assign(static_cast<std::size_t>(value_buffer_bytes), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((element_count + 7) / 8), 0);
+  }
+
+  const auto list_defined_level =
+      column.top_level_required ? std::int16_t{0} : std::int16_t{1};
+  std::int64_t element_index = 0;
+  for (const auto &page : column.pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (!page.has_value_encoding || page.value_encoding != kEncodingPlain ||
+        page.decoded_definition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid list boolean page");
+    }
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid list boolean payload offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    const auto expected_bytes =
+        static_cast<std::size_t>((page.decoded_non_null_values + 7) / 8);
+    if (values.size() != expected_bytes) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: list boolean payload size mismatch");
+    }
+    std::int32_t value_index = 0;
+    for (std::int32_t row = 0; row < page.num_values; ++row) {
+      const auto definition =
+          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
+      if (definition <= list_defined_level) {
+        continue;
+      }
+      if (element_index >= element_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: list boolean element span exceeds row "
+            "group");
+      }
+      if (definition == column.max_definition_level) {
+        if (value_index >= page.decoded_non_null_values) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: missing list boolean value");
+        }
+        if (bit_stream_value_is_set(values, value_index)) {
+          set_output_validity_bit(&out->values, element_index);
+        }
+        ++value_index;
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, element_index);
+        }
+      }
+      ++element_index;
+    }
+    if (value_index != page.decoded_non_null_values) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing list boolean values");
+    }
+  }
+  if (element_index != element_count) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: list boolean element count mismatch");
+  }
+  return {};
+}
+
 sanitize::Status materialize_simple_list_delta_binary_packed_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
@@ -6685,6 +6783,13 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     if (is_simple_top_level_list_leaf(column)) {
       if (column.native_read_value_buffer_kind == "fixed_width") {
         SAN_RETURN_NOT_OK(materialize_simple_list_fixed_width_column(
+            stream->file, column, &stream->page_scratch, &child));
+        child.buffers[0] =
+            child.validity.empty() ? nullptr : child.validity.data();
+        child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
+        child.array.n_buffers = 2;
+      } else if (column.native_read_value_buffer_kind == "bit_packed_boolean") {
+        SAN_RETURN_NOT_OK(materialize_simple_list_boolean_column(
             stream->file, column, &stream->page_scratch, &child));
         child.buffers[0] =
             child.validity.empty() ? nullptr : child.validity.data();
