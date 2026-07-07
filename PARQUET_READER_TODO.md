@@ -19,7 +19,7 @@ replacement. Remaining work:
    - [x] Fixed-size binary details.
    - [x] Date and timestamp units/timezone metadata.
    - [x] Unsigned integer logical types.
-   - Nullability edge cases across all supported types.
+   - [x] Nullability edge cases across all supported types.
 
 1. Support nested and repeated columns:
 

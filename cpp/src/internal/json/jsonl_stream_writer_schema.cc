@@ -178,6 +178,7 @@ sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
   JsonlField field;
   field.name = schema.name ? schema.name : "";
   field.format = schema.format;
+  field.nullable = (schema.flags & ARROW_FLAG_NULLABLE) != 0;
   SAN_ASSIGN_OR_RAISE(field.kind, kind_from_format(schema.format));
   if (field.kind == JsonlKind::kDecimal &&
       !parse_decimal_format(schema.format, &field)) {

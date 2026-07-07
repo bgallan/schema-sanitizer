@@ -549,6 +549,115 @@ def test_native_parquet_stream_materializes_fixed_size_binary(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_preserves_required_scalar_nullability(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet reader preserves required scalar field nullability."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "required-scalars.parquet"
+    schema = pa.schema(
+        [
+            pa.field("ok", pa.bool_(), nullable=False),
+            pa.field("i8", pa.int8(), nullable=False),
+            pa.field("u16", pa.uint16(), nullable=False),
+            pa.field("n", pa.int64(), nullable=False),
+            pa.field("f", pa.float32(), nullable=False),
+            pa.field("g", pa.float64(), nullable=False),
+            pa.field("s", pa.string(), nullable=False),
+            pa.field("payload", pa.binary(), nullable=False),
+            pa.field("fixed_payload", pa.binary(4), nullable=False),
+            pa.field("amount", pa.decimal128(10, 2), nullable=False),
+            pa.field("day", pa.date32(), nullable=False),
+            pa.field("ts", pa.timestamp("us"), nullable=False),
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [
+            pa.array([True, False, True], type=pa.bool_()),
+            pa.array([-1, 2, 3], type=pa.int8()),
+            pa.array([1, 65000, 3], type=pa.uint16()),
+            pa.array([10, 20, 30], type=pa.int64()),
+            pa.array([1.25, 2.5, 3.75], type=pa.float32()),
+            pa.array([1.5, 2.25, 3.125], type=pa.float64()),
+            pa.array(["alpha", "bravo", "charlie"], type=pa.string()),
+            pa.array([b"a", b"bb", b"ccc"], type=pa.binary()),
+            pa.array([b"abcd", b"wxyz", b"1234"], type=pa.binary(4)),
+            pa.array(
+                [Decimal("1.23"), Decimal("4.56"), Decimal("7.89")],
+                type=pa.decimal128(10, 2),
+            ),
+            pa.array(
+                [dt.date(2026, 1, 1), dt.date(2026, 1, 2), dt.date(2026, 1, 3)],
+                type=pa.date32(),
+            ),
+            pa.array(
+                [
+                    dt.datetime(2026, 1, 1, 1, 2, 3),
+                    dt.datetime(2026, 1, 1, 1, 2, 4),
+                    dt.datetime(2026, 1, 1, 1, 2, 5),
+                ],
+                type=pa.timestamp("us"),
+            ),
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    row_group = info["row_groups"][0]
+    assert row_group["num_rows"] == 3
+    assert all(column["max_definition_level"] == 0 for column in row_group["columns"])
+    assert all(column["native_read_total_nulls"] == 0 for column in row_group["columns"])
+    assert all(column["native_read_arrow_null_count"] == 0 for column in row_group["columns"])
+    assert all(column["native_read_has_validity_buffer"] == 0 for column in row_group["columns"])
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_writer_rejects_null_in_required_field(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify native Parquet writer does not materialize nulls in required fields."""
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "required-null.parquet"
+    schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
+    table = pa.Table.from_arrays([pa.array([1, None], type=pa.int64())], schema=schema)
+    caplog.set_level(logging.ERROR, logger="schema_sanitizer.api_impl.native_file_output")
+
+    with pytest.raises(pa.ArrowInvalid, match="non-nullable"):
+        write_parquet_native_first_stream(
+            pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+            path,
+            feature="test",
+            parquet_compression="uncompressed",
+        )
+    assert "required field contains null" in caplog.text
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_reads_empty_file_schema(
     tmp_path: Path,
 ) -> None:

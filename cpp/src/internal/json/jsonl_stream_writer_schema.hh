@@ -56,6 +56,7 @@ struct JsonlField {
   JsonlKind dictionary_index_kind = JsonlKind::kNull;
   std::string name;
   std::string format;
+  bool nullable = true;
   int32_t decimal_precision = 0;
   int32_t decimal_scale = 0;
   int32_t decimal_byte_width = 16;

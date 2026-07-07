@@ -396,6 +396,7 @@ primitive_node_from_field(const jsonl::JsonlField &field, std::string name) {
   node.node_kind = NodeKind::kPrimitive;
   node.arrow_kind = field.kind;
   node.name = std::move(name);
+  node.required = !field.nullable;
   auto set_int_logical = [&](std::int8_t bit_width, bool is_signed,
                              ConvertedType converted_type) {
     node.has_converted_type = true;
@@ -541,6 +542,7 @@ struct_node_from_field(const jsonl::JsonlField &field, std::string name) {
   node.node_kind = name == "schema" ? NodeKind::kRoot : NodeKind::kStruct;
   node.arrow_kind = field.kind;
   node.name = std::move(name);
+  node.required = node.node_kind == NodeKind::kRoot || !field.nullable;
   node.children.reserve(field.children.size());
   for (const auto &child : field.children) {
     SAN_ASSIGN_OR_RAISE(auto child_node, node_from_field(child, child.name));
@@ -567,6 +569,7 @@ list_node_from_field(const jsonl::JsonlField &field, std::string name) {
   node.node_kind = NodeKind::kList;
   node.arrow_kind = field.kind;
   node.name = std::move(name);
+  node.required = !field.nullable;
   node.fixed_size_list_size = field.fixed_size_list_size;
   SAN_ASSIGN_OR_RAISE(auto element, node_from_field(value, "element"));
   node.element = std::make_unique<ParquetNode>(std::move(element));
@@ -600,6 +603,7 @@ map_node_from_field(const jsonl::JsonlField &field, std::string name) {
   node.node_kind = NodeKind::kMap;
   node.arrow_kind = field.kind;
   node.name = std::move(name);
+  node.required = !field.nullable;
   auto entry_node = std::make_unique<ParquetNode>();
   entry_node->node_kind = NodeKind::kStruct;
   entry_node->arrow_kind = entry.kind;
@@ -1845,6 +1849,11 @@ sanitize::Status collect_node(const ParquetNode &node, const ArrowArray &array,
     emit_nulls_for_subtree(node, pages, definition_level, repetition_level);
     return sanitize::Status::OK();
   }
+  if (node.node_kind != NodeKind::kRoot && node.required &&
+      !bitmap_is_valid(array, row)) {
+    return sanitize::Status::Invalid(
+        "native Parquet writer: required field contains null");
+  }
 
   switch (node.node_kind) {
   case NodeKind::kRoot:
@@ -2221,8 +2230,10 @@ std::string encode_page_levels_and_values(const LeafColumn &column,
     payload.append(encode_levels(page_data.repetition_levels,
                                  column.max_repetition_level));
   }
-  payload.append(
-      encode_levels(page_data.definition_levels, column.max_definition_level));
+  if (column.max_definition_level > 0) {
+    payload.append(encode_levels(page_data.definition_levels,
+                                 column.max_definition_level));
+  }
   payload.append(encoded_values);
   return payload;
 }
