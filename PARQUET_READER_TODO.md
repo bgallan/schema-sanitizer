@@ -23,7 +23,8 @@ replacement. Remaining work:
 
 1. Support nested and repeated columns:
 
-   - Structs.
+   - [x] Required non-repeated structs with scalar leaves.
+   - Nullable structs.
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.

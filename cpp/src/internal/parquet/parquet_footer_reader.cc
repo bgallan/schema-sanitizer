@@ -1479,6 +1479,7 @@ struct LeafLevelInfo {
   std::vector<std::string> path;
   std::int16_t max_definition_level = 0;
   std::int16_t max_repetition_level = 0;
+  bool top_level_required = true;
   std::int32_t fixed_type_length = 0;
   std::string native_arrow_format;
 };
@@ -1488,7 +1489,7 @@ collect_leaf_levels(const std::vector<SchemaElementInfo> &schema,
                     std::size_t *index, std::vector<std::string> path,
                     std::int16_t definition_level,
                     std::int16_t repetition_level, bool is_root,
-                    std::vector<LeafLevelInfo> *out) {
+                    bool top_level_required, std::vector<LeafLevelInfo> *out) {
   if (!index || !out || *index >= schema.size()) {
     return sanitize::Status::Invalid("Parquet schema levels: invalid schema");
   }
@@ -1505,6 +1506,9 @@ collect_leaf_levels(const std::vector<SchemaElementInfo> &schema,
       ++next_repetition_level;
     }
     path.push_back(element.name);
+    if (path.size() == 1) {
+      top_level_required = repetition == 0;
+    }
   }
 
   const auto child_count = element.has_num_children
@@ -1516,6 +1520,7 @@ collect_leaf_levels(const std::vector<SchemaElementInfo> &schema,
           .path = std::move(path),
           .max_definition_level = next_definition_level,
           .max_repetition_level = next_repetition_level,
+          .top_level_required = top_level_required,
           .fixed_type_length =
               element.has_type_length ? element.type_length : 0,
           .native_arrow_format = arrow_format_for_leaf(element),
@@ -1524,9 +1529,9 @@ collect_leaf_levels(const std::vector<SchemaElementInfo> &schema,
     return {};
   }
   for (std::int32_t i = 0; i < child_count; ++i) {
-    SAN_RETURN_NOT_OK(collect_leaf_levels(schema, index, path,
-                                          next_definition_level,
-                                          next_repetition_level, false, out));
+    SAN_RETURN_NOT_OK(collect_leaf_levels(
+        schema, index, path, next_definition_level, next_repetition_level,
+        false, top_level_required, out));
   }
   return {};
 }
@@ -1539,8 +1544,8 @@ schema_leaf_levels(const std::vector<SchemaElementInfo> &schema) {
   }
   std::size_t index = 0;
   std::vector<std::string> path;
-  SAN_RETURN_NOT_OK(
-      collect_leaf_levels(schema, &index, std::move(path), 0, 0, true, &out));
+  SAN_RETURN_NOT_OK(collect_leaf_levels(schema, &index, std::move(path), 0, 0,
+                                        true, true, &out));
   return out;
 }
 
@@ -1561,6 +1566,7 @@ sanitize::Status assign_column_levels(FooterInfo *info) {
       }
       column.max_definition_level = match->max_definition_level;
       column.max_repetition_level = match->max_repetition_level;
+      column.top_level_required = match->top_level_required;
       column.fixed_type_length = match->fixed_type_length;
       column.native_arrow_format = match->native_arrow_format;
     }
@@ -3884,6 +3890,10 @@ void add_readiness_blocker(NativeReadinessInfo *info, std::string blocker) {
   info->blockers.push_back(std::move(blocker));
 }
 
+bool native_plain_path_is_materializable(const std::vector<std::string> &path,
+                                         std::int16_t max_repetition_level,
+                                         bool top_level_required);
+
 NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
   NativeReadinessInfo readiness;
   const auto max_buffer_bytes = configured_native_reader_max_buffer_bytes();
@@ -3916,7 +3926,9 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
         if (label.empty()) {
           label = "<unknown>";
         }
-        if (leaf.path.size() != 1) {
+        if (!native_plain_path_is_materializable(leaf.path,
+                                                 leaf.max_repetition_level,
+                                                 leaf.top_level_required)) {
           add_readiness_blocker(
               &readiness, label + ": nested path is not materializable yet");
         }
@@ -3943,7 +3955,9 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
     }
     for (const auto &column : row_group.columns) {
       const auto label = column_path_label(column);
-      if (column.path_in_schema.size() != 1) {
+      if (!native_plain_path_is_materializable(column.path_in_schema,
+                                               column.max_repetition_level,
+                                               column.top_level_required)) {
         add_readiness_blocker(
             &readiness, label + ": nested path is not materializable yet");
       }
@@ -4227,9 +4241,23 @@ struct NativeParquetColumnSchema {
   std::string format;
 };
 
+struct NativeParquetStructSchema {
+  ArrowSchema schema{};
+  std::string name;
+  std::string format = "+s";
+  std::vector<NativeParquetColumnSchema> children;
+  std::vector<ArrowSchema *> child_ptrs;
+};
+
+struct NativeParquetTopLevelSchema {
+  bool is_struct = false;
+  NativeParquetColumnSchema leaf;
+  NativeParquetStructSchema struct_node;
+};
+
 struct NativeParquetSchemaState {
   std::string root_format = "+s";
-  std::vector<NativeParquetColumnSchema> columns;
+  std::vector<NativeParquetTopLevelSchema> fields;
   std::vector<ArrowSchema *> children;
 };
 
@@ -4241,8 +4269,15 @@ struct NativeParquetChildArray {
   std::array<const void *, 3> buffers{nullptr, nullptr, nullptr};
 };
 
+struct NativeParquetStructArray {
+  ArrowArray array{};
+  std::vector<ArrowArray *> children;
+  std::array<const void *, 1> buffers{nullptr};
+};
+
 struct NativeParquetArrayState {
   std::vector<NativeParquetChildArray> columns;
+  std::vector<NativeParquetStructArray> structs;
   std::vector<ArrowArray *> children;
   std::array<const void *, 1> struct_buffers{nullptr};
 };
@@ -4331,6 +4366,99 @@ bool bit_stream_value_is_set(std::string_view values, std::int32_t index) {
   return (static_cast<std::uint8_t>(values[byte_index]) & mask) != 0;
 }
 
+struct NativeParquetOutputField {
+  bool is_struct = false;
+  std::string name;
+  std::vector<std::size_t> column_indices;
+};
+
+bool native_plain_path_is_materializable(const std::vector<std::string> &path,
+                                         std::int16_t max_repetition_level,
+                                         bool top_level_required) {
+  if (max_repetition_level != 0) {
+    return false;
+  }
+  if (path.size() == 1) {
+    return true;
+  }
+  return path.size() == 2 && top_level_required;
+}
+
+sanitize::Status add_native_output_field(
+    std::vector<NativeParquetOutputField> *fields,
+    const std::vector<std::string> &path, std::size_t column_index,
+    std::int16_t max_repetition_level, bool top_level_required) {
+  if (!fields) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: output layout is null");
+  }
+  if (!native_plain_path_is_materializable(path, max_repetition_level,
+                                           top_level_required)) {
+    return sanitize::Status::NotImplemented(
+        "native Parquet reader: nested path is not materializable yet");
+  }
+  if (path.empty()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: column path is empty");
+  }
+  const bool is_struct = path.size() == 2;
+  const auto &top_level_name = path[0];
+  auto match = std::find_if(fields->begin(), fields->end(),
+                            [&](const NativeParquetOutputField &field) {
+                              return field.name == top_level_name;
+                            });
+  if (match == fields->end()) {
+    NativeParquetOutputField field;
+    field.is_struct = is_struct;
+    field.name = top_level_name;
+    field.column_indices.push_back(column_index);
+    fields->push_back(std::move(field));
+    return {};
+  }
+  if (match->is_struct != is_struct) {
+    return sanitize::Status::NotImplemented(
+        "native Parquet reader: mixed scalar and struct output path");
+  }
+  match->column_indices.push_back(column_index);
+  return {};
+}
+
+sanitize::Status
+build_native_output_layout(const std::vector<ColumnChunkInfo> &columns,
+                           std::vector<NativeParquetOutputField> *fields) {
+  if (!fields) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: output layout is null");
+  }
+  fields->clear();
+  fields->reserve(columns.size());
+  for (std::size_t i = 0; i < columns.size(); ++i) {
+    const auto &column = columns[i];
+    SAN_RETURN_NOT_OK(add_native_output_field(fields, column.path_in_schema, i,
+                                              column.max_repetition_level,
+                                              column.top_level_required));
+  }
+  return {};
+}
+
+sanitize::Status
+build_native_output_layout(const std::vector<LeafLevelInfo> &leaves,
+                           std::vector<NativeParquetOutputField> *fields) {
+  if (!fields) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: output layout is null");
+  }
+  fields->clear();
+  fields->reserve(leaves.size());
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    const auto &leaf = leaves[i];
+    SAN_RETURN_NOT_OK(add_native_output_field(fields, leaf.path, i,
+                                              leaf.max_repetition_level,
+                                              leaf.top_level_required));
+  }
+  return {};
+}
+
 sanitize::Status materialization_payload(std::ifstream &file,
                                          const ColumnChunkInfo &column,
                                          const PageHeaderInfo &page,
@@ -4373,7 +4501,9 @@ sanitize::Status materialization_payload(std::ifstream &file,
 }
 
 sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
-  if (column.path_in_schema.size() != 1 || column.max_repetition_level != 0 ||
+  if (!native_plain_path_is_materializable(column.path_in_schema,
+                                           column.max_repetition_level,
+                                           column.top_level_required) ||
       !column.native_read_plan_decoded) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: column is not materializable");
@@ -5318,7 +5448,6 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
   }
   const RowGroupInfo *row_group =
       footer.row_groups.empty() ? nullptr : &footer.row_groups.front();
-  const auto column_count = row_group ? row_group->columns.size() : 0;
 
   std::vector<LeafLevelInfo> empty_file_leaves;
   if (!row_group) {
@@ -5326,46 +5455,111 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                         schema_leaf_levels(footer.schema_elements));
   }
 
-  const auto output_column_count =
-      row_group ? column_count : empty_file_leaves.size();
-  state->columns.resize(output_column_count);
-  state->children.reserve(output_column_count);
-  for (std::size_t i = 0; i < output_column_count; ++i) {
-    std::string name;
-    std::string format;
-    std::int16_t max_definition_level = 0;
-    if (row_group) {
-      const auto &column = row_group->columns[i];
+  std::vector<NativeParquetOutputField> layout;
+  if (row_group) {
+    for (const auto &column : row_group->columns) {
       SAN_RETURN_NOT_OK(validate_native_plain_column(column));
-      name = column.path_in_schema.empty() ? "" : column.path_in_schema[0];
-      format = column.native_arrow_format;
-      max_definition_level = column.max_definition_level;
-    } else {
-      const auto &leaf = empty_file_leaves[i];
-      if (leaf.path.size() != 1 || leaf.max_repetition_level != 0 ||
+    }
+    SAN_RETURN_NOT_OK(build_native_output_layout(row_group->columns, &layout));
+  } else {
+    for (const auto &leaf : empty_file_leaves) {
+      if (!native_plain_path_is_materializable(
+              leaf.path, leaf.max_repetition_level, leaf.top_level_required) ||
           leaf.native_arrow_format.empty()) {
         return sanitize::Status::NotImplemented(
             "native Parquet reader: empty file schema is not materializable");
       }
-      name = leaf.path[0];
-      format = leaf.native_arrow_format;
-      max_definition_level = leaf.max_definition_level;
+    }
+    SAN_RETURN_NOT_OK(build_native_output_layout(empty_file_leaves, &layout));
+  }
+
+  state->fields.resize(layout.size());
+  state->children.reserve(layout.size());
+  for (std::size_t field_index = 0; field_index < layout.size();
+       ++field_index) {
+    const auto &field = layout[field_index];
+    auto &top_level = state->fields[field_index];
+    top_level.is_struct = field.is_struct;
+    if (!field.is_struct) {
+      const auto column_index = field.column_indices.front();
+      std::string format;
+      std::int16_t max_definition_level = 0;
+      if (row_group) {
+        const auto &column = row_group->columns[column_index];
+        format = column.native_arrow_format;
+        max_definition_level = column.max_definition_level;
+      } else {
+        const auto &leaf = empty_file_leaves[column_index];
+        format = leaf.native_arrow_format;
+        max_definition_level = leaf.max_definition_level;
+      }
+      auto &child = top_level.leaf;
+      child.name = field.name;
+      child.format = std::move(format);
+      sanitize::internal::cdata_stream::clear_schema(&child.schema);
+      child.schema.format = child.format.c_str();
+      child.schema.name = child.name.c_str();
+      child.schema.metadata = nullptr;
+      child.schema.flags = max_definition_level > 0 ? ARROW_FLAG_NULLABLE : 0;
+      child.schema.n_children = 0;
+      child.schema.children = nullptr;
+      child.schema.dictionary = nullptr;
+      child.schema.private_data = nullptr;
+      child.schema.release = &native_parquet_schema_child_release;
+      state->children.push_back(&child.schema);
+      continue;
     }
 
-    auto &child = state->columns[i];
-    child.name = std::move(name);
-    child.format = std::move(format);
-    sanitize::internal::cdata_stream::clear_schema(&child.schema);
-    child.schema.format = child.format.c_str();
-    child.schema.name = child.name.c_str();
-    child.schema.metadata = nullptr;
-    child.schema.flags = max_definition_level > 0 ? ARROW_FLAG_NULLABLE : 0;
-    child.schema.n_children = 0;
-    child.schema.children = nullptr;
-    child.schema.dictionary = nullptr;
-    child.schema.private_data = nullptr;
-    child.schema.release = &native_parquet_schema_child_release;
-    state->children.push_back(&child.schema);
+    auto &struct_node = top_level.struct_node;
+    struct_node.name = field.name;
+    struct_node.children.resize(field.column_indices.size());
+    struct_node.child_ptrs.reserve(field.column_indices.size());
+    for (std::size_t child_index = 0; child_index < field.column_indices.size();
+         ++child_index) {
+      const auto column_index = field.column_indices[child_index];
+      std::string name;
+      std::string format;
+      std::int16_t max_definition_level = 0;
+      if (row_group) {
+        const auto &column = row_group->columns[column_index];
+        name = column.path_in_schema[1];
+        format = column.native_arrow_format;
+        max_definition_level = column.max_definition_level;
+      } else {
+        const auto &leaf = empty_file_leaves[column_index];
+        name = leaf.path[1];
+        format = leaf.native_arrow_format;
+        max_definition_level = leaf.max_definition_level;
+      }
+      auto &child = struct_node.children[child_index];
+      child.name = std::move(name);
+      child.format = std::move(format);
+      sanitize::internal::cdata_stream::clear_schema(&child.schema);
+      child.schema.format = child.format.c_str();
+      child.schema.name = child.name.c_str();
+      child.schema.metadata = nullptr;
+      child.schema.flags = max_definition_level > 0 ? ARROW_FLAG_NULLABLE : 0;
+      child.schema.n_children = 0;
+      child.schema.children = nullptr;
+      child.schema.dictionary = nullptr;
+      child.schema.private_data = nullptr;
+      child.schema.release = &native_parquet_schema_child_release;
+      struct_node.child_ptrs.push_back(&child.schema);
+    }
+    sanitize::internal::cdata_stream::clear_schema(&struct_node.schema);
+    struct_node.schema.format = struct_node.format.c_str();
+    struct_node.schema.name = struct_node.name.c_str();
+    struct_node.schema.metadata = nullptr;
+    struct_node.schema.flags = 0;
+    struct_node.schema.n_children =
+        static_cast<std::int64_t>(struct_node.child_ptrs.size());
+    struct_node.schema.children = struct_node.child_ptrs.empty()
+                                      ? nullptr
+                                      : struct_node.child_ptrs.data();
+    struct_node.schema.dictionary = nullptr;
+    struct_node.schema.private_data = nullptr;
+    struct_node.schema.release = &native_parquet_schema_child_release;
+    state->children.push_back(&struct_node.schema);
   }
   sanitize::internal::cdata_stream::clear_schema(out);
   out->format = state->root_format.c_str();
@@ -5414,7 +5608,6 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
         "native Parquet reader: input stream is not readable");
   }
   state->columns.resize(row_group.columns.size());
-  state->children.reserve(row_group.columns.size());
   for (std::size_t i = 0; i < row_group.columns.size(); ++i) {
     const auto &column = row_group.columns[i];
     SAN_RETURN_NOT_OK(validate_native_plain_column(column));
@@ -5502,7 +5695,38 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     child.array.dictionary = nullptr;
     child.array.private_data = nullptr;
     child.array.release = &native_parquet_array_child_release;
-    state->children.push_back(&child.array);
+  }
+  std::vector<NativeParquetOutputField> layout;
+  SAN_RETURN_NOT_OK(build_native_output_layout(row_group.columns, &layout));
+  state->structs.resize(std::count_if(
+      layout.begin(), layout.end(),
+      [](const NativeParquetOutputField &field) { return field.is_struct; }));
+  state->children.reserve(layout.size());
+  std::size_t struct_index = 0;
+  for (const auto &field : layout) {
+    if (!field.is_struct) {
+      state->children.push_back(
+          &state->columns[field.column_indices.front()].array);
+      continue;
+    }
+    auto &struct_array = state->structs[struct_index++];
+    struct_array.children.reserve(field.column_indices.size());
+    for (const auto column_index : field.column_indices) {
+      struct_array.children.push_back(&state->columns[column_index].array);
+    }
+    struct_array.array.length = row_group.num_rows;
+    struct_array.array.null_count = 0;
+    struct_array.array.offset = 0;
+    struct_array.array.n_buffers = 1;
+    struct_array.array.buffers = struct_array.buffers.data();
+    struct_array.array.n_children =
+        static_cast<std::int64_t>(struct_array.children.size());
+    struct_array.array.children =
+        struct_array.children.empty() ? nullptr : struct_array.children.data();
+    struct_array.array.dictionary = nullptr;
+    struct_array.array.private_data = nullptr;
+    struct_array.array.release = &native_parquet_array_child_release;
+    state->children.push_back(&struct_array.array);
   }
   sanitize::internal::cdata_stream::clear_array(out);
   out->length = row_group.num_rows;
