@@ -195,6 +195,13 @@ struct ColumnChunkInfo {
   std::int64_t nested_repeated_level_non_null_value_count = 0;
   std::vector<std::int32_t> nested_repeated_level_offsets;
   std::vector<std::uint8_t> nested_repeated_level_validity_bitmap;
+  bool deep_repeated_level_layout_decoded = false;
+  std::int64_t deep_repeated_level_row_count = 0;
+  std::int64_t deep_repeated_level_null_count = 0;
+  std::int64_t deep_repeated_level_element_count = 0;
+  std::int64_t deep_repeated_level_non_null_value_count = 0;
+  std::vector<std::int32_t> deep_repeated_level_offsets;
+  std::vector<std::uint8_t> deep_repeated_level_validity_bitmap;
 };
 
 struct RowGroupInfo {
