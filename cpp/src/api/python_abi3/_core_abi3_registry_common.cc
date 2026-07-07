@@ -106,7 +106,7 @@ make_native_registry_plan_from_json(
 
   auto merged_r = sanitize::merge_schema_registry(make_registry_merge_input(
       sanitize::LogicalSchema{}, registry_json, field_name_policy,
-      prepared->spec.default_key_name));
+      prepared->spec.default_key_name, prepared->spec.field_order));
   if (!merged_r.ok()) {
     return merged_r.status();
   }

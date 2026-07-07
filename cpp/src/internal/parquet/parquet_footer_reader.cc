@@ -1415,10 +1415,9 @@ std::string arrow_format_for_leaf(const SchemaElementInfo &element) {
   }
   if (element.logical_type == "date" || element.logical_type == "time" ||
       element.logical_type == "timestamp") {
-    return arrow_temporal_format(element.logical_type,
-                                 element.logical_type_time_unit,
-                                 element.physical_type,
-                                 element.logical_type_is_adjusted_to_utc);
+    return arrow_temporal_format(
+        element.logical_type, element.logical_type_time_unit,
+        element.physical_type, element.logical_type_is_adjusted_to_utc);
   }
   if (element.logical_type == "integer" &&
       element.has_logical_type_integer_bit_width &&

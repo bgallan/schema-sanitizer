@@ -7,6 +7,7 @@
 
 #include "sanitize/core/logical_schema.hh"
 #include "sanitize/core/status.hh"
+#include "sanitize/options/options.hh"
 
 namespace sanitize {
 
@@ -16,6 +17,7 @@ struct SchemaRegistryMergeInput {
   std::string field_name_policy = "lower_snake";
   std::string detected_at;
   std::string default_key_name = "default_key";
+  FieldOrderPolicy field_order = FieldOrderPolicy::kAlphabetically;
 };
 
 struct SchemaRegistryMergeResult {

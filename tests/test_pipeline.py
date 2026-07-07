@@ -1460,6 +1460,49 @@ def test_bigquery_integration_builds_external_table_ddl() -> None:
     assert parse_hive_partition_column("hour:INT64") == ("hour", "INT64")
 
 
+def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> None:
+    """Verify BigQuery DDL can mirror column_order='alphabetically' recursively."""
+    pa = __import__("pyarrow")
+    from schema_sanitizer.integrations.bigquery import (
+        BigQueryTableRef,
+        ExternalTableSpec,
+        external_table_ddl,
+    )
+
+    ddl, _skipped = external_table_ddl(
+        BigQueryTableRef("project", "dataset", "events"),
+        pa.schema(
+            [
+                pa.field("z", pa.int64()),
+                pa.field(
+                    "variables",
+                    pa.struct(
+                        [
+                            pa.field("email", pa.string()),
+                            pa.field("phone", pa.string()),
+                            pa.field("birthday", pa.string()),
+                            pa.field("company", pa.string()),
+                        ]
+                    ),
+                ),
+                pa.field("a", pa.string()),
+            ]
+        ),
+        ExternalTableSpec(
+            source_uris=["gs://silver/events/*"],
+            hive_uri_prefix="gs://silver/events",
+            partition_columns=(("date", "DATE"),),
+        ),
+        sort_fields_alphabetically=True,
+    )
+
+    assert ddl.index("`a` STRING") < ddl.index("`variables` STRUCT") < ddl.index("`z` INT64")
+    assert (
+        "`variables` STRUCT<`birthday` STRING, `company` STRING, "
+        "`email` STRING, `phone` STRING>"
+    ) in ddl
+
+
 def test_bigquery_registry_sidecar_partition_queries() -> None:
     """Verify BigQuery registry sidecar SQL uses encoded Hive partition keys."""
     from schema_sanitizer.integrations.bigquery import (

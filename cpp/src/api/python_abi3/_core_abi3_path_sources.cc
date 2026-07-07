@@ -657,7 +657,8 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
     }
     auto merged = sanitize::merge_schema_registry(make_registry_merge_input(
         std::move(ingest.logical_schema), combined_registry.c_str(),
-        field_name_policy, ingest.opts->spec.default_key_name));
+        field_name_policy, ingest.opts->spec.default_key_name,
+        ingest.opts->spec.field_order));
     if (!merged.ok()) {
       return merged.status();
     }
@@ -747,7 +748,8 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
 
   auto merge_input = make_registry_merge_input(std::move(combined_schema),
                                                registry_json, field_name_policy,
-                                               prepared->spec.default_key_name);
+                                               prepared->spec.default_key_name,
+                                               prepared->spec.field_order);
   sanitize::Result<sanitize::SchemaRegistryMergeResult> final_merged_r =
       previous_schema ? sanitize::merge_schema_registry_with_previous_schema(
                             merge_input, *previous_schema)

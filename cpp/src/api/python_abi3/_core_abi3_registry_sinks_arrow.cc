@@ -97,7 +97,8 @@ PyObject *py_context_to_registry_sink_arrow_stream(PyObject *, PyObject *args) {
 
     auto merged_r = sanitize::merge_schema_registry(make_registry_merge_input(
         std::move(input_schema), registry_json, field_name_policy,
-        prepared_options->spec.default_key_name));
+        prepared_options->spec.default_key_name,
+        prepared_options->spec.field_order));
     if (!merged_r.ok()) {
       raise_status_error(code_for_status(merged_r.status()),
                          dup_cstr(merged_r.status().ToString()));

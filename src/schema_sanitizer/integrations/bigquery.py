@@ -289,12 +289,23 @@ def arrow_decimal_to_bq_type(data_type: Any) -> str:
     return "NUMERIC"
 
 
-def arrow_type_to_bq_sql(data_type: Any) -> str:
+def _iter_arrow_fields(data_type_or_schema: Any, *, sort_alphabetically: bool) -> list[Any]:
+    """Return Arrow fields, optionally sorted by field name."""
+    fields = list(data_type_or_schema)
+    if sort_alphabetically:
+        fields.sort(key=lambda field: field.name)
+    return fields
+
+
+def arrow_type_to_bq_sql(data_type: Any, *, sort_fields_alphabetically: bool = False) -> str:
     """Convert a PyArrow type to a BigQuery Standard SQL type."""
     import pyarrow as pa
 
     if pa.types.is_dictionary(data_type):
-        return arrow_type_to_bq_sql(data_type.value_type)
+        return arrow_type_to_bq_sql(
+            data_type.value_type,
+            sort_fields_alphabetically=sort_fields_alphabetically,
+        )
     if pa.types.is_null(data_type):
         return "STRING"
     if pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
@@ -332,17 +343,35 @@ def arrow_type_to_bq_sql(data_type: Any) -> str:
         return "BYTES"
     if pa.types.is_struct(data_type):
         child_types = [
-            f"{quote_bq_identifier_component(child.name)} {arrow_type_to_bq_sql(child.type)}"
-            for child in data_type
+            f"{quote_bq_identifier_component(child.name)} "
+            f"{arrow_type_to_bq_sql(child.type, sort_fields_alphabetically=sort_fields_alphabetically)}"
+            for child in _iter_arrow_fields(
+                data_type,
+                sort_alphabetically=sort_fields_alphabetically,
+            )
         ]
         return f"STRUCT<{', '.join(child_types)}>"
     if pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
-        return f"ARRAY<{arrow_type_to_bq_sql(data_type.value_type)}>"
+        return (
+            "ARRAY<"
+            f"{arrow_type_to_bq_sql(data_type.value_type, sort_fields_alphabetically=sort_fields_alphabetically)}"
+            ">"
+        )
     if hasattr(pa.types, "is_fixed_size_list") and pa.types.is_fixed_size_list(data_type):
-        return f"ARRAY<{arrow_type_to_bq_sql(data_type.value_type)}>"
+        return (
+            "ARRAY<"
+            f"{arrow_type_to_bq_sql(data_type.value_type, sort_fields_alphabetically=sort_fields_alphabetically)}"
+            ">"
+        )
     if pa.types.is_map(data_type):
-        key_type = arrow_type_to_bq_sql(data_type.key_type)
-        item_type = arrow_type_to_bq_sql(data_type.item_type)
+        key_type = arrow_type_to_bq_sql(
+            data_type.key_type,
+            sort_fields_alphabetically=sort_fields_alphabetically,
+        )
+        item_type = arrow_type_to_bq_sql(
+            data_type.item_type,
+            sort_fields_alphabetically=sort_fields_alphabetically,
+        )
         return f"ARRAY<STRUCT<`key` {key_type}, `value` {item_type}>>"
     LOGGER.warning("Unsupported Arrow type %s. Falling back to STRING in BigQuery DDL.", data_type)
     return "STRING"
@@ -352,16 +381,18 @@ def arrow_schema_to_bq_column_ddl(
     schema: Any,
     *,
     partition_names: set[str],
+    sort_fields_alphabetically: bool = False,
 ) -> tuple[str, list[str]]:
     """Convert a PyArrow schema to BigQuery column DDL."""
     lines: list[str] = []
     skipped_partition_fields: list[str] = []
-    for field in schema:
+    for field in _iter_arrow_fields(schema, sort_alphabetically=sort_fields_alphabetically):
         if field.name in partition_names:
             skipped_partition_fields.append(field.name)
             continue
         lines.append(
-            f"    {quote_bq_identifier_component(field.name)} {arrow_type_to_bq_sql(field.type)}"
+            f"    {quote_bq_identifier_component(field.name)} "
+            f"{arrow_type_to_bq_sql(field.type, sort_fields_alphabetically=sort_fields_alphabetically)}"
         )
     return ",\n".join(lines), skipped_partition_fields
 
@@ -425,11 +456,14 @@ def external_table_ddl(
     table_ref: BigQueryTableRef,
     schema: Any,
     spec: ExternalTableSpec,
+    *,
+    sort_fields_alphabetically: bool = False,
 ) -> tuple[str, list[str]]:
     """Build CREATE OR REPLACE EXTERNAL TABLE DDL and skipped partition fields."""
     column_ddl, skipped_partition_fields = arrow_schema_to_bq_column_ddl(
         schema,
         partition_names=hive_partition_names(spec.partition_columns),
+        sort_fields_alphabetically=sort_fields_alphabetically,
     )
     if not column_ddl:
         raise RuntimeError(
@@ -457,9 +491,15 @@ def create_or_replace_external_table_from_schema(
     table_ref: BigQueryTableRef,
     schema: Any,
     spec: ExternalTableSpec,
+    sort_fields_alphabetically: bool = False,
 ) -> list[str]:
     """Create or replace a BigQuery external table and return skipped fields."""
-    ddl, skipped_partition_fields = external_table_ddl(table_ref, schema, spec)
+    ddl, skipped_partition_fields = external_table_ddl(
+        table_ref,
+        schema,
+        spec,
+        sort_fields_alphabetically=sort_fields_alphabetically,
+    )
     LOGGER.debug("BigQuery external table DDL:\n%s", ddl)
     with dbapi.connect(db_kwargs=db_kwargs) as conn:
         with conn.cursor() as cur:
@@ -1282,7 +1322,14 @@ def create_or_replace_external_bigquery_table_from_namespace(
     dbapi, _database_options = import_bigquery_adbc()
     db_kwargs = bigquery_db_kwargs_from_namespace(args, table_ref)
     spec = external_table_spec_from_namespace(args)
-    _ddl, skipped_partition_fields = external_table_ddl(table_ref, schema, spec)
+    column_order = str(getattr(args, "column_order", "alphabetically")).strip().lower()
+    sort_fields_alphabetically = column_order in {"alphabetically", "sorted"}
+    _ddl, skipped_partition_fields = external_table_ddl(
+        table_ref,
+        schema,
+        spec,
+        sort_fields_alphabetically=sort_fields_alphabetically,
+    )
 
     if skipped_partition_fields:
         LOGGER.warning(
@@ -1301,6 +1348,8 @@ def create_or_replace_external_bigquery_table_from_namespace(
         spec.partition_columns,
         bool(spec.parquet_enable_list_inference),
     )
+    if sort_fields_alphabetically:
+        LOGGER.debug("BigQuery external table schema field ordering=alphabetically")
     LOGGER.debug("BigQuery external table source URIs: %s", spec.source_uris)
     if normalize_external_format(spec.external_format) == "PARQUET":
         LOGGER.debug(
@@ -1314,6 +1363,7 @@ def create_or_replace_external_bigquery_table_from_namespace(
         table_ref=table_ref,
         schema=schema,
         spec=spec,
+        sort_fields_alphabetically=sort_fields_alphabetically,
     )
     LOGGER.info("BigQuery external table replace status=done table=%s", table_ref.display_name)
 

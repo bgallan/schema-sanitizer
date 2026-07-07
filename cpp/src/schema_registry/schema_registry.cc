@@ -2,6 +2,7 @@
 
 #include "sanitize/schema_registry/schema_registry.hh"
 
+#include "internal/planning/schema_evolution.hh"
 #include "internal/planning/variant_field_names.hh"
 #include "sanitize/metadata/file_metadata.hh"
 #include "schema_registry/schema_registry_internal.hh"
@@ -591,6 +592,10 @@ Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous(
                      drifts, detected_at, input.default_key_name);
   }
   schema_registry_internal::normalize_integer_float_schema(schema);
+  if (input.field_order == FieldOrderPolicy::kAlphabetically) {
+    schema = internal::reorder_schema_fields(schema, nullptr,
+                                             input.field_order);
+  }
 
   SchemaRegistryMergeResult out;
   out.schema = std::move(schema);
