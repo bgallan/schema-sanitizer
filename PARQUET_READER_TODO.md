@@ -63,6 +63,7 @@ replacement. Remaining work:
    - [x] Native projection support for top-level scalar columns.
    - [x] Native projection support for supported top-level struct columns.
    - [x] Native projection support for supported top-level list columns.
+   - [x] Native projection support for empty supported file schemas.
    - [x] Projection support through PyArrow fallback when native cannot satisfy
      projected column reads.
    - [x] Batch-size control, including PyArrow fallback when native row-group

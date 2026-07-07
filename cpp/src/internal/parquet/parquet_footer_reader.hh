@@ -206,6 +206,7 @@ struct FooterInfo {
   std::string created_by;
   std::vector<SchemaElementInfo> schema_elements;
   std::vector<RowGroupInfo> row_groups;
+  std::vector<std::string> projected_columns;
 };
 
 // Reads bounded Parquet footer metadata from a local file path.

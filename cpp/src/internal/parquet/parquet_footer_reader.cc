@@ -1569,6 +1569,35 @@ schema_leaf_levels(const std::vector<SchemaElementInfo> &schema) {
   return out;
 }
 
+sanitize::Status
+project_leaf_levels_for_columns(const std::vector<LeafLevelInfo> &leaves,
+                                const std::vector<std::string> &columns,
+                                std::vector<LeafLevelInfo> *out) {
+  if (!out) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: projection output is null");
+  }
+  out->clear();
+  if (columns.empty()) {
+    *out = leaves;
+    return {};
+  }
+  out->reserve(leaves.size());
+  for (const auto &name : columns) {
+    const auto before_count = out->size();
+    for (const auto &leaf : leaves) {
+      if (!leaf.path.empty() && leaf.path.front() == name) {
+        out->push_back(leaf);
+      }
+    }
+    if (out->size() == before_count) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: projection column not found: ", name);
+    }
+  }
+  return {};
+}
+
 sanitize::Status assign_column_levels(FooterInfo *info) {
   if (!info) {
     return sanitize::Status::Invalid("Parquet schema levels: internal error");
@@ -4202,7 +4231,14 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
       add_readiness_blocker(&readiness,
                             "empty file schema is not materializable yet");
     } else {
-      for (const auto &leaf : leaves.ValueOrDie()) {
+      std::vector<LeafLevelInfo> projected_leaves;
+      const auto projection_status = project_leaf_levels_for_columns(
+          leaves.ValueOrDie(), info.projected_columns, &projected_leaves);
+      if (!projection_status.ok()) {
+        add_readiness_blocker(&readiness,
+                              "empty file schema projection failed");
+      }
+      for (const auto &leaf : projected_leaves) {
         std::string label;
         for (std::size_t i = 0; i < leaf.path.size(); ++i) {
           if (i > 0) {
@@ -6683,6 +6719,11 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
   if (!row_group) {
     SAN_ASSIGN_OR_RAISE(empty_file_leaves,
                         schema_leaf_levels(footer.schema_elements));
+    std::vector<LeafLevelInfo> projected_empty_file_leaves;
+    SAN_RETURN_NOT_OK(project_leaf_levels_for_columns(
+        empty_file_leaves, footer.projected_columns,
+        &projected_empty_file_leaves));
+    empty_file_leaves = std::move(projected_empty_file_leaves);
   }
 
   std::vector<NativeParquetOutputField> layout;
@@ -7646,6 +7687,7 @@ sanitize::Status project_footer_row_group_columns(
   if (!info || projected_columns.empty()) {
     return {};
   }
+  info->projected_columns = projected_columns;
   for (auto &row_group : info->row_groups) {
     std::vector<ColumnChunkInfo> selected;
     selected.reserve(row_group.columns.size());
