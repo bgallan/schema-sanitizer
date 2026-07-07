@@ -1,6 +1,6 @@
 # schema-sanitizer
 
-**Version 0.3.4:** this project is still being tuned and tested, especially for
+**Version 0.3.5:** this project is still being tuned and tested, especially for
 generating Parquet files used by BigQuery external tables.
 
 `schema-sanitizer` converts messy CSV, JSON, JSON Lines, NDJSON, XML, and
