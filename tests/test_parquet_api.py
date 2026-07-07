@@ -1218,6 +1218,60 @@ def test_native_parquet_stream_reads_multiple_row_groups(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_reads_list_columns_across_row_groups(
+    tmp_path: Path,
+) -> None:
+    """Verify native list arrays reset offsets correctly per row group."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "multi-row-group-list.parquet"
+    schema = pa.schema([pa.field("items", pa.list_(pa.int64()))])
+    batches = [
+        pa.record_batch(
+            [pa.array([[1, 2], None], type=pa.list_(pa.int64()))],
+            schema=schema,
+        ),
+        pa.record_batch(
+            [pa.array([[], [3, 4, 5]], type=pa.list_(pa.int64()))],
+            schema=schema,
+        ),
+    ]
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(schema, batches),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["row_group_count"] == 2
+    assert [row_group["num_rows"] for row_group in info["row_groups"]] == [2, 2]
+    assert [
+        row_group["columns"][0]["repeated_level_offsets"]
+        for row_group in info["row_groups"]
+    ] == [[0, 2, 2], [0, 0, 3]]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == [
+        {"items": [1, 2]},
+        {"items": None},
+        {"items": []},
+        {"items": [3, 4, 5]},
+    ]
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

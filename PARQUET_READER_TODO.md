@@ -45,6 +45,7 @@ replacement. Remaining work:
 1. Broaden row-group and page coverage:
 
    - [x] Multi-row-group parity tests.
+   - [x] Simple top-level lists across multiple row groups.
    - [x] Multiple data pages per column.
    - [x] Mixed null/non-null spans across pages.
    - [x] Native footer parsing for empty row groups.
