@@ -383,6 +383,71 @@ def test_native_parquet_stream_projection_uses_native_route(
 
 
 @_requires_pyarrow
+def test_parquet_filter_uses_dataset_scanner_instead_of_native_route(
+    tmp_path: Path,
+) -> None:
+    """Verify dataset filters are honored through the PyArrow scanner route."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    ds = pytest.importorskip("pyarrow.dataset")
+    path = tmp_path / "native-filter.parquet"
+    table = pa.table(
+        {
+            "a": pa.array([1, 2, 3], type=pa.int64()),
+            "b": pa.array(["x", "y", "z"], type=pa.string()),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["b"],
+        filters=ds.field("a") > 1,
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == [{"b": "y"}, {"b": "z"}]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is False
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "filter_requires_dataset_scanner"
+
+
+@_requires_pyarrow
+def test_parquet_filter_rejects_buffer_source() -> None:
+    """Verify filters are never silently ignored for non-dataset sources."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        open_parquet_record_batch_stream_factory,
+    )
+
+    ds = pytest.importorskip("pyarrow.dataset")
+    sink = pa.BufferOutputStream()
+    pq.write_table(_sample_table(), sink)
+
+    with pytest.raises(ValueError, match="filters require a path-backed source"):
+        open_parquet_record_batch_stream_factory(
+            sink.getvalue().to_pybytes(),
+            source="text",
+            feature="test",
+            filters=ds.field("a") > 1,
+        )
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_plain_boolean_rows(
     tmp_path: Path,
 ) -> None:

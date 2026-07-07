@@ -91,6 +91,7 @@ class ParquetRecordBatchStreamFactory:
         batch_size: int = DEFAULT_PARQUET_BATCH_ROWS,
         use_threads: bool = False,
         columns: list[str] | tuple[str, ...] | None = None,
+        filters: Any | None = None,
     ) -> None:
         """Store the Parquet source and read its schema once."""
         self._data = data
@@ -99,7 +100,10 @@ class ParquetRecordBatchStreamFactory:
         self._batch_size = batch_size
         self._use_threads = use_threads
         self._columns = None if columns is None else tuple(columns)
+        self._filters = filters
         self._local_path = local_parquet_path_or_none(data, source=source, feature=feature)
+        if self._filters is not None and self._local_path is None:
+            raise ValueError("Parquet filters require a path-backed source")
         self.sink = "stream"
         self.diagnostics = None
         self._pa = ensure_pyarrow(feature=feature)
@@ -166,6 +170,13 @@ class ParquetRecordBatchStreamFactory:
 
     def _try_native_stream(self) -> Any | None:
         """Return a native Parquet Arrow C stream capsule when supported."""
+        if self._filters is not None:
+            _set_parquet_native_reader_diagnostics(
+                attempted=False,
+                ready=False,
+                reason="filter_requires_dataset_scanner",
+            )
+            return None
         if self._local_path is None:
             _set_parquet_native_reader_diagnostics(
                 attempted=False,
@@ -277,6 +288,7 @@ class ParquetRecordBatchStreamFactory:
                 return native_capsule
             scanner = self._dataset.scanner(
                 columns=None if self._columns is None else list(self._columns),
+                filter=self._filters,
                 batch_size=self._batch_size,
                 use_threads=self._use_threads,
             )
@@ -374,6 +386,7 @@ def open_parquet_record_batch_stream_factory(
     batch_size: int = DEFAULT_PARQUET_BATCH_ROWS,
     use_threads: bool = False,
     columns: list[str] | tuple[str, ...] | None = None,
+    filters: Any | None = None,
 ) -> ParquetRecordBatchStreamFactory:
     """Open Parquet input as a reusable Arrow C Stream factory."""
     return ParquetRecordBatchStreamFactory(
@@ -383,6 +396,7 @@ def open_parquet_record_batch_stream_factory(
         batch_size=batch_size,
         use_threads=use_threads,
         columns=columns,
+        filters=filters,
     )
 
 

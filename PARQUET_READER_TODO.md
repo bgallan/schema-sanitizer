@@ -53,7 +53,8 @@ replacement. Remaining work:
      projected column reads.
    - [x] Batch-size control, including PyArrow fallback when native row-group
      batches would exceed the requested batch size.
-   - Predicate/filter integration if direct native reads become dataset-aware.
+   - [x] Predicate/filter integration through PyArrow dataset scanner fallback.
+   - Native predicate pushdown if direct native reads become dataset-aware.
 
 1. Harden large-file behavior:
 
