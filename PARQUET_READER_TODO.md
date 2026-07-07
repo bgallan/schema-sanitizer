@@ -34,7 +34,7 @@ replacement. Remaining work:
    - [x] Multi-row-group parity tests.
    - [x] Multiple data pages per column.
    - [x] Mixed null/non-null spans across pages.
-   - Empty row groups.
+   - [x] Native footer parsing for empty row groups.
    - [x] Production fallback for empty row groups through PyArrow.
    - [x] Empty files.
 

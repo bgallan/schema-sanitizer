@@ -3193,6 +3193,12 @@ sanitize::Status read_page_headers_for_column(std::ifstream &file,
       column->total_compressed_size <= 0) {
     return {};
   }
+  if (column->has_num_values && column->num_values == 0) {
+    column->pages.clear();
+    column->decoded_dictionary_values.clear();
+    column->decoded_dictionary_fixed_width_values.clear();
+    return {};
+  }
   const bool has_dictionary = column->has_dictionary_page_offset;
   if (!has_dictionary && !column->has_data_page_offset) {
     return {};

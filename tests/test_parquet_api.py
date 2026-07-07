@@ -852,6 +852,7 @@ def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
+        native_parquet_footer_info,
         open_parquet_record_batch_stream_factory,
     )
 
@@ -868,6 +869,14 @@ def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
     assert metadata.num_rows == 0
     assert metadata.num_row_groups == 1
     assert metadata.row_group(0).num_rows == 0
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 1
+    assert info["row_groups"][0]["num_rows"] == 0
+    assert all(not column["pages"] for column in info["row_groups"][0]["columns"])
+    assert info["native_reader_ready"] == 0
+    assert any("file was not written" in blocker for blocker in info["native_reader_blockers"])
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)
@@ -879,8 +888,8 @@ def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
     diagnostics = last_parquet_native_reader_diagnostics()
     assert diagnostics["attempted"] is True
     assert diagnostics["ready"] is False
-    assert diagnostics["reason"] == "footer_info_error"
-    assert any("missing compressed page size" in blocker for blocker in diagnostics["blockers"])
+    assert diagnostics["reason"] == "not_ready"
+    assert any("file was not written" in blocker for blocker in diagnostics["blockers"])
 
 
 @_requires_pyarrow
