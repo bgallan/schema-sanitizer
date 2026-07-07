@@ -23,6 +23,12 @@ from .pyarrow_schema_support import SchemaSupportCache
 
 _DIRECT_SCHEMA_SUPPORT_CACHE = SchemaSupportCache()
 _LAST_PARQUET_STREAM_FACTORY_ROUTE = "none"
+_LAST_PARQUET_NATIVE_READER_DIAGNOSTICS: dict[str, Any] = {
+    "attempted": False,
+    "ready": False,
+    "reason": "none",
+    "blockers": [],
+}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -31,10 +37,31 @@ def last_parquet_stream_factory_route() -> str:
     return _LAST_PARQUET_STREAM_FACTORY_ROUTE
 
 
+def last_parquet_native_reader_diagnostics() -> dict[str, Any]:
+    """Return diagnostics for the most recent native Parquet reader attempt."""
+    diagnostics = dict(_LAST_PARQUET_NATIVE_READER_DIAGNOSTICS)
+    diagnostics["blockers"] = list(diagnostics.get("blockers") or [])
+    return diagnostics
+
+
 def _set_parquet_stream_factory_route(route: str) -> None:
     """Record the route used by the most recent Parquet stream factory."""
     global _LAST_PARQUET_STREAM_FACTORY_ROUTE
     _LAST_PARQUET_STREAM_FACTORY_ROUTE = route
+
+
+def _set_parquet_native_reader_diagnostics(**diagnostics: Any) -> None:
+    """Record diagnostics for the most recent native reader attempt."""
+    global _LAST_PARQUET_NATIVE_READER_DIAGNOSTICS
+    normalized = {
+        "attempted": False,
+        "ready": False,
+        "reason": "none",
+        "blockers": [],
+    }
+    normalized.update(diagnostics)
+    normalized["blockers"] = list(normalized.get("blockers") or [])
+    _LAST_PARQUET_NATIVE_READER_DIAGNOSTICS = normalized
 
 
 def record_batch_reader_from_iterable(pa: Any, schema: Any, batches: Any) -> Any:
@@ -106,21 +133,70 @@ class ParquetRecordBatchStreamFactory:
     def _try_native_stream(self) -> Any | None:
         """Return a native Parquet Arrow C stream capsule when supported."""
         if self._source != "path":
+            _set_parquet_native_reader_diagnostics(
+                attempted=False,
+                ready=False,
+                reason="source_not_path",
+            )
             return None
         native_read = PARQUET_STREAM_READ.get()
         if native_read is None:
+            _set_parquet_native_reader_diagnostics(
+                attempted=False,
+                ready=False,
+                reason="native_function_unavailable",
+            )
             return None
         info = native_parquet_footer_info(self._data)
-        if not info or info.get("native_reader_ready") != 1:
+        if not info:
+            _set_parquet_native_reader_diagnostics(
+                attempted=True,
+                ready=False,
+                reason="footer_info_unavailable",
+            )
+            _LOGGER.debug("Native Parquet reader skipped: footer info unavailable")
+            return None
+        blockers = list(info.get("native_reader_blockers") or [])
+        if info.get("native_reader_ready") != 1:
+            _set_parquet_native_reader_diagnostics(
+                attempted=True,
+                ready=False,
+                reason="not_ready",
+                blockers=blockers,
+                row_group_count=info.get("row_group_count"),
+                num_rows=info.get("num_rows"),
+            )
+            first_blocker = blockers[0] if blockers else "unknown blocker"
+            _LOGGER.debug(
+                "Native Parquet reader skipped; retrying input with PyArrow: %s",
+                first_blocker,
+            )
             return None
         try:
             capsule = native_read(self._data)
         except RuntimeError as exc:
+            _set_parquet_native_reader_diagnostics(
+                attempted=True,
+                ready=True,
+                reason="native_error",
+                blockers=[],
+                error=str(exc),
+                row_group_count=info.get("row_group_count"),
+                num_rows=info.get("num_rows"),
+            )
             _LOGGER.error(
                 "Native Parquet reader failed; retrying input with PyArrow",
                 exc_info=exc,
             )
             return None
+        _set_parquet_native_reader_diagnostics(
+            attempted=True,
+            ready=True,
+            reason="native_stream",
+            blockers=[],
+            row_group_count=info.get("row_group_count"),
+            num_rows=info.get("num_rows"),
+        )
         _set_parquet_stream_factory_route("native_parquet_stream")
         self._keepalive = (capsule,)
         return capsule
@@ -147,6 +223,12 @@ class ParquetRecordBatchStreamFactory:
             self._pending_opened_file = None
         else:
             parquet_file, opened_file = self._open_parquet_file()
+        if self._source != "path":
+            _set_parquet_native_reader_diagnostics(
+                attempted=False,
+                ready=False,
+                reason="source_not_path",
+            )
         batches = parquet_file.iter_batches(
             batch_size=self._batch_size,
             use_threads=self._use_threads,
@@ -235,6 +317,7 @@ def open_parquet_record_batch_stream_factory(
 
 __all__ = [
     "ParquetRecordBatchStreamFactory",
+    "last_parquet_native_reader_diagnostics",
     "last_parquet_stream_factory_route",
     "native_parquet_footer_info",
     "open_parquet_record_batch_stream_factory",

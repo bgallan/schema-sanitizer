@@ -64,6 +64,6 @@ replacement. Remaining work:
 
 1. Keep fallback observability strong:
 
-   - Preserve clear route labels for native vs PyArrow reads.
-   - Log unsupported native-reader cases at a useful level.
-   - Add counters/diagnostics if native reader adoption becomes user-visible.
+   - [x] Preserve clear route labels for native vs PyArrow reads.
+   - [x] Log unsupported native-reader cases at a useful level.
+   - [x] Add counters/diagnostics if native reader adoption becomes user-visible.

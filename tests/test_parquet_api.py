@@ -114,6 +114,7 @@ def test_native_parquet_footer_info_maps_utc_timestamp_timezone(tmp_path: Path) 
 def test_read_parquet_path_materializes_table(tmp_path: Path) -> None:
     """Verify read parquet path materializes table."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
 
@@ -126,6 +127,69 @@ def test_read_parquet_path_materializes_table(tmp_path: Path) -> None:
 
     assert result.clean_data.to_pylist() == _sample_table().to_pylist()
     assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("file was not written" in blocker for blocker in diagnostics["blockers"])
+
+
+@_requires_pyarrow
+def test_native_parquet_reader_logs_not_ready_fallback(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify unsupported native Parquet attempts leave useful fallback diagnostics."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    path = tmp_path / "pyarrow.parquet"
+    pq.write_table(_sample_table(), path)
+    caplog.set_level(logging.DEBUG, logger="schema_sanitizer.adapters.pyarrow_parquet_direct")
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("file was not written" in blocker for blocker in diagnostics["blockers"])
+    assert "Native Parquet reader skipped; retrying input with PyArrow" in caplog.text
+
+
+@_requires_pyarrow
+def test_parquet_file_like_records_non_native_source_diagnostics() -> None:
+    """Verify file-like Parquet inputs explain why native reader was bypassed."""
+    from io import BytesIO
+
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    data = BytesIO()
+    pq.write_table(_sample_table(), data)
+    data.seek(0)
+
+    factory = open_parquet_record_batch_stream_factory(data, source="stream", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_parquetfile_iter_batches"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is False
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "source_not_path"
+    assert diagnostics["blockers"] == []
 
 
 @_requires_pyarrow
@@ -134,6 +198,7 @@ def test_native_parquet_stream_materializes_plain_fixed_width_rows(
 ) -> None:
     """Verify the native Parquet stream materializes supported fixed-width pages."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
         native_parquet_footer_info,
         open_parquet_record_batch_stream_factory,
@@ -163,6 +228,13 @@ def test_native_parquet_stream_materializes_plain_fixed_width_rows(
 
     assert reader.read_all().to_pylist() == table.to_pylist()
     assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+    assert diagnostics["row_group_count"] == 1
+    assert diagnostics["num_rows"] == 4
 
 
 @_requires_pyarrow
