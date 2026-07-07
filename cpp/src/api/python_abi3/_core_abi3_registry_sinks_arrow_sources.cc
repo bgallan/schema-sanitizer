@@ -649,10 +649,9 @@ merge_arrow_source_schemas(
   if (!has_schema) {
     return sanitize::Status::Invalid("sources must not be empty");
   }
-  auto merge_input = make_registry_merge_input(std::move(combined_schema),
-                                               registry_json, field_name_policy,
-                                               prepared->spec.default_key_name,
-                                               prepared->spec.field_order);
+  auto merge_input = make_registry_merge_input(
+      std::move(combined_schema), registry_json, field_name_policy,
+      prepared->spec.default_key_name, prepared->spec.field_order);
   return previous_schema ? sanitize::merge_schema_registry_with_previous_schema(
                                merge_input, *previous_schema)
                          : sanitize::merge_schema_registry(merge_input);

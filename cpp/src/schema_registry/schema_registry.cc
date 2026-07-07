@@ -593,8 +593,8 @@ Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous(
   }
   schema_registry_internal::normalize_integer_float_schema(schema);
   if (input.field_order == FieldOrderPolicy::kAlphabetically) {
-    schema = internal::reorder_schema_fields(schema, nullptr,
-                                             input.field_order);
+    schema =
+        internal::reorder_schema_fields(schema, nullptr, input.field_order);
   }
 
   SchemaRegistryMergeResult out;

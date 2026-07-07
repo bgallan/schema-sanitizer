@@ -746,10 +746,9 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
         "Schema warm-up found no valid JSON sources: ", detail);
   }
 
-  auto merge_input = make_registry_merge_input(std::move(combined_schema),
-                                               registry_json, field_name_policy,
-                                               prepared->spec.default_key_name,
-                                               prepared->spec.field_order);
+  auto merge_input = make_registry_merge_input(
+      std::move(combined_schema), registry_json, field_name_policy,
+      prepared->spec.default_key_name, prepared->spec.field_order);
   sanitize::Result<sanitize::SchemaRegistryMergeResult> final_merged_r =
       previous_schema ? sanitize::merge_schema_registry_with_previous_schema(
                             merge_input, *previous_schema)

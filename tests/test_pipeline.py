@@ -1498,8 +1498,7 @@ def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> 
 
     assert ddl.index("`a` STRING") < ddl.index("`variables` STRUCT") < ddl.index("`z` INT64")
     assert (
-        "`variables` STRUCT<`birthday` STRING, `company` STRING, "
-        "`email` STRING, `phone` STRING>"
+        "`variables` STRUCT<`birthday` STRING, `company` STRING, " "`email` STRING, `phone` STRING>"
     ) in ddl
 
 
