@@ -42,7 +42,9 @@ replacement. Remaining work:
    - [x] Production fallback for complex/nested lists (list/list, list/map, nested list leaves).
    - [x] Native materialization for top-level list-of-struct with scalar leaves.
    - [x] Native materialization for top-level list-of-list with scalar leaves.
-   - Native materialization for list/map and deeper arbitrary nested list shapes.
+   - [x] Native materialization for top-level map with scalar key/value leaves.
+   - [x] Native materialization for top-level list-of-map with scalar key/value leaves.
+   - Native materialization for arbitrary nested repeated shapes beyond two repeated levels.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.

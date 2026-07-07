@@ -560,11 +560,6 @@ list_node_from_field(const jsonl::JsonlField &field, std::string name) {
                                             "' must have one child");
   }
   const auto &value = field.children.front();
-  if (value.kind == jsonl::JsonlKind::kMap) {
-    return sanitize::Status::NotImplemented(
-        kUnsupportedPrefix, " list field '", field.name,
-        "' has unsupported element format '", value.format, "'");
-  }
   ParquetNode node;
   node.node_kind = NodeKind::kList;
   node.arrow_kind = field.kind;
