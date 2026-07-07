@@ -34,10 +34,12 @@ replacement. Remaining work:
    - [x] Simple top-level boolean lists with PLAIN bit-packed elements.
    - [x] Simple top-level float lists with BYTE_STREAM_SPLIT elements.
    - [x] Simple top-level string/binary lists with PLAIN byte-array elements.
+   - [x] Simple top-level logical/fixed-size scalar lists.
    - [x] Simple top-level lists with nullable scalar elements.
    - [x] Simple top-level lists across multiple data pages.
    - [x] Empty files with simple top-level list schemas.
-   - Lists.
+   - [x] Simple top-level scalar lists.
+   - Complex/nested lists (list of struct/list/map).
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.

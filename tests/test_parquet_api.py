@@ -1255,8 +1255,7 @@ def test_native_parquet_stream_reads_list_columns_across_row_groups(
     assert info["row_group_count"] == 2
     assert [row_group["num_rows"] for row_group in info["row_groups"]] == [2, 2]
     assert [
-        row_group["columns"][0]["repeated_level_offsets"]
-        for row_group in info["row_groups"]
+        row_group["columns"][0]["repeated_level_offsets"] for row_group in info["row_groups"]
     ] == [[0, 2, 2], [0, 0, 3]]
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
@@ -2307,6 +2306,104 @@ def test_native_parquet_stream_materializes_simple_boolean_lists(
     reader = pa.RecordBatchReader.from_stream(factory)
 
     assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array", "native_format", "expected_offsets"),
+    [
+        (
+            "date32",
+            pa.array(
+                [[dt.date(2024, 1, 1)], None, [], [dt.date(2024, 1, 2)]],
+                type=pa.list_(pa.date32()),
+            ),
+            "tdD",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "timestamp_us",
+            pa.array(
+                [
+                    [dt.datetime(2024, 1, 1, 1, 2, 3, 123456)],
+                    None,
+                    [],
+                    [dt.datetime(2024, 1, 2, 1, 2, 3, 123456)],
+                ],
+                type=pa.list_(pa.timestamp("us")),
+            ),
+            "tsu:",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "decimal128",
+            pa.array(
+                [[Decimal("12.34")], None, [], [Decimal("-0.10")]],
+                type=pa.list_(pa.decimal128(10, 2)),
+            ),
+            "d:10,2,128",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "fixed_size_binary",
+            pa.array([[b"abcd"], None, [], [b"wxyz"]], type=pa.list_(pa.binary(4))),
+            "w:4",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "uint64",
+            pa.array(
+                [[1, 2**63], None, [], [2**64 - 1]],
+                type=pa.list_(pa.uint64()),
+            ),
+            "L",
+            [0, 2, 2, 2, 3],
+        ),
+    ],
+)
+def test_native_parquet_stream_materializes_logical_fixed_width_lists(
+    tmp_path: Path,
+    name: str,
+    array: pa.Array,
+    native_format: str,
+    expected_offsets: list[int],
+) -> None:
+    """Verify native lists preserve fixed-width logical scalar element types."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"native-logical-{name}-list.parquet"
+    table = pa.table({"items": array})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_arrow_format"] == native_format
+    assert column["native_read_value_buffer_kind"] == "fixed_width"
+    assert column["repeated_level_offsets"] == expected_offsets
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
     assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
