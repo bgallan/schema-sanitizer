@@ -66,6 +66,7 @@ replacement. Remaining work:
 1. Add cross-writer compatibility:
 
    - [x] PyArrow-written files through PyArrow fallback.
+   - [x] Spark-compatible INT96 timestamp variants through PyArrow fallback.
    - Spark-written files.
    - [x] DuckDB-written files through PyArrow fallback.
    - BigQuery-exported Parquet variants.

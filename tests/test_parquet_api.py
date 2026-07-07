@@ -1264,6 +1264,43 @@ def test_native_parquet_footer_info_reads_pyarrow_file(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
+def test_spark_int96_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
+    """Verify Spark-style INT96 timestamps stay readable through fallback."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "spark-int96.parquet"
+    value = dt.datetime(2024, 1, 1, 1, 2, 3, 123456)
+    pq.write_table(
+        pa.table({"ts": pa.array([value], type=pa.timestamp("ns"))}),
+        path,
+        flavor="spark",
+        use_deprecated_int96_timestamps=True,
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert info["schema_elements"][1]["physical_type"] == 3
+    assert any("unsupported physical type" in blocker for blocker in info["native_reader_blockers"])
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.schema.field("ts").type == pa.timestamp("us")
+    assert result.clean_data.to_pylist() == [{"ts": value}]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("unsupported physical type" in blocker for blocker in diagnostics["blockers"])
+
+
+@_requires_pyarrow
 def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
     """Verify DuckDB-written Parquet stays readable through the safe fallback."""
     duckdb = pytest.importorskip("duckdb")
