@@ -486,6 +486,69 @@ def test_native_parquet_stream_materializes_decimal_fixed_bytes(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_fixed_size_binary(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream materializes fixed-size binary columns."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "fixed-size-binary.parquet"
+    plain_values = [
+        None if index % 10 == 0 else index.to_bytes(4, "little") for index in range(600)
+    ]
+    table = pa.table(
+        {
+            "plain_token": pa.array(
+                plain_values,
+                type=pa.binary(4),
+            ),
+            "dict_token": pa.array(
+                [b"same", b"same", b"same", None, b"same"] * 120,
+                type=pa.binary(4),
+            ),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    columns = {
+        tuple(column["path_in_schema"]): column for column in info["row_groups"][0]["columns"]
+    }
+    assert columns[("plain_token",)]["physical_type"] == 7
+    assert columns[("plain_token",)]["fixed_type_length"] == 4
+    assert columns[("plain_token",)]["native_arrow_format"] == "w:4"
+    assert columns[("plain_token",)]["native_read_value_buffer_kind"] == "fixed_width"
+    assert columns[("plain_token",)]["native_read_value_width_bytes"] == 4
+    assert columns[("plain_token",)]["native_read_arrow_n_buffers"] == 2
+    assert columns[("dict_token",)]["physical_type"] == 7
+    assert columns[("dict_token",)]["fixed_type_length"] == 4
+    assert columns[("dict_token",)]["native_arrow_format"] == "w:4"
+    assert columns[("dict_token",)]["native_read_value_buffer_kind"] == "dictionary_fixed_width"
+    assert columns[("dict_token",)]["native_read_value_width_bytes"] == 4
+    assert columns[("dict_token",)]["native_read_arrow_n_buffers"] == 2
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_reads_empty_file_schema(
     tmp_path: Path,
 ) -> None:

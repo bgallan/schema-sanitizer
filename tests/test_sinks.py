@@ -2309,9 +2309,10 @@ def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path) -> None:
     batch = pa.record_batch(
         [
             pa.array([b"abc"], type=pa.binary()),
+            pa.array([b"wxyz"], type=pa.binary(4)),
             pa.array([[("a", 1), ("b", 2)]], type=map_type),
         ],
-        names=["payload", "attrs"],
+        names=["payload", "fixed_payload", "attrs"],
     )
     reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     out = tmp_path / "out.jsonl"
@@ -2321,6 +2322,7 @@ def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path) -> None:
     row = json.loads(out.read_text(encoding="utf-8").strip())
     assert row == {
         "payload": "YWJj",
+        "fixed_payload": "d3h5eg==",
         "attrs": [{"key": "a", "value": 1}, {"key": "b", "value": 2}],
     }
 

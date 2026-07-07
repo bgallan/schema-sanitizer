@@ -101,6 +101,7 @@ struct ParquetNode {
   std::int32_t decimal_precision = 0;
   std::int32_t decimal_scale = 0;
   std::int32_t decimal_byte_width = 0;
+  std::int32_t fixed_binary_byte_width = 0;
   std::vector<ParquetNode> children;
   std::unique_ptr<ParquetNode> element;
   std::size_t leaf_index = 0;
@@ -469,6 +470,15 @@ primitive_node_from_field(const jsonl::JsonlField &field, std::string name) {
       node.converted_type = ConvertedType::kUtf8;
     }
     return node;
+  case jsonl::JsonlKind::kFixedSizeBinary:
+    if (field.fixed_size_binary_size <= 0) {
+      return sanitize::Status::NotImplemented(
+          kUnsupportedPrefix, " Arrow fixed-size binary field '", field.name,
+          "' has unsupported format '", field.format, "'");
+    }
+    node.physical_type = PhysicalType::kFixedLenByteArray;
+    node.fixed_binary_byte_width = field.fixed_size_binary_size;
+    return node;
   case jsonl::JsonlKind::kTimestampMillis:
   case jsonl::JsonlKind::kTimestampMicros:
   case jsonl::JsonlKind::kTimestampNanos:
@@ -489,6 +499,7 @@ primitive_node_from_field(const jsonl::JsonlField &field, std::string name) {
     node.decimal_precision = field.decimal_precision;
     node.decimal_scale = field.decimal_scale;
     node.decimal_byte_width = field.decimal_byte_width;
+    node.fixed_binary_byte_width = field.decimal_byte_width;
     return node;
   default:
     return sanitize::Status::NotImplemented(
@@ -1158,6 +1169,31 @@ bool byte_array_less(std::string_view left, std::string_view right) {
                                       });
 }
 
+std::optional<std::pair<std::string, std::string>>
+fixed_size_binary_min_max(std::string_view values, std::int32_t byte_width) {
+  if (byte_width <= 0 || values.empty() ||
+      values.size() % static_cast<std::size_t>(byte_width) != 0) {
+    return std::nullopt;
+  }
+  const auto width = static_cast<std::size_t>(byte_width);
+  std::optional<std::string> min_value;
+  std::optional<std::string> max_value;
+  for (std::size_t offset = 0; offset < values.size(); offset += width) {
+    std::string current(values.substr(offset, width));
+    if (!min_value || byte_array_less(current, *min_value)) {
+      min_value = current;
+    }
+    if (!max_value || byte_array_less(*max_value, current)) {
+      max_value = std::move(current);
+    }
+  }
+  if (!min_value || !max_value) {
+    return std::nullopt;
+  }
+  return std::pair<std::string, std::string>{std::move(*min_value),
+                                             std::move(*max_value)};
+}
+
 bool is_byte_array_kind(jsonl::JsonlKind kind) {
   return kind == jsonl::JsonlKind::kString ||
          kind == jsonl::JsonlKind::kLargeString ||
@@ -1190,6 +1226,11 @@ std::optional<std::size_t> fixed_dictionary_value_width(const ParquetNode &node,
       return std::nullopt;
     }
     return static_cast<std::size_t>(node.decimal_byte_width);
+  case jsonl::JsonlKind::kFixedSizeBinary:
+    if (node.fixed_binary_byte_width <= 0) {
+      return std::nullopt;
+    }
+    return static_cast<std::size_t>(node.fixed_binary_byte_width);
   default:
     return std::nullopt;
   }
@@ -1514,6 +1555,9 @@ encoded_min_max_for_column(const LeafColumn &column,
   case jsonl::JsonlKind::kDecimal:
     return fixed_len_byte_array_min_max(page_data.values,
                                         column.node->decimal_byte_width);
+  case jsonl::JsonlKind::kFixedSizeBinary:
+    return fixed_size_binary_min_max(page_data.values,
+                                     column.node->fixed_binary_byte_width);
   default:
     return std::nullopt;
   }
@@ -1641,6 +1685,24 @@ sanitize::Status append_decimal_value(std::string &out, const ParquetNode &node,
   return sanitize::Status::OK();
 }
 
+// Appends one Arrow fixed-size binary value as Parquet fixed bytes.
+sanitize::Status append_fixed_size_binary_value(std::string &out,
+                                                const ParquetNode &node,
+                                                const ArrowArray &array,
+                                                std::int64_t row) {
+  if (node.fixed_binary_byte_width <= 0 || array.n_buffers <= 1 ||
+      !array.buffers || !array.buffers[1]) {
+    return sanitize::Status::Invalid(
+        "native Parquet writer: missing fixed-size binary value buffer");
+  }
+  const auto *data = static_cast<const char *>(array.buffers[1]);
+  const auto byte_width =
+      static_cast<std::size_t>(node.fixed_binary_byte_width);
+  const auto offset = static_cast<std::size_t>(array.offset + row) * byte_width;
+  out.append(data + offset, byte_width);
+  return sanitize::Status::OK();
+}
+
 // Appends one non-null primitive value.
 sanitize::Status append_plain_primitive_value(
     std::string &out, std::vector<bool> *bool_values, const ParquetNode &node,
@@ -1687,6 +1749,8 @@ sanitize::Status append_plain_primitive_value(
   case jsonl::JsonlKind::kLargeString:
   case jsonl::JsonlKind::kLargeBinary:
     return append_binary_value<std::int64_t>(out, array, row);
+  case jsonl::JsonlKind::kFixedSizeBinary:
+    return append_fixed_size_binary_value(out, node, array, row);
   case jsonl::JsonlKind::kDecimal:
     return append_decimal_value(out, node, array, row);
   default:
@@ -2622,7 +2686,7 @@ void write_primitive_schema_element(CompactWriter &writer,
                                     const ParquetNode &node) {
   writer.FieldI32(1, static_cast<std::int32_t>(node.physical_type));
   if (node.physical_type == PhysicalType::kFixedLenByteArray) {
-    writer.FieldI32(2, node.decimal_byte_width);
+    writer.FieldI32(2, node.fixed_binary_byte_width);
   }
   writer.FieldI32(3, node.required ? 0 : 1);
   writer.FieldString(4, node.name);

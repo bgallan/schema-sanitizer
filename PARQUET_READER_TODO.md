@@ -16,7 +16,7 @@ replacement. Remaining work:
 1. Complete physical and logical type coverage:
 
    - [x] Decimal logical types.
-   - Fixed-size binary details.
+   - [x] Fixed-size binary details.
    - [x] Date and timestamp units/timezone metadata.
    - [x] Unsigned integer logical types.
    - Nullability edge cases across all supported types.

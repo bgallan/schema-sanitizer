@@ -30,6 +30,7 @@ enum class JsonlKind {
   kLargeString,
   kBinary,
   kLargeBinary,
+  kFixedSizeBinary,
   kTimestampMillis,
   kTimestampMicros,
   kTimestampNanos,
@@ -58,6 +59,7 @@ struct JsonlField {
   int32_t decimal_precision = 0;
   int32_t decimal_scale = 0;
   int32_t decimal_byte_width = 16;
+  int32_t fixed_size_binary_size = 0;
   int32_t fixed_size_list_size = 0;
   std::vector<JsonlField> children;
 };
