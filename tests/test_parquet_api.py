@@ -958,23 +958,16 @@ def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
 
 
 @_requires_pyarrow
-def test_native_parquet_footer_info_blocks_empty_nested_file_readiness(
+def test_native_parquet_footer_info_blocks_empty_repeated_file_readiness(
     tmp_path: Path,
 ) -> None:
-    """Verify empty nested files do not claim native reader readiness yet."""
+    """Verify empty repeated files do not claim native reader readiness yet."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
     from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
 
     require_native()
-    path = tmp_path / "empty-nested.parquet"
-    table = pa.table(
-        {
-            "profile": pa.array(
-                [],
-                type=pa.struct([pa.field("name", pa.string())]),
-            )
-        }
-    )
+    path = tmp_path / "empty-repeated.parquet"
+    table = pa.table({"scores": pa.array([], type=pa.list_(pa.int64()))})
     write_parquet_native_first_stream(
         pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
         path,
@@ -988,7 +981,7 @@ def test_native_parquet_footer_info_blocks_empty_nested_file_readiness(
     assert info["row_group_count"] == 0
     assert info["native_reader_ready"] == 0
     assert any(
-        "nested path is not materializable yet" in blocker
+        "repeated levels are not materializable yet" in blocker
         for blocker in info["native_reader_blockers"]
     )
 
@@ -1761,21 +1754,14 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
 def test_native_parquet_footer_info_blocks_nested_native_reader_readiness(
     tmp_path: Path,
 ) -> None:
-    """Verify native reader readiness stays conservative for nested files."""
+    """Verify native reader readiness stays conservative for repeated files."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
 
     require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(
-        pa.table(
-            {
-                "profile": pa.array(
-                    [{"name": "a"}, {"name": "b"}],
-                    type=pa.struct([pa.field("name", pa.string())]),
-                )
-            }
-        ),
+        pa.table({"scores": pa.array([[1, 2], [3]], type=pa.list_(pa.int64()))}),
         src,
     )
 
@@ -1790,7 +1776,7 @@ def test_native_parquet_footer_info_blocks_nested_native_reader_readiness(
     assert info is not None
     assert info["native_reader_ready"] == 0
     assert any(
-        "nested path is not materializable yet" in blocker
+        "repeated levels are not materializable yet" in blocker
         for blocker in info["native_reader_blockers"]
     )
 
@@ -1848,6 +1834,67 @@ def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
         ["profile", "name"],
         ["profile", "score"],
     ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_nullable_struct_scalar_leaves(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader can materialize nullable structs with scalar leaves."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "nullable-struct.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field(
+                "profile",
+                pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64(), nullable=False),
+                    ]
+                ),
+            ),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"id": 1, "profile": {"name": "a", "score": 1.5}},
+            {"id": 2, "profile": None},
+            {"id": 3, "profile": {"name": None, "score": 3.5}},
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)

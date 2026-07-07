@@ -138,6 +138,7 @@ T read_plain_value(std::string_view values, std::size_t offset) {
 struct LevelDecodeInfo {
   std::int32_t decoded_count = 0;
   std::int32_t max_level_count = 0;
+  std::vector<std::int16_t> level_values;
   std::vector<std::uint8_t> validity_bitmap;
 };
 
@@ -307,7 +308,8 @@ sanitize::Result<std::int16_t> read_little_level_value(std::string_view data,
 sanitize::Result<LevelDecodeInfo>
 decode_level_stream(std::string_view payload, std::size_t *offset,
                     std::int16_t max_level, std::int32_t expected_count,
-                    bool capture_validity_bitmap = false) {
+                    bool capture_validity_bitmap = false,
+                    bool capture_level_values = false) {
   if (!offset) {
     return sanitize::Status::Invalid("Parquet levels: internal offset error");
   }
@@ -317,6 +319,9 @@ decode_level_stream(std::string_view payload, std::size_t *offset,
   if (max_level <= 0) {
     LevelDecodeInfo info;
     info.max_level_count = expected_count;
+    if (capture_level_values) {
+      info.level_values.assign(static_cast<std::size_t>(expected_count), 0);
+    }
     if (capture_validity_bitmap) {
       SAN_RETURN_NOT_OK(initialize_validity_bitmap(expected_count, true,
                                                    &info.validity_bitmap));
@@ -342,6 +347,9 @@ decode_level_stream(std::string_view payload, std::size_t *offset,
     SAN_RETURN_NOT_OK(initialize_validity_bitmap(expected_count, false,
                                                  &info.validity_bitmap));
   }
+  if (capture_level_values) {
+    info.level_values.reserve(static_cast<std::size_t>(expected_count));
+  }
   while (encoded_offset < encoded.size() &&
          info.decoded_count < expected_count) {
     std::uint64_t header = 0;
@@ -360,6 +368,10 @@ decode_level_stream(std::string_view payload, std::size_t *offset,
       }
       const auto run_start = info.decoded_count;
       info.decoded_count += static_cast<std::int32_t>(run_length);
+      if (capture_level_values) {
+        info.level_values.insert(info.level_values.end(),
+                                 static_cast<std::size_t>(run_length), value);
+      }
       if (value == max_level) {
         info.max_level_count += static_cast<std::int32_t>(run_length);
       }
@@ -404,6 +416,9 @@ decode_level_stream(std::string_view payload, std::size_t *offset,
         set_validity_bit(&info.validity_bitmap, info.decoded_count,
                          value == max_level);
       }
+      if (capture_level_values) {
+        info.level_values.push_back(value);
+      }
       ++info.decoded_count;
       if (value == max_level) {
         ++info.max_level_count;
@@ -419,6 +434,11 @@ decode_level_stream(std::string_view payload, std::size_t *offset,
   }
   if (info.decoded_count != expected_count) {
     return sanitize::Status::Invalid("Parquet levels: decoded count mismatch");
+  }
+  if (capture_level_values &&
+      info.level_values.size() != static_cast<std::size_t>(expected_count)) {
+    return sanitize::Status::Invalid(
+        "Parquet levels: decoded level value count mismatch");
   }
   return info;
 }
@@ -3056,11 +3076,15 @@ sanitize::Status decode_page_levels(std::string_view payload,
   }
   LevelDecodeInfo definition;
   definition.max_level_count = page->num_values;
+  const bool capture_definition_level_values =
+      column.path_in_schema.size() == 2 && !column.top_level_required &&
+      column.max_repetition_level == 0;
   if (column.max_definition_level > 0) {
     SAN_ASSIGN_OR_RAISE(definition,
                         decode_level_stream(payload, &offset,
                                             column.max_definition_level,
-                                            page->num_values, true));
+                                            page->num_values, true,
+                                            capture_definition_level_values));
     page->decoded_definition_levels = definition.decoded_count;
   } else {
     SAN_RETURN_NOT_OK(initialize_validity_bitmap(page->num_values, true,
@@ -3080,6 +3104,7 @@ sanitize::Status decode_page_levels(std::string_view payload,
         "Parquet levels: validity bitmap too large");
   }
   page->decoded_validity_bitmap = std::move(definition.validity_bitmap);
+  page->decoded_definition_level_values = std::move(definition.level_values);
   page->decoded_validity_bytes =
       static_cast<std::int32_t>(page->decoded_validity_bitmap.size());
   page->validity_bitmap_decoded = true;
@@ -4271,6 +4296,7 @@ struct NativeParquetChildArray {
 
 struct NativeParquetStructArray {
   ArrowArray array{};
+  std::vector<std::uint8_t> validity;
   std::vector<ArrowArray *> children;
   std::array<const void *, 1> buffers{nullptr};
 };
@@ -4368,6 +4394,7 @@ bool bit_stream_value_is_set(std::string_view values, std::int32_t index) {
 
 struct NativeParquetOutputField {
   bool is_struct = false;
+  bool top_level_required = true;
   std::string name;
   std::vector<std::size_t> column_indices;
 };
@@ -4381,7 +4408,8 @@ bool native_plain_path_is_materializable(const std::vector<std::string> &path,
   if (path.size() == 1) {
     return true;
   }
-  return path.size() == 2 && top_level_required;
+  (void)top_level_required;
+  return path.size() == 2;
 }
 
 sanitize::Status add_native_output_field(
@@ -4410,6 +4438,7 @@ sanitize::Status add_native_output_field(
   if (match == fields->end()) {
     NativeParquetOutputField field;
     field.is_struct = is_struct;
+    field.top_level_required = top_level_required;
     field.name = top_level_name;
     field.column_indices.push_back(column_index);
     fields->push_back(std::move(field));
@@ -4418,6 +4447,10 @@ sanitize::Status add_native_output_field(
   if (match->is_struct != is_struct) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: mixed scalar and struct output path");
+  }
+  if (match->top_level_required != top_level_required) {
+    return sanitize::Status::NotImplemented(
+        "native Parquet reader: inconsistent struct output nullability");
   }
   match->column_indices.push_back(column_index);
   return {};
@@ -4498,6 +4531,50 @@ sanitize::Status materialization_payload(std::ifstream &file,
   }
   return sanitize::Status::NotImplemented(
       "native Parquet reader: unsupported compression");
+}
+
+sanitize::Result<std::int64_t>
+materialize_optional_struct_validity(const ColumnChunkInfo &column,
+                                     std::int64_t row_count,
+                                     std::vector<std::uint8_t> *validity) {
+  if (!validity) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: struct validity output is null");
+  }
+  if (row_count < 0 ||
+      row_count > std::numeric_limits<std::int64_t>::max() - 7) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: struct row count is invalid");
+  }
+  const auto validity_bytes = (row_count + 7) / 8;
+  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
+  std::int64_t null_count = row_count;
+  for (const auto &span : column.native_read_page_spans) {
+    if (span.page_index < 0 ||
+        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: struct validity page span is invalid");
+    }
+    const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
+    if (span.row_count < 0 || page.decoded_definition_level_values.size() !=
+                                  static_cast<std::size_t>(span.row_count)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: struct definition level count mismatch");
+    }
+    for (std::int32_t row = 0; row < span.row_count; ++row) {
+      const auto global_row = span.first_row_index + row;
+      if (global_row < 0 || global_row >= row_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: struct row span exceeds row group");
+      }
+      if (page.decoded_definition_level_values[static_cast<std::size_t>(row)] >=
+          1) {
+        set_output_validity_bit(validity, global_row);
+        --null_count;
+      }
+    }
+  }
+  return null_count;
 }
 
 sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
@@ -5538,7 +5615,11 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
       child.schema.format = child.format.c_str();
       child.schema.name = child.name.c_str();
       child.schema.metadata = nullptr;
-      child.schema.flags = max_definition_level > 0 ? ARROW_FLAG_NULLABLE : 0;
+      const auto parent_definition_level =
+          field.top_level_required ? std::int16_t{0} : std::int16_t{1};
+      child.schema.flags = max_definition_level > parent_definition_level
+                               ? ARROW_FLAG_NULLABLE
+                               : 0;
       child.schema.n_children = 0;
       child.schema.children = nullptr;
       child.schema.dictionary = nullptr;
@@ -5550,7 +5631,8 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
     struct_node.schema.format = struct_node.format.c_str();
     struct_node.schema.name = struct_node.name.c_str();
     struct_node.schema.metadata = nullptr;
-    struct_node.schema.flags = 0;
+    struct_node.schema.flags =
+        field.top_level_required ? 0 : ARROW_FLAG_NULLABLE;
     struct_node.schema.n_children =
         static_cast<std::int64_t>(struct_node.child_ptrs.size());
     struct_node.schema.children = struct_node.child_ptrs.empty()
@@ -5715,7 +5797,19 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
       struct_array.children.push_back(&state->columns[column_index].array);
     }
     struct_array.array.length = row_group.num_rows;
-    struct_array.array.null_count = 0;
+    if (field.top_level_required) {
+      struct_array.array.null_count = 0;
+      struct_array.buffers[0] = nullptr;
+    } else {
+      SAN_ASSIGN_OR_RAISE(const auto null_count,
+                          materialize_optional_struct_validity(
+                              row_group.columns[field.column_indices.front()],
+                              row_group.num_rows, &struct_array.validity));
+      struct_array.array.null_count = null_count;
+      struct_array.buffers[0] = struct_array.validity.empty()
+                                    ? nullptr
+                                    : struct_array.validity.data();
+    }
     struct_array.array.offset = 0;
     struct_array.array.n_buffers = 1;
     struct_array.array.buffers = struct_array.buffers.data();

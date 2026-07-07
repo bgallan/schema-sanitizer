@@ -65,6 +65,7 @@ struct PageHeaderInfo {
   bool levels_decoded = false;
   std::int32_t decoded_definition_levels = 0;
   std::int32_t decoded_repetition_levels = 0;
+  std::vector<std::int16_t> decoded_definition_level_values;
   std::int32_t value_payload_offset = 0;
   std::int32_t decoded_non_null_values = 0;
   std::int32_t decoded_null_values = 0;
