@@ -32,6 +32,7 @@ replacement. Remaining work:
    - [x] Simple top-level fixed-width lists with PLAIN elements.
    - [x] Simple top-level dictionary-encoded scalar lists.
    - [x] Simple top-level boolean lists with PLAIN bit-packed elements.
+   - [x] Simple top-level float lists with BYTE_STREAM_SPLIT elements.
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.

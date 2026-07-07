@@ -2026,6 +2026,47 @@ def test_native_parquet_stream_materializes_simple_boolean_lists(
 
 
 @_requires_pyarrow
+def test_native_parquet_footer_info_plans_byte_stream_split_float_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify simple BYTE_STREAM_SPLIT float lists are planned natively."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+
+    require_native()
+    path = tmp_path / "pyarrow-byte-stream-split-list.parquet"
+    table = pa.table(
+        {
+            "values": pa.array(
+                [[1.25, 2.5], None, [], [3.75]],
+                type=pa.list_(pa.float64()),
+            )
+        }
+    )
+    pq.write_table(
+        table,
+        path,
+        compression="NONE",
+        use_dictionary=False,
+        use_byte_stream_split=True,
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert info["native_reader_blockers"] == [
+        "file was not written by schema-sanitizer native parquet writer"
+    ]
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_plan_decoded"] == 1
+    assert column["native_read_value_buffer_kind"] == "byte_stream_split"
+    assert column["native_read_value_width_bytes"] == 8
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+    assert column["pages"][0]["value_encoding"] == 9
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_dictionary_string_lists(
     tmp_path: Path,
 ) -> None:
