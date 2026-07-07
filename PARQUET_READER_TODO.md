@@ -25,6 +25,7 @@ replacement. Remaining work:
 
    - [x] Required non-repeated structs with scalar leaves.
    - [x] Nullable top-level non-repeated structs with scalar leaves.
+   - [x] Bounded definition/repetition level diagnostics for repeated leaves.
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.

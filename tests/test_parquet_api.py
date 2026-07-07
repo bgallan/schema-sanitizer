@@ -1832,6 +1832,42 @@ def test_native_parquet_footer_info_blocks_nested_native_reader_readiness(
 
 
 @_requires_pyarrow
+def test_native_parquet_footer_info_captures_repeated_level_values(
+    tmp_path: Path,
+) -> None:
+    """Verify repeated columns expose level streams needed for list offsets."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list.parquet"
+    table = pa.table({"scores": pa.array([[1, 2], None, [], [3]], type=pa.list_(pa.int64()))})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    column = info["row_groups"][0]["columns"][0]
+    assert column["path_in_schema"] == ["scores", "list", "element"]
+    assert column["max_definition_level"] == 3
+    assert column["max_repetition_level"] == 1
+    page = column["pages"][0]
+    assert page["decoded_definition_level_values"] == [3, 3, 0, 1, 3]
+    assert page["decoded_repetition_level_values"] == [0, 1, 0, 0, 0]
+    assert page["decoded_value_preview"] == ["1", "2", "3"]
+    assert any(
+        "repeated levels are not materializable yet" in blocker
+        for blocker in info["native_reader_blockers"]
+    )
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
     tmp_path: Path,
 ) -> None:

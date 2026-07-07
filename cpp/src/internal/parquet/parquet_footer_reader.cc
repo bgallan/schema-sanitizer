@@ -3071,14 +3071,15 @@ sanitize::Status decode_page_levels(std::string_view payload,
     SAN_ASSIGN_OR_RAISE(repetition,
                         decode_level_stream(payload, &offset,
                                             column.max_repetition_level,
-                                            page->num_values));
+                                            page->num_values, false, true));
     page->decoded_repetition_levels = repetition.decoded_count;
+    page->decoded_repetition_level_values = std::move(repetition.level_values);
   }
   LevelDecodeInfo definition;
   definition.max_level_count = page->num_values;
   const bool capture_definition_level_values =
-      column.path_in_schema.size() == 2 && !column.top_level_required &&
-      column.max_repetition_level == 0;
+      column.max_repetition_level > 0 ||
+      (column.path_in_schema.size() == 2 && !column.top_level_required);
   if (column.max_definition_level > 0) {
     SAN_ASSIGN_OR_RAISE(definition,
                         decode_level_stream(payload, &offset,
@@ -4077,6 +4078,18 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
 
 void append_int_array(std::string &out,
                       const std::vector<std::int32_t> &items) {
+  out.push_back('[');
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) {
+      out.push_back(',');
+    }
+    out += std::to_string(items[i]);
+  }
+  out.push_back(']');
+}
+
+void append_int16_array(std::string &out,
+                        const std::vector<std::int16_t> &items) {
   out.push_back('[');
   for (std::size_t i = 0; i < items.size(); ++i) {
     if (i > 0) {
@@ -6251,9 +6264,19 @@ sanitize::Result<std::string> read_footer_info_json(const std::string &path) {
           json_write::append_int_field(out, page_first,
                                        "decoded_definition_levels",
                                        page.decoded_definition_levels);
+          if (!page.decoded_definition_level_values.empty()) {
+            json_write::append_key(out, page_first,
+                                   "decoded_definition_level_values");
+            append_int16_array(out, page.decoded_definition_level_values);
+          }
           json_write::append_int_field(out, page_first,
                                        "decoded_repetition_levels",
                                        page.decoded_repetition_levels);
+          if (!page.decoded_repetition_level_values.empty()) {
+            json_write::append_key(out, page_first,
+                                   "decoded_repetition_level_values");
+            append_int16_array(out, page.decoded_repetition_level_values);
+          }
           json_write::append_int_field(out, page_first, "value_payload_offset",
                                        page.value_payload_offset);
           json_write::append_int_field(out, page_first,
