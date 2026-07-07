@@ -813,6 +813,61 @@ def test_remote_parquet_directory_stages_children_concurrently(monkeypatch, tmp_
         staged.close()
 
 
+def test_remote_parquet_directory_public_reader_uses_staged_arrow_path(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Verify remote Parquet directories stage locally and preserve source URIs."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from schema_sanitizer.api_impl import public_input
+    from schema_sanitizer.api_impl.async_remote_io import StagedPath
+
+    require_native()
+
+    def fake_stage_remote_parquet_directory(uri, *, suffixes, memory_limit_bytes):
+        """Return a local staged Parquet directory for a remote URI."""
+        assert uri == "s3://bucket/partition/"
+        assert suffixes == (".parquet", ".pq")
+        assert memory_limit_bytes is None
+        staged_dir = tmp_path / "staged-parquet"
+        staged_dir.mkdir()
+        pq.write_table(pa.table({"id": [1, 2]}), staged_dir / "a.parquet")
+        pq.write_table(pa.table({"id": [3]}), staged_dir / "b.parquet")
+        return StagedPath(
+            str(staged_dir),
+            is_dir=True,
+            source_file_by_name={
+                "a.parquet": "s3://bucket/partition/a.parquet",
+                "b.parquet": "s3://bucket/partition/b.parquet",
+            },
+        )
+
+    monkeypatch.setattr(
+        public_input,
+        "stage_remote_parquet_directory",
+        fake_stage_remote_parquet_directory,
+    )
+
+    result = ss.to_pyarrow(
+        "s3://bucket/partition/",
+        input_format="parquet",
+        input_mode="directory",
+    )
+
+    rows = result.clean_data.to_pylist()
+    assert [{key: row[key] for key in ("id",)} for row in rows] == [
+        {"id": 1},
+        {"id": 2},
+        {"id": 3},
+    ]
+    assert [row["source_file"] for row in rows] == [
+        "s3://bucket/partition/a.parquet",
+        "s3://bucket/partition/a.parquet",
+        "s3://bucket/partition/b.parquet",
+    ]
+
+
 def test_remote_text_directory_stages_child_sources_concurrently(monkeypatch) -> None:
     """Verify remote text directory staging preserves child files and source URIs."""
     from schema_sanitizer.api_impl import async_remote_io
