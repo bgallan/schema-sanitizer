@@ -27,6 +27,7 @@ replacement. Remaining work:
    - [x] Nullable top-level non-repeated structs with scalar leaves.
    - [x] Bounded definition/repetition level diagnostics for repeated leaves.
    - [x] Simple top-level list row-offset reconstruction diagnostics.
+   - [x] Simple top-level integer lists with DELTA_BINARY_PACKED elements.
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.

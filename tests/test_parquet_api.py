@@ -1801,11 +1801,15 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
 
 
 @_requires_pyarrow
-def test_native_parquet_footer_info_blocks_nested_native_reader_readiness(
+def test_native_parquet_stream_materializes_simple_integer_lists(
     tmp_path: Path,
 ) -> None:
-    """Verify native reader readiness stays conservative for repeated files."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    """Verify native reader materializes simple top-level integer lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
@@ -1824,11 +1828,17 @@ def test_native_parquet_footer_info_blocks_nested_native_reader_readiness(
     info = native_parquet_footer_info(out)
 
     assert info is not None
-    assert info["native_reader_ready"] == 0
-    assert any(
-        "repeated levels are not materializable yet" in blocker
-        for blocker in info["native_reader_blockers"]
-    )
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().select(["scores"]).to_pylist() == [
+        {"scores": [1, 2]},
+        {"scores": [3]},
+    ]
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -1836,7 +1846,11 @@ def test_native_parquet_footer_info_captures_repeated_level_values(
     tmp_path: Path,
 ) -> None:
     """Verify repeated columns expose level streams needed for list offsets."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
     from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
 
     require_native()
@@ -1852,7 +1866,8 @@ def test_native_parquet_footer_info_captures_repeated_level_values(
     info = native_parquet_footer_info(path)
 
     assert info is not None
-    assert info["native_reader_ready"] == 0
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
     column = info["row_groups"][0]["columns"][0]
     assert column["path_in_schema"] == ["scores", "list", "element"]
     assert column["max_definition_level"] == 3
@@ -1868,10 +1883,12 @@ def test_native_parquet_footer_info_captures_repeated_level_values(
     assert page["decoded_definition_level_values"] == [3, 3, 0, 1, 3]
     assert page["decoded_repetition_level_values"] == [0, 1, 0, 0, 0]
     assert page["decoded_value_preview"] == ["1", "2", "3"]
-    assert any(
-        "repeated levels are not materializable yet" in blocker
-        for blocker in info["native_reader_blockers"]
-    )
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -2066,10 +2083,10 @@ def test_native_parquet_stream_projects_struct_scalar_leaves(
 
 
 @_requires_pyarrow
-def test_nested_native_parquet_reader_fallback_materializes_cleanly(
+def test_nested_native_parquet_reader_materializes_supported_nested_shapes(
     tmp_path: Path,
 ) -> None:
-    """Verify nested native-written files fall back without losing data."""
+    """Verify supported nested native-written files materialize natively."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
@@ -2098,24 +2115,19 @@ def test_nested_native_parquet_reader_fallback_materializes_cleanly(
 
     info = native_parquet_footer_info(path)
     assert info is not None
-    assert info["native_reader_ready"] == 0
-    assert any(
-        "nested path is not materializable yet" in blocker
-        for blocker in info["native_reader_blockers"]
-    )
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)
 
     assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
     diagnostics = last_parquet_native_reader_diagnostics()
     assert diagnostics["attempted"] is True
-    assert diagnostics["ready"] is False
-    assert diagnostics["reason"] == "not_ready"
-    assert any(
-        "nested path is not materializable yet" in blocker for blocker in diagnostics["blockers"]
-    )
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
 
 
 @_requires_pyarrow
