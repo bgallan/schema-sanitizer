@@ -6,8 +6,9 @@ replacement. Remaining work:
 
 1. Materialize all native-planned encodings:
 
-   - RLE dictionary pages.
-   - DELTA_BINARY_PACKED.
+   - [x] RLE dictionary byte-array/string pages.
+   - RLE dictionary pages for non-byte-array physical types.
+   - [x] DELTA_BINARY_PACKED integer pages.
    - DELTA_LENGTH_BYTE_ARRAY.
    - BYTE_STREAM_SPLIT.
    - Boolean bit-packed PLAIN values.

@@ -78,6 +78,7 @@ struct PageHeaderInfo {
   std::int32_t materialized_offset_bytes = 0;
   std::int32_t dictionary_index_bit_width = 0;
   std::vector<std::string> decoded_value_preview;
+  std::vector<std::string> decoded_byte_array_values;
 };
 
 struct PageLocationInfo {
@@ -173,6 +174,7 @@ struct ColumnChunkInfo {
   std::int32_t native_read_has_validity_buffer = 0;
   std::int32_t native_read_has_offsets_buffer = 0;
   std::int32_t native_read_has_values_buffer = 0;
+  std::vector<std::string> decoded_dictionary_values;
   std::vector<NativeReadPageSpanInfo> native_read_page_spans;
 };
 

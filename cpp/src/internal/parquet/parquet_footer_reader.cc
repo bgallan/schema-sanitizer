@@ -143,12 +143,14 @@ struct PlainValueDecodeInfo {
   std::int32_t materialized_value_bytes = 0;
   std::int32_t materialized_offset_bytes = 0;
   std::vector<std::string> preview;
+  std::vector<std::string> byte_array_values;
 };
 
 struct DictionaryPageState {
   bool decoded = false;
   std::int32_t value_count = 0;
   std::vector<std::string> preview;
+  std::vector<std::string> byte_array_values;
 };
 
 struct NativeReadinessInfo {
@@ -1949,12 +1951,17 @@ arrow_boolean_value_buffer_bytes(std::int32_t row_count) {
 
 sanitize::Result<std::int32_t> decode_plain_byte_array_values(
     std::string_view values, std::int32_t expected_values,
-    std::vector<std::string> *preview, std::int32_t *data_bytes) {
+    std::vector<std::string> *preview, std::vector<std::string> *raw_values,
+    std::int32_t *data_bytes) {
   if (expected_values < 0) {
     return sanitize::Status::Invalid("Parquet values: negative value count");
   }
   if (preview) {
     preview->clear();
+  }
+  if (raw_values) {
+    raw_values->clear();
+    raw_values->reserve(static_cast<std::size_t>(expected_values));
   }
   std::int64_t total_data_bytes = 0;
   std::size_t offset = 0;
@@ -1973,6 +1980,9 @@ sanitize::Result<std::int32_t> decode_plain_byte_array_values(
     }
     if (preview && preview->size() < kMaxValuePreviewItems) {
       preview->push_back(preview_bytes(values.substr(offset, size)));
+    }
+    if (raw_values) {
+      raw_values->emplace_back(values.substr(offset, size));
     }
     if (size > static_cast<std::size_t>(
                    std::numeric_limits<std::int32_t>::max()) ||
@@ -2018,9 +2028,10 @@ decode_plain_value_payload(std::string_view values,
   if (column.has_physical_type && column.physical_type == kPhysicalByteArray) {
     std::int32_t decoded_values = 0;
     std::int32_t data_bytes = 0;
-    SAN_ASSIGN_OR_RAISE(decoded_values, decode_plain_byte_array_values(
-                                            values, expected_values,
-                                            &info.preview, &data_bytes));
+    SAN_ASSIGN_OR_RAISE(
+        decoded_values,
+        decode_plain_byte_array_values(values, expected_values, &info.preview,
+                                       &info.byte_array_values, &data_bytes));
     if (decoded_values != expected_values) {
       return sanitize::Status::Invalid(
           "Parquet values: BYTE_ARRAY count mismatch");
@@ -2519,7 +2530,7 @@ sanitize::Result<std::uint32_t> read_little_u32_value(std::string_view data,
 sanitize::Result<std::int32_t> decode_rle_dictionary_indices(
     std::string_view values, const DictionaryPageState &dictionary,
     std::int32_t expected_values, std::vector<std::string> *preview,
-    std::int32_t *index_bit_width) {
+    std::vector<std::uint32_t> *indices, std::int32_t *index_bit_width) {
   if (!dictionary.decoded || dictionary.value_count <= 0) {
     return sanitize::Status::Invalid(
         "Parquet values: missing dictionary page before dictionary data page");
@@ -2533,6 +2544,10 @@ sanitize::Result<std::int32_t> decode_rle_dictionary_indices(
   }
   if (preview) {
     preview->clear();
+  }
+  if (indices) {
+    indices->clear();
+    indices->reserve(static_cast<std::size_t>(expected_values));
   }
   std::size_t offset = 0;
   const auto bit_width = static_cast<std::uint8_t>(values[offset++]);
@@ -2566,6 +2581,9 @@ sanitize::Result<std::int32_t> decode_rle_dictionary_indices(
       for (std::int64_t i = 0; i < run_length; ++i) {
         if (preview && preview->size() < kMaxValuePreviewItems) {
           preview->push_back(dictionary_preview_value(dictionary, index));
+        }
+        if (indices) {
+          indices->push_back(index);
         }
       }
       decoded += static_cast<std::int32_t>(run_length);
@@ -2601,6 +2619,9 @@ sanitize::Result<std::int32_t> decode_rle_dictionary_indices(
         preview->push_back(dictionary_preview_value(
             dictionary, static_cast<std::uint32_t>(index64)));
       }
+      if (indices) {
+        indices->push_back(static_cast<std::uint32_t>(index64));
+      }
       ++decoded;
     }
     encoded_offset += packed_bytes;
@@ -2616,10 +2637,9 @@ sanitize::Result<std::int32_t> decode_rle_dictionary_indices(
   return decoded;
 }
 
-sanitize::Status
-decode_rle_dictionary_page(std::string_view payload,
-                           const DictionaryPageState *dictionary,
-                           PageHeaderInfo *page) {
+sanitize::Status decode_rle_dictionary_page(
+    std::string_view payload, const ColumnChunkInfo &column,
+    const DictionaryPageState *dictionary, PageHeaderInfo *page) {
   if (!page || page->value_payload_offset < 0 ||
       static_cast<std::size_t>(page->value_payload_offset) > payload.size()) {
     return sanitize::Status::Invalid(
@@ -2632,12 +2652,13 @@ decode_rle_dictionary_page(std::string_view payload,
   const auto values =
       payload.substr(static_cast<std::size_t>(page->value_payload_offset));
   std::vector<std::string> preview;
+  std::vector<std::uint32_t> indices;
   std::int32_t decoded_values = 0;
   std::int32_t index_bit_width = 0;
   SAN_ASSIGN_OR_RAISE(decoded_values,
                       decode_rle_dictionary_indices(
                           values, *dictionary, page->decoded_non_null_values,
-                          &preview, &index_bit_width));
+                          &preview, &indices, &index_bit_width));
   if (decoded_values != page->decoded_non_null_values) {
     return sanitize::Status::Invalid(
         "Parquet values: dictionary decoded count mismatch");
@@ -2649,11 +2670,32 @@ decode_rle_dictionary_page(std::string_view payload,
   }
   page->decoded_value_bytes = static_cast<std::int32_t>(values.size());
   page->dictionary_index_bit_width = index_bit_width;
-  SAN_ASSIGN_OR_RAISE(page->materialized_value_bytes,
-                      arrow_fixed_width_value_buffer_bytes(
-                          page->num_values,
-                          static_cast<std::int32_t>(sizeof(std::int32_t)),
-                          "dictionary index value buffer"));
+  if (column.has_physical_type && column.physical_type == kPhysicalByteArray &&
+      !dictionary->byte_array_values.empty()) {
+    std::int64_t materialized_bytes = 0;
+    for (const auto index : indices) {
+      const auto &value =
+          dictionary->byte_array_values[static_cast<std::size_t>(index)];
+      if (value.size() > static_cast<std::size_t>(
+                             std::numeric_limits<std::int32_t>::max()) ||
+          materialized_bytes > std::numeric_limits<std::int32_t>::max() -
+                                   static_cast<std::int64_t>(value.size())) {
+        return sanitize::Status::Invalid(
+            "Parquet values: dictionary materialized value buffer too large");
+      }
+      materialized_bytes += static_cast<std::int64_t>(value.size());
+    }
+    page->materialized_value_bytes =
+        static_cast<std::int32_t>(materialized_bytes);
+    SAN_ASSIGN_OR_RAISE(page->materialized_offset_bytes,
+                        arrow_i32_offset_buffer_bytes(page->num_values));
+  } else {
+    SAN_ASSIGN_OR_RAISE(page->materialized_value_bytes,
+                        arrow_fixed_width_value_buffer_bytes(
+                            page->num_values,
+                            static_cast<std::int32_t>(sizeof(std::int32_t)),
+                            "dictionary index value buffer"));
+  }
   page->decoded_value_preview = std::move(preview);
   page->values_decoded = true;
   page->values_decode_skipped = false;
@@ -2681,7 +2723,7 @@ sanitize::Status decode_page_values(std::string_view payload,
     return decode_delta_length_byte_array_page(payload, column, page);
   }
   if (page->value_encoding == kEncodingRleDictionary) {
-    return decode_rle_dictionary_page(payload, dictionary, page);
+    return decode_rle_dictionary_page(payload, column, dictionary, page);
   }
   if (page->value_encoding == kEncodingByteStreamSplit) {
     return decode_byte_stream_split_page(payload, column, page);
@@ -2759,12 +2801,14 @@ sanitize::Status decode_dictionary_page_values(std::string_view payload,
   page->materialized_value_bytes = decoded.materialized_value_bytes;
   page->materialized_offset_bytes = decoded.materialized_offset_bytes;
   page->decoded_value_preview = decoded.preview;
+  page->decoded_byte_array_values = decoded.byte_array_values;
   page->values_decoded = true;
   page->values_decode_skipped = false;
   if (state) {
     state->decoded = true;
     state->value_count = page->num_values;
     state->preview = std::move(decoded.preview);
+    state->byte_array_values = std::move(decoded.byte_array_values);
   }
   return {};
 }
@@ -2887,6 +2931,7 @@ sanitize::Status read_page_headers_for_column(std::ifstream &file,
       break;
     }
   }
+  column->decoded_dictionary_values = std::move(dictionary.byte_array_values);
   return {};
 }
 
@@ -3184,6 +3229,10 @@ std::string value_buffer_kind_for_page(const ColumnChunkInfo &column,
     return "delta_length_byte_array";
   }
   if (page.value_encoding == kEncodingRleDictionary) {
+    if (column.physical_type == kPhysicalByteArray &&
+        !column.decoded_dictionary_values.empty()) {
+      return "dictionary_byte_array";
+    }
     return "rle_dictionary_indices";
   }
   if (page.value_encoding == kEncodingByteStreamSplit) {
@@ -3201,6 +3250,10 @@ std::int32_t value_width_bytes_for_page(const ColumnChunkInfo &column,
     auto width = byte_stream_split_width(column);
     return width.value_or(0);
   }
+  if (page.value_encoding == kEncodingDeltaBinaryPacked) {
+    auto width = fixed_width_for_plain_values(column);
+    return width.value_or(0);
+  }
   if (page.value_encoding != kEncodingPlain) {
     return 0;
   }
@@ -3209,11 +3262,11 @@ std::int32_t value_width_bytes_for_page(const ColumnChunkInfo &column,
 }
 
 std::int32_t arrow_buffer_count_for_value_kind(std::string_view kind) {
-  if (kind == "plain_byte_array") {
+  if (kind == "plain_byte_array" || kind == "dictionary_byte_array") {
     return 3;
   }
-  if (kind == "fixed_width" || kind == "rle_dictionary_indices" ||
-      kind == "byte_stream_split") {
+  if (kind == "fixed_width" || kind == "delta_binary_packed" ||
+      kind == "rle_dictionary_indices" || kind == "byte_stream_split") {
     return 2;
   }
   return 0;
@@ -3850,7 +3903,9 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
         "native Parquet reader: unsupported physical type");
   }
   if (column.native_read_value_buffer_kind != "fixed_width" &&
-      column.native_read_value_buffer_kind != "plain_byte_array") {
+      column.native_read_value_buffer_kind != "plain_byte_array" &&
+      column.native_read_value_buffer_kind != "dictionary_byte_array" &&
+      column.native_read_value_buffer_kind != "delta_binary_packed") {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: unsupported value encoding");
   }
@@ -3859,11 +3914,37 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
     return sanitize::Status::Invalid(
         "native Parquet reader: fixed-width value width is invalid");
   }
+  if (column.native_read_value_buffer_kind == "delta_binary_packed" &&
+      (column.native_read_value_width_bytes <= 0 ||
+       (column.physical_type != kPhysicalInt32 &&
+        column.physical_type != kPhysicalInt64))) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: DELTA_BINARY_PACKED integer width is invalid");
+  }
   for (const auto &page : column.pages) {
     if (page.is_dictionary_page) {
       continue;
     }
-    if (!page.has_value_encoding || page.value_encoding != kEncodingPlain) {
+    if (!page.has_value_encoding) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: missing page value encoding");
+    }
+    if (column.native_read_value_buffer_kind == "dictionary_byte_array") {
+      if (column.decoded_dictionary_values.empty() ||
+          page.value_encoding != kEncodingRleDictionary) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: unsupported dictionary page");
+      }
+      continue;
+    }
+    if (column.native_read_value_buffer_kind == "delta_binary_packed") {
+      if (page.value_encoding != kEncodingDeltaBinaryPacked) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: unsupported DELTA_BINARY_PACKED page");
+      }
+      continue;
+    }
+    if (page.value_encoding != kEncodingPlain) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: only PLAIN data pages are materialized");
     }
@@ -3940,6 +4021,116 @@ sanitize::Status materialize_fixed_width_column(std::ifstream &file,
   return {};
 }
 
+sanitize::Status materialize_delta_binary_packed_column(
+    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
+    NativeParquetChildArray *out) {
+  if (!out || row_count < 0 ||
+      row_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid DELTA_BINARY_PACKED row count");
+  }
+  const auto width = column.native_read_value_width_bytes;
+  if ((column.physical_type != kPhysicalInt32 &&
+       column.physical_type != kPhysicalInt64) ||
+      (width != 4 && width != 8)) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: unsupported DELTA_BINARY_PACKED physical type");
+  }
+  const auto value_bytes =
+      static_cast<std::uint64_t>(row_count) * static_cast<std::uint64_t>(width);
+  if (value_bytes >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: DELTA_BINARY_PACKED value buffer is too large");
+  }
+  out->values.assign(static_cast<std::size_t>(value_bytes), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+  }
+  for (const auto &span : column.native_read_page_spans) {
+    if (span.page_index < 0 ||
+        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid DELTA_BINARY_PACKED page span index");
+    }
+    const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
+    if (!page.has_value_encoding ||
+        page.value_encoding != kEncodingDeltaBinaryPacked) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: expected DELTA_BINARY_PACKED data page");
+    }
+    std::string payload;
+    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid DELTA_BINARY_PACKED payload offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    std::vector<std::int64_t> decoded_values;
+    decoded_values.reserve(static_cast<std::size_t>(span.non_null_count));
+    SAN_ASSIGN_OR_RAISE(
+        const auto consumed,
+        decode_delta_binary_packed_stream(
+            values, span.non_null_count,
+            [&](std::int64_t value) -> sanitize::Status {
+              if (column.physical_type == kPhysicalInt32 &&
+                  (value < std::numeric_limits<std::int32_t>::min() ||
+                   value > std::numeric_limits<std::int32_t>::max())) {
+                return sanitize::Status::Invalid(
+                    "native Parquet reader: DELTA_BINARY_PACKED int32 out of "
+                    "range");
+              }
+              decoded_values.push_back(value);
+              return {};
+            }));
+    if (consumed != values.size() ||
+        decoded_values.size() !=
+            static_cast<std::size_t>(span.non_null_count)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: DELTA_BINARY_PACKED decoded count mismatch");
+    }
+    std::size_t value_offset = 0;
+    for (std::int32_t row = 0; row < span.row_count; ++row) {
+      const auto global_row = span.first_row_index + row;
+      if (global_row < 0 || global_row >= row_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: DELTA_BINARY_PACKED row span exceeds row "
+            "group");
+      }
+      const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      if (valid) {
+        if (value_offset >= decoded_values.size()) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: missing DELTA_BINARY_PACKED value");
+        }
+        const auto target =
+            out->values.data() + static_cast<std::size_t>(global_row) *
+                                     static_cast<std::size_t>(width);
+        if (column.physical_type == kPhysicalInt32) {
+          const auto value =
+              static_cast<std::int32_t>(decoded_values[value_offset]);
+          std::memcpy(target, &value, sizeof(value));
+        } else {
+          const auto value = decoded_values[value_offset];
+          std::memcpy(target, &value, sizeof(value));
+        }
+        ++value_offset;
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, global_row);
+        }
+      }
+    }
+    if (value_offset != decoded_values.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing DELTA_BINARY_PACKED values");
+    }
+  }
+  return {};
+}
+
 sanitize::Status materialize_byte_array_column(std::ifstream &file,
                                                const ColumnChunkInfo &column,
                                                std::int64_t row_count,
@@ -3955,8 +4146,8 @@ sanitize::Status materialize_byte_array_column(std::ifstream &file,
     out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
   }
   if (column.native_read_materialized_value_bytes < 0 ||
-      column.native_read_materialized_value_bytes >
-          static_cast<std::int64_t>(std::numeric_limits<std::size_t>::max())) {
+      static_cast<std::uint64_t>(column.native_read_materialized_value_bytes) >
+          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::Invalid(
         "native Parquet reader: byte-array value buffer is too large");
   }
@@ -4020,6 +4211,121 @@ sanitize::Status materialize_byte_array_column(std::ifstream &file,
     if (value_offset != values.size()) {
       return sanitize::Status::Invalid(
           "native Parquet reader: trailing BYTE_ARRAY payload bytes");
+    }
+    next_expected_row += span.row_count;
+  }
+  return {};
+}
+
+sanitize::Status materialize_dictionary_byte_array_column(
+    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
+    NativeParquetChildArray *out) {
+  if (!out || row_count < 0 ||
+      row_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid dictionary byte-array row count");
+  }
+  if (column.decoded_dictionary_values.empty()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: missing decoded dictionary values");
+  }
+  out->offsets.assign(static_cast<std::size_t>(row_count + 1), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+  }
+  if (column.native_read_materialized_value_bytes < 0 ||
+      static_cast<std::uint64_t>(column.native_read_materialized_value_bytes) >
+          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: dictionary byte-array buffer is too large");
+  }
+  out->values.reserve(
+      static_cast<std::size_t>(column.native_read_materialized_value_bytes));
+
+  DictionaryPageState dictionary;
+  dictionary.decoded = true;
+  dictionary.value_count =
+      static_cast<std::int32_t>(column.decoded_dictionary_values.size());
+  dictionary.byte_array_values = column.decoded_dictionary_values;
+
+  std::int32_t current_offset = 0;
+  std::int64_t next_expected_row = 0;
+  for (const auto &span : column.native_read_page_spans) {
+    if (span.page_index < 0 ||
+        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid dictionary page span index");
+    }
+    if (span.first_row_index != next_expected_row) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: non-contiguous dictionary page spans");
+    }
+    const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
+    if (!page.has_value_encoding ||
+        page.value_encoding != kEncodingRleDictionary) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: expected RLE dictionary data page");
+    }
+    std::string payload;
+    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid dictionary value payload offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    std::vector<std::uint32_t> indices;
+    std::int32_t index_bit_width = 0;
+    SAN_ASSIGN_OR_RAISE(
+        const auto decoded_indices,
+        decode_rle_dictionary_indices(values, dictionary, span.non_null_count,
+                                      nullptr, &indices, &index_bit_width));
+    if (decoded_indices != span.non_null_count ||
+        static_cast<std::size_t>(decoded_indices) != indices.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: dictionary index count mismatch");
+    }
+    std::size_t index_offset = 0;
+    for (std::int32_t row = 0; row < span.row_count; ++row) {
+      const auto global_row = span.first_row_index + row;
+      if (global_row < 0 || global_row >= row_count) {
+        return sanitize::Status::Invalid("native Parquet reader: dictionary "
+                                         "page row span exceeds row group");
+      }
+      const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      if (valid) {
+        if (index_offset >= indices.size()) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: missing dictionary index");
+        }
+        const auto dictionary_index = indices[index_offset++];
+        if (dictionary_index >= column.decoded_dictionary_values.size()) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: dictionary index out of range");
+        }
+        const auto &value =
+            column.decoded_dictionary_values[static_cast<std::size_t>(
+                dictionary_index)];
+        if (value.size() > static_cast<std::size_t>(
+                               std::numeric_limits<std::int32_t>::max()) ||
+            current_offset > std::numeric_limits<std::int32_t>::max() -
+                                 static_cast<std::int32_t>(value.size())) {
+          return sanitize::Status::Invalid("native Parquet reader: dictionary "
+                                           "byte-array offsets exceed int32");
+        }
+        out->values.insert(out->values.end(), value.begin(), value.end());
+        current_offset += static_cast<std::int32_t>(value.size());
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, global_row);
+        }
+      }
+      out->offsets[static_cast<std::size_t>(global_row + 1)] = current_offset;
+    }
+    if (index_offset != indices.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing dictionary indices");
     }
     next_expected_row += span.row_count;
   }
@@ -4112,8 +4418,24 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
+    } else if (column.native_read_value_buffer_kind == "delta_binary_packed") {
+      SAN_RETURN_NOT_OK(materialize_delta_binary_packed_column(
+          file, column, row_group.num_rows, &child));
+      child.buffers[0] =
+          child.validity.empty() ? nullptr : child.validity.data();
+      child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
+      child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "plain_byte_array") {
       SAN_RETURN_NOT_OK(materialize_byte_array_column(
+          file, column, row_group.num_rows, &child));
+      child.buffers[0] =
+          child.validity.empty() ? nullptr : child.validity.data();
+      child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
+      child.buffers[2] = child.values.empty() ? nullptr : child.values.data();
+      child.array.n_buffers = 3;
+    } else if (column.native_read_value_buffer_kind ==
+               "dictionary_byte_array") {
+      SAN_RETURN_NOT_OK(materialize_dictionary_byte_array_column(
           file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();

@@ -138,11 +138,10 @@ def test_native_parquet_stream_materializes_plain_fixed_width_rows(
 
 
 @_requires_pyarrow
-def test_native_parquet_stream_retries_pyarrow_for_unsupported_encoding(
+def test_native_parquet_stream_materializes_rle_dictionary_strings(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Verify unsupported native page encodings fall back to PyArrow."""
+    """Verify the native Parquet stream materializes RLE dictionary strings."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
         last_parquet_stream_factory_route,
         native_parquet_footer_info,
@@ -160,16 +159,17 @@ def test_native_parquet_stream_retries_pyarrow_for_unsupported_encoding(
         parquet_compression="uncompressed",
     )
     info = native_parquet_footer_info(path)
-    caplog.set_level(logging.ERROR, logger="schema_sanitizer.adapters.pyarrow_parquet_direct")
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
+    assert info["row_groups"][0]["columns"][0]["native_read_value_buffer_kind"] == (
+        "dictionary_byte_array"
+    )
     assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
-    assert "Native Parquet reader failed; retrying input with PyArrow" in caplog.text
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -361,9 +361,15 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
         )
         data_page = column["pages"][data_page_index]
         expected_value_kind = column["native_read_value_buffer_kind"]
-        expected_value_width = 8 if expected_value_kind == "fixed_width" else 0
-        expected_arrow_buffers = 3 if expected_value_kind == "plain_byte_array" else 2
-        expected_offsets_buffer = 1 if expected_value_kind == "plain_byte_array" else 0
+        expected_value_width = (
+            8 if expected_value_kind in {"fixed_width", "delta_binary_packed"} else 0
+        )
+        expected_arrow_buffers = (
+            3 if expected_value_kind in {"plain_byte_array", "dictionary_byte_array"} else 2
+        )
+        expected_offsets_buffer = (
+            1 if expected_value_kind in {"plain_byte_array", "dictionary_byte_array"} else 0
+        )
         assert column["max_definition_level"] == 1
         assert column["max_repetition_level"] == 0
         assert column["column_index_decoded"] == 1
@@ -396,7 +402,7 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
             == data_page["materialized_offset_bytes"]
         )
         assert column["native_read_value_width_bytes"] == expected_value_width
-        if expected_value_kind == "rle_dictionary_indices":
+        if expected_value_kind in {"rle_dictionary_indices", "dictionary_byte_array"}:
             assert column["native_read_dictionary_index_bit_width"] > 0
         else:
             assert column["native_read_dictionary_index_bit_width"] == 0
@@ -446,9 +452,9 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
         assert data_page["values_decode_skipped"] == 0
         assert data_page["decoded_value_bytes"] > 0
         assert data_page["materialized_value_bytes"] > 0
-        if expected_value_kind == "fixed_width":
+        if expected_value_kind in {"fixed_width", "delta_binary_packed"}:
             assert data_page["materialized_offset_bytes"] == 0
-        elif expected_value_kind == "plain_byte_array":
+        elif expected_value_kind in {"plain_byte_array", "dictionary_byte_array"}:
             assert data_page["materialized_offset_bytes"] == (data_page["num_values"] + 1) * 4
         else:
             assert data_page["materialized_offset_bytes"] == 0
@@ -575,7 +581,11 @@ def test_native_parquet_footer_info_decodes_delta_binary_packed_int_values(
     tmp_path: Path,
 ) -> None:
     """Verify native footer parsing validates DELTA_BINARY_PACKED integer pages."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
@@ -601,6 +611,13 @@ def test_native_parquet_footer_info_decodes_delta_binary_packed_int_values(
     assert page["materialized_value_bytes"] == 50 * 8
     assert page["materialized_offset_bytes"] == 0
     assert page["decoded_value_preview"] == [str(value) for value in range(8)]
+    assert column["native_read_value_buffer_kind"] == "delta_binary_packed"
+    assert column["native_read_arrow_n_buffers"] == 2
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().column("n").to_pylist() == list(range(50))
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -628,6 +645,9 @@ def test_native_parquet_footer_info_decodes_rle_dictionary_string_pages(
         column for column in info["row_groups"][0]["columns"] if column["path_in_schema"] == ["s"]
     )
     assert 8 in column["encodings"]
+    assert column["native_read_value_buffer_kind"] == "dictionary_byte_array"
+    assert column["native_read_arrow_n_buffers"] == 3
+    assert column["native_read_has_offsets_buffer"] == 1
     dictionary_page = column["pages"][0]
     data_page = column["pages"][1]
     assert dictionary_page["is_dictionary_page"] == 1
@@ -640,6 +660,7 @@ def test_native_parquet_footer_info_decodes_rle_dictionary_string_pages(
     assert data_page["values_decoded"] == 1
     assert data_page["values_decode_skipped"] == 0
     assert data_page["materialized_value_bytes"] == 500 * 4
+    assert data_page["materialized_offset_bytes"] == (500 + 1) * 4
     assert data_page["dictionary_index_bit_width"] > 0
     assert data_page["decoded_value_preview"] == ["same"] * 8
 
