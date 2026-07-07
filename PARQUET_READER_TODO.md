@@ -15,10 +15,10 @@ replacement. Remaining work:
 
 1. Complete physical and logical type coverage:
 
-   - Decimal logical types.
+   - [x] Decimal logical types.
    - Fixed-size binary details.
    - [x] Date and timestamp units/timezone metadata.
-   - Unsigned integer logical types.
+   - [x] Unsigned integer logical types.
    - Nullability edge cases across all supported types.
 
 1. Support nested and repeated columns:

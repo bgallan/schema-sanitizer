@@ -293,6 +293,127 @@ def test_native_parquet_stream_materializes_rle_dictionary_fixed_width(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_integer_logical_widths(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream writes Arrow-width integer buffers."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "integer-logical-widths.parquet"
+    table = pa.table(
+        {
+            "i8": pa.array([-5, 7, None, -1], type=pa.int8()),
+            "u8": pa.array([250, 1, None, 2], type=pa.uint8()),
+            "i16": pa.array([-300, 12, None, -2], type=pa.int16()),
+            "u16": pa.array([65000, 2, None, 3], type=pa.uint16()),
+            "u32": pa.array([4_000_000_000, 7, None, 8], type=pa.uint32()),
+            "u64": pa.array([2**63 + 5, 9, None, 10], type=pa.uint64()),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    widths = {
+        tuple(column["path_in_schema"]): column["native_read_value_width_bytes"]
+        for column in info["row_groups"][0]["columns"]
+    }
+    assert widths == {
+        ("i8",): 1,
+        ("u8",): 1,
+        ("i16",): 2,
+        ("u16",): 2,
+        ("u32",): 4,
+        ("u64",): 8,
+    }
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_decimal_fixed_bytes(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream converts decimal fixed bytes to Arrow order."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "decimal-fixed-bytes.parquet"
+    table = pa.table(
+        {
+            "plain_amount": pa.array(
+                [Decimal("123.45"), Decimal("-0.10"), None, Decimal("999.99")],
+                type=pa.decimal128(10, 2),
+            ),
+            "dict_amount": pa.array(
+                [Decimal("1.00"), Decimal("2.00"), Decimal("1.00"), None],
+                type=pa.decimal128(10, 2),
+            ),
+            "big_amount": pa.array(
+                [
+                    Decimal("123456789012345678901234567890.1234"),
+                    Decimal("-1.0000"),
+                    None,
+                    Decimal("2.5000"),
+                ],
+                type=pa.decimal256(40, 4),
+            ),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    columns = {
+        tuple(column["path_in_schema"]): column for column in info["row_groups"][0]["columns"]
+    }
+    assert columns[("plain_amount",)]["native_arrow_format"] == "d:10,2,128"
+    assert columns[("plain_amount",)]["native_read_value_buffer_kind"] == "fixed_width"
+    assert columns[("plain_amount",)]["native_read_value_width_bytes"] == 16
+    assert columns[("dict_amount",)]["native_arrow_format"] == "d:10,2,128"
+    assert columns[("dict_amount",)]["native_read_value_buffer_kind"] == "dictionary_fixed_width"
+    assert columns[("dict_amount",)]["native_read_value_width_bytes"] == 16
+    assert columns[("big_amount",)]["native_arrow_format"] == "d:40,4,256"
+    assert columns[("big_amount",)]["native_read_value_buffer_kind"] == "fixed_width"
+    assert columns[("big_amount",)]["native_read_value_width_bytes"] == 32
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_reads_empty_file_schema(
     tmp_path: Path,
 ) -> None:

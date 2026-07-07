@@ -1861,6 +1861,203 @@ fixed_width_for_plain_values(const ColumnChunkInfo &column) {
   }
 }
 
+bool starts_with(std::string_view value, std::string_view prefix) {
+  return value.size() >= prefix.size() &&
+         value.substr(0, prefix.size()) == prefix;
+}
+
+std::optional<std::int32_t> parse_positive_i32(std::string_view value) {
+  if (value.empty()) {
+    return std::nullopt;
+  }
+  std::int64_t out = 0;
+  for (const char ch : value) {
+    if (ch < '0' || ch > '9') {
+      return std::nullopt;
+    }
+    out = out * 10 + static_cast<std::int64_t>(ch - '0');
+    if (out > std::numeric_limits<std::int32_t>::max()) {
+      return std::nullopt;
+    }
+  }
+  if (out <= 0) {
+    return std::nullopt;
+  }
+  return static_cast<std::int32_t>(out);
+}
+
+bool is_decimal_arrow_format(std::string_view format) {
+  return starts_with(format, "d:");
+}
+
+std::optional<std::int32_t> decimal_arrow_width_bytes(std::string_view format) {
+  if (!is_decimal_arrow_format(format)) {
+    return std::nullopt;
+  }
+  const auto last_comma = format.rfind(',');
+  if (last_comma == std::string_view::npos || last_comma + 1 >= format.size()) {
+    return std::nullopt;
+  }
+  auto bits = parse_positive_i32(format.substr(last_comma + 1));
+  if (!bits || *bits % 8 != 0) {
+    return std::nullopt;
+  }
+  return *bits / 8;
+}
+
+std::optional<std::int32_t>
+arrow_value_width_for_column(const ColumnChunkInfo &column) {
+  const auto format = std::string_view(column.native_arrow_format);
+  if (format == "c" || format == "C") {
+    return 1;
+  }
+  if (format == "s" || format == "S") {
+    return 2;
+  }
+  if (format == "i" || format == "I" || format == "f" || format == "tdD" ||
+      format == "ttm") {
+    return 4;
+  }
+  if (format == "l" || format == "L" || format == "g" ||
+      starts_with(format, "ts") || format == "ttu" || format == "ttn") {
+    return 8;
+  }
+  if (auto decimal_width = decimal_arrow_width_bytes(format)) {
+    return decimal_width;
+  }
+  if (starts_with(format, "w:")) {
+    return parse_positive_i32(format.substr(2));
+  }
+  return fixed_width_for_plain_values(column);
+}
+
+template <class T> void copy_numeric_value(std::uint8_t *target, T value) {
+  std::memcpy(target, &value, sizeof(T));
+}
+
+sanitize::Status write_arrow_integer_value(std::uint8_t *target,
+                                           const ColumnChunkInfo &column,
+                                           std::int64_t value) {
+  if (!target) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: null fixed-width output buffer");
+  }
+  const auto format = std::string_view(column.native_arrow_format);
+  if (format == "c") {
+    if (value < std::numeric_limits<std::int8_t>::min() ||
+        value > std::numeric_limits<std::int8_t>::max()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: int8 value out of range");
+    }
+    copy_numeric_value(target, static_cast<std::int8_t>(value));
+    return {};
+  }
+  if (format == "C") {
+    if (value < 0 || value > std::numeric_limits<std::uint8_t>::max()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: uint8 value out of range");
+    }
+    copy_numeric_value(target, static_cast<std::uint8_t>(value));
+    return {};
+  }
+  if (format == "s") {
+    if (value < std::numeric_limits<std::int16_t>::min() ||
+        value > std::numeric_limits<std::int16_t>::max()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: int16 value out of range");
+    }
+    copy_numeric_value(target, static_cast<std::int16_t>(value));
+    return {};
+  }
+  if (format == "S") {
+    if (value < 0 || value > std::numeric_limits<std::uint16_t>::max()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: uint16 value out of range");
+    }
+    copy_numeric_value(target, static_cast<std::uint16_t>(value));
+    return {};
+  }
+  if (format == "i" || format == "tdD" || format == "ttm") {
+    if (value < std::numeric_limits<std::int32_t>::min() ||
+        value > std::numeric_limits<std::int32_t>::max()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: int32 value out of range");
+    }
+    copy_numeric_value(target, static_cast<std::int32_t>(value));
+    return {};
+  }
+  if (format == "I") {
+    if (value < 0 || static_cast<std::uint64_t>(value) >
+                         std::numeric_limits<std::uint32_t>::max()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: uint32 value out of range");
+    }
+    copy_numeric_value(target, static_cast<std::uint32_t>(value));
+    return {};
+  }
+  if (format == "l" || starts_with(format, "ts") || format == "ttu" ||
+      format == "ttn") {
+    copy_numeric_value(target, value);
+    return {};
+  }
+  if (format == "L") {
+    copy_numeric_value(target, static_cast<std::uint64_t>(value));
+    return {};
+  }
+  return sanitize::Status::Invalid(
+      "native Parquet reader: unsupported integer Arrow format");
+}
+
+sanitize::Status copy_fixed_width_physical_to_arrow(
+    std::uint8_t *target, const char *source, const ColumnChunkInfo &column,
+    std::int32_t physical_width, std::int32_t arrow_width) {
+  if (!target || !source || physical_width <= 0 || arrow_width <= 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid fixed-width copy input");
+  }
+  if (column.physical_type == kPhysicalInt32) {
+    if (physical_width != 4) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid INT32 physical width");
+    }
+    if (column.native_arrow_format == "I") {
+      copy_numeric_value(target, read_plain_value<std::uint32_t>(
+                                     std::string_view(source, 4), 0));
+      return {};
+    }
+    return write_arrow_integer_value(
+        target, column,
+        static_cast<std::int64_t>(
+            read_plain_value<std::int32_t>(std::string_view(source, 4), 0)));
+  }
+  if (column.physical_type == kPhysicalInt64) {
+    if (physical_width != 8) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid INT64 physical width");
+    }
+    return write_arrow_integer_value(
+        target, column,
+        read_plain_value<std::int64_t>(std::string_view(source, 8), 0));
+  }
+  if (is_decimal_arrow_format(column.native_arrow_format)) {
+    if (physical_width != arrow_width) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: decimal physical width mismatch");
+    }
+    for (std::int32_t i = 0; i < arrow_width; ++i) {
+      target[static_cast<std::size_t>(i)] =
+          static_cast<std::uint8_t>(source[physical_width - 1 - i]);
+    }
+    return {};
+  }
+  if (physical_width != arrow_width) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: fixed-width Arrow width mismatch");
+  }
+  std::memcpy(target, source, static_cast<std::size_t>(arrow_width));
+  return {};
+}
+
 std::vector<std::string> preview_plain_boolean_values(std::string_view values,
                                                       std::int32_t count) {
   std::vector<std::string> out;
@@ -1905,7 +2102,7 @@ preview_plain_fixed_values(std::string_view values,
       out.push_back(std::to_string(read_plain_value<double>(values, offset)));
       break;
     case kPhysicalFixedLenByteArray:
-      out.push_back(preview_bytes(values.substr(
+      out.push_back(hex_bytes(values.substr(
           offset, static_cast<std::size_t>(column.fixed_type_length))));
       break;
     default:
@@ -2074,7 +2271,14 @@ decode_plain_value_payload(std::string_view values,
         "Parquet values: fixed-width payload size mismatch");
   }
   info.decoded_bytes = static_cast<std::int32_t>(expected_bytes);
-  info.materialized_value_bytes = info.decoded_bytes;
+  auto arrow_width = arrow_value_width_for_column(column);
+  if (!arrow_width || *arrow_width <= 0) {
+    return sanitize::Status::NotImplemented(
+        "Parquet values: unsupported Arrow fixed-width type");
+  }
+  SAN_ASSIGN_OR_RAISE(info.materialized_value_bytes,
+                      arrow_fixed_width_value_buffer_bytes(
+                          expected_values, *arrow_width, "PLAIN value buffer"));
   info.preview = preview_plain_fixed_values(values, column, expected_values);
   info.fixed_width_values.assign(values.begin(), values.end());
   return info;
@@ -2121,7 +2325,7 @@ sanitize::Status decode_plain_values(std::string_view payload,
     SAN_ASSIGN_OR_RAISE(page->materialized_offset_bytes,
                         arrow_i32_offset_buffer_bytes(page->num_values));
   } else {
-    auto width = fixed_width_for_plain_values(column);
+    auto width = arrow_value_width_for_column(column);
     if (width && *width > 0) {
       SAN_ASSIGN_OR_RAISE(page->materialized_value_bytes,
                           arrow_fixed_width_value_buffer_bytes(
@@ -2325,7 +2529,7 @@ sanitize::Status decode_delta_binary_packed_page(std::string_view payload,
         "Parquet values: DELTA_BINARY_PACKED payload too large");
   }
   page->decoded_value_bytes = static_cast<std::int32_t>(values.size());
-  auto width = fixed_width_for_plain_values(column);
+  auto width = arrow_value_width_for_column(column);
   if (!width || *width <= 0) {
     return sanitize::Status::Invalid(
         "Parquet values: DELTA_BINARY_PACKED materialized width missing");
@@ -2700,24 +2904,29 @@ sanitize::Status decode_rle_dictionary_page(
     SAN_ASSIGN_OR_RAISE(page->materialized_offset_bytes,
                         arrow_i32_offset_buffer_bytes(page->num_values));
   } else if (!dictionary->fixed_width_values.empty()) {
-    auto width = fixed_width_for_plain_values(column);
-    if (!width || *width <= 0) {
+    auto physical_width = fixed_width_for_plain_values(column);
+    if (!physical_width || *physical_width <= 0) {
       return sanitize::Status::Invalid(
           "Parquet values: dictionary fixed-width value width is invalid");
     }
     const auto expected_dictionary_bytes =
         static_cast<std::int64_t>(dictionary->value_count) *
-        static_cast<std::int64_t>(*width);
+        static_cast<std::int64_t>(*physical_width);
     if (expected_dictionary_bytes < 0 ||
         static_cast<std::uint64_t>(expected_dictionary_bytes) !=
             dictionary->fixed_width_values.size()) {
       return sanitize::Status::Invalid(
           "Parquet values: dictionary fixed-width payload size mismatch");
     }
+    auto arrow_width = arrow_value_width_for_column(column);
+    if (!arrow_width || *arrow_width <= 0) {
+      return sanitize::Status::Invalid(
+          "Parquet values: dictionary fixed-width Arrow width is invalid");
+    }
     SAN_ASSIGN_OR_RAISE(
         page->materialized_value_bytes,
         arrow_fixed_width_value_buffer_bytes(
-            page->num_values, *width,
+            page->num_values, *arrow_width,
             "dictionary fixed-width materialized value buffer"));
   } else {
     SAN_ASSIGN_OR_RAISE(page->materialized_value_bytes,
@@ -3289,21 +3498,21 @@ std::int32_t value_width_bytes_for_page(const ColumnChunkInfo &column,
     return 0;
   }
   if (page.value_encoding == kEncodingByteStreamSplit) {
-    auto width = byte_stream_split_width(column);
+    auto width = arrow_value_width_for_column(column);
     return width.value_or(0);
   }
   if (page.value_encoding == kEncodingDeltaBinaryPacked) {
-    auto width = fixed_width_for_plain_values(column);
+    auto width = arrow_value_width_for_column(column);
     return width.value_or(0);
   }
   if (page.value_encoding == kEncodingRleDictionary) {
-    auto width = fixed_width_for_plain_values(column);
+    auto width = arrow_value_width_for_column(column);
     return width.value_or(0);
   }
   if (page.value_encoding != kEncodingPlain) {
     return 0;
   }
-  auto width = fixed_width_for_plain_values(column);
+  auto width = arrow_value_width_for_column(column);
   return width.value_or(0);
 }
 
@@ -4094,9 +4303,14 @@ sanitize::Status materialize_fixed_width_column(std::ifstream &file,
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid fixed-width row count");
   }
-  const auto width = column.native_read_value_width_bytes;
-  const auto value_bytes =
-      static_cast<std::uint64_t>(row_count) * static_cast<std::uint64_t>(width);
+  const auto arrow_width = column.native_read_value_width_bytes;
+  const auto physical_width = fixed_width_for_plain_values(column);
+  if (!physical_width || *physical_width <= 0 || arrow_width <= 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: fixed-width value width is invalid");
+  }
+  const auto value_bytes = static_cast<std::uint64_t>(row_count) *
+                           static_cast<std::uint64_t>(arrow_width);
   if (value_bytes >
       static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::Invalid(
@@ -4131,15 +4345,18 @@ sanitize::Status materialize_fixed_width_column(std::ifstream &file,
       }
       const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
       if (valid) {
-        if (values.size() - value_offset < static_cast<std::size_t>(width)) {
+        if (values.size() - value_offset <
+            static_cast<std::size_t>(*physical_width)) {
           return sanitize::Status::Invalid(
               "native Parquet reader: truncated fixed-width payload");
         }
-        std::memcpy(out->values.data() + static_cast<std::size_t>(global_row) *
-                                             static_cast<std::size_t>(width),
-                    values.data() + value_offset,
-                    static_cast<std::size_t>(width));
-        value_offset += static_cast<std::size_t>(width);
+        auto *target =
+            out->values.data() + static_cast<std::size_t>(global_row) *
+                                     static_cast<std::size_t>(arrow_width);
+        SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
+            target, values.data() + value_offset, column, *physical_width,
+            arrow_width));
+        value_offset += static_cast<std::size_t>(*physical_width);
         if (!out->validity.empty()) {
           set_output_validity_bit(&out->validity, global_row);
         }
@@ -4240,9 +4457,10 @@ sanitize::Status materialize_delta_binary_packed_column(
         "native Parquet reader: invalid DELTA_BINARY_PACKED row count");
   }
   const auto width = column.native_read_value_width_bytes;
+  const auto physical_width = fixed_width_for_plain_values(column);
   if ((column.physical_type != kPhysicalInt32 &&
        column.physical_type != kPhysicalInt64) ||
-      (width != 4 && width != 8)) {
+      !physical_width || *physical_width <= 0 || width <= 0) {
     return sanitize::Status::Invalid(
         "native Parquet reader: unsupported DELTA_BINARY_PACKED physical type");
   }
@@ -4318,14 +4536,8 @@ sanitize::Status materialize_delta_binary_packed_column(
         const auto target =
             out->values.data() + static_cast<std::size_t>(global_row) *
                                      static_cast<std::size_t>(width);
-        if (column.physical_type == kPhysicalInt32) {
-          const auto value =
-              static_cast<std::int32_t>(decoded_values[value_offset]);
-          std::memcpy(target, &value, sizeof(value));
-        } else {
-          const auto value = decoded_values[value_offset];
-          std::memcpy(target, &value, sizeof(value));
-        }
+        SAN_RETURN_NOT_OK(write_arrow_integer_value(
+            target, column, decoded_values[value_offset]));
         ++value_offset;
         if (!out->validity.empty()) {
           set_output_validity_bit(&out->validity, global_row);
@@ -4787,8 +4999,9 @@ sanitize::Status materialize_dictionary_fixed_width_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid fixed-width dictionary row count");
   }
-  const auto width = column.native_read_value_width_bytes;
-  if (width <= 0) {
+  const auto arrow_width = column.native_read_value_width_bytes;
+  const auto physical_width = fixed_width_for_plain_values(column);
+  if (!physical_width || *physical_width <= 0 || arrow_width <= 0) {
     return sanitize::Status::Invalid(
         "native Parquet reader: fixed-width dictionary width is invalid");
   }
@@ -4797,21 +5010,21 @@ sanitize::Status materialize_dictionary_fixed_width_column(
         "native Parquet reader: missing fixed-width dictionary values");
   }
   if (column.decoded_dictionary_fixed_width_values.size() %
-          static_cast<std::size_t>(width) !=
+          static_cast<std::size_t>(*physical_width) !=
       0) {
     return sanitize::Status::Invalid(
         "native Parquet reader: fixed-width dictionary payload is misaligned");
   }
   const auto dictionary_value_count =
       column.decoded_dictionary_fixed_width_values.size() /
-      static_cast<std::size_t>(width);
+      static_cast<std::size_t>(*physical_width);
   if (dictionary_value_count >
       static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
     return sanitize::Status::Invalid(
         "native Parquet reader: fixed-width dictionary is too large");
   }
-  const auto value_bytes =
-      static_cast<std::uint64_t>(row_count) * static_cast<std::uint64_t>(width);
+  const auto value_bytes = static_cast<std::uint64_t>(row_count) *
+                           static_cast<std::uint64_t>(arrow_width);
   if (value_bytes >
       static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::Invalid(
@@ -4884,14 +5097,16 @@ sanitize::Status materialize_dictionary_fixed_width_column(
               "range");
         }
         const auto source_offset = static_cast<std::size_t>(dictionary_index) *
-                                   static_cast<std::size_t>(width);
+                                   static_cast<std::size_t>(*physical_width);
         auto *target =
             out->values.data() + static_cast<std::size_t>(global_row) *
-                                     static_cast<std::size_t>(width);
-        std::memcpy(target,
-                    column.decoded_dictionary_fixed_width_values.data() +
-                        source_offset,
-                    static_cast<std::size_t>(width));
+                                     static_cast<std::size_t>(arrow_width);
+        SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
+            target,
+            reinterpret_cast<const char *>(
+                column.decoded_dictionary_fixed_width_values.data() +
+                source_offset),
+            column, *physical_width, arrow_width));
         if (!out->validity.empty()) {
           set_output_validity_bit(&out->validity, global_row);
         }
