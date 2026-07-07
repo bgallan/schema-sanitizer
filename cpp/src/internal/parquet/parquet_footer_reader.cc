@@ -4185,6 +4185,7 @@ struct NativeParquetArrayState {
 
 struct NativeParquetStreamState {
   std::string path;
+  std::ifstream file;
   FooterInfo footer;
   std::size_t row_group_index = 0;
   std::string last_error;
@@ -5324,10 +5325,10 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
   if (!state) {
     return sanitize::Status::OutOfMemory("native Parquet reader array OOM");
   }
-  std::ifstream file(stream->path, std::ios::binary);
-  if (!file) {
+  stream->file.clear();
+  if (!stream->file) {
     return sanitize::Status::IOError(
-        "native Parquet reader: failed opening input");
+        "native Parquet reader: input stream is not readable");
   }
   state->columns.resize(row_group.columns.size());
   state->children.reserve(row_group.columns.size());
@@ -5337,35 +5338,35 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     auto &child = state->columns[i];
     if (column.native_read_value_buffer_kind == "fixed_width") {
       SAN_RETURN_NOT_OK(materialize_fixed_width_column(
-          file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "bit_packed_boolean") {
-      SAN_RETURN_NOT_OK(
-          materialize_boolean_column(file, column, row_group.num_rows, &child));
+      SAN_RETURN_NOT_OK(materialize_boolean_column(stream->file, column,
+                                                   row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "delta_binary_packed") {
       SAN_RETURN_NOT_OK(materialize_delta_binary_packed_column(
-          file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "byte_stream_split") {
       SAN_RETURN_NOT_OK(materialize_byte_stream_split_column(
-          file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "plain_byte_array") {
       SAN_RETURN_NOT_OK(materialize_byte_array_column(
-          file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
@@ -5374,7 +5375,7 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     } else if (column.native_read_value_buffer_kind ==
                "delta_length_byte_array") {
       SAN_RETURN_NOT_OK(materialize_delta_length_byte_array_column(
-          file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
@@ -5383,7 +5384,7 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     } else if (column.native_read_value_buffer_kind ==
                "dictionary_byte_array") {
       SAN_RETURN_NOT_OK(materialize_dictionary_byte_array_column(
-          file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
@@ -5392,7 +5393,7 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     } else if (column.native_read_value_buffer_kind ==
                "dictionary_fixed_width") {
       SAN_RETURN_NOT_OK(materialize_dictionary_fixed_width_column(
-          file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
@@ -5901,10 +5902,37 @@ sanitize::Result<std::string> read_footer_info_json(const std::string &path) {
   return out;
 }
 
+sanitize::Status project_footer_row_group_columns(
+    FooterInfo *info, const std::vector<std::string> &projected_columns) {
+  if (!info || projected_columns.empty()) {
+    return {};
+  }
+  for (auto &row_group : info->row_groups) {
+    std::vector<ColumnChunkInfo> selected;
+    selected.reserve(projected_columns.size());
+    for (const auto &name : projected_columns) {
+      auto it = std::find_if(row_group.columns.begin(), row_group.columns.end(),
+                             [&](const ColumnChunkInfo &column) {
+                               return !column.path_in_schema.empty() &&
+                                      column.path_in_schema.front() == name;
+                             });
+      if (it == row_group.columns.end()) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: projection column not found: ", name);
+      }
+      selected.push_back(*it);
+    }
+    row_group.columns = std::move(selected);
+  }
+  return {};
+}
+
 sanitize::Result<ArrowArrayStream *>
-make_arrow_stream(const std::string &path) {
+make_arrow_stream(const std::string &path,
+                  const std::vector<std::string> &projected_columns) {
   FooterInfo info;
   SAN_ASSIGN_OR_RAISE(info, read_footer_info(path));
+  SAN_RETURN_NOT_OK(project_footer_row_group_columns(&info, projected_columns));
   const auto readiness = native_reader_readiness(info);
   if (!readiness.ready) {
     std::string message = "native Parquet reader: file is not ready";
@@ -5925,6 +5953,11 @@ make_arrow_stream(const std::string &path) {
     return sanitize::Status::OutOfMemory("native Parquet reader stream OOM");
   }
   state->path = path;
+  state->file.open(path, std::ios::binary);
+  if (!state->file) {
+    return sanitize::Status::IOError(
+        "native Parquet reader: failed opening input");
+  }
   state->footer = std::move(info);
 
   auto *stream = new (std::nothrow) ArrowArrayStream();

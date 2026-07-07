@@ -205,6 +205,8 @@ sanitize::Result<FooterInfo> read_footer_info(const std::string &path);
 sanitize::Result<std::string> read_footer_info_json(const std::string &path);
 
 // Opens a bounded native Arrow C stream for supported local Parquet files.
-sanitize::Result<ArrowArrayStream *> make_arrow_stream(const std::string &path);
+sanitize::Result<ArrowArrayStream *>
+make_arrow_stream(const std::string &path,
+                  const std::vector<std::string> &projected_columns = {});
 
 } // namespace sanitize::internal::parquet_footer_reader

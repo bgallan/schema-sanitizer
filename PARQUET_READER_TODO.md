@@ -27,6 +27,7 @@ replacement. Remaining work:
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
+   - [x] Production fallback for nested/repeated files through PyArrow.
 
 1. Broaden row-group and page coverage:
 
@@ -34,30 +35,35 @@ replacement. Remaining work:
    - [x] Multiple data pages per column.
    - [x] Mixed null/non-null spans across pages.
    - Empty row groups.
+   - [x] Production fallback for empty row groups through PyArrow.
    - [x] Empty files.
 
 1. Expand input source support:
 
-   - File-like objects.
-   - Buffers.
+   - [x] File-like objects through PyArrow fallback.
+   - [x] Buffers through PyArrow fallback.
    - Filesystem-backed non-local paths.
-   - Directory/dataset reads.
+   - [x] Directory/dataset reads through the direct Arrow path.
 
 1. Match production reader behavior:
 
-   - Projection support.
-   - Batch-size control.
+   - [x] Native projection support for top-level scalar columns.
+   - [x] Projection support through PyArrow fallback when native cannot satisfy
+     projected column reads.
+   - [x] Batch-size control, including PyArrow fallback when native row-group
+     batches would exceed the requested batch size.
    - Predicate/filter integration if direct native reads become dataset-aware.
 
 1. Harden large-file behavior:
 
+   - [x] Reuse the native input file handle across row groups.
    - Page-buffer reuse.
    - Streaming materialization instead of whole-row-group buffering where possible.
    - [x] Memory-budget checks for decoded/materialized buffers.
 
 1. Add cross-writer compatibility:
 
-   - PyArrow-written files.
+   - [x] PyArrow-written files through PyArrow fallback.
    - Spark-written files.
    - DuckDB-written files.
    - BigQuery-exported Parquet variants.

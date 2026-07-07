@@ -89,6 +89,7 @@ class ParquetRecordBatchStreamFactory:
         feature: str,
         batch_size: int = DEFAULT_PARQUET_BATCH_ROWS,
         use_threads: bool = False,
+        columns: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         """Store the Parquet source and read its schema once."""
         self._data = data
@@ -96,6 +97,7 @@ class ParquetRecordBatchStreamFactory:
         self._feature = feature
         self._batch_size = batch_size
         self._use_threads = use_threads
+        self._columns = None if columns is None else tuple(columns)
         self.sink = "stream"
         self.diagnostics = None
         self._pa = ensure_pyarrow(feature=feature)
@@ -114,11 +116,11 @@ class ParquetRecordBatchStreamFactory:
                 dependency_name="pyarrow",
             )
             self._dataset = self._ds.dataset(data, format="parquet")
-            self.schema = self._dataset.schema
+            self.schema = self._project_schema(self._dataset.schema)
         else:
             self._dataset = None
             self._pending_parquet_file, self._pending_opened_file = self._open_parquet_file()
-            self.schema = self._pending_parquet_file.schema_arrow
+            self.schema = self._project_schema(self._pending_parquet_file.schema_arrow)
 
     def _open_parquet_file(self) -> tuple[Any, Any | None]:
         """Open a ParquetFile and return it with any owned file handle."""
@@ -129,6 +131,36 @@ class ParquetRecordBatchStreamFactory:
             pa=self._pa,
         )
         return self._pq.ParquetFile(src), opened_file
+
+    def _project_schema(self, schema: Any) -> Any:
+        """Return a top-level projected schema when columns were requested."""
+        if self._columns is None:
+            return schema
+        fields = []
+        for column in self._columns:
+            index = schema.get_field_index(column)
+            if index < 0:
+                raise KeyError(f"Parquet projection column not found: {column!r}")
+            fields.append(schema.field(index))
+        return self._pa.schema(fields, metadata=schema.metadata)
+
+    def _native_batch_size_blocker(self, info: dict[str, Any]) -> str | None:
+        """Return a blocker when native row-group batches exceed requested size."""
+        if self._batch_size <= 0:
+            return None
+        max_row_group_rows = 0
+        for row_group in info.get("row_groups") or []:
+            try:
+                row_group_rows = int(row_group.get("num_rows") or 0)
+            except (TypeError, ValueError):
+                continue
+            max_row_group_rows = max(max_row_group_rows, row_group_rows)
+        if max_row_group_rows <= self._batch_size:
+            return None
+        return (
+            f"native reader row group has {max_row_group_rows} rows but requested "
+            f"batch_size is {self._batch_size}"
+        )
 
     def _try_native_stream(self) -> Any | None:
         """Return a native Parquet Arrow C stream capsule when supported."""
@@ -147,7 +179,21 @@ class ParquetRecordBatchStreamFactory:
                 reason="native_function_unavailable",
             )
             return None
-        info = native_parquet_footer_info(self._data)
+        try:
+            info = native_parquet_footer_info(self._data)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            _set_parquet_native_reader_diagnostics(
+                attempted=True,
+                ready=False,
+                reason="footer_info_error",
+                blockers=[str(exc)],
+            )
+            _LOGGER.debug(
+                "Native Parquet reader skipped; footer info failed; retrying "
+                "input with PyArrow: %s",
+                exc,
+            )
+            return None
         if not info:
             _set_parquet_native_reader_diagnostics(
                 attempted=True,
@@ -157,6 +203,22 @@ class ParquetRecordBatchStreamFactory:
             _LOGGER.debug("Native Parquet reader skipped: footer info unavailable")
             return None
         blockers = list(info.get("native_reader_blockers") or [])
+        if info.get("native_reader_ready") == 1:
+            batch_size_blocker = self._native_batch_size_blocker(info)
+            if batch_size_blocker is not None:
+                _set_parquet_native_reader_diagnostics(
+                    attempted=True,
+                    ready=False,
+                    reason="not_ready",
+                    blockers=[batch_size_blocker],
+                    row_group_count=info.get("row_group_count"),
+                    num_rows=info.get("num_rows"),
+                )
+                _LOGGER.debug(
+                    "Native Parquet reader skipped; retrying input with PyArrow: %s",
+                    batch_size_blocker,
+                )
+                return None
         if info.get("native_reader_ready") != 1:
             _set_parquet_native_reader_diagnostics(
                 attempted=True,
@@ -173,7 +235,10 @@ class ParquetRecordBatchStreamFactory:
             )
             return None
         try:
-            capsule = native_read(self._data)
+            if self._columns is None:
+                capsule = native_read(self._data)
+            else:
+                capsule = native_read(self._data, list(self._columns))
         except RuntimeError as exc:
             _set_parquet_native_reader_diagnostics(
                 attempted=True,
@@ -209,6 +274,7 @@ class ParquetRecordBatchStreamFactory:
             if native_capsule is not None:
                 return native_capsule
             scanner = self._dataset.scanner(
+                columns=None if self._columns is None else list(self._columns),
                 batch_size=self._batch_size,
                 use_threads=self._use_threads,
             )
@@ -231,6 +297,7 @@ class ParquetRecordBatchStreamFactory:
             )
         batches = parquet_file.iter_batches(
             batch_size=self._batch_size,
+            columns=None if self._columns is None else list(self._columns),
             use_threads=self._use_threads,
         )
         reader = record_batch_reader_from_iterable(self._pa, self.schema, batches)
@@ -304,6 +371,7 @@ def open_parquet_record_batch_stream_factory(
     feature: str,
     batch_size: int = DEFAULT_PARQUET_BATCH_ROWS,
     use_threads: bool = False,
+    columns: list[str] | tuple[str, ...] | None = None,
 ) -> ParquetRecordBatchStreamFactory:
     """Open Parquet input as a reusable Arrow C Stream factory."""
     return ParquetRecordBatchStreamFactory(
@@ -312,6 +380,7 @@ def open_parquet_record_batch_stream_factory(
         feature=feature,
         batch_size=batch_size,
         use_threads=use_threads,
+        columns=columns,
     )
 
 
