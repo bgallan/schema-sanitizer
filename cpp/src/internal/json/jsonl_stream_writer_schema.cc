@@ -42,6 +42,22 @@ bool parse_fixed_size_list_format(std::string_view format, JsonlField *field) {
   return true;
 }
 
+bool parse_fixed_size_binary_format(std::string_view format,
+                                    JsonlField *field) {
+  if (!format.starts_with("w:") || !field) {
+    return false;
+  }
+  int32_t size = 0;
+  const char *begin = format.data() + 2;
+  const char *end = format.data() + format.size();
+  auto [ptr, ec] = std::from_chars(begin, end, size);
+  if (ec != std::errc() || ptr != end || size <= 0) {
+    return false;
+  }
+  field->fixed_size_binary_size = size;
+  return true;
+}
+
 } // namespace
 
 sanitize::Result<JsonlKind> kind_from_format(std::string_view format) {
@@ -95,6 +111,9 @@ sanitize::Result<JsonlKind> kind_from_format(std::string_view format) {
   }
   if (format == "Z") {
     return JsonlKind::kLargeBinary;
+  }
+  if (format.starts_with("w:")) {
+    return JsonlKind::kFixedSizeBinary;
   }
   if (format.starts_with("tsm:")) {
     return JsonlKind::kTimestampMillis;
@@ -159,6 +178,7 @@ sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
   JsonlField field;
   field.name = schema.name ? schema.name : "";
   field.format = schema.format;
+  field.nullable = (schema.flags & ARROW_FLAG_NULLABLE) != 0;
   SAN_ASSIGN_OR_RAISE(field.kind, kind_from_format(schema.format));
   if (field.kind == JsonlKind::kDecimal &&
       !parse_decimal_format(schema.format, &field)) {
@@ -170,6 +190,12 @@ sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
       !parse_fixed_size_list_format(schema.format, &field)) {
     return sanitize::Status::Invalid(
         "JSONL writer: invalid fixed-size list Arrow format '",
+        std::string(schema.format), "'");
+  }
+  if (field.kind == JsonlKind::kFixedSizeBinary &&
+      !parse_fixed_size_binary_format(schema.format, &field)) {
+    return sanitize::Status::Invalid(
+        "JSONL writer: invalid fixed-size binary Arrow format '",
         std::string(schema.format), "'");
   }
   if (schema.n_children < 0) {

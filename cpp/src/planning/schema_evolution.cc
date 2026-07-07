@@ -51,6 +51,69 @@ check_strict_compatible(const sanitize::LogicalSchema &base,
   return sanitize::Status::OK();
 }
 
+static sanitize::LogicalType
+merge_type_additive(const sanitize::LogicalType &base,
+                    const sanitize::LogicalType &inferred);
+
+static sanitize::LogicalField
+merge_field_additive(const sanitize::LogicalField &base,
+                     const sanitize::LogicalField &inferred) {
+  sanitize::LogicalField out = base;
+  if (base.type && inferred.type) {
+    out.type = std::make_unique<sanitize::LogicalType>(
+        merge_type_additive(*base.type, *inferred.type));
+  }
+  return out;
+}
+
+// Appends inferred fields that are absent from the schema contract, recursively
+// merging matching struct/list fields.
+static std::vector<sanitize::LogicalField> merge_fields_additive(
+    const std::vector<sanitize::LogicalField> &base_fields,
+    const std::vector<sanitize::LogicalField> &inferred_fields) {
+  std::vector<sanitize::LogicalField> out;
+  out.reserve(base_fields.size() + inferred_fields.size());
+
+  std::unordered_set<std::string_view> base_names;
+  base_names.reserve(base_fields.size());
+  for (const auto &base_field : base_fields) {
+    base_names.insert(base_field.name);
+    if (const auto *inferred = find_field(inferred_fields, base_field.name)) {
+      out.push_back(merge_field_additive(base_field, *inferred));
+    } else {
+      out.push_back(base_field);
+    }
+  }
+
+  for (const auto &field : inferred_fields) {
+    if (!base_names.contains(field.name))
+      out.push_back(field);
+  }
+  return out;
+}
+
+static sanitize::LogicalType
+merge_type_additive(const sanitize::LogicalType &base,
+                    const sanitize::LogicalType &inferred) {
+  if (base.kind == sanitize::LogicalKind::kStruct &&
+      inferred.kind == sanitize::LogicalKind::kStruct) {
+    sanitize::LogicalType out(sanitize::LogicalKind::kStruct);
+    out.fields = merge_fields_additive(base.fields, inferred.fields);
+    return out;
+  }
+
+  if (base.kind == sanitize::LogicalKind::kList &&
+      inferred.kind == sanitize::LogicalKind::kList && base.value &&
+      inferred.value) {
+    sanitize::LogicalType out(sanitize::LogicalKind::kList);
+    out.value = std::make_unique<sanitize::LogicalType>(
+        merge_type_additive(*base.value, *inferred.value));
+    return out;
+  }
+
+  return base;
+}
+
 // Appends inferred root fields that are absent from the schema contract.
 static sanitize::LogicalSchema
 merge_schema_additive(const sanitize::LogicalSchema &base,
@@ -58,17 +121,7 @@ merge_schema_additive(const sanitize::LogicalSchema &base,
   if (base.fields.empty())
     return inferred;
   sanitize::LogicalSchema out;
-  out.fields.reserve(base.fields.size() + inferred.fields.size());
-  out.fields.insert(out.fields.end(), base.fields.begin(), base.fields.end());
-  std::unordered_set<std::string_view> base_names;
-  base_names.reserve(base.fields.size());
-  for (const auto &f : base.fields)
-    base_names.insert(f.name);
-  for (const auto &f : inferred.fields) {
-    if (base_names.contains(f.name))
-      continue;
-    out.fields.push_back(f);
-  }
+  out.fields = merge_fields_additive(base.fields, inferred.fields);
   return out;
 }
 

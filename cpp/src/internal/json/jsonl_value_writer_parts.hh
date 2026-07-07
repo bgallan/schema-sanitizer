@@ -45,6 +45,10 @@ sanitize::Status append_binary32_value(std::string &out,
                                        const ArrowArray &array, int64_t row);
 sanitize::Status append_binary64_value(std::string &out,
                                        const ArrowArray &array, int64_t row);
+sanitize::Status append_fixed_size_binary_value(std::string &out,
+                                                const JsonlField &field,
+                                                const ArrowArray &array,
+                                                int64_t row);
 
 // Appends date, time, and timestamp Arrow values.
 sanitize::Status append_timestamp_value(std::string &out,

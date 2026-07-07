@@ -637,7 +637,7 @@ merge_arrow_source_schemas(
                                                source.stream_obj, prepared));
     auto merged = sanitize::merge_schema_registry(make_registry_merge_input(
         std::move(input_schema), combined_registry.c_str(), field_name_policy,
-        prepared->spec.default_key_name));
+        prepared->spec.default_key_name, prepared->spec.field_order));
     if (!merged.ok()) {
       return merged.status();
     }
@@ -649,9 +649,9 @@ merge_arrow_source_schemas(
   if (!has_schema) {
     return sanitize::Status::Invalid("sources must not be empty");
   }
-  auto merge_input = make_registry_merge_input(std::move(combined_schema),
-                                               registry_json, field_name_policy,
-                                               prepared->spec.default_key_name);
+  auto merge_input = make_registry_merge_input(
+      std::move(combined_schema), registry_json, field_name_policy,
+      prepared->spec.default_key_name, prepared->spec.field_order);
   return previous_schema ? sanitize::merge_schema_registry_with_previous_schema(
                                merge_input, *previous_schema)
                          : sanitize::merge_schema_registry(merge_input);
@@ -885,7 +885,8 @@ sanitize::Status open_next_source(NativeArrowSourcesStreamState *state) {
     auto merged_r = sanitize::merge_schema_registry(make_registry_merge_input(
         std::move(input_schema), state->registry_json.c_str(),
         state->field_name_policy.c_str(),
-        state->prepared->spec.default_key_name));
+        state->prepared->spec.default_key_name,
+        state->prepared->spec.field_order));
     if (!merged_r.ok()) {
       return merged_r.status();
     }

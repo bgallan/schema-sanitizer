@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace core_abi3_internal {
 
@@ -44,7 +45,9 @@ PyObject *py_parquet_footer_info_json(PyObject *, PyObject *args) {
 
 PyObject *py_parquet_stream_read(PyObject *, PyObject *args) {
   PyObject *path_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "O:parquet_stream_read", &path_obj)) {
+  PyObject *columns_obj = nullptr;
+  if (!PyArg_ParseTuple(args, "O|O:parquet_stream_read", &path_obj,
+                        &columns_obj)) {
     return nullptr;
   }
   PyObject *encoded = fsencode_path(path_obj);
@@ -59,8 +62,40 @@ PyObject *py_parquet_stream_read(PyObject *, PyObject *args) {
     return nullptr;
   }
 
+  std::vector<std::string> projected_columns;
+  if (columns_obj && columns_obj != Py_None) {
+    const Py_ssize_t size = PySequence_Size(columns_obj);
+    if (size < 0) {
+      PyErr_SetString(PyExc_TypeError,
+                      "parquet_stream_read columns must be a sequence");
+      return nullptr;
+    }
+    projected_columns.reserve(static_cast<std::size_t>(size));
+    for (Py_ssize_t i = 0; i < size; ++i) {
+      PyObject *item = PySequence_GetItem(columns_obj, i);
+      if (!item) {
+        return nullptr;
+      }
+      std::unique_ptr<PyObject, decltype(&Py_DECREF)> item_owner(item,
+                                                                 Py_DECREF);
+      if (!PyUnicode_Check(item)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "parquet_stream_read columns must be strings");
+        return nullptr;
+      }
+      Py_ssize_t column_size = 0;
+      const char *column_data = PyUnicode_AsUTF8AndSize(item, &column_size);
+      if (!column_data) {
+        return nullptr;
+      }
+      projected_columns.emplace_back(column_data,
+                                     static_cast<std::size_t>(column_size));
+    }
+  }
+
   auto result = sanitize::internal::parquet_footer_reader::make_arrow_stream(
-      std::string(path_data, static_cast<std::size_t>(path_size)));
+      std::string(path_data, static_cast<std::size_t>(path_size)),
+      projected_columns);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;

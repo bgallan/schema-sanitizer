@@ -65,6 +65,8 @@ struct PageHeaderInfo {
   bool levels_decoded = false;
   std::int32_t decoded_definition_levels = 0;
   std::int32_t decoded_repetition_levels = 0;
+  std::vector<std::int16_t> decoded_repetition_level_values;
+  std::vector<std::int16_t> decoded_definition_level_values;
   std::int32_t value_payload_offset = 0;
   std::int32_t decoded_non_null_values = 0;
   std::int32_t decoded_null_values = 0;
@@ -78,6 +80,8 @@ struct PageHeaderInfo {
   std::int32_t materialized_offset_bytes = 0;
   std::int32_t dictionary_index_bit_width = 0;
   std::vector<std::string> decoded_value_preview;
+  std::vector<std::string> decoded_byte_array_values;
+  std::vector<std::uint8_t> decoded_fixed_width_values;
 };
 
 struct PageLocationInfo {
@@ -120,6 +124,16 @@ struct NativeReadPageSpanInfo {
   std::string value_buffer_kind;
 };
 
+struct RepeatedLevelLayoutInfo {
+  bool decoded = false;
+  std::int64_t row_count = 0;
+  std::int64_t null_count = 0;
+  std::int64_t element_count = 0;
+  std::int64_t non_null_value_count = 0;
+  std::vector<std::int32_t> offsets;
+  std::vector<std::uint8_t> validity_bitmap;
+};
+
 struct ColumnChunkInfo {
   std::vector<std::string> path_in_schema;
   bool has_physical_type = false;
@@ -149,6 +163,7 @@ struct ColumnChunkInfo {
   std::int32_t offset_index_length = 0;
   std::int16_t max_definition_level = 0;
   std::int16_t max_repetition_level = 0;
+  bool top_level_required = true;
   std::int32_t fixed_type_length = 0;
   std::string native_arrow_format;
   std::vector<PageHeaderInfo> pages;
@@ -173,7 +188,31 @@ struct ColumnChunkInfo {
   std::int32_t native_read_has_validity_buffer = 0;
   std::int32_t native_read_has_offsets_buffer = 0;
   std::int32_t native_read_has_values_buffer = 0;
+  std::vector<std::string> decoded_dictionary_values;
+  std::vector<std::uint8_t> decoded_dictionary_fixed_width_values;
   std::vector<NativeReadPageSpanInfo> native_read_page_spans;
+  bool repeated_level_layout_decoded = false;
+  std::int64_t repeated_level_row_count = 0;
+  std::int64_t repeated_level_null_count = 0;
+  std::int64_t repeated_level_element_count = 0;
+  std::int64_t repeated_level_non_null_value_count = 0;
+  std::vector<std::int32_t> repeated_level_offsets;
+  std::vector<std::uint8_t> repeated_level_validity_bitmap;
+  bool nested_repeated_level_layout_decoded = false;
+  std::int64_t nested_repeated_level_row_count = 0;
+  std::int64_t nested_repeated_level_null_count = 0;
+  std::int64_t nested_repeated_level_element_count = 0;
+  std::int64_t nested_repeated_level_non_null_value_count = 0;
+  std::vector<std::int32_t> nested_repeated_level_offsets;
+  std::vector<std::uint8_t> nested_repeated_level_validity_bitmap;
+  bool deep_repeated_level_layout_decoded = false;
+  std::int64_t deep_repeated_level_row_count = 0;
+  std::int64_t deep_repeated_level_null_count = 0;
+  std::int64_t deep_repeated_level_element_count = 0;
+  std::int64_t deep_repeated_level_non_null_value_count = 0;
+  std::vector<std::int32_t> deep_repeated_level_offsets;
+  std::vector<std::uint8_t> deep_repeated_level_validity_bitmap;
+  std::vector<RepeatedLevelLayoutInfo> repeated_level_layouts;
 };
 
 struct RowGroupInfo {
@@ -192,6 +231,7 @@ struct FooterInfo {
   std::string created_by;
   std::vector<SchemaElementInfo> schema_elements;
   std::vector<RowGroupInfo> row_groups;
+  std::vector<std::string> projected_columns;
 };
 
 // Reads bounded Parquet footer metadata from a local file path.
@@ -201,6 +241,8 @@ sanitize::Result<FooterInfo> read_footer_info(const std::string &path);
 sanitize::Result<std::string> read_footer_info_json(const std::string &path);
 
 // Opens a bounded native Arrow C stream for supported local Parquet files.
-sanitize::Result<ArrowArrayStream *> make_arrow_stream(const std::string &path);
+sanitize::Result<ArrowArrayStream *>
+make_arrow_stream(const std::string &path,
+                  const std::vector<std::string> &projected_columns = {});
 
 } // namespace sanitize::internal::parquet_footer_reader

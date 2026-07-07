@@ -72,6 +72,8 @@ sanitize::Status append_value(std::string &out, const JsonlField &field,
     return append_binary32_value(out, array, row);
   case JsonlKind::kLargeBinary:
     return append_binary64_value(out, array, row);
+  case JsonlKind::kFixedSizeBinary:
+    return append_fixed_size_binary_value(out, field, array, row);
   case JsonlKind::kTimestampMillis:
     return append_timestamp_value(out, array, row, 1000);
   case JsonlKind::kTimestampMicros:

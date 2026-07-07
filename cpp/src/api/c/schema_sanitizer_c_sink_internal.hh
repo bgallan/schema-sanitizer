@@ -57,7 +57,9 @@ sanitize::SchemaRegistryMergeInput
 make_registry_merge_input(sanitize::LogicalSchema inferred_schema,
                           const char *registry_json,
                           const char *field_name_policy,
-                          std::string_view default_key_name = "default_key");
+                          std::string_view default_key_name = "default_key",
+                          sanitize::FieldOrderPolicy field_order =
+                              sanitize::FieldOrderPolicy::kAlphabetically);
 // Copies registry/drift JSON strings into optional sink outputs.
 int copy_registry_json_outputs(
     const sanitize::SchemaRegistryMergeResult &merged,

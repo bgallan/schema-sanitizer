@@ -104,4 +104,26 @@ sanitize::Status append_binary64_value(std::string &out,
   return append_binary_value<int64_t>(out, array, row);
 }
 
+sanitize::Status append_fixed_size_binary_value(std::string &out,
+                                                const JsonlField &field,
+                                                const ArrowArray &array,
+                                                int64_t row) {
+  if (field.fixed_size_binary_size <= 0) {
+    return sanitize::Status::Invalid(
+        "JSONL writer: invalid fixed-size binary width");
+  }
+  if (!array.buffers || !array.buffers[1]) {
+    return sanitize::Status::Invalid(
+        "JSONL writer: missing fixed-size binary buffer");
+  }
+  const auto *data = static_cast<const char *>(array.buffers[1]);
+  const auto byte_width =
+      static_cast<std::size_t>(field.fixed_size_binary_size);
+  const auto offset = static_cast<std::size_t>(array.offset + row) * byte_width;
+  out.push_back('"');
+  append_base64(out, std::string_view(data + offset, byte_width));
+  out.push_back('"');
+  return sanitize::Status::OK();
+}
+
 } // namespace sanitize::internal::jsonl_stream_writer

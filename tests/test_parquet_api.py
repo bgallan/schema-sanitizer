@@ -83,9 +83,38 @@ def test_parquet_path_with_temporal_values(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
+def test_native_parquet_footer_info_maps_utc_timestamp_timezone(tmp_path: Path) -> None:
+    """Verify adjusted UTC Parquet timestamps expose an Arrow timezone."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+
+    require_native()
+    path = tmp_path / "data.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "ts": pa.array(
+                    [dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.UTC)],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+            }
+        ),
+        path,
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["schema_elements"][1]["logical_type"] == "timestamp"
+    assert info["schema_elements"][1]["logical_type_time_unit"] == "micros"
+    assert info["schema_elements"][1]["logical_type_is_adjusted_to_utc"] == 1
+    assert info["row_groups"][0]["columns"][0]["native_arrow_format"] == "tsu:UTC"
+
+
+@_requires_pyarrow
 def test_read_parquet_path_materializes_table(tmp_path: Path) -> None:
     """Verify read parquet path materializes table."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
 
@@ -98,6 +127,120 @@ def test_read_parquet_path_materializes_table(tmp_path: Path) -> None:
 
     assert result.clean_data.to_pylist() == _sample_table().to_pylist()
     assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("file was not written" in blocker for blocker in diagnostics["blockers"])
+
+
+@_requires_pyarrow
+def test_native_parquet_reader_logs_not_ready_fallback(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify unsupported native Parquet attempts leave useful fallback diagnostics."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    path = tmp_path / "pyarrow.parquet"
+    pq.write_table(_sample_table(), path)
+    caplog.set_level(logging.DEBUG, logger="schema_sanitizer.adapters.pyarrow_parquet_direct")
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("file was not written" in blocker for blocker in diagnostics["blockers"])
+    assert "Native Parquet reader skipped; retrying input with PyArrow" in caplog.text
+
+
+@_requires_pyarrow
+def test_parquet_file_like_records_non_native_source_diagnostics() -> None:
+    """Verify file-like Parquet inputs explain why native reader was bypassed."""
+    from io import BytesIO
+
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    data = BytesIO()
+    pq.write_table(_sample_table(), data)
+    data.seek(0)
+
+    factory = open_parquet_record_batch_stream_factory(data, source="stream", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_parquetfile_iter_batches"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is False
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "source_not_path"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_parquet_buffer_records_non_native_source_diagnostics() -> None:
+    """Verify in-memory Parquet buffers use the safe non-native fallback."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    sink = pa.BufferOutputStream()
+    pq.write_table(_sample_table(), sink)
+    data = sink.getvalue().to_pybytes()
+
+    factory = open_parquet_record_batch_stream_factory(data, source="text", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_parquetfile_iter_batches"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is False
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "source_not_path"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_parquet_buffer_projection_materializes_requested_columns() -> None:
+    """Verify buffer-backed Parquet projections expose the projected schema."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    table = pa.table({"a": [1, 2], "b": ["x", "y"], "c": [True, False]})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)
+
+    factory = open_parquet_record_batch_stream_factory(
+        sink.getvalue().to_pybytes(),
+        source="text",
+        feature="test",
+        columns=["b"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == [{"b": "x"}, {"b": "y"}]
+    assert last_parquet_stream_factory_route() == "pyarrow_parquetfile_iter_batches"
 
 
 @_requires_pyarrow
@@ -106,6 +249,7 @@ def test_native_parquet_stream_materializes_plain_fixed_width_rows(
 ) -> None:
     """Verify the native Parquet stream materializes supported fixed-width pages."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
         native_parquet_footer_info,
         open_parquet_record_batch_stream_factory,
@@ -135,14 +279,218 @@ def test_native_parquet_stream_materializes_plain_fixed_width_rows(
 
     assert reader.read_all().to_pylist() == table.to_pylist()
     assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+    assert diagnostics["row_group_count"] == 1
+    assert diagnostics["num_rows"] == 4
 
 
 @_requires_pyarrow
-def test_native_parquet_stream_retries_pyarrow_for_unsupported_encoding(
+def test_native_parquet_stream_respects_small_batch_size_with_pyarrow_fallback(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Verify unsupported native page encodings fall back to PyArrow."""
+    """Verify native Parquet falls back when row-group batches exceed batch_size."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-small-batches.parquet"
+    table = pa.table({"a": pa.array([1, 2, 3, 4, 5], type=pa.int64())})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        batch_size=2,
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    batches = list(reader)
+
+    assert [batch.num_rows for batch in batches] == [2, 2, 1]
+    assert pa.Table.from_batches(batches).to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("requested batch_size is 2" in blocker for blocker in diagnostics["blockers"])
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projection_uses_native_route(
+    tmp_path: Path,
+) -> None:
+    """Verify projected scalar reads stay on the native Parquet route."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-projection.parquet"
+    table = pa.table(
+        {
+            "a": pa.array([1, 2, 3], type=pa.int64()),
+            "b": pa.array(["x", "y", "z"], type=pa.string()),
+            "c": pa.array([True, False, True], type=pa.bool_()),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["b"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == [{"b": "x"}, {"b": "y"}, {"b": "z"}]
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_parquet_filter_uses_dataset_scanner_instead_of_native_route(
+    tmp_path: Path,
+) -> None:
+    """Verify dataset filters are honored through the PyArrow scanner route."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    ds = pytest.importorskip("pyarrow.dataset")
+    path = tmp_path / "native-filter.parquet"
+    table = pa.table(
+        {
+            "a": pa.array([1, 2, 3], type=pa.int64()),
+            "b": pa.array(["x", "y", "z"], type=pa.string()),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["b"],
+        filters=ds.field("a") > 1,
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == [{"b": "y"}, {"b": "z"}]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is False
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "filter_requires_dataset_scanner"
+
+
+@_requires_pyarrow
+def test_parquet_filter_rejects_buffer_source() -> None:
+    """Verify filters are never silently ignored for non-dataset sources."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        open_parquet_record_batch_stream_factory,
+    )
+
+    ds = pytest.importorskip("pyarrow.dataset")
+    sink = pa.BufferOutputStream()
+    pq.write_table(_sample_table(), sink)
+
+    with pytest.raises(ValueError, match="filters require a path-backed source"):
+        open_parquet_record_batch_stream_factory(
+            sink.getvalue().to_pybytes(),
+            source="text",
+            feature="test",
+            filters=ds.field("a") > 1,
+        )
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_plain_boolean_rows(
+    tmp_path: Path,
+) -> None:
+    """Verify the native Parquet stream materializes PLAIN boolean pages."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-bool.parquet"
+    table = pa.table({"ok": pa.array([True, None, False, True], type=pa.bool_())})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    column = info["row_groups"][0]["columns"][0]
+    page = column["pages"][0]
+    assert info["native_reader_ready"] == 1
+    assert column["native_arrow_format"] == "b"
+    assert column["native_read_value_buffer_kind"] == "bit_packed_boolean"
+    assert column["native_read_arrow_n_buffers"] == 2
+    assert page["value_encoding"] == 0
+    assert page["decoded_value_preview"] == ["true", "false", "true"]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_rle_dictionary_strings(
+    tmp_path: Path,
+) -> None:
+    """Verify the native Parquet stream materializes RLE dictionary strings."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
         last_parquet_stream_factory_route,
         native_parquet_footer_info,
@@ -160,16 +508,912 @@ def test_native_parquet_stream_retries_pyarrow_for_unsupported_encoding(
         parquet_compression="uncompressed",
     )
     info = native_parquet_footer_info(path)
-    caplog.set_level(logging.ERROR, logger="schema_sanitizer.adapters.pyarrow_parquet_direct")
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
+    assert info["row_groups"][0]["columns"][0]["native_read_value_buffer_kind"] == (
+        "dictionary_byte_array"
+    )
     assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_rle_dictionary_fixed_width(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream materializes fixed-width dictionary pages."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    src = tmp_path / "source.parquet"
+    out = tmp_path / "out.parquet"
+    values = [7] * 500
+    table = pa.table({"n": pa.array(values, type=pa.int64())})
+    pq.write_table(table, src)
+
+    ss.to_parquet(
+        src,
+        out,
+        input_format="parquet",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(out)
+
+    assert info is not None
+    column = next(
+        column for column in info["row_groups"][0]["columns"] if column["path_in_schema"] == ["n"]
+    )
+    assert info["native_reader_ready"] == 1
+    assert column["native_read_value_buffer_kind"] == "dictionary_fixed_width"
+    assert column["native_read_value_width_bytes"] == 8
+    assert column["native_read_arrow_n_buffers"] == 2
+    dictionary_page = column["pages"][0]
+    data_page = column["pages"][1]
+    assert dictionary_page["is_dictionary_page"] == 1
+    assert dictionary_page["decoded_value_preview"] == ["7"]
+    assert data_page["value_encoding"] == 8
+    assert data_page["decoded_value_preview"] == ["7"] * 8
+    assert data_page["materialized_value_bytes"] == len(values) * 8
+    assert data_page["materialized_offset_bytes"] == 0
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    generated = {"schema_registry", "schema_drifts", "source_file", "ingestion_timestamp"}
+    assert [
+        {key: value for key, value in row.items() if key not in generated}
+        for row in reader.read_all().to_pylist()
+    ] == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_integer_logical_widths(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream writes Arrow-width integer buffers."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "integer-logical-widths.parquet"
+    table = pa.table(
+        {
+            "i8": pa.array([-5, 7, None, -1], type=pa.int8()),
+            "u8": pa.array([250, 1, None, 2], type=pa.uint8()),
+            "i16": pa.array([-300, 12, None, -2], type=pa.int16()),
+            "u16": pa.array([65000, 2, None, 3], type=pa.uint16()),
+            "u32": pa.array([4_000_000_000, 7, None, 8], type=pa.uint32()),
+            "u64": pa.array([2**63 + 5, 9, None, 10], type=pa.uint64()),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    widths = {
+        tuple(column["path_in_schema"]): column["native_read_value_width_bytes"]
+        for column in info["row_groups"][0]["columns"]
+    }
+    assert widths == {
+        ("i8",): 1,
+        ("u8",): 1,
+        ("i16",): 2,
+        ("u16",): 2,
+        ("u32",): 4,
+        ("u64",): 8,
+    }
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_decimal_fixed_bytes(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream converts decimal fixed bytes to Arrow order."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "decimal-fixed-bytes.parquet"
+    table = pa.table(
+        {
+            "plain_amount": pa.array(
+                [Decimal("123.45"), Decimal("-0.10"), None, Decimal("999.99")],
+                type=pa.decimal128(10, 2),
+            ),
+            "dict_amount": pa.array(
+                [Decimal("1.00"), Decimal("2.00"), Decimal("1.00"), None],
+                type=pa.decimal128(10, 2),
+            ),
+            "big_amount": pa.array(
+                [
+                    Decimal("123456789012345678901234567890.1234"),
+                    Decimal("-1.0000"),
+                    None,
+                    Decimal("2.5000"),
+                ],
+                type=pa.decimal256(40, 4),
+            ),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    columns = {
+        tuple(column["path_in_schema"]): column for column in info["row_groups"][0]["columns"]
+    }
+    assert columns[("plain_amount",)]["native_arrow_format"] == "d:10,2,128"
+    assert columns[("plain_amount",)]["native_read_value_buffer_kind"] == "fixed_width"
+    assert columns[("plain_amount",)]["native_read_value_width_bytes"] == 16
+    assert columns[("dict_amount",)]["native_arrow_format"] == "d:10,2,128"
+    assert columns[("dict_amount",)]["native_read_value_buffer_kind"] == "dictionary_fixed_width"
+    assert columns[("dict_amount",)]["native_read_value_width_bytes"] == 16
+    assert columns[("big_amount",)]["native_arrow_format"] == "d:40,4,256"
+    assert columns[("big_amount",)]["native_read_value_buffer_kind"] == "fixed_width"
+    assert columns[("big_amount",)]["native_read_value_width_bytes"] == 32
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_fixed_size_binary(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream materializes fixed-size binary columns."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "fixed-size-binary.parquet"
+    plain_values = [
+        None if index % 10 == 0 else index.to_bytes(4, "little") for index in range(600)
+    ]
+    table = pa.table(
+        {
+            "plain_token": pa.array(
+                plain_values,
+                type=pa.binary(4),
+            ),
+            "dict_token": pa.array(
+                [b"same", b"same", b"same", None, b"same"] * 120,
+                type=pa.binary(4),
+            ),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    columns = {
+        tuple(column["path_in_schema"]): column for column in info["row_groups"][0]["columns"]
+    }
+    assert columns[("plain_token",)]["physical_type"] == 7
+    assert columns[("plain_token",)]["fixed_type_length"] == 4
+    assert columns[("plain_token",)]["native_arrow_format"] == "w:4"
+    assert columns[("plain_token",)]["native_read_value_buffer_kind"] == "fixed_width"
+    assert columns[("plain_token",)]["native_read_value_width_bytes"] == 4
+    assert columns[("plain_token",)]["native_read_arrow_n_buffers"] == 2
+    assert columns[("dict_token",)]["physical_type"] == 7
+    assert columns[("dict_token",)]["fixed_type_length"] == 4
+    assert columns[("dict_token",)]["native_arrow_format"] == "w:4"
+    assert columns[("dict_token",)]["native_read_value_buffer_kind"] == "dictionary_fixed_width"
+    assert columns[("dict_token",)]["native_read_value_width_bytes"] == 4
+    assert columns[("dict_token",)]["native_read_arrow_n_buffers"] == 2
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_preserves_required_scalar_nullability(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet reader preserves required scalar field nullability."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "required-scalars.parquet"
+    schema = pa.schema(
+        [
+            pa.field("ok", pa.bool_(), nullable=False),
+            pa.field("i8", pa.int8(), nullable=False),
+            pa.field("u16", pa.uint16(), nullable=False),
+            pa.field("n", pa.int64(), nullable=False),
+            pa.field("f", pa.float32(), nullable=False),
+            pa.field("g", pa.float64(), nullable=False),
+            pa.field("s", pa.string(), nullable=False),
+            pa.field("payload", pa.binary(), nullable=False),
+            pa.field("fixed_payload", pa.binary(4), nullable=False),
+            pa.field("amount", pa.decimal128(10, 2), nullable=False),
+            pa.field("day", pa.date32(), nullable=False),
+            pa.field("ts", pa.timestamp("us"), nullable=False),
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [
+            pa.array([True, False, True], type=pa.bool_()),
+            pa.array([-1, 2, 3], type=pa.int8()),
+            pa.array([1, 65000, 3], type=pa.uint16()),
+            pa.array([10, 20, 30], type=pa.int64()),
+            pa.array([1.25, 2.5, 3.75], type=pa.float32()),
+            pa.array([1.5, 2.25, 3.125], type=pa.float64()),
+            pa.array(["alpha", "bravo", "charlie"], type=pa.string()),
+            pa.array([b"a", b"bb", b"ccc"], type=pa.binary()),
+            pa.array([b"abcd", b"wxyz", b"1234"], type=pa.binary(4)),
+            pa.array(
+                [Decimal("1.23"), Decimal("4.56"), Decimal("7.89")],
+                type=pa.decimal128(10, 2),
+            ),
+            pa.array(
+                [dt.date(2026, 1, 1), dt.date(2026, 1, 2), dt.date(2026, 1, 3)],
+                type=pa.date32(),
+            ),
+            pa.array(
+                [
+                    dt.datetime(2026, 1, 1, 1, 2, 3),
+                    dt.datetime(2026, 1, 1, 1, 2, 4),
+                    dt.datetime(2026, 1, 1, 1, 2, 5),
+                ],
+                type=pa.timestamp("us"),
+            ),
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    row_group = info["row_groups"][0]
+    assert row_group["num_rows"] == 3
+    assert all(column["max_definition_level"] == 0 for column in row_group["columns"])
+    assert all(column["native_read_total_nulls"] == 0 for column in row_group["columns"])
+    assert all(column["native_read_arrow_null_count"] == 0 for column in row_group["columns"])
+    assert all(column["native_read_has_validity_buffer"] == 0 for column in row_group["columns"])
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    assert out.schema.equals(schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_writer_rejects_null_in_required_field(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify native Parquet writer does not materialize nulls in required fields."""
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "required-null.parquet"
+    schema = pa.schema([pa.field("n", pa.int64(), nullable=False)])
+    table = pa.Table.from_arrays([pa.array([1, None], type=pa.int64())], schema=schema)
+    caplog.set_level(logging.ERROR, logger="schema_sanitizer.api_impl.native_file_output")
+
+    with pytest.raises(pa.ArrowInvalid, match="non-nullable"):
+        write_parquet_native_first_stream(
+            pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+            path,
+            feature="test",
+            parquet_compression="uncompressed",
+        )
+    assert "required field contains null" in caplog.text
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_reads_empty_file_schema(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream handles empty files with footer schema only."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty.parquet"
+    table = pa.table(
+        {
+            "a": pa.array([], type=pa.int64()),
+            "b": pa.array([], type=pa.string()),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 0
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_reads_empty_struct_file_schema(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream handles empty supported struct schemas."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-struct.parquet"
+    schema = pa.schema(
+        [
+            pa.field(
+                "profile",
+                pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64(), nullable=False),
+                    ]
+                ),
+            )
+        ]
+    )
+    table = pa.Table.from_pylist([], schema=schema)
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 0
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
+    tmp_path: Path,
+) -> None:
+    """Verify empty row groups remain readable through the PyArrow fallback."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+
+    require_native()
+    path = tmp_path / "empty-row-group.parquet"
+    table = pa.table(
+        {
+            "a": pa.array([], type=pa.int64()),
+            "b": pa.array([], type=pa.string()),
+        }
+    )
+    pq.write_table(table, path, row_group_size=1)
+    metadata = pq.ParquetFile(path).metadata
+    assert metadata.num_rows == 0
+    assert metadata.num_row_groups == 1
+    assert metadata.row_group(0).num_rows == 0
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 1
+    assert info["row_groups"][0]["num_rows"] == 0
+    assert all(not column["pages"] for column in info["row_groups"][0]["columns"])
+    assert info["native_reader_ready"] == 0
+    assert any("file was not written" in blocker for blocker in info["native_reader_blockers"])
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
     assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
-    assert "Native Parquet reader failed; retrying input with PyArrow" in caplog.text
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("file was not written" in blocker for blocker in diagnostics["blockers"])
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_reads_empty_supported_list_file_schema(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader handles empty files with supported list schemas."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-list.parquet"
+    table = pa.Table.from_pylist(
+        [],
+        schema=pa.schema(
+            [
+                pa.field("scores", pa.list_(pa.int64())),
+                pa.field(
+                    "items",
+                    pa.list_(
+                        pa.struct(
+                            [
+                                pa.field("score", pa.int64()),
+                                pa.field("label", pa.string()),
+                            ]
+                        )
+                    ),
+                ),
+                pa.field("nested_scores", pa.list_(pa.list_(pa.int64()))),
+                pa.field("deep_scores", pa.list_(pa.list_(pa.list_(pa.int64())))),
+                pa.field(
+                    "very_deep_scores",
+                    pa.list_(pa.list_(pa.list_(pa.list_(pa.int64())))),
+                ),
+                pa.field("labels", pa.map_(pa.string(), pa.int64())),
+                pa.field("nested_labels", pa.list_(pa.map_(pa.string(), pa.int64()))),
+            ]
+        ),
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 0
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_empty_file_schema(
+    tmp_path: Path,
+) -> None:
+    """Verify native empty-file reads honor projected column order."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-projected.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("profile", pa.struct([pa.field("name", pa.string())])),
+            pa.field("scores", pa.list_(pa.int64())),
+        ]
+    )
+    table = pa.Table.from_pylist([], schema=schema)
+    expected = table.select(["scores", "id"])
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["scores", "id"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(expected.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repeated(
+    tmp_path: Path,
+) -> None:
+    """Verify empty-file projection ignores unsupported unprojected fields."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-projected-complex.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("items", pa.list_(pa.struct([pa.field("ids", pa.list_(pa.int64()))]))),
+        ]
+    )
+    table = pa.Table.from_pylist([], schema=schema)
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["id"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.select(["id"]).schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_footer_info_accepts_empty_list_struct_list_chain_readiness(
+    tmp_path: Path,
+) -> None:
+    """Verify empty list-struct nested-list files can use the native reader."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-complex-repeated.parquet"
+    schema = pa.schema(
+        [pa.field("items", pa.list_(pa.struct([pa.field("ids", pa.list_(pa.list_(pa.int64())))])))]
+    )
+    table = pa.Table.from_pylist([], schema=schema)
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 0
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_reads_multiple_row_groups(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream returns all row groups in order."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "multi-row-group.parquet"
+    schema = pa.schema([("a", pa.int64()), ("b", pa.string())])
+    batches = [
+        pa.record_batch(
+            [pa.array([1, 2], type=pa.int64()), pa.array(["x", "y"])],
+            schema=schema,
+        ),
+        pa.record_batch(
+            [pa.array([3], type=pa.int64()), pa.array(["z"])],
+            schema=schema,
+        ),
+    ]
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(schema, batches),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["row_group_count"] == 2
+    assert [row_group["num_rows"] for row_group in info["row_groups"]] == [2, 1]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().to_pylist() == [
+        {"a": 1, "b": "x"},
+        {"a": 2, "b": "y"},
+        {"a": 3, "b": "z"},
+    ]
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_reads_list_columns_across_row_groups(
+    tmp_path: Path,
+) -> None:
+    """Verify native list arrays reset offsets correctly per row group."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "multi-row-group-list.parquet"
+    schema = pa.schema([pa.field("items", pa.list_(pa.int64()))])
+    batches = [
+        pa.record_batch(
+            [pa.array([[1, 2], None], type=pa.list_(pa.int64()))],
+            schema=schema,
+        ),
+        pa.record_batch(
+            [pa.array([[], [3, 4, 5]], type=pa.list_(pa.int64()))],
+            schema=schema,
+        ),
+    ]
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(schema, batches),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["row_group_count"] == 2
+    assert [row_group["num_rows"] for row_group in info["row_groups"]] == [2, 2]
+    assert [
+        row_group["columns"][0]["repeated_level_offsets"] for row_group in info["row_groups"]
+    ] == [[0, 2, 2], [0, 0, 3]]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == [
+        {"items": [1, 2]},
+        {"items": None},
+        {"items": []},
+        {"items": [3, 4, 5]},
+    ]
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native Parquet stream materializes split pages and null spans."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_PAGE_BYTES", "96")
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_BYTES", "1048576")
+    path = tmp_path / "multi-page-null-spans.parquet"
+    rows = 80
+    table = pa.table(
+        {
+            "a": pa.array(
+                [None if row % 7 == 0 else row * 1000003 for row in range(rows)],
+                type=pa.int64(),
+            ),
+            "b": pa.array(
+                [
+                    None if row % 5 == 0 else f"value-{row:03d}-with-page-split-padding"
+                    for row in range(rows)
+                ],
+                type=pa.string(),
+            ),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    row_group = info["row_groups"][0]
+    assert row_group["num_rows"] == rows
+    for column in row_group["columns"]:
+        data_pages = [page for page in column["pages"] if page["is_dictionary_page"] == 0]
+        assert len(data_pages) > 1
+        assert column["native_read_data_page_count"] == len(data_pages)
+        assert len(column["native_read_page_spans"]) == len(data_pages)
+        assert sum(span["row_count"] for span in column["native_read_page_spans"]) == rows
+        assert sum(span["null_count"] for span in column["native_read_page_spans"]) > 0
+        assert [span["first_row_index"] for span in column["native_read_page_spans"]] == [
+            location["first_row_index"] for location in column["offset_index_locations"]
+        ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_reader_memory_budget_blocks_native_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native Parquet reader refuses row groups over its buffer budget."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "budget.parquet"
+    table = pa.table(
+        {
+            "a": pa.array([1, 2, 3], type=pa.int64()),
+            "b": pa.array(["wide-value-000", "wide-value-001", "wide-value-002"]),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_READER_MAX_BUFFER_BYTES", "1")
+    limited_info = native_parquet_footer_info(path)
+
+    assert limited_info is not None
+    assert limited_info["native_reader_ready"] == 0
+    assert any(
+        "native buffer estimate" in blocker and "exceeds configured limit 1" in blocker
+        for blocker in limited_info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
 
 
 @_requires_pyarrow
@@ -286,6 +1530,307 @@ def test_native_parquet_footer_info_reads_pyarrow_file(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
+def test_spark_int96_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
+    """Verify Spark-style INT96 timestamps stay readable through fallback."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "spark-int96.parquet"
+    value = dt.datetime(2024, 1, 1, 1, 2, 3, 123456)
+    pq.write_table(
+        pa.table({"ts": pa.array([value], type=pa.timestamp("ns"))}),
+        path,
+        flavor="spark",
+        use_deprecated_int96_timestamps=True,
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert info["schema_elements"][1]["physical_type"] == 3
+    assert any("unsupported physical type" in blocker for blocker in info["native_reader_blockers"])
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.schema.field("ts").type == pa.timestamp("us")
+    assert result.clean_data.to_pylist() == [{"ts": value}]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any("unsupported physical type" in blocker for blocker in diagnostics["blockers"])
+
+
+@_requires_pyarrow
+def test_spark_flavored_nested_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
+    """Verify Spark-flavored nested Parquet remains readable through fallback."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "spark-flavored-nested.parquet"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "profile": pa.array(
+                [{"name": "a", "score": 1.5}, {"name": "b", "score": None}],
+                type=pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64()),
+                    ]
+                ),
+            ),
+            "tags": pa.array([["alpha", "beta"], ["gamma"]], type=pa.list_(pa.string())),
+        }
+    )
+    pq.write_table(table, path, flavor="spark", compression="snappy")
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert any(
+        "nested or repeated column is not yet native materializable" in blocker
+        or "unsupported compression" in blocker
+        for blocker in info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
+def test_bigquery_compatible_standard_parquet_uses_pyarrow_fallback(
+    tmp_path: Path,
+) -> None:
+    """Verify BigQuery-style logical scalars without Arrow metadata stay readable."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "bigquery-compatible.parquet"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "name": pa.array(["a", "b"], type=pa.string()),
+            "active": pa.array([True, None], type=pa.bool_()),
+            "amount": pa.array(
+                [Decimal("12.34"), Decimal("56.78")],
+                type=pa.decimal128(10, 2),
+            ),
+            "event_date": pa.array(
+                [dt.date(2024, 1, 1), dt.date(2024, 1, 2)],
+                type=pa.date32(),
+            ),
+            "event_ts": pa.array(
+                [
+                    dt.datetime(2024, 1, 1, 1, 2, 3, 123456),
+                    dt.datetime(2024, 1, 2, 1, 2, 3, 123456),
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+        }
+    )
+    pq.write_table(
+        table,
+        path,
+        store_schema=False,
+        compression="snappy",
+        coerce_timestamps="us",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert info["schema_elements"][4]["logical_type"] == "decimal"
+    assert info["schema_elements"][5]["logical_type"] == "date"
+    assert info["schema_elements"][6]["logical_type"] == "timestamp"
+    assert any("unsupported compression" in blocker for blocker in info["native_reader_blockers"])
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == [
+        {
+            "active": True,
+            "amount": "12.34",
+            "eventdate": dt.date(2024, 1, 1),
+            "eventts": dt.datetime(2024, 1, 1, 1, 2, 3, 123456),
+            "id": 1,
+            "name": "a",
+        },
+        {
+            "active": None,
+            "amount": "56.78",
+            "eventdate": dt.date(2024, 1, 2),
+            "eventts": dt.datetime(2024, 1, 2, 1, 2, 3, 123456),
+            "id": 2,
+            "name": "b",
+        },
+    ]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
+def test_bigquery_export_like_nested_parquet_uses_pyarrow_fallback(
+    tmp_path: Path,
+) -> None:
+    """Verify BigQuery-export-like nested/repeated Parquet stays readable."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "bigquery-export-like.parquet"
+    table = pa.table(
+        {
+            "user_id": pa.array(["u1", "u2"], type=pa.string()),
+            "event_date": pa.array(
+                [dt.date(2024, 2, 1), dt.date(2024, 2, 2)],
+                type=pa.date32(),
+            ),
+            "event_ts": pa.array(
+                [
+                    dt.datetime(2024, 2, 1, 12, 0, 0, 123456),
+                    dt.datetime(2024, 2, 2, 12, 0, 0, 123456),
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "metrics": pa.array(
+                [
+                    {"score": Decimal("12.34"), "rank": 1},
+                    {"score": Decimal("56.78"), "rank": 2},
+                ],
+                type=pa.struct(
+                    [
+                        pa.field("score", pa.decimal128(10, 2)),
+                        pa.field("rank", pa.int64()),
+                    ]
+                ),
+            ),
+            "items": pa.array(
+                [
+                    [{"sku": "a", "quantity": 2}, {"sku": "b", "quantity": 1}],
+                    [{"sku": "c", "quantity": 3}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("sku", pa.string()),
+                            pa.field("quantity", pa.int64()),
+                        ]
+                    )
+                ),
+            ),
+        }
+    )
+    pq.write_table(
+        table,
+        path,
+        store_schema=False,
+        compression="snappy",
+        coerce_timestamps="us",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert any(
+        "file was not written by schema-sanitizer native parquet writer" in blocker
+        or "nested or repeated column is not yet native materializable" in blocker
+        or "unsupported compression" in blocker
+        for blocker in info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == [
+        {
+            "eventdate": dt.date(2024, 2, 1),
+            "eventts": dt.datetime(2024, 2, 1, 12, 0, 0, 123456),
+            "items": [{"quantity": 2, "sku": "a"}, {"quantity": 1, "sku": "b"}],
+            "metrics": {"rank": 1, "score": "12.34"},
+            "userid": "u1",
+        },
+        {
+            "eventdate": dt.date(2024, 2, 2),
+            "eventts": dt.datetime(2024, 2, 2, 12, 0, 0, 123456),
+            "items": [{"quantity": 3, "sku": "c"}],
+            "metrics": {"rank": 2, "score": "56.78"},
+            "userid": "u2",
+        },
+    ]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
+def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
+    """Verify DuckDB-written Parquet stays readable through the safe fallback."""
+    duckdb = pytest.importorskip("duckdb")
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "duckdb.parquet"
+    with duckdb.connect() as connection:
+        connection.execute(
+            "COPY (SELECT 1::BIGINT AS a, 'x' AS b UNION ALL SELECT 2, 'y') "
+            "TO ? (FORMAT PARQUET)",
+            [str(path)],
+        )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert "DuckDB" in info["created_by"]
+    assert info["native_reader_ready"] == 0
+    assert (
+        "file was not written by schema-sanitizer native parquet writer"
+        in info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert (
+        "file was not written by schema-sanitizer native parquet writer" in diagnostics["blockers"]
+    )
+
+
+@_requires_pyarrow
 def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) -> None:
     """Verify native footer parsing understands schema-sanitizer Parquet output."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
@@ -361,9 +1906,18 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
         )
         data_page = column["pages"][data_page_index]
         expected_value_kind = column["native_read_value_buffer_kind"]
-        expected_value_width = 8 if expected_value_kind == "fixed_width" else 0
-        expected_arrow_buffers = 3 if expected_value_kind == "plain_byte_array" else 2
-        expected_offsets_buffer = 1 if expected_value_kind == "plain_byte_array" else 0
+        expected_value_width = (
+            8
+            if expected_value_kind
+            in {"fixed_width", "delta_binary_packed", "dictionary_fixed_width"}
+            else 0
+        )
+        expected_arrow_buffers = (
+            3 if expected_value_kind in {"plain_byte_array", "dictionary_byte_array"} else 2
+        )
+        expected_offsets_buffer = (
+            1 if expected_value_kind in {"plain_byte_array", "dictionary_byte_array"} else 0
+        )
         assert column["max_definition_level"] == 1
         assert column["max_repetition_level"] == 0
         assert column["column_index_decoded"] == 1
@@ -396,7 +1950,11 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
             == data_page["materialized_offset_bytes"]
         )
         assert column["native_read_value_width_bytes"] == expected_value_width
-        if expected_value_kind == "rle_dictionary_indices":
+        if expected_value_kind in {
+            "rle_dictionary_indices",
+            "dictionary_byte_array",
+            "dictionary_fixed_width",
+        }:
             assert column["native_read_dictionary_index_bit_width"] > 0
         else:
             assert column["native_read_dictionary_index_bit_width"] == 0
@@ -446,9 +2004,9 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
         assert data_page["values_decode_skipped"] == 0
         assert data_page["decoded_value_bytes"] > 0
         assert data_page["materialized_value_bytes"] > 0
-        if expected_value_kind == "fixed_width":
+        if expected_value_kind in {"fixed_width", "delta_binary_packed"}:
             assert data_page["materialized_offset_bytes"] == 0
-        elif expected_value_kind == "plain_byte_array":
+        elif expected_value_kind in {"plain_byte_array", "dictionary_byte_array"}:
             assert data_page["materialized_offset_bytes"] == (data_page["num_values"] + 1) * 4
         else:
             assert data_page["materialized_offset_bytes"] == 0
@@ -466,24 +2024,21 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
 
 
 @_requires_pyarrow
-def test_native_parquet_footer_info_blocks_nested_native_reader_readiness(
+def test_native_parquet_stream_materializes_simple_integer_lists(
     tmp_path: Path,
 ) -> None:
-    """Verify native reader readiness stays conservative for nested files."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    """Verify native reader materializes simple top-level integer lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(
-        pa.table(
-            {
-                "profile": pa.array(
-                    [{"name": "a"}, {"name": "b"}],
-                    type=pa.struct([pa.field("name", pa.string())]),
-                )
-            }
-        ),
+        pa.table({"scores": pa.array([[1, 2], [3]], type=pa.list_(pa.int64()))}),
         src,
     )
 
@@ -496,11 +2051,1589 @@ def test_native_parquet_footer_info_blocks_nested_native_reader_readiness(
     info = native_parquet_footer_info(out)
 
     assert info is not None
-    assert info["native_reader_ready"] == 0
-    assert any(
-        "nested path is not materializable yet" in blocker
-        for blocker in info["native_reader_blockers"]
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().select(["scores"]).to_pylist() == [
+        {"scores": [1, 2]},
+        {"scores": [3]},
+    ]
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_simple_lists_across_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native list reconstruction stitches offsets across data pages."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
     )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_PAGE_BYTES", "96")
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_BYTES", "1048576")
+    path = tmp_path / "native-list-multi-page.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [[row, row + 1] for row in range(120)],
+                type=pa.list_(pa.int64()),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    column = info["row_groups"][0]["columns"][0]
+    data_pages = [page for page in column["pages"] if page["is_dictionary_page"] == 0]
+    assert len(data_pages) > 1
+    assert column["repeated_level_offsets"][:4] == [0, 2, 4, 6]
+    assert column["repeated_level_offsets"][-4:] == [234, 236, 238, 240]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_footer_info_captures_repeated_level_values(
+    tmp_path: Path,
+) -> None:
+    """Verify repeated columns expose level streams needed for list offsets."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list.parquet"
+    table = pa.table({"scores": pa.array([[1, 2], None, [], [3]], type=pa.list_(pa.int64()))})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["path_in_schema"] == ["scores", "list", "element"]
+    assert column["max_definition_level"] == 3
+    assert column["max_repetition_level"] == 1
+    assert column["repeated_level_layout_decoded"] == 1
+    assert column["repeated_level_row_count"] == 4
+    assert column["repeated_level_null_count"] == 1
+    assert column["repeated_level_element_count"] == 3
+    assert column["repeated_level_non_null_value_count"] == 3
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+    page = column["pages"][0]
+    assert page["decoded_definition_level_values"] == [3, 3, 0, 1, 3]
+    assert page["decoded_repetition_level_values"] == [0, 1, 0, 0, 0]
+    assert page["decoded_value_preview"] == ["1", "2", "3"]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_simple_string_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes simple top-level string lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-string-list.parquet"
+    table = pa.table(
+        {"tags": pa.array([["a", "bb"], None, [], ["ccc"]], type=pa.list_(pa.string()))}
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "delta_length_byte_array"
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array"),
+    [
+        ("string", pa.array([["only"]], type=pa.list_(pa.string()))),
+        ("binary", pa.array([[b"only"]], type=pa.list_(pa.binary()))),
+    ],
+)
+def test_native_parquet_stream_materializes_plain_byte_array_lists(
+    tmp_path: Path,
+    name: str,
+    array: pa.Array,
+) -> None:
+    """Verify native reader materializes PLAIN byte-array list elements."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"native-plain-byte-array-{name}-list.parquet"
+    table = pa.table({"tags": array})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "plain_byte_array"
+    assert column["native_read_arrow_n_buffers"] == 3
+    assert column["repeated_level_offsets"] == [0, 1]
+    assert column["pages"][0]["value_encoding"] == 0
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_simple_float_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes simple top-level fixed-width lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-float-list.parquet"
+    table = pa.table(
+        {
+            "values": pa.array(
+                [[1.25, 2.5], None, [], [3.75]],
+                type=pa.list_(pa.float64()),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "fixed_width"
+    assert column["native_read_value_width_bytes"] == 8
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_simple_boolean_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes simple top-level boolean lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-boolean-list.parquet"
+    table = pa.table(
+        {
+            "flags": pa.array(
+                [[True, False], None, [], [True]],
+                type=pa.list_(pa.bool_()),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "bit_packed_boolean"
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array", "native_format", "expected_offsets"),
+    [
+        (
+            "date32",
+            pa.array(
+                [[dt.date(2024, 1, 1)], None, [], [dt.date(2024, 1, 2)]],
+                type=pa.list_(pa.date32()),
+            ),
+            "tdD",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "timestamp_us",
+            pa.array(
+                [
+                    [dt.datetime(2024, 1, 1, 1, 2, 3, 123456)],
+                    None,
+                    [],
+                    [dt.datetime(2024, 1, 2, 1, 2, 3, 123456)],
+                ],
+                type=pa.list_(pa.timestamp("us")),
+            ),
+            "tsu:",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "decimal128",
+            pa.array(
+                [[Decimal("12.34")], None, [], [Decimal("-0.10")]],
+                type=pa.list_(pa.decimal128(10, 2)),
+            ),
+            "d:10,2,128",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "fixed_size_binary",
+            pa.array([[b"abcd"], None, [], [b"wxyz"]], type=pa.list_(pa.binary(4))),
+            "w:4",
+            [0, 1, 1, 1, 2],
+        ),
+        (
+            "uint64",
+            pa.array(
+                [[1, 2**63], None, [], [2**64 - 1]],
+                type=pa.list_(pa.uint64()),
+            ),
+            "L",
+            [0, 2, 2, 2, 3],
+        ),
+    ],
+)
+def test_native_parquet_stream_materializes_logical_fixed_width_lists(
+    tmp_path: Path,
+    name: str,
+    array: pa.Array,
+    native_format: str,
+    expected_offsets: list[int],
+) -> None:
+    """Verify native lists preserve fixed-width logical scalar element types."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"native-logical-{name}-list.parquet"
+    table = pa.table({"items": array})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_arrow_format"] == native_format
+    assert column["native_read_value_buffer_kind"] == "fixed_width"
+    assert column["repeated_level_offsets"] == expected_offsets
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    out = reader.read_all()
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array"),
+    [
+        (
+            "int",
+            pa.array(
+                [[1, None, 2], None, [], [None, 3]],
+                type=pa.list_(pa.int64()),
+            ),
+        ),
+        (
+            "string",
+            pa.array(
+                [["a", None, "b"], None, [], [None, "c"]],
+                type=pa.list_(pa.string()),
+            ),
+        ),
+        (
+            "bool",
+            pa.array(
+                [[True, None, False], None, [], [None, True]],
+                type=pa.list_(pa.bool_()),
+            ),
+        ),
+    ],
+)
+def test_native_parquet_stream_materializes_nullable_list_elements(
+    tmp_path: Path,
+    name: str,
+    array: pa.Array,
+) -> None:
+    """Verify native list reconstruction preserves null child elements."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"native-nullable-{name}-list.parquet"
+    table = pa.table({"items": array})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    column = info["row_groups"][0]["columns"][0]
+    assert column["max_definition_level"] == 3
+    assert column["native_read_total_nulls"] == 2
+    assert column["repeated_level_offsets"] == [0, 3, 3, 3, 5]
+    assert column["pages"][0]["decoded_definition_level_values"] == [
+        3,
+        2,
+        3,
+        0,
+        1,
+        2,
+        3,
+    ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_footer_info_plans_byte_stream_split_float_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify simple BYTE_STREAM_SPLIT float lists are planned natively."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+
+    require_native()
+    path = tmp_path / "pyarrow-byte-stream-split-list.parquet"
+    table = pa.table(
+        {
+            "values": pa.array(
+                [[1.25, 2.5], None, [], [3.75]],
+                type=pa.list_(pa.float64()),
+            )
+        }
+    )
+    pq.write_table(
+        table,
+        path,
+        compression="NONE",
+        use_dictionary=False,
+        use_byte_stream_split=True,
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert info["native_reader_blockers"] == [
+        "file was not written by schema-sanitizer native parquet writer"
+    ]
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_plan_decoded"] == 1
+    assert column["native_read_value_buffer_kind"] == "byte_stream_split"
+    assert column["native_read_value_width_bytes"] == 8
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+    assert column["pages"][0]["value_encoding"] == 9
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_dictionary_string_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes RLE dictionary string list elements."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-dict-string-list.parquet"
+    table = pa.table(
+        {"tags": pa.array([["same", "same"], None, [], ["same"]] * 200, type=pa.list_(pa.string()))}
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "dictionary_byte_array"
+    assert column["repeated_level_offsets"][:5] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"].startswith("dd")
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_dictionary_integer_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes RLE dictionary fixed-width list elements."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-dict-integer-list.parquet"
+    table = pa.table({"nums": pa.array([[7, 7], None, [], [7]] * 200, type=pa.list_(pa.int64()))})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "dictionary_fixed_width"
+    assert column["native_read_value_width_bytes"] == 8
+    assert column["repeated_level_offsets"][:5] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"].startswith("dd")
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_top_level_map_scalar_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes top-level maps with scalar key/value leaves."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map.parquet"
+    table = pa.table(
+        {
+            "labels": pa.array(
+                [[("a", 1), ("b", 2)], None, [], [("c", None)]],
+                type=pa.map_(pa.string(), pa.int64()),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["labels", "key_value", "key"],
+        ["labels", "key_value", "value"],
+    ]
+    assert columns[0]["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert columns[1]["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert columns[0]["native_read_total_nulls"] == 0
+    assert columns[1]["native_read_total_nulls"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_of_struct_scalar_leaves(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes top-level list structs with scalar leaves."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-struct.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [None, {"score": 1, "label": "a"}, {"score": None, "label": "b"}],
+                    None,
+                    [],
+                    [{"score": 3, "label": None}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("score", pa.int64()),
+                            pa.field("label", pa.string()),
+                        ]
+                    )
+                ),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["items", "list", "element", "score"],
+        ["items", "list", "element", "label"],
+    ]
+    assert columns[0]["repeated_level_offsets"] == [0, 3, 3, 3, 4]
+    assert columns[1]["repeated_level_offsets"] == [0, 3, 3, 3, 4]
+    assert columns[0]["native_read_total_nulls"] == 2
+    assert columns[1]["native_read_total_nulls"] == 2
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_of_list_scalar_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes top-level nested scalar lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-list.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [[1, 2], [], None],
+                    None,
+                    [],
+                    [[None, 3]],
+                ],
+                type=pa.list_(pa.list_(pa.int64())),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["path_in_schema"] == ["items", "list", "element", "list", "element"]
+    assert column["repeated_level_offsets"] == [0, 3, 3, 3, 4]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+    assert column["nested_repeated_level_offsets"] == [0, 2, 2, 2, 4]
+    assert column["nested_repeated_level_validity_hex_preview"] == "0b"
+    assert column["native_read_arrow_length"] == 4
+    assert column["native_read_arrow_null_count"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_of_map_scalar_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes top-level lists of scalar maps."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-map.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [[("a", 1), ("b", 2)], [], None],
+                    None,
+                    [],
+                    [[("c", None)]],
+                ],
+                type=pa.list_(pa.map_(pa.string(), pa.int64())),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["items", "list", "element", "key_value", "key"],
+        ["items", "list", "element", "key_value", "value"],
+    ]
+    assert columns[0]["repeated_level_offsets"] == [0, 3, 3, 3, 4]
+    assert columns[0]["nested_repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert columns[0]["nested_repeated_level_validity_hex_preview"] == "0b"
+    assert columns[0]["native_read_total_nulls"] == 0
+    assert columns[1]["native_read_total_nulls"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_of_list_of_list_scalar_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes top-level three-deep scalar lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-list-list.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [[[1, 2], []], None],
+                    [],
+                    None,
+                    [[[None, 3]]],
+                ],
+                type=pa.list_(pa.list_(pa.list_(pa.int64()))),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["path_in_schema"] == [
+        "items",
+        "list",
+        "element",
+        "list",
+        "element",
+        "list",
+        "element",
+    ]
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0b"
+    assert column["nested_repeated_level_offsets"] == [0, 2, 2, 3]
+    assert column["nested_repeated_level_validity_hex_preview"] == "05"
+    assert column["deep_repeated_level_offsets"] == [0, 2, 2, 4]
+    assert column["deep_repeated_level_validity_hex_preview"] == ""
+    assert column["native_read_arrow_length"] == 4
+    assert column["native_read_arrow_null_count"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array"),
+    [
+        (
+            "list4-int",
+            pa.array(
+                [
+                    [[[[1, 2], []], None], []],
+                    None,
+                    [],
+                    [[[[None, 3]]]],
+                ],
+                type=pa.list_(pa.list_(pa.list_(pa.list_(pa.int64())))),
+            ),
+        ),
+        (
+            "list5-string",
+            pa.array(
+                [
+                    [[[[["a"], []]]]],
+                    None,
+                    [],
+                    [[[[[None, "b"]]]]],
+                ],
+                type=pa.list_(pa.list_(pa.list_(pa.list_(pa.list_(pa.string()))))),
+            ),
+        ),
+    ],
+)
+def test_native_parquet_stream_materializes_arbitrary_depth_list_chains(
+    tmp_path: Path,
+    name: str,
+    array: pa.Array,
+) -> None:
+    """Verify native reader materializes scalar list chains deeper than three."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"native-{name}.parquet"
+    table = pa.table({"items": array})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_struct_with_inner_list(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes list structs with scalar list children."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-struct-inner-list.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [{"ids": [1, 2], "name": "a"}, {"ids": [], "name": "b"}],
+                    None,
+                    [{"ids": None, "name": None}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("ids", pa.list_(pa.int64())),
+                            pa.field("name", pa.string()),
+                        ]
+                    )
+                ),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["items", "list", "element", "ids", "list", "element"],
+        ["items", "list", "element", "name"],
+    ]
+    assert columns[0]["repeated_level_offsets"] == [0, 2, 2, 3]
+    assert columns[0]["nested_repeated_level_offsets"] == [0, 2, 2, 2]
+    assert columns[1]["repeated_level_offsets"] == [0, 2, 2, 3]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_struct_with_inner_list_chain(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes list structs with nested list children."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-struct-inner-list-chain.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [{"ids": [[1, 2], []], "name": "a"}],
+                    None,
+                    [{"ids": None, "name": None}, {"ids": [[None, 3]], "name": "b"}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("ids", pa.list_(pa.list_(pa.int64()))),
+                            pa.field("name", pa.string()),
+                        ]
+                    )
+                ),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["items", "list", "element", "ids", "list", "element", "list", "element"],
+        ["items", "list", "element", "name"],
+    ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_map_with_list_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes maps whose values are scalar lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map-list-values.parquet"
+    table = pa.table(
+        {
+            "labels": pa.array(
+                [[("a", [1, 2]), ("b", [])], None, [("c", None)]],
+                type=pa.map_(pa.string(), pa.list_(pa.int64())),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["labels", "key_value", "key"],
+        ["labels", "key_value", "value", "list", "element"],
+    ]
+    assert columns[0]["repeated_level_offsets"] == [0, 2, 2, 3]
+    assert columns[1]["repeated_level_offsets"] == [0, 2, 2, 3]
+    assert columns[1]["nested_repeated_level_offsets"] == [0, 2, 2, 2]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_map_with_list_chain_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes maps whose values are nested lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map-list-chain-values.parquet"
+    table = pa.table(
+        {
+            "labels": pa.array(
+                [[("a", [[1, 2], []])], None, [("b", None), ("c", [[None, 3]])]],
+                type=pa.map_(pa.string(), pa.list_(pa.list_(pa.int64()))),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["labels", "key_value", "key"],
+        ["labels", "key_value", "value", "list", "element", "list", "element"],
+    ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_list_struct_projection_uses_native_reader(
+    tmp_path: Path,
+) -> None:
+    """Verify projected list structs with scalar leaves use the native reader."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "complex-nested-list-projection.parquet"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "items": pa.array(
+                [
+                    [{"score": 1, "label": "a"}, {"score": 2, "label": "b"}],
+                    [{"score": 3, "label": "c"}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("score", pa.int64()),
+                            pa.field("label", pa.string()),
+                        ]
+                    )
+                ),
+            ),
+        }
+    )
+    expected = table.select(["items"])
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["items"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_list_list_projection_uses_native_reader(
+    tmp_path: Path,
+) -> None:
+    """Verify projected nested scalar lists use the native reader."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "nested-list-projection.parquet"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "items": pa.array(
+                [
+                    [[1, 2], [], None],
+                    [[None, 3]],
+                ],
+                type=pa.list_(pa.list_(pa.int64())),
+            ),
+        }
+    )
+    expected = table.select(["items"])
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["items"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader can materialize required structs with scalar leaves."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "required-struct.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field(
+                "profile",
+                pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64(), nullable=False),
+                    ]
+                ),
+                nullable=False,
+            ),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"id": 1, "profile": {"name": "a", "score": 1.5}},
+            {"id": 2, "profile": {"name": None, "score": 2.5}},
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    assert [column["path_in_schema"] for column in info["row_groups"][0]["columns"]] == [
+        ["id"],
+        ["profile", "name"],
+        ["profile", "score"],
+    ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_nullable_struct_scalar_leaves(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader can materialize nullable structs with scalar leaves."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "nullable-struct.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field(
+                "profile",
+                pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64(), nullable=False),
+                    ]
+                ),
+            ),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"id": 1, "profile": {"name": "a", "score": 1.5}},
+            {"id": 2, "profile": None},
+            {"id": 3, "profile": {"name": None, "score": 3.5}},
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_struct_scalar_leaves(
+    tmp_path: Path,
+) -> None:
+    """Verify native struct projection keeps every leaf under the struct."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "projected-struct.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field(
+                "profile",
+                pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64(), nullable=False),
+                    ]
+                ),
+            ),
+            pa.field("flag", pa.bool_()),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"id": 1, "profile": {"name": "a", "score": 1.5}, "flag": True},
+            {"id": 2, "profile": None, "flag": False},
+            {"id": 3, "profile": {"name": None, "score": 3.5}, "flag": None},
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["profile", "id"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    expected = table.select(["profile", "id"])
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_simple_list_with_unsupported_unprojected_column(
+    tmp_path: Path,
+) -> None:
+    """Verify list projection can use native route despite unprojected blockers."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "projected-list.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("scores", pa.list_(pa.int64())),
+            pa.field("items", pa.list_(pa.struct([pa.field("ids", pa.list_(pa.int64()))]))),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"id": 1, "scores": [1, 2], "items": [{"ids": [10]}]},
+            {"id": 2, "scores": None, "items": []},
+            {"id": 3, "scores": [3], "items": None},
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["scores", "id"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    expected = table.select(["scores", "id"])
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_nested_native_parquet_reader_materializes_supported_nested_shapes(
+    tmp_path: Path,
+) -> None:
+    """Verify supported nested native-written files materialize natively."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "nested-native.parquet"
+    table = pa.table(
+        {
+            "profile": pa.array(
+                [{"name": "a"}, None, {"name": "b"}],
+                type=pa.struct([pa.field("name", pa.string())]),
+            ),
+            "scores": pa.array([[1, 2], None, []], type=pa.list_(pa.int64())),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
 
 
 @_requires_pyarrow
@@ -575,7 +3708,11 @@ def test_native_parquet_footer_info_decodes_delta_binary_packed_int_values(
     tmp_path: Path,
 ) -> None:
     """Verify native footer parsing validates DELTA_BINARY_PACKED integer pages."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
@@ -601,6 +3738,13 @@ def test_native_parquet_footer_info_decodes_delta_binary_packed_int_values(
     assert page["materialized_value_bytes"] == 50 * 8
     assert page["materialized_offset_bytes"] == 0
     assert page["decoded_value_preview"] == [str(value) for value in range(8)]
+    assert column["native_read_value_buffer_kind"] == "delta_binary_packed"
+    assert column["native_read_arrow_n_buffers"] == 2
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().column("n").to_pylist() == list(range(50))
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -628,6 +3772,9 @@ def test_native_parquet_footer_info_decodes_rle_dictionary_string_pages(
         column for column in info["row_groups"][0]["columns"] if column["path_in_schema"] == ["s"]
     )
     assert 8 in column["encodings"]
+    assert column["native_read_value_buffer_kind"] == "dictionary_byte_array"
+    assert column["native_read_arrow_n_buffers"] == 3
+    assert column["native_read_has_offsets_buffer"] == 1
     dictionary_page = column["pages"][0]
     data_page = column["pages"][1]
     assert dictionary_page["is_dictionary_page"] == 1
@@ -640,6 +3787,7 @@ def test_native_parquet_footer_info_decodes_rle_dictionary_string_pages(
     assert data_page["values_decoded"] == 1
     assert data_page["values_decode_skipped"] == 0
     assert data_page["materialized_value_bytes"] == 500 * 4
+    assert data_page["materialized_offset_bytes"] == (500 + 1) * 4
     assert data_page["dictionary_index_bit_width"] > 0
     assert data_page["decoded_value_preview"] == ["same"] * 8
 
@@ -649,7 +3797,11 @@ def test_native_parquet_footer_info_decodes_delta_length_byte_array_pages(
     tmp_path: Path,
 ) -> None:
     """Verify native footer parsing validates DELTA_LENGTH_BYTE_ARRAY pages."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
@@ -675,6 +3827,16 @@ def test_native_parquet_footer_info_decodes_delta_length_byte_array_pages(
     assert page["values_decoded"] == 1
     assert page["values_decode_skipped"] == 0
     assert page["decoded_value_preview"] == values[:8]
+    assert column["native_read_value_buffer_kind"] == "delta_length_byte_array"
+    assert column["native_read_arrow_n_buffers"] == 3
+    assert column["native_read_has_offsets_buffer"] == 1
+    assert page["materialized_value_bytes"] == sum(len(value) for value in values)
+    assert page["materialized_offset_bytes"] == (len(values) + 1) * 4
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().column("s").to_pylist() == values
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -682,7 +3844,11 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
     tmp_path: Path,
 ) -> None:
     """Verify native footer parsing validates BYTE_STREAM_SPLIT float pages."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
@@ -707,6 +3873,9 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         pytest.skip("native writer did not choose BYTE_STREAM_SPLIT on this platform")
     assert page["value_encoding"] == 9
     assert page["decoded_non_null_values"] == 1000
+    assert column["native_read_value_buffer_kind"] == "byte_stream_split"
+    assert column["native_read_value_width_bytes"] == 4
+    assert column["native_read_arrow_n_buffers"] == 2
     assert page["values_decoded"] == 1
     assert page["values_decode_skipped"] == 0
     assert page["decoded_value_preview"] == [
@@ -720,10 +3889,20 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         "0.000000",
     ]
 
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().column("f").to_pylist() == values
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
 
 @_requires_pyarrow
 def test_read_parquet_file_uri_materializes_table(tmp_path: Path) -> None:
     """Verify read parquet accepts file URIs."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+    )
+
     require_native()
 
     path = tmp_path / "data.parquet"
@@ -732,6 +3911,51 @@ def test_read_parquet_file_uri_materializes_table(tmp_path: Path) -> None:
     result = read_test_parquet(path.as_uri())
 
     assert result.clean_data.to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
+def test_native_parquet_file_uri_uses_native_route(tmp_path: Path) -> None:
+    """Verify local file URIs share the native path-backed Parquet reader."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+    )
+
+    require_native()
+
+    src = tmp_path / "src.parquet"
+    out = tmp_path / "out.parquet"
+    pq.write_table(_sample_table(), src)
+    ss.to_parquet(src, out, input_format="parquet", parquet_compression="uncompressed")
+
+    result = read_test_parquet(out.as_uri())
+
+    assert result.clean_data.select(["a", "b"]).to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+
+
+@_requires_pyarrow
+def test_remote_parquet_uri_requires_staging() -> None:
+    """Verify remote Parquet URIs are not treated as local direct sources."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        open_parquet_record_batch_stream_factory,
+    )
+
+    with pytest.raises(ValueError, match="URI inputs must be staged"):
+        open_parquet_record_batch_stream_factory(
+            "gs://bucket/data.parquet",
+            source="uri",
+            feature="test",
+        )
 
 
 @_requires_pyarrow

@@ -2309,9 +2309,10 @@ def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path) -> None:
     batch = pa.record_batch(
         [
             pa.array([b"abc"], type=pa.binary()),
+            pa.array([b"wxyz"], type=pa.binary(4)),
             pa.array([[("a", 1), ("b", 2)]], type=map_type),
         ],
-        names=["payload", "attrs"],
+        names=["payload", "fixed_payload", "attrs"],
     )
     reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     out = tmp_path / "out.jsonl"
@@ -2321,6 +2322,7 @@ def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path) -> None:
     row = json.loads(out.read_text(encoding="utf-8").strip())
     assert row == {
         "payload": "YWJj",
+        "fixed_payload": "d3h5eg==",
         "attrs": [{"key": "a", "value": 1}, {"key": "b", "value": 2}],
     }
 
@@ -2714,6 +2716,61 @@ def test_empty_first_partition_does_not_destabilize_registry(tmp_path: Path) -> 
         replay_result.schema_registry["schema_generation"]
         == populated_result.schema_registry["schema_generation"]
     )
+
+
+def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
+    tmp_path: Path,
+) -> None:
+    """Verify physical Parquet schemas sort additive nested registry fields."""
+    require_native()
+    pq = pytest.importorskip("pyarrow.parquet")
+
+    first_source = tmp_path / "first.jsonl"
+    first_source.write_text(
+        json.dumps({"variables": {"email": "a@example.com", "phone": "1"}}) + "\n",
+        encoding="utf-8",
+    )
+    first_out = tmp_path / "first.parquet"
+    first = ss.to_parquet(
+        first_source,
+        first_out,
+        input_format="jsonl",
+        field_name_policy="lower_snake",
+        column_order="alphabetically",
+    )
+
+    second_source = tmp_path / "second.jsonl"
+    second_source.write_text(
+        json.dumps(
+            {
+                "variables": {
+                    "birthday": "2026-01-01",
+                    "company": "acme",
+                    "country": "ES",
+                    "email": "b@example.com",
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    second_out = tmp_path / "second.parquet"
+    second = ss.to_parquet(
+        second_source,
+        second_out,
+        input_format="jsonl",
+        field_name_policy="lower_snake",
+        column_order="alphabetically",
+        schema_registry=first.schema_registry,
+    )
+
+    physical_schema = pq.read_schema(second_out)
+    variable_names = [field.name for field in physical_schema.field("variables").type]
+    assert variable_names == ["birthday", "company", "country", "email", "phone"]
+
+    registry_fields = second.schema_registry["canonical_schema"]["fields"]
+    variables = next(field for field in registry_fields if field["name"] == "variables")
+    assert [field["name"] for field in variables["type"]["fields"]] == variable_names
 
 
 def test_to_parquet_writes_timestamp_micros_by_default(tmp_path: Path) -> None:

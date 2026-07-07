@@ -201,6 +201,97 @@ def test_column_order_alphabetically_applies_to_strict_schema_contract() -> None
     assert _field_names(schema.field("a").type) == ["a", "z"]
 
 
+def test_column_order_alphabetically_reorders_additive_contract_nested_fields() -> None:
+    """Verify additive schema contracts merge and sort newly inferred nested fields."""
+    schema_contract = pa.schema(
+        [
+            (
+                "variables",
+                pa.struct(
+                    [
+                        ("email", pa.string()),
+                        ("phone", pa.string()),
+                    ]
+                ),
+            )
+        ]
+    )
+    rows = [
+        {
+            "variables": {
+                "birthday": "2026-01-01",
+                "company": "acme",
+                "email": "a@example.com",
+            }
+        }
+    ]
+
+    res = _read_result(
+        rows,
+        case="python_obj",
+        tmp_path=None,
+        schema_contract=schema_contract,
+        schema_mode="additive",
+        column_order="alphabetically",
+    )
+
+    assert res.clean_data is not None
+    assert _field_names(res.clean_data.schema.field("variables").type) == [
+        "birthday",
+        "company",
+        "email",
+        "phone",
+    ]
+
+
+def test_column_order_alphabetically_reorders_incremental_registry_struct_fields(
+    tmp_path,
+) -> None:
+    """Verify registry-backed additive runs sort existing and newly added nested fields."""
+    first_path = tmp_path / "first.jsonl"
+    first_path.write_text(
+        json.dumps({"variables": {"email": "a@example.com", "phone": "1"}}) + "\n",
+        encoding="utf-8",
+    )
+    second_path = tmp_path / "second.jsonl"
+    second_path.write_text(
+        json.dumps(
+            {
+                "variables": {
+                    "birthday": "2026-01-01",
+                    "company": "acme",
+                    "country": "ES",
+                    "email": "b@example.com",
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    first = ss.to_pyarrow(
+        first_path,
+        input_format="jsonl",
+        field_name_policy="lower_snake",
+        column_order="alphabetically",
+    )
+    second = ss.to_pyarrow(
+        second_path,
+        input_format="jsonl",
+        field_name_policy="lower_snake",
+        column_order="alphabetically",
+        schema_registry=first.schema_registry,
+    )
+
+    assert second.clean_data is not None
+    variable_names = _field_names(second.clean_data.schema.field("variables").type)
+    assert variable_names == ["birthday", "company", "country", "email", "phone"]
+
+    registry_fields = second.schema_registry["canonical_schema"]["fields"]
+    variables = next(field for field in registry_fields if field["name"] == "variables")
+    assert [field["name"] for field in variables["type"]["fields"]] == variable_names
+
+
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_field_name_policy_lower_alpha_sanitizes_dirty_keys_by_default(
     input_case, tmp_path
