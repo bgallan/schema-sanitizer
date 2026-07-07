@@ -2605,6 +2605,181 @@ def test_native_parquet_stream_materializes_dictionary_integer_lists(
 
 
 @_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "table"),
+    [
+        (
+            "list_struct",
+            pa.table(
+                {
+                    "items": pa.array(
+                        [[{"score": 1, "label": "a"}, {"score": None, "label": "b"}], None, []],
+                        type=pa.list_(
+                            pa.struct(
+                                [
+                                    pa.field("score", pa.int64()),
+                                    pa.field("label", pa.string()),
+                                ]
+                            )
+                        ),
+                    )
+                }
+            ),
+        ),
+        (
+            "list_list",
+            pa.table(
+                {
+                    "items": pa.array(
+                        [[[1, 2], [], None], None, [[3]]],
+                        type=pa.list_(pa.list_(pa.int64())),
+                    )
+                }
+            ),
+        ),
+        (
+            "list_map",
+            pa.table(
+                {
+                    "items": pa.array(
+                        [[[("a", 1), ("b", 2)]], None, []],
+                        type=pa.list_(pa.map_(pa.string(), pa.int64())),
+                    )
+                }
+            ),
+        ),
+        (
+            "list_struct_inner_list",
+            pa.table(
+                {
+                    "items": pa.array(
+                        [[{"ids": [1, 2], "name": "a"}, {"ids": [], "name": "b"}], None],
+                        type=pa.list_(
+                            pa.struct(
+                                [
+                                    pa.field("ids", pa.list_(pa.int64())),
+                                    pa.field("name", pa.string()),
+                                ]
+                            )
+                        ),
+                    )
+                }
+            ),
+        ),
+    ],
+)
+def test_complex_nested_lists_use_pyarrow_fallback(
+    tmp_path: Path,
+    name: str,
+    table: pa.Table,
+) -> None:
+    """Verify complex/nested list shapes stay production-readable through fallback."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"complex-nested-{name}.parquet"
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert any(
+        "nested path is not materializable yet" in blocker
+        for blocker in info["native_reader_blockers"]
+    )
+    assert any(
+        "repeated levels are not materializable yet" in blocker
+        for blocker in info["native_reader_blockers"]
+    )
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert any(
+        "nested path is not materializable yet" in blocker for blocker in diagnostics["blockers"]
+    )
+
+
+@_requires_pyarrow
+def test_complex_nested_list_projection_uses_pyarrow_fallback(
+    tmp_path: Path,
+) -> None:
+    """Verify projected complex list reads fall back without losing schema."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "complex-nested-list-projection.parquet"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "items": pa.array(
+                [
+                    [{"score": 1, "label": "a"}, {"score": 2, "label": "b"}],
+                    [{"score": 3, "label": "c"}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("score", pa.int64()),
+                            pa.field("label", pa.string()),
+                        ]
+                    )
+                ),
+            ),
+        }
+    )
+    expected = table.select(["items"])
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["items"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
     tmp_path: Path,
 ) -> None:

@@ -39,7 +39,8 @@ replacement. Remaining work:
    - [x] Simple top-level lists across multiple data pages.
    - [x] Empty files with simple top-level list schemas.
    - [x] Simple top-level scalar lists.
-   - Complex/nested lists (list of struct/list/map).
+   - [x] Production fallback for complex/nested lists (list of struct/list/map).
+   - Native materialization for complex/nested lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.
@@ -71,6 +72,7 @@ replacement. Remaining work:
    - [x] Native projection support for empty supported file schemas.
    - [x] Projection support through PyArrow fallback when native cannot satisfy
      projected column reads.
+   - [x] Projection support through PyArrow fallback for complex/nested lists.
    - [x] Batch-size control, including PyArrow fallback when native row-group
      batches would exceed the requested batch size.
    - [x] Predicate/filter integration through PyArrow dataset scanner fallback.
