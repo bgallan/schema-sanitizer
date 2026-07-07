@@ -57,7 +57,7 @@ replacement. Remaining work:
 1. Harden large-file behavior:
 
    - [x] Reuse the native input file handle across row groups.
-   - Page-buffer reuse.
+   - [x] Reuse native page payload buffers during row-group materialization.
    - Streaming materialization instead of whole-row-group buffering where possible.
    - [x] Memory-budget checks for decoded/materialized buffers.
 

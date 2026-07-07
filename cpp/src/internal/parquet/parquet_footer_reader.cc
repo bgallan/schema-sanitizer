@@ -1805,6 +1805,29 @@ sanitize::Result<std::string> read_exact_payload(std::ifstream &file,
   return payload;
 }
 
+sanitize::Status read_exact_payload_into(std::ifstream &file,
+                                         std::int64_t offset, std::int32_t size,
+                                         std::string *out) {
+  if (!out) {
+    return sanitize::Status::Invalid("Parquet page payload: output is null");
+  }
+  if (offset < 0 || size < 0) {
+    return sanitize::Status::Invalid("Parquet page payload: invalid range");
+  }
+  if (static_cast<std::size_t>(size) > kMaxPayloadVerificationBytes) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: payload exceeds verification limit");
+  }
+  out->assign(static_cast<std::size_t>(size), '\0');
+  file.clear();
+  file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+  file.read(out->data(), static_cast<std::streamsize>(out->size()));
+  if (!file) {
+    return sanitize::Status::IOError("Parquet page payload: failed reading");
+  }
+  return {};
+}
+
 #if defined(SCHEMA_SANITIZER_HAS_ZLIB)
 sanitize::Result<std::string> gzip_decompress_payload(std::string_view payload,
                                                       std::int32_t expected) {
@@ -1837,6 +1860,41 @@ sanitize::Result<std::string> gzip_decompress_payload(std::string_view payload,
   }
   out.resize(static_cast<std::size_t>(total_out));
   return out;
+}
+
+sanitize::Status gzip_decompress_payload_into(std::string_view payload,
+                                              std::int32_t expected,
+                                              std::string *out) {
+  if (!out) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: decompression output is null");
+  }
+  if (expected < 0) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: negative uncompressed size");
+  }
+  if (static_cast<std::size_t>(expected) > kMaxPayloadVerificationBytes) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: uncompressed page exceeds verification limit");
+  }
+  out->assign(static_cast<std::size_t>(expected), '\0');
+  z_stream stream{};
+  stream.next_in =
+      reinterpret_cast<Bytef *>(const_cast<char *>(payload.data()));
+  stream.avail_in = static_cast<uInt>(payload.size());
+  stream.next_out = reinterpret_cast<Bytef *>(out->data());
+  stream.avail_out = static_cast<uInt>(out->size());
+  if (inflateInit2(&stream, 15 + 32) != Z_OK) {
+    return sanitize::Status::Invalid("Parquet page payload: gzip init failed");
+  }
+  const int rc = inflate(&stream, Z_FINISH);
+  const int end_rc = inflateEnd(&stream);
+  if (rc != Z_STREAM_END || end_rc != Z_OK ||
+      stream.total_out != static_cast<uLong>(out->size())) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: gzip decompression failed");
+  }
+  return {};
 }
 #endif
 
@@ -4183,9 +4241,15 @@ struct NativeParquetArrayState {
   std::array<const void *, 1> struct_buffers{nullptr};
 };
 
+struct NativeParquetPageScratch {
+  std::string compressed_payload;
+  std::string decompressed_payload;
+};
+
 struct NativeParquetStreamState {
   std::string path;
   std::ifstream file;
+  NativeParquetPageScratch page_scratch;
   FooterInfo footer;
   std::size_t row_group_index = 0;
   std::string last_error;
@@ -4261,32 +4325,38 @@ bool bit_stream_value_is_set(std::string_view values, std::int32_t index) {
   return (static_cast<std::uint8_t>(values[byte_index]) & mask) != 0;
 }
 
-sanitize::Result<std::string>
-materialization_payload(std::ifstream &file, const ColumnChunkInfo &column,
-                        const PageHeaderInfo &page) {
+sanitize::Status materialization_payload(std::ifstream &file,
+                                         const ColumnChunkInfo &column,
+                                         const PageHeaderInfo &page,
+                                         NativeParquetPageScratch *scratch,
+                                         std::string_view *out) {
+  if (!scratch || !out) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: page scratch is null");
+  }
   if (!column.has_codec || !page.has_compressed_page_size ||
       !page.has_uncompressed_page_size) {
     return sanitize::Status::Invalid(
         "native Parquet reader: page payload sizes are incomplete");
   }
-  std::string payload;
-  SAN_ASSIGN_OR_RAISE(payload,
-                      read_exact_payload(file, page.compressed_payload_offset,
-                                         page.compressed_page_size));
+  SAN_RETURN_NOT_OK(read_exact_payload_into(
+      file, page.compressed_payload_offset, page.compressed_page_size,
+      &scratch->compressed_payload));
   if (column.codec == kCompressionUncompressed) {
     if (page.compressed_page_size != page.uncompressed_page_size) {
       return sanitize::Status::Invalid(
           "native Parquet reader: uncompressed page size mismatch");
     }
-    return payload;
+    *out = scratch->compressed_payload;
+    return {};
   }
   if (column.codec == kCompressionGzip) {
 #if defined(SCHEMA_SANITIZER_HAS_ZLIB)
-    std::string decompressed;
-    SAN_ASSIGN_OR_RAISE(
-        decompressed,
-        gzip_decompress_payload(payload, page.uncompressed_page_size));
-    return decompressed;
+    SAN_RETURN_NOT_OK(gzip_decompress_payload_into(
+        scratch->compressed_payload, page.uncompressed_page_size,
+        &scratch->decompressed_payload));
+    *out = scratch->decompressed_payload;
+    return {};
 #else
     return sanitize::Status::NotImplemented(
         "native Parquet reader: gzip support was not compiled in");
@@ -4395,10 +4465,9 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
   return {};
 }
 
-sanitize::Status materialize_fixed_width_column(std::ifstream &file,
-                                                const ColumnChunkInfo &column,
-                                                std::int64_t row_count,
-                                                NativeParquetChildArray *out) {
+sanitize::Status materialize_fixed_width_column(
+    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
           static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -4429,8 +4498,9 @@ sanitize::Status materialize_fixed_width_column(std::ifstream &file,
           "native Parquet reader: invalid page span index");
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -4475,6 +4545,7 @@ sanitize::Status materialize_fixed_width_column(std::ifstream &file,
 sanitize::Status materialize_boolean_column(std::ifstream &file,
                                             const ColumnChunkInfo &column,
                                             std::int64_t row_count,
+                                            NativeParquetPageScratch *scratch,
                                             NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
@@ -4504,8 +4575,9 @@ sanitize::Status materialize_boolean_column(std::ifstream &file,
       return sanitize::Status::Invalid(
           "native Parquet reader: expected PLAIN boolean data page");
     }
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -4551,7 +4623,7 @@ sanitize::Status materialize_boolean_column(std::ifstream &file,
 
 sanitize::Status materialize_delta_binary_packed_column(
     std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetChildArray *out) {
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
           static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -4589,8 +4661,9 @@ sanitize::Status materialize_delta_binary_packed_column(
       return sanitize::Status::Invalid(
           "native Parquet reader: expected DELTA_BINARY_PACKED data page");
     }
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -4656,7 +4729,7 @@ sanitize::Status materialize_delta_binary_packed_column(
 
 sanitize::Status materialize_byte_stream_split_column(
     std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetChildArray *out) {
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
           static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -4693,8 +4766,9 @@ sanitize::Status materialize_byte_stream_split_column(
       return sanitize::Status::Invalid(
           "native Parquet reader: expected BYTE_STREAM_SPLIT data page");
     }
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -4750,10 +4824,9 @@ sanitize::Status materialize_byte_stream_split_column(
   return {};
 }
 
-sanitize::Status materialize_byte_array_column(std::ifstream &file,
-                                               const ColumnChunkInfo &column,
-                                               std::int64_t row_count,
-                                               NativeParquetChildArray *out) {
+sanitize::Status materialize_byte_array_column(
+    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
           static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -4785,8 +4858,9 @@ sanitize::Status materialize_byte_array_column(std::ifstream &file,
           "native Parquet reader: non-contiguous byte-array page spans");
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -4838,7 +4912,7 @@ sanitize::Status materialize_byte_array_column(std::ifstream &file,
 
 sanitize::Status materialize_delta_length_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetChildArray *out) {
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
           static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -4882,8 +4956,9 @@ sanitize::Status materialize_delta_length_byte_array_column(
       return sanitize::Status::Invalid(
           "native Parquet reader: expected DELTA_LENGTH_BYTE_ARRAY data page");
     }
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -4979,7 +5054,7 @@ sanitize::Status materialize_delta_length_byte_array_column(
 
 sanitize::Status materialize_dictionary_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetChildArray *out) {
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
           static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -5027,8 +5102,9 @@ sanitize::Status materialize_dictionary_byte_array_column(
       return sanitize::Status::Invalid(
           "native Parquet reader: expected RLE dictionary data page");
     }
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -5094,7 +5170,7 @@ sanitize::Status materialize_dictionary_byte_array_column(
 
 sanitize::Status materialize_dictionary_fixed_width_column(
     std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetChildArray *out) {
+    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
   if (!out || row_count < 0 ||
       row_count >
           static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -5157,8 +5233,9 @@ sanitize::Status materialize_dictionary_fixed_width_column(
           "native Parquet reader: expected RLE fixed-width dictionary data "
           "page");
     }
-    std::string payload;
-    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    std::string_view payload;
+    SAN_RETURN_NOT_OK(
+        materialization_payload(file, column, page, scratch, &payload));
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
@@ -5338,35 +5415,40 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     auto &child = state->columns[i];
     if (column.native_read_value_buffer_kind == "fixed_width") {
       SAN_RETURN_NOT_OK(materialize_fixed_width_column(
-          stream->file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &stream->page_scratch,
+          &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "bit_packed_boolean") {
-      SAN_RETURN_NOT_OK(materialize_boolean_column(stream->file, column,
-                                                   row_group.num_rows, &child));
+      SAN_RETURN_NOT_OK(
+          materialize_boolean_column(stream->file, column, row_group.num_rows,
+                                     &stream->page_scratch, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "delta_binary_packed") {
       SAN_RETURN_NOT_OK(materialize_delta_binary_packed_column(
-          stream->file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &stream->page_scratch,
+          &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "byte_stream_split") {
       SAN_RETURN_NOT_OK(materialize_byte_stream_split_column(
-          stream->file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &stream->page_scratch,
+          &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "plain_byte_array") {
       SAN_RETURN_NOT_OK(materialize_byte_array_column(
-          stream->file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &stream->page_scratch,
+          &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
@@ -5375,7 +5457,8 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     } else if (column.native_read_value_buffer_kind ==
                "delta_length_byte_array") {
       SAN_RETURN_NOT_OK(materialize_delta_length_byte_array_column(
-          stream->file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &stream->page_scratch,
+          &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
@@ -5384,7 +5467,8 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     } else if (column.native_read_value_buffer_kind ==
                "dictionary_byte_array") {
       SAN_RETURN_NOT_OK(materialize_dictionary_byte_array_column(
-          stream->file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &stream->page_scratch,
+          &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
@@ -5393,7 +5477,8 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     } else if (column.native_read_value_buffer_kind ==
                "dictionary_fixed_width") {
       SAN_RETURN_NOT_OK(materialize_dictionary_fixed_width_column(
-          stream->file, column, row_group.num_rows, &child));
+          stream->file, column, row_group.num_rows, &stream->page_scratch,
+          &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
