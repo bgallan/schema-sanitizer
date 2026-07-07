@@ -3267,7 +3267,8 @@ std::int32_t arrow_buffer_count_for_value_kind(std::string_view kind) {
     return 3;
   }
   if (kind == "fixed_width" || kind == "delta_binary_packed" ||
-      kind == "rle_dictionary_indices" || kind == "byte_stream_split") {
+      kind == "rle_dictionary_indices" || kind == "byte_stream_split" ||
+      kind == "bit_packed_boolean") {
     return 2;
   }
   return 0;
@@ -3858,6 +3859,18 @@ void set_output_validity_bit(std::vector<std::uint8_t> *bitmap,
       (*bitmap)[byte_index] | static_cast<std::uint8_t>(1U << (index % 8)));
 }
 
+bool bit_stream_value_is_set(std::string_view values, std::int32_t index) {
+  if (index < 0) {
+    return false;
+  }
+  const auto byte_index = static_cast<std::size_t>(index / 8);
+  if (byte_index >= values.size()) {
+    return false;
+  }
+  const auto mask = static_cast<std::uint8_t>(1U << (index % 8));
+  return (static_cast<std::uint8_t>(values[byte_index]) & mask) != 0;
+}
+
 sanitize::Result<std::string>
 materialization_payload(std::ifstream &file, const ColumnChunkInfo &column,
                         const PageHeaderInfo &page) {
@@ -3899,7 +3912,7 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: column is not materializable");
   }
-  if (!column.has_physical_type || column.physical_type == kPhysicalBoolean) {
+  if (!column.has_physical_type) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: unsupported physical type");
   }
@@ -3907,7 +3920,9 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
       column.native_read_value_buffer_kind != "plain_byte_array" &&
       column.native_read_value_buffer_kind != "dictionary_byte_array" &&
       column.native_read_value_buffer_kind != "delta_binary_packed" &&
-      column.native_read_value_buffer_kind != "delta_length_byte_array") {
+      column.native_read_value_buffer_kind != "delta_length_byte_array" &&
+      column.native_read_value_buffer_kind != "byte_stream_split" &&
+      column.native_read_value_buffer_kind != "bit_packed_boolean") {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: unsupported value encoding");
   }
@@ -3951,6 +3966,24 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
           page.value_encoding != kEncodingDeltaLengthByteArray) {
         return sanitize::Status::NotImplemented(
             "native Parquet reader: unsupported DELTA_LENGTH_BYTE_ARRAY page");
+      }
+      continue;
+    }
+    if (column.native_read_value_buffer_kind == "byte_stream_split") {
+      if ((column.physical_type != kPhysicalFloat &&
+           column.physical_type != kPhysicalDouble) ||
+          page.value_encoding != kEncodingByteStreamSplit ||
+          column.native_read_value_width_bytes <= 0) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: unsupported BYTE_STREAM_SPLIT page");
+      }
+      continue;
+    }
+    if (column.native_read_value_buffer_kind == "bit_packed_boolean") {
+      if (column.physical_type != kPhysicalBoolean ||
+          page.value_encoding != kEncodingPlain) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: unsupported boolean page");
       }
       continue;
     }
@@ -4026,6 +4059,83 @@ sanitize::Status materialize_fixed_width_column(std::ifstream &file,
     if (value_offset != values.size()) {
       return sanitize::Status::Invalid(
           "native Parquet reader: trailing fixed-width payload bytes");
+    }
+  }
+  return {};
+}
+
+sanitize::Status materialize_boolean_column(std::ifstream &file,
+                                            const ColumnChunkInfo &column,
+                                            std::int64_t row_count,
+                                            NativeParquetChildArray *out) {
+  if (!out || row_count < 0 ||
+      row_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid boolean row count");
+  }
+  if (column.physical_type != kPhysicalBoolean) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: boolean materialization requires boolean type");
+  }
+  SAN_ASSIGN_OR_RAISE(
+      const auto value_buffer_bytes,
+      arrow_boolean_value_buffer_bytes(static_cast<std::int32_t>(row_count)));
+  out->values.assign(static_cast<std::size_t>(value_buffer_bytes), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+  }
+  for (const auto &span : column.native_read_page_spans) {
+    if (span.page_index < 0 ||
+        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid boolean page span index");
+    }
+    const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
+    if (!page.has_value_encoding || page.value_encoding != kEncodingPlain) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: expected PLAIN boolean data page");
+    }
+    std::string payload;
+    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid boolean payload offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    const auto expected_bytes =
+        static_cast<std::size_t>((span.non_null_count + 7) / 8);
+    if (values.size() != expected_bytes) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: boolean payload size mismatch");
+    }
+    std::int32_t value_index = 0;
+    for (std::int32_t row = 0; row < span.row_count; ++row) {
+      const auto global_row = span.first_row_index + row;
+      if (global_row < 0 || global_row >= row_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: boolean row span exceeds row group");
+      }
+      const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      if (valid) {
+        if (value_index >= span.non_null_count) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: missing boolean value");
+        }
+        if (bit_stream_value_is_set(values, value_index)) {
+          set_output_validity_bit(&out->values, global_row);
+        }
+        ++value_index;
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, global_row);
+        }
+      }
+    }
+    if (value_index != span.non_null_count) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing boolean values");
     }
   }
   return {};
@@ -4136,6 +4246,102 @@ sanitize::Status materialize_delta_binary_packed_column(
     if (value_offset != decoded_values.size()) {
       return sanitize::Status::Invalid(
           "native Parquet reader: trailing DELTA_BINARY_PACKED values");
+    }
+  }
+  return {};
+}
+
+sanitize::Status materialize_byte_stream_split_column(
+    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
+    NativeParquetChildArray *out) {
+  if (!out || row_count < 0 ||
+      row_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid BYTE_STREAM_SPLIT row count");
+  }
+  const auto width = column.native_read_value_width_bytes;
+  if ((column.physical_type != kPhysicalFloat &&
+       column.physical_type != kPhysicalDouble) ||
+      (width != 4 && width != 8)) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: unsupported BYTE_STREAM_SPLIT physical type");
+  }
+  const auto value_bytes =
+      static_cast<std::uint64_t>(row_count) * static_cast<std::uint64_t>(width);
+  if (value_bytes >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: BYTE_STREAM_SPLIT value buffer is too large");
+  }
+  out->values.assign(static_cast<std::size_t>(value_bytes), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+  }
+  for (const auto &span : column.native_read_page_spans) {
+    if (span.page_index < 0 ||
+        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid BYTE_STREAM_SPLIT page span index");
+    }
+    const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
+    if (!page.has_value_encoding ||
+        page.value_encoding != kEncodingByteStreamSplit) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: expected BYTE_STREAM_SPLIT data page");
+    }
+    std::string payload;
+    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid BYTE_STREAM_SPLIT payload offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    const auto expected_bytes =
+        static_cast<std::uint64_t>(span.non_null_count) *
+        static_cast<std::uint64_t>(width);
+    if (expected_bytes > static_cast<std::uint64_t>(
+                             std::numeric_limits<std::size_t>::max()) ||
+        values.size() != static_cast<std::size_t>(expected_bytes)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: BYTE_STREAM_SPLIT payload size mismatch");
+    }
+    std::int32_t value_index = 0;
+    for (std::int32_t row = 0; row < span.row_count; ++row) {
+      const auto global_row = span.first_row_index + row;
+      if (global_row < 0 || global_row >= row_count) {
+        return sanitize::Status::Invalid("native Parquet reader: "
+                                         "BYTE_STREAM_SPLIT row span exceeds "
+                                         "row group");
+      }
+      const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      if (valid) {
+        if (value_index >= span.non_null_count) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: missing BYTE_STREAM_SPLIT value");
+        }
+        auto *target =
+            out->values.data() + static_cast<std::size_t>(global_row) *
+                                     static_cast<std::size_t>(width);
+        for (std::int32_t byte_index = 0; byte_index < width; ++byte_index) {
+          const auto source_offset =
+              static_cast<std::size_t>(byte_index) *
+                  static_cast<std::size_t>(span.non_null_count) +
+              static_cast<std::size_t>(value_index);
+          target[static_cast<std::size_t>(byte_index)] =
+              static_cast<std::uint8_t>(values[source_offset]);
+        }
+        ++value_index;
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, global_row);
+        }
+      }
+    }
+    if (value_index != span.non_null_count) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing BYTE_STREAM_SPLIT values");
     }
   }
   return {};
@@ -4569,8 +4775,22 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
           child.validity.empty() ? nullptr : child.validity.data();
       child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 2;
+    } else if (column.native_read_value_buffer_kind == "bit_packed_boolean") {
+      SAN_RETURN_NOT_OK(
+          materialize_boolean_column(file, column, row_group.num_rows, &child));
+      child.buffers[0] =
+          child.validity.empty() ? nullptr : child.validity.data();
+      child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
+      child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "delta_binary_packed") {
       SAN_RETURN_NOT_OK(materialize_delta_binary_packed_column(
+          file, column, row_group.num_rows, &child));
+      child.buffers[0] =
+          child.validity.empty() ? nullptr : child.validity.data();
+      child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
+      child.array.n_buffers = 2;
+    } else if (column.native_read_value_buffer_kind == "byte_stream_split") {
+      SAN_RETURN_NOT_OK(materialize_byte_stream_split_column(
           file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();

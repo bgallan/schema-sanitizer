@@ -138,6 +138,45 @@ def test_native_parquet_stream_materializes_plain_fixed_width_rows(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_plain_boolean_rows(
+    tmp_path: Path,
+) -> None:
+    """Verify the native Parquet stream materializes PLAIN boolean pages."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-bool.parquet"
+    table = pa.table({"ok": pa.array([True, None, False, True], type=pa.bool_())})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    column = info["row_groups"][0]["columns"][0]
+    page = column["pages"][0]
+    assert info["native_reader_ready"] == 1
+    assert column["native_arrow_format"] == "b"
+    assert column["native_read_value_buffer_kind"] == "bit_packed_boolean"
+    assert column["native_read_arrow_n_buffers"] == 2
+    assert page["value_encoding"] == 0
+    assert page["decoded_value_preview"] == ["true", "false", "true"]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_rle_dictionary_strings(
     tmp_path: Path,
 ) -> None:
@@ -717,7 +756,11 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
     tmp_path: Path,
 ) -> None:
     """Verify native footer parsing validates BYTE_STREAM_SPLIT float pages."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
@@ -742,6 +785,9 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         pytest.skip("native writer did not choose BYTE_STREAM_SPLIT on this platform")
     assert page["value_encoding"] == 9
     assert page["decoded_non_null_values"] == 1000
+    assert column["native_read_value_buffer_kind"] == "byte_stream_split"
+    assert column["native_read_value_width_bytes"] == 4
+    assert column["native_read_arrow_n_buffers"] == 2
     assert page["values_decoded"] == 1
     assert page["values_decode_skipped"] == 0
     assert page["decoded_value_preview"] == [
@@ -754,6 +800,11 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         "6.000000",
         "0.000000",
     ]
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().column("f").to_pylist() == values
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow

@@ -10,8 +10,8 @@ replacement. Remaining work:
    - RLE dictionary pages for non-byte-array physical types.
    - [x] DELTA_BINARY_PACKED integer pages.
    - [x] DELTA_LENGTH_BYTE_ARRAY byte-array/string pages.
-   - BYTE_STREAM_SPLIT.
-   - Boolean bit-packed PLAIN values.
+   - [x] BYTE_STREAM_SPLIT float/double pages.
+   - [x] Boolean bit-packed PLAIN values.
 
 1. Complete physical and logical type coverage:
 
