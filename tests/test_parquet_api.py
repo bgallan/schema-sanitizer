@@ -1857,6 +1857,13 @@ def test_native_parquet_footer_info_captures_repeated_level_values(
     assert column["path_in_schema"] == ["scores", "list", "element"]
     assert column["max_definition_level"] == 3
     assert column["max_repetition_level"] == 1
+    assert column["repeated_level_layout_decoded"] == 1
+    assert column["repeated_level_row_count"] == 4
+    assert column["repeated_level_null_count"] == 1
+    assert column["repeated_level_element_count"] == 3
+    assert column["repeated_level_non_null_value_count"] == 3
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
     page = column["pages"][0]
     assert page["decoded_definition_level_values"] == [3, 3, 0, 1, 3]
     assert page["decoded_repetition_level_values"] == [0, 1, 0, 0, 0]

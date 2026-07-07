@@ -181,6 +181,13 @@ struct ColumnChunkInfo {
   std::vector<std::string> decoded_dictionary_values;
   std::vector<std::uint8_t> decoded_dictionary_fixed_width_values;
   std::vector<NativeReadPageSpanInfo> native_read_page_spans;
+  bool repeated_level_layout_decoded = false;
+  std::int64_t repeated_level_row_count = 0;
+  std::int64_t repeated_level_null_count = 0;
+  std::int64_t repeated_level_element_count = 0;
+  std::int64_t repeated_level_non_null_value_count = 0;
+  std::vector<std::int32_t> repeated_level_offsets;
+  std::vector<std::uint8_t> repeated_level_validity_bitmap;
 };
 
 struct RowGroupInfo {

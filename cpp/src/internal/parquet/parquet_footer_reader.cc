@@ -3723,6 +3723,127 @@ native_reader_row_group_buffer_bytes(const RowGroupInfo &row_group) {
   return total;
 }
 
+bool is_simple_top_level_list_leaf(const ColumnChunkInfo &column) {
+  return column.max_repetition_level == 1 &&
+         column.path_in_schema.size() == 3 &&
+         column.path_in_schema[1] == "list";
+}
+
+sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
+                                                 ColumnChunkInfo *column) {
+  if (!column || !is_simple_top_level_list_leaf(*column)) {
+    return {};
+  }
+  if (row_count < 0 ||
+      row_count > std::numeric_limits<std::int32_t>::max() - 1) {
+    return sanitize::Status::Invalid(
+        "Parquet repeated levels: row count is not materializable");
+  }
+  const auto validity_bytes = (row_count + 7) / 8;
+  if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
+    return sanitize::Status::Invalid(
+        "Parquet repeated levels: validity bitmap exceeds memory limit");
+  }
+  column->repeated_level_offsets.clear();
+  column->repeated_level_validity_bitmap.assign(
+      static_cast<std::size_t>(validity_bytes), 0);
+  column->repeated_level_offsets.reserve(static_cast<std::size_t>(row_count) +
+                                         1U);
+  column->repeated_level_offsets.push_back(0);
+  column->repeated_level_row_count = row_count;
+  column->repeated_level_null_count = 0;
+  column->repeated_level_element_count = 0;
+  column->repeated_level_non_null_value_count = 0;
+
+  const auto list_defined_level =
+      column->top_level_required ? std::int16_t{0} : std::int16_t{1};
+  std::int64_t current_row = -1;
+  std::int32_t current_element_count = 0;
+  bool saw_level = false;
+  for (const auto &page : column->pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (!page.levels_decoded || !page.has_num_values ||
+        page.decoded_definition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values) ||
+        page.decoded_repetition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values)) {
+      column->repeated_level_offsets.clear();
+      column->repeated_level_validity_bitmap.clear();
+      return {};
+    }
+    std::int32_t page_non_null_values = 0;
+    for (std::int32_t i = 0; i < page.num_values; ++i) {
+      saw_level = true;
+      const auto definition =
+          page.decoded_definition_level_values[static_cast<std::size_t>(i)];
+      const auto repetition =
+          page.decoded_repetition_level_values[static_cast<std::size_t>(i)];
+      if (definition < 0 || definition > column->max_definition_level ||
+          repetition < 0 || repetition > column->max_repetition_level) {
+        return sanitize::Status::Invalid(
+            "Parquet repeated levels: level exceeds schema maximum");
+      }
+      if (repetition == 0) {
+        if (current_row >= 0) {
+          column->repeated_level_offsets.push_back(current_element_count);
+        }
+        ++current_row;
+        if (current_row >= row_count) {
+          return sanitize::Status::Invalid(
+              "Parquet repeated levels: row count exceeds row group");
+        }
+        const bool list_valid =
+            column->top_level_required || definition >= list_defined_level;
+        if (list_valid) {
+          set_validity_bit(&column->repeated_level_validity_bitmap,
+                           static_cast<std::int32_t>(current_row), true);
+        } else {
+          ++column->repeated_level_null_count;
+        }
+      } else if (current_row < 0) {
+        return sanitize::Status::Invalid(
+            "Parquet repeated levels: first value does not start a row");
+      } else if (definition <= list_defined_level) {
+        return sanitize::Status::Invalid(
+            "Parquet repeated levels: repeated null or empty list marker");
+      }
+
+      const bool list_valid =
+          column->top_level_required || definition >= list_defined_level;
+      if (list_valid && definition > list_defined_level) {
+        ++current_element_count;
+        ++column->repeated_level_element_count;
+        if (definition == column->max_definition_level) {
+          ++page_non_null_values;
+          ++column->repeated_level_non_null_value_count;
+        }
+      }
+    }
+    if (page_non_null_values != page.decoded_non_null_values) {
+      return sanitize::Status::Invalid(
+          "Parquet repeated levels: non-null value count mismatch");
+    }
+  }
+  if (row_count == 0) {
+    column->repeated_level_layout_decoded = true;
+    return {};
+  }
+  if (!saw_level || current_row + 1 != row_count) {
+    return sanitize::Status::Invalid(
+        "Parquet repeated levels: row count mismatch");
+  }
+  column->repeated_level_offsets.push_back(current_element_count);
+  if (column->repeated_level_offsets.size() !=
+      static_cast<std::size_t>(row_count + 1)) {
+    return sanitize::Status::Invalid(
+        "Parquet repeated levels: offset count mismatch");
+  }
+  column->repeated_level_layout_decoded = true;
+  return {};
+}
+
 sanitize::Status assign_native_read_page_spans(FooterInfo *info) {
   if (!info) {
     return sanitize::Status::Invalid(
@@ -3750,7 +3871,16 @@ sanitize::Status assign_native_read_page_spans(FooterInfo *info) {
       column.native_read_has_offsets_buffer = 0;
       column.native_read_has_values_buffer = 0;
       column.native_read_page_spans.clear();
+      column.repeated_level_layout_decoded = false;
+      column.repeated_level_row_count = 0;
+      column.repeated_level_null_count = 0;
+      column.repeated_level_element_count = 0;
+      column.repeated_level_non_null_value_count = 0;
+      column.repeated_level_offsets.clear();
+      column.repeated_level_validity_bitmap.clear();
       if (column.max_repetition_level != 0) {
+        SAN_RETURN_NOT_OK(assign_simple_list_level_layout(
+            row_group.has_num_rows ? row_group.num_rows : -1, &column));
         continue;
       }
       bool complete = true;
@@ -6201,6 +6331,28 @@ sanitize::Result<std::string> read_footer_info_json(const std::string &path) {
                                      column.native_read_has_values_buffer);
         json_write::append_key(out, column_first, "native_read_page_spans");
         append_native_read_page_spans(out, column.native_read_page_spans);
+      }
+      json_write::append_int_field(
+          out, column_first, "repeated_level_layout_decoded",
+          column.repeated_level_layout_decoded ? 1 : 0);
+      if (column.repeated_level_layout_decoded) {
+        json_write::append_int_field(out, column_first,
+                                     "repeated_level_row_count",
+                                     column.repeated_level_row_count);
+        json_write::append_int_field(out, column_first,
+                                     "repeated_level_null_count",
+                                     column.repeated_level_null_count);
+        json_write::append_int_field(out, column_first,
+                                     "repeated_level_element_count",
+                                     column.repeated_level_element_count);
+        json_write::append_int_field(
+            out, column_first, "repeated_level_non_null_value_count",
+            column.repeated_level_non_null_value_count);
+        json_write::append_key(out, column_first, "repeated_level_offsets");
+        append_int_array(out, column.repeated_level_offsets);
+        json_write::append_string_field(
+            out, column_first, "repeated_level_validity_hex_preview",
+            hex_bytes_preview(column.repeated_level_validity_bitmap));
       }
       json_write::append_key(out, column_first, "pages");
       out.push_back('[');
