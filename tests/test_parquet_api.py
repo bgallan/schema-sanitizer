@@ -910,6 +910,56 @@ def test_native_parquet_stream_reads_empty_file_schema(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_reads_empty_struct_file_schema(
+    tmp_path: Path,
+) -> None:
+    """Verify native Parquet stream handles empty supported struct schemas."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-struct.parquet"
+    schema = pa.schema(
+        [
+            pa.field(
+                "profile",
+                pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64(), nullable=False),
+                    ]
+                ),
+            )
+        ]
+    )
+    table = pa.Table.from_pylist([], schema=schema)
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 0
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
     tmp_path: Path,
 ) -> None:
@@ -1900,6 +1950,70 @@ def test_native_parquet_stream_materializes_nullable_struct_scalar_leaves(
     reader = pa.RecordBatchReader.from_stream(factory)
 
     assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+    assert diagnostics["blockers"] == []
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_struct_scalar_leaves(
+    tmp_path: Path,
+) -> None:
+    """Verify native struct projection keeps every leaf under the struct."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "projected-struct.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field(
+                "profile",
+                pa.struct(
+                    [
+                        pa.field("name", pa.string()),
+                        pa.field("score", pa.float64(), nullable=False),
+                    ]
+                ),
+            ),
+            pa.field("flag", pa.bool_()),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"id": 1, "profile": {"name": "a", "score": 1.5}, "flag": True},
+            {"id": 2, "profile": None, "flag": False},
+            {"id": 3, "profile": {"name": None, "score": 3.5}, "flag": None},
+        ],
+        schema=schema,
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["profile", "id"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+    expected = table.select(["profile", "id"])
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
     assert last_parquet_stream_factory_route() == "native_parquet_stream"
     diagnostics = last_parquet_native_reader_diagnostics()
     assert diagnostics["attempted"] is True

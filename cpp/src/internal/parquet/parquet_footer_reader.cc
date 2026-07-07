@@ -6318,18 +6318,19 @@ sanitize::Status project_footer_row_group_columns(
   }
   for (auto &row_group : info->row_groups) {
     std::vector<ColumnChunkInfo> selected;
-    selected.reserve(projected_columns.size());
+    selected.reserve(row_group.columns.size());
     for (const auto &name : projected_columns) {
-      auto it = std::find_if(row_group.columns.begin(), row_group.columns.end(),
-                             [&](const ColumnChunkInfo &column) {
-                               return !column.path_in_schema.empty() &&
-                                      column.path_in_schema.front() == name;
-                             });
-      if (it == row_group.columns.end()) {
+      auto before_count = selected.size();
+      for (const auto &column : row_group.columns) {
+        if (!column.path_in_schema.empty() &&
+            column.path_in_schema.front() == name) {
+          selected.push_back(column);
+        }
+      }
+      if (selected.size() == before_count) {
         return sanitize::Status::Invalid(
             "native Parquet reader: projection column not found: ", name);
       }
-      selected.push_back(*it);
     }
     row_group.columns = std::move(selected);
   }
