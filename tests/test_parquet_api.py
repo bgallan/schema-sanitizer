@@ -1093,6 +1093,53 @@ def test_native_parquet_stream_projects_empty_file_schema(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repeated(
+    tmp_path: Path,
+) -> None:
+    """Verify empty-file projection ignores unsupported unprojected fields."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-projected-complex.parquet"
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("items", pa.list_(pa.struct([pa.field("score", pa.int64())]))),
+        ]
+    )
+    table = pa.Table.from_pylist([], schema=schema)
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 0
+    assert any("items.list.element.score" in blocker for blocker in info["native_reader_blockers"])
+
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["id"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.select(["id"]).schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_footer_info_blocks_empty_complex_repeated_file_readiness(
     tmp_path: Path,
 ) -> None:
@@ -1928,6 +1975,55 @@ def test_native_parquet_stream_materializes_simple_integer_lists(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_simple_lists_across_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native list reconstruction stitches offsets across data pages."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_PAGE_BYTES", "96")
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_BYTES", "1048576")
+    path = tmp_path / "native-list-multi-page.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [[row, row + 1] for row in range(120)],
+                type=pa.list_(pa.int64()),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    column = info["row_groups"][0]["columns"][0]
+    data_pages = [page for page in column["pages"] if page["is_dictionary_page"] == 0]
+    assert len(data_pages) > 1
+    assert column["repeated_level_offsets"][:4] == [0, 2, 4, 6]
+    assert column["repeated_level_offsets"][-4:] == [234, 236, 238, 240]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_footer_info_captures_repeated_level_values(
     tmp_path: Path,
 ) -> None:
@@ -2019,8 +2115,17 @@ def test_native_parquet_stream_materializes_simple_string_lists(
 
 
 @_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array"),
+    [
+        ("string", pa.array([["only"]], type=pa.list_(pa.string()))),
+        ("binary", pa.array([[b"only"]], type=pa.list_(pa.binary()))),
+    ],
+)
 def test_native_parquet_stream_materializes_plain_byte_array_lists(
     tmp_path: Path,
+    name: str,
+    array: pa.Array,
 ) -> None:
     """Verify native reader materializes PLAIN byte-array list elements."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
@@ -2031,8 +2136,8 @@ def test_native_parquet_stream_materializes_plain_byte_array_lists(
     from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
 
     require_native()
-    path = tmp_path / "native-plain-byte-array-list.parquet"
-    table = pa.table({"tags": pa.array([["only"]], type=pa.list_(pa.string()))})
+    path = tmp_path / f"native-plain-byte-array-{name}-list.parquet"
+    table = pa.table({"tags": array})
     write_parquet_native_first_stream(
         pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
         path,
