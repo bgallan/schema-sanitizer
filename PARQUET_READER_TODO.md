@@ -53,7 +53,7 @@ replacement. Remaining work:
 
    - Page-buffer reuse.
    - Streaming materialization instead of whole-row-group buffering where possible.
-   - Memory-budget checks for decoded/materialized buffers.
+   - [x] Memory-budget checks for decoded/materialized buffers.
 
 1. Add cross-writer compatibility:
 

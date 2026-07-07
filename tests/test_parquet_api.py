@@ -602,6 +602,53 @@ def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
 
 
 @_requires_pyarrow
+def test_native_parquet_reader_memory_budget_blocks_native_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native Parquet reader refuses row groups over its buffer budget."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "budget.parquet"
+    table = pa.table(
+        {
+            "a": pa.array([1, 2, 3], type=pa.int64()),
+            "b": pa.array(["wide-value-000", "wide-value-001", "wide-value-002"]),
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+
+    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_READER_MAX_BUFFER_BYTES", "1")
+    limited_info = native_parquet_footer_info(path)
+
+    assert limited_info is not None
+    assert limited_info["native_reader_ready"] == 0
+    assert any(
+        "native buffer estimate" in blocker and "exceeds configured limit 1" in blocker
+        for blocker in limited_info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+
+
+@_requires_pyarrow
 def test_read_parquet_retries_pyarrow_after_native_reader_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
