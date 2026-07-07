@@ -2019,6 +2019,46 @@ def test_native_parquet_stream_materializes_simple_string_lists(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_plain_byte_array_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes PLAIN byte-array list elements."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-plain-byte-array-list.parquet"
+    table = pa.table({"tags": pa.array([["only"]], type=pa.list_(pa.string()))})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "plain_byte_array"
+    assert column["native_read_arrow_n_buffers"] == 3
+    assert column["repeated_level_offsets"] == [0, 1]
+    assert column["pages"][0]["value_encoding"] == 0
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_simple_float_lists(
     tmp_path: Path,
 ) -> None:
