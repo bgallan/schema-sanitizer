@@ -17,6 +17,7 @@ from ._optional import ensure_optional_dependency
 from .pyarrow_parquet_common import (
     DEFAULT_PARQUET_BATCH_ROWS,
     ensure_pyarrow,
+    local_parquet_path_or_none,
     open_parquet_source,
 )
 from .pyarrow_schema_support import SchemaSupportCache
@@ -98,6 +99,7 @@ class ParquetRecordBatchStreamFactory:
         self._batch_size = batch_size
         self._use_threads = use_threads
         self._columns = None if columns is None else tuple(columns)
+        self._local_path = local_parquet_path_or_none(data, source=source, feature=feature)
         self.sink = "stream"
         self.diagnostics = None
         self._pa = ensure_pyarrow(feature=feature)
@@ -108,14 +110,14 @@ class ParquetRecordBatchStreamFactory:
         self._keepalive: tuple[Any, ...] = ()
         self._pending_parquet_file: Any | None = None
         self._pending_opened_file: Any | None = None
-        if source == "path":
+        if self._local_path is not None:
             self._ds = ensure_optional_dependency(
                 "pyarrow.dataset",
                 extra="pyarrow",
                 feature=feature,
                 dependency_name="pyarrow",
             )
-            self._dataset = self._ds.dataset(data, format="parquet")
+            self._dataset = self._ds.dataset(self._local_path, format="parquet")
             self.schema = self._project_schema(self._dataset.schema)
         else:
             self._dataset = None
@@ -164,7 +166,7 @@ class ParquetRecordBatchStreamFactory:
 
     def _try_native_stream(self) -> Any | None:
         """Return a native Parquet Arrow C stream capsule when supported."""
-        if self._source != "path":
+        if self._local_path is None:
             _set_parquet_native_reader_diagnostics(
                 attempted=False,
                 ready=False,
@@ -180,7 +182,7 @@ class ParquetRecordBatchStreamFactory:
             )
             return None
         try:
-            info = native_parquet_footer_info(self._data)
+            info = native_parquet_footer_info(self._local_path)
         except (RuntimeError, TypeError, ValueError) as exc:
             _set_parquet_native_reader_diagnostics(
                 attempted=True,
@@ -236,9 +238,9 @@ class ParquetRecordBatchStreamFactory:
             return None
         try:
             if self._columns is None:
-                capsule = native_read(self._data)
+                capsule = native_read(self._local_path)
             else:
-                capsule = native_read(self._data, list(self._columns))
+                capsule = native_read(self._local_path, list(self._columns))
         except RuntimeError as exc:
             _set_parquet_native_reader_diagnostics(
                 attempted=True,
@@ -289,7 +291,7 @@ class ParquetRecordBatchStreamFactory:
             self._pending_opened_file = None
         else:
             parquet_file, opened_file = self._open_parquet_file()
-        if self._source != "path":
+        if self._local_path is None:
             _set_parquet_native_reader_diagnostics(
                 attempted=False,
                 ready=False,

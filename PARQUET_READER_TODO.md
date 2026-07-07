@@ -42,7 +42,8 @@ replacement. Remaining work:
 
    - [x] File-like objects through PyArrow fallback.
    - [x] Buffers through PyArrow fallback.
-   - Filesystem-backed non-local paths.
+   - [x] Local `file://` filesystem URIs through the direct Arrow path.
+   - Remote filesystem/cloud URIs that require staging or provider credentials.
    - [x] Directory/dataset reads through the direct Arrow path.
 
 1. Match production reader behavior:

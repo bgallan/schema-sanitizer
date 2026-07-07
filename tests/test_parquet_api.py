@@ -1744,6 +1744,11 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
 @_requires_pyarrow
 def test_read_parquet_file_uri_materializes_table(tmp_path: Path) -> None:
     """Verify read parquet accepts file URIs."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+    )
+
     require_native()
 
     path = tmp_path / "data.parquet"
@@ -1752,6 +1757,51 @@ def test_read_parquet_file_uri_materializes_table(tmp_path: Path) -> None:
     result = read_test_parquet(path.as_uri())
 
     assert result.clean_data.to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+
+
+@_requires_pyarrow
+def test_native_parquet_file_uri_uses_native_route(tmp_path: Path) -> None:
+    """Verify local file URIs share the native path-backed Parquet reader."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+    )
+
+    require_native()
+
+    src = tmp_path / "src.parquet"
+    out = tmp_path / "out.parquet"
+    pq.write_table(_sample_table(), src)
+    ss.to_parquet(src, out, input_format="parquet")
+
+    result = read_test_parquet(out.as_uri())
+
+    assert result.clean_data.select(["a", "b"]).to_pylist() == _sample_table().to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is True
+    assert diagnostics["reason"] == "native_stream"
+
+
+@_requires_pyarrow
+def test_remote_parquet_uri_requires_staging() -> None:
+    """Verify remote Parquet URIs are not treated as local direct sources."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        open_parquet_record_batch_stream_factory,
+    )
+
+    with pytest.raises(ValueError, match="URI inputs must be staged"):
+        open_parquet_record_batch_stream_factory(
+            "gs://bucket/data.parquet",
+            source="uri",
+            feature="test",
+        )
 
 
 @_requires_pyarrow

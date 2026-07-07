@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core_impl.path_uris import local_path_or_reject_remote
 from .pyarrow_common import ensure_pyarrow
 
 DEFAULT_PARQUET_BATCH_ROWS = 65536
@@ -36,12 +37,25 @@ def parquet_use_threads_from_memory_limit(memory_limit_bytes: int | None) -> boo
     )
 
 
-def open_parquet_source(data: Any, *, source: str, feature: str, pa: Any) -> tuple[Any, Any | None]:
-    """Open a Parquet source and return ``(source, owned_file)``."""
+def local_parquet_path_or_none(data: Any, *, source: str, feature: str) -> str | None:
+    """Return a local filesystem path when a Parquet source names one."""
     if source == "path":
         import os
 
-        return os.fspath(data), None
+        return os.fspath(data)
+    if source == "uri":
+        return local_path_or_reject_remote(
+            data,
+            remote_error=f"{feature} URI inputs must be staged before Parquet decoding",
+        )
+    return None
+
+
+def open_parquet_source(data: Any, *, source: str, feature: str, pa: Any) -> tuple[Any, Any | None]:
+    """Open a Parquet source and return ``(source, owned_file)``."""
+    local_path = local_parquet_path_or_none(data, source=source, feature=feature)
+    if local_path is not None:
+        return local_path, None
     if source == "uri":
         raise ValueError(f"{feature} URI inputs must be staged before Parquet decoding")
     if source == "text":
@@ -63,6 +77,7 @@ __all__ = [
     "ESTIMATED_ROW_BYTES",
     "THREADED_PARQUET_MIN_MEMORY_BYTES",
     "ensure_pyarrow",
+    "local_parquet_path_or_none",
     "open_parquet_source",
     "parquet_batch_size_from_memory_limit",
     "parquet_memory_limit_allows_direct_ingest",
