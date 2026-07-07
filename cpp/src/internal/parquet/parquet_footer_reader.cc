@@ -4178,6 +4178,8 @@ void add_readiness_blocker(NativeReadinessInfo *info, std::string blocker) {
 bool native_plain_path_is_materializable(const std::vector<std::string> &path,
                                          std::int16_t max_repetition_level,
                                          bool top_level_required);
+bool is_simple_top_level_list_path(const std::vector<std::string> &path,
+                                   std::int16_t max_repetition_level);
 
 NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
   NativeReadinessInfo readiness;
@@ -4217,7 +4219,9 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
           add_readiness_blocker(
               &readiness, label + ": nested path is not materializable yet");
         }
-        if (leaf.max_repetition_level != 0) {
+        if (leaf.max_repetition_level != 0 &&
+            !is_simple_top_level_list_path(leaf.path,
+                                           leaf.max_repetition_level)) {
           add_readiness_blocker(&readiness, label + ": repeated levels are not "
                                                     "materializable yet");
         }

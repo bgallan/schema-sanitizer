@@ -1008,16 +1008,54 @@ def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
 
 
 @_requires_pyarrow
-def test_native_parquet_footer_info_blocks_empty_repeated_file_readiness(
+def test_native_parquet_stream_reads_empty_simple_list_file_schema(
     tmp_path: Path,
 ) -> None:
-    """Verify empty repeated files do not claim native reader readiness yet."""
+    """Verify native reader handles empty files with supported list schemas."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "empty-list.parquet"
+    table = pa.table({"scores": pa.array([], type=pa.list_(pa.int64()))})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["num_rows"] == 0
+    assert info["row_group_count"] == 0
+    assert info["native_reader_ready"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_footer_info_blocks_empty_complex_repeated_file_readiness(
+    tmp_path: Path,
+) -> None:
+    """Verify empty unsupported repeated files do not claim native readiness."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
     from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
 
     require_native()
-    path = tmp_path / "empty-repeated.parquet"
-    table = pa.table({"scores": pa.array([], type=pa.list_(pa.int64()))})
+    path = tmp_path / "empty-complex-repeated.parquet"
+    schema = pa.schema([pa.field("items", pa.list_(pa.struct([pa.field("score", pa.int64())])))])
+    table = pa.Table.from_pylist([], schema=schema)
     write_parquet_native_first_stream(
         pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
         path,
@@ -1031,7 +1069,7 @@ def test_native_parquet_footer_info_blocks_empty_repeated_file_readiness(
     assert info["row_group_count"] == 0
     assert info["native_reader_ready"] == 0
     assert any(
-        "repeated levels are not materializable yet" in blocker
+        "nested path is not materializable yet" in blocker
         for blocker in info["native_reader_blockers"]
     )
 

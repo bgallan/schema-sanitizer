@@ -34,6 +34,7 @@ replacement. Remaining work:
    - [x] Simple top-level boolean lists with PLAIN bit-packed elements.
    - [x] Simple top-level float lists with BYTE_STREAM_SPLIT elements.
    - [x] Simple top-level lists with nullable scalar elements.
+   - [x] Empty files with simple top-level list schemas.
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
