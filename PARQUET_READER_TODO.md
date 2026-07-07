@@ -7,7 +7,7 @@ replacement. Remaining work:
 1. Materialize all native-planned encodings:
 
    - [x] RLE dictionary byte-array/string pages.
-   - RLE dictionary pages for non-byte-array physical types.
+   - [x] RLE dictionary pages for non-byte-array physical types.
    - [x] DELTA_BINARY_PACKED integer pages.
    - [x] DELTA_LENGTH_BYTE_ARRAY byte-array/string pages.
    - [x] BYTE_STREAM_SPLIT float/double pages.
@@ -30,10 +30,11 @@ replacement. Remaining work:
 
 1. Broaden row-group and page coverage:
 
-   - Multi-row-group parity tests.
-   - Multiple data pages per column.
-   - Mixed null/non-null spans across pages.
-   - Empty row groups and empty files.
+   - [x] Multi-row-group parity tests.
+   - [x] Multiple data pages per column.
+   - [x] Mixed null/non-null spans across pages.
+   - Empty row groups.
+   - [x] Empty files.
 
 1. Expand input source support:
 

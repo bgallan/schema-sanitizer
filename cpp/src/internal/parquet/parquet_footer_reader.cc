@@ -144,6 +144,7 @@ struct PlainValueDecodeInfo {
   std::int32_t materialized_offset_bytes = 0;
   std::vector<std::string> preview;
   std::vector<std::string> byte_array_values;
+  std::vector<std::uint8_t> fixed_width_values;
 };
 
 struct DictionaryPageState {
@@ -151,6 +152,7 @@ struct DictionaryPageState {
   std::int32_t value_count = 0;
   std::vector<std::string> preview;
   std::vector<std::string> byte_array_values;
+  std::vector<std::uint8_t> fixed_width_values;
 };
 
 struct NativeReadinessInfo {
@@ -1460,6 +1462,11 @@ std::string arrow_format_for_leaf(const SchemaElementInfo &element) {
     return "g";
   case kPhysicalByteArray:
     return "z";
+  case kPhysicalFixedLenByteArray:
+    if (element.has_type_length && element.type_length > 0) {
+      return "w:" + std::to_string(element.type_length);
+    }
+    return {};
   default:
     return {};
   }
@@ -2069,6 +2076,7 @@ decode_plain_value_payload(std::string_view values,
   info.decoded_bytes = static_cast<std::int32_t>(expected_bytes);
   info.materialized_value_bytes = info.decoded_bytes;
   info.preview = preview_plain_fixed_values(values, column, expected_values);
+  info.fixed_width_values.assign(values.begin(), values.end());
   return info;
 }
 
@@ -2691,6 +2699,26 @@ sanitize::Status decode_rle_dictionary_page(
         static_cast<std::int32_t>(materialized_bytes);
     SAN_ASSIGN_OR_RAISE(page->materialized_offset_bytes,
                         arrow_i32_offset_buffer_bytes(page->num_values));
+  } else if (!dictionary->fixed_width_values.empty()) {
+    auto width = fixed_width_for_plain_values(column);
+    if (!width || *width <= 0) {
+      return sanitize::Status::Invalid(
+          "Parquet values: dictionary fixed-width value width is invalid");
+    }
+    const auto expected_dictionary_bytes =
+        static_cast<std::int64_t>(dictionary->value_count) *
+        static_cast<std::int64_t>(*width);
+    if (expected_dictionary_bytes < 0 ||
+        static_cast<std::uint64_t>(expected_dictionary_bytes) !=
+            dictionary->fixed_width_values.size()) {
+      return sanitize::Status::Invalid(
+          "Parquet values: dictionary fixed-width payload size mismatch");
+    }
+    SAN_ASSIGN_OR_RAISE(
+        page->materialized_value_bytes,
+        arrow_fixed_width_value_buffer_bytes(
+            page->num_values, *width,
+            "dictionary fixed-width materialized value buffer"));
   } else {
     SAN_ASSIGN_OR_RAISE(page->materialized_value_bytes,
                         arrow_fixed_width_value_buffer_bytes(
@@ -2804,6 +2832,7 @@ sanitize::Status decode_dictionary_page_values(std::string_view payload,
   page->materialized_offset_bytes = decoded.materialized_offset_bytes;
   page->decoded_value_preview = decoded.preview;
   page->decoded_byte_array_values = decoded.byte_array_values;
+  page->decoded_fixed_width_values = decoded.fixed_width_values;
   page->values_decoded = true;
   page->values_decode_skipped = false;
   if (state) {
@@ -2811,6 +2840,7 @@ sanitize::Status decode_dictionary_page_values(std::string_view payload,
     state->value_count = page->num_values;
     state->preview = std::move(decoded.preview);
     state->byte_array_values = std::move(decoded.byte_array_values);
+    state->fixed_width_values = std::move(decoded.fixed_width_values);
   }
   return {};
 }
@@ -2934,6 +2964,8 @@ sanitize::Status read_page_headers_for_column(std::ifstream &file,
     }
   }
   column->decoded_dictionary_values = std::move(dictionary.byte_array_values);
+  column->decoded_dictionary_fixed_width_values =
+      std::move(dictionary.fixed_width_values);
   return {};
 }
 
@@ -3235,6 +3267,14 @@ std::string value_buffer_kind_for_page(const ColumnChunkInfo &column,
         !column.decoded_dictionary_values.empty()) {
       return "dictionary_byte_array";
     }
+    if ((column.physical_type == kPhysicalInt32 ||
+         column.physical_type == kPhysicalInt64 ||
+         column.physical_type == kPhysicalFloat ||
+         column.physical_type == kPhysicalDouble ||
+         column.physical_type == kPhysicalFixedLenByteArray) &&
+        !column.decoded_dictionary_fixed_width_values.empty()) {
+      return "dictionary_fixed_width";
+    }
     return "rle_dictionary_indices";
   }
   if (page.value_encoding == kEncodingByteStreamSplit) {
@@ -3256,6 +3296,10 @@ std::int32_t value_width_bytes_for_page(const ColumnChunkInfo &column,
     auto width = fixed_width_for_plain_values(column);
     return width.value_or(0);
   }
+  if (page.value_encoding == kEncodingRleDictionary) {
+    auto width = fixed_width_for_plain_values(column);
+    return width.value_or(0);
+  }
   if (page.value_encoding != kEncodingPlain) {
     return 0;
   }
@@ -3269,8 +3313,8 @@ std::int32_t arrow_buffer_count_for_value_kind(std::string_view kind) {
     return 3;
   }
   if (kind == "fixed_width" || kind == "delta_binary_packed" ||
-      kind == "rle_dictionary_indices" || kind == "byte_stream_split" ||
-      kind == "bit_packed_boolean") {
+      kind == "rle_dictionary_indices" || kind == "dictionary_fixed_width" ||
+      kind == "byte_stream_split" || kind == "bit_packed_boolean") {
     return 2;
   }
   return 0;
@@ -3492,6 +3536,39 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
   }
   if (info.row_groups.empty() && info.num_rows > 0) {
     add_readiness_blocker(&readiness, "non-empty file has no row groups");
+  }
+  if (info.row_groups.empty() && info.num_rows == 0 &&
+      !info.schema_elements.empty()) {
+    auto leaves = schema_leaf_levels(info.schema_elements);
+    if (!leaves.ok()) {
+      add_readiness_blocker(&readiness,
+                            "empty file schema is not materializable yet");
+    } else {
+      for (const auto &leaf : leaves.ValueOrDie()) {
+        std::string label;
+        for (std::size_t i = 0; i < leaf.path.size(); ++i) {
+          if (i > 0) {
+            label.push_back('.');
+          }
+          label += leaf.path[i];
+        }
+        if (label.empty()) {
+          label = "<unknown>";
+        }
+        if (leaf.path.size() != 1) {
+          add_readiness_blocker(
+              &readiness, label + ": nested path is not materializable yet");
+        }
+        if (leaf.max_repetition_level != 0) {
+          add_readiness_blocker(&readiness, label + ": repeated levels are not "
+                                                    "materializable yet");
+        }
+        if (leaf.native_arrow_format.empty()) {
+          add_readiness_blocker(
+              &readiness, label + ": native Arrow format was not planned");
+        }
+      }
+    }
   }
 
   for (std::size_t row_group_index = 0;
@@ -3921,6 +3998,7 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
   if (column.native_read_value_buffer_kind != "fixed_width" &&
       column.native_read_value_buffer_kind != "plain_byte_array" &&
       column.native_read_value_buffer_kind != "dictionary_byte_array" &&
+      column.native_read_value_buffer_kind != "dictionary_fixed_width" &&
       column.native_read_value_buffer_kind != "delta_binary_packed" &&
       column.native_read_value_buffer_kind != "delta_length_byte_array" &&
       column.native_read_value_buffer_kind != "byte_stream_split" &&
@@ -3953,6 +4031,15 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
           page.value_encoding != kEncodingRleDictionary) {
         return sanitize::Status::NotImplemented(
             "native Parquet reader: unsupported dictionary page");
+      }
+      continue;
+    }
+    if (column.native_read_value_buffer_kind == "dictionary_fixed_width") {
+      if (column.decoded_dictionary_fixed_width_values.empty() ||
+          page.value_encoding != kEncodingRleDictionary ||
+          column.native_read_value_width_bytes <= 0) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: unsupported fixed-width dictionary page");
       }
       continue;
     }
@@ -4691,6 +4778,133 @@ sanitize::Status materialize_dictionary_byte_array_column(
   return {};
 }
 
+sanitize::Status materialize_dictionary_fixed_width_column(
+    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
+    NativeParquetChildArray *out) {
+  if (!out || row_count < 0 ||
+      row_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid fixed-width dictionary row count");
+  }
+  const auto width = column.native_read_value_width_bytes;
+  if (width <= 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: fixed-width dictionary width is invalid");
+  }
+  if (column.decoded_dictionary_fixed_width_values.empty()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: missing fixed-width dictionary values");
+  }
+  if (column.decoded_dictionary_fixed_width_values.size() %
+          static_cast<std::size_t>(width) !=
+      0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: fixed-width dictionary payload is misaligned");
+  }
+  const auto dictionary_value_count =
+      column.decoded_dictionary_fixed_width_values.size() /
+      static_cast<std::size_t>(width);
+  if (dictionary_value_count >
+      static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: fixed-width dictionary is too large");
+  }
+  const auto value_bytes =
+      static_cast<std::uint64_t>(row_count) * static_cast<std::uint64_t>(width);
+  if (value_bytes >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: fixed-width dictionary value buffer is too "
+        "large");
+  }
+  out->values.assign(static_cast<std::size_t>(value_bytes), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+  }
+
+  DictionaryPageState dictionary;
+  dictionary.decoded = true;
+  dictionary.value_count = static_cast<std::int32_t>(dictionary_value_count);
+  dictionary.fixed_width_values = column.decoded_dictionary_fixed_width_values;
+
+  for (const auto &span : column.native_read_page_spans) {
+    if (span.page_index < 0 ||
+        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid fixed-width dictionary page span "
+          "index");
+    }
+    const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
+    if (!page.has_value_encoding ||
+        page.value_encoding != kEncodingRleDictionary) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: expected RLE fixed-width dictionary data "
+          "page");
+    }
+    std::string payload;
+    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid fixed-width dictionary value payload "
+          "offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    std::vector<std::uint32_t> indices;
+    std::int32_t index_bit_width = 0;
+    SAN_ASSIGN_OR_RAISE(
+        const auto decoded_indices,
+        decode_rle_dictionary_indices(values, dictionary, span.non_null_count,
+                                      nullptr, &indices, &index_bit_width));
+    if (decoded_indices != span.non_null_count ||
+        static_cast<std::size_t>(decoded_indices) != indices.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: fixed-width dictionary index count mismatch");
+    }
+    std::size_t index_offset = 0;
+    for (std::int32_t row = 0; row < span.row_count; ++row) {
+      const auto global_row = span.first_row_index + row;
+      if (global_row < 0 || global_row >= row_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: fixed-width dictionary page row span "
+            "exceeds row group");
+      }
+      const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      if (valid) {
+        if (index_offset >= indices.size()) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: missing fixed-width dictionary index");
+        }
+        const auto dictionary_index = indices[index_offset++];
+        if (dictionary_index >= dictionary_value_count) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: fixed-width dictionary index out of "
+              "range");
+        }
+        const auto source_offset = static_cast<std::size_t>(dictionary_index) *
+                                   static_cast<std::size_t>(width);
+        auto *target =
+            out->values.data() + static_cast<std::size_t>(global_row) *
+                                     static_cast<std::size_t>(width);
+        std::memcpy(target,
+                    column.decoded_dictionary_fixed_width_values.data() +
+                        source_offset,
+                    static_cast<std::size_t>(width));
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, global_row);
+        }
+      }
+    }
+    if (index_offset != indices.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing fixed-width dictionary indices");
+    }
+  }
+  return {};
+}
+
 sanitize::Status build_native_schema(const FooterInfo &footer,
                                      ArrowSchema *out) {
   if (!out) {
@@ -4705,20 +4919,47 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
   const RowGroupInfo *row_group =
       footer.row_groups.empty() ? nullptr : &footer.row_groups.front();
   const auto column_count = row_group ? row_group->columns.size() : 0;
-  state->columns.resize(column_count);
-  state->children.reserve(column_count);
-  for (std::size_t i = 0; i < column_count; ++i) {
-    const auto &column = row_group->columns[i];
-    SAN_RETURN_NOT_OK(validate_native_plain_column(column));
+
+  std::vector<LeafLevelInfo> empty_file_leaves;
+  if (!row_group) {
+    SAN_ASSIGN_OR_RAISE(empty_file_leaves,
+                        schema_leaf_levels(footer.schema_elements));
+  }
+
+  const auto output_column_count =
+      row_group ? column_count : empty_file_leaves.size();
+  state->columns.resize(output_column_count);
+  state->children.reserve(output_column_count);
+  for (std::size_t i = 0; i < output_column_count; ++i) {
+    std::string name;
+    std::string format;
+    std::int16_t max_definition_level = 0;
+    if (row_group) {
+      const auto &column = row_group->columns[i];
+      SAN_RETURN_NOT_OK(validate_native_plain_column(column));
+      name = column.path_in_schema.empty() ? "" : column.path_in_schema[0];
+      format = column.native_arrow_format;
+      max_definition_level = column.max_definition_level;
+    } else {
+      const auto &leaf = empty_file_leaves[i];
+      if (leaf.path.size() != 1 || leaf.max_repetition_level != 0 ||
+          leaf.native_arrow_format.empty()) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: empty file schema is not materializable");
+      }
+      name = leaf.path[0];
+      format = leaf.native_arrow_format;
+      max_definition_level = leaf.max_definition_level;
+    }
+
     auto &child = state->columns[i];
-    child.name = column.path_in_schema.empty() ? "" : column.path_in_schema[0];
-    child.format = column.native_arrow_format;
+    child.name = std::move(name);
+    child.format = std::move(format);
     sanitize::internal::cdata_stream::clear_schema(&child.schema);
     child.schema.format = child.format.c_str();
     child.schema.name = child.name.c_str();
     child.schema.metadata = nullptr;
-    child.schema.flags =
-        column.max_definition_level > 0 ? ARROW_FLAG_NULLABLE : 0;
+    child.schema.flags = max_definition_level > 0 ? ARROW_FLAG_NULLABLE : 0;
     child.schema.n_children = 0;
     child.schema.children = nullptr;
     child.schema.dictionary = nullptr;
@@ -4824,6 +5065,14 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
       child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
       child.buffers[2] = child.values.empty() ? nullptr : child.values.data();
       child.array.n_buffers = 3;
+    } else if (column.native_read_value_buffer_kind ==
+               "dictionary_fixed_width") {
+      SAN_RETURN_NOT_OK(materialize_dictionary_fixed_width_column(
+          file, column, row_group.num_rows, &child));
+      child.buffers[0] =
+          child.validity.empty() ? nullptr : child.validity.data();
+      child.buffers[1] = child.values.empty() ? nullptr : child.values.data();
+      child.array.n_buffers = 2;
     } else {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: unsupported value buffer kind");
@@ -5332,10 +5581,6 @@ sanitize::Result<ArrowArrayStream *>
 make_arrow_stream(const std::string &path) {
   FooterInfo info;
   SAN_ASSIGN_OR_RAISE(info, read_footer_info(path));
-  if (info.row_groups.empty()) {
-    return sanitize::Status::NotImplemented(
-        "native Parquet reader: empty files without row groups use PyArrow");
-  }
   const auto readiness = native_reader_readiness(info);
   if (!readiness.ready) {
     std::string message = "native Parquet reader: file is not ready";
