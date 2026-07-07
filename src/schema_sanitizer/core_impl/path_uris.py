@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 
@@ -22,6 +22,12 @@ def local_path_from_file_uri(uri: str) -> str:
     parsed = urlparse(uri)
     if parsed.scheme.lower() != "file":
         raise ValueError(f"not a file URI: {uri!r}")
+    if (
+        os.name == "nt"
+        and parsed.path.startswith("/")
+        and looks_like_windows_drive_path(parsed.path[1:3])
+    ):
+        return unquote(parsed.path[1:]).replace("/", "\\")
     if parsed.netloc and parsed.netloc.lower() != "localhost":
         return url2pathname(f"//{parsed.netloc}{parsed.path}")
     return url2pathname(parsed.path)

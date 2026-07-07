@@ -65,6 +65,20 @@ def test_local_path_uri_helpers_do_not_reject_windows_drive_paths() -> None:
         local_path_or_reject_remote("s3://bucket/out.jsonl", remote_error="remote")
 
 
+def test_local_path_from_file_uri_normalizes_windows_drive_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Windows file URI drive paths do not keep a leading slash."""
+    from schema_sanitizer.core_impl import path_uris
+
+    monkeypatch.setattr(path_uris.os, "name", "nt")
+
+    assert (
+        path_uris.local_path_from_file_uri("file:///C:/Users/runner/AppData/out%20file.parquet")
+        == r"C:\Users\runner\AppData\out file.parquet"
+    )
+
+
 def test_file_uri_auto_format_uses_platform_path_normalization() -> None:
     """Verify file URI format detection uses native path normalization."""
     data, source, format_name = _resolve_source_and_format(

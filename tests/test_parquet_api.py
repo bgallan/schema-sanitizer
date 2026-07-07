@@ -3931,7 +3931,7 @@ def test_native_parquet_file_uri_uses_native_route(tmp_path: Path) -> None:
     src = tmp_path / "src.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(_sample_table(), src)
-    ss.to_parquet(src, out, input_format="parquet")
+    ss.to_parquet(src, out, input_format="parquet", parquet_compression="uncompressed")
 
     result = read_test_parquet(out.as_uri())
 
