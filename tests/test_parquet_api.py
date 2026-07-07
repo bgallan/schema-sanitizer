@@ -1166,11 +1166,15 @@ def test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repe
 
 
 @_requires_pyarrow
-def test_native_parquet_footer_info_blocks_empty_complex_repeated_file_readiness(
+def test_native_parquet_footer_info_accepts_empty_list_struct_list_chain_readiness(
     tmp_path: Path,
 ) -> None:
-    """Verify empty unsupported repeated files do not claim native readiness."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    """Verify empty list-struct nested-list files can use the native reader."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
     from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
 
     require_native()
@@ -1190,11 +1194,16 @@ def test_native_parquet_footer_info_blocks_empty_complex_repeated_file_readiness
     assert info is not None
     assert info["num_rows"] == 0
     assert info["row_group_count"] == 0
-    assert info["native_reader_ready"] == 0
-    assert any(
-        "nested path is not materializable yet" in blocker
-        for blocker in info["native_reader_blockers"]
-    )
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.num_rows == 0
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -3065,6 +3074,66 @@ def test_native_parquet_stream_materializes_list_struct_with_inner_list(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_list_struct_with_inner_list_chain(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes list structs with nested list children."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-struct-inner-list-chain.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [{"ids": [[1, 2], []], "name": "a"}],
+                    None,
+                    [{"ids": None, "name": None}, {"ids": [[None, 3]], "name": "b"}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("ids", pa.list_(pa.list_(pa.int64()))),
+                            pa.field("name", pa.string()),
+                        ]
+                    )
+                ),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["items", "list", "element", "ids", "list", "element", "list", "element"],
+        ["items", "list", "element", "name"],
+    ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_map_with_list_values(
     tmp_path: Path,
 ) -> None:
@@ -3106,6 +3175,55 @@ def test_native_parquet_stream_materializes_map_with_list_values(
     assert columns[0]["repeated_level_offsets"] == [0, 2, 2, 3]
     assert columns[1]["repeated_level_offsets"] == [0, 2, 2, 3]
     assert columns[1]["nested_repeated_level_offsets"] == [0, 2, 2, 2]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_map_with_list_chain_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes maps whose values are nested lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map-list-chain-values.parquet"
+    table = pa.table(
+        {
+            "labels": pa.array(
+                [[("a", [[1, 2], []])], None, [("b", None), ("c", [[None, 3]])]],
+                type=pa.map_(pa.string(), pa.list_(pa.list_(pa.int64()))),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["labels", "key_value", "key"],
+        ["labels", "key_value", "value", "list", "element", "list", "element"],
+    ]
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)

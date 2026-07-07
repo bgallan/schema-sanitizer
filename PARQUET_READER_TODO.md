@@ -48,6 +48,8 @@ replacement. Remaining work:
    - [x] Native materialization for top-level list-of-map with scalar key/value leaves.
    - [x] Native materialization for top-level list-of-struct with scalar list children.
    - [x] Native materialization for top-level map with scalar list values.
+   - [x] Native materialization for top-level list-of-struct with scalar list-chain children.
+   - [x] Native materialization for top-level map with scalar list-chain values.
    - Native materialization for arbitrary recursive mixed repeated struct/map shapes.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
