@@ -30,6 +30,7 @@ replacement. Remaining work:
    - [x] Simple top-level integer lists with DELTA_BINARY_PACKED elements.
    - [x] Simple top-level string lists with DELTA_LENGTH_BYTE_ARRAY elements.
    - [x] Simple top-level fixed-width lists with PLAIN elements.
+   - [x] Simple top-level dictionary-encoded scalar lists.
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
