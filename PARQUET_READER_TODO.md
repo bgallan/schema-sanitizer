@@ -39,8 +39,9 @@ replacement. Remaining work:
    - [x] Simple top-level lists across multiple data pages.
    - [x] Empty files with simple top-level list schemas.
    - [x] Simple top-level scalar lists.
-   - [x] Production fallback for complex/nested lists (list of struct/list/map).
-   - Native materialization for complex/nested lists.
+   - [x] Production fallback for complex/nested lists (list/list, list/map, nested list leaves).
+   - [x] Native materialization for top-level list-of-struct with scalar leaves.
+   - Native materialization for nested list/list-map shapes.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.

@@ -1008,7 +1008,7 @@ def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(
 
 
 @_requires_pyarrow
-def test_native_parquet_stream_reads_empty_simple_list_file_schema(
+def test_native_parquet_stream_reads_empty_supported_list_file_schema(
     tmp_path: Path,
 ) -> None:
     """Verify native reader handles empty files with supported list schemas."""
@@ -1021,7 +1021,25 @@ def test_native_parquet_stream_reads_empty_simple_list_file_schema(
 
     require_native()
     path = tmp_path / "empty-list.parquet"
-    table = pa.table({"scores": pa.array([], type=pa.list_(pa.int64()))})
+    table = pa.Table.from_pylist(
+        [],
+        schema=pa.schema(
+            [
+                pa.field("scores", pa.list_(pa.int64())),
+                pa.field(
+                    "items",
+                    pa.list_(
+                        pa.struct(
+                            [
+                                pa.field("score", pa.int64()),
+                                pa.field("label", pa.string()),
+                            ]
+                        )
+                    ),
+                ),
+            ]
+        ),
+    )
     write_parquet_native_first_stream(
         pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
         path,
@@ -1109,7 +1127,7 @@ def test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repe
     schema = pa.schema(
         [
             pa.field("id", pa.int64()),
-            pa.field("items", pa.list_(pa.struct([pa.field("score", pa.int64())]))),
+            pa.field("items", pa.list_(pa.struct([pa.field("ids", pa.list_(pa.int64()))]))),
         ]
     )
     table = pa.Table.from_pylist([], schema=schema)
@@ -1123,7 +1141,7 @@ def test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repe
 
     assert info is not None
     assert info["native_reader_ready"] == 0
-    assert any("items.list.element.score" in blocker for blocker in info["native_reader_blockers"])
+    assert any("items.list.element.ids" in blocker for blocker in info["native_reader_blockers"])
 
     factory = open_parquet_record_batch_stream_factory(
         path,
@@ -1149,7 +1167,9 @@ def test_native_parquet_footer_info_blocks_empty_complex_repeated_file_readiness
 
     require_native()
     path = tmp_path / "empty-complex-repeated.parquet"
-    schema = pa.schema([pa.field("items", pa.list_(pa.struct([pa.field("score", pa.int64())])))])
+    schema = pa.schema(
+        [pa.field("items", pa.list_(pa.struct([pa.field("ids", pa.list_(pa.int64()))])))]
+    )
     table = pa.Table.from_pylist([], schema=schema)
     write_parquet_native_first_stream(
         pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
@@ -2605,27 +2625,74 @@ def test_native_parquet_stream_materializes_dictionary_integer_lists(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_list_of_struct_scalar_leaves(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes top-level list structs with scalar leaves."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-struct.parquet"
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [None, {"score": 1, "label": "a"}, {"score": None, "label": "b"}],
+                    None,
+                    [],
+                    [{"score": 3, "label": None}],
+                ],
+                type=pa.list_(
+                    pa.struct(
+                        [
+                            pa.field("score", pa.int64()),
+                            pa.field("label", pa.string()),
+                        ]
+                    )
+                ),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    columns = info["row_groups"][0]["columns"]
+    assert [column["path_in_schema"] for column in columns] == [
+        ["items", "list", "element", "score"],
+        ["items", "list", "element", "label"],
+    ]
+    assert columns[0]["repeated_level_offsets"] == [0, 3, 3, 3, 4]
+    assert columns[1]["repeated_level_offsets"] == [0, 3, 3, 3, 4]
+    assert columns[0]["native_read_total_nulls"] == 2
+    assert columns[1]["native_read_total_nulls"] == 2
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 @pytest.mark.parametrize(
     ("name", "table"),
     [
-        (
-            "list_struct",
-            pa.table(
-                {
-                    "items": pa.array(
-                        [[{"score": 1, "label": "a"}, {"score": None, "label": "b"}], None, []],
-                        type=pa.list_(
-                            pa.struct(
-                                [
-                                    pa.field("score", pa.int64()),
-                                    pa.field("label", pa.string()),
-                                ]
-                            )
-                        ),
-                    )
-                }
-            ),
-        ),
         (
             "list_list",
             pa.table(
@@ -2673,7 +2740,7 @@ def test_complex_nested_lists_use_pyarrow_fallback(
     name: str,
     table: pa.Table,
 ) -> None:
-    """Verify complex/nested list shapes stay production-readable through fallback."""
+    """Verify unsupported complex/nested list shapes remain readable through fallback."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
@@ -2721,12 +2788,11 @@ def test_complex_nested_lists_use_pyarrow_fallback(
 
 
 @_requires_pyarrow
-def test_complex_nested_list_projection_uses_pyarrow_fallback(
+def test_list_struct_projection_uses_native_reader(
     tmp_path: Path,
 ) -> None:
-    """Verify projected complex list reads fall back without losing schema."""
+    """Verify projected list structs with scalar leaves use the native reader."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
-        last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
         open_parquet_record_batch_stream_factory,
     )
@@ -2772,11 +2838,7 @@ def test_complex_nested_list_projection_uses_pyarrow_fallback(
 
     assert out.schema.equals(expected.schema)
     assert out.to_pylist() == expected.to_pylist()
-    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
-    diagnostics = last_parquet_native_reader_diagnostics()
-    assert diagnostics["attempted"] is True
-    assert diagnostics["ready"] is False
-    assert diagnostics["reason"] == "not_ready"
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -2989,12 +3051,12 @@ def test_native_parquet_stream_projects_simple_list_with_unsupported_unprojected
         [
             pa.field("id", pa.int64()),
             pa.field("scores", pa.list_(pa.int64())),
-            pa.field("items", pa.list_(pa.struct([pa.field("score", pa.int64())]))),
+            pa.field("items", pa.list_(pa.struct([pa.field("ids", pa.list_(pa.int64()))]))),
         ]
     )
     table = pa.Table.from_pylist(
         [
-            {"id": 1, "scores": [1, 2], "items": [{"score": 10}]},
+            {"id": 1, "scores": [1, 2], "items": [{"ids": [10]}]},
             {"id": 2, "scores": None, "items": []},
             {"id": 3, "scores": [3], "items": None},
         ],
@@ -3010,7 +3072,7 @@ def test_native_parquet_stream_projects_simple_list_with_unsupported_unprojected
     info = native_parquet_footer_info(path)
     assert info is not None
     assert info["native_reader_ready"] == 0
-    assert any("items.list.element.score" in blocker for blocker in info["native_reader_blockers"])
+    assert any("items.list.element.ids" in blocker for blocker in info["native_reader_blockers"])
 
     factory = open_parquet_record_batch_stream_factory(
         path,
