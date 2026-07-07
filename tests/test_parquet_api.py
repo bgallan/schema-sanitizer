@@ -1039,6 +1039,10 @@ def test_native_parquet_stream_reads_empty_supported_list_file_schema(
                 ),
                 pa.field("nested_scores", pa.list_(pa.list_(pa.int64()))),
                 pa.field("deep_scores", pa.list_(pa.list_(pa.list_(pa.int64())))),
+                pa.field(
+                    "very_deep_scores",
+                    pa.list_(pa.list_(pa.list_(pa.list_(pa.int64())))),
+                ),
                 pa.field("labels", pa.map_(pa.string(), pa.int64())),
                 pa.field("nested_labels", pa.list_(pa.map_(pa.string(), pa.int64()))),
             ]
@@ -2919,6 +2923,74 @@ def test_native_parquet_stream_materializes_list_of_list_of_list_scalar_values(
     assert column["deep_repeated_level_validity_hex_preview"] == ""
     assert column["native_read_arrow_length"] == 4
     assert column["native_read_arrow_null_count"] == 1
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array"),
+    [
+        (
+            "list4-int",
+            pa.array(
+                [
+                    [[[[1, 2], []], None], []],
+                    None,
+                    [],
+                    [[[[None, 3]]]],
+                ],
+                type=pa.list_(pa.list_(pa.list_(pa.list_(pa.int64())))),
+            ),
+        ),
+        (
+            "list5-string",
+            pa.array(
+                [
+                    [[[[["a"], []]]]],
+                    None,
+                    [],
+                    [[[[[None, "b"]]]]],
+                ],
+                type=pa.list_(pa.list_(pa.list_(pa.list_(pa.list_(pa.string()))))),
+            ),
+        ),
+    ],
+)
+def test_native_parquet_stream_materializes_arbitrary_depth_list_chains(
+    tmp_path: Path,
+    name: str,
+    array: pa.Array,
+) -> None:
+    """Verify native reader materializes scalar list chains deeper than three."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"native-{name}.parquet"
+    table = pa.table({"items": array})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)

@@ -124,6 +124,16 @@ struct NativeReadPageSpanInfo {
   std::string value_buffer_kind;
 };
 
+struct RepeatedLevelLayoutInfo {
+  bool decoded = false;
+  std::int64_t row_count = 0;
+  std::int64_t null_count = 0;
+  std::int64_t element_count = 0;
+  std::int64_t non_null_value_count = 0;
+  std::vector<std::int32_t> offsets;
+  std::vector<std::uint8_t> validity_bitmap;
+};
+
 struct ColumnChunkInfo {
   std::vector<std::string> path_in_schema;
   bool has_physical_type = false;
@@ -202,6 +212,7 @@ struct ColumnChunkInfo {
   std::int64_t deep_repeated_level_non_null_value_count = 0;
   std::vector<std::int32_t> deep_repeated_level_offsets;
   std::vector<std::uint8_t> deep_repeated_level_validity_bitmap;
+  std::vector<RepeatedLevelLayoutInfo> repeated_level_layouts;
 };
 
 struct RowGroupInfo {
