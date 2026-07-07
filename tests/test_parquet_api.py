@@ -2026,6 +2026,81 @@ def test_native_parquet_stream_materializes_simple_boolean_lists(
 
 
 @_requires_pyarrow
+@pytest.mark.parametrize(
+    ("name", "array"),
+    [
+        (
+            "int",
+            pa.array(
+                [[1, None, 2], None, [], [None, 3]],
+                type=pa.list_(pa.int64()),
+            ),
+        ),
+        (
+            "string",
+            pa.array(
+                [["a", None, "b"], None, [], [None, "c"]],
+                type=pa.list_(pa.string()),
+            ),
+        ),
+        (
+            "bool",
+            pa.array(
+                [[True, None, False], None, [], [None, True]],
+                type=pa.list_(pa.bool_()),
+            ),
+        ),
+    ],
+)
+def test_native_parquet_stream_materializes_nullable_list_elements(
+    tmp_path: Path,
+    name: str,
+    array: pa.Array,
+) -> None:
+    """Verify native list reconstruction preserves null child elements."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / f"native-nullable-{name}-list.parquet"
+    table = pa.table({"items": array})
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    column = info["row_groups"][0]["columns"][0]
+    assert column["max_definition_level"] == 3
+    assert column["native_read_total_nulls"] == 2
+    assert column["repeated_level_offsets"] == [0, 3, 3, 3, 5]
+    assert column["pages"][0]["decoded_definition_level_values"] == [
+        3,
+        2,
+        3,
+        0,
+        1,
+        2,
+        3,
+    ]
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_footer_info_plans_byte_stream_split_float_lists(
     tmp_path: Path,
 ) -> None:
