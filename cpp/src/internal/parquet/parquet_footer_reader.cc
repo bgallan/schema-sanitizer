@@ -3262,7 +3262,8 @@ std::int32_t value_width_bytes_for_page(const ColumnChunkInfo &column,
 }
 
 std::int32_t arrow_buffer_count_for_value_kind(std::string_view kind) {
-  if (kind == "plain_byte_array" || kind == "dictionary_byte_array") {
+  if (kind == "plain_byte_array" || kind == "dictionary_byte_array" ||
+      kind == "delta_length_byte_array") {
     return 3;
   }
   if (kind == "fixed_width" || kind == "delta_binary_packed" ||
@@ -3905,7 +3906,8 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
   if (column.native_read_value_buffer_kind != "fixed_width" &&
       column.native_read_value_buffer_kind != "plain_byte_array" &&
       column.native_read_value_buffer_kind != "dictionary_byte_array" &&
-      column.native_read_value_buffer_kind != "delta_binary_packed") {
+      column.native_read_value_buffer_kind != "delta_binary_packed" &&
+      column.native_read_value_buffer_kind != "delta_length_byte_array") {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: unsupported value encoding");
   }
@@ -3941,6 +3943,14 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
       if (page.value_encoding != kEncodingDeltaBinaryPacked) {
         return sanitize::Status::NotImplemented(
             "native Parquet reader: unsupported DELTA_BINARY_PACKED page");
+      }
+      continue;
+    }
+    if (column.native_read_value_buffer_kind == "delta_length_byte_array") {
+      if (column.physical_type != kPhysicalByteArray ||
+          page.value_encoding != kEncodingDeltaLengthByteArray) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: unsupported DELTA_LENGTH_BYTE_ARRAY page");
       }
       continue;
     }
@@ -4217,6 +4227,147 @@ sanitize::Status materialize_byte_array_column(std::ifstream &file,
   return {};
 }
 
+sanitize::Status materialize_delta_length_byte_array_column(
+    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
+    NativeParquetChildArray *out) {
+  if (!out || row_count < 0 ||
+      row_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid DELTA_LENGTH_BYTE_ARRAY row count");
+  }
+  if (column.physical_type != kPhysicalByteArray) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY requires BYTE_ARRAY");
+  }
+  out->offsets.assign(static_cast<std::size_t>(row_count + 1), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+  }
+  if (column.native_read_materialized_value_bytes < 0 ||
+      static_cast<std::uint64_t>(column.native_read_materialized_value_bytes) >
+          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY buffer is too large");
+  }
+  out->values.reserve(
+      static_cast<std::size_t>(column.native_read_materialized_value_bytes));
+
+  std::int32_t current_offset = 0;
+  std::int64_t next_expected_row = 0;
+  for (const auto &span : column.native_read_page_spans) {
+    if (span.page_index < 0 ||
+        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid DELTA_LENGTH_BYTE_ARRAY page span "
+          "index");
+    }
+    if (span.first_row_index != next_expected_row) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: non-contiguous DELTA_LENGTH_BYTE_ARRAY page "
+          "spans");
+    }
+    const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
+    if (!page.has_value_encoding ||
+        page.value_encoding != kEncodingDeltaLengthByteArray) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: expected DELTA_LENGTH_BYTE_ARRAY data page");
+    }
+    std::string payload;
+    SAN_ASSIGN_OR_RAISE(payload, materialization_payload(file, column, page));
+    if (page.value_payload_offset < 0 ||
+        static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: invalid DELTA_LENGTH_BYTE_ARRAY payload "
+          "offset");
+    }
+    const auto values = std::string_view(payload).substr(
+        static_cast<std::size_t>(page.value_payload_offset));
+    std::vector<std::int32_t> lengths;
+    lengths.reserve(static_cast<std::size_t>(span.non_null_count));
+    std::uint64_t page_value_bytes = 0;
+    SAN_ASSIGN_OR_RAISE(
+        const auto lengths_bytes,
+        decode_delta_binary_packed_stream(
+            values, span.non_null_count,
+            [&](std::int64_t length) -> sanitize::Status {
+              if (length < 0 ||
+                  length > std::numeric_limits<std::int32_t>::max()) {
+                return sanitize::Status::Invalid(
+                    "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY invalid "
+                    "length");
+              }
+              const auto size = static_cast<std::uint64_t>(length);
+              if (page_value_bytes >
+                  std::numeric_limits<std::uint64_t>::max() - size) {
+                return sanitize::Status::Invalid(
+                    "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY length "
+                    "overflow");
+              }
+              page_value_bytes += size;
+              lengths.push_back(static_cast<std::int32_t>(length));
+              return {};
+            }));
+    if (lengths.size() != static_cast<std::size_t>(span.non_null_count) ||
+        lengths_bytes > values.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY length count "
+          "mismatch");
+    }
+    const auto bytes = values.substr(lengths_bytes);
+    if (page_value_bytes != static_cast<std::uint64_t>(bytes.size())) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY byte payload "
+          "mismatch");
+    }
+
+    std::size_t length_offset = 0;
+    std::size_t byte_offset = 0;
+    for (std::int32_t row = 0; row < span.row_count; ++row) {
+      const auto global_row = span.first_row_index + row;
+      if (global_row < 0 || global_row >= row_count) {
+        return sanitize::Status::Invalid("native Parquet reader: "
+                                         "DELTA_LENGTH_BYTE_ARRAY row span "
+                                         "exceeds row group");
+      }
+      const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      if (valid) {
+        if (length_offset >= lengths.size()) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: missing DELTA_LENGTH_BYTE_ARRAY length");
+        }
+        const auto size = static_cast<std::size_t>(lengths[length_offset++]);
+        if (bytes.size() - byte_offset < size) {
+          return sanitize::Status::Invalid("native Parquet reader: truncated "
+                                           "DELTA_LENGTH_BYTE_ARRAY payload");
+        }
+        if (size > static_cast<std::size_t>(
+                       std::numeric_limits<std::int32_t>::max()) ||
+            current_offset > std::numeric_limits<std::int32_t>::max() -
+                                 static_cast<std::int32_t>(size)) {
+          return sanitize::Status::Invalid(
+              "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY offsets exceed "
+              "int32");
+        }
+        out->values.insert(out->values.end(), bytes.data() + byte_offset,
+                           bytes.data() + byte_offset + size);
+        byte_offset += size;
+        current_offset += static_cast<std::int32_t>(size);
+        if (!out->validity.empty()) {
+          set_output_validity_bit(&out->validity, global_row);
+        }
+      }
+      out->offsets[static_cast<std::size_t>(global_row + 1)] = current_offset;
+    }
+    if (length_offset != lengths.size() || byte_offset != bytes.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: trailing DELTA_LENGTH_BYTE_ARRAY values");
+    }
+    next_expected_row += span.row_count;
+  }
+  return {};
+}
+
 sanitize::Status materialize_dictionary_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
     NativeParquetChildArray *out) {
@@ -4427,6 +4578,15 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
       child.array.n_buffers = 2;
     } else if (column.native_read_value_buffer_kind == "plain_byte_array") {
       SAN_RETURN_NOT_OK(materialize_byte_array_column(
+          file, column, row_group.num_rows, &child));
+      child.buffers[0] =
+          child.validity.empty() ? nullptr : child.validity.data();
+      child.buffers[1] = child.offsets.empty() ? nullptr : child.offsets.data();
+      child.buffers[2] = child.values.empty() ? nullptr : child.values.data();
+      child.array.n_buffers = 3;
+    } else if (column.native_read_value_buffer_kind ==
+               "delta_length_byte_array") {
+      SAN_RETURN_NOT_OK(materialize_delta_length_byte_array_column(
           file, column, row_group.num_rows, &child));
       child.buffers[0] =
           child.validity.empty() ? nullptr : child.validity.data();

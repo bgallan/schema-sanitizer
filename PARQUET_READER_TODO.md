@@ -9,7 +9,7 @@ replacement. Remaining work:
    - [x] RLE dictionary byte-array/string pages.
    - RLE dictionary pages for non-byte-array physical types.
    - [x] DELTA_BINARY_PACKED integer pages.
-   - DELTA_LENGTH_BYTE_ARRAY.
+   - [x] DELTA_LENGTH_BYTE_ARRAY byte-array/string pages.
    - BYTE_STREAM_SPLIT.
    - Boolean bit-packed PLAIN values.
 

@@ -670,7 +670,11 @@ def test_native_parquet_footer_info_decodes_delta_length_byte_array_pages(
     tmp_path: Path,
 ) -> None:
     """Verify native footer parsing validates DELTA_LENGTH_BYTE_ARRAY pages."""
-    from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
 
     require_native()
     src = tmp_path / "source.parquet"
@@ -696,6 +700,16 @@ def test_native_parquet_footer_info_decodes_delta_length_byte_array_pages(
     assert page["values_decoded"] == 1
     assert page["values_decode_skipped"] == 0
     assert page["decoded_value_preview"] == values[:8]
+    assert column["native_read_value_buffer_kind"] == "delta_length_byte_array"
+    assert column["native_read_arrow_n_buffers"] == 3
+    assert column["native_read_has_offsets_buffer"] == 1
+    assert page["materialized_value_bytes"] == sum(len(value) for value in values)
+    assert page["materialized_offset_bytes"] == (len(values) + 1) * 4
+
+    factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    assert reader.read_all().column("s").to_pylist() == values
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
