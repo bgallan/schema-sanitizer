@@ -46,7 +46,9 @@ replacement. Remaining work:
    - [x] Native materialization for arbitrary-depth top-level list chains with scalar leaves.
    - [x] Native materialization for top-level map with scalar key/value leaves.
    - [x] Native materialization for top-level list-of-map with scalar key/value leaves.
-   - Native materialization for arbitrary mixed repeated struct/map shapes beyond three repeated levels.
+   - [x] Native materialization for top-level list-of-struct with scalar list children.
+   - [x] Native materialization for top-level map with scalar list values.
+   - Native materialization for arbitrary recursive mixed repeated struct/map shapes.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.
