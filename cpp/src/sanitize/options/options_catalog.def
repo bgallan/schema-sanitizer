@@ -1,0 +1,129 @@
+// Single source of truth for sanitize::Options fields.
+//
+// Include this file multiple times with a macro definition:
+//
+//   #define SCHEMA_SANITIZER_OPTION(type, name, default_expr, group, doc) ...
+//   #define SCHEMA_SANITIZER_OPTION_DEFAULT(type, name, group, doc) ...
+//   #include "sanitize/options/options_catalog.def"
+//   #undef SCHEMA_SANITIZER_OPTION
+//   #undef SCHEMA_SANITIZER_OPTION_DEFAULT
+//
+// Keep option names stable: they are part of the public API.
+//
+// --- Inference: string tokenization and regex fallback
+SCHEMA_SANITIZER_OPTION_DEFAULT(
+    std::vector<std::string>, true_tokens, "inference",
+    "String tokens interpreted as boolean true (ASCII case-folded) during "
+    "schema inference and materialization.")
+SCHEMA_SANITIZER_OPTION_DEFAULT(
+    std::vector<std::string>, false_tokens, "inference",
+    "String tokens interpreted as boolean false (ASCII case-folded) during "
+    "schema inference and materialization.")
+SCHEMA_SANITIZER_OPTION_DEFAULT(
+    std::vector<std::string>, timestamp_regexps, "inference",
+    "Additional timestamp regex patterns used during schema inference and "
+    "materialization. If capture groups are present, groups 1..6 map to "
+    "Y,m,d,H,M,S; optional 7=fraction, 8=timezone.")
+SCHEMA_SANITIZER_OPTION_DEFAULT(
+    std::vector<std::string>, date_regexps, "inference",
+    "Additional date regex patterns used during schema inference and "
+    "materialization. If capture groups are present, groups 1..3 map to Y,m,d.")
+SCHEMA_SANITIZER_OPTION_DEFAULT(
+    std::vector<std::string>, time_regexps, "inference",
+    "Additional time regex patterns used during schema inference and "
+    "materialization. If capture groups are present, groups 1..3 map to H,M,S.")
+
+// --- Inference: scalar detection
+SCHEMA_SANITIZER_OPTION(
+    bool, parse_iso_timestamps, false, "inference",
+    "Parse ISO timestamps from strings during schema inference and "
+    "materialization.")
+SCHEMA_SANITIZER_OPTION(
+    bool, parse_iso_dates, false, "inference",
+    "Parse ISO dates from strings during schema inference and materialization.")
+SCHEMA_SANITIZER_OPTION(
+    bool, parse_iso_times, false, "inference",
+    "Parse ISO times from strings during schema inference and materialization.")
+SCHEMA_SANITIZER_OPTION(
+    bool, parse_integers, false, "inference",
+    "Parse integers from strings during schema inference and materialization.")
+SCHEMA_SANITIZER_OPTION(
+    bool, parse_floats, false, "inference",
+    "Parse floats from strings during schema inference and materialization.")
+SCHEMA_SANITIZER_OPTION(
+    std::string, parse_float_decimal_separator, std::string("."),
+    "inference", "Decimal separator used when parsing floats from strings.")
+SCHEMA_SANITIZER_OPTION(
+    std::string, parse_float_thousands_separator, std::string(","),
+    "inference",
+    "Thousands separator used when parsing grouped floats from strings.")
+
+// Maximum Arrow container depth for object/array expansion.
+SCHEMA_SANITIZER_OPTION(
+    int32_t, arrow_max_depth, 32, "inference",
+    "Maximum Arrow container depth for object/array expansion. Struct and list "
+    "containers count; scalar leaves and top-level field wrappers do not.")
+
+// Maximum Parquet/BigQuery RECORD depth for object expansion.
+SCHEMA_SANITIZER_OPTION(
+    int32_t, parquet_max_depth, 15, "inference",
+    "Maximum Parquet/BigQuery RECORD depth for object expansion. Struct "
+    "containers count; list containers and scalar leaves do not.")
+
+// For scalar values in a STRUCT, wrap them as {default_key_name: scalar}.
+SCHEMA_SANITIZER_OPTION(std::string, default_key_name,
+                        std::string("default_key"), "inference",
+                        "Key name used when wrapping scalars into objects.")
+
+// --- Schema contract / evolution
+SCHEMA_SANITIZER_OPTION(
+    std::optional<sanitize::LogicalSchema>, arrow_schema_contract, std::nullopt,
+    "schema", "Internal Arrow schema contract derived from schema_registry.")
+SCHEMA_SANITIZER_OPTION(
+    sanitize::SchemaEvolutionMode, schema_evolution,
+    sanitize::SchemaEvolutionMode::kAdditive, "schema",
+    "How to reconcile inferred data with the active schema contract.")
+SCHEMA_SANITIZER_OPTION(sanitize::FieldOrderPolicy, field_order,
+                        sanitize::FieldOrderPolicy::kAlphabetically, "schema",
+                        "Field ordering policy for the output schema.")
+SCHEMA_SANITIZER_OPTION(
+    std::string, field_name_policy, std::string("lower_alpha"), "schema",
+    "Output field-name policy. lower_alpha keeps only lowercase a-z "
+    "characters and adds deterministic collision suffixes; lower_snake keeps "
+    "lowercase a-z, numbers, and underscores; preserve keeps source names.")
+SCHEMA_SANITIZER_OPTION(
+    std::string, timestamp_precision, std::string("TIMESTAMP_MICROS"),
+    "schema",
+    "Output timestamp precision. Accepted values are TIMESTAMP_MILLIS, "
+    "TIMESTAMP_MICROS, and TIMESTAMP_NANOS.")
+
+// --- Input I/O
+SCHEMA_SANITIZER_OPTION(int64_t, io_chunk_bytes, (1LL * 1024 * 1024), "io",
+                        "Chunk size for streaming reads (bytes).")
+SCHEMA_SANITIZER_OPTION(
+    std::string, input_text_encoding, std::string("utf-8"), "io",
+    "Character encoding used to decode text bytes for CSV/JSON ingestion.")
+
+// --- XML parsing
+SCHEMA_SANITIZER_OPTION(
+    std::string, xml_row_tag, std::string(""), "xml",
+    "Direct child element tag to stream as XML rows. Empty means the whole XML "
+    "document is treated as one row.")
+
+// --- CSV parsing
+SCHEMA_SANITIZER_OPTION(bool, csv_has_header, true, "csv",
+                        "If true, treat the first CSV row as a header.")
+SCHEMA_SANITIZER_OPTION(std::string, csv_delimiter, std::string(","), "csv",
+                        "CSV delimiter string (usually a single character).")
+
+// --- Errors
+SCHEMA_SANITIZER_OPTION(sanitize::OnErrorPolicy, on_error,
+                        sanitize::OnErrorPolicy::kEmitNullRow, "errors",
+                        "Row-level error handling policy.")
+
+// --- Performance
+// Single per-batch memory budget in bytes. <= 0 uses default batch sizing. This
+// is used to derive internal inference read sizes and output batch sizes.
+SCHEMA_SANITIZER_OPTION(int64_t, memory_limit_bytes, -1, "performance",
+                        "Per-batch memory budget in bytes for inference reads "
+                        "and produced batches (<=0 uses defaults).")

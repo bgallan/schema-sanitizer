@@ -1,0 +1,224 @@
+/*
+ * Python ABI3 reader-backed chunk source.
+ *
+ * This file adapts seekable Python byte readers to the native replayable
+ * ChunkSource interface used by CSV, JSON, XML, and Parquet frontends.
+ */
+#include "internal/abi/core_abi3_internal.hh"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include "sanitize/core/status.hh"
+#include "sanitize/ingest/chunk_source.hh"
+
+namespace core_abi3_internal {
+namespace {
+
+/// Convert the active Python exception into a native invalid status.
+sanitize::Status python_error_status(const char *where) {
+  PyObject *type = nullptr;
+  PyObject *value = nullptr;
+  PyObject *traceback = nullptr;
+  PyErr_Fetch(&type, &value, &traceback);
+  PyErr_NormalizeException(&type, &value, &traceback);
+
+  std::string msg(where ? where : "python stream");
+  msg += ": ";
+  if (value) {
+    PyObject *text = PyObject_Str(value);
+    if (text) {
+      Py_ssize_t n = 0;
+      const char *s = PyUnicode_AsUTF8AndSize(text, &n);
+      if (s && n > 0) {
+        msg.append(s, static_cast<std::size_t>(n));
+      } else {
+        msg += "Python stream error";
+      }
+      Py_DECREF(text);
+    } else {
+      PyErr_Clear();
+      msg += "Python stream error";
+    }
+  } else {
+    msg += "Python stream error";
+  }
+
+  Py_XDECREF(type);
+  Py_XDECREF(value);
+  Py_XDECREF(traceback);
+  return sanitize::Status::Invalid(msg);
+}
+
+/// Decrement a Python object reference from a shared_ptr deleter under the GIL.
+void decref_python_object_with_gil(const void *p) {
+  if (!p) {
+    return;
+  }
+  if (!Py_IsInitialized()) {
+    return;
+  }
+  PyGILState_STATE gil = PyGILState_Ensure();
+  Py_DECREF(reinterpret_cast<PyObject *>(const_cast<void *>(p)));
+  PyGILState_Release(gil);
+}
+
+/// Adapts a seekable Python byte reader to the native chunk-source interface.
+class PythonReaderChunkSource final : public sanitize::ChunkSource {
+public:
+  /// Retain the Python reader for the lifetime of this chunk source.
+  explicit PythonReaderChunkSource(PyObject *reader) : reader_(reader) {
+    Py_INCREF(reader_);
+    read_ = PyObject_GetAttrString(reader_, "read");
+    if (!read_) {
+      PyErr_Clear();
+    }
+    seek_ = PyObject_GetAttrString(reader_, "seek");
+    if (!seek_) {
+      PyErr_Clear();
+    }
+  }
+
+  /// Release the retained Python reader while holding the GIL.
+  ~PythonReaderChunkSource() override {
+    if (!reader_ || !Py_IsInitialized()) {
+      return;
+    }
+    PyGILState_STATE gil = PyGILState_Ensure();
+    Py_XDECREF(seek_);
+    Py_XDECREF(read_);
+    Py_DECREF(reader_);
+    PyGILState_Release(gil);
+  }
+
+  /// Seek the Python reader back to the beginning for a new native pass.
+  sanitize::Status Reset() override {
+    if (!seek_) {
+      return sanitize::Status::Invalid(
+          "Python stream reset failed: missing seek method");
+    }
+    PyGILState_STATE gil = PyGILState_Ensure();
+    PyObject *result = PyObject_CallFunction(seek_, "i", 0);
+    if (!result) {
+      auto status = python_error_status("Python stream reset failed");
+      PyGILState_Release(gil);
+      return status;
+    }
+    Py_DECREF(result);
+    PyGILState_Release(gil);
+    pos_ = 0;
+    full_view_.reset();
+    return sanitize::Status::OK();
+  }
+
+  /// Read the next bounded byte chunk from the Python reader.
+  sanitize::Result<sanitize::Chunk> NextChunk(int64_t max_bytes) override {
+    if (max_bytes <= 0) {
+      return sanitize::Status::Invalid("NextChunk: max_bytes must be > 0");
+    }
+    if (!read_) {
+      return sanitize::Status::Invalid(
+          "Python stream read failed: missing read method");
+    }
+
+    PyGILState_STATE gil = PyGILState_Ensure();
+    PyObject *raw =
+        PyObject_CallFunction(read_, "L", static_cast<long long>(max_bytes));
+    if (!raw) {
+      auto status = python_error_status("Python stream read failed");
+      PyGILState_Release(gil);
+      return status;
+    }
+    if (raw == Py_None) {
+      Py_DECREF(raw);
+      PyGILState_Release(gil);
+      return sanitize::Chunk{.owner = nullptr,
+                             .data = std::string_view{},
+                             .base_offset = pos_,
+                             .source_name_owner = {},
+                             .source_name = {},
+                             .source_index = 0,
+                             .has_source_index = false};
+    }
+
+    PyObject *bytes = PyBytes_FromObject(raw);
+    Py_DECREF(raw);
+    if (!bytes) {
+      auto status = python_error_status(
+          "Python stream read did not return a bytes-like object");
+      PyGILState_Release(gil);
+      return status;
+    }
+
+    char *data = nullptr;
+    Py_ssize_t n = 0;
+    if (PyBytes_AsStringAndSize(bytes, &data, &n) != 0 || !data || n < 0) {
+      Py_DECREF(bytes);
+      PyErr_Clear();
+      PyGILState_Release(gil);
+      return sanitize::Status::Invalid(
+          "Python stream read returned invalid bytes");
+    }
+
+    const std::size_t base = pos_;
+    pos_ += static_cast<std::size_t>(n);
+    std::shared_ptr<const void> owner(bytes, &decref_python_object_with_gil);
+    sanitize::Chunk chunk{
+        .owner = std::move(owner),
+        .data = std::string_view(data, static_cast<std::size_t>(n)),
+        .base_offset = base,
+        .source_name_owner = {},
+        .source_name = {},
+        .source_index = 0,
+        .has_source_index = false,
+    };
+    PyGILState_Release(gil);
+    return chunk;
+  }
+
+  /// Materialize the full reader content when a frontend requires a view.
+  sanitize::Result<sanitize::Chunk> View() override {
+    if (!full_view_) {
+      SAN_RETURN_NOT_OK(Reset());
+      auto bytes = std::make_shared<std::string>();
+      for (;;) {
+        SAN_ASSIGN_OR_RAISE(auto chunk, NextChunk(int64_t{1} << 20));
+        if (chunk.data.empty()) {
+          break;
+        }
+        bytes->append(chunk.data);
+      }
+      full_view_ = std::move(bytes);
+      SAN_RETURN_NOT_OK(Reset());
+    }
+    return sanitize::Chunk{
+        .owner = full_view_,
+        .data = std::string_view(*full_view_),
+        .base_offset = 0,
+        .source_name_owner = {},
+        .source_name = {},
+        .source_index = 0,
+        .has_source_index = false,
+    };
+  }
+
+private:
+  PyObject *reader_ = nullptr;
+  PyObject *read_ = nullptr;
+  PyObject *seek_ = nullptr;
+  std::size_t pos_ = 0;
+  std::shared_ptr<std::string> full_view_;
+};
+
+} // namespace
+
+std::shared_ptr<sanitize::ChunkSource>
+make_python_reader_chunk_source(PyObject *reader) {
+  return std::make_shared<PythonReaderChunkSource>(reader);
+}
+
+} // namespace core_abi3_internal

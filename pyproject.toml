@@ -1,0 +1,156 @@
+[build-system]
+requires = [
+  "scikit-build-core==0.11.6"
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "schema-sanitizer"
+dynamic = ["version"]
+description = "Data sanitization for CSV, JSON, JSONL, XML, Parquet, and Python objects incremental pipelines."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+keywords = ["arrow", "pyarrow", "json", "xml", "csv", "schema", "sanitization"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython"
+]
+
+[[project.authors]]
+name = "bgallan"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pre-commit>=3.7",
+  "build>=1.2",
+  "ruff>=0.6.0",
+  "mypy>=1.10",
+  "pyarrow>=14.0.0",
+  "pandas>=2.0",
+  "polars>=0.20",
+  "duckdb>=1.0"
+]
+pyarrow = [
+  "pyarrow>=14.0.0"
+]
+polars = [
+  "polars>=0.20"
+]
+pandas = [
+  "pandas>=2.0"
+]
+duckdb = [
+  "duckdb>=1.0"
+]
+cloud = [
+  "aiohttp>=3.9",
+  "google-auth>=2.0",
+  "aiobotocore>=2.13",
+  "azure-identity>=1.16",
+  "azure-storage-blob>=12.20"
+]
+all = [
+  "pyarrow>=14.0.0",
+  "polars>=0.20",
+  "pandas>=2.0",
+  "duckdb>=1.0",
+  "aiohttp>=3.9",
+  "google-auth>=2.0",
+  "aiobotocore>=2.13",
+  "azure-identity>=1.16",
+  "azure-storage-blob>=12.20"
+]
+
+[project.urls]
+Homepage = "https://github.com/bgallan/schema-sanitizer"
+Repository = "https://github.com/bgallan/schema-sanitizer"
+Changelog = "https://github.com/bgallan/schema-sanitizer/releases"
+Issues = "https://github.com/bgallan/schema-sanitizer/issues"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/schema_sanitizer", "tests"]
+exclude = ["build", "dist", "wheelhouse", "cpp"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+no_implicit_optional = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "E", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["E402"]
+
+[tool.scikit-build]
+# Keep builds predictable and fast.
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.build]
+verbose = true
+
+[tool.scikit-build.cmake]
+version = ">=4.3,<4.4"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "meta/VERSION"
+regex = '^(?P<value>\d+\.\d+(?:\.\d+)?(?:\.post\d+)?)$'
+
+[tool.scikit-build.sdist]
+include = [
+  "cpp/**",
+  "src/**",
+  "tests/**",
+  "examples/**",
+  "meta/**",
+  "meta/VERSION",
+  ".github/**",
+  "CMakeLists.txt",
+  "LICENSE",
+  "README.md",
+  "pyproject.toml"
+]
+exclude = [
+  "**/__pycache__/**",
+  "**/*.pyc",
+  "**/*.pyo",
+  ".pytest_cache/**",
+  ".mypy_cache/**",
+  ".ruff_cache/**",
+  "build/**",
+  "dist/**",
+  "wheelhouse/**"
+]
+
+[tool.scikit-build.wheel]
+py-api = "cp311"
+packages = ["src/schema_sanitizer"]

@@ -1,0 +1,377 @@
+---
+name: Publish
+on:
+  # Manual only until the release process is intentionally activated.
+  # Default mode builds and validates artifacts without uploading them.
+  # GitHub only allows users with write access to run workflow_dispatch.
+  # Jobs below also require the selected ref to be main.
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Publish target
+        required: true
+        default: check-only
+        type: choice
+        options: [check-only, testpypi, pypi]
+      release_tag:
+        description: Optional release tag to validate, for example v0.2.3
+        required: false
+        default: ''
+        type: string
+      confirm_publish:
+        description: Type "publish schema-sanitizer" to allow an upload
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+jobs:
+  validate-version:
+    name: validate version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      package-version: ${{ steps.version.outputs.package-version }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate package version and optional tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < meta/VERSION)"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(\.post[0-9]+)?$ ]]; then
+            echo "Invalid meta/VERSION: ${version}" >&2
+            exit 1
+          fi
+          echo "package-version=${version}" >> "${GITHUB_OUTPUT}"
+          expected_tag="v${version}"
+          release_tag="${{ inputs.release_tag }}"
+          if [[ -n "${release_tag}" && "${release_tag}" != "${expected_tag}" ]]; then
+            echo "release_tag (${release_tag}) does not match meta/VERSION (${expected_tag})" >&2
+            exit 1
+          fi
+  sdist:
+    name: sdist
+    needs: [validate-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Build sdist
+        run: |
+          python -m pip install -U pip build twine
+          python -m build --sdist
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist-sdist
+          path: dist/*
+  wheels:
+    name: wheels (${{ matrix.name }})
+    needs: [validate-version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            arch_linux: x86_64
+          - name: windows-amd64
+            os: windows-latest
+            arch_windows: AMD64
+          - name: macos-x86_64
+            os: macos-15-intel
+            arch_macos: x86_64
+          - name: macos-arm64
+            os: macos-14
+            arch_macos: arm64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install cibuildwheel
+        run: python -m pip install -U pip cibuildwheel
+      - name: Install zlib (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: vcpkg install zlib:x64-windows-static
+      - name: Build wheels (abi3, Linux)
+        if: runner.os == 'Linux'
+        env:
+          # One build per platform: abi3 wheels, built with CPython 3.11.
+          CIBW_BUILD: cp311-*
+          CIBW_PROJECT_REQUIRES_PYTHON: '>=3.11'
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_SKIP: '*-musllinux_*'
+          CIBW_ARCHS_LINUX: ${{ matrix.arch_linux }}
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
+          CIBW_TEST_REQUIRES: pyarrow
+          CIBW_TEST_COMMAND: >-
+            python -c "import tempfile; from pathlib import Path; import pyarrow as
+            pa,
+            pyarrow.parquet as pq; import schema_sanitizer as s,
+            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
+            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
+            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
+            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
+            p, feature='wheel-gzip-smoke');
+            c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
+            assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
+        run: cibuildwheel --output-dir wheelhouse
+      - name: Build wheels (abi3, Windows)
+        if: runner.os == 'Windows'
+        env:
+          CIBW_BUILD: cp311-*
+          CIBW_PROJECT_REQUIRES_PYTHON: '>=3.11'
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_ARCHS_WINDOWS: ${{ matrix.arch_windows }}
+          CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static"
+          CIBW_TEST_REQUIRES: pyarrow
+          CIBW_TEST_COMMAND: >-
+            python -c "import tempfile; from pathlib import Path; import pyarrow as
+            pa,
+            pyarrow.parquet as pq; import schema_sanitizer as s,
+            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
+            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
+            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
+            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
+            p, feature='wheel-gzip-smoke');
+            c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
+            assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
+        run: cibuildwheel --output-dir wheelhouse
+      - name: Build wheels (abi3, macOS)
+        if: runner.os == 'macOS'
+        env:
+          CIBW_BUILD: cp311-*
+          CIBW_PROJECT_REQUIRES_PYTHON: '>=3.11'
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_ARCHS_MACOS: ${{ matrix.arch_macos }}
+          CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
+          CIBW_TEST_REQUIRES: pyarrow
+          CIBW_TEST_COMMAND: >-
+            python -c "import tempfile; from pathlib import Path; import pyarrow as
+            pa,
+            pyarrow.parquet as pq; import schema_sanitizer as s,
+            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
+            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
+            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
+            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
+            p, feature='wheel-gzip-smoke');
+            c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
+            assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
+        run: cibuildwheel --output-dir wheelhouse
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist-wheels-${{ matrix.name }}
+          path: wheelhouse/*
+  validate-artifacts:
+    name: validate artifacts
+    needs: [sdist, wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Validate built distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip twine packaging
+          python -m twine check dist/*
+          python - <<'PY'
+          from pathlib import Path
+          from packaging.utils import parse_wheel_filename, parse_sdist_filename
+          files = sorted(Path("dist").iterdir())
+          for path in files:
+              print(path.name)
+          sdists = [p for p in files if p.name.endswith(".tar.gz")]
+          wheels = [p for p in files if p.suffix == ".whl"]
+          if len(sdists) != 1:
+              raise SystemExit(f"Expected exactly 1 sdist, found {len(sdists)}")
+          if len(wheels) != 4:
+              raise SystemExit(f"Expected exactly 4 wheels, found {len(wheels)}")
+          sdist_name, sdist_version = parse_sdist_filename(sdists[0].name)
+          wheel_versions = set()
+          wheel_platforms = set()
+          for wheel in wheels:
+              name, version, _build, tags = parse_wheel_filename(wheel.name)
+              if name != sdist_name:
+                  raise SystemExit(f"Wheel project name {name!s} != sdist name {sdist_name!s}")
+              wheel_versions.add(version)
+              wheel_platforms.update(tag.platform for tag in tags)
+          versions = {sdist_version, *wheel_versions}
+          if len(versions) != 1:
+              raise SystemExit(f"Mismatched distribution versions: {sorted(map(str, versions))}")
+          required_platform_markers = ("manylinux_2_28_x86_64", "win_amd64", "macosx")
+          joined_platforms = " ".join(sorted(wheel_platforms))
+          for marker in required_platform_markers:
+              if marker not in joined_platforms:
+                  raise SystemExit(f"Missing wheel platform marker {marker!r}: {joined_platforms}")
+          PY
+  wheel-smoke:
+    name: wheel smoke (${{ matrix.name }}, py${{ matrix.python-version }})
+    needs: [wheels]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+        target: [linux-x86_64, windows-amd64, macos-x86_64, macos-arm64]
+        include:
+          - target: linux-x86_64
+            name: linux-x86_64
+            artifact: dist-wheels-linux-x86_64
+            os: ubuntu-latest
+          - target: windows-amd64
+            name: windows-amd64
+            artifact: dist-wheels-windows-amd64
+            os: windows-latest
+          - target: macos-x86_64
+            name: macos-x86_64
+            artifact: dist-wheels-macos-x86_64
+            os: macos-15-intel
+          - target: macos-arm64
+            name: macos-arm64
+            artifact: dist-wheels-macos-arm64
+            os: macos-14
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+      - name: Install wheel and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          python -m pip install dist/*.whl
+          python - <<'PY'
+          import sys
+          import schema_sanitizer as ss
+          import schema_sanitizer._core_abi3 as core
+          print("python", sys.version.split()[0])
+          print("schema-sanitizer", ss.__version__)
+          print("core", core.__file__)
+          PY
+  publish:
+    name: publish
+    needs: [validate-artifacts, wheel-smoke]
+    if: github.event_name == 'workflow_dispatch' && inputs.repository != 'check-only'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # OIDC / Trusted Publishing
+    steps:
+      - name: Confirm upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.confirm_publish }}" != "publish schema-sanitizer" ]]; then
+            echo 'Refusing upload: confirm_publish must be exactly "publish schema-sanitizer".' >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Publish with Trusted Publishing
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python -m pip install -U pip twine
+          case "${{ inputs.repository }}" in
+            pypi)
+              index_base="https://pypi.org"
+              upload_url="https://upload.pypi.org/legacy/"
+              twine_extra_args=()
+              ;;
+            testpypi)
+              index_base="https://test.pypi.org"
+              upload_url="https://test.pypi.org/legacy/"
+              twine_extra_args=(--skip-existing)
+              ;;
+            *)
+              echo "Unsupported publish target: ${{ inputs.repository }}" >&2
+              exit 1
+              ;;
+          esac
+          audience="$(
+            INDEX_BASE="${index_base}" python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          with urllib.request.urlopen(f"{os.environ['INDEX_BASE']}/_/oidc/audience", timeout=30) as resp:
+              print(json.load(resp)["audience"])
+          PY
+          )"
+          oidc_response="$(
+            curl --fail --silent --show-error \
+              --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}"
+          )"
+          oidc_token="$(
+            OIDC_RESPONSE="${oidc_response}" python - <<'PY'
+          import json
+          import os
+          print(json.loads(os.environ["OIDC_RESPONSE"])["value"])
+          PY
+          )"
+          mint_response="$(
+            OIDC_TOKEN="${oidc_token}" INDEX_BASE="${index_base}" python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+          payload = json.dumps({"token": os.environ["OIDC_TOKEN"]}).encode("utf-8")
+          request = urllib.request.Request(
+              f"{os.environ['INDEX_BASE']}/_/oidc/mint-token",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as resp:
+                  print(resp.read().decode("utf-8"))
+          except urllib.error.HTTPError as exc:
+              body = exc.read().decode("utf-8", "replace")
+              print(
+                  f"PyPI Trusted Publishing token mint failed: HTTP {exc.code} {exc.reason}",
+                  file=sys.stderr,
+              )
+              if body:
+                  print(body, file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
+          )"
+          api_token="$(
+            MINT_RESPONSE="${mint_response}" python - <<'PY'
+          import json
+          import os
+          print(json.loads(os.environ["MINT_RESPONSE"])["token"])
+          PY
+          )"
+          echo "::add-mask::${api_token}"
+          TWINE_USERNAME="__token__" \
+          TWINE_PASSWORD="${api_token}" \
+          python -m twine upload \
+            --repository-url "${upload_url}" \
+            --verbose \
+            "${twine_extra_args[@]}" \
+            dist/*

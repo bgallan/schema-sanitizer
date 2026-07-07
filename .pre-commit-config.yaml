@@ -1,0 +1,95 @@
+---
+minimum_pre_commit_version: 3.7.0
+default_stages: [pre-commit, pre-push]
+exclude: ^(build/|dist/|wheelhouse/|\.venv.*/|__pycache__/)
+repos:
+  # Generic repo hygiene + config file formatting
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: pretty-format-json
+        args: [--autofix, --indent=2, --no-sort-keys]
+
+  # C/C++ formatting + style-lint
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v20.1.8
+    hooks:
+      - id: clang-format
+        files: ^cpp/src/.*\.(c|cc|cpp|h|hh|hpp|inc)$
+        types_or: [text]
+        args: [--style=file, -i]
+      - id: clang-format
+        name: clang-format-check
+        files: ^cpp/src/.*\.(c|cc|cpp|h|hh|hpp|inc)$
+        types_or: [text]
+        args: [--style=file, --dry-run, --Werror]
+
+  # Python linting/formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        files: ^(src|tests|meta/ci)/.*\.py$
+        args: [--fix]
+      - id: ruff-format
+        files: ^(src|tests|meta/ci)/.*\.py$
+
+  # Markdown formatting + syntax check
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 0.7.22
+    hooks:
+      - id: mdformat
+        files: \.md$
+      - id: mdformat
+        name: mdformat-check
+        files: \.md$
+        args: [--check]
+
+  # Shell linting + formatting
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        files: \.sh$
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.8.0-1
+    hooks:
+      - id: shfmt
+        files: \.sh$
+        args: [-w, -i, '2', -ci]
+
+  # Project-local formatters not covered above.
+  - repo: local
+    hooks:
+      - id: cmake-format
+        name: cmake-format
+        entry: cmake-format
+        language: python
+        additional_dependencies: [cmakelang==0.6.13]
+        files: (^|/)(CMakeLists\.txt|.*\.cmake(\.in)?)$
+        args: [--in-place]
+      - id: cmake-format-check
+        name: cmake-format-check
+        entry: cmake-format
+        language: python
+        additional_dependencies: [cmakelang==0.6.13]
+        files: (^|/)(CMakeLists\.txt|.*\.cmake(\.in)?)$
+        args: [--check]
+      - id: yamlfix
+        name: yamlfix
+        entry: yamlfix
+        language: python
+        additional_dependencies: [yamlfix==1.18.0]
+        files: \.(yaml|yml)$
+      - id: toml-sort
+        name: toml-sort
+        entry: toml-sort
+        language: python
+        additional_dependencies: [toml-sort==0.24.3]
+        files: \.toml$
+        args: [--in-place]
