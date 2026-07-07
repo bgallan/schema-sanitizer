@@ -28,6 +28,7 @@ replacement. Remaining work:
    - [x] Bounded definition/repetition level diagnostics for repeated leaves.
    - [x] Simple top-level list row-offset reconstruction diagnostics.
    - [x] Simple top-level integer lists with DELTA_BINARY_PACKED elements.
+   - [x] Simple top-level string lists with DELTA_LENGTH_BYTE_ARRAY elements.
    - Lists.
    - Repeated fields.
    - Full definition/repetition level reconstruction.

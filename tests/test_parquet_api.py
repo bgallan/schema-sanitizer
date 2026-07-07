@@ -1892,6 +1892,47 @@ def test_native_parquet_footer_info_captures_repeated_level_values(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_simple_string_lists(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes simple top-level string lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-string-list.parquet"
+    table = pa.table(
+        {"tags": pa.array([["a", "bb"], None, [], ["ccc"]], type=pa.list_(pa.string()))}
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    column = info["row_groups"][0]["columns"][0]
+    assert column["native_read_value_buffer_kind"] == "delta_length_byte_array"
+    assert column["repeated_level_offsets"] == [0, 2, 2, 2, 3]
+    assert column["repeated_level_validity_hex_preview"] == "0d"
+
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+
+    assert reader.read_all().to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
     tmp_path: Path,
 ) -> None:
