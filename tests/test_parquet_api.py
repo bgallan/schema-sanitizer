@@ -1264,6 +1264,47 @@ def test_native_parquet_footer_info_reads_pyarrow_file(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
+def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
+    """Verify DuckDB-written Parquet stays readable through the safe fallback."""
+    duckdb = pytest.importorskip("duckdb")
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_native_reader_diagnostics,
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+    )
+
+    require_native()
+    path = tmp_path / "duckdb.parquet"
+    with duckdb.connect() as connection:
+        connection.execute(
+            "COPY (SELECT 1::BIGINT AS a, 'x' AS b UNION ALL SELECT 2, 'y') "
+            "TO ? (FORMAT PARQUET)",
+            [str(path)],
+        )
+
+    info = native_parquet_footer_info(path)
+    assert info is not None
+    assert "DuckDB" in info["created_by"]
+    assert info["native_reader_ready"] == 0
+    assert (
+        "file was not written by schema-sanitizer native parquet writer"
+        in info["native_reader_blockers"]
+    )
+
+    result = read_test_parquet(path)
+
+    assert result.clean_data.to_pylist() == [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
+    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
+    diagnostics = last_parquet_native_reader_diagnostics()
+    assert diagnostics["attempted"] is True
+    assert diagnostics["ready"] is False
+    assert diagnostics["reason"] == "not_ready"
+    assert (
+        "file was not written by schema-sanitizer native parquet writer" in diagnostics["blockers"]
+    )
+
+
+@_requires_pyarrow
 def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) -> None:
     """Verify native footer parsing understands schema-sanitizer Parquet output."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import native_parquet_footer_info

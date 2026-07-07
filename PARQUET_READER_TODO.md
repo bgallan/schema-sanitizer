@@ -67,7 +67,7 @@ replacement. Remaining work:
 
    - [x] PyArrow-written files through PyArrow fallback.
    - Spark-written files.
-   - DuckDB-written files.
+   - [x] DuckDB-written files through PyArrow fallback.
    - BigQuery-exported Parquet variants.
 
 1. Keep fallback observability strong:
