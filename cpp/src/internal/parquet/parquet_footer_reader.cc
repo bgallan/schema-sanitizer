@@ -10188,37 +10188,6 @@ native_recursive_schema_list_chain_leaf(
   }
 }
 
-sanitize::Result<std::size_t> native_recursive_schema_single_child(
-    const NativeRecursiveMaterializationTree &tree, std::size_t node_index,
-    NativeRecursiveMaterializationNodeKind kind) {
-  if (!tree.valid || node_index >= tree.nodes.size()) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive schema child lookup node is "
-        "invalid");
-  }
-  std::optional<std::size_t> matched_child;
-  for (const auto child_index : tree.nodes[node_index].children) {
-    if (child_index >= tree.nodes.size()) {
-      return sanitize::Status::Invalid(
-          "native Parquet reader: recursive schema child lookup child is "
-          "invalid");
-    }
-    if (tree.nodes[child_index].kind != kind) {
-      continue;
-    }
-    if (matched_child.has_value()) {
-      return sanitize::Status::Invalid(
-          "native Parquet reader: recursive schema child lookup is ambiguous");
-    }
-    matched_child = child_index;
-  }
-  if (!matched_child.has_value()) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive schema child lookup did not match");
-  }
-  return matched_child.value();
-}
-
 sanitize::Result<NativeRecursiveMaterializationResourceCounts>
 native_recursive_schema_resource_counts(
     const NativeRecursiveMaterializationTree &tree, std::size_t node_index) {
@@ -10489,60 +10458,6 @@ sanitize::Result<ArrowSchema *> build_native_recursive_schema_node(
       "native Parquet reader: unknown recursive schema node kind");
 }
 
-sanitize::Status build_native_recursive_scalar_list_schema(
-    const NativeRecursiveSchemaSource &source,
-    const NativeRecursiveMaterializationTree &tree,
-    const NativeParquetOutputField &field, NativeParquetListSchema *list_node) {
-  if (!list_node || !tree.valid || tree.root >= tree.nodes.size() ||
-      !field.is_list || field.is_list_struct || field.is_list_map ||
-      field.column_indices.size() != 1 || field.list_depth <= 0) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: invalid recursive scalar list schema");
-  }
-  const auto &root_node = tree.nodes[tree.root];
-  if (root_node.kind != NativeRecursiveMaterializationNodeKind::List) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive scalar list root is not a list");
-  }
-  list_node->name = field.name;
-  SAN_ASSIGN_OR_RAISE(const auto list_chain,
-                      native_recursive_schema_list_chain_leaf(tree, tree.root));
-  if (list_chain.depth != field.list_depth ||
-      list_chain.leaf_node_index >= tree.nodes.size()) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive scalar list depth mismatch");
-  }
-  const auto &leaf_node = tree.nodes[list_chain.leaf_node_index];
-  if (!leaf_node.leaf_column_index.has_value()) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive scalar list leaf has no column");
-  }
-  SAN_ASSIGN_OR_RAISE(const auto leaf,
-                      native_recursive_schema_leaf_info(
-                          source, leaf_node.leaf_column_index.value()));
-  SAN_ASSIGN_OR_RAISE(
-      const auto required_definition_level,
-      native_recursive_schema_leaf_required_definition_level(leaf));
-  if (field.list_depth == 1) {
-    initialize_native_column_schema(&list_node->child, "item", leaf.format,
-                                    leaf.max_definition_level,
-                                    required_definition_level);
-    list_node->child_ptrs[0] = &list_node->child.schema;
-  } else {
-    list_node->chain_list_children.reserve(
-        static_cast<std::size_t>(field.list_depth - 1));
-    SAN_ASSIGN_OR_RAISE(
-        auto *chain_schema,
-        build_native_repeated_list_chain_schema(
-            &list_node->chain_list_children, "item", leaf.format,
-            static_cast<std::int16_t>(field.list_depth - 1),
-            leaf.max_definition_level, required_definition_level));
-    list_node->child_ptrs[0] = chain_schema;
-  }
-  finalize_native_list_schema(list_node, !field.top_level_required);
-  return {};
-}
-
 sanitize::Status build_native_schema(const FooterInfo &footer,
                                      ArrowSchema *out) {
   if (!out) {
@@ -10607,46 +10522,9 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
     }
     if (field.is_list) {
       auto &list_node = top_level.list_node;
-      list_node.name = field.name;
-      if (field.is_list_struct) {
-        auto &struct_child = list_node.struct_child;
-        SAN_ASSIGN_OR_RAISE(
-            const auto struct_node_index,
-            native_recursive_schema_single_child(
-                field.recursive_tree, field.recursive_tree.root,
-                NativeRecursiveMaterializationNodeKind::Struct));
-        SAN_RETURN_NOT_OK(build_native_recursive_struct_schema(
-            schema_source, field.recursive_tree, struct_node_index,
-            &struct_child, true));
-        list_node.child_ptrs[0] = &struct_child.schema;
-        finalize_native_list_schema(&list_node, !field.top_level_required);
-        state->children.push_back(&list_node.schema);
-        continue;
-      }
-      if (field.is_list_map) {
-        auto &map_child = list_node.map_child;
-        SAN_ASSIGN_OR_RAISE(const auto map_node_index,
-                            native_recursive_schema_single_child(
-                                field.recursive_tree, field.recursive_tree.root,
-                                NativeRecursiveMaterializationNodeKind::Map));
-        SAN_RETURN_NOT_OK(build_native_recursive_map_schema(
-            schema_source, field.recursive_tree, map_node_index, &map_child,
-            true));
-        list_node.child_ptrs[0] = &map_child.schema;
-        finalize_native_list_schema(&list_node, !field.top_level_required);
-        state->children.push_back(&list_node.schema);
-        continue;
-      }
-      const auto scalar_list_chain = native_recursive_schema_list_chain_leaf(
-          field.recursive_tree, field.recursive_tree.root);
-      if (scalar_list_chain.ok()) {
-        SAN_RETURN_NOT_OK(build_native_recursive_scalar_list_schema(
-            schema_source, field.recursive_tree, field, &list_node));
-      } else {
-        SAN_RETURN_NOT_OK(build_native_recursive_complex_list_schema(
-            schema_source, field.recursive_tree, field.recursive_tree.root,
-            &list_node, !field.top_level_required));
-      }
+      SAN_RETURN_NOT_OK(build_native_recursive_complex_list_schema(
+          schema_source, field.recursive_tree, field.recursive_tree.root,
+          &list_node, !field.top_level_required));
       state->children.push_back(&list_node.schema);
       continue;
     }

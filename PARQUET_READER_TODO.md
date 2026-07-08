@@ -101,6 +101,8 @@ replacement. Remaining work:
      - [x] Added generated parity coverage for a top-level struct containing map/list/map/struct/list/list/struct/map recursion.
      - [x] Top-level scalar list, list-of-struct, list-of-map, and complex-list outputs now share one recursive list-output materializer.
      - [x] Removed the old branch-specific scalar-list/list-struct/list-map output materializers after migrating their layout handling into recursive context helpers.
+     - [x] Top-level scalar list, list-of-struct, list-of-map, and complex-list schemas now share one recursive list-schema builder.
+     - [x] Removed the old branch-specific scalar-list/list-struct/list-map schema construction helpers after unifying list schema construction.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
