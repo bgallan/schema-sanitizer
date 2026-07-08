@@ -89,6 +89,7 @@ replacement. Remaining work:
      - [x] Native readiness and stream creation now share merged recursive output-field layout validation, so unsupported mixed recursive layouts fall back before native batch consumption.
      - [x] Top-level recursive struct materialization now supports nested ordinary struct children with scalar list/list-chain children using generic footer-derived repeated layouts and row-level struct validity reconstruction.
      - [x] Map and list-map recursive value materialization now supports nested ordinary struct children with scalar list/list-chain children using map-entry-aware generic repeated layouts.
+     - [x] Recursive list-node materialization now supports list-of-struct children under map and list-map values, including scalar/list children inside the struct element.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
