@@ -54,6 +54,9 @@ replacement. Remaining work:
      - [x] Top-level list-of-struct with scalar map children.
      - [x] Top-level list-of-struct with scalar map children containing scalar list values.
      - [x] Top-level list-of-struct with scalar map children containing scalar list-chain values.
+     - [x] Top-level list-of-struct with scalar map children containing scalar struct values.
+     - [x] Top-level list-of-struct with scalar map children containing scalar struct values with scalar list children.
+     - [x] Top-level list-of-struct with scalar map children containing scalar struct values with scalar list-chain children.
      - [x] Top-level map with scalar struct values.
      - [x] Top-level map with scalar struct values containing scalar list children.
      - [x] Top-level map with scalar struct values containing scalar list-chain children.
