@@ -6740,6 +6740,7 @@ struct NativeRecursivePathPlan {
   bool is_list_list_list = false;
   bool is_list_map = false;
   bool is_map = false;
+  bool map_value_is_struct = false;
   std::int16_t list_depth = 0;
 };
 
@@ -6806,6 +6807,17 @@ bool native_recursive_map_value_tail_supported(
   return native_recursive_struct_tail_supported(path, index);
 }
 
+bool native_recursive_map_value_tail_is_struct(
+    const std::vector<std::string> &path, std::size_t index) {
+  if (index >= path.size()) {
+    return false;
+  }
+  if (path[index] == "list" || path[index] == "key_value") {
+    return false;
+  }
+  return native_recursive_struct_tail_supported(path, index);
+}
+
 bool native_recursive_map_tail_supported(const std::vector<std::string> &path,
                                          std::size_t key_value_index) {
   if (key_value_index >= path.size() || path[key_value_index] != "key_value" ||
@@ -6819,6 +6831,16 @@ bool native_recursive_map_tail_supported(const std::vector<std::string> &path,
     return false;
   }
   return native_recursive_map_value_tail_supported(path, key_value_index + 2);
+}
+
+bool native_recursive_map_tail_value_is_struct(
+    const std::vector<std::string> &path, std::size_t key_value_index) {
+  if (key_value_index >= path.size() || path[key_value_index] != "key_value" ||
+      key_value_index + 1 >= path.size() ||
+      path[key_value_index + 1] != "value") {
+    return false;
+  }
+  return native_recursive_map_value_tail_is_struct(path, key_value_index + 2);
 }
 
 bool native_materializer_shape_supported_by_current_code(
@@ -6897,6 +6919,8 @@ plan_native_recursive_path(const std::vector<std::string> &path,
     if (path.size() > 3 && path[3] == "key_value") {
       plan.is_list_map = true;
       plan.materializable = native_recursive_map_tail_supported(path, 3);
+      plan.map_value_is_struct =
+          native_recursive_map_tail_value_is_struct(path, 3);
       return plan;
     }
     plan.is_list_struct = true;
@@ -6906,6 +6930,8 @@ plan_native_recursive_path(const std::vector<std::string> &path,
   if (path.size() >= 2 && path[1] == "key_value") {
     plan.is_map = true;
     plan.materializable = native_recursive_map_tail_supported(path, 1);
+    plan.map_value_is_struct =
+        native_recursive_map_tail_value_is_struct(path, 1);
     return plan;
   }
   plan.is_struct = true;
@@ -6998,19 +7024,13 @@ sanitize::Status add_native_output_field(
     return sanitize::Status::NotImplemented(
         "native Parquet reader: multi-column nested list output path");
   }
-  const bool is_list_map_struct =
-      is_top_level_list_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_list_map_struct_list_chain_depth_path(path,
-                                                      max_repetition_level) > 0;
-  if (is_list_map && !is_list_map_struct && match->column_indices.size() >= 2) {
+  if (is_list_map && !plan.map_value_is_struct &&
+      match->column_indices.size() >= 2) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: list map output has too many leaf columns");
   }
-  const bool is_map_struct =
-      is_top_level_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_map_struct_list_chain_depth_path(path, max_repetition_level) >
-          0;
-  if (is_map && !is_map_struct && match->column_indices.size() >= 2) {
+  if (is_map && !plan.map_value_is_struct &&
+      match->column_indices.size() >= 2) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: map output has too many leaf columns");
   }
@@ -7156,11 +7176,12 @@ validate_list_struct_repetition_layout(const RowGroupInfo &row_group,
         "native Parquet reader: list struct column index is invalid");
   }
   const auto &first = row_group.columns[first_index];
-  if (!(is_top_level_list_struct_leaf(first) ||
-        is_top_level_list_struct_list_leaf(first) ||
-        is_top_level_list_struct_map_leaf(first) ||
-        top_level_list_struct_map_list_chain_depth(first) > 0 ||
-        top_level_list_struct_list_chain_depth(first) > 1) ||
+  const auto first_plan = plan_native_recursive_path(first.path_in_schema,
+                                                     first.max_repetition_level,
+                                                     first.top_level_required);
+  if (!first_plan.materializable || !first_plan.is_list_struct ||
+      !native_materializer_shape_supported_by_current_code(
+          first.path_in_schema, first.max_repetition_level) ||
       !first.repeated_level_layout_decoded) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: list struct layout was not decoded");
@@ -7171,13 +7192,12 @@ validate_list_struct_repetition_layout(const RowGroupInfo &row_group,
           "native Parquet reader: list struct column index is invalid");
     }
     const auto &column = row_group.columns[column_index];
-    if (!(is_top_level_list_struct_leaf(column) ||
-          is_top_level_list_struct_list_leaf(column) ||
-          is_top_level_list_struct_map_leaf(column) ||
-          top_level_list_struct_map_list_chain_depth(column) > 0 ||
-          is_top_level_list_struct_map_struct_leaf(column) ||
-          top_level_list_struct_map_struct_list_chain_depth(column) > 0 ||
-          top_level_list_struct_list_chain_depth(column) > 1) ||
+    const auto plan = plan_native_recursive_path(column.path_in_schema,
+                                                 column.max_repetition_level,
+                                                 column.top_level_required);
+    if (!plan.materializable || !plan.is_list_struct ||
+        !native_materializer_shape_supported_by_current_code(
+            column.path_in_schema, column.max_repetition_level) ||
         !column.repeated_level_layout_decoded ||
         column.repeated_level_row_count != first.repeated_level_row_count ||
         column.repeated_level_null_count != first.repeated_level_null_count ||
@@ -7189,12 +7209,7 @@ validate_list_struct_repetition_layout(const RowGroupInfo &row_group,
       return sanitize::Status::NotImplemented(
           "native Parquet reader: list struct leaf repetition layouts differ");
     }
-    if ((is_top_level_list_struct_list_leaf(column) ||
-         is_top_level_list_struct_map_leaf(column) ||
-         top_level_list_struct_map_list_chain_depth(column) > 0 ||
-         is_top_level_list_struct_map_struct_leaf(column) ||
-         top_level_list_struct_map_struct_list_chain_depth(column) > 0 ||
-         top_level_list_struct_list_chain_depth(column) > 1) &&
+    if (column.max_repetition_level > 1 &&
         !column.nested_repeated_level_layout_decoded) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: list struct nested list layout was not "
@@ -7217,10 +7232,12 @@ validate_map_repetition_layout(const RowGroupInfo &row_group,
         "native Parquet reader: map column index is invalid");
   }
   const auto &first = row_group.columns[first_index];
-  if (!(is_top_level_map_leaf(first) || is_top_level_map_struct_leaf(first) ||
-        top_level_map_struct_list_chain_depth(first) > 0 ||
-        is_top_level_map_list_leaf(first) ||
-        top_level_map_list_chain_depth(first) > 1) ||
+  const auto first_plan = plan_native_recursive_path(first.path_in_schema,
+                                                     first.max_repetition_level,
+                                                     first.top_level_required);
+  if (!first_plan.materializable || !first_plan.is_map ||
+      !native_materializer_shape_supported_by_current_code(
+          first.path_in_schema, first.max_repetition_level) ||
       !first.repeated_level_layout_decoded) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: map layout was not decoded");
@@ -7231,11 +7248,12 @@ validate_map_repetition_layout(const RowGroupInfo &row_group,
           "native Parquet reader: map column index is invalid");
     }
     const auto &column = row_group.columns[column_index];
-    if (!(is_top_level_map_leaf(column) ||
-          is_top_level_map_struct_leaf(column) ||
-          top_level_map_struct_list_chain_depth(column) > 0 ||
-          is_top_level_map_list_leaf(column) ||
-          top_level_map_list_chain_depth(column) > 1) ||
+    const auto plan = plan_native_recursive_path(column.path_in_schema,
+                                                 column.max_repetition_level,
+                                                 column.top_level_required);
+    if (!plan.materializable || !plan.is_map ||
+        !native_materializer_shape_supported_by_current_code(
+            column.path_in_schema, column.max_repetition_level) ||
         !column.repeated_level_layout_decoded ||
         column.repeated_level_row_count != first.repeated_level_row_count ||
         column.repeated_level_null_count != first.repeated_level_null_count ||
@@ -7247,9 +7265,7 @@ validate_map_repetition_layout(const RowGroupInfo &row_group,
       return sanitize::Status::NotImplemented(
           "native Parquet reader: map leaf repetition layouts differ");
     }
-    if ((is_top_level_map_list_leaf(column) ||
-         top_level_map_struct_list_chain_depth(column) > 0 ||
-         top_level_map_list_chain_depth(column) > 1) &&
+    if (column.max_repetition_level > 1 &&
         !column.nested_repeated_level_layout_decoded) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: map nested list layout was not decoded");
@@ -7271,9 +7287,12 @@ validate_list_map_repetition_layout(const RowGroupInfo &row_group,
         "native Parquet reader: list map column index is invalid");
   }
   const auto &first = row_group.columns[first_index];
-  if (!(is_top_level_list_map_leaf(first) ||
-        is_top_level_list_map_struct_leaf(first) ||
-        top_level_list_map_struct_list_chain_depth(first) > 0) ||
+  const auto first_plan = plan_native_recursive_path(first.path_in_schema,
+                                                     first.max_repetition_level,
+                                                     first.top_level_required);
+  if (!first_plan.materializable || !first_plan.is_list_map ||
+      !native_materializer_shape_supported_by_current_code(
+          first.path_in_schema, first.max_repetition_level) ||
       !first.repeated_level_layout_decoded ||
       !first.nested_repeated_level_layout_decoded) {
     return sanitize::Status::NotImplemented(
@@ -7285,9 +7304,12 @@ validate_list_map_repetition_layout(const RowGroupInfo &row_group,
           "native Parquet reader: list map column index is invalid");
     }
     const auto &column = row_group.columns[column_index];
-    if (!(is_top_level_list_map_leaf(column) ||
-          is_top_level_list_map_struct_leaf(column) ||
-          top_level_list_map_struct_list_chain_depth(column) > 0) ||
+    const auto plan = plan_native_recursive_path(column.path_in_schema,
+                                                 column.max_repetition_level,
+                                                 column.top_level_required);
+    if (!plan.materializable || !plan.is_list_map ||
+        !native_materializer_shape_supported_by_current_code(
+            column.path_in_schema, column.max_repetition_level) ||
         !column.repeated_level_layout_decoded ||
         !column.nested_repeated_level_layout_decoded ||
         column.repeated_level_row_count != first.repeated_level_row_count ||
