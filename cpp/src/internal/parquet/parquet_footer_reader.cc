@@ -9503,6 +9503,65 @@ sanitize::Status materialize_dictionary_fixed_width_column(
   return {};
 }
 
+sanitize::Result<ArrowSchema *> build_native_repeated_list_chain_schema(
+    std::vector<NativeParquetInnerListSchema> *list_children,
+    std::string first_list_name, std::string leaf_format,
+    std::int16_t list_depth, std::int16_t max_definition_level,
+    std::int16_t leaf_required_definition_level) {
+  if (!list_children || list_depth <= 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid recursive list schema chain");
+  }
+  const auto required_capacity =
+      list_children->size() + static_cast<std::size_t>(list_depth);
+  if (list_children->capacity() < required_capacity) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive list schema reservation is too small");
+  }
+  const auto first_list_index = list_children->size();
+  for (std::int16_t level = 0; level < list_depth; ++level) {
+    auto &list_child = list_children->emplace_back();
+    list_child.name = level == 0 ? first_list_name : "item";
+  }
+  auto &leaf_list = list_children->back();
+  leaf_list.child.name = "item";
+  leaf_list.child.format = std::move(leaf_format);
+  sanitize::internal::cdata_stream::clear_schema(&leaf_list.child.schema);
+  leaf_list.child.schema.format = leaf_list.child.format.c_str();
+  leaf_list.child.schema.name = leaf_list.child.name.c_str();
+  leaf_list.child.schema.metadata = nullptr;
+  leaf_list.child.schema.flags =
+      max_definition_level > leaf_required_definition_level ? ARROW_FLAG_NULLABLE
+                                                            : 0;
+  leaf_list.child.schema.n_children = 0;
+  leaf_list.child.schema.children = nullptr;
+  leaf_list.child.schema.dictionary = nullptr;
+  leaf_list.child.schema.private_data = nullptr;
+  leaf_list.child.schema.release = &native_parquet_schema_child_release;
+  leaf_list.child_ptrs[0] = &leaf_list.child.schema;
+  for (std::size_t reverse_index = first_list_index +
+                                   static_cast<std::size_t>(list_depth);
+       reverse_index > first_list_index; --reverse_index) {
+    const auto list_index = reverse_index - 1;
+    auto &list_child = (*list_children)[list_index];
+    if (list_index + 1 <
+        first_list_index + static_cast<std::size_t>(list_depth)) {
+      list_child.child_ptrs[0] = &(*list_children)[list_index + 1].schema;
+    }
+    sanitize::internal::cdata_stream::clear_schema(&list_child.schema);
+    list_child.schema.format = list_child.format.c_str();
+    list_child.schema.name = list_child.name.c_str();
+    list_child.schema.metadata = nullptr;
+    list_child.schema.flags = ARROW_FLAG_NULLABLE;
+    list_child.schema.n_children = 1;
+    list_child.schema.children = list_child.child_ptrs.data();
+    list_child.schema.dictionary = nullptr;
+    list_child.schema.private_data = nullptr;
+    list_child.schema.release = &native_parquet_schema_child_release;
+  }
+  return &(*list_children)[first_list_index].schema;
+}
+
 sanitize::Status build_native_schema(const FooterInfo &footer,
                                      ArrowSchema *out) {
   if (!out) {
@@ -9692,63 +9751,18 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                       struct_leaf.path, struct_leaf.max_repetition_level);
             }
             if (struct_leaf_list_depth > 0) {
-              const auto first_list_index = value_struct.list_children.size();
-              for (std::int16_t level = 0; level < struct_leaf_list_depth;
-                   ++level) {
-                auto &list_child = value_struct.list_children.emplace_back();
-                list_child.name = level == 0 ? struct_leaf_name : "item";
-              }
-              auto &leaf_list = value_struct.list_children.back();
-              leaf_list.child.name = "item";
-              leaf_list.child.format = std::move(struct_leaf_format);
-              sanitize::internal::cdata_stream::clear_schema(
-                  &leaf_list.child.schema);
-              leaf_list.child.schema.format = leaf_list.child.format.c_str();
-              leaf_list.child.schema.name = leaf_list.child.name.c_str();
-              leaf_list.child.schema.metadata = nullptr;
               const auto inner_list_defined_level = static_cast<std::int16_t>(
                   (struct_leaf_top_level_required ? std::int16_t{0}
                                                   : std::int16_t{1}) +
                   3 + (struct_leaf_list_depth - 1) * 2);
-              leaf_list.child.schema.flags =
-                  struct_leaf_max_definition_level >
-                          inner_list_defined_level + 1
-                      ? ARROW_FLAG_NULLABLE
-                      : 0;
-              leaf_list.child.schema.n_children = 0;
-              leaf_list.child.schema.children = nullptr;
-              leaf_list.child.schema.dictionary = nullptr;
-              leaf_list.child.schema.private_data = nullptr;
-              leaf_list.child.schema.release =
-                  &native_parquet_schema_child_release;
-              leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-              for (std::size_t reverse_index =
-                       first_list_index +
-                       static_cast<std::size_t>(struct_leaf_list_depth);
-                   reverse_index > first_list_index; --reverse_index) {
-                const auto list_index = reverse_index - 1;
-                auto &list_child = value_struct.list_children[list_index];
-                if (list_index + 1 <
-                    first_list_index +
-                        static_cast<std::size_t>(struct_leaf_list_depth)) {
-                  list_child.child_ptrs[0] =
-                      &value_struct.list_children[list_index + 1].schema;
-                }
-                sanitize::internal::cdata_stream::clear_schema(
-                    &list_child.schema);
-                list_child.schema.format = list_child.format.c_str();
-                list_child.schema.name = list_child.name.c_str();
-                list_child.schema.metadata = nullptr;
-                list_child.schema.flags = ARROW_FLAG_NULLABLE;
-                list_child.schema.n_children = 1;
-                list_child.schema.children = list_child.child_ptrs.data();
-                list_child.schema.dictionary = nullptr;
-                list_child.schema.private_data = nullptr;
-                list_child.schema.release =
-                    &native_parquet_schema_child_release;
-              }
-              value_struct.child_ptrs.push_back(
-                  &value_struct.list_children[first_list_index].schema);
+              SAN_ASSIGN_OR_RAISE(
+                  auto *chain_schema,
+                  build_native_repeated_list_chain_schema(
+                      &value_struct.list_children, std::move(struct_leaf_name),
+                      std::move(struct_leaf_format), struct_leaf_list_depth,
+                      struct_leaf_max_definition_level,
+                      static_cast<std::int16_t>(inner_list_defined_level + 1)));
+              value_struct.child_ptrs.push_back(chain_schema);
               continue;
             }
             auto &struct_leaf_child = value_struct.children[struct_child_index];
@@ -9791,56 +9805,16 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
           continue;
         }
         if (child_list_depth > 0) {
-          const auto first_list_index = entries.list_children.size();
-          for (std::int16_t level = 0; level < child_list_depth; ++level) {
-            auto &list_child = entries.list_children.emplace_back();
-            list_child.name = level == 0 ? name : "item";
-          }
-          auto &leaf_list = entries.list_children.back();
-          leaf_list.child.name = "item";
-          leaf_list.child.format = std::move(format);
-          sanitize::internal::cdata_stream::clear_schema(
-              &leaf_list.child.schema);
-          leaf_list.child.schema.format = leaf_list.child.format.c_str();
-          leaf_list.child.schema.name = leaf_list.child.name.c_str();
-          leaf_list.child.schema.metadata = nullptr;
           const auto inner_list_defined_level = static_cast<std::int16_t>(
               (top_level_required ? std::int16_t{0} : std::int16_t{1}) + 2 +
               (child_list_depth - 1) * 2);
-          leaf_list.child.schema.flags =
-              max_definition_level > inner_list_defined_level + 1
-                  ? ARROW_FLAG_NULLABLE
-                  : 0;
-          leaf_list.child.schema.n_children = 0;
-          leaf_list.child.schema.children = nullptr;
-          leaf_list.child.schema.dictionary = nullptr;
-          leaf_list.child.schema.private_data = nullptr;
-          leaf_list.child.schema.release = &native_parquet_schema_child_release;
-          leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-          for (std::size_t reverse_index =
-                   first_list_index +
-                   static_cast<std::size_t>(child_list_depth);
-               reverse_index > first_list_index; --reverse_index) {
-            const auto list_index = reverse_index - 1;
-            auto &list_child = entries.list_children[list_index];
-            if (list_index + 1 <
-                first_list_index + static_cast<std::size_t>(child_list_depth)) {
-              list_child.child_ptrs[0] =
-                  &entries.list_children[list_index + 1].schema;
-            }
-            sanitize::internal::cdata_stream::clear_schema(&list_child.schema);
-            list_child.schema.format = list_child.format.c_str();
-            list_child.schema.name = list_child.name.c_str();
-            list_child.schema.metadata = nullptr;
-            list_child.schema.flags = ARROW_FLAG_NULLABLE;
-            list_child.schema.n_children = 1;
-            list_child.schema.children = list_child.child_ptrs.data();
-            list_child.schema.dictionary = nullptr;
-            list_child.schema.private_data = nullptr;
-            list_child.schema.release = &native_parquet_schema_child_release;
-          }
-          entries.child_ptrs.push_back(
-              &entries.list_children[first_list_index].schema);
+          SAN_ASSIGN_OR_RAISE(
+              auto *chain_schema,
+              build_native_repeated_list_chain_schema(
+                  &entries.list_children, std::move(name), std::move(format),
+                  child_list_depth, max_definition_level,
+                  static_cast<std::int16_t>(inner_list_defined_level + 1)));
+          entries.child_ptrs.push_back(chain_schema);
           continue;
         }
         auto &child = entries.children[child_index];
@@ -10145,73 +10119,23 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                               struct_leaf.max_repetition_level);
                     }
                     if (struct_leaf_list_depth > 0) {
-                      const auto first_list_index =
-                          value_struct.list_children.size();
-                      for (std::int16_t level = 0;
-                           level < struct_leaf_list_depth; ++level) {
-                        auto &list_child =
-                            value_struct.list_children.emplace_back();
-                        list_child.name =
-                            level == 0 ? struct_leaf_name : "item";
-                      }
-                      auto &leaf_list = value_struct.list_children.back();
-                      leaf_list.child.name = "item";
-                      leaf_list.child.format = std::move(struct_leaf_format);
-                      sanitize::internal::cdata_stream::clear_schema(
-                          &leaf_list.child.schema);
-                      leaf_list.child.schema.format =
-                          leaf_list.child.format.c_str();
-                      leaf_list.child.schema.name =
-                          leaf_list.child.name.c_str();
-                      leaf_list.child.schema.metadata = nullptr;
                       const auto inner_list_defined_level =
                           static_cast<std::int16_t>(
                               (struct_leaf_top_level_required
                                    ? std::int16_t{0}
                                    : std::int16_t{1}) +
                               6 + (struct_leaf_list_depth - 1) * 2);
-                      leaf_list.child.schema.flags =
-                          struct_leaf_max_definition_level >
-                                  inner_list_defined_level + 1
-                              ? ARROW_FLAG_NULLABLE
-                              : 0;
-                      leaf_list.child.schema.n_children = 0;
-                      leaf_list.child.schema.children = nullptr;
-                      leaf_list.child.schema.dictionary = nullptr;
-                      leaf_list.child.schema.private_data = nullptr;
-                      leaf_list.child.schema.release =
-                          &native_parquet_schema_child_release;
-                      leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-                      for (std::size_t reverse_index =
-                               first_list_index +
-                               static_cast<std::size_t>(struct_leaf_list_depth);
-                           reverse_index > first_list_index; --reverse_index) {
-                        const auto list_index = reverse_index - 1;
-                        auto &list_child =
-                            value_struct.list_children[list_index];
-                        if (list_index + 1 <
-                            first_list_index + static_cast<std::size_t>(
-                                                   struct_leaf_list_depth)) {
-                          list_child.child_ptrs[0] =
-                              &value_struct.list_children[list_index + 1]
-                                   .schema;
-                        }
-                        sanitize::internal::cdata_stream::clear_schema(
-                            &list_child.schema);
-                        list_child.schema.format = list_child.format.c_str();
-                        list_child.schema.name = list_child.name.c_str();
-                        list_child.schema.metadata = nullptr;
-                        list_child.schema.flags = ARROW_FLAG_NULLABLE;
-                        list_child.schema.n_children = 1;
-                        list_child.schema.children =
-                            list_child.child_ptrs.data();
-                        list_child.schema.dictionary = nullptr;
-                        list_child.schema.private_data = nullptr;
-                        list_child.schema.release =
-                            &native_parquet_schema_child_release;
-                      }
-                      value_struct.child_ptrs.push_back(
-                          &value_struct.list_children[first_list_index].schema);
+                      SAN_ASSIGN_OR_RAISE(
+                          auto *chain_schema,
+                          build_native_repeated_list_chain_schema(
+                              &value_struct.list_children,
+                              std::move(struct_leaf_name),
+                              std::move(struct_leaf_format),
+                              struct_leaf_list_depth,
+                              struct_leaf_max_definition_level,
+                              static_cast<std::int16_t>(
+                                  inner_list_defined_level + 1)));
+                      value_struct.child_ptrs.push_back(chain_schema);
                       continue;
                     }
                     auto &struct_leaf_child =
@@ -10262,65 +10186,20 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                   continue;
                 }
                 if (map_leaf_list_depth > 0) {
-                  const auto first_list_index = entries.list_children.size();
-                  for (std::int16_t level = 0; level < map_leaf_list_depth;
-                       ++level) {
-                    auto &list_child = entries.list_children.emplace_back();
-                    list_child.name = level == 0 ? map_leaf_name : "item";
-                  }
-                  auto &leaf_list = entries.list_children.back();
-                  leaf_list.child.name = "item";
-                  leaf_list.child.format = std::move(map_leaf_format);
-                  sanitize::internal::cdata_stream::clear_schema(
-                      &leaf_list.child.schema);
-                  leaf_list.child.schema.format =
-                      leaf_list.child.format.c_str();
-                  leaf_list.child.schema.name = leaf_list.child.name.c_str();
-                  leaf_list.child.schema.metadata = nullptr;
                   const auto inner_list_defined_level =
                       static_cast<std::int16_t>(
                           (map_leaf_top_level_required ? std::int16_t{0}
                                                        : std::int16_t{1}) +
                           5 + (map_leaf_list_depth - 1) * 2);
-                  leaf_list.child.schema.flags =
-                      map_leaf_max_definition_level >
-                              inner_list_defined_level + 1
-                          ? ARROW_FLAG_NULLABLE
-                          : 0;
-                  leaf_list.child.schema.n_children = 0;
-                  leaf_list.child.schema.children = nullptr;
-                  leaf_list.child.schema.dictionary = nullptr;
-                  leaf_list.child.schema.private_data = nullptr;
-                  leaf_list.child.schema.release =
-                      &native_parquet_schema_child_release;
-                  leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-                  for (std::size_t reverse_index =
-                           first_list_index +
-                           static_cast<std::size_t>(map_leaf_list_depth);
-                       reverse_index > first_list_index; --reverse_index) {
-                    const auto list_index = reverse_index - 1;
-                    auto &list_child = entries.list_children[list_index];
-                    if (list_index + 1 <
-                        first_list_index +
-                            static_cast<std::size_t>(map_leaf_list_depth)) {
-                      list_child.child_ptrs[0] =
-                          &entries.list_children[list_index + 1].schema;
-                    }
-                    sanitize::internal::cdata_stream::clear_schema(
-                        &list_child.schema);
-                    list_child.schema.format = list_child.format.c_str();
-                    list_child.schema.name = list_child.name.c_str();
-                    list_child.schema.metadata = nullptr;
-                    list_child.schema.flags = ARROW_FLAG_NULLABLE;
-                    list_child.schema.n_children = 1;
-                    list_child.schema.children = list_child.child_ptrs.data();
-                    list_child.schema.dictionary = nullptr;
-                    list_child.schema.private_data = nullptr;
-                    list_child.schema.release =
-                        &native_parquet_schema_child_release;
-                  }
-                  entries.child_ptrs.push_back(
-                      &entries.list_children[first_list_index].schema);
+                  SAN_ASSIGN_OR_RAISE(
+                      auto *chain_schema,
+                      build_native_repeated_list_chain_schema(
+                          &entries.list_children, std::move(map_leaf_name),
+                          std::move(map_leaf_format), map_leaf_list_depth,
+                          map_leaf_max_definition_level,
+                          static_cast<std::int16_t>(
+                              inner_list_defined_level + 1)));
+                  entries.child_ptrs.push_back(chain_schema);
                   continue;
                 }
                 auto &map_leaf_child = entries.children[map_child_index];
@@ -10374,60 +10253,16 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
               continue;
             }
             if (child_list_depth > 0) {
-              const auto first_list_index = struct_child.list_children.size();
-              for (std::int16_t level = 0; level < child_list_depth; ++level) {
-                auto &list_child = struct_child.list_children.emplace_back();
-                list_child.name = level == 0 ? name : "item";
-              }
-              auto &leaf_list = struct_child.list_children.back();
-              leaf_list.child.name = "item";
-              leaf_list.child.format = std::move(format);
-              sanitize::internal::cdata_stream::clear_schema(
-                  &leaf_list.child.schema);
-              leaf_list.child.schema.format = leaf_list.child.format.c_str();
-              leaf_list.child.schema.name = leaf_list.child.name.c_str();
-              leaf_list.child.schema.metadata = nullptr;
               const auto inner_list_defined_level = static_cast<std::int16_t>(
                   (top_level_required ? std::int16_t{0} : std::int16_t{1}) + 3 +
                   (child_list_depth - 1) * 2);
-              leaf_list.child.schema.flags =
-                  max_definition_level > inner_list_defined_level + 1
-                      ? ARROW_FLAG_NULLABLE
-                      : 0;
-              leaf_list.child.schema.n_children = 0;
-              leaf_list.child.schema.children = nullptr;
-              leaf_list.child.schema.dictionary = nullptr;
-              leaf_list.child.schema.private_data = nullptr;
-              leaf_list.child.schema.release =
-                  &native_parquet_schema_child_release;
-              leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-              for (std::size_t reverse_index =
-                       first_list_index +
-                       static_cast<std::size_t>(child_list_depth);
-                   reverse_index > first_list_index; --reverse_index) {
-                const auto list_index = reverse_index - 1;
-                auto &list_child = struct_child.list_children[list_index];
-                if (list_index + 1 <
-                    first_list_index +
-                        static_cast<std::size_t>(child_list_depth)) {
-                  list_child.child_ptrs[0] =
-                      &struct_child.list_children[list_index + 1].schema;
-                }
-                sanitize::internal::cdata_stream::clear_schema(
-                    &list_child.schema);
-                list_child.schema.format = list_child.format.c_str();
-                list_child.schema.name = list_child.name.c_str();
-                list_child.schema.metadata = nullptr;
-                list_child.schema.flags = ARROW_FLAG_NULLABLE;
-                list_child.schema.n_children = 1;
-                list_child.schema.children = list_child.child_ptrs.data();
-                list_child.schema.dictionary = nullptr;
-                list_child.schema.private_data = nullptr;
-                list_child.schema.release =
-                    &native_parquet_schema_child_release;
-              }
-              struct_child.child_ptrs.push_back(
-                  &struct_child.list_children[first_list_index].schema);
+              SAN_ASSIGN_OR_RAISE(
+                  auto *chain_schema,
+                  build_native_repeated_list_chain_schema(
+                      &struct_child.list_children, std::move(name),
+                      std::move(format), child_list_depth, max_definition_level,
+                      static_cast<std::int16_t>(inner_list_defined_level + 1)));
+              struct_child.child_ptrs.push_back(chain_schema);
               continue;
             }
             auto &child = struct_child.children[child_index];
@@ -10479,51 +10314,19 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
             max_definition_level = leaf.max_definition_level;
             top_level_required = leaf.top_level_required;
           }
-          list_node.chain_list_children.resize(
-              static_cast<std::size_t>(field.list_depth - 1));
-          auto &leaf_list = list_node.chain_list_children.back();
-          leaf_list.child.name = "item";
-          leaf_list.child.format = std::move(format);
-          sanitize::internal::cdata_stream::clear_schema(
-              &leaf_list.child.schema);
-          leaf_list.child.schema.format = leaf_list.child.format.c_str();
-          leaf_list.child.schema.name = leaf_list.child.name.c_str();
-          leaf_list.child.schema.metadata = nullptr;
           const auto deepest_list_defined_level = static_cast<std::int16_t>(
               (top_level_required ? std::int16_t{0} : std::int16_t{1}) +
               (field.list_depth - 1) * 2);
-          leaf_list.child.schema.flags =
-              max_definition_level > deepest_list_defined_level + 1
-                  ? ARROW_FLAG_NULLABLE
-                  : 0;
-          leaf_list.child.schema.n_children = 0;
-          leaf_list.child.schema.children = nullptr;
-          leaf_list.child.schema.dictionary = nullptr;
-          leaf_list.child.schema.private_data = nullptr;
-          leaf_list.child.schema.release = &native_parquet_schema_child_release;
-          leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-
-          for (std::size_t reverse_index = list_node.chain_list_children.size();
-               reverse_index > 0; --reverse_index) {
-            const auto child_index = reverse_index - 1;
-            auto &child_list = list_node.chain_list_children[child_index];
-            if (child_index + 1 < list_node.chain_list_children.size()) {
-              child_list.child_ptrs[0] =
-                  &list_node.chain_list_children[child_index + 1].schema;
-            }
-            sanitize::internal::cdata_stream::clear_schema(&child_list.schema);
-            child_list.schema.format = child_list.format.c_str();
-            child_list.schema.name = child_list.name.c_str();
-            child_list.schema.metadata = nullptr;
-            child_list.schema.flags = ARROW_FLAG_NULLABLE;
-            child_list.schema.n_children = 1;
-            child_list.schema.children = child_list.child_ptrs.data();
-            child_list.schema.dictionary = nullptr;
-            child_list.schema.private_data = nullptr;
-            child_list.schema.release = &native_parquet_schema_child_release;
-          }
-          list_node.child_ptrs[0] =
-              &list_node.chain_list_children.front().schema;
+          list_node.chain_list_children.reserve(
+              static_cast<std::size_t>(field.list_depth - 1));
+          SAN_ASSIGN_OR_RAISE(
+              auto *chain_schema,
+              build_native_repeated_list_chain_schema(
+                  &list_node.chain_list_children, "item", std::move(format),
+                  static_cast<std::int16_t>(field.list_depth - 1),
+                  max_definition_level,
+                  static_cast<std::int16_t>(deepest_list_defined_level + 1)));
+          list_node.child_ptrs[0] = chain_schema;
         } else if (field.is_list_list_list) {
           const auto column_index = field.column_indices.front();
           std::string format;
@@ -10753,67 +10556,22 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                           struct_leaf.path, struct_leaf.max_repetition_level);
                 }
                 if (struct_leaf_list_depth > 0) {
-                  const auto first_list_index =
-                      value_struct.list_children.size();
-                  for (std::int16_t level = 0; level < struct_leaf_list_depth;
-                       ++level) {
-                    auto &list_child =
-                        value_struct.list_children.emplace_back();
-                    list_child.name = level == 0 ? struct_leaf_name : "item";
-                  }
-                  auto &leaf_list = value_struct.list_children.back();
-                  leaf_list.child.name = "item";
-                  leaf_list.child.format = std::move(struct_leaf_format);
-                  sanitize::internal::cdata_stream::clear_schema(
-                      &leaf_list.child.schema);
-                  leaf_list.child.schema.format =
-                      leaf_list.child.format.c_str();
-                  leaf_list.child.schema.name = leaf_list.child.name.c_str();
-                  leaf_list.child.schema.metadata = nullptr;
                   const auto inner_list_defined_level =
                       static_cast<std::int16_t>(
                           (struct_leaf_top_level_required ? std::int16_t{0}
                                                           : std::int16_t{1}) +
                           5 + (struct_leaf_list_depth - 1) * 2);
-                  leaf_list.child.schema.flags =
-                      struct_leaf_max_definition_level >
-                              inner_list_defined_level + 1
-                          ? ARROW_FLAG_NULLABLE
-                          : 0;
-                  leaf_list.child.schema.n_children = 0;
-                  leaf_list.child.schema.children = nullptr;
-                  leaf_list.child.schema.dictionary = nullptr;
-                  leaf_list.child.schema.private_data = nullptr;
-                  leaf_list.child.schema.release =
-                      &native_parquet_schema_child_release;
-                  leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-                  for (std::size_t reverse_index =
-                           first_list_index +
-                           static_cast<std::size_t>(struct_leaf_list_depth);
-                       reverse_index > first_list_index; --reverse_index) {
-                    const auto list_index = reverse_index - 1;
-                    auto &list_child = value_struct.list_children[list_index];
-                    if (list_index + 1 <
-                        first_list_index +
-                            static_cast<std::size_t>(struct_leaf_list_depth)) {
-                      list_child.child_ptrs[0] =
-                          &value_struct.list_children[list_index + 1].schema;
-                    }
-                    sanitize::internal::cdata_stream::clear_schema(
-                        &list_child.schema);
-                    list_child.schema.format = list_child.format.c_str();
-                    list_child.schema.name = list_child.name.c_str();
-                    list_child.schema.metadata = nullptr;
-                    list_child.schema.flags = ARROW_FLAG_NULLABLE;
-                    list_child.schema.n_children = 1;
-                    list_child.schema.children = list_child.child_ptrs.data();
-                    list_child.schema.dictionary = nullptr;
-                    list_child.schema.private_data = nullptr;
-                    list_child.schema.release =
-                        &native_parquet_schema_child_release;
-                  }
-                  value_struct.child_ptrs.push_back(
-                      &value_struct.list_children[first_list_index].schema);
+                  SAN_ASSIGN_OR_RAISE(
+                      auto *chain_schema,
+                      build_native_repeated_list_chain_schema(
+                          &value_struct.list_children,
+                          std::move(struct_leaf_name),
+                          std::move(struct_leaf_format),
+                          struct_leaf_list_depth,
+                          struct_leaf_max_definition_level,
+                          static_cast<std::int16_t>(
+                              inner_list_defined_level + 1)));
+                  value_struct.child_ptrs.push_back(chain_schema);
                   continue;
                 }
                 auto &struct_leaf_child =
@@ -11181,63 +10939,19 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                         struct_leaf.path, struct_leaf.max_repetition_level);
               }
               if (struct_leaf_list_depth > 0) {
-                const auto first_list_index = value_struct.list_children.size();
-                for (std::int16_t level = 0; level < struct_leaf_list_depth;
-                     ++level) {
-                  auto &list_child = value_struct.list_children.emplace_back();
-                  list_child.name = level == 0 ? struct_leaf_name : "item";
-                }
-                auto &leaf_list = value_struct.list_children.back();
-                leaf_list.child.name = "item";
-                leaf_list.child.format = std::move(struct_leaf_format);
-                sanitize::internal::cdata_stream::clear_schema(
-                    &leaf_list.child.schema);
-                leaf_list.child.schema.format = leaf_list.child.format.c_str();
-                leaf_list.child.schema.name = leaf_list.child.name.c_str();
-                leaf_list.child.schema.metadata = nullptr;
                 const auto inner_list_defined_level = static_cast<std::int16_t>(
                     (struct_leaf_top_level_required ? std::int16_t{1}
                                                     : std::int16_t{2}) +
                     3 + (struct_leaf_list_depth - 1) * 2);
-                leaf_list.child.schema.flags =
-                    struct_leaf_max_definition_level >
-                            inner_list_defined_level + 1
-                        ? ARROW_FLAG_NULLABLE
-                        : 0;
-                leaf_list.child.schema.n_children = 0;
-                leaf_list.child.schema.children = nullptr;
-                leaf_list.child.schema.dictionary = nullptr;
-                leaf_list.child.schema.private_data = nullptr;
-                leaf_list.child.schema.release =
-                    &native_parquet_schema_child_release;
-                leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-                for (std::size_t reverse_index =
-                         first_list_index +
-                         static_cast<std::size_t>(struct_leaf_list_depth);
-                     reverse_index > first_list_index; --reverse_index) {
-                  const auto list_index = reverse_index - 1;
-                  auto &list_child = value_struct.list_children[list_index];
-                  if (list_index + 1 <
-                      first_list_index +
-                          static_cast<std::size_t>(struct_leaf_list_depth)) {
-                    list_child.child_ptrs[0] =
-                        &value_struct.list_children[list_index + 1].schema;
-                  }
-                  sanitize::internal::cdata_stream::clear_schema(
-                      &list_child.schema);
-                  list_child.schema.format = list_child.format.c_str();
-                  list_child.schema.name = list_child.name.c_str();
-                  list_child.schema.metadata = nullptr;
-                  list_child.schema.flags = ARROW_FLAG_NULLABLE;
-                  list_child.schema.n_children = 1;
-                  list_child.schema.children = list_child.child_ptrs.data();
-                  list_child.schema.dictionary = nullptr;
-                  list_child.schema.private_data = nullptr;
-                  list_child.schema.release =
-                      &native_parquet_schema_child_release;
-                }
-                value_struct.child_ptrs.push_back(
-                    &value_struct.list_children[first_list_index].schema);
+                SAN_ASSIGN_OR_RAISE(
+                    auto *chain_schema,
+                    build_native_repeated_list_chain_schema(
+                        &value_struct.list_children, std::move(struct_leaf_name),
+                        std::move(struct_leaf_format), struct_leaf_list_depth,
+                        struct_leaf_max_definition_level,
+                        static_cast<std::int16_t>(
+                            inner_list_defined_level + 1)));
+                value_struct.child_ptrs.push_back(chain_schema);
                 continue;
               }
               auto &struct_leaf_child =
@@ -11283,58 +10997,17 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
             continue;
           }
           if (child_list_depth > 0) {
-            const auto first_list_index = entries.list_children.size();
-            for (std::int16_t level = 0; level < child_list_depth; ++level) {
-              auto &list_child = entries.list_children.emplace_back();
-              list_child.name = level == 0 ? child_name : "item";
-            }
-            auto &leaf_list = entries.list_children.back();
-            leaf_list.child.name = "item";
-            leaf_list.child.format = std::move(child_format);
-            sanitize::internal::cdata_stream::clear_schema(
-                &leaf_list.child.schema);
-            leaf_list.child.schema.format = leaf_list.child.format.c_str();
-            leaf_list.child.schema.name = leaf_list.child.name.c_str();
-            leaf_list.child.schema.metadata = nullptr;
             const auto inner_list_defined_level = static_cast<std::int16_t>(
                 (child_top_level_required ? std::int16_t{1} : std::int16_t{2}) +
                 2 + (child_list_depth - 1) * 2);
-            leaf_list.child.schema.flags =
-                child_max_definition_level > inner_list_defined_level + 1
-                    ? ARROW_FLAG_NULLABLE
-                    : 0;
-            leaf_list.child.schema.n_children = 0;
-            leaf_list.child.schema.children = nullptr;
-            leaf_list.child.schema.dictionary = nullptr;
-            leaf_list.child.schema.private_data = nullptr;
-            leaf_list.child.schema.release =
-                &native_parquet_schema_child_release;
-            leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-            for (std::size_t reverse_index =
-                     first_list_index +
-                     static_cast<std::size_t>(child_list_depth);
-                 reverse_index > first_list_index; --reverse_index) {
-              const auto list_index = reverse_index - 1;
-              auto &list_child = entries.list_children[list_index];
-              if (list_index + 1 < first_list_index + static_cast<std::size_t>(
-                                                          child_list_depth)) {
-                list_child.child_ptrs[0] =
-                    &entries.list_children[list_index + 1].schema;
-              }
-              sanitize::internal::cdata_stream::clear_schema(
-                  &list_child.schema);
-              list_child.schema.format = list_child.format.c_str();
-              list_child.schema.name = list_child.name.c_str();
-              list_child.schema.metadata = nullptr;
-              list_child.schema.flags = ARROW_FLAG_NULLABLE;
-              list_child.schema.n_children = 1;
-              list_child.schema.children = list_child.child_ptrs.data();
-              list_child.schema.dictionary = nullptr;
-              list_child.schema.private_data = nullptr;
-              list_child.schema.release = &native_parquet_schema_child_release;
-            }
-            entries.child_ptrs.push_back(
-                &entries.list_children[first_list_index].schema);
+            SAN_ASSIGN_OR_RAISE(
+                auto *chain_schema,
+                build_native_repeated_list_chain_schema(
+                    &entries.list_children, std::move(child_name),
+                    std::move(child_format), child_list_depth,
+                    child_max_definition_level,
+                    static_cast<std::int16_t>(inner_list_defined_level + 1)));
+            entries.child_ptrs.push_back(chain_schema);
             continue;
           }
           auto &entry_child = entries.children[map_child_index];

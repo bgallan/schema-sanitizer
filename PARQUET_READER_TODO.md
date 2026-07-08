@@ -71,6 +71,7 @@ replacement. Remaining work:
      - [x] Top-level struct with scalar map children containing scalar struct values with scalar list-chain children.
      - [x] Recursive path planner started for native readiness and output-layout classification.
      - [x] Recursive native list-chain Arrow array assembly shared across supported nested parents.
+     - [x] Recursive native list-chain Arrow schema assembly shared across supported nested parents.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
