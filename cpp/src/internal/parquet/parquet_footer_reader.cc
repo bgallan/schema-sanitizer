@@ -3980,6 +3980,32 @@ top_level_struct_map_list_chain_depth_path(const std::vector<std::string> &path,
   return depth;
 }
 
+bool is_top_level_struct_map_struct_leaf_path(
+    const std::vector<std::string> &path, std::int16_t max_repetition_level) {
+  return max_repetition_level == 1 && path.size() == 5 &&
+         path[2] == "key_value" && path[3] == "value";
+}
+
+std::int16_t top_level_struct_map_struct_list_chain_depth_path(
+    const std::vector<std::string> &path, std::int16_t max_repetition_level) {
+  if (max_repetition_level < 2 || path.size() < 7 || path[2] != "key_value" ||
+      path[3] != "value") {
+    return 0;
+  }
+  const auto depth = static_cast<std::int16_t>(max_repetition_level - 1);
+  if (path.size() != 5U + static_cast<std::size_t>(depth) * 2U) {
+    return 0;
+  }
+  for (std::int16_t level = 0; level < depth; ++level) {
+    const auto list_index = 5U + static_cast<std::size_t>(level) * 2U;
+    const auto element_index = list_index + 1U;
+    if (path[list_index] != "list" || path[element_index] != "element") {
+      return 0;
+    }
+  }
+  return depth;
+}
+
 bool is_top_level_map_struct_leaf_path(const std::vector<std::string> &path,
                                        std::int16_t max_repetition_level) {
   return max_repetition_level == 1 && path.size() == 4 &&
@@ -4102,6 +4128,17 @@ top_level_struct_map_list_chain_depth(const ColumnChunkInfo &column) {
       column.path_in_schema, column.max_repetition_level);
 }
 
+bool is_top_level_struct_map_struct_leaf(const ColumnChunkInfo &column) {
+  return is_top_level_struct_map_struct_leaf_path(column.path_in_schema,
+                                                  column.max_repetition_level);
+}
+
+std::int16_t
+top_level_struct_map_struct_list_chain_depth(const ColumnChunkInfo &column) {
+  return top_level_struct_map_struct_list_chain_depth_path(
+      column.path_in_schema, column.max_repetition_level);
+}
+
 bool is_top_level_map_struct_leaf(const ColumnChunkInfo &column) {
   return is_top_level_map_struct_leaf_path(column.path_in_schema,
                                            column.max_repetition_level);
@@ -4140,6 +4177,8 @@ bool is_supported_top_level_list_leaf(const ColumnChunkInfo &column) {
          is_top_level_map_leaf(column) ||
          is_top_level_struct_map_leaf(column) ||
          (top_level_struct_map_list_chain_depth(column) > 0) ||
+         is_top_level_struct_map_struct_leaf(column) ||
+         (top_level_struct_map_struct_list_chain_depth(column) > 0) ||
          is_top_level_map_struct_leaf(column) ||
          (top_level_map_struct_list_chain_depth(column) > 0) ||
          is_top_level_map_list_leaf(column) ||
@@ -4151,6 +4190,7 @@ std::int64_t list_leaf_value_count(const ColumnChunkInfo &column) {
        top_level_list_struct_map_list_chain_depth(column) > 0 ||
        top_level_list_map_struct_list_chain_depth(column) > 0 ||
        top_level_struct_map_list_chain_depth(column) > 0 ||
+       top_level_struct_map_struct_list_chain_depth(column) > 0 ||
        top_level_map_struct_list_chain_depth(column) > 0 ||
        top_level_map_list_chain_depth(column) > 1) &&
       !column.repeated_level_layouts.empty()) {
@@ -4226,6 +4266,14 @@ list_leaf_value_parent_defined_level(const ColumnChunkInfo &column) {
   if (struct_map_list_chain_depth > 0) {
     return static_cast<std::int16_t>(2 + 2 +
                                      (struct_map_list_chain_depth - 1) * 2);
+  }
+  const auto struct_map_struct_list_chain_depth =
+      top_level_struct_map_struct_list_chain_depth(column);
+  if (struct_map_struct_list_chain_depth > 0) {
+    const auto map_defined_level =
+        column.top_level_required ? std::int16_t{1} : std::int16_t{2};
+    return static_cast<std::int16_t>(
+        map_defined_level + 3 + (struct_map_struct_list_chain_depth - 1) * 2);
   }
   const auto list_struct_map_list_chain_depth =
       top_level_list_struct_map_list_chain_depth(column);
@@ -5084,7 +5132,9 @@ assign_generic_list_chain_level_layout(std::int64_t row_count,
   }
   const auto list_defined_level =
       (is_top_level_struct_map_leaf(*column) ||
-       top_level_struct_map_list_chain_depth(*column) > 0)
+       is_top_level_struct_map_struct_leaf(*column) ||
+       top_level_struct_map_list_chain_depth(*column) > 0 ||
+       top_level_struct_map_struct_list_chain_depth(*column) > 0)
           ? std::int16_t{2}
           : (column->top_level_required ? std::int16_t{0} : std::int16_t{1});
   auto depth = top_level_list_chain_depth(*column);
@@ -5104,6 +5154,8 @@ assign_generic_list_chain_level_layout(std::int64_t row_count,
         top_level_list_map_struct_list_chain_depth(*column);
     const auto struct_map_list_chain_depth =
         top_level_struct_map_list_chain_depth(*column);
+    const auto struct_map_struct_list_chain_depth =
+        top_level_struct_map_struct_list_chain_depth(*column);
     const auto map_struct_list_chain_depth =
         top_level_map_struct_list_chain_depth(*column);
     const auto map_list_chain_depth = top_level_map_list_chain_depth(*column);
@@ -5142,6 +5194,14 @@ assign_generic_list_chain_level_layout(std::int64_t row_count,
       for (std::int16_t level = 1; level < depth; ++level) {
         list_defined_levels[static_cast<std::size_t>(level)] =
             static_cast<std::int16_t>(list_defined_level + 2 + (level - 1) * 2);
+      }
+    } else if (struct_map_struct_list_chain_depth > 0) {
+      depth = static_cast<std::int16_t>(struct_map_struct_list_chain_depth + 1);
+      list_defined_levels.resize(static_cast<std::size_t>(depth));
+      list_defined_levels[0] = list_defined_level;
+      for (std::int16_t level = 1; level < depth; ++level) {
+        list_defined_levels[static_cast<std::size_t>(level)] =
+            static_cast<std::int16_t>(list_defined_level + 3 + (level - 1) * 2);
       }
     } else if (map_struct_list_chain_depth > 0) {
       depth = static_cast<std::int16_t>(map_struct_list_chain_depth + 1);
@@ -5468,6 +5528,7 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
       top_level_list_struct_map_list_chain_depth(*column) > 0 ||
       top_level_list_map_struct_list_chain_depth(*column) > 0 ||
       top_level_struct_map_list_chain_depth(*column) > 0 ||
+      top_level_struct_map_struct_list_chain_depth(*column) > 0 ||
       top_level_map_struct_list_chain_depth(*column) > 0 ||
       top_level_map_list_chain_depth(*column) > 1) {
     return assign_generic_list_chain_level_layout(row_count, column);
@@ -5511,11 +5572,13 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
 
   const auto list_defined_level =
       (is_top_level_struct_map_leaf(*column) ||
+       is_top_level_struct_map_struct_leaf(*column) ||
        top_level_struct_map_list_chain_depth(*column) > 0)
           ? std::int16_t{2}
           : (column->top_level_required ? std::int16_t{0} : std::int16_t{1});
   const auto list_valid_for_definition = [&](std::int16_t definition) {
     if (is_top_level_struct_map_leaf(*column) ||
+        is_top_level_struct_map_struct_leaf(*column) ||
         top_level_struct_map_list_chain_depth(*column) > 0) {
       return definition >= list_defined_level;
     }
@@ -5969,6 +6032,10 @@ bool is_top_level_struct_map_leaf_path(const std::vector<std::string> &path,
 std::int16_t
 top_level_struct_map_list_chain_depth_path(const std::vector<std::string> &path,
                                            std::int16_t max_repetition_level);
+bool is_top_level_struct_map_struct_leaf_path(
+    const std::vector<std::string> &path, std::int16_t max_repetition_level);
+std::int16_t top_level_struct_map_struct_list_chain_depth_path(
+    const std::vector<std::string> &path, std::int16_t max_repetition_level);
 bool is_top_level_map_struct_leaf_path(const std::vector<std::string> &path,
                                        std::int16_t max_repetition_level);
 std::int16_t
@@ -6055,6 +6122,10 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
             !is_top_level_struct_map_leaf_path(leaf.path,
                                                leaf.max_repetition_level) &&
             top_level_struct_map_list_chain_depth_path(
+                leaf.path, leaf.max_repetition_level) == 0 &&
+            !is_top_level_struct_map_struct_leaf_path(
+                leaf.path, leaf.max_repetition_level) &&
+            top_level_struct_map_struct_list_chain_depth_path(
                 leaf.path, leaf.max_repetition_level) == 0 &&
             !is_top_level_map_struct_leaf_path(leaf.path,
                                                leaf.max_repetition_level) &&
@@ -6605,6 +6676,9 @@ bool native_plain_path_is_materializable(const std::vector<std::string> &path,
       is_top_level_struct_map_leaf_path(path, max_repetition_level) ||
       top_level_struct_map_list_chain_depth_path(path, max_repetition_level) >
           0 ||
+      is_top_level_struct_map_struct_leaf_path(path, max_repetition_level) ||
+      top_level_struct_map_struct_list_chain_depth_path(
+          path, max_repetition_level) > 0 ||
       is_top_level_map_struct_leaf_path(path, max_repetition_level) ||
       top_level_map_struct_list_chain_depth_path(path, max_repetition_level) >
           0 ||
@@ -6687,7 +6761,10 @@ sanitize::Status add_native_output_field(
       (path.size() == 2 ||
        is_top_level_struct_map_leaf_path(path, max_repetition_level) ||
        top_level_struct_map_list_chain_depth_path(path, max_repetition_level) >
-           0);
+           0 ||
+       is_top_level_struct_map_struct_leaf_path(path, max_repetition_level) ||
+       top_level_struct_map_struct_list_chain_depth_path(
+           path, max_repetition_level) > 0);
   const auto &top_level_name = path[0];
   auto match = std::find_if(fields->begin(), fields->end(),
                             [&](const NativeParquetOutputField &field) {
@@ -7181,6 +7258,66 @@ materialize_map_value_struct_validity(const ColumnChunkInfo &column,
   if (element_index != element_count) {
     return sanitize::Status::Invalid(
         "native Parquet reader: map value struct validity element count "
+        "mismatch");
+  }
+  if (null_count == 0) {
+    validity->clear();
+  }
+  return null_count;
+}
+
+sanitize::Result<std::int64_t> materialize_struct_map_value_struct_validity(
+    const ColumnChunkInfo &column, std::vector<std::uint8_t> *validity) {
+  if (!validity || !column.repeated_level_layout_decoded ||
+      !list_leaf_value_count_is_materializable(column)) {
+    return sanitize::Status::Invalid("native Parquet reader: invalid struct "
+                                     "map value struct validity layout");
+  }
+  const auto element_count = column.repeated_level_element_count;
+  const auto validity_bytes = (element_count + 7) / 8;
+  if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
+    return sanitize::Status::Invalid("native Parquet reader: struct map value "
+                                     "struct validity bitmap exceeds "
+                                     "memory limit");
+  }
+  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
+  const auto value_struct_defined_level =
+      column.top_level_required ? std::int16_t{2} : std::int16_t{3};
+  std::int64_t null_count = 0;
+  std::int64_t element_index = 0;
+  for (const auto &page : column.pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (page.decoded_definition_level_values.size() !=
+        static_cast<std::size_t>(page.num_values)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: struct map value struct definition level "
+          "count mismatch");
+    }
+    for (std::int32_t row = 0; row < page.num_values; ++row) {
+      const auto definition =
+          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
+      if (definition <= value_struct_defined_level - 1) {
+        continue;
+      }
+      if (element_index >= element_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: struct map value struct validity exceeds "
+            "element count");
+      }
+      if (definition > value_struct_defined_level) {
+        set_output_validity_bit(validity,
+                                static_cast<std::int32_t>(element_index));
+      } else {
+        ++null_count;
+      }
+      ++element_index;
+    }
+  }
+  if (element_index != element_count) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: struct map value struct validity element count "
         "mismatch");
   }
   if (null_count == 0) {
@@ -10384,6 +10521,10 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                     : empty_file_leaves[column_index].max_repetition_level;
       if (is_top_level_struct_map_leaf_path(path, max_repetition_level) ||
           top_level_struct_map_list_chain_depth_path(
+              path, max_repetition_level) > 0 ||
+          is_top_level_struct_map_struct_leaf_path(path,
+                                                   max_repetition_level) ||
+          top_level_struct_map_struct_list_chain_depth_path(
               path, max_repetition_level) > 0) {
         const auto &map_name = path[1];
         if (std::find(map_child_names.begin(), map_child_names.end(),
@@ -10403,6 +10544,10 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
           if ((is_top_level_struct_map_leaf_path(candidate_path,
                                                  candidate_repetition_level) ||
                top_level_struct_map_list_chain_depth_path(
+                   candidate_path, candidate_repetition_level) > 0 ||
+               is_top_level_struct_map_struct_leaf_path(
+                   candidate_path, candidate_repetition_level) ||
+               top_level_struct_map_struct_list_chain_depth_path(
                    candidate_path, candidate_repetition_level) > 0) &&
               candidate_path.size() > 1 && candidate_path[1] == map_name) {
             map_column_indices.push_back(candidate_index);
@@ -10434,7 +10579,29 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
             });
         entries.list_children.reserve(
             static_cast<std::size_t>(nested_list_child_count));
+        const auto nested_struct_list_child_count = std::accumulate(
+            map_column_indices.begin(), map_column_indices.end(),
+            std::int16_t{0},
+            [&](std::int16_t total, std::size_t map_column_index) {
+              if (row_group) {
+                return static_cast<std::int16_t>(
+                    total + (map_column_index < row_group->columns.size()
+                                 ? top_level_struct_map_struct_list_chain_depth(
+                                       row_group->columns[map_column_index])
+                                 : 0));
+              }
+              return static_cast<std::int16_t>(
+                  total +
+                  (map_column_index < empty_file_leaves.size()
+                       ? top_level_struct_map_struct_list_chain_depth_path(
+                             empty_file_leaves[map_column_index].path,
+                             empty_file_leaves[map_column_index]
+                                 .max_repetition_level)
+                       : 0));
+            });
+        entries.struct_children.reserve(1);
         entries.child_ptrs.reserve(map_column_indices.size());
+        bool map_value_struct_added = false;
         for (std::size_t map_child_index = 0;
              map_child_index < map_column_indices.size(); ++map_child_index) {
           const auto map_column_index = map_column_indices[map_child_index];
@@ -10460,6 +10627,181 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
             child_top_level_required = map_leaf.top_level_required;
             child_list_depth = top_level_struct_map_list_chain_depth_path(
                 map_leaf.path, map_leaf.max_repetition_level);
+          }
+          const auto child_struct_list_depth =
+              top_level_struct_map_struct_list_chain_depth_path(
+                  map_path, row_group ? row_group->columns[map_column_index]
+                                            .max_repetition_level
+                                      : empty_file_leaves[map_column_index]
+                                            .max_repetition_level);
+          if (is_top_level_struct_map_struct_leaf_path(
+                  map_path, row_group ? row_group->columns[map_column_index]
+                                            .max_repetition_level
+                                      : empty_file_leaves[map_column_index]
+                                            .max_repetition_level) ||
+              child_struct_list_depth > 0) {
+            if (map_value_struct_added) {
+              continue;
+            }
+            map_value_struct_added = true;
+            std::vector<std::size_t> struct_column_indices;
+            for (const auto candidate_index : map_column_indices) {
+              const auto &candidate_path =
+                  row_group ? row_group->columns[candidate_index].path_in_schema
+                            : empty_file_leaves[candidate_index].path;
+              const auto candidate_repetition_level =
+                  row_group
+                      ? row_group->columns[candidate_index].max_repetition_level
+                      : empty_file_leaves[candidate_index].max_repetition_level;
+              if (is_top_level_struct_map_struct_leaf_path(
+                      candidate_path, candidate_repetition_level) ||
+                  top_level_struct_map_struct_list_chain_depth_path(
+                      candidate_path, candidate_repetition_level) > 0) {
+                struct_column_indices.push_back(candidate_index);
+              }
+            }
+            auto &value_struct = entries.struct_children.emplace_back();
+            value_struct.name = "value";
+            value_struct.children.resize(struct_column_indices.size());
+            value_struct.list_children.reserve(
+                static_cast<std::size_t>(nested_struct_list_child_count));
+            value_struct.child_ptrs.reserve(struct_column_indices.size());
+            for (std::size_t struct_child_index = 0;
+                 struct_child_index < struct_column_indices.size();
+                 ++struct_child_index) {
+              const auto struct_column_index =
+                  struct_column_indices[struct_child_index];
+              const auto &struct_path =
+                  row_group
+                      ? row_group->columns[struct_column_index].path_in_schema
+                      : empty_file_leaves[struct_column_index].path;
+              std::string struct_leaf_name = struct_path[4];
+              std::string struct_leaf_format;
+              std::int16_t struct_leaf_max_definition_level = 0;
+              bool struct_leaf_top_level_required = true;
+              std::int16_t struct_leaf_list_depth = 0;
+              if (row_group) {
+                const auto &struct_column =
+                    row_group->columns[struct_column_index];
+                struct_leaf_format = struct_column.native_arrow_format;
+                struct_leaf_max_definition_level =
+                    struct_column.max_definition_level;
+                struct_leaf_top_level_required =
+                    struct_column.top_level_required;
+                struct_leaf_list_depth =
+                    top_level_struct_map_struct_list_chain_depth(struct_column);
+              } else {
+                const auto &struct_leaf =
+                    empty_file_leaves[struct_column_index];
+                struct_leaf_format = struct_leaf.native_arrow_format;
+                struct_leaf_max_definition_level =
+                    struct_leaf.max_definition_level;
+                struct_leaf_top_level_required = struct_leaf.top_level_required;
+                struct_leaf_list_depth =
+                    top_level_struct_map_struct_list_chain_depth_path(
+                        struct_leaf.path, struct_leaf.max_repetition_level);
+              }
+              if (struct_leaf_list_depth > 0) {
+                const auto first_list_index = value_struct.list_children.size();
+                for (std::int16_t level = 0; level < struct_leaf_list_depth;
+                     ++level) {
+                  auto &list_child = value_struct.list_children.emplace_back();
+                  list_child.name = level == 0 ? struct_leaf_name : "item";
+                }
+                auto &leaf_list = value_struct.list_children.back();
+                leaf_list.child.name = "item";
+                leaf_list.child.format = std::move(struct_leaf_format);
+                sanitize::internal::cdata_stream::clear_schema(
+                    &leaf_list.child.schema);
+                leaf_list.child.schema.format = leaf_list.child.format.c_str();
+                leaf_list.child.schema.name = leaf_list.child.name.c_str();
+                leaf_list.child.schema.metadata = nullptr;
+                const auto inner_list_defined_level = static_cast<std::int16_t>(
+                    (struct_leaf_top_level_required ? std::int16_t{1}
+                                                    : std::int16_t{2}) +
+                    3 + (struct_leaf_list_depth - 1) * 2);
+                leaf_list.child.schema.flags =
+                    struct_leaf_max_definition_level >
+                            inner_list_defined_level + 1
+                        ? ARROW_FLAG_NULLABLE
+                        : 0;
+                leaf_list.child.schema.n_children = 0;
+                leaf_list.child.schema.children = nullptr;
+                leaf_list.child.schema.dictionary = nullptr;
+                leaf_list.child.schema.private_data = nullptr;
+                leaf_list.child.schema.release =
+                    &native_parquet_schema_child_release;
+                leaf_list.child_ptrs[0] = &leaf_list.child.schema;
+                for (std::size_t reverse_index =
+                         first_list_index +
+                         static_cast<std::size_t>(struct_leaf_list_depth);
+                     reverse_index > first_list_index; --reverse_index) {
+                  const auto list_index = reverse_index - 1;
+                  auto &list_child = value_struct.list_children[list_index];
+                  if (list_index + 1 <
+                      first_list_index +
+                          static_cast<std::size_t>(struct_leaf_list_depth)) {
+                    list_child.child_ptrs[0] =
+                        &value_struct.list_children[list_index + 1].schema;
+                  }
+                  sanitize::internal::cdata_stream::clear_schema(
+                      &list_child.schema);
+                  list_child.schema.format = list_child.format.c_str();
+                  list_child.schema.name = list_child.name.c_str();
+                  list_child.schema.metadata = nullptr;
+                  list_child.schema.flags = ARROW_FLAG_NULLABLE;
+                  list_child.schema.n_children = 1;
+                  list_child.schema.children = list_child.child_ptrs.data();
+                  list_child.schema.dictionary = nullptr;
+                  list_child.schema.private_data = nullptr;
+                  list_child.schema.release =
+                      &native_parquet_schema_child_release;
+                }
+                value_struct.child_ptrs.push_back(
+                    &value_struct.list_children[first_list_index].schema);
+                continue;
+              }
+              auto &struct_leaf_child =
+                  value_struct.children[struct_child_index];
+              struct_leaf_child.name = std::move(struct_leaf_name);
+              struct_leaf_child.format = std::move(struct_leaf_format);
+              sanitize::internal::cdata_stream::clear_schema(
+                  &struct_leaf_child.schema);
+              struct_leaf_child.schema.format =
+                  struct_leaf_child.format.c_str();
+              struct_leaf_child.schema.name = struct_leaf_child.name.c_str();
+              struct_leaf_child.schema.metadata = nullptr;
+              const auto value_struct_defined_level =
+                  struct_leaf_top_level_required ? std::int16_t{2}
+                                                 : std::int16_t{3};
+              struct_leaf_child.schema.flags =
+                  struct_leaf_max_definition_level > value_struct_defined_level
+                      ? ARROW_FLAG_NULLABLE
+                      : 0;
+              struct_leaf_child.schema.n_children = 0;
+              struct_leaf_child.schema.children = nullptr;
+              struct_leaf_child.schema.dictionary = nullptr;
+              struct_leaf_child.schema.private_data = nullptr;
+              struct_leaf_child.schema.release =
+                  &native_parquet_schema_child_release;
+              value_struct.child_ptrs.push_back(&struct_leaf_child.schema);
+            }
+            sanitize::internal::cdata_stream::clear_schema(
+                &value_struct.schema);
+            value_struct.schema.format = value_struct.format.c_str();
+            value_struct.schema.name = value_struct.name.c_str();
+            value_struct.schema.metadata = nullptr;
+            value_struct.schema.flags = ARROW_FLAG_NULLABLE;
+            value_struct.schema.n_children =
+                static_cast<std::int64_t>(value_struct.child_ptrs.size());
+            value_struct.schema.children = value_struct.child_ptrs.empty()
+                                               ? nullptr
+                                               : value_struct.child_ptrs.data();
+            value_struct.schema.dictionary = nullptr;
+            value_struct.schema.private_data = nullptr;
+            value_struct.schema.release = &native_parquet_schema_child_release;
+            entries.child_ptrs.push_back(&value_struct.schema);
+            continue;
           }
           if (child_list_depth > 0) {
             const auto first_list_index = entries.list_children.size();
@@ -10844,7 +11186,31 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
               }
               const auto &column = row_group.columns[column_index];
               if ((is_top_level_struct_map_leaf(column) ||
-                   top_level_struct_map_list_chain_depth(column) > 0) &&
+                   top_level_struct_map_list_chain_depth(column) > 0 ||
+                   is_top_level_struct_map_struct_leaf(column) ||
+                   top_level_struct_map_struct_list_chain_depth(column) > 0) &&
+                  column.path_in_schema.size() > 1 &&
+                  std::find(map_names.begin(), map_names.end(),
+                            column.path_in_schema[1]) == map_names.end()) {
+                map_names.push_back(column.path_in_schema[1]);
+              }
+            }
+            return total + map_names.size();
+          }) +
+      std::accumulate(
+          layout.begin(), layout.end(), std::size_t{0},
+          [&](std::size_t total, const NativeParquetOutputField &field) {
+            if (!field.is_struct) {
+              return total;
+            }
+            std::vector<std::string> map_names;
+            for (const auto column_index : field.column_indices) {
+              if (column_index >= row_group.columns.size()) {
+                continue;
+              }
+              const auto &column = row_group.columns[column_index];
+              if ((is_top_level_struct_map_struct_leaf(column) ||
+                   top_level_struct_map_struct_list_chain_depth(column) > 0) &&
                   column.path_in_schema.size() > 1 &&
                   std::find(map_names.begin(), map_names.end(),
                             column.path_in_schema[1]) == map_names.end()) {
@@ -10967,7 +11333,9 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
         }
         const auto &column = row_group.columns[column_index];
         if ((is_top_level_struct_map_leaf(column) ||
-             top_level_struct_map_list_chain_depth(column) > 0) &&
+             top_level_struct_map_list_chain_depth(column) > 0 ||
+             is_top_level_struct_map_struct_leaf(column) ||
+             top_level_struct_map_struct_list_chain_depth(column) > 0) &&
             column.path_in_schema.size() > 1 &&
             std::find(map_names.begin(), map_names.end(),
                       column.path_in_schema[1]) == map_names.end()) {
@@ -10981,6 +11349,15 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
             return static_cast<std::int16_t>(
                 total + (column_index < row_group.columns.size()
                              ? top_level_struct_map_list_chain_depth(
+                                   row_group.columns[column_index])
+                             : 0));
+          }));
+      list_array_count += static_cast<std::size_t>(std::accumulate(
+          field.column_indices.begin(), field.column_indices.end(),
+          std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
+            return static_cast<std::int16_t>(
+                total + (column_index < row_group.columns.size()
+                             ? top_level_struct_map_struct_list_chain_depth(
                                    row_group.columns[column_index])
                              : 0));
           }));
@@ -11855,7 +12232,9 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
       }
       const auto &candidate = row_group.columns[candidate_index];
       if (!is_top_level_struct_map_leaf(candidate) &&
-          top_level_struct_map_list_chain_depth(candidate) == 0) {
+          top_level_struct_map_list_chain_depth(candidate) == 0 &&
+          !is_top_level_struct_map_struct_leaf(candidate) &&
+          top_level_struct_map_struct_list_chain_depth(candidate) == 0) {
         struct_validity_column = &candidate;
         break;
       }
@@ -11871,7 +12250,9 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
       }
       const auto &child_column = row_group.columns[column_index];
       if (is_top_level_struct_map_leaf(child_column) ||
-          top_level_struct_map_list_chain_depth(child_column) > 0) {
+          top_level_struct_map_list_chain_depth(child_column) > 0 ||
+          is_top_level_struct_map_struct_leaf(child_column) ||
+          top_level_struct_map_struct_list_chain_depth(child_column) > 0) {
         const auto &map_name = child_column.path_in_schema[1];
         if (std::find(map_child_names.begin(), map_child_names.end(),
                       map_name) != map_child_names.end()) {
@@ -11885,7 +12266,9 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
           }
           const auto &candidate = row_group.columns[candidate_index];
           if ((is_top_level_struct_map_leaf(candidate) ||
-               top_level_struct_map_list_chain_depth(candidate) > 0) &&
+               top_level_struct_map_list_chain_depth(candidate) > 0 ||
+               is_top_level_struct_map_struct_leaf(candidate) ||
+               top_level_struct_map_struct_list_chain_depth(candidate) > 0) &&
               candidate.path_in_schema.size() > 1 &&
               candidate.path_in_schema[1] == map_name) {
             map_column_indices.push_back(candidate_index);
@@ -11894,10 +12277,137 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
         auto &map_array = state->lists[list_index++];
         auto &entries_array = state->structs[struct_index++];
         entries_array.children.reserve(map_column_indices.size());
+        bool map_value_struct_added = false;
         for (const auto map_column_index : map_column_indices) {
           const auto &map_column = row_group.columns[map_column_index];
           const auto child_list_depth =
               top_level_struct_map_list_chain_depth(map_column);
+          if (is_top_level_struct_map_struct_leaf(map_column) ||
+              top_level_struct_map_struct_list_chain_depth(map_column) > 0) {
+            if (map_value_struct_added) {
+              continue;
+            }
+            map_value_struct_added = true;
+            std::vector<std::size_t> struct_column_indices;
+            for (const auto candidate_index : map_column_indices) {
+              if (candidate_index >= row_group.columns.size()) {
+                continue;
+              }
+              const auto &candidate = row_group.columns[candidate_index];
+              if (is_top_level_struct_map_struct_leaf(candidate) ||
+                  top_level_struct_map_struct_list_chain_depth(candidate) > 0) {
+                struct_column_indices.push_back(candidate_index);
+              }
+            }
+            if (struct_column_indices.empty()) {
+              return sanitize::Status::Invalid(
+                  "native Parquet reader: struct map value struct has no "
+                  "leaves");
+            }
+            const ColumnChunkInfo *value_struct_layout_column = &map_column;
+            for (const auto candidate_index : struct_column_indices) {
+              if (candidate_index >= row_group.columns.size()) {
+                continue;
+              }
+              const auto &candidate = row_group.columns[candidate_index];
+              if (top_level_struct_map_struct_list_chain_depth(candidate) ==
+                  0) {
+                value_struct_layout_column = &candidate;
+                break;
+              }
+            }
+            auto &value_struct_array = state->structs[struct_index++];
+            value_struct_array.children.reserve(struct_column_indices.size());
+            for (const auto struct_column_index : struct_column_indices) {
+              const auto &struct_column =
+                  row_group.columns[struct_column_index];
+              const auto struct_list_depth =
+                  top_level_struct_map_struct_list_chain_depth(struct_column);
+              if (struct_list_depth > 0) {
+                if (struct_column.repeated_level_layouts.size() !=
+                    static_cast<std::size_t>(struct_list_depth + 1)) {
+                  return sanitize::Status::NotImplemented(
+                      "native Parquet reader: struct map value struct nested "
+                      "list layout was not decoded");
+                }
+                std::vector<NativeParquetListArray *> chain_arrays;
+                chain_arrays.reserve(
+                    static_cast<std::size_t>(struct_list_depth));
+                for (std::int16_t level = 0; level < struct_list_depth;
+                     ++level) {
+                  chain_arrays.push_back(&state->lists[list_index++]);
+                }
+                for (std::int16_t level = struct_list_depth; level >= 1;
+                     --level) {
+                  const auto layout_index = static_cast<std::size_t>(level);
+                  const auto array_index = static_cast<std::size_t>(level - 1);
+                  const auto &level_layout =
+                      struct_column.repeated_level_layouts[layout_index];
+                  if (!level_layout.decoded) {
+                    return sanitize::Status::NotImplemented(
+                        "native Parquet reader: struct map value struct nested "
+                        "list level was not decoded");
+                  }
+                  auto &inner_array = *chain_arrays[array_index];
+                  inner_array.validity = level_layout.validity_bitmap;
+                  inner_array.offsets = level_layout.offsets;
+                  inner_array.children[0] =
+                      (level == struct_list_depth)
+                          ? &state->columns[struct_column_index].array
+                          : &chain_arrays[array_index + 1]->array;
+                  inner_array.array.length = level_layout.row_count;
+                  inner_array.array.null_count = level_layout.null_count;
+                  inner_array.array.offset = 0;
+                  inner_array.array.n_buffers = 2;
+                  inner_array.buffers[0] = inner_array.validity.empty()
+                                               ? nullptr
+                                               : inner_array.validity.data();
+                  inner_array.buffers[1] = inner_array.offsets.empty()
+                                               ? nullptr
+                                               : inner_array.offsets.data();
+                  inner_array.array.buffers = inner_array.buffers.data();
+                  inner_array.array.n_children = 1;
+                  inner_array.array.children = inner_array.children.data();
+                  inner_array.array.dictionary = nullptr;
+                  inner_array.array.private_data = nullptr;
+                  inner_array.array.release =
+                      &native_parquet_array_child_release;
+                }
+                value_struct_array.children.push_back(
+                    &chain_arrays.front()->array);
+              } else {
+                value_struct_array.children.push_back(
+                    &state->columns[struct_column_index].array);
+              }
+            }
+            value_struct_array.array.length =
+                value_struct_layout_column->repeated_level_element_count;
+            SAN_ASSIGN_OR_RAISE(
+                const auto value_struct_null_count,
+                materialize_struct_map_value_struct_validity(
+                    *value_struct_layout_column, &value_struct_array.validity));
+            value_struct_array.array.null_count = value_struct_null_count;
+            value_struct_array.array.offset = 0;
+            value_struct_array.array.n_buffers = 1;
+            value_struct_array.buffers[0] =
+                value_struct_array.validity.empty()
+                    ? nullptr
+                    : value_struct_array.validity.data();
+            value_struct_array.array.buffers =
+                value_struct_array.buffers.data();
+            value_struct_array.array.n_children =
+                static_cast<std::int64_t>(value_struct_array.children.size());
+            value_struct_array.array.children =
+                value_struct_array.children.empty()
+                    ? nullptr
+                    : value_struct_array.children.data();
+            value_struct_array.array.dictionary = nullptr;
+            value_struct_array.array.private_data = nullptr;
+            value_struct_array.array.release =
+                &native_parquet_array_child_release;
+            entries_array.children.push_back(&value_struct_array.array);
+            continue;
+          }
           if (child_list_depth > 0) {
             if (map_column.repeated_level_layouts.size() !=
                 static_cast<std::size_t>(child_list_depth + 1)) {

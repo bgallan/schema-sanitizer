@@ -63,6 +63,9 @@ replacement. Remaining work:
      - [x] Top-level struct with scalar map children.
      - [x] Top-level struct with scalar map children containing scalar list values.
      - [x] Top-level struct with scalar map children containing scalar list-chain values.
+     - [x] Top-level struct with scalar map children containing scalar struct values.
+     - [x] Top-level struct with scalar map children containing scalar struct values with scalar list children.
+     - [x] Top-level struct with scalar map children containing scalar struct values with scalar list-chain children.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.
