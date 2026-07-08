@@ -5676,7 +5676,7 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
       is_top_level_map_list_leaf(*column)) {
     return assign_nested_list_level_layout(row_count, column);
   }
-  if (column->max_repetition_level > 1 &&
+  if (column->max_repetition_level > 0 &&
       native_plain_path_is_materializable(column->path_in_schema,
                                           column->max_repetition_level,
                                           column->top_level_required) &&
@@ -7325,7 +7325,8 @@ bool native_materializer_shape_supported_by_current_code(
       native_recursive_list_struct_tail_supported(path, 3)) {
     return true;
   }
-  if (path.size() >= 2 && native_recursive_struct_tail_supported(path, 1)) {
+  if (path.size() >= 2 &&
+      native_recursive_struct_tail_supported(path, 1, true)) {
     return true;
   }
   return is_simple_top_level_list_path(path, max_repetition_level) ||
@@ -7419,8 +7420,7 @@ plan_native_recursive_path(const std::vector<std::string> &path,
     return plan;
   }
   plan.is_struct = true;
-  plan.materializable = native_recursive_struct_tail_supported(
-      path, 1, max_repetition_level == 0);
+  plan.materializable = native_recursive_struct_tail_supported(path, 1, true);
   return plan;
 }
 
@@ -7669,10 +7669,76 @@ sanitize::Status materialization_payload(std::ifstream &file,
       "native Parquet reader: unsupported compression");
 }
 
+sanitize::Result<std::int64_t> materialize_row_struct_validity_from_levels(
+    const ColumnChunkInfo &column, std::int64_t row_count,
+    std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
+  if (!validity) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: row struct validity output is null");
+  }
+  if (row_count < 0 ||
+      row_count > std::numeric_limits<std::int64_t>::max() - 7) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: row struct row count is invalid");
+  }
+  if (defined_level <= 0) {
+    validity->clear();
+    return std::int64_t{0};
+  }
+  const auto validity_bytes = (row_count + 7) / 8;
+  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
+  std::int64_t null_count = row_count;
+  std::int64_t current_row = -1;
+  bool saw_level = false;
+  for (const auto &page : column.pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (!page.levels_decoded || !page.has_num_values ||
+        page.decoded_definition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values) ||
+        page.decoded_repetition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: row struct level count mismatch");
+    }
+    for (std::int32_t row = 0; row < page.num_values; ++row) {
+      saw_level = true;
+      const auto repetition =
+          page.decoded_repetition_level_values[static_cast<std::size_t>(row)];
+      if (repetition != 0) {
+        continue;
+      }
+      ++current_row;
+      if (current_row >= row_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: row struct row count exceeds row group");
+      }
+      if (page.decoded_definition_level_values[static_cast<std::size_t>(row)] >=
+          defined_level) {
+        set_output_validity_bit(validity, current_row);
+        --null_count;
+      }
+    }
+  }
+  if (row_count > 0 && (!saw_level || current_row + 1 != row_count)) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: row struct row count mismatch");
+  }
+  if (null_count == 0) {
+    validity->clear();
+  }
+  return null_count;
+}
+
 sanitize::Result<std::int64_t>
 materialize_optional_struct_validity(const ColumnChunkInfo &column,
                                      std::int64_t row_count,
                                      std::vector<std::uint8_t> *validity) {
+  if (column.max_repetition_level > 0) {
+    return materialize_row_struct_validity_from_levels(
+        column, row_count, std::int16_t{1}, validity);
+  }
   if (!validity) {
     return sanitize::Status::Invalid(
         "native Parquet reader: struct validity output is null");
@@ -7709,6 +7775,9 @@ materialize_optional_struct_validity(const ColumnChunkInfo &column,
         --null_count;
       }
     }
+  }
+  if (null_count == 0) {
+    validity->clear();
   }
   return null_count;
 }
@@ -10844,6 +10913,10 @@ definition_level_for_path_prefix(const ColumnChunkInfo &column,
 sanitize::Result<std::int64_t> materialize_struct_validity_at_definition_level(
     const ColumnChunkInfo &column, std::int64_t row_count,
     std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
+  if (column.max_repetition_level > 0) {
+    return materialize_row_struct_validity_from_levels(column, row_count,
+                                                       defined_level, validity);
+  }
   if (!validity) {
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive struct validity output is null");
