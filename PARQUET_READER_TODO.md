@@ -80,6 +80,7 @@ replacement. Remaining work:
      - [x] Recursive map-entry assembly drives supported top-level, list-map, list-struct-map, and struct-map entries.
      - [x] Recursive struct-child assembly materializes supported map children directly, removing row-group map-name grouping loops.
      - [x] Recursive Arrow schema construction now drives supported top-level maps, list-of-struct, list-of-map, and top-level struct shapes.
+     - [x] Recursive Arrow schema construction is single-headed for all native-supported output shapes.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
