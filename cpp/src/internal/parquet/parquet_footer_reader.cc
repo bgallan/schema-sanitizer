@@ -6728,6 +6728,7 @@ struct NativeRecursiveMaterializationNode {
   NativeRecursiveMaterializationNodeKind kind =
       NativeRecursiveMaterializationNodeKind::Leaf;
   std::string name;
+  std::optional<std::size_t> leaf_column_index;
   std::vector<std::size_t> children;
 };
 
@@ -6785,20 +6786,24 @@ struct NativeRecursivePathPlan {
 
 NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
     const std::vector<std::string> &path, std::size_t tail_index,
-    std::string name, std::vector<NativeRecursiveMaterializationNode> *nodes);
+    std::string name, std::optional<std::size_t> leaf_column_index,
+    std::vector<NativeRecursiveMaterializationNode> *nodes);
 
 NativeRecursiveMaterializationParseResult parse_native_recursive_component(
     const std::vector<std::string> &path, std::size_t index,
+    std::optional<std::size_t> leaf_column_index,
     std::vector<NativeRecursiveMaterializationNode> *nodes) {
   if (!nodes || index >= path.size()) {
     return {};
   }
-  return parse_native_recursive_named_tail(path, index + 1, path[index], nodes);
+  return parse_native_recursive_named_tail(path, index + 1, path[index],
+                                           leaf_column_index, nodes);
 }
 
 NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
     const std::vector<std::string> &path, std::size_t tail_index,
-    std::string name, std::vector<NativeRecursiveMaterializationNode> *nodes) {
+    std::string name, std::optional<std::size_t> leaf_column_index,
+    std::vector<NativeRecursiveMaterializationNode> *nodes) {
   if (!nodes) {
     return {};
   }
@@ -6806,6 +6811,7 @@ NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
     NativeRecursiveMaterializationNode node;
     node.kind = NativeRecursiveMaterializationNodeKind::Leaf;
     node.name = std::move(name);
+    node.leaf_column_index = leaf_column_index;
     const auto node_index = nodes->size();
     nodes->push_back(std::move(node));
     return {true, node_index, tail_index, 0};
@@ -6814,8 +6820,8 @@ NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
     if (tail_index + 1 >= path.size() || path[tail_index + 1] != "element") {
       return {};
     }
-    auto child = parse_native_recursive_named_tail(path, tail_index + 2,
-                                                   "element", nodes);
+    auto child = parse_native_recursive_named_tail(
+        path, tail_index + 2, "element", leaf_column_index, nodes);
     if (!child.ok ||
         child.repetition_depth == std::numeric_limits<std::int16_t>::max()) {
       return {};
@@ -6836,8 +6842,8 @@ NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
         (path[tail_index + 1] != "key" && path[tail_index + 1] != "value")) {
       return {};
     }
-    auto child = parse_native_recursive_named_tail(path, tail_index + 2,
-                                                   path[tail_index + 1], nodes);
+    auto child = parse_native_recursive_named_tail(
+        path, tail_index + 2, path[tail_index + 1], leaf_column_index, nodes);
     if (!child.ok ||
         child.repetition_depth == std::numeric_limits<std::int16_t>::max()) {
       return {};
@@ -6853,7 +6859,8 @@ NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
         static_cast<std::int16_t>(child.repetition_depth + std::int16_t{1});
     return child;
   }
-  auto child = parse_native_recursive_component(path, tail_index, nodes);
+  auto child = parse_native_recursive_component(path, tail_index,
+                                                leaf_column_index, nodes);
   if (!child.ok) {
     return {};
   }
@@ -6868,13 +6875,15 @@ NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
 }
 
 NativeRecursiveMaterializationTree build_native_recursive_materialization_tree(
-    const std::vector<std::string> &path, std::int16_t max_repetition_level) {
+    const std::vector<std::string> &path, std::int16_t max_repetition_level,
+    std::optional<std::size_t> leaf_column_index = std::nullopt) {
   NativeRecursiveMaterializationTree tree;
   if (path.empty() || max_repetition_level < 0) {
     return tree;
   }
   tree.nodes.reserve(path.size());
-  auto parsed = parse_native_recursive_component(path, 0, &tree.nodes);
+  auto parsed =
+      parse_native_recursive_component(path, 0, leaf_column_index, &tree.nodes);
   if (!parsed.ok || parsed.next_index != path.size() ||
       parsed.repetition_depth != max_repetition_level) {
     return tree;
@@ -6896,6 +6905,7 @@ sanitize::Result<std::size_t> clone_native_recursive_materialization_subtree(
   NativeRecursiveMaterializationNode cloned_node;
   cloned_node.kind = source_node.kind;
   cloned_node.name = source_node.name;
+  cloned_node.leaf_column_index = source_node.leaf_column_index;
   cloned_node.children.reserve(source_node.children.size());
   for (const auto source_child_index : source_node.children) {
     SAN_ASSIGN_OR_RAISE(auto cloned_child_index,
@@ -6919,12 +6929,25 @@ sanitize::Status merge_native_recursive_materialization_node(
         "invalid");
   }
   const auto &source_node = source.nodes[source_index];
-  const auto &destination_node = destination->nodes[destination_index];
+  auto &destination_node = destination->nodes[destination_index];
   if (source_node.kind != destination_node.kind ||
       source_node.name != destination_node.name) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: recursive materialization tree branches are "
         "incompatible");
+  }
+  if (source_node.kind == NativeRecursiveMaterializationNodeKind::Leaf) {
+    if (destination_node.leaf_column_index.has_value() &&
+        source_node.leaf_column_index.has_value() &&
+        destination_node.leaf_column_index.value() !=
+            source_node.leaf_column_index.value()) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: duplicate recursive leaf path has different "
+          "columns");
+    }
+    if (!destination_node.leaf_column_index.has_value()) {
+      destination_node.leaf_column_index = source_node.leaf_column_index;
+    }
   }
   for (const auto source_child_index : source_node.children) {
     if (source_child_index >= source.nodes.size()) {
@@ -7004,6 +7027,11 @@ sanitize::Status count_native_recursive_materialization_node(
   const auto &node = tree.nodes[node_index];
   switch (node.kind) {
   case NativeRecursiveMaterializationNodeKind::Leaf:
+    if (!node.leaf_column_index.has_value()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive materialization leaf has no "
+          "column index");
+    }
     ++counts->leaf_count;
     break;
   case NativeRecursiveMaterializationNodeKind::Struct:
@@ -7036,6 +7064,45 @@ count_native_recursive_materialization_resources(
   SAN_RETURN_NOT_OK(
       count_native_recursive_materialization_node(tree, tree.root, &counts));
   return counts;
+}
+
+sanitize::Status collect_native_recursive_materialization_leaf_columns(
+    const NativeRecursiveMaterializationTree &tree, std::size_t node_index,
+    std::vector<std::size_t> *column_indices) {
+  if (!column_indices || node_index >= tree.nodes.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization leaf collection node "
+        "is invalid");
+  }
+  const auto &node = tree.nodes[node_index];
+  if (node.kind == NativeRecursiveMaterializationNodeKind::Leaf) {
+    if (!node.leaf_column_index.has_value()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive materialization leaf has no "
+          "column index");
+    }
+    column_indices->push_back(node.leaf_column_index.value());
+    return {};
+  }
+  for (const auto child_index : node.children) {
+    SAN_RETURN_NOT_OK(collect_native_recursive_materialization_leaf_columns(
+        tree, child_index, column_indices));
+  }
+  return {};
+}
+
+sanitize::Result<std::vector<std::size_t>>
+native_recursive_materialization_leaf_columns(
+    const NativeRecursiveMaterializationTree &tree) {
+  if (!tree.valid || tree.root >= tree.nodes.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization leaf collection tree "
+        "is invalid");
+  }
+  std::vector<std::size_t> column_indices;
+  SAN_RETURN_NOT_OK(collect_native_recursive_materialization_leaf_columns(
+      tree, tree.root, &column_indices));
+  return column_indices;
 }
 
 bool is_simple_top_level_list_path(const std::vector<std::string> &path,
@@ -7270,8 +7337,8 @@ sanitize::Status add_native_output_field(
     return sanitize::Status::Invalid(
         "native Parquet reader: column path is empty");
   }
-  auto recursive_tree =
-      build_native_recursive_materialization_tree(path, max_repetition_level);
+  auto recursive_tree = build_native_recursive_materialization_tree(
+      path, max_repetition_level, column_index);
   if (!recursive_tree.valid) {
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive materialization tree is invalid");
@@ -7383,6 +7450,17 @@ sanitize::Status validate_native_recursive_output_layout(
     if (field.recursive_counts.leaf_count != field.column_indices.size()) {
       return sanitize::Status::Invalid(
           "native Parquet reader: recursive output field leaf count mismatch");
+    }
+    SAN_ASSIGN_OR_RAISE(
+        auto recursive_leaf_columns,
+        native_recursive_materialization_leaf_columns(field.recursive_tree));
+    auto expected_leaf_columns = field.column_indices;
+    std::sort(recursive_leaf_columns.begin(), recursive_leaf_columns.end());
+    std::sort(expected_leaf_columns.begin(), expected_leaf_columns.end());
+    if (recursive_leaf_columns != expected_leaf_columns) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive output field leaf columns "
+          "mismatch");
     }
     observed_leaf_count += field.recursive_counts.leaf_count;
   }
@@ -11753,262 +11831,18 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
   }
   std::vector<NativeParquetOutputField> layout;
   SAN_RETURN_NOT_OK(build_native_output_layout(row_group.columns, &layout));
-  state->structs.resize(
-      std::count_if(layout.begin(), layout.end(),
-                    [](const NativeParquetOutputField &field) {
-                      return field.is_struct || field.is_map ||
-                             (field.is_list &&
-                              (field.is_list_struct || field.is_list_map));
-                    }) +
-      std::accumulate(
-          layout.begin(), layout.end(), std::size_t{0},
-          [&](std::size_t total, const NativeParquetOutputField &field) {
-            if (!field.is_struct) {
-              return total;
-            }
-            std::vector<std::string> map_names;
-            for (const auto column_index : field.column_indices) {
-              if (column_index >= row_group.columns.size()) {
-                continue;
-              }
-              const auto &column = row_group.columns[column_index];
-              if ((is_top_level_struct_map_leaf(column) ||
-                   top_level_struct_map_list_chain_depth(column) > 0 ||
-                   is_top_level_struct_map_struct_leaf(column) ||
-                   top_level_struct_map_struct_list_chain_depth(column) > 0) &&
-                  column.path_in_schema.size() > 1 &&
-                  std::find(map_names.begin(), map_names.end(),
-                            column.path_in_schema[1]) == map_names.end()) {
-                map_names.push_back(column.path_in_schema[1]);
-              }
-            }
-            return total + map_names.size();
-          }) +
-      std::accumulate(
-          layout.begin(), layout.end(), std::size_t{0},
-          [&](std::size_t total, const NativeParquetOutputField &field) {
-            if (!field.is_struct) {
-              return total;
-            }
-            std::vector<std::string> map_names;
-            for (const auto column_index : field.column_indices) {
-              if (column_index >= row_group.columns.size()) {
-                continue;
-              }
-              const auto &column = row_group.columns[column_index];
-              if ((is_top_level_struct_map_struct_leaf(column) ||
-                   top_level_struct_map_struct_list_chain_depth(column) > 0) &&
-                  column.path_in_schema.size() > 1 &&
-                  std::find(map_names.begin(), map_names.end(),
-                            column.path_in_schema[1]) == map_names.end()) {
-                map_names.push_back(column.path_in_schema[1]);
-              }
-            }
-            return total + map_names.size();
-          }) +
-      std::count_if(
-          layout.begin(), layout.end(),
-          [&](const NativeParquetOutputField &field) {
-            return field.is_list_map &&
-                   std::any_of(
-                       field.column_indices.begin(), field.column_indices.end(),
-                       [&](std::size_t column_index) {
-                         return column_index < row_group.columns.size() &&
-                                (is_top_level_list_map_struct_leaf(
-                                     row_group.columns[column_index]) ||
-                                 top_level_list_map_struct_list_chain_depth(
-                                     row_group.columns[column_index]) > 0);
-                       });
-          }) +
-      std::count_if(
-          layout.begin(), layout.end(),
-          [&](const NativeParquetOutputField &field) {
-            return field.is_map &&
-                   std::any_of(
-                       field.column_indices.begin(), field.column_indices.end(),
-                       [&](std::size_t column_index) {
-                         return column_index < row_group.columns.size() &&
-                                (is_top_level_map_struct_leaf(
-                                     row_group.columns[column_index]) ||
-                                 top_level_map_struct_list_chain_depth(
-                                     row_group.columns[column_index]) > 0);
-                       });
-          }) +
-      std::accumulate(
-          layout.begin(), layout.end(), std::size_t{0},
-          [&](std::size_t total, const NativeParquetOutputField &field) {
-            if (!field.is_list_struct) {
-              return total;
-            }
-            std::vector<std::string> names;
-            for (const auto column_index : field.column_indices) {
-              if (column_index >= row_group.columns.size()) {
-                continue;
-              }
-              const auto &column = row_group.columns[column_index];
-              if ((is_top_level_list_struct_map_leaf(column) ||
-                   top_level_list_struct_map_list_chain_depth(column) > 0 ||
-                   is_top_level_list_struct_map_struct_leaf(column) ||
-                   top_level_list_struct_map_struct_list_chain_depth(column) >
-                       0) &&
-                  column.path_in_schema.size() > 3 &&
-                  std::find(names.begin(), names.end(),
-                            column.path_in_schema[3]) == names.end()) {
-                names.push_back(column.path_in_schema[3]);
-              }
-            }
-            return total + names.size();
-          }) +
-      std::accumulate(
-          layout.begin(), layout.end(), std::size_t{0},
-          [&](std::size_t total, const NativeParquetOutputField &field) {
-            if (!field.is_list_struct) {
-              return total;
-            }
-            std::vector<std::string> names;
-            for (const auto column_index : field.column_indices) {
-              if (column_index >= row_group.columns.size()) {
-                continue;
-              }
-              const auto &column = row_group.columns[column_index];
-              if ((is_top_level_list_struct_map_struct_leaf(column) ||
-                   top_level_list_struct_map_struct_list_chain_depth(column) >
-                       0) &&
-                  column.path_in_schema.size() > 3 &&
-                  std::find(names.begin(), names.end(),
-                            column.path_in_schema[3]) == names.end()) {
-                names.push_back(column.path_in_schema[3]);
-              }
-            }
-            return total + names.size();
-          }));
-  std::size_t list_array_count = 0;
-  for (const auto &field : layout) {
-    if (field.is_list) {
-      if (field.list_depth > 3) {
-        list_array_count += static_cast<std::size_t>(field.list_depth);
-      } else if (field.is_list_list_list) {
-        list_array_count += 3U;
-      } else {
-        list_array_count += (field.is_list_list || field.is_list_map) ? 2U : 1U;
-      }
-      if (field.is_list_struct) {
-        list_array_count += static_cast<std::size_t>(std::accumulate(
-            field.column_indices.begin(), field.column_indices.end(),
-            std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-              return static_cast<std::int16_t>(
-                  total + (column_index < row_group.columns.size()
-                               ? top_level_list_struct_list_chain_depth(
-                                     row_group.columns[column_index])
-                               : 0));
-            }));
-        std::vector<std::string> map_names;
-        for (const auto column_index : field.column_indices) {
-          if (column_index >= row_group.columns.size()) {
-            continue;
-          }
-          const auto &column = row_group.columns[column_index];
-          if ((is_top_level_list_struct_map_leaf(column) ||
-               top_level_list_struct_map_list_chain_depth(column) > 0 ||
-               is_top_level_list_struct_map_struct_leaf(column) ||
-               top_level_list_struct_map_struct_list_chain_depth(column) > 0) &&
-              column.path_in_schema.size() > 3 &&
-              std::find(map_names.begin(), map_names.end(),
-                        column.path_in_schema[3]) == map_names.end()) {
-            map_names.push_back(column.path_in_schema[3]);
-          }
-        }
-        list_array_count += map_names.size();
-        list_array_count += static_cast<std::size_t>(std::accumulate(
-            field.column_indices.begin(), field.column_indices.end(),
-            std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-              return static_cast<std::int16_t>(
-                  total + (column_index < row_group.columns.size()
-                               ? top_level_list_struct_map_list_chain_depth(
-                                     row_group.columns[column_index])
-                               : 0));
-            }));
-        list_array_count += static_cast<std::size_t>(std::accumulate(
-            field.column_indices.begin(), field.column_indices.end(),
-            std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-              return static_cast<std::int16_t>(
-                  total +
-                  (column_index < row_group.columns.size()
-                       ? top_level_list_struct_map_struct_list_chain_depth(
-                             row_group.columns[column_index])
-                       : 0));
-            }));
-      }
-      if (field.is_list_map) {
-        list_array_count += static_cast<std::size_t>(std::accumulate(
-            field.column_indices.begin(), field.column_indices.end(),
-            std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-              return static_cast<std::int16_t>(
-                  total + (column_index < row_group.columns.size()
-                               ? top_level_list_map_struct_list_chain_depth(
-                                     row_group.columns[column_index])
-                               : 0));
-            }));
-      }
-    } else if (field.is_struct) {
-      std::vector<std::string> map_names;
-      for (const auto column_index : field.column_indices) {
-        if (column_index >= row_group.columns.size()) {
-          continue;
-        }
-        const auto &column = row_group.columns[column_index];
-        if ((is_top_level_struct_map_leaf(column) ||
-             top_level_struct_map_list_chain_depth(column) > 0 ||
-             is_top_level_struct_map_struct_leaf(column) ||
-             top_level_struct_map_struct_list_chain_depth(column) > 0) &&
-            column.path_in_schema.size() > 1 &&
-            std::find(map_names.begin(), map_names.end(),
-                      column.path_in_schema[1]) == map_names.end()) {
-          map_names.push_back(column.path_in_schema[1]);
-        }
-      }
-      list_array_count += map_names.size();
-      list_array_count += static_cast<std::size_t>(std::accumulate(
-          field.column_indices.begin(), field.column_indices.end(),
-          std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-            return static_cast<std::int16_t>(
-                total + (column_index < row_group.columns.size()
-                             ? top_level_struct_map_list_chain_depth(
-                                   row_group.columns[column_index])
-                             : 0));
-          }));
-      list_array_count += static_cast<std::size_t>(std::accumulate(
-          field.column_indices.begin(), field.column_indices.end(),
-          std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-            return static_cast<std::int16_t>(
-                total + (column_index < row_group.columns.size()
-                             ? top_level_struct_map_struct_list_chain_depth(
-                                   row_group.columns[column_index])
-                             : 0));
-          }));
-    } else if (field.is_map) {
-      ++list_array_count;
-      list_array_count += static_cast<std::size_t>(std::accumulate(
-          field.column_indices.begin(), field.column_indices.end(),
-          std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-            return static_cast<std::int16_t>(
-                total + (column_index < row_group.columns.size()
-                             ? top_level_map_list_chain_depth(
-                                   row_group.columns[column_index])
-                             : 0));
-          }));
-      list_array_count += static_cast<std::size_t>(std::accumulate(
-          field.column_indices.begin(), field.column_indices.end(),
-          std::int16_t{0}, [&](std::int16_t total, std::size_t column_index) {
-            return static_cast<std::int16_t>(
-                total + (column_index < row_group.columns.size()
-                             ? top_level_map_struct_list_chain_depth(
-                                   row_group.columns[column_index])
-                             : 0));
-          }));
-    }
-  }
-  state->lists.resize(list_array_count);
+  const auto recursive_struct_array_count = std::accumulate(
+      layout.begin(), layout.end(), std::size_t{0},
+      [](std::size_t total, const NativeParquetOutputField &field) {
+        return total + field.recursive_counts.struct_count;
+      });
+  const auto recursive_list_array_count = std::accumulate(
+      layout.begin(), layout.end(), std::size_t{0},
+      [](std::size_t total, const NativeParquetOutputField &field) {
+        return total + field.recursive_counts.list_count;
+      });
+  state->structs.resize(recursive_struct_array_count);
+  state->lists.resize(recursive_list_array_count);
   state->children.reserve(layout.size());
   std::size_t struct_index = 0;
   std::size_t list_index = 0;

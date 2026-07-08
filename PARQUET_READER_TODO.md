@@ -85,6 +85,8 @@ replacement. Remaining work:
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
      - [x] Merge per-leaf recursive trees into one validated output-field tree.
+     - [x] Drive native struct/list allocation counts from recursive output-field trees.
+     - [x] Store and validate source column indices on recursive materialization leaves.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.
