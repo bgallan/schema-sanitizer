@@ -9515,8 +9515,8 @@ sanitize::Result<ArrowSchema *> build_native_repeated_list_chain_schema(
   const auto required_capacity =
       list_children->size() + static_cast<std::size_t>(list_depth);
   if (list_children->capacity() < required_capacity) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive list schema reservation is too small");
+    return sanitize::Status::Invalid("native Parquet reader: recursive list "
+                                     "schema reservation is too small");
   }
   const auto first_list_index = list_children->size();
   for (std::int16_t level = 0; level < list_depth; ++level) {
@@ -9531,16 +9531,17 @@ sanitize::Result<ArrowSchema *> build_native_repeated_list_chain_schema(
   leaf_list.child.schema.name = leaf_list.child.name.c_str();
   leaf_list.child.schema.metadata = nullptr;
   leaf_list.child.schema.flags =
-      max_definition_level > leaf_required_definition_level ? ARROW_FLAG_NULLABLE
-                                                            : 0;
+      max_definition_level > leaf_required_definition_level
+          ? ARROW_FLAG_NULLABLE
+          : 0;
   leaf_list.child.schema.n_children = 0;
   leaf_list.child.schema.children = nullptr;
   leaf_list.child.schema.dictionary = nullptr;
   leaf_list.child.schema.private_data = nullptr;
   leaf_list.child.schema.release = &native_parquet_schema_child_release;
   leaf_list.child_ptrs[0] = &leaf_list.child.schema;
-  for (std::size_t reverse_index = first_list_index +
-                                   static_cast<std::size_t>(list_depth);
+  for (std::size_t reverse_index =
+           first_list_index + static_cast<std::size_t>(list_depth);
        reverse_index > first_list_index; --reverse_index) {
     const auto list_index = reverse_index - 1;
     auto &list_child = (*list_children)[list_index];
@@ -10197,8 +10198,8 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                           &entries.list_children, std::move(map_leaf_name),
                           std::move(map_leaf_format), map_leaf_list_depth,
                           map_leaf_max_definition_level,
-                          static_cast<std::int16_t>(
-                              inner_list_defined_level + 1)));
+                          static_cast<std::int16_t>(inner_list_defined_level +
+                                                    1)));
                   entries.child_ptrs.push_back(chain_schema);
                   continue;
                 }
@@ -10561,16 +10562,15 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                           (struct_leaf_top_level_required ? std::int16_t{0}
                                                           : std::int16_t{1}) +
                           5 + (struct_leaf_list_depth - 1) * 2);
-                  SAN_ASSIGN_OR_RAISE(
-                      auto *chain_schema,
-                      build_native_repeated_list_chain_schema(
-                          &value_struct.list_children,
-                          std::move(struct_leaf_name),
-                          std::move(struct_leaf_format),
-                          struct_leaf_list_depth,
-                          struct_leaf_max_definition_level,
-                          static_cast<std::int16_t>(
-                              inner_list_defined_level + 1)));
+                  SAN_ASSIGN_OR_RAISE(auto *chain_schema,
+                                      build_native_repeated_list_chain_schema(
+                                          &value_struct.list_children,
+                                          std::move(struct_leaf_name),
+                                          std::move(struct_leaf_format),
+                                          struct_leaf_list_depth,
+                                          struct_leaf_max_definition_level,
+                                          static_cast<std::int16_t>(
+                                              inner_list_defined_level + 1)));
                   value_struct.child_ptrs.push_back(chain_schema);
                   continue;
                 }
@@ -10943,14 +10943,15 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
                     (struct_leaf_top_level_required ? std::int16_t{1}
                                                     : std::int16_t{2}) +
                     3 + (struct_leaf_list_depth - 1) * 2);
-                SAN_ASSIGN_OR_RAISE(
-                    auto *chain_schema,
-                    build_native_repeated_list_chain_schema(
-                        &value_struct.list_children, std::move(struct_leaf_name),
-                        std::move(struct_leaf_format), struct_leaf_list_depth,
-                        struct_leaf_max_definition_level,
-                        static_cast<std::int16_t>(
-                            inner_list_defined_level + 1)));
+                SAN_ASSIGN_OR_RAISE(auto *chain_schema,
+                                    build_native_repeated_list_chain_schema(
+                                        &value_struct.list_children,
+                                        std::move(struct_leaf_name),
+                                        std::move(struct_leaf_format),
+                                        struct_leaf_list_depth,
+                                        struct_leaf_max_definition_level,
+                                        static_cast<std::int16_t>(
+                                            inner_list_defined_level + 1)));
                 value_struct.child_ptrs.push_back(chain_schema);
                 continue;
               }
