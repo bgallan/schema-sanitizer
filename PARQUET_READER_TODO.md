@@ -69,6 +69,8 @@ replacement. Remaining work:
      - [x] Top-level struct with scalar map children containing scalar struct values.
      - [x] Top-level struct with scalar map children containing scalar struct values with scalar list children.
      - [x] Top-level struct with scalar map children containing scalar struct values with scalar list-chain children.
+     - [x] Recursive path planner started for native readiness and output-layout classification.
+     - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.

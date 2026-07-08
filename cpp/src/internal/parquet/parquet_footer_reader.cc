@@ -6731,56 +6731,196 @@ struct NativeParquetOutputField {
   std::vector<std::size_t> column_indices;
 };
 
+struct NativeRecursivePathPlan {
+  bool materializable = false;
+  bool is_struct = false;
+  bool is_list = false;
+  bool is_list_struct = false;
+  bool is_list_list = false;
+  bool is_list_list_list = false;
+  bool is_list_map = false;
+  bool is_map = false;
+  std::int16_t list_depth = 0;
+};
+
 bool is_simple_top_level_list_path(const std::vector<std::string> &path,
                                    std::int16_t max_repetition_level) {
   return max_repetition_level == 1 && path.size() == 3 && path[1] == "list";
 }
 
+std::int16_t
+native_recursive_list_chain_depth(const std::vector<std::string> &path,
+                                  std::size_t index) {
+  std::int16_t depth = 0;
+  while (index + 1 < path.size() && path[index] == "list" &&
+         path[index + 1] == "element") {
+    ++depth;
+    index += 2;
+  }
+  return index == path.size() ? depth : std::int16_t{0};
+}
+
+bool native_recursive_is_list_chain_leaf(const std::vector<std::string> &path,
+                                         std::size_t index) {
+  return native_recursive_list_chain_depth(path, index) > 0;
+}
+
+bool native_recursive_map_value_tail_supported(
+    const std::vector<std::string> &path, std::size_t index);
+
+bool native_recursive_struct_tail_supported(
+    const std::vector<std::string> &path, std::size_t index) {
+  if (index >= path.size()) {
+    return true;
+  }
+  const auto next = index + 1;
+  if (next == path.size()) {
+    return true;
+  }
+  if (path[next] == "list") {
+    return native_recursive_is_list_chain_leaf(path, next);
+  }
+  if (path[next] == "key_value") {
+    if (next + 1 >= path.size()) {
+      return false;
+    }
+    if (path[next + 1] == "key") {
+      return next + 2 == path.size();
+    }
+    if (path[next + 1] != "value") {
+      return false;
+    }
+    return native_recursive_map_value_tail_supported(path, next + 2);
+  }
+  return false;
+}
+
+bool native_recursive_map_value_tail_supported(
+    const std::vector<std::string> &path, std::size_t index) {
+  if (index == path.size()) {
+    return true;
+  }
+  if (index < path.size() && path[index] == "list") {
+    return native_recursive_is_list_chain_leaf(path, index);
+  }
+  return native_recursive_struct_tail_supported(path, index);
+}
+
+bool native_recursive_map_tail_supported(const std::vector<std::string> &path,
+                                         std::size_t key_value_index) {
+  if (key_value_index >= path.size() || path[key_value_index] != "key_value" ||
+      key_value_index + 1 >= path.size()) {
+    return false;
+  }
+  if (path[key_value_index + 1] == "key") {
+    return key_value_index + 2 == path.size();
+  }
+  if (path[key_value_index + 1] != "value") {
+    return false;
+  }
+  return native_recursive_map_value_tail_supported(path, key_value_index + 2);
+}
+
+bool native_materializer_shape_supported_by_current_code(
+    const std::vector<std::string> &path, std::int16_t max_repetition_level) {
+  if (path.empty()) {
+    return false;
+  }
+  if (max_repetition_level == 0) {
+    return path.size() <= 2;
+  }
+  return is_simple_top_level_list_path(path, max_repetition_level) ||
+         is_top_level_list_struct_leaf_path(path, max_repetition_level) ||
+         is_top_level_list_struct_list_leaf_path(path, max_repetition_level) ||
+         top_level_list_struct_list_chain_depth_path(
+             path, max_repetition_level) > 0 ||
+         is_top_level_list_struct_map_leaf_path(path, max_repetition_level) ||
+         top_level_list_struct_map_list_chain_depth_path(
+             path, max_repetition_level) > 0 ||
+         is_top_level_list_struct_map_struct_leaf_path(path,
+                                                       max_repetition_level) ||
+         top_level_list_struct_map_struct_list_chain_depth_path(
+             path, max_repetition_level) > 0 ||
+         is_top_level_list_list_leaf_path(path, max_repetition_level) ||
+         is_top_level_list_list_list_leaf_path(path, max_repetition_level) ||
+         is_top_level_list_chain_leaf_path(path, max_repetition_level) ||
+         is_top_level_list_map_leaf_path(path, max_repetition_level) ||
+         is_top_level_list_map_struct_leaf_path(path, max_repetition_level) ||
+         top_level_list_map_struct_list_chain_depth_path(
+             path, max_repetition_level) > 0 ||
+         is_top_level_map_leaf_path(path, max_repetition_level) ||
+         is_top_level_struct_map_leaf_path(path, max_repetition_level) ||
+         top_level_struct_map_list_chain_depth_path(path,
+                                                    max_repetition_level) > 0 ||
+         is_top_level_struct_map_struct_leaf_path(path, max_repetition_level) ||
+         top_level_struct_map_struct_list_chain_depth_path(
+             path, max_repetition_level) > 0 ||
+         is_top_level_map_struct_leaf_path(path, max_repetition_level) ||
+         top_level_map_struct_list_chain_depth_path(path,
+                                                    max_repetition_level) > 0 ||
+         is_top_level_map_list_leaf_path(path, max_repetition_level) ||
+         top_level_map_list_chain_depth_path(path, max_repetition_level) > 0;
+}
+
+NativeRecursivePathPlan
+plan_native_recursive_path(const std::vector<std::string> &path,
+                           std::int16_t max_repetition_level,
+                           bool top_level_required) {
+  NativeRecursivePathPlan plan;
+  if (path.empty()) {
+    return plan;
+  }
+  (void)top_level_required;
+  if (max_repetition_level == 0) {
+    plan.materializable = path.size() <= 2;
+    plan.is_struct = path.size() == 2;
+    return plan;
+  }
+  if (path.size() >= 3 && path[1] == "list" && path[2] == "element") {
+    plan.is_list = true;
+    plan.list_depth =
+        top_level_list_chain_depth_path(path, max_repetition_level);
+    if (path.size() == 3) {
+      plan.materializable = max_repetition_level == 1;
+      return plan;
+    }
+    if (path.size() > 3 && path[3] == "list") {
+      plan.is_list_list = path.size() >= 5 && path[3] == "list";
+      plan.is_list_list_list = path.size() >= 7 && path[5] == "list";
+      plan.materializable =
+          native_recursive_is_list_chain_leaf(path, 3) &&
+          max_repetition_level ==
+              static_cast<std::int16_t>(
+                  1 + native_recursive_list_chain_depth(path, 3));
+      return plan;
+    }
+    if (path.size() > 3 && path[3] == "key_value") {
+      plan.is_list_map = true;
+      plan.materializable = native_recursive_map_tail_supported(path, 3);
+      return plan;
+    }
+    plan.is_list_struct = true;
+    plan.materializable = native_recursive_struct_tail_supported(path, 3);
+    return plan;
+  }
+  if (path.size() >= 2 && path[1] == "key_value") {
+    plan.is_map = true;
+    plan.materializable = native_recursive_map_tail_supported(path, 1);
+    return plan;
+  }
+  plan.is_struct = true;
+  plan.materializable = native_recursive_struct_tail_supported(path, 1);
+  return plan;
+}
+
 bool native_plain_path_is_materializable(const std::vector<std::string> &path,
                                          std::int16_t max_repetition_level,
                                          bool top_level_required) {
-  if (is_simple_top_level_list_path(path, max_repetition_level) ||
-      is_top_level_list_struct_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_struct_list_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_struct_map_leaf_path(path, max_repetition_level) ||
-      top_level_list_struct_map_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      is_top_level_list_struct_map_struct_leaf_path(path,
-                                                    max_repetition_level) ||
-      top_level_list_struct_map_struct_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      top_level_list_struct_list_chain_depth_path(path, max_repetition_level) >
-          1 ||
-      is_top_level_list_list_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_list_list_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_chain_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_map_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_list_map_struct_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      is_top_level_map_leaf_path(path, max_repetition_level) ||
-      is_top_level_struct_map_leaf_path(path, max_repetition_level) ||
-      top_level_struct_map_list_chain_depth_path(path, max_repetition_level) >
-          0 ||
-      is_top_level_struct_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_struct_map_struct_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      is_top_level_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_map_struct_list_chain_depth_path(path, max_repetition_level) >
-          0 ||
-      is_top_level_map_list_leaf_path(path, max_repetition_level) ||
-      top_level_map_list_chain_depth_path(path, max_repetition_level) > 1) {
-    (void)top_level_required;
-    return true;
-  }
-  if (max_repetition_level != 0) {
-    return false;
-  }
-  if (path.size() == 1) {
-    return true;
-  }
-  (void)top_level_required;
-  return path.size() == 2;
+  const auto plan = plan_native_recursive_path(path, max_repetition_level,
+                                               top_level_required);
+  return plan.materializable &&
+         native_materializer_shape_supported_by_current_code(
+             path, max_repetition_level);
 }
 
 sanitize::Status add_native_output_field(
@@ -6791,8 +6931,11 @@ sanitize::Status add_native_output_field(
     return sanitize::Status::Invalid(
         "native Parquet reader: output layout is null");
   }
-  if (!native_plain_path_is_materializable(path, max_repetition_level,
-                                           top_level_required)) {
+  const auto plan = plan_native_recursive_path(path, max_repetition_level,
+                                               top_level_required);
+  if (!plan.materializable ||
+      !native_materializer_shape_supported_by_current_code(
+          path, max_repetition_level)) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: nested path is not materializable yet");
   }
@@ -6800,65 +6943,14 @@ sanitize::Status add_native_output_field(
     return sanitize::Status::Invalid(
         "native Parquet reader: column path is empty");
   }
-  const bool is_list =
-      is_simple_top_level_list_path(path, max_repetition_level) ||
-      is_top_level_list_struct_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_struct_list_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_struct_map_leaf_path(path, max_repetition_level) ||
-      top_level_list_struct_map_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      is_top_level_list_struct_map_struct_leaf_path(path,
-                                                    max_repetition_level) ||
-      top_level_list_struct_map_struct_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      top_level_list_struct_list_chain_depth_path(path, max_repetition_level) >
-          1 ||
-      is_top_level_list_list_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_list_list_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_chain_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_map_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_list_map_struct_list_chain_depth_path(path,
-                                                      max_repetition_level) > 0;
-  const bool is_map =
-      is_top_level_map_leaf_path(path, max_repetition_level) ||
-      is_top_level_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_map_struct_list_chain_depth_path(path, max_repetition_level) >
-          0 ||
-      is_top_level_map_list_leaf_path(path, max_repetition_level) ||
-      top_level_map_list_chain_depth_path(path, max_repetition_level) > 1;
-  const auto list_depth =
-      top_level_list_chain_depth_path(path, max_repetition_level);
-  const bool is_list_struct =
-      is_top_level_list_struct_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_struct_list_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_struct_map_leaf_path(path, max_repetition_level) ||
-      top_level_list_struct_map_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      is_top_level_list_struct_map_struct_leaf_path(path,
-                                                    max_repetition_level) ||
-      top_level_list_struct_map_struct_list_chain_depth_path(
-          path, max_repetition_level) > 0 ||
-      top_level_list_struct_list_chain_depth_path(path, max_repetition_level) >
-          1;
-  const bool is_list_list =
-      is_top_level_list_list_leaf_path(path, max_repetition_level);
-  const bool is_list_list_list =
-      is_top_level_list_list_list_leaf_path(path, max_repetition_level);
-  const bool is_list_map =
-      is_top_level_list_map_leaf_path(path, max_repetition_level) ||
-      is_top_level_list_map_struct_leaf_path(path, max_repetition_level) ||
-      top_level_list_map_struct_list_chain_depth_path(path,
-                                                      max_repetition_level) > 0;
-  const bool is_struct =
-      !is_list && !is_map &&
-      (path.size() == 2 ||
-       is_top_level_struct_map_leaf_path(path, max_repetition_level) ||
-       top_level_struct_map_list_chain_depth_path(path, max_repetition_level) >
-           0 ||
-       is_top_level_struct_map_struct_leaf_path(path, max_repetition_level) ||
-       top_level_struct_map_struct_list_chain_depth_path(
-           path, max_repetition_level) > 0);
+  const bool is_list = plan.is_list;
+  const bool is_map = plan.is_map;
+  const auto list_depth = plan.list_depth;
+  const bool is_list_struct = plan.is_list_struct;
+  const bool is_list_list = plan.is_list_list;
+  const bool is_list_list_list = plan.is_list_list_list;
+  const bool is_list_map = plan.is_list_map;
+  const bool is_struct = plan.is_struct;
   const auto &top_level_name = path[0];
   auto match = std::find_if(fields->begin(), fields->end(),
                             [&](const NativeParquetOutputField &field) {
