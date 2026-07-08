@@ -6717,6 +6717,34 @@ bool bit_stream_value_is_set(std::string_view values, std::int32_t index) {
   return (static_cast<std::uint8_t>(values[byte_index]) & mask) != 0;
 }
 
+enum class NativeRecursiveMaterializationNodeKind {
+  Leaf,
+  Struct,
+  List,
+  Map,
+};
+
+struct NativeRecursiveMaterializationNode {
+  NativeRecursiveMaterializationNodeKind kind =
+      NativeRecursiveMaterializationNodeKind::Leaf;
+  std::string name;
+  std::vector<std::size_t> children;
+};
+
+struct NativeRecursiveMaterializationTree {
+  bool valid = false;
+  std::size_t root = 0;
+  std::int16_t repetition_depth = 0;
+  std::vector<NativeRecursiveMaterializationNode> nodes;
+};
+
+struct NativeRecursiveMaterializationParseResult {
+  bool ok = false;
+  std::size_t node_index = 0;
+  std::size_t next_index = 0;
+  std::int16_t repetition_depth = 0;
+};
+
 struct NativeParquetOutputField {
   bool is_struct = false;
   bool is_list = false;
@@ -6729,10 +6757,12 @@ struct NativeParquetOutputField {
   bool top_level_required = true;
   std::string name;
   std::vector<std::size_t> column_indices;
+  std::vector<NativeRecursiveMaterializationTree> recursive_trees;
 };
 
 struct NativeRecursivePathPlan {
   bool materializable = false;
+  bool recursive_tree_valid = false;
   bool is_struct = false;
   bool is_list = false;
   bool is_list_struct = false;
@@ -6742,7 +6772,110 @@ struct NativeRecursivePathPlan {
   bool is_map = false;
   bool map_value_is_struct = false;
   std::int16_t list_depth = 0;
+  std::int16_t recursive_repetition_depth = 0;
 };
+
+NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
+    const std::vector<std::string> &path, std::size_t tail_index,
+    std::string name, std::vector<NativeRecursiveMaterializationNode> *nodes);
+
+NativeRecursiveMaterializationParseResult parse_native_recursive_component(
+    const std::vector<std::string> &path, std::size_t index,
+    std::vector<NativeRecursiveMaterializationNode> *nodes) {
+  if (!nodes || index >= path.size()) {
+    return {};
+  }
+  return parse_native_recursive_named_tail(path, index + 1, path[index], nodes);
+}
+
+NativeRecursiveMaterializationParseResult parse_native_recursive_named_tail(
+    const std::vector<std::string> &path, std::size_t tail_index,
+    std::string name, std::vector<NativeRecursiveMaterializationNode> *nodes) {
+  if (!nodes) {
+    return {};
+  }
+  if (tail_index == path.size()) {
+    NativeRecursiveMaterializationNode node;
+    node.kind = NativeRecursiveMaterializationNodeKind::Leaf;
+    node.name = std::move(name);
+    const auto node_index = nodes->size();
+    nodes->push_back(std::move(node));
+    return {true, node_index, tail_index, 0};
+  }
+  if (path[tail_index] == "list") {
+    if (tail_index + 1 >= path.size() || path[tail_index + 1] != "element") {
+      return {};
+    }
+    auto child = parse_native_recursive_named_tail(path, tail_index + 2,
+                                                   "element", nodes);
+    if (!child.ok ||
+        child.repetition_depth == std::numeric_limits<std::int16_t>::max()) {
+      return {};
+    }
+    NativeRecursiveMaterializationNode node;
+    node.kind = NativeRecursiveMaterializationNodeKind::List;
+    node.name = std::move(name);
+    node.children.push_back(child.node_index);
+    const auto node_index = nodes->size();
+    nodes->push_back(std::move(node));
+    child.node_index = node_index;
+    child.repetition_depth =
+        static_cast<std::int16_t>(child.repetition_depth + std::int16_t{1});
+    return child;
+  }
+  if (path[tail_index] == "key_value") {
+    if (tail_index + 1 >= path.size() ||
+        (path[tail_index + 1] != "key" && path[tail_index + 1] != "value")) {
+      return {};
+    }
+    auto child = parse_native_recursive_named_tail(path, tail_index + 2,
+                                                   path[tail_index + 1], nodes);
+    if (!child.ok ||
+        child.repetition_depth == std::numeric_limits<std::int16_t>::max()) {
+      return {};
+    }
+    NativeRecursiveMaterializationNode node;
+    node.kind = NativeRecursiveMaterializationNodeKind::Map;
+    node.name = std::move(name);
+    node.children.push_back(child.node_index);
+    const auto node_index = nodes->size();
+    nodes->push_back(std::move(node));
+    child.node_index = node_index;
+    child.repetition_depth =
+        static_cast<std::int16_t>(child.repetition_depth + std::int16_t{1});
+    return child;
+  }
+  auto child = parse_native_recursive_component(path, tail_index, nodes);
+  if (!child.ok) {
+    return {};
+  }
+  NativeRecursiveMaterializationNode node;
+  node.kind = NativeRecursiveMaterializationNodeKind::Struct;
+  node.name = std::move(name);
+  node.children.push_back(child.node_index);
+  const auto node_index = nodes->size();
+  nodes->push_back(std::move(node));
+  child.node_index = node_index;
+  return child;
+}
+
+NativeRecursiveMaterializationTree build_native_recursive_materialization_tree(
+    const std::vector<std::string> &path, std::int16_t max_repetition_level) {
+  NativeRecursiveMaterializationTree tree;
+  if (path.empty() || max_repetition_level < 0) {
+    return tree;
+  }
+  tree.nodes.reserve(path.size());
+  auto parsed = parse_native_recursive_component(path, 0, &tree.nodes);
+  if (!parsed.ok || parsed.next_index != path.size() ||
+      parsed.repetition_depth != max_repetition_level) {
+    return tree;
+  }
+  tree.valid = true;
+  tree.root = parsed.node_index;
+  tree.repetition_depth = parsed.repetition_depth;
+  return tree;
+}
 
 bool is_simple_top_level_list_path(const std::vector<std::string> &path,
                                    std::int16_t max_repetition_level) {
@@ -6892,6 +7025,13 @@ plan_native_recursive_path(const std::vector<std::string> &path,
   if (path.empty()) {
     return plan;
   }
+  const auto tree =
+      build_native_recursive_materialization_tree(path, max_repetition_level);
+  if (!tree.valid) {
+    return plan;
+  }
+  plan.recursive_tree_valid = true;
+  plan.recursive_repetition_depth = tree.repetition_depth;
   (void)top_level_required;
   if (max_repetition_level == 0) {
     plan.materializable = path.size() <= 2;
@@ -6969,6 +7109,12 @@ sanitize::Status add_native_output_field(
     return sanitize::Status::Invalid(
         "native Parquet reader: column path is empty");
   }
+  auto recursive_tree =
+      build_native_recursive_materialization_tree(path, max_repetition_level);
+  if (!recursive_tree.valid) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization tree is invalid");
+  }
   const bool is_list = plan.is_list;
   const bool is_map = plan.is_map;
   const auto list_depth = plan.list_depth;
@@ -6995,6 +7141,7 @@ sanitize::Status add_native_output_field(
     field.top_level_required = top_level_required;
     field.name = top_level_name;
     field.column_indices.push_back(column_index);
+    field.recursive_trees.push_back(std::move(recursive_tree));
     fields->push_back(std::move(field));
     return {};
   }
@@ -7039,6 +7186,7 @@ sanitize::Status add_native_output_field(
         "native Parquet reader: inconsistent struct output nullability");
   }
   match->column_indices.push_back(column_index);
+  match->recursive_trees.push_back(std::move(recursive_tree));
   return {};
 }
 

@@ -74,6 +74,16 @@ replacement. Remaining work:
      - [x] Recursive native list-chain Arrow schema assembly shared across supported nested parents.
      - [x] Recursive planner drives native nested repetition-layout validation for supported list-struct, map, and list-map routes.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
+       Remaining honest effort: large. The next real finish line is a recursive
+       materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
+       allocation, repetition/definition-level interpretation, Arrow schema
+       construction, and Arrow array construction. Until that exists, supported
+       shapes still depend on several branch-specific materializers. Expected
+       effort is multiple focused engineering days, plus generated deep-shape
+       fixtures, because every recursive level must preserve memory safety and
+       exact null/empty-list semantics.
+     - [x] Start recursive materialization tree construction from Parquet paths.
+     - [x] Persist recursive materialization trees in native output layout.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.
