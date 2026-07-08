@@ -4241,7 +4241,34 @@ bool is_supported_top_level_list_leaf(const ColumnChunkInfo &column) {
                                               column.top_level_required));
 }
 
+std::vector<std::int16_t>
+generic_list_defined_levels_from_path(const ColumnChunkInfo &column) {
+  std::vector<std::int16_t> levels;
+  if (column.max_repetition_level <= 0 || column.path_in_schema.empty() ||
+      column.path_definition_levels.size() != column.path_in_schema.size()) {
+    return levels;
+  }
+  levels.reserve(static_cast<std::size_t>(column.max_repetition_level));
+  for (std::size_t i = 1; i + 1 < column.path_in_schema.size(); ++i) {
+    if (column.path_in_schema[i] == "list" &&
+        column.path_in_schema[i + 1] == "element") {
+      levels.push_back(column.path_definition_levels[i - 1]);
+      ++i;
+    }
+  }
+  if (levels.size() != static_cast<std::size_t>(column.max_repetition_level)) {
+    levels.clear();
+  }
+  return levels;
+}
+
 std::int64_t list_leaf_value_count(const ColumnChunkInfo &column) {
+  if (column.repeated_level_layouts.size() ==
+          static_cast<std::size_t>(column.max_repetition_level) &&
+      !column.repeated_level_layouts.empty() &&
+      !generic_list_defined_levels_from_path(column).empty()) {
+    return column.repeated_level_layouts.back().element_count;
+  }
   if ((top_level_list_struct_list_chain_depth(column) > 1 ||
        top_level_list_struct_map_list_chain_depth(column) > 0 ||
        top_level_list_struct_map_struct_list_chain_depth(column) > 0 ||
@@ -4291,6 +4318,10 @@ bool list_leaf_value_count_is_materializable(const ColumnChunkInfo &column) {
 
 std::int16_t
 list_leaf_value_parent_defined_level(const ColumnChunkInfo &column) {
+  const auto generic_levels = generic_list_defined_levels_from_path(column);
+  if (!generic_levels.empty()) {
+    return generic_levels.back();
+  }
   const auto list_chain_depth = top_level_list_chain_depth(column);
   if (list_chain_depth > 3) {
     const auto list_defined_level =
@@ -5310,6 +5341,16 @@ assign_generic_list_chain_level_layout(std::int64_t row_count,
       }
     }
   }
+  if ((depth <= 0 || list_defined_levels.empty()) &&
+      column->max_repetition_level > 0 && !column->path_in_schema.empty() &&
+      column->path_definition_levels.size() == column->path_in_schema.size()) {
+    auto generic_defined_levels =
+        generic_list_defined_levels_from_path(*column);
+    if (!generic_defined_levels.empty()) {
+      depth = column->max_repetition_level;
+      list_defined_levels = std::move(generic_defined_levels);
+    }
+  }
   if (depth <= 0 || list_defined_levels.empty()) {
     return {};
   }
@@ -5634,6 +5675,13 @@ sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
       is_top_level_list_struct_map_struct_leaf(*column) ||
       is_top_level_map_list_leaf(*column)) {
     return assign_nested_list_level_layout(row_count, column);
+  }
+  if (column->max_repetition_level > 1 &&
+      native_plain_path_is_materializable(column->path_in_schema,
+                                          column->max_repetition_level,
+                                          column->top_level_required) &&
+      !generic_list_defined_levels_from_path(*column).empty()) {
+    return assign_generic_list_chain_level_layout(row_count, column);
   }
   if (row_count < 0 ||
       row_count > std::numeric_limits<std::int32_t>::max() - 1) {
@@ -7191,8 +7239,7 @@ bool native_recursive_list_struct_tail_supported(
     return true;
   }
   if (path[next] == "list") {
-    return direct_list_struct_child &&
-           native_recursive_is_list_chain_leaf(path, next);
+    return native_recursive_is_list_chain_leaf(path, next);
   }
   if (path[next] == "key_value") {
     return direct_list_struct_child &&
@@ -10938,32 +10985,25 @@ materialize_list_struct_child_validity_at_definition_level(
     const ColumnChunkInfo &column, std::int16_t defined_level,
     std::vector<std::uint8_t> *validity) {
   if (!validity || !column.repeated_level_layout_decoded ||
-      !list_leaf_value_count_is_materializable(column)) {
+      column.repeated_level_element_count < 0 ||
+      column.repeated_level_element_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid recursive list-struct child validity "
         "layout");
   }
-  const auto nested_list_chain_depth =
-      top_level_list_struct_list_chain_depth(column);
-  const bool use_outer_list_entry_records = nested_list_chain_depth > 1;
-  const auto element_count = use_outer_list_entry_records
-                                 ? column.repeated_level_element_count
-                                 : list_leaf_value_count(column);
-  if (element_count < 0) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive list-struct child element count is "
-        "invalid");
-  }
+  const auto element_count = column.repeated_level_element_count;
   const auto validity_bytes = (element_count + 7) / 8;
   if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive list-struct child validity bitmap "
         "exceeds memory limit");
   }
+  const auto generic_levels = generic_list_defined_levels_from_path(column);
   const auto list_defined_level =
-      use_outer_list_entry_records
-          ? (column.top_level_required ? std::int16_t{0} : std::int16_t{1})
-          : list_leaf_value_parent_defined_level(column);
+      !generic_levels.empty()
+          ? generic_levels.front()
+          : (column.top_level_required ? std::int16_t{0} : std::int16_t{1});
   if (defined_level <= list_defined_level) {
     validity->clear();
     return std::int64_t{0};
@@ -10977,7 +11017,7 @@ materialize_list_struct_child_validity_at_definition_level(
     }
     if (page.decoded_definition_level_values.size() !=
             static_cast<std::size_t>(page.num_values) ||
-        (use_outer_list_entry_records &&
+        (column.max_repetition_level > 1 &&
          page.decoded_repetition_level_values.size() !=
              static_cast<std::size_t>(page.num_values))) {
       return sanitize::Status::Invalid(
@@ -10990,7 +11030,7 @@ materialize_list_struct_child_validity_at_definition_level(
       if (definition <= list_defined_level) {
         continue;
       }
-      if (use_outer_list_entry_records) {
+      if (column.max_repetition_level > 1) {
         const auto repetition =
             page.decoded_repetition_level_values[static_cast<std::size_t>(row)];
         if (repetition > 1) {
@@ -11266,7 +11306,7 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
     SAN_ASSIGN_OR_RAISE(
         null_count, materialize_list_struct_child_validity_at_definition_level(
                         layout_column, defined_level, &struct_array.validity));
-    length = list_leaf_value_count(layout_column);
+    length = layout_column.repeated_level_element_count;
   } else {
     SAN_ASSIGN_OR_RAISE(null_count,
                         materialize_struct_validity_at_definition_level(
@@ -11438,7 +11478,8 @@ select_list_struct_layout_column(const RowGroupInfo &row_group,
       continue;
     }
     const auto &candidate = row_group.columns[candidate_index];
-    if (!is_top_level_list_struct_map_leaf(candidate) &&
+    if (candidate.max_repetition_level == 1 &&
+        !is_top_level_list_struct_map_leaf(candidate) &&
         top_level_list_struct_map_list_chain_depth(candidate) == 0 &&
         !is_top_level_list_struct_map_struct_leaf(candidate) &&
         top_level_list_struct_map_struct_list_chain_depth(candidate) == 0) {
