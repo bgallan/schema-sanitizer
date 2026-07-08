@@ -163,6 +163,7 @@ struct ColumnChunkInfo {
   std::int32_t offset_index_length = 0;
   std::int16_t max_definition_level = 0;
   std::int16_t max_repetition_level = 0;
+  std::vector<std::int16_t> path_definition_levels;
   bool top_level_required = true;
   std::int32_t fixed_type_length = 0;
   std::string native_arrow_format;
