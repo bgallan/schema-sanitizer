@@ -11816,7 +11816,7 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
                         materialize_native_recursive_child_node(
                             state, row_group, tree, child_index,
                             first_child_list_layout_index + 1, map_context,
-                            first_map_child_list_layout_index, false, false,
+                            first_map_child_list_layout_index, true, false,
                             struct_child_context, cursor));
     struct_array.children.push_back(child_array);
   }
@@ -11887,9 +11887,17 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
           "native Parquet reader: recursive map child is not materialized in "
           "this parent context");
     }
+    auto child_map_context = map_context;
+    auto child_map_first_layout_index = first_map_child_list_layout_index;
+    if (map_context == NativeRecursiveMapValueStructContext::GenericListMap ||
+        (struct_child_context != NativeRecursiveStructChildContext::None &&
+         first_child_list_layout_index > 1)) {
+      child_map_context = NativeRecursiveMapValueStructContext::GenericListMap;
+      child_map_first_layout_index = first_child_list_layout_index + 1;
+    }
     return materialize_native_recursive_map_node(
-        state, row_group, tree, child_node_index, map_context,
-        first_map_child_list_layout_index, cursor);
+        state, row_group, tree, child_node_index, child_map_context,
+        child_map_first_layout_index, cursor);
   }
   if (child_node.kind == NativeRecursiveMaterializationNodeKind::Struct) {
     if (!allow_struct_map_value &&
@@ -11942,12 +11950,14 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
   const auto &struct_node = tree.nodes[struct_node_index];
   struct_array.children.reserve(struct_node.children.size());
   for (const auto grandchild_node_index : struct_node.children) {
-    SAN_ASSIGN_OR_RAISE(auto *grandchild_array,
-                        materialize_native_recursive_child_node(
-                            state, row_group, tree, grandchild_node_index,
-                            first_child_list_layout_index, map_context,
-                            first_map_child_list_layout_index, false, false,
-                            struct_context, cursor));
+    SAN_ASSIGN_OR_RAISE(
+        auto *grandchild_array,
+        materialize_native_recursive_child_node(
+            state, row_group, tree, grandchild_node_index,
+            first_child_list_layout_index, map_context,
+            first_map_child_list_layout_index,
+            struct_context != NativeRecursiveStructChildContext::None, false,
+            struct_context, cursor));
     struct_array.children.push_back(grandchild_array);
   }
   SAN_ASSIGN_OR_RAISE(const auto node_path,
@@ -12300,9 +12310,24 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_node(
       &cursor->struct_index, &cursor->list_index,
       NativeRecursiveStructChildContext::ListStructElement,
       &struct_array.children));
-  SAN_ASSIGN_OR_RAISE(const auto struct_null_count,
-                      materialize_list_struct_validity(*struct_layout_column,
-                                                       &struct_array.validity));
+  std::int64_t struct_null_count = 0;
+  if (!generic_list_defined_levels_from_path(*struct_layout_column).empty()) {
+    SAN_ASSIGN_OR_RAISE(
+        const auto node_path,
+        native_recursive_node_path(field.recursive_tree, struct_node_index));
+    SAN_ASSIGN_OR_RAISE(
+        const auto defined_level,
+        definition_level_for_path_prefix(*struct_layout_column, node_path));
+    SAN_ASSIGN_OR_RAISE(
+        struct_null_count,
+        materialize_list_struct_child_validity_at_definition_level(
+            *struct_layout_column, std::size_t{0}, defined_level,
+            &struct_array.validity));
+  } else {
+    SAN_ASSIGN_OR_RAISE(struct_null_count,
+                        materialize_list_struct_validity(
+                            *struct_layout_column, &struct_array.validity));
+  }
   SAN_RETURN_NOT_OK(configure_native_struct_array(
       &struct_array, struct_layout_column->repeated_level_element_count,
       struct_null_count));
