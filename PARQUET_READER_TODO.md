@@ -86,7 +86,7 @@ replacement. Remaining work:
      - [x] Recursive map-entry struct materialization now uses generic footer definition-level thresholds for top-level map and list-map nested struct values.
      - [x] Recursive list-struct element materialization now supports nested ordinary struct children using footer definition-level thresholds.
      - [x] Recursive list-struct element materialization now supports nested ordinary struct children with scalar list/list-chain children using generic footer-derived repeated layouts.
-     - [x] Native stream creation now validates merged recursive output-field layouts before exposing a native stream, so unsupported mixed recursive layouts fall back instead of failing during batch consumption.
+     - [x] Native readiness and stream creation now share merged recursive output-field layout validation, so unsupported mixed recursive layouts fall back before native batch consumption.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
@@ -96,6 +96,10 @@ replacement. Remaining work:
        effort is multiple focused engineering days, plus generated deep-shape
        fixtures, because every recursive level must preserve memory safety and
        exact null/empty-list semantics.
+       Current concrete blocker: repeated-list layout decoding is still
+       row-rooted for generic paths, so child lists under nested structs/maps
+       cannot be promoted just by relaxing planner classifiers; they need
+       parent-rooted offsets and validity at each recursive node.
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
      - [x] Merge per-leaf recursive trees into one validated output-field tree.

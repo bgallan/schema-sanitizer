@@ -6190,6 +6190,8 @@ std::int16_t
 top_level_map_list_chain_depth_path(const std::vector<std::string> &path,
                                     std::int16_t max_repetition_level);
 bool is_supported_top_level_list_leaf(const ColumnChunkInfo &column);
+sanitize::Status validate_native_recursive_row_group_output_layout(
+    const RowGroupInfo &row_group);
 
 NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
   NativeReadinessInfo readiness;
@@ -6398,6 +6400,14 @@ NativeReadinessInfo native_reader_readiness(const FooterInfo &info) {
           "row group " + std::to_string(row_group_index) +
               ": native buffer estimate " + std::to_string(*estimated) +
               " exceeds configured limit " + std::to_string(max_buffer_bytes));
+    }
+    auto output_layout_status =
+        validate_native_recursive_row_group_output_layout(row_group);
+    if (!output_layout_status.ok()) {
+      add_readiness_blocker(
+          &readiness, "row group " + std::to_string(row_group_index) +
+                          ": recursive output layout is not materializable: " +
+                          output_layout_status.message());
     }
   }
   return readiness;
@@ -7874,6 +7884,32 @@ validate_list_map_repetition_layout(const RowGroupInfo &row_group,
              first.nested_repeated_level_validity_bitmap)) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: list map leaf repetition layouts differ");
+    }
+  }
+  return {};
+}
+
+sanitize::Status validate_native_recursive_row_group_output_layout(
+    const RowGroupInfo &row_group) {
+  std::vector<NativeParquetOutputField> layout;
+  SAN_RETURN_NOT_OK(build_native_output_layout(row_group.columns, &layout));
+  for (const auto &field : layout) {
+    if (field.column_indices.empty() ||
+        field.column_indices.front() >= row_group.columns.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: output field has invalid columns");
+    }
+    const auto &column = row_group.columns[field.column_indices.front()];
+    if (field.is_map) {
+      SAN_RETURN_NOT_OK(validate_map_repetition_layout(row_group, field));
+    } else if (field.is_list_struct) {
+      SAN_RETURN_NOT_OK(
+          validate_list_struct_repetition_layout(row_group, field));
+    } else if (field.is_list_map) {
+      SAN_RETURN_NOT_OK(validate_list_map_repetition_layout(row_group, field));
+    } else if (field.is_list && !column.repeated_level_layout_decoded) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: scalar list layout was not decoded");
     }
   }
   return {};
@@ -12542,28 +12578,8 @@ make_arrow_stream(const std::string &path,
     for (const auto &column : row_group.columns) {
       SAN_RETURN_NOT_OK(validate_native_plain_column(column));
     }
-    std::vector<NativeParquetOutputField> layout;
-    SAN_RETURN_NOT_OK(build_native_output_layout(row_group.columns, &layout));
-    for (const auto &field : layout) {
-      if (field.column_indices.empty() ||
-          field.column_indices.front() >= row_group.columns.size()) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: output field has invalid columns");
-      }
-      const auto &column = row_group.columns[field.column_indices.front()];
-      if (field.is_map) {
-        SAN_RETURN_NOT_OK(validate_map_repetition_layout(row_group, field));
-      } else if (field.is_list_struct) {
-        SAN_RETURN_NOT_OK(
-            validate_list_struct_repetition_layout(row_group, field));
-      } else if (field.is_list_map) {
-        SAN_RETURN_NOT_OK(
-            validate_list_map_repetition_layout(row_group, field));
-      } else if (field.is_list && !column.repeated_level_layout_decoded) {
-        return sanitize::Status::NotImplemented(
-            "native Parquet reader: scalar list layout was not decoded");
-      }
-    }
+    SAN_RETURN_NOT_OK(
+        validate_native_recursive_row_group_output_layout(row_group));
   }
   auto state = std::unique_ptr<NativeParquetStreamState>(
       new (std::nothrow) NativeParquetStreamState());
