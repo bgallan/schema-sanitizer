@@ -11574,6 +11574,102 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
   return {};
 }
 
+struct NativeRepeatedLevelLayoutView {
+  bool decoded = false;
+  std::int64_t row_count = 0;
+  std::int64_t null_count = 0;
+  const std::vector<std::int32_t> *offsets = nullptr;
+  const std::vector<std::uint8_t> *validity_bitmap = nullptr;
+};
+
+sanitize::Result<NativeRepeatedLevelLayoutView>
+native_repeated_level_layout(const ColumnChunkInfo &column,
+                             std::size_t layout_index) {
+  if (layout_index < column.repeated_level_layouts.size()) {
+    const auto &layout = column.repeated_level_layouts[layout_index];
+    if (layout.decoded) {
+      return NativeRepeatedLevelLayoutView{true, layout.row_count,
+                                           layout.null_count, &layout.offsets,
+                                           &layout.validity_bitmap};
+    }
+  }
+  if (layout_index == 0 && column.repeated_level_layout_decoded) {
+    return NativeRepeatedLevelLayoutView{
+        true, column.repeated_level_row_count, column.repeated_level_null_count,
+        &column.repeated_level_offsets, &column.repeated_level_validity_bitmap};
+  }
+  if (layout_index == 1 && column.nested_repeated_level_layout_decoded) {
+    return NativeRepeatedLevelLayoutView{
+        true, column.nested_repeated_level_row_count,
+        column.nested_repeated_level_null_count,
+        &column.nested_repeated_level_offsets,
+        &column.nested_repeated_level_validity_bitmap};
+  }
+  if (layout_index == 2 && column.deep_repeated_level_layout_decoded) {
+    return NativeRepeatedLevelLayoutView{
+        true, column.deep_repeated_level_row_count,
+        column.deep_repeated_level_null_count,
+        &column.deep_repeated_level_offsets,
+        &column.deep_repeated_level_validity_bitmap};
+  }
+  return sanitize::Status::NotImplemented(
+      "native Parquet reader: recursive list chain layout was not decoded");
+}
+
+sanitize::Status
+configure_native_list_array(NativeParquetListArray *list_array,
+                            const std::vector<std::uint8_t> &validity,
+                            const std::vector<std::int32_t> &offsets,
+                            ArrowArray *child, std::int64_t length,
+                            std::int64_t null_count) {
+  if (!list_array || !child || length < 0 || null_count < 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid list array shell");
+  }
+  list_array->validity = validity;
+  list_array->offsets = offsets;
+  list_array->children[0] = child;
+  list_array->array.length = length;
+  list_array->array.null_count = null_count;
+  list_array->array.offset = 0;
+  list_array->array.n_buffers = 2;
+  list_array->buffers[0] =
+      list_array->validity.empty() ? nullptr : list_array->validity.data();
+  list_array->buffers[1] =
+      list_array->offsets.empty() ? nullptr : list_array->offsets.data();
+  list_array->array.buffers = list_array->buffers.data();
+  list_array->array.n_children = 1;
+  list_array->array.children = list_array->children.data();
+  list_array->array.dictionary = nullptr;
+  list_array->array.private_data = nullptr;
+  list_array->array.release = &native_parquet_array_child_release;
+  return {};
+}
+
+sanitize::Status
+configure_native_struct_array(NativeParquetStructArray *struct_array,
+                              std::int64_t length, std::int64_t null_count) {
+  if (!struct_array || length < 0 || null_count < 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid struct array shell");
+  }
+  struct_array->array.length = length;
+  struct_array->array.null_count = null_count;
+  struct_array->array.offset = 0;
+  struct_array->array.n_buffers = 1;
+  struct_array->buffers[0] =
+      struct_array->validity.empty() ? nullptr : struct_array->validity.data();
+  struct_array->array.buffers = struct_array->buffers.data();
+  struct_array->array.n_children =
+      static_cast<std::int64_t>(struct_array->children.size());
+  struct_array->array.children =
+      struct_array->children.empty() ? nullptr : struct_array->children.data();
+  struct_array->array.dictionary = nullptr;
+  struct_array->array.private_data = nullptr;
+  struct_array->array.release = &native_parquet_array_child_release;
+  return {};
+}
+
 sanitize::Result<ArrowArray *> materialize_native_repeated_list_chain(
     NativeParquetArrayState *state, const ColumnChunkInfo &column,
     std::int16_t list_depth, std::size_t first_layout_index,
@@ -11581,12 +11677,6 @@ sanitize::Result<ArrowArray *> materialize_native_repeated_list_chain(
   if (!state || !leaf_child || !list_index || list_depth <= 0) {
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid recursive list chain materialization");
-  }
-  const auto required_layouts =
-      first_layout_index + static_cast<std::size_t>(list_depth);
-  if (column.repeated_level_layouts.size() < required_layouts) {
-    return sanitize::Status::NotImplemented(
-        "native Parquet reader: recursive list chain layout was not decoded");
   }
   if (*list_index + static_cast<std::size_t>(list_depth) >
       state->lists.size()) {
@@ -11602,33 +11692,54 @@ sanitize::Result<ArrowArray *> materialize_native_repeated_list_chain(
     const auto layout_index =
         first_layout_index + static_cast<std::size_t>(level - 1);
     const auto array_index = static_cast<std::size_t>(level - 1);
-    const auto &level_layout = column.repeated_level_layouts[layout_index];
+    SAN_ASSIGN_OR_RAISE(const auto level_layout,
+                        native_repeated_level_layout(column, layout_index));
     if (!level_layout.decoded) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: recursive list chain level was not decoded");
     }
     auto &inner_array = *chain_arrays[array_index];
-    inner_array.validity = level_layout.validity_bitmap;
-    inner_array.offsets = level_layout.offsets;
-    inner_array.children[0] = (level == list_depth)
-                                  ? leaf_child
-                                  : &chain_arrays[array_index + 1]->array;
-    inner_array.array.length = level_layout.row_count;
-    inner_array.array.null_count = level_layout.null_count;
-    inner_array.array.offset = 0;
-    inner_array.array.n_buffers = 2;
-    inner_array.buffers[0] =
-        inner_array.validity.empty() ? nullptr : inner_array.validity.data();
-    inner_array.buffers[1] =
-        inner_array.offsets.empty() ? nullptr : inner_array.offsets.data();
-    inner_array.array.buffers = inner_array.buffers.data();
-    inner_array.array.n_children = 1;
-    inner_array.array.children = inner_array.children.data();
-    inner_array.array.dictionary = nullptr;
-    inner_array.array.private_data = nullptr;
-    inner_array.array.release = &native_parquet_array_child_release;
+    SAN_RETURN_NOT_OK(configure_native_list_array(
+        &inner_array, *level_layout.validity_bitmap, *level_layout.offsets,
+        (level == list_depth) ? leaf_child
+                              : &chain_arrays[array_index + 1]->array,
+        level_layout.row_count, level_layout.null_count));
   }
   return &chain_arrays.front()->array;
+}
+
+sanitize::Result<ArrowArray *> materialize_native_recursive_scalar_list_output(
+    NativeParquetArrayState *state, const RowGroupInfo &row_group,
+    const NativeParquetOutputField &field, const ColumnChunkInfo &column,
+    std::size_t column_index, std::size_t *list_index) {
+  if (!state || !list_index || !field.is_list || field.is_list_struct ||
+      field.is_list_map || field.column_indices.size() != 1 ||
+      field.list_depth <= 0 || column_index >= state->columns.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid recursive scalar list output");
+  }
+  if (!column.repeated_level_layout_decoded) {
+    return sanitize::Status::NotImplemented(
+        "native Parquet reader: scalar list layout was not decoded");
+  }
+  if (*list_index >= state->lists.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: scalar list allocation mismatch");
+  }
+  ArrowArray *list_child = &state->columns[column_index].array;
+  if (field.list_depth > 1) {
+    SAN_ASSIGN_OR_RAISE(list_child,
+                        materialize_native_repeated_list_chain(
+                            state, column,
+                            static_cast<std::int16_t>(field.list_depth - 1), 1,
+                            &state->columns[column_index].array, list_index));
+  }
+  auto &list_array = state->lists[(*list_index)++];
+  SAN_RETURN_NOT_OK(configure_native_list_array(
+      &list_array, column.repeated_level_validity_bitmap,
+      column.repeated_level_offsets, list_child, row_group.num_rows,
+      column.repeated_level_null_count));
+  return &list_array.array;
 }
 
 sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
@@ -11912,115 +12023,46 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                     &state->columns[struct_column_index].array);
               }
             }
-            value_struct_array.array.length =
-                value_struct_layout_column->repeated_level_element_count;
             SAN_ASSIGN_OR_RAISE(
                 const auto value_struct_null_count,
                 materialize_map_value_struct_validity(
                     *value_struct_layout_column, &value_struct_array.validity));
-            value_struct_array.array.null_count = value_struct_null_count;
-            value_struct_array.array.offset = 0;
-            value_struct_array.array.n_buffers = 1;
-            value_struct_array.buffers[0] =
-                value_struct_array.validity.empty()
-                    ? nullptr
-                    : value_struct_array.validity.data();
-            value_struct_array.array.buffers =
-                value_struct_array.buffers.data();
-            value_struct_array.array.n_children =
-                static_cast<std::int64_t>(value_struct_array.children.size());
-            value_struct_array.array.children =
-                value_struct_array.children.empty()
-                    ? nullptr
-                    : value_struct_array.children.data();
-            value_struct_array.array.dictionary = nullptr;
-            value_struct_array.array.private_data = nullptr;
-            value_struct_array.array.release =
-                &native_parquet_array_child_release;
+            SAN_RETURN_NOT_OK(configure_native_struct_array(
+                &value_struct_array,
+                value_struct_layout_column->repeated_level_element_count,
+                value_struct_null_count));
             entries_array.children.push_back(&value_struct_array.array);
-          } else if (child_list_depth > 1) {
+          } else if (child_list_depth > 0) {
             SAN_ASSIGN_OR_RAISE(
                 auto *chain_array,
                 materialize_native_repeated_list_chain(
                     state.get(), child_column, child_list_depth, 1,
                     &state->columns[child_column_index].array, &list_index));
             entries_array.children.push_back(chain_array);
-          } else if (child_list_depth == 1) {
-            if (!child_column.nested_repeated_level_layout_decoded) {
-              return sanitize::Status::NotImplemented(
-                  "native Parquet reader: map nested list layout was not "
-                  "decoded");
-            }
-            auto &inner_list_array = state->lists[list_index++];
-            inner_list_array.validity =
-                child_column.nested_repeated_level_validity_bitmap;
-            inner_list_array.offsets =
-                child_column.nested_repeated_level_offsets;
-            inner_list_array.children[0] =
-                &state->columns[child_column_index].array;
-            inner_list_array.array.length =
-                child_column.nested_repeated_level_row_count;
-            inner_list_array.array.null_count =
-                child_column.nested_repeated_level_null_count;
-            inner_list_array.array.offset = 0;
-            inner_list_array.array.n_buffers = 2;
-            inner_list_array.buffers[0] =
-                inner_list_array.validity.empty()
-                    ? nullptr
-                    : inner_list_array.validity.data();
-            inner_list_array.buffers[1] = inner_list_array.offsets.empty()
-                                              ? nullptr
-                                              : inner_list_array.offsets.data();
-            inner_list_array.array.buffers = inner_list_array.buffers.data();
-            inner_list_array.array.n_children = 1;
-            inner_list_array.array.children = inner_list_array.children.data();
-            inner_list_array.array.dictionary = nullptr;
-            inner_list_array.array.private_data = nullptr;
-            inner_list_array.array.release =
-                &native_parquet_array_child_release;
-            entries_array.children.push_back(&inner_list_array.array);
           } else {
             entries_array.children.push_back(
                 &state->columns[child_column_index].array);
           }
         }
-        entries_array.array.length = column.repeated_level_element_count;
-        entries_array.array.null_count = 0;
-        entries_array.array.offset = 0;
-        entries_array.array.n_buffers = 1;
-        entries_array.buffers[0] = nullptr;
-        entries_array.array.buffers = entries_array.buffers.data();
-        entries_array.array.n_children =
-            static_cast<std::int64_t>(entries_array.children.size());
-        entries_array.array.children = entries_array.children.empty()
-                                           ? nullptr
-                                           : entries_array.children.data();
-        entries_array.array.dictionary = nullptr;
-        entries_array.array.private_data = nullptr;
-        entries_array.array.release = &native_parquet_array_child_release;
-
-        map_array.validity = column.repeated_level_validity_bitmap;
-        map_array.offsets = column.repeated_level_offsets;
-        map_array.children[0] = &entries_array.array;
-        map_array.array.length = row_group.num_rows;
-        map_array.array.null_count = column.repeated_level_null_count;
-        map_array.array.offset = 0;
-        map_array.array.n_buffers = 2;
-        map_array.buffers[0] =
-            map_array.validity.empty() ? nullptr : map_array.validity.data();
-        map_array.buffers[1] =
-            map_array.offsets.empty() ? nullptr : map_array.offsets.data();
-        map_array.array.buffers = map_array.buffers.data();
-        map_array.array.n_children = 1;
-        map_array.array.children = map_array.children.data();
-        map_array.array.dictionary = nullptr;
-        map_array.array.private_data = nullptr;
-        map_array.array.release = &native_parquet_array_child_release;
+        SAN_RETURN_NOT_OK(configure_native_struct_array(
+            &entries_array, column.repeated_level_element_count, 0));
+        SAN_RETURN_NOT_OK(configure_native_list_array(
+            &map_array, column.repeated_level_validity_bitmap,
+            column.repeated_level_offsets, &entries_array.array,
+            row_group.num_rows, column.repeated_level_null_count));
         state->children.push_back(&map_array.array);
         continue;
       }
       const auto column_index = field.column_indices.front();
       const auto &column = row_group.columns[column_index];
+      if (!field.is_list_map && !field.is_list_struct) {
+        SAN_ASSIGN_OR_RAISE(auto *list_array,
+                            materialize_native_recursive_scalar_list_output(
+                                state.get(), row_group, field, column,
+                                column_index, &list_index));
+        state->children.push_back(list_array);
+        continue;
+      }
       auto &list_array = state->lists[list_index++];
       ArrowArray *list_child = &state->columns[column_index].array;
       if (field.is_list_map) {
@@ -12084,156 +12126,28 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                     &state->columns[struct_column_index].array);
               }
             }
-            value_struct_array.array.length =
-                value_struct_layout_column->nested_repeated_level_element_count;
             SAN_ASSIGN_OR_RAISE(
                 const auto value_struct_null_count,
                 materialize_list_map_value_struct_validity(
                     *value_struct_layout_column, &value_struct_array.validity));
-            value_struct_array.array.null_count = value_struct_null_count;
-            value_struct_array.array.offset = 0;
-            value_struct_array.array.n_buffers = 1;
-            value_struct_array.buffers[0] =
-                value_struct_array.validity.empty()
-                    ? nullptr
-                    : value_struct_array.validity.data();
-            value_struct_array.array.buffers =
-                value_struct_array.buffers.data();
-            value_struct_array.array.n_children =
-                static_cast<std::int64_t>(value_struct_array.children.size());
-            value_struct_array.array.children =
-                value_struct_array.children.empty()
-                    ? nullptr
-                    : value_struct_array.children.data();
-            value_struct_array.array.dictionary = nullptr;
-            value_struct_array.array.private_data = nullptr;
-            value_struct_array.array.release =
-                &native_parquet_array_child_release;
+            SAN_RETURN_NOT_OK(configure_native_struct_array(
+                &value_struct_array,
+                value_struct_layout_column->nested_repeated_level_element_count,
+                value_struct_null_count));
             entries_array.children.push_back(&value_struct_array.array);
           } else {
             entries_array.children.push_back(
                 &state->columns[child_column_index].array);
           }
         }
-        entries_array.array.length = column.nested_repeated_level_element_count;
-        entries_array.array.null_count = 0;
-        entries_array.array.offset = 0;
-        entries_array.array.n_buffers = 1;
-        entries_array.buffers[0] = nullptr;
-        entries_array.array.buffers = entries_array.buffers.data();
-        entries_array.array.n_children =
-            static_cast<std::int64_t>(entries_array.children.size());
-        entries_array.array.children = entries_array.children.empty()
-                                           ? nullptr
-                                           : entries_array.children.data();
-        entries_array.array.dictionary = nullptr;
-        entries_array.array.private_data = nullptr;
-        entries_array.array.release = &native_parquet_array_child_release;
-
-        map_array.validity = column.nested_repeated_level_validity_bitmap;
-        map_array.offsets = column.nested_repeated_level_offsets;
-        map_array.children[0] = &entries_array.array;
-        map_array.array.length = column.nested_repeated_level_row_count;
-        map_array.array.null_count = column.nested_repeated_level_null_count;
-        map_array.array.offset = 0;
-        map_array.array.n_buffers = 2;
-        map_array.buffers[0] =
-            map_array.validity.empty() ? nullptr : map_array.validity.data();
-        map_array.buffers[1] =
-            map_array.offsets.empty() ? nullptr : map_array.offsets.data();
-        map_array.array.buffers = map_array.buffers.data();
-        map_array.array.n_children = 1;
-        map_array.array.children = map_array.children.data();
-        map_array.array.dictionary = nullptr;
-        map_array.array.private_data = nullptr;
-        map_array.array.release = &native_parquet_array_child_release;
+        SAN_RETURN_NOT_OK(configure_native_struct_array(
+            &entries_array, column.nested_repeated_level_element_count, 0));
+        SAN_RETURN_NOT_OK(configure_native_list_array(
+            &map_array, column.nested_repeated_level_validity_bitmap,
+            column.nested_repeated_level_offsets, &entries_array.array,
+            column.nested_repeated_level_row_count,
+            column.nested_repeated_level_null_count));
         list_child = &map_array.array;
-      } else if (field.list_depth > 3) {
-        SAN_ASSIGN_OR_RAISE(
-            list_child, materialize_native_repeated_list_chain(
-                            state.get(), column,
-                            static_cast<std::int16_t>(field.list_depth - 1), 1,
-                            &state->columns[column_index].array, &list_index));
-      } else if (field.is_list_list_list) {
-        if (!column.nested_repeated_level_layout_decoded ||
-            !column.deep_repeated_level_layout_decoded) {
-          return sanitize::Status::NotImplemented(
-              "native Parquet reader: deep nested list layout was not "
-              "decoded");
-        }
-        auto &middle_list_array = state->lists[list_index++];
-        auto &inner_list_array = state->lists[list_index++];
-        inner_list_array.validity = column.deep_repeated_level_validity_bitmap;
-        inner_list_array.offsets = column.deep_repeated_level_offsets;
-        inner_list_array.children[0] = &state->columns[column_index].array;
-        inner_list_array.array.length = column.deep_repeated_level_row_count;
-        inner_list_array.array.null_count =
-            column.deep_repeated_level_null_count;
-        inner_list_array.array.offset = 0;
-        inner_list_array.array.n_buffers = 2;
-        inner_list_array.buffers[0] = inner_list_array.validity.empty()
-                                          ? nullptr
-                                          : inner_list_array.validity.data();
-        inner_list_array.buffers[1] = inner_list_array.offsets.empty()
-                                          ? nullptr
-                                          : inner_list_array.offsets.data();
-        inner_list_array.array.buffers = inner_list_array.buffers.data();
-        inner_list_array.array.n_children = 1;
-        inner_list_array.array.children = inner_list_array.children.data();
-        inner_list_array.array.dictionary = nullptr;
-        inner_list_array.array.private_data = nullptr;
-        inner_list_array.array.release = &native_parquet_array_child_release;
-
-        middle_list_array.validity =
-            column.nested_repeated_level_validity_bitmap;
-        middle_list_array.offsets = column.nested_repeated_level_offsets;
-        middle_list_array.children[0] = &inner_list_array.array;
-        middle_list_array.array.length = column.nested_repeated_level_row_count;
-        middle_list_array.array.null_count =
-            column.nested_repeated_level_null_count;
-        middle_list_array.array.offset = 0;
-        middle_list_array.array.n_buffers = 2;
-        middle_list_array.buffers[0] = middle_list_array.validity.empty()
-                                           ? nullptr
-                                           : middle_list_array.validity.data();
-        middle_list_array.buffers[1] = middle_list_array.offsets.empty()
-                                           ? nullptr
-                                           : middle_list_array.offsets.data();
-        middle_list_array.array.buffers = middle_list_array.buffers.data();
-        middle_list_array.array.n_children = 1;
-        middle_list_array.array.children = middle_list_array.children.data();
-        middle_list_array.array.dictionary = nullptr;
-        middle_list_array.array.private_data = nullptr;
-        middle_list_array.array.release = &native_parquet_array_child_release;
-        list_child = &middle_list_array.array;
-      } else if (field.is_list_list) {
-        if (!column.nested_repeated_level_layout_decoded) {
-          return sanitize::Status::NotImplemented(
-              "native Parquet reader: nested list layout was not decoded");
-        }
-        auto &inner_list_array = state->lists[list_index++];
-        inner_list_array.validity =
-            column.nested_repeated_level_validity_bitmap;
-        inner_list_array.offsets = column.nested_repeated_level_offsets;
-        inner_list_array.children[0] = &state->columns[column_index].array;
-        inner_list_array.array.length = column.nested_repeated_level_row_count;
-        inner_list_array.array.null_count =
-            column.nested_repeated_level_null_count;
-        inner_list_array.array.offset = 0;
-        inner_list_array.array.n_buffers = 2;
-        inner_list_array.buffers[0] = inner_list_array.validity.empty()
-                                          ? nullptr
-                                          : inner_list_array.validity.data();
-        inner_list_array.buffers[1] = inner_list_array.offsets.empty()
-                                          ? nullptr
-                                          : inner_list_array.offsets.data();
-        inner_list_array.array.buffers = inner_list_array.buffers.data();
-        inner_list_array.array.n_children = 1;
-        inner_list_array.array.children = inner_list_array.children.data();
-        inner_list_array.array.dictionary = nullptr;
-        inner_list_array.array.private_data = nullptr;
-        inner_list_array.array.release = &native_parquet_array_child_release;
-        list_child = &inner_list_array.array;
       } else if (field.is_list_struct) {
         SAN_RETURN_NOT_OK(
             validate_list_struct_repetition_layout(row_group, field));
@@ -12352,33 +12266,16 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                         &state->columns[struct_column_index].array);
                   }
                 }
-                value_struct_array.array.length =
-                    value_struct_layout_column
-                        ->nested_repeated_level_element_count;
                 SAN_ASSIGN_OR_RAISE(
                     const auto value_struct_null_count,
                     materialize_list_struct_map_value_struct_validity(
                         *value_struct_layout_column,
                         &value_struct_array.validity));
-                value_struct_array.array.null_count = value_struct_null_count;
-                value_struct_array.array.offset = 0;
-                value_struct_array.array.n_buffers = 1;
-                value_struct_array.buffers[0] =
-                    value_struct_array.validity.empty()
-                        ? nullptr
-                        : value_struct_array.validity.data();
-                value_struct_array.array.buffers =
-                    value_struct_array.buffers.data();
-                value_struct_array.array.n_children = static_cast<std::int64_t>(
-                    value_struct_array.children.size());
-                value_struct_array.array.children =
-                    value_struct_array.children.empty()
-                        ? nullptr
-                        : value_struct_array.children.data();
-                value_struct_array.array.dictionary = nullptr;
-                value_struct_array.array.private_data = nullptr;
-                value_struct_array.array.release =
-                    &native_parquet_array_child_release;
+                SAN_RETURN_NOT_OK(configure_native_struct_array(
+                    &value_struct_array,
+                    value_struct_layout_column
+                        ->nested_repeated_level_element_count,
+                    value_struct_null_count));
                 entries_array.children.push_back(&value_struct_array.array);
               } else if (map_value_list_depth > 0) {
                 SAN_ASSIGN_OR_RAISE(
@@ -12392,129 +12289,40 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                     &state->columns[map_column_index].array);
               }
             }
-            entries_array.array.length =
-                child_column.nested_repeated_level_element_count;
-            entries_array.array.null_count = 0;
-            entries_array.array.offset = 0;
-            entries_array.array.n_buffers = 1;
-            entries_array.buffers[0] = nullptr;
-            entries_array.array.buffers = entries_array.buffers.data();
-            entries_array.array.n_children =
-                static_cast<std::int64_t>(entries_array.children.size());
-            entries_array.array.children = entries_array.children.empty()
-                                               ? nullptr
-                                               : entries_array.children.data();
-            entries_array.array.dictionary = nullptr;
-            entries_array.array.private_data = nullptr;
-            entries_array.array.release = &native_parquet_array_child_release;
-
-            map_array.validity =
-                child_column.nested_repeated_level_validity_bitmap;
-            map_array.offsets = child_column.nested_repeated_level_offsets;
-            map_array.children[0] = &entries_array.array;
-            map_array.array.length =
-                child_column.nested_repeated_level_row_count;
-            map_array.array.null_count =
-                child_column.nested_repeated_level_null_count;
-            map_array.array.offset = 0;
-            map_array.array.n_buffers = 2;
-            map_array.buffers[0] = map_array.validity.empty()
-                                       ? nullptr
-                                       : map_array.validity.data();
-            map_array.buffers[1] =
-                map_array.offsets.empty() ? nullptr : map_array.offsets.data();
-            map_array.array.buffers = map_array.buffers.data();
-            map_array.array.n_children = 1;
-            map_array.array.children = map_array.children.data();
-            map_array.array.dictionary = nullptr;
-            map_array.array.private_data = nullptr;
-            map_array.array.release = &native_parquet_array_child_release;
+            SAN_RETURN_NOT_OK(configure_native_struct_array(
+                &entries_array,
+                child_column.nested_repeated_level_element_count, 0));
+            SAN_RETURN_NOT_OK(configure_native_list_array(
+                &map_array, child_column.nested_repeated_level_validity_bitmap,
+                child_column.nested_repeated_level_offsets,
+                &entries_array.array,
+                child_column.nested_repeated_level_row_count,
+                child_column.nested_repeated_level_null_count));
             struct_array.children.push_back(&map_array.array);
-          } else if (child_list_depth > 1) {
+          } else if (child_list_depth > 0) {
             SAN_ASSIGN_OR_RAISE(
                 auto *chain_array,
                 materialize_native_repeated_list_chain(
                     state.get(), child_column, child_list_depth, 1,
                     &state->columns[child_column_index].array, &list_index));
             struct_array.children.push_back(chain_array);
-          } else if (child_list_depth == 1) {
-            if (!child_column.nested_repeated_level_layout_decoded) {
-              return sanitize::Status::NotImplemented(
-                  "native Parquet reader: list struct nested list layout was "
-                  "not decoded");
-            }
-            auto &inner_list_array = state->lists[list_index++];
-            inner_list_array.validity =
-                child_column.nested_repeated_level_validity_bitmap;
-            inner_list_array.offsets =
-                child_column.nested_repeated_level_offsets;
-            inner_list_array.children[0] =
-                &state->columns[child_column_index].array;
-            inner_list_array.array.length =
-                child_column.nested_repeated_level_row_count;
-            inner_list_array.array.null_count =
-                child_column.nested_repeated_level_null_count;
-            inner_list_array.array.offset = 0;
-            inner_list_array.array.n_buffers = 2;
-            inner_list_array.buffers[0] =
-                inner_list_array.validity.empty()
-                    ? nullptr
-                    : inner_list_array.validity.data();
-            inner_list_array.buffers[1] = inner_list_array.offsets.empty()
-                                              ? nullptr
-                                              : inner_list_array.offsets.data();
-            inner_list_array.array.buffers = inner_list_array.buffers.data();
-            inner_list_array.array.n_children = 1;
-            inner_list_array.array.children = inner_list_array.children.data();
-            inner_list_array.array.dictionary = nullptr;
-            inner_list_array.array.private_data = nullptr;
-            inner_list_array.array.release =
-                &native_parquet_array_child_release;
-            struct_array.children.push_back(&inner_list_array.array);
           } else {
             struct_array.children.push_back(
                 &state->columns[child_column_index].array);
           }
         }
-        struct_array.array.length =
-            struct_layout_column->repeated_level_element_count;
         SAN_ASSIGN_OR_RAISE(const auto struct_null_count,
                             materialize_list_struct_validity(
                                 *struct_layout_column, &struct_array.validity));
-        struct_array.array.null_count = struct_null_count;
-        struct_array.array.offset = 0;
-        struct_array.array.n_buffers = 1;
-        struct_array.buffers[0] = struct_array.validity.empty()
-                                      ? nullptr
-                                      : struct_array.validity.data();
-        struct_array.array.buffers = struct_array.buffers.data();
-        struct_array.array.n_children =
-            static_cast<std::int64_t>(struct_array.children.size());
-        struct_array.array.children = struct_array.children.empty()
-                                          ? nullptr
-                                          : struct_array.children.data();
-        struct_array.array.dictionary = nullptr;
-        struct_array.array.private_data = nullptr;
-        struct_array.array.release = &native_parquet_array_child_release;
+        SAN_RETURN_NOT_OK(configure_native_struct_array(
+            &struct_array, struct_layout_column->repeated_level_element_count,
+            struct_null_count));
         list_child = &struct_array.array;
       }
-      list_array.validity = column.repeated_level_validity_bitmap;
-      list_array.offsets = column.repeated_level_offsets;
-      list_array.children[0] = list_child;
-      list_array.array.length = row_group.num_rows;
-      list_array.array.null_count = column.repeated_level_null_count;
-      list_array.array.offset = 0;
-      list_array.array.n_buffers = 2;
-      list_array.buffers[0] =
-          list_array.validity.empty() ? nullptr : list_array.validity.data();
-      list_array.buffers[1] =
-          list_array.offsets.empty() ? nullptr : list_array.offsets.data();
-      list_array.array.buffers = list_array.buffers.data();
-      list_array.array.n_children = 1;
-      list_array.array.children = list_array.children.data();
-      list_array.array.dictionary = nullptr;
-      list_array.array.private_data = nullptr;
-      list_array.array.release = &native_parquet_array_child_release;
+      SAN_RETURN_NOT_OK(configure_native_list_array(
+          &list_array, column.repeated_level_validity_bitmap,
+          column.repeated_level_offsets, list_child, row_group.num_rows,
+          column.repeated_level_null_count));
       state->children.push_back(&list_array.array);
       continue;
     }
@@ -12636,31 +12444,14 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                     &state->columns[struct_column_index].array);
               }
             }
-            value_struct_array.array.length =
-                value_struct_layout_column->repeated_level_element_count;
             SAN_ASSIGN_OR_RAISE(
                 const auto value_struct_null_count,
                 materialize_struct_map_value_struct_validity(
                     *value_struct_layout_column, &value_struct_array.validity));
-            value_struct_array.array.null_count = value_struct_null_count;
-            value_struct_array.array.offset = 0;
-            value_struct_array.array.n_buffers = 1;
-            value_struct_array.buffers[0] =
-                value_struct_array.validity.empty()
-                    ? nullptr
-                    : value_struct_array.validity.data();
-            value_struct_array.array.buffers =
-                value_struct_array.buffers.data();
-            value_struct_array.array.n_children =
-                static_cast<std::int64_t>(value_struct_array.children.size());
-            value_struct_array.array.children =
-                value_struct_array.children.empty()
-                    ? nullptr
-                    : value_struct_array.children.data();
-            value_struct_array.array.dictionary = nullptr;
-            value_struct_array.array.private_data = nullptr;
-            value_struct_array.array.release =
-                &native_parquet_array_child_release;
+            SAN_RETURN_NOT_OK(configure_native_struct_array(
+                &value_struct_array,
+                value_struct_layout_column->repeated_level_element_count,
+                value_struct_null_count));
             entries_array.children.push_back(&value_struct_array.array);
             continue;
           }
@@ -12676,47 +12467,20 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                 &state->columns[map_column_index].array);
           }
         }
-        entries_array.array.length = child_column.repeated_level_element_count;
-        entries_array.array.null_count = 0;
-        entries_array.array.offset = 0;
-        entries_array.array.n_buffers = 1;
-        entries_array.buffers[0] = nullptr;
-        entries_array.array.buffers = entries_array.buffers.data();
-        entries_array.array.n_children =
-            static_cast<std::int64_t>(entries_array.children.size());
-        entries_array.array.children = entries_array.children.empty()
-                                           ? nullptr
-                                           : entries_array.children.data();
-        entries_array.array.dictionary = nullptr;
-        entries_array.array.private_data = nullptr;
-        entries_array.array.release = &native_parquet_array_child_release;
-
-        map_array.validity = child_column.repeated_level_validity_bitmap;
-        map_array.offsets = child_column.repeated_level_offsets;
-        map_array.children[0] = &entries_array.array;
-        map_array.array.length = row_group.num_rows;
-        map_array.array.null_count = child_column.repeated_level_null_count;
-        map_array.array.offset = 0;
-        map_array.array.n_buffers = 2;
-        map_array.buffers[0] =
-            map_array.validity.empty() ? nullptr : map_array.validity.data();
-        map_array.buffers[1] =
-            map_array.offsets.empty() ? nullptr : map_array.offsets.data();
-        map_array.array.buffers = map_array.buffers.data();
-        map_array.array.n_children = 1;
-        map_array.array.children = map_array.children.data();
-        map_array.array.dictionary = nullptr;
-        map_array.array.private_data = nullptr;
-        map_array.array.release = &native_parquet_array_child_release;
+        SAN_RETURN_NOT_OK(configure_native_struct_array(
+            &entries_array, child_column.repeated_level_element_count, 0));
+        SAN_RETURN_NOT_OK(configure_native_list_array(
+            &map_array, child_column.repeated_level_validity_bitmap,
+            child_column.repeated_level_offsets, &entries_array.array,
+            row_group.num_rows, child_column.repeated_level_null_count));
         struct_array.children.push_back(&map_array.array);
       } else {
         struct_array.children.push_back(&state->columns[column_index].array);
       }
     }
-    struct_array.array.length = row_group.num_rows;
     if (field.top_level_required) {
-      struct_array.array.null_count = 0;
-      struct_array.buffers[0] = nullptr;
+      SAN_RETURN_NOT_OK(
+          configure_native_struct_array(&struct_array, row_group.num_rows, 0));
     } else {
       if (!struct_validity_column) {
         return sanitize::Status::Invalid(
@@ -12726,21 +12490,9 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                           materialize_optional_struct_validity(
                               *struct_validity_column, row_group.num_rows,
                               &struct_array.validity));
-      struct_array.array.null_count = null_count;
-      struct_array.buffers[0] = struct_array.validity.empty()
-                                    ? nullptr
-                                    : struct_array.validity.data();
+      SAN_RETURN_NOT_OK(configure_native_struct_array(
+          &struct_array, row_group.num_rows, null_count));
     }
-    struct_array.array.offset = 0;
-    struct_array.array.n_buffers = 1;
-    struct_array.array.buffers = struct_array.buffers.data();
-    struct_array.array.n_children =
-        static_cast<std::int64_t>(struct_array.children.size());
-    struct_array.array.children =
-        struct_array.children.empty() ? nullptr : struct_array.children.data();
-    struct_array.array.dictionary = nullptr;
-    struct_array.array.private_data = nullptr;
-    struct_array.array.release = &native_parquet_array_child_release;
     state->children.push_back(&struct_array.array);
   }
   sanitize::internal::cdata_stream::clear_array(out);
