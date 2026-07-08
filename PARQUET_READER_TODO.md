@@ -51,6 +51,16 @@ replacement. Remaining work:
    - [x] Native materialization for top-level list-of-struct with scalar list-chain children.
    - [x] Native materialization for top-level map with scalar list-chain values.
    - Native materialization for arbitrary recursive mixed repeated struct/map shapes.
+     - [x] Top-level list-of-struct with scalar map children.
+     - [x] Top-level list-of-struct with scalar map children containing scalar list values.
+     - [x] Top-level list-of-struct with scalar map children containing scalar list-chain values.
+     - [x] Top-level map with scalar struct values.
+     - [x] Top-level map with scalar struct values containing scalar list children.
+     - [x] Top-level map with scalar struct values containing scalar list-chain children.
+     - [x] Top-level list-of-map with scalar struct values.
+     - [x] Top-level list-of-map with scalar struct values containing scalar list children.
+     - [x] Top-level list-of-map with scalar struct values containing scalar list-chain children.
+     - [x] Top-level struct with scalar map children.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.
