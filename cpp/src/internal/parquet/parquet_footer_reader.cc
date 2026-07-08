@@ -7284,7 +7284,7 @@ bool native_recursive_list_tail_supported(const std::vector<std::string> &path,
     return native_recursive_list_tail_supported(path, child_index);
   }
   if (path[child_index] == "key_value") {
-    return false;
+    return native_recursive_map_tail_supported(path, child_index);
   }
   return native_recursive_struct_tail_supported(path, child_index, true);
 }
@@ -10920,6 +10920,7 @@ enum class NativeRecursiveMapValueStructContext {
   ListMap,
   ListStructMap,
   StructMap,
+  GenericListMap,
 };
 
 enum class NativeRecursiveStructChildContext {
@@ -11185,6 +11186,8 @@ std::int16_t map_entry_present_definition_level_for_context(
         column.top_level_required ? std::int16_t{0} : std::int16_t{1};
     return static_cast<std::int16_t>(list_defined_level + std::int16_t{3});
   }
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    break;
   }
   return 0;
 }
@@ -11198,6 +11201,8 @@ std::int16_t map_entry_repetition_level_for_context(
   case NativeRecursiveMapValueStructContext::ListMap:
   case NativeRecursiveMapValueStructContext::ListStructMap:
     return std::int16_t{2};
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    break;
   }
   return std::int16_t{1};
 }
@@ -11234,6 +11239,18 @@ map_entry_record_count_for_context(NativeRecursiveMapValueStructContext context,
     }
   }
   return element_count;
+}
+
+sanitize::Result<std::int64_t>
+generic_map_entry_record_count(const ColumnChunkInfo &column,
+                               std::size_t map_layout_index) {
+  SAN_ASSIGN_OR_RAISE(const auto map_layout,
+                      native_repeated_level_layout(column, map_layout_index));
+  if (!map_layout.decoded) {
+    return sanitize::Status::NotImplemented(
+        "native Parquet reader: recursive generic map layout was not decoded");
+  }
+  return map_layout.element_count;
 }
 
 sanitize::Result<std::int64_t>
@@ -11306,6 +11323,93 @@ materialize_map_entry_struct_validity_at_definition_level(
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive map-entry struct validity element "
         "count mismatch");
+  }
+  if (null_count == 0) {
+    validity->clear();
+  }
+  return null_count;
+}
+
+sanitize::Result<std::int64_t>
+materialize_generic_map_entry_struct_validity_at_definition_level(
+    const ColumnChunkInfo &column, std::size_t map_layout_index,
+    std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
+  if (!validity || map_layout_index >= column.repeated_level_layouts.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid recursive generic map-entry struct "
+        "validity layout");
+  }
+  const auto generic_levels = generic_list_defined_levels_from_path(column);
+  if (generic_levels.empty() || map_layout_index >= generic_levels.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive generic map definition levels are "
+        "invalid");
+  }
+  SAN_ASSIGN_OR_RAISE(const auto map_layout,
+                      native_repeated_level_layout(column, map_layout_index));
+  if (!map_layout.decoded || map_layout.element_count < 0 ||
+      map_layout.element_count >
+          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid recursive generic map-entry struct "
+        "validity layout");
+  }
+  const auto element_count = map_layout.element_count;
+  const auto validity_bytes = (element_count + 7) / 8;
+  if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive generic map-entry struct validity "
+        "bitmap exceeds memory limit");
+  }
+  const auto map_defined_level = generic_levels[map_layout_index];
+  if (defined_level <= map_defined_level) {
+    validity->clear();
+    return std::int64_t{0};
+  }
+  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
+  std::int64_t null_count = 0;
+  std::int64_t element_index = 0;
+  const auto entry_repetition_level =
+      static_cast<std::int16_t>(map_layout_index + 1);
+  for (const auto &page : column.pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (page.decoded_definition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values) ||
+        page.decoded_repetition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive generic map-entry struct level "
+          "count mismatch");
+    }
+    for (std::int32_t row = 0; row < page.num_values; ++row) {
+      const auto definition =
+          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
+      const auto repetition =
+          page.decoded_repetition_level_values[static_cast<std::size_t>(row)];
+      if (definition <= map_defined_level ||
+          repetition > entry_repetition_level) {
+        continue;
+      }
+      if (element_index >= element_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: recursive generic map-entry struct "
+            "validity exceeds element count");
+      }
+      if (definition >= defined_level) {
+        set_output_validity_bit(validity,
+                                static_cast<std::int32_t>(element_index));
+      } else {
+        ++null_count;
+      }
+      ++element_index;
+    }
+  }
+  if (element_index != element_count) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive generic map-entry struct validity "
+        "element count mismatch");
   }
   if (null_count == 0) {
     validity->clear();
@@ -11497,6 +11601,8 @@ std::int16_t map_value_struct_list_chain_depth_for_context(
     return top_level_list_struct_map_struct_list_chain_depth(column);
   case NativeRecursiveMapValueStructContext::StructMap:
     return top_level_struct_map_struct_list_chain_depth(column);
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    return 0;
   }
   return 0;
 }
@@ -11511,6 +11617,8 @@ std::int64_t map_value_struct_length_for_context(
   case NativeRecursiveMapValueStructContext::ListMap:
   case NativeRecursiveMapValueStructContext::ListStructMap:
     return column.nested_repeated_level_element_count;
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    return 0;
   }
   return 0;
 }
@@ -11532,6 +11640,8 @@ map_array_length_for_context(NativeRecursiveMapValueStructContext context,
   case NativeRecursiveMapValueStructContext::ListMap:
   case NativeRecursiveMapValueStructContext::ListStructMap:
     return column.nested_repeated_level_row_count;
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    return 0;
   }
   return 0;
 }
@@ -11546,6 +11656,8 @@ map_validity_for_context(NativeRecursiveMapValueStructContext context,
   case NativeRecursiveMapValueStructContext::ListMap:
   case NativeRecursiveMapValueStructContext::ListStructMap:
     return column.nested_repeated_level_validity_bitmap;
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    break;
   }
   return column.repeated_level_validity_bitmap;
 }
@@ -11560,6 +11672,8 @@ map_offsets_for_context(NativeRecursiveMapValueStructContext context,
   case NativeRecursiveMapValueStructContext::ListMap:
   case NativeRecursiveMapValueStructContext::ListStructMap:
     return column.nested_repeated_level_offsets;
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    break;
   }
   return column.repeated_level_offsets;
 }
@@ -11574,6 +11688,8 @@ map_null_count_for_context(NativeRecursiveMapValueStructContext context,
   case NativeRecursiveMapValueStructContext::ListMap:
   case NativeRecursiveMapValueStructContext::ListStructMap:
     return column.nested_repeated_level_null_count;
+  case NativeRecursiveMapValueStructContext::GenericListMap:
+    return 0;
   }
   return 0;
 }
@@ -11668,6 +11784,18 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
         &list_array, *list_layout.validity_bitmap, *list_layout.offsets,
         &state->columns[child_node.leaf_column_index.value()].array,
         list_layout.row_count, list_layout.null_count));
+    return &list_array.array;
+  }
+  if (child_node.kind == NativeRecursiveMaterializationNodeKind::Map) {
+    SAN_ASSIGN_OR_RAISE(
+        auto *child_array,
+        materialize_native_recursive_map_node(
+            state, row_group, tree, child_node_index,
+            NativeRecursiveMapValueStructContext::GenericListMap,
+            first_child_list_layout_index + 2, cursor));
+    SAN_RETURN_NOT_OK(configure_native_list_array(
+        &list_array, *list_layout.validity_bitmap, *list_layout.offsets,
+        child_array, list_layout.row_count, list_layout.null_count));
     return &list_array.array;
   }
   if (child_node.kind != NativeRecursiveMaterializationNodeKind::Struct) {
@@ -11830,12 +11958,28 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
   std::int64_t null_count = 0;
   std::int64_t length = 0;
   if (struct_context == NativeRecursiveStructChildContext::MapValue) {
-    SAN_ASSIGN_OR_RAISE(
-        null_count,
-        materialize_map_entry_struct_validity_at_definition_level(
-            map_context, layout_column, defined_level, &struct_array.validity));
-    SAN_ASSIGN_OR_RAISE(
-        length, map_entry_record_count_for_context(map_context, layout_column));
+    if (map_context == NativeRecursiveMapValueStructContext::GenericListMap) {
+      if (first_map_child_list_layout_index == 0) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: recursive generic map layout index is "
+            "invalid");
+      }
+      const auto map_layout_index = first_map_child_list_layout_index - 1;
+      SAN_ASSIGN_OR_RAISE(
+          null_count,
+          materialize_generic_map_entry_struct_validity_at_definition_level(
+              layout_column, map_layout_index, defined_level,
+              &struct_array.validity));
+      SAN_ASSIGN_OR_RAISE(length, generic_map_entry_record_count(
+                                      layout_column, map_layout_index));
+    } else {
+      SAN_ASSIGN_OR_RAISE(
+          null_count, materialize_map_entry_struct_validity_at_definition_level(
+                          map_context, layout_column, defined_level,
+                          &struct_array.validity));
+      SAN_ASSIGN_OR_RAISE(length, map_entry_record_count_for_context(
+                                      map_context, layout_column));
+    }
   } else if (struct_context ==
              NativeRecursiveStructChildContext::ListStructElement) {
     SAN_ASSIGN_OR_RAISE(
@@ -12078,6 +12222,24 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
         "native Parquet reader: recursive map node has no leaves");
   }
   const auto &layout_column = row_group.columns[map_column_indices.front()];
+  std::optional<NativeRepeatedLevelLayoutView> generic_map_layout;
+  if (context == NativeRecursiveMapValueStructContext::GenericListMap) {
+    if (first_map_child_list_layout_index == 0) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive generic map layout index is "
+          "invalid");
+    }
+    SAN_ASSIGN_OR_RAISE(
+        const auto layout,
+        native_repeated_level_layout(layout_column,
+                                     first_map_child_list_layout_index - 1));
+    if (!layout.decoded) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: recursive generic map layout was not "
+          "decoded");
+    }
+    generic_map_layout = layout;
+  }
   if (cursor->list_index >= state->lists.size() ||
       cursor->struct_index >= state->structs.size()) {
     return sanitize::Status::Invalid(
@@ -12090,14 +12252,23 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
       state, row_group, tree, map_node_index, context,
       first_map_child_list_layout_index, &cursor->struct_index,
       &cursor->list_index, &entries_array.children));
-  SAN_RETURN_NOT_OK(configure_native_struct_array(
-      &entries_array, map_entries_length_for_context(context, layout_column),
-      0));
-  SAN_RETURN_NOT_OK(configure_native_list_array(
-      &map_array, map_validity_for_context(context, layout_column),
-      map_offsets_for_context(context, layout_column), &entries_array.array,
-      map_array_length_for_context(context, row_group, layout_column),
-      map_null_count_for_context(context, layout_column)));
+  if (generic_map_layout.has_value()) {
+    const auto &layout = generic_map_layout.value();
+    SAN_RETURN_NOT_OK(
+        configure_native_struct_array(&entries_array, layout.element_count, 0));
+    SAN_RETURN_NOT_OK(configure_native_list_array(
+        &map_array, *layout.validity_bitmap, *layout.offsets,
+        &entries_array.array, layout.row_count, layout.null_count));
+  } else {
+    SAN_RETURN_NOT_OK(configure_native_struct_array(
+        &entries_array, map_entries_length_for_context(context, layout_column),
+        0));
+    SAN_RETURN_NOT_OK(configure_native_list_array(
+        &map_array, map_validity_for_context(context, layout_column),
+        map_offsets_for_context(context, layout_column), &entries_array.array,
+        map_array_length_for_context(context, row_group, layout_column),
+        map_null_count_for_context(context, layout_column)));
+  }
   return &map_array.array;
 }
 

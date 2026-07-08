@@ -92,6 +92,7 @@ replacement. Remaining work:
      - [x] Recursive list-node materialization now supports list-of-struct children under map and list-map values, including scalar/list children inside the struct element.
      - [x] Recursive complex-list schema construction now supports nested list children instead of failing after the first complex list node.
      - [x] Recursive complex-list array materialization now supports `list<list<struct<...>>>` shapes at top level, inside map values, and inside list-map values, including scalar-list children inside the struct element.
+     - [x] Recursive complex-list array materialization now supports direct map children under nested list nodes, including `list<list<map<...>>>`, map values containing `list<list<map<...>>>`, list-map values containing `list<list<map<...>>>`, and struct-valued entries in those nested maps.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
@@ -101,10 +102,11 @@ replacement. Remaining work:
        effort is multiple focused engineering days, plus generated deep-shape
        fixtures, because every recursive level must preserve memory safety and
        exact null/empty-list semantics.
-       Current concrete blocker: arbitrary mixed recursive repeated shapes that
-       introduce map nodes inside nested complex-list nodes still need a fully
-       node-context-driven repeated-layout planner; they cannot be promoted
-       just by relaxing planner classifiers.
+       Current concrete blocker: mathematically arbitrary mixed recursive
+       shapes still need generated deep-shape fixtures and a fully
+       node-context-driven materializer that no longer carries branch-specific
+       map/list context names; they cannot be promoted just by relaxing planner
+       classifiers.
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
      - [x] Merge per-leaf recursive trees into one validated output-field tree.
