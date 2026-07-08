@@ -11445,6 +11445,63 @@ sanitize::Status build_native_schema(const FooterInfo &footer,
   return {};
 }
 
+sanitize::Result<ArrowArray *> materialize_native_repeated_list_chain(
+    NativeParquetArrayState *state, const ColumnChunkInfo &column,
+    std::int16_t list_depth, std::size_t first_layout_index,
+    ArrowArray *leaf_child, std::size_t *list_index) {
+  if (!state || !leaf_child || !list_index || list_depth <= 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid recursive list chain materialization");
+  }
+  const auto required_layouts =
+      first_layout_index + static_cast<std::size_t>(list_depth);
+  if (column.repeated_level_layouts.size() < required_layouts) {
+    return sanitize::Status::NotImplemented(
+        "native Parquet reader: recursive list chain layout was not decoded");
+  }
+  if (*list_index + static_cast<std::size_t>(list_depth) >
+      state->lists.size()) {
+    return sanitize::Status::Invalid("native Parquet reader: recursive list "
+                                     "chain array allocation mismatch");
+  }
+  std::vector<NativeParquetListArray *> chain_arrays;
+  chain_arrays.reserve(static_cast<std::size_t>(list_depth));
+  for (std::int16_t level = 0; level < list_depth; ++level) {
+    chain_arrays.push_back(&state->lists[(*list_index)++]);
+  }
+  for (std::int16_t level = list_depth; level >= 1; --level) {
+    const auto layout_index =
+        first_layout_index + static_cast<std::size_t>(level - 1);
+    const auto array_index = static_cast<std::size_t>(level - 1);
+    const auto &level_layout = column.repeated_level_layouts[layout_index];
+    if (!level_layout.decoded) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: recursive list chain level was not decoded");
+    }
+    auto &inner_array = *chain_arrays[array_index];
+    inner_array.validity = level_layout.validity_bitmap;
+    inner_array.offsets = level_layout.offsets;
+    inner_array.children[0] = (level == list_depth)
+                                  ? leaf_child
+                                  : &chain_arrays[array_index + 1]->array;
+    inner_array.array.length = level_layout.row_count;
+    inner_array.array.null_count = level_layout.null_count;
+    inner_array.array.offset = 0;
+    inner_array.array.n_buffers = 2;
+    inner_array.buffers[0] =
+        inner_array.validity.empty() ? nullptr : inner_array.validity.data();
+    inner_array.buffers[1] =
+        inner_array.offsets.empty() ? nullptr : inner_array.offsets.data();
+    inner_array.array.buffers = inner_array.buffers.data();
+    inner_array.array.n_children = 1;
+    inner_array.array.children = inner_array.children.data();
+    inner_array.array.dictionary = nullptr;
+    inner_array.array.private_data = nullptr;
+    inner_array.array.release = &native_parquet_array_child_release;
+  }
+  return &chain_arrays.front()->array;
+}
+
 sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                                               ArrowArray *out) {
   if (!stream || !out) {
@@ -11958,57 +12015,13 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
               const auto struct_list_depth =
                   top_level_map_struct_list_chain_depth(struct_column);
               if (struct_list_depth > 0) {
-                if (struct_column.repeated_level_layouts.size() !=
-                    static_cast<std::size_t>(struct_list_depth + 1)) {
-                  return sanitize::Status::NotImplemented(
-                      "native Parquet reader: map value struct nested list "
-                      "layout was not decoded");
-                }
-                std::vector<NativeParquetListArray *> chain_arrays;
-                chain_arrays.reserve(
-                    static_cast<std::size_t>(struct_list_depth));
-                for (std::int16_t level = 0; level < struct_list_depth;
-                     ++level) {
-                  chain_arrays.push_back(&state->lists[list_index++]);
-                }
-                for (std::int16_t level = struct_list_depth; level >= 1;
-                     --level) {
-                  const auto layout_index = static_cast<std::size_t>(level);
-                  const auto array_index = static_cast<std::size_t>(level - 1);
-                  const auto &level_layout =
-                      struct_column.repeated_level_layouts[layout_index];
-                  if (!level_layout.decoded) {
-                    return sanitize::Status::NotImplemented(
-                        "native Parquet reader: map value struct nested list "
-                        "level was not decoded");
-                  }
-                  auto &inner_array = *chain_arrays[array_index];
-                  inner_array.validity = level_layout.validity_bitmap;
-                  inner_array.offsets = level_layout.offsets;
-                  inner_array.children[0] =
-                      (level == struct_list_depth)
-                          ? &state->columns[struct_column_index].array
-                          : &chain_arrays[array_index + 1]->array;
-                  inner_array.array.length = level_layout.row_count;
-                  inner_array.array.null_count = level_layout.null_count;
-                  inner_array.array.offset = 0;
-                  inner_array.array.n_buffers = 2;
-                  inner_array.buffers[0] = inner_array.validity.empty()
-                                               ? nullptr
-                                               : inner_array.validity.data();
-                  inner_array.buffers[1] = inner_array.offsets.empty()
-                                               ? nullptr
-                                               : inner_array.offsets.data();
-                  inner_array.array.buffers = inner_array.buffers.data();
-                  inner_array.array.n_children = 1;
-                  inner_array.array.children = inner_array.children.data();
-                  inner_array.array.dictionary = nullptr;
-                  inner_array.array.private_data = nullptr;
-                  inner_array.array.release =
-                      &native_parquet_array_child_release;
-                }
-                value_struct_array.children.push_back(
-                    &chain_arrays.front()->array);
+                SAN_ASSIGN_OR_RAISE(
+                    auto *chain_array,
+                    materialize_native_repeated_list_chain(
+                        state.get(), struct_column, struct_list_depth, 1,
+                        &state->columns[struct_column_index].array,
+                        &list_index));
+                value_struct_array.children.push_back(chain_array);
               } else {
                 value_struct_array.children.push_back(
                     &state->columns[struct_column_index].array);
@@ -12041,52 +12054,12 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                 &native_parquet_array_child_release;
             entries_array.children.push_back(&value_struct_array.array);
           } else if (child_list_depth > 1) {
-            if (child_column.repeated_level_layouts.size() !=
-                static_cast<std::size_t>(child_list_depth + 1)) {
-              return sanitize::Status::NotImplemented(
-                  "native Parquet reader: map nested list chain layout was not "
-                  "decoded");
-            }
-            std::vector<NativeParquetListArray *> chain_arrays;
-            chain_arrays.reserve(static_cast<std::size_t>(child_list_depth));
-            for (std::int16_t level = 0; level < child_list_depth; ++level) {
-              chain_arrays.push_back(&state->lists[list_index++]);
-            }
-            for (std::int16_t level = child_list_depth; level >= 1; --level) {
-              const auto layout_index = static_cast<std::size_t>(level);
-              const auto array_index = static_cast<std::size_t>(level - 1);
-              const auto &level_layout =
-                  child_column.repeated_level_layouts[layout_index];
-              if (!level_layout.decoded) {
-                return sanitize::Status::NotImplemented(
-                    "native Parquet reader: map nested list chain level was "
-                    "not decoded");
-              }
-              auto &inner_array = *chain_arrays[array_index];
-              inner_array.validity = level_layout.validity_bitmap;
-              inner_array.offsets = level_layout.offsets;
-              inner_array.children[0] =
-                  (level == child_list_depth)
-                      ? &state->columns[child_column_index].array
-                      : &chain_arrays[array_index + 1]->array;
-              inner_array.array.length = level_layout.row_count;
-              inner_array.array.null_count = level_layout.null_count;
-              inner_array.array.offset = 0;
-              inner_array.array.n_buffers = 2;
-              inner_array.buffers[0] = inner_array.validity.empty()
-                                           ? nullptr
-                                           : inner_array.validity.data();
-              inner_array.buffers[1] = inner_array.offsets.empty()
-                                           ? nullptr
-                                           : inner_array.offsets.data();
-              inner_array.array.buffers = inner_array.buffers.data();
-              inner_array.array.n_children = 1;
-              inner_array.array.children = inner_array.children.data();
-              inner_array.array.dictionary = nullptr;
-              inner_array.array.private_data = nullptr;
-              inner_array.array.release = &native_parquet_array_child_release;
-            }
-            entries_array.children.push_back(&chain_arrays.front()->array);
+            SAN_ASSIGN_OR_RAISE(
+                auto *chain_array,
+                materialize_native_repeated_list_chain(
+                    state.get(), child_column, child_list_depth, 1,
+                    &state->columns[child_column_index].array, &list_index));
+            entries_array.children.push_back(chain_array);
           } else if (child_list_depth == 1) {
             if (!child_column.nested_repeated_level_layout_decoded) {
               return sanitize::Status::NotImplemented(
@@ -12214,58 +12187,13 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
               const auto struct_list_depth =
                   top_level_list_map_struct_list_chain_depth(struct_column);
               if (struct_list_depth > 0) {
-                if (struct_column.repeated_level_layouts.size() !=
-                    static_cast<std::size_t>(struct_list_depth + 2)) {
-                  return sanitize::Status::NotImplemented(
-                      "native Parquet reader: list map value struct nested "
-                      "list "
-                      "layout was not decoded");
-                }
-                std::vector<NativeParquetListArray *> chain_arrays;
-                chain_arrays.reserve(
-                    static_cast<std::size_t>(struct_list_depth));
-                for (std::int16_t level = 0; level < struct_list_depth;
-                     ++level) {
-                  chain_arrays.push_back(&state->lists[list_index++]);
-                }
-                for (std::int16_t level = struct_list_depth; level >= 1;
-                     --level) {
-                  const auto layout_index = static_cast<std::size_t>(level + 1);
-                  const auto array_index = static_cast<std::size_t>(level - 1);
-                  const auto &level_layout =
-                      struct_column.repeated_level_layouts[layout_index];
-                  if (!level_layout.decoded) {
-                    return sanitize::Status::NotImplemented(
-                        "native Parquet reader: list map value struct nested "
-                        "list level was not decoded");
-                  }
-                  auto &inner_array = *chain_arrays[array_index];
-                  inner_array.validity = level_layout.validity_bitmap;
-                  inner_array.offsets = level_layout.offsets;
-                  inner_array.children[0] =
-                      (level == struct_list_depth)
-                          ? &state->columns[struct_column_index].array
-                          : &chain_arrays[array_index + 1]->array;
-                  inner_array.array.length = level_layout.row_count;
-                  inner_array.array.null_count = level_layout.null_count;
-                  inner_array.array.offset = 0;
-                  inner_array.array.n_buffers = 2;
-                  inner_array.buffers[0] = inner_array.validity.empty()
-                                               ? nullptr
-                                               : inner_array.validity.data();
-                  inner_array.buffers[1] = inner_array.offsets.empty()
-                                               ? nullptr
-                                               : inner_array.offsets.data();
-                  inner_array.array.buffers = inner_array.buffers.data();
-                  inner_array.array.n_children = 1;
-                  inner_array.array.children = inner_array.children.data();
-                  inner_array.array.dictionary = nullptr;
-                  inner_array.array.private_data = nullptr;
-                  inner_array.array.release =
-                      &native_parquet_array_child_release;
-                }
-                value_struct_array.children.push_back(
-                    &chain_arrays.front()->array);
+                SAN_ASSIGN_OR_RAISE(
+                    auto *chain_array,
+                    materialize_native_repeated_list_chain(
+                        state.get(), struct_column, struct_list_depth, 2,
+                        &state->columns[struct_column_index].array,
+                        &list_index));
+                value_struct_array.children.push_back(chain_array);
               } else {
                 value_struct_array.children.push_back(
                     &state->columns[struct_column_index].array);
@@ -12336,53 +12264,11 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
         map_array.array.release = &native_parquet_array_child_release;
         list_child = &map_array.array;
       } else if (field.list_depth > 3) {
-        if (column.repeated_level_layouts.size() !=
-            static_cast<std::size_t>(field.list_depth)) {
-          return sanitize::Status::NotImplemented(
-              "native Parquet reader: generic nested list layout was not "
-              "decoded");
-        }
-        std::vector<NativeParquetListArray *> chain_arrays;
-        chain_arrays.reserve(static_cast<std::size_t>(field.list_depth - 1));
-        for (std::int16_t level = 1; level < field.list_depth; ++level) {
-          chain_arrays.push_back(&state->lists[list_index++]);
-        }
-        for (std::int16_t level =
-                 static_cast<std::int16_t>(field.list_depth - 1);
-             level >= 1; --level) {
-          const auto layout_index = static_cast<std::size_t>(level);
-          const auto array_index = static_cast<std::size_t>(level - 1);
-          const auto &level_layout =
-              column.repeated_level_layouts[layout_index];
-          if (!level_layout.decoded) {
-            return sanitize::Status::NotImplemented(
-                "native Parquet reader: generic nested list level was not "
-                "decoded");
-          }
-          auto &inner_array = *chain_arrays[array_index];
-          inner_array.validity = level_layout.validity_bitmap;
-          inner_array.offsets = level_layout.offsets;
-          inner_array.children[0] = (level == field.list_depth - 1)
-                                        ? &state->columns[column_index].array
-                                        : &chain_arrays[array_index + 1]->array;
-          inner_array.array.length = level_layout.row_count;
-          inner_array.array.null_count = level_layout.null_count;
-          inner_array.array.offset = 0;
-          inner_array.array.n_buffers = 2;
-          inner_array.buffers[0] = inner_array.validity.empty()
-                                       ? nullptr
-                                       : inner_array.validity.data();
-          inner_array.buffers[1] = inner_array.offsets.empty()
-                                       ? nullptr
-                                       : inner_array.offsets.data();
-          inner_array.array.buffers = inner_array.buffers.data();
-          inner_array.array.n_children = 1;
-          inner_array.array.children = inner_array.children.data();
-          inner_array.array.dictionary = nullptr;
-          inner_array.array.private_data = nullptr;
-          inner_array.array.release = &native_parquet_array_child_release;
-        }
-        list_child = &chain_arrays.front()->array;
+        SAN_ASSIGN_OR_RAISE(
+            list_child, materialize_native_repeated_list_chain(
+                            state.get(), column,
+                            static_cast<std::int16_t>(field.list_depth - 1), 1,
+                            &state->columns[column_index].array, &list_index));
       } else if (field.is_list_list_list) {
         if (!column.nested_repeated_level_layout_decoded ||
             !column.deep_repeated_level_layout_decoded) {
@@ -12569,60 +12455,13 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                       top_level_list_struct_map_struct_list_chain_depth(
                           struct_column);
                   if (struct_list_depth > 0) {
-                    if (struct_column.repeated_level_layouts.size() !=
-                        static_cast<std::size_t>(struct_list_depth + 2)) {
-                      return sanitize::Status::NotImplemented(
-                          "native Parquet reader: list struct map value struct "
-                          "nested list layout was not decoded");
-                    }
-                    std::vector<NativeParquetListArray *> chain_arrays;
-                    chain_arrays.reserve(
-                        static_cast<std::size_t>(struct_list_depth));
-                    for (std::int16_t level = 0; level < struct_list_depth;
-                         ++level) {
-                      chain_arrays.push_back(&state->lists[list_index++]);
-                    }
-                    for (std::int16_t level = struct_list_depth; level >= 1;
-                         --level) {
-                      const auto layout_index =
-                          static_cast<std::size_t>(level + 1);
-                      const auto array_index =
-                          static_cast<std::size_t>(level - 1);
-                      const auto &level_layout =
-                          struct_column.repeated_level_layouts[layout_index];
-                      if (!level_layout.decoded) {
-                        return sanitize::Status::NotImplemented(
-                            "native Parquet reader: list struct map value "
-                            "struct nested list level was not decoded");
-                      }
-                      auto &inner_array = *chain_arrays[array_index];
-                      inner_array.validity = level_layout.validity_bitmap;
-                      inner_array.offsets = level_layout.offsets;
-                      inner_array.children[0] =
-                          (level == struct_list_depth)
-                              ? &state->columns[struct_column_index].array
-                              : &chain_arrays[array_index + 1]->array;
-                      inner_array.array.length = level_layout.row_count;
-                      inner_array.array.null_count = level_layout.null_count;
-                      inner_array.array.offset = 0;
-                      inner_array.array.n_buffers = 2;
-                      inner_array.buffers[0] =
-                          inner_array.validity.empty()
-                              ? nullptr
-                              : inner_array.validity.data();
-                      inner_array.buffers[1] = inner_array.offsets.empty()
-                                                   ? nullptr
-                                                   : inner_array.offsets.data();
-                      inner_array.array.buffers = inner_array.buffers.data();
-                      inner_array.array.n_children = 1;
-                      inner_array.array.children = inner_array.children.data();
-                      inner_array.array.dictionary = nullptr;
-                      inner_array.array.private_data = nullptr;
-                      inner_array.array.release =
-                          &native_parquet_array_child_release;
-                    }
-                    value_struct_array.children.push_back(
-                        &chain_arrays.front()->array);
+                    SAN_ASSIGN_OR_RAISE(
+                        auto *chain_array,
+                        materialize_native_repeated_list_chain(
+                            state.get(), struct_column, struct_list_depth, 2,
+                            &state->columns[struct_column_index].array,
+                            &list_index));
+                    value_struct_array.children.push_back(chain_array);
                   } else {
                     value_struct_array.children.push_back(
                         &state->columns[struct_column_index].array);
@@ -12657,56 +12496,12 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                     &native_parquet_array_child_release;
                 entries_array.children.push_back(&value_struct_array.array);
               } else if (map_value_list_depth > 0) {
-                if (map_column.repeated_level_layouts.size() !=
-                    static_cast<std::size_t>(map_value_list_depth + 2)) {
-                  return sanitize::Status::NotImplemented(
-                      "native Parquet reader: list struct map nested list "
-                      "layout was not decoded");
-                }
-                std::vector<NativeParquetListArray *> chain_arrays;
-                chain_arrays.reserve(
-                    static_cast<std::size_t>(map_value_list_depth));
-                for (std::int16_t level = 0; level < map_value_list_depth;
-                     ++level) {
-                  chain_arrays.push_back(&state->lists[list_index++]);
-                }
-                for (std::int16_t level = map_value_list_depth; level >= 1;
-                     --level) {
-                  const auto layout_index = static_cast<std::size_t>(level + 1);
-                  const auto array_index = static_cast<std::size_t>(level - 1);
-                  const auto &level_layout =
-                      map_column.repeated_level_layouts[layout_index];
-                  if (!level_layout.decoded) {
-                    return sanitize::Status::NotImplemented(
-                        "native Parquet reader: list struct map nested list "
-                        "level was not decoded");
-                  }
-                  auto &inner_array = *chain_arrays[array_index];
-                  inner_array.validity = level_layout.validity_bitmap;
-                  inner_array.offsets = level_layout.offsets;
-                  inner_array.children[0] =
-                      (level == map_value_list_depth)
-                          ? &state->columns[map_column_index].array
-                          : &chain_arrays[array_index + 1]->array;
-                  inner_array.array.length = level_layout.row_count;
-                  inner_array.array.null_count = level_layout.null_count;
-                  inner_array.array.offset = 0;
-                  inner_array.array.n_buffers = 2;
-                  inner_array.buffers[0] = inner_array.validity.empty()
-                                               ? nullptr
-                                               : inner_array.validity.data();
-                  inner_array.buffers[1] = inner_array.offsets.empty()
-                                               ? nullptr
-                                               : inner_array.offsets.data();
-                  inner_array.array.buffers = inner_array.buffers.data();
-                  inner_array.array.n_children = 1;
-                  inner_array.array.children = inner_array.children.data();
-                  inner_array.array.dictionary = nullptr;
-                  inner_array.array.private_data = nullptr;
-                  inner_array.array.release =
-                      &native_parquet_array_child_release;
-                }
-                entries_array.children.push_back(&chain_arrays.front()->array);
+                SAN_ASSIGN_OR_RAISE(
+                    auto *chain_array,
+                    materialize_native_repeated_list_chain(
+                        state.get(), map_column, map_value_list_depth, 2,
+                        &state->columns[map_column_index].array, &list_index));
+                entries_array.children.push_back(chain_array);
               } else {
                 entries_array.children.push_back(
                     &state->columns[map_column_index].array);
@@ -12751,52 +12546,12 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
             map_array.array.release = &native_parquet_array_child_release;
             struct_array.children.push_back(&map_array.array);
           } else if (child_list_depth > 1) {
-            if (child_column.repeated_level_layouts.size() !=
-                static_cast<std::size_t>(child_list_depth + 1)) {
-              return sanitize::Status::NotImplemented(
-                  "native Parquet reader: list struct nested list chain layout "
-                  "was not decoded");
-            }
-            std::vector<NativeParquetListArray *> chain_arrays;
-            chain_arrays.reserve(static_cast<std::size_t>(child_list_depth));
-            for (std::int16_t level = 0; level < child_list_depth; ++level) {
-              chain_arrays.push_back(&state->lists[list_index++]);
-            }
-            for (std::int16_t level = child_list_depth; level >= 1; --level) {
-              const auto layout_index = static_cast<std::size_t>(level);
-              const auto array_index = static_cast<std::size_t>(level - 1);
-              const auto &level_layout =
-                  child_column.repeated_level_layouts[layout_index];
-              if (!level_layout.decoded) {
-                return sanitize::Status::NotImplemented(
-                    "native Parquet reader: list struct nested list chain "
-                    "level was not decoded");
-              }
-              auto &inner_array = *chain_arrays[array_index];
-              inner_array.validity = level_layout.validity_bitmap;
-              inner_array.offsets = level_layout.offsets;
-              inner_array.children[0] =
-                  (level == child_list_depth)
-                      ? &state->columns[child_column_index].array
-                      : &chain_arrays[array_index + 1]->array;
-              inner_array.array.length = level_layout.row_count;
-              inner_array.array.null_count = level_layout.null_count;
-              inner_array.array.offset = 0;
-              inner_array.array.n_buffers = 2;
-              inner_array.buffers[0] = inner_array.validity.empty()
-                                           ? nullptr
-                                           : inner_array.validity.data();
-              inner_array.buffers[1] = inner_array.offsets.empty()
-                                           ? nullptr
-                                           : inner_array.offsets.data();
-              inner_array.array.buffers = inner_array.buffers.data();
-              inner_array.array.n_children = 1;
-              inner_array.array.children = inner_array.children.data();
-              inner_array.array.dictionary = nullptr;
-              inner_array.array.private_data = nullptr;
-              inner_array.array.release = &native_parquet_array_child_release;
-            }
-            struct_array.children.push_back(&chain_arrays.front()->array);
+            SAN_ASSIGN_OR_RAISE(
+                auto *chain_array,
+                materialize_native_repeated_list_chain(
+                    state.get(), child_column, child_list_depth, 1,
+                    &state->columns[child_column_index].array, &list_index));
+            struct_array.children.push_back(chain_array);
           } else if (child_list_depth == 1) {
             if (!child_column.nested_repeated_level_layout_decoded) {
               return sanitize::Status::NotImplemented(
@@ -12984,57 +12739,13 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
               const auto struct_list_depth =
                   top_level_struct_map_struct_list_chain_depth(struct_column);
               if (struct_list_depth > 0) {
-                if (struct_column.repeated_level_layouts.size() !=
-                    static_cast<std::size_t>(struct_list_depth + 1)) {
-                  return sanitize::Status::NotImplemented(
-                      "native Parquet reader: struct map value struct nested "
-                      "list layout was not decoded");
-                }
-                std::vector<NativeParquetListArray *> chain_arrays;
-                chain_arrays.reserve(
-                    static_cast<std::size_t>(struct_list_depth));
-                for (std::int16_t level = 0; level < struct_list_depth;
-                     ++level) {
-                  chain_arrays.push_back(&state->lists[list_index++]);
-                }
-                for (std::int16_t level = struct_list_depth; level >= 1;
-                     --level) {
-                  const auto layout_index = static_cast<std::size_t>(level);
-                  const auto array_index = static_cast<std::size_t>(level - 1);
-                  const auto &level_layout =
-                      struct_column.repeated_level_layouts[layout_index];
-                  if (!level_layout.decoded) {
-                    return sanitize::Status::NotImplemented(
-                        "native Parquet reader: struct map value struct nested "
-                        "list level was not decoded");
-                  }
-                  auto &inner_array = *chain_arrays[array_index];
-                  inner_array.validity = level_layout.validity_bitmap;
-                  inner_array.offsets = level_layout.offsets;
-                  inner_array.children[0] =
-                      (level == struct_list_depth)
-                          ? &state->columns[struct_column_index].array
-                          : &chain_arrays[array_index + 1]->array;
-                  inner_array.array.length = level_layout.row_count;
-                  inner_array.array.null_count = level_layout.null_count;
-                  inner_array.array.offset = 0;
-                  inner_array.array.n_buffers = 2;
-                  inner_array.buffers[0] = inner_array.validity.empty()
-                                               ? nullptr
-                                               : inner_array.validity.data();
-                  inner_array.buffers[1] = inner_array.offsets.empty()
-                                               ? nullptr
-                                               : inner_array.offsets.data();
-                  inner_array.array.buffers = inner_array.buffers.data();
-                  inner_array.array.n_children = 1;
-                  inner_array.array.children = inner_array.children.data();
-                  inner_array.array.dictionary = nullptr;
-                  inner_array.array.private_data = nullptr;
-                  inner_array.array.release =
-                      &native_parquet_array_child_release;
-                }
-                value_struct_array.children.push_back(
-                    &chain_arrays.front()->array);
+                SAN_ASSIGN_OR_RAISE(
+                    auto *chain_array,
+                    materialize_native_repeated_list_chain(
+                        state.get(), struct_column, struct_list_depth, 1,
+                        &state->columns[struct_column_index].array,
+                        &list_index));
+                value_struct_array.children.push_back(chain_array);
               } else {
                 value_struct_array.children.push_back(
                     &state->columns[struct_column_index].array);
@@ -13069,52 +12780,12 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
             continue;
           }
           if (child_list_depth > 0) {
-            if (map_column.repeated_level_layouts.size() !=
-                static_cast<std::size_t>(child_list_depth + 1)) {
-              return sanitize::Status::NotImplemented(
-                  "native Parquet reader: struct map nested list chain layout "
-                  "was not decoded");
-            }
-            std::vector<NativeParquetListArray *> chain_arrays;
-            chain_arrays.reserve(static_cast<std::size_t>(child_list_depth));
-            for (std::int16_t level = 0; level < child_list_depth; ++level) {
-              chain_arrays.push_back(&state->lists[list_index++]);
-            }
-            for (std::int16_t level = child_list_depth; level >= 1; --level) {
-              const auto layout_index = static_cast<std::size_t>(level);
-              const auto array_index = static_cast<std::size_t>(level - 1);
-              const auto &level_layout =
-                  map_column.repeated_level_layouts[layout_index];
-              if (!level_layout.decoded) {
-                return sanitize::Status::NotImplemented(
-                    "native Parquet reader: struct map nested list chain "
-                    "level was not decoded");
-              }
-              auto &inner_array = *chain_arrays[array_index];
-              inner_array.validity = level_layout.validity_bitmap;
-              inner_array.offsets = level_layout.offsets;
-              inner_array.children[0] =
-                  (level == child_list_depth)
-                      ? &state->columns[map_column_index].array
-                      : &chain_arrays[array_index + 1]->array;
-              inner_array.array.length = level_layout.row_count;
-              inner_array.array.null_count = level_layout.null_count;
-              inner_array.array.offset = 0;
-              inner_array.array.n_buffers = 2;
-              inner_array.buffers[0] = inner_array.validity.empty()
-                                           ? nullptr
-                                           : inner_array.validity.data();
-              inner_array.buffers[1] = inner_array.offsets.empty()
-                                           ? nullptr
-                                           : inner_array.offsets.data();
-              inner_array.array.buffers = inner_array.buffers.data();
-              inner_array.array.n_children = 1;
-              inner_array.array.children = inner_array.children.data();
-              inner_array.array.dictionary = nullptr;
-              inner_array.array.private_data = nullptr;
-              inner_array.array.release = &native_parquet_array_child_release;
-            }
-            entries_array.children.push_back(&chain_arrays.front()->array);
+            SAN_ASSIGN_OR_RAISE(auto *chain_array,
+                                materialize_native_repeated_list_chain(
+                                    state.get(), map_column, child_list_depth,
+                                    1, &state->columns[map_column_index].array,
+                                    &list_index));
+            entries_array.children.push_back(chain_array);
           } else {
             entries_array.children.push_back(
                 &state->columns[map_column_index].array);
