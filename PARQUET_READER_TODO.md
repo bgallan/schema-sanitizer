@@ -83,6 +83,7 @@ replacement. Remaining work:
      - [x] Recursive Arrow schema construction is single-headed for all native-supported output shapes.
      - [x] Recursive row-group output-field materialization is single-headed for all native-supported output shapes.
      - [x] Recursive materialization now supports ordinary nested struct children under non-repeated top-level structs using footer definition-level thresholds.
+     - [x] Recursive map-entry struct materialization now uses generic footer definition-level thresholds for top-level map and list-map nested struct values.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer

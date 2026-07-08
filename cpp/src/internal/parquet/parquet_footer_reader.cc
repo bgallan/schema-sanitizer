@@ -4206,6 +4206,10 @@ std::int16_t top_level_map_list_chain_depth(const ColumnChunkInfo &column) {
                                              column.max_repetition_level);
 }
 
+bool native_plain_path_is_materializable(const std::vector<std::string> &path,
+                                         std::int16_t max_repetition_level,
+                                         bool top_level_required);
+
 bool is_supported_top_level_list_leaf(const ColumnChunkInfo &column) {
   return is_simple_top_level_list_leaf(column) ||
          is_top_level_list_struct_leaf(column) ||
@@ -4230,7 +4234,11 @@ bool is_supported_top_level_list_leaf(const ColumnChunkInfo &column) {
          is_top_level_map_struct_leaf(column) ||
          (top_level_map_struct_list_chain_depth(column) > 0) ||
          is_top_level_map_list_leaf(column) ||
-         (top_level_map_list_chain_depth(column) > 1);
+         (top_level_map_list_chain_depth(column) > 1) ||
+         (column.max_repetition_level > 0 &&
+          native_plain_path_is_materializable(column.path_in_schema,
+                                              column.max_repetition_level,
+                                              column.top_level_required));
 }
 
 std::int64_t list_leaf_value_count(const ColumnChunkInfo &column) {
@@ -7173,7 +7181,7 @@ bool native_recursive_map_value_tail_supported(
   if (index < path.size() && path[index] == "list") {
     return native_recursive_is_list_chain_leaf(path, index);
   }
-  return native_recursive_struct_tail_supported(path, index);
+  return native_recursive_struct_tail_supported(path, index, true);
 }
 
 bool native_recursive_map_value_tail_is_struct(
@@ -7184,7 +7192,7 @@ bool native_recursive_map_value_tail_is_struct(
   if (path[index] == "list" || path[index] == "key_value") {
     return false;
   }
-  return native_recursive_struct_tail_supported(path, index);
+  return native_recursive_struct_tail_supported(path, index, true);
 }
 
 bool native_recursive_map_tail_supported(const std::vector<std::string> &path,
@@ -7219,6 +7227,17 @@ bool native_materializer_shape_supported_by_current_code(
   }
   if (max_repetition_level == 0) {
     return native_recursive_struct_tail_supported(path, 1, true);
+  }
+  if (path.size() >= 2 && path[1] == "key_value" &&
+      native_recursive_map_tail_supported(path, 1)) {
+    return true;
+  }
+  if (path.size() >= 4 && path[1] == "list" && path[2] == "element" &&
+      path[3] == "key_value" && native_recursive_map_tail_supported(path, 3)) {
+    return true;
+  }
+  if (path.size() >= 2 && native_recursive_struct_tail_supported(path, 1)) {
+    return true;
   }
   return is_simple_top_level_list_path(path, max_repetition_level) ||
          is_top_level_list_struct_leaf_path(path, max_repetition_level) ||
@@ -7753,24 +7772,27 @@ validate_list_map_repetition_layout(const RowGroupInfo &row_group,
         !native_materializer_shape_supported_by_current_code(
             column.path_in_schema, column.max_repetition_level) ||
         !column.repeated_level_layout_decoded ||
-        !column.nested_repeated_level_layout_decoded ||
         column.repeated_level_row_count != first.repeated_level_row_count ||
         column.repeated_level_null_count != first.repeated_level_null_count ||
         column.repeated_level_element_count !=
             first.repeated_level_element_count ||
         column.repeated_level_offsets != first.repeated_level_offsets ||
         column.repeated_level_validity_bitmap !=
-            first.repeated_level_validity_bitmap ||
-        column.nested_repeated_level_row_count !=
-            first.nested_repeated_level_row_count ||
-        column.nested_repeated_level_null_count !=
-            first.nested_repeated_level_null_count ||
-        column.nested_repeated_level_element_count !=
-            first.nested_repeated_level_element_count ||
-        column.nested_repeated_level_offsets !=
-            first.nested_repeated_level_offsets ||
-        column.nested_repeated_level_validity_bitmap !=
-            first.nested_repeated_level_validity_bitmap) {
+            first.repeated_level_validity_bitmap) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: list map leaf repetition layouts differ");
+    }
+    if (column.nested_repeated_level_layout_decoded &&
+        (column.nested_repeated_level_row_count !=
+             first.nested_repeated_level_row_count ||
+         column.nested_repeated_level_null_count !=
+             first.nested_repeated_level_null_count ||
+         column.nested_repeated_level_element_count !=
+             first.nested_repeated_level_element_count ||
+         column.nested_repeated_level_offsets !=
+             first.nested_repeated_level_offsets ||
+         column.nested_repeated_level_validity_bitmap !=
+             first.nested_repeated_level_validity_bitmap)) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: list map leaf repetition layouts differ");
     }
@@ -7850,259 +7872,6 @@ materialize_list_struct_validity(const ColumnChunkInfo &column,
   if (element_index != element_count) {
     return sanitize::Status::Invalid(
         "native Parquet reader: list struct validity element count mismatch");
-  }
-  if (null_count == 0) {
-    validity->clear();
-  }
-  return null_count;
-}
-
-sanitize::Result<std::int64_t>
-materialize_map_value_struct_validity(const ColumnChunkInfo &column,
-                                      std::vector<std::uint8_t> *validity) {
-  if (!validity || !column.repeated_level_layout_decoded ||
-      !list_leaf_value_count_is_materializable(column)) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: invalid map value struct validity layout");
-  }
-  const auto element_count = column.repeated_level_element_count;
-  const auto validity_bytes = (element_count + 7) / 8;
-  if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: map value struct validity bitmap exceeds "
-        "memory limit");
-  }
-  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
-  const auto map_defined_level =
-      column.top_level_required ? std::int16_t{0} : std::int16_t{1};
-  const auto value_struct_defined_level =
-      static_cast<std::int16_t>(map_defined_level + 1);
-  std::int64_t null_count = 0;
-  std::int64_t element_index = 0;
-  for (const auto &page : column.pages) {
-    if (page.is_dictionary_page) {
-      continue;
-    }
-    if (page.decoded_definition_level_values.size() !=
-        static_cast<std::size_t>(page.num_values)) {
-      return sanitize::Status::Invalid(
-          "native Parquet reader: map value struct definition level count "
-          "mismatch");
-    }
-    for (std::int32_t row = 0; row < page.num_values; ++row) {
-      const auto definition =
-          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
-      if (definition <= map_defined_level) {
-        continue;
-      }
-      if (element_index >= element_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: map value struct validity exceeds element "
-            "count");
-      }
-      if (definition > value_struct_defined_level) {
-        set_output_validity_bit(validity,
-                                static_cast<std::int32_t>(element_index));
-      } else {
-        ++null_count;
-      }
-      ++element_index;
-    }
-  }
-  if (element_index != element_count) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: map value struct validity element count "
-        "mismatch");
-  }
-  if (null_count == 0) {
-    validity->clear();
-  }
-  return null_count;
-}
-
-sanitize::Result<std::int64_t> materialize_struct_map_value_struct_validity(
-    const ColumnChunkInfo &column, std::vector<std::uint8_t> *validity) {
-  if (!validity || !column.repeated_level_layout_decoded ||
-      !list_leaf_value_count_is_materializable(column)) {
-    return sanitize::Status::Invalid("native Parquet reader: invalid struct "
-                                     "map value struct validity layout");
-  }
-  const auto element_count = column.repeated_level_element_count;
-  const auto validity_bytes = (element_count + 7) / 8;
-  if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
-    return sanitize::Status::Invalid("native Parquet reader: struct map value "
-                                     "struct validity bitmap exceeds "
-                                     "memory limit");
-  }
-  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
-  const auto value_struct_defined_level =
-      column.top_level_required ? std::int16_t{2} : std::int16_t{3};
-  std::int64_t null_count = 0;
-  std::int64_t element_index = 0;
-  for (const auto &page : column.pages) {
-    if (page.is_dictionary_page) {
-      continue;
-    }
-    if (page.decoded_definition_level_values.size() !=
-        static_cast<std::size_t>(page.num_values)) {
-      return sanitize::Status::Invalid(
-          "native Parquet reader: struct map value struct definition level "
-          "count mismatch");
-    }
-    for (std::int32_t row = 0; row < page.num_values; ++row) {
-      const auto definition =
-          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
-      if (definition <= value_struct_defined_level - 1) {
-        continue;
-      }
-      if (element_index >= element_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: struct map value struct validity exceeds "
-            "element count");
-      }
-      if (definition > value_struct_defined_level) {
-        set_output_validity_bit(validity,
-                                static_cast<std::int32_t>(element_index));
-      } else {
-        ++null_count;
-      }
-      ++element_index;
-    }
-  }
-  if (element_index != element_count) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: struct map value struct validity element count "
-        "mismatch");
-  }
-  if (null_count == 0) {
-    validity->clear();
-  }
-  return null_count;
-}
-
-sanitize::Result<std::int64_t> materialize_list_map_value_struct_validity(
-    const ColumnChunkInfo &column, std::vector<std::uint8_t> *validity) {
-  if (!validity || !column.nested_repeated_level_layout_decoded ||
-      !list_leaf_value_count_is_materializable(column)) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: invalid list map value struct validity layout");
-  }
-  const auto element_count = column.nested_repeated_level_element_count;
-  const auto validity_bytes = (element_count + 7) / 8;
-  if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: list map value struct validity bitmap exceeds "
-        "memory limit");
-  }
-  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
-  const auto list_defined_level =
-      column.top_level_required ? std::int16_t{0} : std::int16_t{1};
-  const auto entry_defined_level =
-      static_cast<std::int16_t>(list_defined_level + 2);
-  const auto value_struct_defined_level =
-      static_cast<std::int16_t>(entry_defined_level + 1);
-  std::int64_t null_count = 0;
-  std::int64_t element_index = 0;
-  for (const auto &page : column.pages) {
-    if (page.is_dictionary_page) {
-      continue;
-    }
-    if (page.decoded_definition_level_values.size() !=
-        static_cast<std::size_t>(page.num_values)) {
-      return sanitize::Status::Invalid(
-          "native Parquet reader: list map value struct definition level count "
-          "mismatch");
-    }
-    for (std::int32_t row = 0; row < page.num_values; ++row) {
-      const auto definition =
-          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
-      if (definition <= entry_defined_level) {
-        continue;
-      }
-      if (element_index >= element_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: list map value struct validity exceeds "
-            "element count");
-      }
-      if (definition > value_struct_defined_level) {
-        set_output_validity_bit(validity,
-                                static_cast<std::int32_t>(element_index));
-      } else {
-        ++null_count;
-      }
-      ++element_index;
-    }
-  }
-  if (element_index != element_count) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: list map value struct validity element count "
-        "mismatch");
-  }
-  if (null_count == 0) {
-    validity->clear();
-  }
-  return null_count;
-}
-
-sanitize::Result<std::int64_t>
-materialize_list_struct_map_value_struct_validity(
-    const ColumnChunkInfo &column, std::vector<std::uint8_t> *validity) {
-  if (!validity || !column.nested_repeated_level_layout_decoded ||
-      !list_leaf_value_count_is_materializable(column)) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: invalid list struct map value struct validity "
-        "layout");
-  }
-  const auto element_count = column.nested_repeated_level_element_count;
-  const auto validity_bytes = (element_count + 7) / 8;
-  if (static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: list struct map value struct validity bitmap "
-        "exceeds memory limit");
-  }
-  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
-  const auto list_defined_level =
-      column.top_level_required ? std::int16_t{0} : std::int16_t{1};
-  const auto entry_defined_level =
-      static_cast<std::int16_t>(list_defined_level + 3);
-  const auto value_struct_defined_level =
-      static_cast<std::int16_t>(entry_defined_level + 1);
-  std::int64_t null_count = 0;
-  std::int64_t element_index = 0;
-  for (const auto &page : column.pages) {
-    if (page.is_dictionary_page) {
-      continue;
-    }
-    if (page.decoded_definition_level_values.size() !=
-        static_cast<std::size_t>(page.num_values)) {
-      return sanitize::Status::Invalid("native Parquet reader: list struct map "
-                                       "value struct definition level "
-                                       "count mismatch");
-    }
-    for (std::int32_t row = 0; row < page.num_values; ++row) {
-      const auto definition =
-          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
-      if (definition <= entry_defined_level) {
-        continue;
-      }
-      if (element_index >= element_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: list struct map value struct validity "
-            "exceeds element count");
-      }
-      if (definition > value_struct_defined_level) {
-        set_output_validity_bit(validity,
-                                static_cast<std::int32_t>(element_index));
-      } else {
-        ++null_count;
-      }
-      ++element_index;
-    }
-  }
-  if (element_index != element_count) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: list struct map value struct validity element "
-        "count mismatch");
   }
   if (null_count == 0) {
     validity->clear();
@@ -10181,6 +9950,10 @@ native_recursive_schema_leaf_required_definition_level(
     return static_cast<std::int16_t>(top_level_base + std::int16_t{5} +
                                      (depth - 1) * 2);
   }
+  if (path.size() >= 2 &&
+      leaf.path_definition_levels.size() >= path.size() - 1) {
+    return leaf.path_definition_levels[path.size() - 2];
+  }
   return sanitize::Status::NotImplemented(
       "native Parquet reader: recursive schema definition-level shape is not "
       "supported");
@@ -10810,6 +10583,12 @@ enum class NativeRecursiveMapValueStructContext {
   StructMap,
 };
 
+enum class NativeRecursiveStructChildContext {
+  None,
+  RowGroup,
+  MapValue,
+};
+
 sanitize::Result<ArrowArray *> materialize_native_repeated_list_chain(
     NativeParquetArrayState *state, const ColumnChunkInfo &column,
     std::int16_t list_depth, std::size_t first_layout_index,
@@ -10820,6 +10599,15 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
     const NativeRecursiveMaterializationTree &tree, std::size_t map_node_index,
     NativeRecursiveMapValueStructContext context,
     std::size_t first_map_child_list_layout_index,
+    NativeRecursiveArrayCursor *cursor);
+
+sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
+    NativeParquetArrayState *state, const RowGroupInfo &row_group,
+    const NativeRecursiveMaterializationTree &tree,
+    std::size_t struct_node_index, std::size_t first_child_list_layout_index,
+    NativeRecursiveMapValueStructContext map_context,
+    std::size_t first_map_child_list_layout_index,
+    NativeRecursiveStructChildContext struct_context,
     NativeRecursiveArrayCursor *cursor);
 
 sanitize::Result<NativeRecursiveScalarListChain>
@@ -10989,6 +10777,129 @@ sanitize::Result<std::int64_t> materialize_struct_validity_at_definition_level(
   return null_count;
 }
 
+std::int64_t map_value_struct_length_for_context(
+    NativeRecursiveMapValueStructContext context,
+    const ColumnChunkInfo &column);
+
+std::int16_t map_entry_present_definition_level_for_context(
+    NativeRecursiveMapValueStructContext context,
+    const ColumnChunkInfo &column) {
+  switch (context) {
+  case NativeRecursiveMapValueStructContext::TopLevelMap:
+    return column.top_level_required ? std::int16_t{0} : std::int16_t{1};
+  case NativeRecursiveMapValueStructContext::StructMap:
+    return column.top_level_required ? std::int16_t{1} : std::int16_t{2};
+  case NativeRecursiveMapValueStructContext::ListMap: {
+    const auto list_defined_level =
+        column.top_level_required ? std::int16_t{0} : std::int16_t{1};
+    return static_cast<std::int16_t>(list_defined_level + std::int16_t{2});
+  }
+  case NativeRecursiveMapValueStructContext::ListStructMap: {
+    const auto list_defined_level =
+        column.top_level_required ? std::int16_t{0} : std::int16_t{1};
+    return static_cast<std::int16_t>(list_defined_level + std::int16_t{3});
+  }
+  }
+  return 0;
+}
+
+sanitize::Result<std::int64_t>
+map_entry_record_count_for_context(NativeRecursiveMapValueStructContext context,
+                                   const ColumnChunkInfo &column) {
+  const auto entry_present_level =
+      map_entry_present_definition_level_for_context(context, column);
+  std::int64_t element_count = 0;
+  for (const auto &page : column.pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (page.decoded_definition_level_values.size() !=
+        static_cast<std::size_t>(page.num_values)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive map-entry record definition level "
+          "count mismatch");
+    }
+    for (std::int32_t row = 0; row < page.num_values; ++row) {
+      const auto definition =
+          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
+      if (definition > entry_present_level) {
+        ++element_count;
+      }
+    }
+  }
+  return element_count;
+}
+
+sanitize::Result<std::int64_t>
+materialize_map_entry_struct_validity_at_definition_level(
+    NativeRecursiveMapValueStructContext context, const ColumnChunkInfo &column,
+    std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
+  if (!validity || !column.repeated_level_layout_decoded ||
+      !list_leaf_value_count_is_materializable(column)) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid recursive map-entry struct validity "
+        "layout");
+  }
+  SAN_ASSIGN_OR_RAISE(const auto element_count,
+                      map_entry_record_count_for_context(context, column));
+  const auto validity_bytes = (element_count + 7) / 8;
+  if (element_count < 0 ||
+      static_cast<std::uint64_t>(validity_bytes) > kMaxValidityBitmapBytes) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive map-entry struct validity bitmap "
+        "exceeds memory limit");
+  }
+  if (defined_level <=
+      map_entry_present_definition_level_for_context(context, column)) {
+    validity->clear();
+    return std::int64_t{0};
+  }
+  validity->assign(static_cast<std::size_t>(validity_bytes), 0);
+  const auto entry_present_level =
+      map_entry_present_definition_level_for_context(context, column);
+  std::int64_t null_count = 0;
+  std::int64_t element_index = 0;
+  for (const auto &page : column.pages) {
+    if (page.is_dictionary_page) {
+      continue;
+    }
+    if (page.decoded_definition_level_values.size() !=
+        static_cast<std::size_t>(page.num_values)) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive map-entry struct definition level "
+          "count mismatch");
+    }
+    for (std::int32_t row = 0; row < page.num_values; ++row) {
+      const auto definition =
+          page.decoded_definition_level_values[static_cast<std::size_t>(row)];
+      if (definition <= entry_present_level) {
+        continue;
+      }
+      if (element_index >= element_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: recursive map-entry struct validity "
+            "exceeds element count");
+      }
+      if (definition >= defined_level) {
+        set_output_validity_bit(validity,
+                                static_cast<std::int32_t>(element_index));
+      } else {
+        ++null_count;
+      }
+      ++element_index;
+    }
+  }
+  if (element_index != element_count) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive map-entry struct validity element "
+        "count mismatch");
+  }
+  if (null_count == 0) {
+    validity->clear();
+  }
+  return null_count;
+}
+
 std::int16_t map_value_struct_list_chain_depth_for_context(
     const ColumnChunkInfo &column,
     NativeRecursiveMapValueStructContext context) {
@@ -11003,24 +10914,6 @@ std::int16_t map_value_struct_list_chain_depth_for_context(
     return top_level_struct_map_struct_list_chain_depth(column);
   }
   return 0;
-}
-
-sanitize::Result<std::int64_t>
-materialize_map_value_struct_validity_for_context(
-    NativeRecursiveMapValueStructContext context, const ColumnChunkInfo &column,
-    std::vector<std::uint8_t> *validity) {
-  switch (context) {
-  case NativeRecursiveMapValueStructContext::TopLevelMap:
-    return materialize_map_value_struct_validity(column, validity);
-  case NativeRecursiveMapValueStructContext::ListMap:
-    return materialize_list_map_value_struct_validity(column, validity);
-  case NativeRecursiveMapValueStructContext::ListStructMap:
-    return materialize_list_struct_map_value_struct_validity(column, validity);
-  case NativeRecursiveMapValueStructContext::StructMap:
-    return materialize_struct_map_value_struct_validity(column, validity);
-  }
-  return sanitize::Status::Invalid(
-      "native Parquet reader: invalid recursive map value struct context");
 }
 
 std::int64_t map_value_struct_length_for_context(
@@ -11132,7 +11025,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
     std::size_t child_node_index, std::size_t first_child_list_layout_index,
     NativeRecursiveMapValueStructContext map_context,
     std::size_t first_map_child_list_layout_index, bool allow_map_child,
-    bool allow_struct_map_value, bool allow_struct_child,
+    bool allow_struct_map_value,
+    NativeRecursiveStructChildContext struct_child_context,
     NativeRecursiveArrayCursor *cursor) {
   if (!state || !cursor || !tree.valid ||
       child_node_index >= tree.nodes.size()) {
@@ -11173,61 +11067,88 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
         first_map_child_list_layout_index, cursor);
   }
   if (child_node.kind == NativeRecursiveMaterializationNodeKind::Struct) {
-    if (!allow_struct_map_value && !allow_struct_child) {
+    if (!allow_struct_map_value &&
+        struct_child_context == NativeRecursiveStructChildContext::None) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: recursive struct child is not materialized "
           "in "
           "this parent context");
     }
-    if (cursor->struct_index >= state->structs.size()) {
-      return sanitize::Status::Invalid(
-          "native Parquet reader: recursive map struct allocation mismatch");
-    }
-    SAN_ASSIGN_OR_RAISE(const auto struct_column_indices,
-                        native_recursive_materialization_leaf_columns_from_node(
-                            tree, child_node_index));
-    SAN_ASSIGN_OR_RAISE(const auto layout_column_index,
-                        select_map_value_struct_layout_column(
-                            row_group, struct_column_indices, map_context));
-    const auto &layout_column = row_group.columns[layout_column_index];
-    auto &value_struct_array = state->structs[cursor->struct_index++];
-    value_struct_array.children.reserve(struct_column_indices.size());
-    for (const auto grandchild_node_index : child_node.children) {
-      SAN_ASSIGN_OR_RAISE(auto *grandchild_array,
-                          materialize_native_recursive_child_node(
-                              state, row_group, tree, grandchild_node_index,
-                              first_child_list_layout_index, map_context,
-                              first_map_child_list_layout_index, false, false,
-                              allow_struct_child, cursor));
-      value_struct_array.children.push_back(grandchild_array);
-    }
-    std::int64_t value_struct_null_count = 0;
-    std::int64_t value_struct_length = 0;
-    if (allow_struct_map_value) {
-      SAN_ASSIGN_OR_RAISE(
-          value_struct_null_count,
-          materialize_map_value_struct_validity_for_context(
-              map_context, layout_column, &value_struct_array.validity));
-      value_struct_length =
-          map_value_struct_length_for_context(map_context, layout_column);
-    } else {
-      SAN_ASSIGN_OR_RAISE(const auto child_path,
-                          native_recursive_node_path(tree, child_node_index));
-      SAN_ASSIGN_OR_RAISE(
-          const auto defined_level,
-          definition_level_for_path_prefix(layout_column, child_path));
-      SAN_ASSIGN_OR_RAISE(value_struct_null_count,
-                          materialize_struct_validity_at_definition_level(
-                              layout_column, row_group.num_rows, defined_level,
-                              &value_struct_array.validity));
-      value_struct_length = row_group.num_rows;
-    }
-    SAN_RETURN_NOT_OK(configure_native_struct_array(
-        &value_struct_array, value_struct_length, value_struct_null_count));
-    return &value_struct_array.array;
+    return materialize_native_recursive_struct_node(
+        state, row_group, tree, child_node_index, first_child_list_layout_index,
+        map_context, first_map_child_list_layout_index,
+        allow_struct_map_value ? NativeRecursiveStructChildContext::MapValue
+                               : struct_child_context,
+        cursor);
   }
   return sanitize::Status::Invalid(
       "native Parquet reader: unknown recursive child node kind");
+}
+
+sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
+    NativeParquetArrayState *state, const RowGroupInfo &row_group,
+    const NativeRecursiveMaterializationTree &tree,
+    std::size_t struct_node_index, std::size_t first_child_list_layout_index,
+    NativeRecursiveMapValueStructContext map_context,
+    std::size_t first_map_child_list_layout_index,
+    NativeRecursiveStructChildContext struct_context,
+    NativeRecursiveArrayCursor *cursor) {
+  if (!state || !cursor || !tree.valid ||
+      struct_node_index >= tree.nodes.size() ||
+      tree.nodes[struct_node_index].kind !=
+          NativeRecursiveMaterializationNodeKind::Struct ||
+      struct_context == NativeRecursiveStructChildContext::None) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: invalid recursive struct node "
+        "materialization");
+  }
+  if (cursor->struct_index >= state->structs.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive struct node allocation mismatch");
+  }
+  SAN_ASSIGN_OR_RAISE(const auto struct_column_indices,
+                      native_recursive_materialization_leaf_columns_from_node(
+                          tree, struct_node_index));
+  SAN_ASSIGN_OR_RAISE(const auto layout_column_index,
+                      select_map_value_struct_layout_column(
+                          row_group, struct_column_indices, map_context));
+  const auto &layout_column = row_group.columns[layout_column_index];
+  auto &struct_array = state->structs[cursor->struct_index++];
+  const auto &struct_node = tree.nodes[struct_node_index];
+  struct_array.children.reserve(struct_node.children.size());
+  for (const auto grandchild_node_index : struct_node.children) {
+    SAN_ASSIGN_OR_RAISE(auto *grandchild_array,
+                        materialize_native_recursive_child_node(
+                            state, row_group, tree, grandchild_node_index,
+                            first_child_list_layout_index, map_context,
+                            first_map_child_list_layout_index, false, false,
+                            struct_context, cursor));
+    struct_array.children.push_back(grandchild_array);
+  }
+  SAN_ASSIGN_OR_RAISE(const auto node_path,
+                      native_recursive_node_path(tree, struct_node_index));
+  SAN_ASSIGN_OR_RAISE(
+      const auto defined_level,
+      definition_level_for_path_prefix(layout_column, node_path));
+  std::int64_t null_count = 0;
+  std::int64_t length = 0;
+  if (struct_context == NativeRecursiveStructChildContext::MapValue) {
+    SAN_ASSIGN_OR_RAISE(
+        null_count,
+        materialize_map_entry_struct_validity_at_definition_level(
+            map_context, layout_column, defined_level, &struct_array.validity));
+    SAN_ASSIGN_OR_RAISE(
+        length, map_entry_record_count_for_context(map_context, layout_column));
+  } else {
+    SAN_ASSIGN_OR_RAISE(null_count,
+                        materialize_struct_validity_at_definition_level(
+                            layout_column, row_group.num_rows, defined_level,
+                            &struct_array.validity));
+    length = row_group.num_rows;
+  }
+  SAN_RETURN_NOT_OK(
+      configure_native_struct_array(&struct_array, length, null_count));
+  return &struct_array.array;
 }
 
 sanitize::Status append_native_recursive_map_entries(
@@ -11254,8 +11175,8 @@ sanitize::Status append_native_recursive_map_entries(
                         materialize_native_recursive_child_node(
                             state, row_group, tree, child_node_index,
                             first_child_list_layout_index, context,
-                            first_child_list_layout_index, false, true, false,
-                            &cursor));
+                            first_child_list_layout_index, false, true,
+                            NativeRecursiveStructChildContext::None, &cursor));
     *struct_index = cursor.struct_index;
     *list_index = cursor.list_index;
     children->push_back(child_array);
@@ -11290,7 +11211,10 @@ sanitize::Status append_native_recursive_struct_children_with_maps(
                             state, row_group, tree, child_node_index,
                             first_child_list_layout_index, map_context,
                             first_map_child_list_layout_index, true, false,
-                            allow_struct_child, &cursor));
+                            allow_struct_child
+                                ? NativeRecursiveStructChildContext::RowGroup
+                                : NativeRecursiveStructChildContext::None,
+                            &cursor));
     *struct_index = cursor.struct_index;
     *list_index = cursor.list_index;
     children->push_back(child_array);
