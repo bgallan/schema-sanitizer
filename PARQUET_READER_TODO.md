@@ -95,6 +95,8 @@ replacement. Remaining work:
      - [x] Recursive complex-list array materialization now supports direct map children under nested list nodes, including `list<list<map<...>>>`, map values containing `list<list<map<...>>>`, list-map values containing `list<list<map<...>>>`, and struct-valued entries in those nested maps.
      - [x] Recursive struct materialization now supports map children inside generic nested map-value structs, covering shapes such as `list<list<map<string, struct<map<...>>>>>`.
      - [x] Added generated deep-shape parity coverage for top-level struct, list-struct, map-value struct, and list-map-value struct parents containing nested `list<list<struct<map<...>>>>` paths.
+     - [x] Native map materialization now receives a repeated-layout context object instead of raw enum/index pairs, starting the migration away from branch-specific map/list plumbing.
+     - [x] Expanded generated deep-shape parity coverage with map values that contain list/map children and struct fields that contain map/list/list/struct/map paths.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer

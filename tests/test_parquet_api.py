@@ -5839,13 +5839,22 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
 
     require_native()
     map_type = pa.map_(pa.string(), pa.int64())
+    map_list_map_type = pa.map_(pa.string(), pa.list_(map_type))
     inner_struct = pa.struct(
         [
             pa.field("m", map_type),
             pa.field("v", pa.int64()),
         ]
     )
+    nested_map_struct = pa.struct(
+        [
+            pa.field("m", map_list_map_type),
+            pa.field("v", pa.int64()),
+        ]
+    )
     list_list_struct_map = pa.list_(pa.list_(inner_struct))
+    list_list_struct_map_list_map = pa.list_(pa.list_(nested_map_struct))
+    map_list_list_struct_map = pa.map_(pa.string(), list_list_struct_map)
     cases = [
         (
             "struct-list-list-struct-map",
@@ -5883,6 +5892,24 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
                 None,
                 [],
                 [{"z": None}],
+            ],
+        ),
+        (
+            "list-list-struct-map-list-map",
+            list_list_struct_map_list_map,
+            [
+                [[{"m": {"a": [{"x": 1}, None], "b": []}, "v": 2}]],
+                None,
+                [[]],
+            ],
+        ),
+        (
+            "struct-map-list-list-struct-map",
+            pa.struct([pa.field("k", map_list_list_struct_map)]),
+            [
+                {"k": {"root": [[{"m": {"x": 1}, "v": 2}]]}},
+                None,
+                {"k": None},
             ],
         ),
     ]
