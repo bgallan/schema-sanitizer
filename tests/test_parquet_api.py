@@ -5853,6 +5853,18 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
         ]
     )
     list_list_struct_map = pa.list_(pa.list_(inner_struct))
+    map_struct_list_list_struct_map_type = pa.map_(
+        pa.string(), pa.struct([pa.field("a", list_list_struct_map)])
+    )
+    map_list_map_struct_type = pa.map_(
+        pa.string(),
+        pa.list_(
+            pa.map_(
+                pa.string(),
+                pa.struct([pa.field("a", list_list_struct_map)]),
+            )
+        ),
+    )
     list_list_struct_map_list_map = pa.list_(pa.list_(nested_map_struct))
     map_list_list_struct_map = pa.map_(pa.string(), list_list_struct_map)
     cases = [
@@ -5877,7 +5889,7 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
         ),
         (
             "map-struct-list-list-struct-map",
-            pa.map_(pa.string(), pa.struct([pa.field("a", list_list_struct_map)])),
+            map_struct_list_list_struct_map_type,
             [
                 {"root": {"a": [[{"m": {"x": 1}, "v": 2}]]}},
                 None,
@@ -5886,7 +5898,7 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
         ),
         (
             "list-map-struct-list-list-struct-map",
-            pa.list_(pa.map_(pa.string(), pa.struct([pa.field("a", list_list_struct_map)]))),
+            pa.list_(map_struct_list_list_struct_map_type),
             [
                 [{"root": {"a": [[{"m": {"x": 1}, "v": 2}]]}}],
                 None,
@@ -5908,6 +5920,26 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
             pa.struct([pa.field("k", map_list_list_struct_map)]),
             [
                 {"k": {"root": [[{"m": {"x": 1}, "v": 2}]]}},
+                None,
+                {"k": None},
+            ],
+        ),
+        (
+            "struct-map-list-map-struct-list-list-struct-map",
+            pa.struct([pa.field("k", map_list_map_struct_type)]),
+            [
+                {
+                    "k": {
+                        "root": [
+                            {
+                                "nested": {
+                                    "a": [[{"m": {"x": 1}, "v": 2}], []],
+                                }
+                            },
+                            {},
+                        ]
+                    }
+                },
                 None,
                 {"k": None},
             ],

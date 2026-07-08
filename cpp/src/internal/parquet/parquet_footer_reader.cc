@@ -10967,6 +10967,46 @@ native_recursive_generic_map_layout_context(std::size_t map_layout_index) {
       map_layout_index + 1};
 }
 
+struct NativeRecursiveChildLayoutContext {
+  std::size_t first_child_list_layout_index = 0;
+  NativeRecursiveMapLayoutContext map_layout_context;
+  bool allow_map_child = false;
+  bool allow_struct_map_value = false;
+  NativeRecursiveStructChildContext struct_child_context =
+      NativeRecursiveStructChildContext::None;
+
+  NativeRecursiveChildLayoutContext nested_list_child() const {
+    auto out = *this;
+    ++out.first_child_list_layout_index;
+    out.allow_map_child = false;
+    out.allow_struct_map_value = false;
+    return out;
+  }
+
+  NativeRecursiveChildLayoutContext nested_struct_child() const {
+    auto out = *this;
+    ++out.first_child_list_layout_index;
+    out.allow_map_child = true;
+    out.allow_struct_map_value = false;
+    return out;
+  }
+
+  NativeRecursiveMapLayoutContext direct_nested_map_layout() const {
+    return native_recursive_generic_map_layout_context(
+        first_child_list_layout_index + 1);
+  }
+};
+
+NativeRecursiveChildLayoutContext native_recursive_child_layout_context(
+    std::size_t first_child_list_layout_index,
+    NativeRecursiveMapLayoutContext map_layout_context, bool allow_map_child,
+    bool allow_struct_map_value,
+    NativeRecursiveStructChildContext struct_child_context) {
+  return NativeRecursiveChildLayoutContext{
+      first_child_list_layout_index, map_layout_context, allow_map_child,
+      allow_struct_map_value, struct_child_context};
+}
+
 sanitize::Result<ArrowArray *> materialize_native_repeated_list_chain(
     NativeParquetArrayState *state, const ColumnChunkInfo &column,
     std::int16_t list_depth, std::size_t first_layout_index,
@@ -10981,20 +11021,15 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
 sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
-    std::size_t child_node_index, std::size_t first_child_list_layout_index,
-    NativeRecursiveMapValueStructContext map_context,
-    std::size_t first_map_child_list_layout_index, bool allow_map_child,
-    bool allow_struct_map_value,
-    NativeRecursiveStructChildContext struct_child_context,
+    std::size_t child_node_index,
+    NativeRecursiveChildLayoutContext child_layout_context,
     NativeRecursiveArrayCursor *cursor);
 
 sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
-    std::size_t struct_node_index, std::size_t first_child_list_layout_index,
-    NativeRecursiveMapValueStructContext map_context,
-    std::size_t first_map_child_list_layout_index,
-    NativeRecursiveStructChildContext struct_context,
+    std::size_t struct_node_index,
+    NativeRecursiveChildLayoutContext child_layout_context,
     NativeRecursiveArrayCursor *cursor);
 
 sanitize::Result<NativeRecursiveScalarListChain>
@@ -11759,10 +11794,7 @@ sanitize::Result<std::size_t> select_map_value_struct_layout_column(
 sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree, std::size_t list_node_index,
-    std::size_t first_child_list_layout_index,
-    NativeRecursiveMapValueStructContext map_context,
-    std::size_t first_map_child_list_layout_index,
-    NativeRecursiveStructChildContext struct_child_context,
+    NativeRecursiveChildLayoutContext child_layout_context,
     NativeRecursiveArrayCursor *cursor) {
   if (!state || !cursor || !tree.valid ||
       list_node_index >= tree.nodes.size() ||
@@ -11780,13 +11812,14 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
   SAN_ASSIGN_OR_RAISE(const auto list_column_indices,
                       native_recursive_materialization_leaf_columns_from_node(
                           tree, list_node_index));
+  SAN_ASSIGN_OR_RAISE(const auto *layout_column,
+                      select_recursive_list_struct_layout_column(
+                          row_group, list_column_indices,
+                          child_layout_context.first_child_list_layout_index));
   SAN_ASSIGN_OR_RAISE(
-      const auto *layout_column,
-      select_recursive_list_struct_layout_column(
-          row_group, list_column_indices, first_child_list_layout_index));
-  SAN_ASSIGN_OR_RAISE(const auto list_layout,
-                      native_repeated_level_layout(
-                          *layout_column, first_child_list_layout_index));
+      const auto list_layout,
+      native_repeated_level_layout(
+          *layout_column, child_layout_context.first_child_list_layout_index));
   if (!list_layout.decoded) {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: recursive list-struct layout was not decoded");
@@ -11802,9 +11835,7 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
     SAN_ASSIGN_OR_RAISE(auto *child_array,
                         materialize_native_recursive_child_node(
                             state, row_group, tree, child_node_index,
-                            first_child_list_layout_index + 1, map_context,
-                            first_map_child_list_layout_index, false, false,
-                            struct_child_context, cursor));
+                            child_layout_context.nested_list_child(), cursor));
     SAN_RETURN_NOT_OK(configure_native_list_array(
         &list_array, *list_layout.validity_bitmap, *list_layout.offsets,
         child_array, list_layout.row_count, list_layout.null_count));
@@ -11826,8 +11857,7 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
     SAN_ASSIGN_OR_RAISE(auto *child_array,
                         materialize_native_recursive_map_node(
                             state, row_group, tree, child_node_index,
-                            native_recursive_generic_map_layout_context(
-                                first_child_list_layout_index + 1),
+                            child_layout_context.direct_nested_map_layout(),
                             cursor));
     SAN_RETURN_NOT_OK(configure_native_list_array(
         &list_array, *list_layout.validity_bitmap, *list_layout.offsets,
@@ -11851,9 +11881,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
     SAN_ASSIGN_OR_RAISE(auto *child_array,
                         materialize_native_recursive_child_node(
                             state, row_group, tree, child_index,
-                            first_child_list_layout_index + 1, map_context,
-                            first_map_child_list_layout_index, true, false,
-                            struct_child_context, cursor));
+                            child_layout_context.nested_struct_child(),
+                            cursor));
     struct_array.children.push_back(child_array);
   }
   SAN_ASSIGN_OR_RAISE(const auto node_path,
@@ -11864,8 +11893,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
   SAN_ASSIGN_OR_RAISE(
       const auto struct_null_count,
       materialize_list_struct_child_validity_at_definition_level(
-          *layout_column, first_child_list_layout_index, defined_level,
-          &struct_array.validity));
+          *layout_column, child_layout_context.first_child_list_layout_index,
+          defined_level, &struct_array.validity));
   SAN_RETURN_NOT_OK(configure_native_struct_array(
       &struct_array, list_layout.element_count, struct_null_count));
   SAN_RETURN_NOT_OK(configure_native_list_array(
@@ -11877,11 +11906,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_child(
 sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
-    std::size_t child_node_index, std::size_t first_child_list_layout_index,
-    NativeRecursiveMapValueStructContext map_context,
-    std::size_t first_map_child_list_layout_index, bool allow_map_child,
-    bool allow_struct_map_value,
-    NativeRecursiveStructChildContext struct_child_context,
+    std::size_t child_node_index,
+    NativeRecursiveChildLayoutContext child_layout_context,
     NativeRecursiveArrayCursor *cursor) {
   if (!state || !cursor || !tree.valid ||
       child_node_index >= tree.nodes.size()) {
@@ -11909,48 +11935,48 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
       }
       const auto &column = row_group.columns[chain.leaf_column_index];
       return materialize_native_repeated_list_chain(
-          state, column, chain.depth, first_child_list_layout_index,
+          state, column, chain.depth,
+          child_layout_context.first_child_list_layout_index,
           &state->columns[chain.leaf_column_index].array, &cursor->list_index);
     }
     return materialize_native_recursive_list_struct_child(
-        state, row_group, tree, child_node_index, first_child_list_layout_index,
-        map_context, first_map_child_list_layout_index, struct_child_context,
-        cursor);
+        state, row_group, tree, child_node_index, child_layout_context, cursor);
   }
   if (child_node.kind == NativeRecursiveMaterializationNodeKind::Map) {
-    if (!allow_map_child) {
+    if (!child_layout_context.allow_map_child) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: recursive map child is not materialized in "
           "this parent context");
     }
-    auto child_map_context = map_context;
-    auto child_map_first_layout_index = first_map_child_list_layout_index;
-    if (map_context == NativeRecursiveMapValueStructContext::GenericListMap ||
-        (struct_child_context != NativeRecursiveStructChildContext::None &&
-         first_child_list_layout_index > 1)) {
-      child_map_context = NativeRecursiveMapValueStructContext::GenericListMap;
-      child_map_first_layout_index = first_child_list_layout_index + 1;
+    auto child_map_layout_context = child_layout_context.map_layout_context;
+    if (child_layout_context.map_layout_context.generic() ||
+        (child_layout_context.struct_child_context !=
+             NativeRecursiveStructChildContext::None &&
+         child_layout_context.first_child_list_layout_index > 1)) {
+      child_map_layout_context = native_recursive_map_layout_context(
+          NativeRecursiveMapValueStructContext::GenericListMap,
+          child_layout_context.first_child_list_layout_index + 1);
     }
     return materialize_native_recursive_map_node(
-        state, row_group, tree, child_node_index,
-        native_recursive_map_layout_context(child_map_context,
-                                            child_map_first_layout_index),
+        state, row_group, tree, child_node_index, child_map_layout_context,
         cursor);
   }
   if (child_node.kind == NativeRecursiveMaterializationNodeKind::Struct) {
-    if (!allow_struct_map_value &&
-        struct_child_context == NativeRecursiveStructChildContext::None) {
+    if (!child_layout_context.allow_struct_map_value &&
+        child_layout_context.struct_child_context ==
+            NativeRecursiveStructChildContext::None) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: recursive struct child is not materialized "
           "in "
           "this parent context");
     }
+    auto struct_context = child_layout_context;
+    if (child_layout_context.allow_struct_map_value) {
+      struct_context.struct_child_context =
+          NativeRecursiveStructChildContext::MapValue;
+    }
     return materialize_native_recursive_struct_node(
-        state, row_group, tree, child_node_index, first_child_list_layout_index,
-        map_context, first_map_child_list_layout_index,
-        allow_struct_map_value ? NativeRecursiveStructChildContext::MapValue
-                               : struct_child_context,
-        cursor);
+        state, row_group, tree, child_node_index, struct_context, cursor);
   }
   return sanitize::Status::Invalid(
       "native Parquet reader: unknown recursive child node kind");
@@ -11959,16 +11985,15 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
 sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
-    std::size_t struct_node_index, std::size_t first_child_list_layout_index,
-    NativeRecursiveMapValueStructContext map_context,
-    std::size_t first_map_child_list_layout_index,
-    NativeRecursiveStructChildContext struct_context,
+    std::size_t struct_node_index,
+    NativeRecursiveChildLayoutContext child_layout_context,
     NativeRecursiveArrayCursor *cursor) {
   if (!state || !cursor || !tree.valid ||
       struct_node_index >= tree.nodes.size() ||
       tree.nodes[struct_node_index].kind !=
           NativeRecursiveMaterializationNodeKind::Struct ||
-      struct_context == NativeRecursiveStructChildContext::None) {
+      child_layout_context.struct_child_context ==
+          NativeRecursiveStructChildContext::None) {
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid recursive struct node "
         "materialization");
@@ -11982,7 +12007,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
                           tree, struct_node_index));
   SAN_ASSIGN_OR_RAISE(const auto layout_column_index,
                       select_map_value_struct_layout_column(
-                          row_group, struct_column_indices, map_context));
+                          row_group, struct_column_indices,
+                          child_layout_context.map_layout_context.kind));
   const auto &layout_column = row_group.columns[layout_column_index];
   auto &struct_array = state->structs[cursor->struct_index++];
   const auto &struct_node = tree.nodes[struct_node_index];
@@ -11992,10 +12018,13 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
         auto *grandchild_array,
         materialize_native_recursive_child_node(
             state, row_group, tree, grandchild_node_index,
-            first_child_list_layout_index, map_context,
-            first_map_child_list_layout_index,
-            struct_context != NativeRecursiveStructChildContext::None, false,
-            struct_context, cursor));
+            native_recursive_child_layout_context(
+                child_layout_context.first_child_list_layout_index,
+                child_layout_context.map_layout_context,
+                child_layout_context.struct_child_context !=
+                    NativeRecursiveStructChildContext::None,
+                false, child_layout_context.struct_child_context),
+            cursor));
     struct_array.children.push_back(grandchild_array);
   }
   SAN_ASSIGN_OR_RAISE(const auto node_path,
@@ -12005,14 +12034,12 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
       definition_level_for_path_prefix(layout_column, node_path));
   std::int64_t null_count = 0;
   std::int64_t length = 0;
-  if (struct_context == NativeRecursiveStructChildContext::MapValue) {
-    if (map_context == NativeRecursiveMapValueStructContext::GenericListMap) {
-      if (first_map_child_list_layout_index == 0) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: recursive generic map layout index is "
-            "invalid");
-      }
-      const auto map_layout_index = first_map_child_list_layout_index - 1;
+  if (child_layout_context.struct_child_context ==
+      NativeRecursiveStructChildContext::MapValue) {
+    if (child_layout_context.map_layout_context.generic()) {
+      SAN_ASSIGN_OR_RAISE(
+          const auto map_layout_index,
+          child_layout_context.map_layout_context.map_layout_index());
       SAN_ASSIGN_OR_RAISE(
           null_count,
           materialize_generic_map_entry_struct_validity_at_definition_level(
@@ -12022,13 +12049,16 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
                                       layout_column, map_layout_index));
     } else {
       SAN_ASSIGN_OR_RAISE(
-          null_count, materialize_map_entry_struct_validity_at_definition_level(
-                          map_context, layout_column, defined_level,
-                          &struct_array.validity));
-      SAN_ASSIGN_OR_RAISE(length, map_entry_record_count_for_context(
-                                      map_context, layout_column));
+          null_count,
+          materialize_map_entry_struct_validity_at_definition_level(
+              child_layout_context.map_layout_context.kind, layout_column,
+              defined_level, &struct_array.validity));
+      SAN_ASSIGN_OR_RAISE(
+          length,
+          map_entry_record_count_for_context(
+              child_layout_context.map_layout_context.kind, layout_column));
     }
-  } else if (struct_context ==
+  } else if (child_layout_context.struct_child_context ==
              NativeRecursiveStructChildContext::ListStructElement) {
     SAN_ASSIGN_OR_RAISE(
         null_count, materialize_list_struct_child_validity_at_definition_level(
@@ -12049,9 +12079,9 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
 sanitize::Status append_native_recursive_map_entries(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree, std::size_t map_node_index,
-    NativeRecursiveMapValueStructContext context,
-    std::size_t first_child_list_layout_index, std::size_t *struct_index,
-    std::size_t *list_index, std::vector<ArrowArray *> *children) {
+    NativeRecursiveMapLayoutContext map_layout_context,
+    std::size_t *struct_index, std::size_t *list_index,
+    std::vector<ArrowArray *> *children) {
   if (!state || !struct_index || !list_index || !children || !tree.valid ||
       map_node_index >= tree.nodes.size() ||
       tree.nodes[map_node_index].kind !=
@@ -12066,12 +12096,15 @@ sanitize::Status append_native_recursive_map_entries(
           "native Parquet reader: recursive map child is invalid");
     }
     NativeRecursiveArrayCursor cursor{*struct_index, *list_index};
-    SAN_ASSIGN_OR_RAISE(auto *child_array,
-                        materialize_native_recursive_child_node(
-                            state, row_group, tree, child_node_index,
-                            first_child_list_layout_index, context,
-                            first_child_list_layout_index, false, true,
-                            NativeRecursiveStructChildContext::None, &cursor));
+    SAN_ASSIGN_OR_RAISE(
+        auto *child_array,
+        materialize_native_recursive_child_node(
+            state, row_group, tree, child_node_index,
+            native_recursive_child_layout_context(
+                map_layout_context.first_child_list_layout_index,
+                map_layout_context, false, true,
+                NativeRecursiveStructChildContext::None),
+            &cursor));
     *struct_index = cursor.struct_index;
     *list_index = cursor.list_index;
     children->push_back(child_array);
@@ -12082,11 +12115,9 @@ sanitize::Status append_native_recursive_map_entries(
 sanitize::Status append_native_recursive_struct_children_with_maps(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
-    std::size_t struct_node_index, std::size_t first_child_list_layout_index,
-    NativeRecursiveMapValueStructContext map_context,
-    std::size_t first_map_child_list_layout_index, std::size_t *struct_index,
-    std::size_t *list_index,
-    NativeRecursiveStructChildContext struct_child_context,
+    std::size_t struct_node_index,
+    NativeRecursiveChildLayoutContext child_layout_context,
+    std::size_t *struct_index, std::size_t *list_index,
     std::vector<ArrowArray *> *children) {
   if (!state || !struct_index || !list_index || !children || !tree.valid ||
       struct_node_index >= tree.nodes.size() ||
@@ -12105,9 +12136,7 @@ sanitize::Status append_native_recursive_struct_children_with_maps(
     SAN_ASSIGN_OR_RAISE(auto *child_array,
                         materialize_native_recursive_child_node(
                             state, row_group, tree, child_node_index,
-                            first_child_list_layout_index, map_context,
-                            first_map_child_list_layout_index, true, false,
-                            struct_child_context, &cursor));
+                            child_layout_context, &cursor));
     *struct_index = cursor.struct_index;
     *list_index = cursor.list_index;
     children->push_back(child_array);
@@ -12292,9 +12321,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
   auto &entries_array = state->structs[cursor->struct_index++];
   entries_array.children.reserve(map_column_indices.size());
   SAN_RETURN_NOT_OK(append_native_recursive_map_entries(
-      state, row_group, tree, map_node_index, map_layout_context.kind,
-      map_layout_context.first_child_list_layout_index, &cursor->struct_index,
-      &cursor->list_index, &entries_array.children));
+      state, row_group, tree, map_node_index, map_layout_context,
+      &cursor->struct_index, &cursor->list_index, &entries_array.children));
   if (generic_map_layout.has_value()) {
     const auto &layout = generic_map_layout.value();
     SAN_RETURN_NOT_OK(
@@ -12342,11 +12370,13 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_struct_node(
                           field.recursive_tree, field.recursive_tree.root,
                           NativeRecursiveMaterializationNodeKind::Struct));
   SAN_RETURN_NOT_OK(append_native_recursive_struct_children_with_maps(
-      state, row_group, field.recursive_tree, struct_node_index, 1,
-      NativeRecursiveMapValueStructContext::ListStructMap, 2,
-      &cursor->struct_index, &cursor->list_index,
-      NativeRecursiveStructChildContext::ListStructElement,
-      &struct_array.children));
+      state, row_group, field.recursive_tree, struct_node_index,
+      native_recursive_child_layout_context(
+          1,
+          native_recursive_map_layout_context(
+              NativeRecursiveMapValueStructContext::ListStructMap, 2),
+          true, false, NativeRecursiveStructChildContext::ListStructElement),
+      &cursor->struct_index, &cursor->list_index, &struct_array.children));
   std::int64_t struct_null_count = 0;
   if (!generic_list_defined_levels_from_path(*struct_layout_column).empty()) {
     SAN_ASSIGN_OR_RAISE(
@@ -12436,9 +12466,14 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_complex_list_output(
   SAN_ASSIGN_OR_RAISE(
       auto *child_array,
       materialize_native_recursive_child_node(
-          state, row_group, field.recursive_tree, child_node_index, 1,
-          NativeRecursiveMapValueStructContext::ListStructMap, 2, false, false,
-          NativeRecursiveStructChildContext::ListStructElement, cursor));
+          state, row_group, field.recursive_tree, child_node_index,
+          native_recursive_child_layout_context(
+              1,
+              native_recursive_map_layout_context(
+                  NativeRecursiveMapValueStructContext::ListStructMap, 2),
+              false, false,
+              NativeRecursiveStructChildContext::ListStructElement),
+          cursor));
   SAN_RETURN_NOT_OK(configure_native_list_array(
       &list_array, outer_column.repeated_level_validity_bitmap,
       outer_column.repeated_level_offsets, child_array, row_group.num_rows,
@@ -12462,10 +12497,13 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_output(
   SAN_ASSIGN_OR_RAISE(const auto *struct_layout_column,
                       select_top_level_struct_layout_column(row_group, field));
   SAN_RETURN_NOT_OK(append_native_recursive_struct_children_with_maps(
-      state, row_group, field.recursive_tree, field.recursive_tree.root, 0,
-      NativeRecursiveMapValueStructContext::StructMap, 1, &cursor->struct_index,
-      &cursor->list_index, NativeRecursiveStructChildContext::RowGroup,
-      &struct_array.children));
+      state, row_group, field.recursive_tree, field.recursive_tree.root,
+      native_recursive_child_layout_context(
+          0,
+          native_recursive_map_layout_context(
+              NativeRecursiveMapValueStructContext::StructMap, 1),
+          true, false, NativeRecursiveStructChildContext::RowGroup),
+      &cursor->struct_index, &cursor->list_index, &struct_array.children));
   if (field.top_level_required) {
     SAN_RETURN_NOT_OK(
         configure_native_struct_array(&struct_array, row_group.num_rows, 0));
