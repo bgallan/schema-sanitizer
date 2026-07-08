@@ -12542,6 +12542,28 @@ make_arrow_stream(const std::string &path,
     for (const auto &column : row_group.columns) {
       SAN_RETURN_NOT_OK(validate_native_plain_column(column));
     }
+    std::vector<NativeParquetOutputField> layout;
+    SAN_RETURN_NOT_OK(build_native_output_layout(row_group.columns, &layout));
+    for (const auto &field : layout) {
+      if (field.column_indices.empty() ||
+          field.column_indices.front() >= row_group.columns.size()) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: output field has invalid columns");
+      }
+      const auto &column = row_group.columns[field.column_indices.front()];
+      if (field.is_map) {
+        SAN_RETURN_NOT_OK(validate_map_repetition_layout(row_group, field));
+      } else if (field.is_list_struct) {
+        SAN_RETURN_NOT_OK(
+            validate_list_struct_repetition_layout(row_group, field));
+      } else if (field.is_list_map) {
+        SAN_RETURN_NOT_OK(
+            validate_list_map_repetition_layout(row_group, field));
+      } else if (field.is_list && !column.repeated_level_layout_decoded) {
+        return sanitize::Status::NotImplemented(
+            "native Parquet reader: scalar list layout was not decoded");
+      }
+    }
   }
   auto state = std::unique_ptr<NativeParquetStreamState>(
       new (std::nothrow) NativeParquetStreamState());
