@@ -6738,6 +6738,12 @@ struct NativeRecursiveMaterializationTree {
   std::vector<NativeRecursiveMaterializationNode> nodes;
 };
 
+struct NativeRecursiveMaterializationResourceCounts {
+  std::size_t struct_count = 0;
+  std::size_t list_count = 0;
+  std::size_t leaf_count = 0;
+};
+
 struct NativeRecursiveMaterializationParseResult {
   bool ok = false;
   std::size_t node_index = 0;
@@ -6758,6 +6764,8 @@ struct NativeParquetOutputField {
   std::string name;
   std::vector<std::size_t> column_indices;
   std::vector<NativeRecursiveMaterializationTree> recursive_trees;
+  NativeRecursiveMaterializationTree recursive_tree;
+  NativeRecursiveMaterializationResourceCounts recursive_counts;
 };
 
 struct NativeRecursivePathPlan {
@@ -6875,6 +6883,159 @@ NativeRecursiveMaterializationTree build_native_recursive_materialization_tree(
   tree.root = parsed.node_index;
   tree.repetition_depth = parsed.repetition_depth;
   return tree;
+}
+
+sanitize::Result<std::size_t> clone_native_recursive_materialization_subtree(
+    const NativeRecursiveMaterializationTree &source, std::size_t source_index,
+    NativeRecursiveMaterializationTree *destination) {
+  if (!destination || source_index >= source.nodes.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization subtree is invalid");
+  }
+  const auto &source_node = source.nodes[source_index];
+  NativeRecursiveMaterializationNode cloned_node;
+  cloned_node.kind = source_node.kind;
+  cloned_node.name = source_node.name;
+  cloned_node.children.reserve(source_node.children.size());
+  for (const auto source_child_index : source_node.children) {
+    SAN_ASSIGN_OR_RAISE(auto cloned_child_index,
+                        clone_native_recursive_materialization_subtree(
+                            source, source_child_index, destination));
+    cloned_node.children.push_back(cloned_child_index);
+  }
+  const auto cloned_index = destination->nodes.size();
+  destination->nodes.push_back(std::move(cloned_node));
+  return cloned_index;
+}
+
+sanitize::Status merge_native_recursive_materialization_node(
+    const NativeRecursiveMaterializationTree &source, std::size_t source_index,
+    NativeRecursiveMaterializationTree *destination,
+    std::size_t destination_index) {
+  if (!destination || source_index >= source.nodes.size() ||
+      destination_index >= destination->nodes.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization merge node is "
+        "invalid");
+  }
+  const auto &source_node = source.nodes[source_index];
+  const auto &destination_node = destination->nodes[destination_index];
+  if (source_node.kind != destination_node.kind ||
+      source_node.name != destination_node.name) {
+    return sanitize::Status::NotImplemented(
+        "native Parquet reader: recursive materialization tree branches are "
+        "incompatible");
+  }
+  for (const auto source_child_index : source_node.children) {
+    if (source_child_index >= source.nodes.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive materialization source child is "
+          "invalid");
+    }
+    const auto &source_child = source.nodes[source_child_index];
+    std::optional<std::size_t> destination_child_index;
+    for (const auto candidate_index :
+         destination->nodes[destination_index].children) {
+      if (candidate_index >= destination->nodes.size()) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: recursive materialization destination "
+            "child is invalid");
+      }
+      const auto &candidate = destination->nodes[candidate_index];
+      if (candidate.kind == source_child.kind &&
+          candidate.name == source_child.name) {
+        destination_child_index = candidate_index;
+        break;
+      }
+    }
+    if (destination_child_index.has_value()) {
+      SAN_RETURN_NOT_OK(merge_native_recursive_materialization_node(
+          source, source_child_index, destination,
+          destination_child_index.value()));
+      continue;
+    }
+    SAN_ASSIGN_OR_RAISE(auto cloned_child_index,
+                        clone_native_recursive_materialization_subtree(
+                            source, source_child_index, destination));
+    destination->nodes[destination_index].children.push_back(
+        cloned_child_index);
+  }
+  return {};
+}
+
+sanitize::Status merge_native_recursive_materialization_tree(
+    const NativeRecursiveMaterializationTree &source,
+    NativeRecursiveMaterializationTree *destination) {
+  if (!source.valid || source.root >= source.nodes.size() || !destination) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization tree is invalid");
+  }
+  if (!destination->valid) {
+    destination->nodes.clear();
+    destination->nodes.reserve(source.nodes.size());
+    SAN_ASSIGN_OR_RAISE(auto cloned_root,
+                        clone_native_recursive_materialization_subtree(
+                            source, source.root, destination));
+    destination->valid = true;
+    destination->root = cloned_root;
+    destination->repetition_depth = source.repetition_depth;
+    return {};
+  }
+  if (destination->root >= destination->nodes.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization destination root is "
+        "invalid");
+  }
+  SAN_RETURN_NOT_OK(merge_native_recursive_materialization_node(
+      source, source.root, destination, destination->root));
+  destination->repetition_depth =
+      std::max(destination->repetition_depth, source.repetition_depth);
+  return {};
+}
+
+sanitize::Status count_native_recursive_materialization_node(
+    const NativeRecursiveMaterializationTree &tree, std::size_t node_index,
+    NativeRecursiveMaterializationResourceCounts *counts) {
+  if (!counts || node_index >= tree.nodes.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization count node is "
+        "invalid");
+  }
+  const auto &node = tree.nodes[node_index];
+  switch (node.kind) {
+  case NativeRecursiveMaterializationNodeKind::Leaf:
+    ++counts->leaf_count;
+    break;
+  case NativeRecursiveMaterializationNodeKind::Struct:
+    ++counts->struct_count;
+    break;
+  case NativeRecursiveMaterializationNodeKind::List:
+    ++counts->list_count;
+    break;
+  case NativeRecursiveMaterializationNodeKind::Map:
+    ++counts->list_count;
+    ++counts->struct_count;
+    break;
+  }
+  for (const auto child_index : node.children) {
+    SAN_RETURN_NOT_OK(
+        count_native_recursive_materialization_node(tree, child_index, counts));
+  }
+  return {};
+}
+
+sanitize::Result<NativeRecursiveMaterializationResourceCounts>
+count_native_recursive_materialization_resources(
+    const NativeRecursiveMaterializationTree &tree) {
+  if (!tree.valid || tree.root >= tree.nodes.size()) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive materialization count tree is "
+        "invalid");
+  }
+  NativeRecursiveMaterializationResourceCounts counts;
+  SAN_RETURN_NOT_OK(
+      count_native_recursive_materialization_node(tree, tree.root, &counts));
+  return counts;
 }
 
 bool is_simple_top_level_list_path(const std::vector<std::string> &path,
@@ -7142,6 +7303,12 @@ sanitize::Status add_native_output_field(
     field.name = top_level_name;
     field.column_indices.push_back(column_index);
     field.recursive_trees.push_back(std::move(recursive_tree));
+    SAN_RETURN_NOT_OK(merge_native_recursive_materialization_tree(
+        field.recursive_trees.back(), &field.recursive_tree));
+    SAN_ASSIGN_OR_RAISE(
+        auto recursive_counts,
+        count_native_recursive_materialization_resources(field.recursive_tree));
+    field.recursive_counts = recursive_counts;
     fields->push_back(std::move(field));
     return {};
   }
@@ -7185,8 +7352,44 @@ sanitize::Status add_native_output_field(
     return sanitize::Status::NotImplemented(
         "native Parquet reader: inconsistent struct output nullability");
   }
+  auto merged_tree = match->recursive_tree;
+  SAN_RETURN_NOT_OK(merge_native_recursive_materialization_tree(recursive_tree,
+                                                                &merged_tree));
+  SAN_ASSIGN_OR_RAISE(
+      auto recursive_counts,
+      count_native_recursive_materialization_resources(merged_tree));
   match->column_indices.push_back(column_index);
   match->recursive_trees.push_back(std::move(recursive_tree));
+  match->recursive_tree = std::move(merged_tree);
+  match->recursive_counts = recursive_counts;
+  return {};
+}
+
+sanitize::Status validate_native_recursive_output_layout(
+    const std::vector<NativeParquetOutputField> &fields,
+    std::size_t expected_leaf_count) {
+  std::size_t observed_leaf_count = 0;
+  for (const auto &field : fields) {
+    if (!field.recursive_tree.valid ||
+        field.recursive_tree.root >= field.recursive_tree.nodes.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive output field tree is invalid");
+    }
+    if (field.recursive_trees.size() != field.column_indices.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive output field leaf tree count "
+          "mismatch");
+    }
+    if (field.recursive_counts.leaf_count != field.column_indices.size()) {
+      return sanitize::Status::Invalid(
+          "native Parquet reader: recursive output field leaf count mismatch");
+    }
+    observed_leaf_count += field.recursive_counts.leaf_count;
+  }
+  if (observed_leaf_count != expected_leaf_count) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: recursive output layout leaf count mismatch");
+  }
   return {};
 }
 
@@ -7205,6 +7408,8 @@ build_native_output_layout(const std::vector<ColumnChunkInfo> &columns,
                                               column.max_repetition_level,
                                               column.top_level_required));
   }
+  SAN_RETURN_NOT_OK(
+      validate_native_recursive_output_layout(*fields, columns.size()));
   return {};
 }
 
@@ -7223,6 +7428,8 @@ build_native_output_layout(const std::vector<LeafLevelInfo> &leaves,
                                               leaf.max_repetition_level,
                                               leaf.top_level_required));
   }
+  SAN_RETURN_NOT_OK(
+      validate_native_recursive_output_layout(*fields, leaves.size()));
   return {};
 }
 

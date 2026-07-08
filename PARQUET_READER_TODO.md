@@ -84,6 +84,7 @@ replacement. Remaining work:
        exact null/empty-list semantics.
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
+     - [x] Merge per-leaf recursive trees into one validated output-field tree.
    - Repeated fields.
    - Full definition/repetition level reconstruction.
    - [x] Production fallback for nested/repeated files through PyArrow.
