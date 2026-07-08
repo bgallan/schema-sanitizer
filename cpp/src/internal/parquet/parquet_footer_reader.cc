@@ -4250,6 +4250,10 @@ generic_list_defined_levels_from_path(const ColumnChunkInfo &column) {
   }
   levels.reserve(static_cast<std::size_t>(column.max_repetition_level));
   for (std::size_t i = 1; i + 1 < column.path_in_schema.size(); ++i) {
+    if (column.path_in_schema[i] == "key_value") {
+      levels.push_back(column.path_definition_levels[i - 1]);
+      continue;
+    }
     if (column.path_in_schema[i] == "list" &&
         column.path_in_schema[i + 1] == "element") {
       levels.push_back(column.path_definition_levels[i - 1]);
@@ -10992,26 +10996,46 @@ std::int16_t map_entry_present_definition_level_for_context(
   return 0;
 }
 
+std::int16_t map_entry_repetition_level_for_context(
+    NativeRecursiveMapValueStructContext context) {
+  switch (context) {
+  case NativeRecursiveMapValueStructContext::TopLevelMap:
+  case NativeRecursiveMapValueStructContext::StructMap:
+    return std::int16_t{1};
+  case NativeRecursiveMapValueStructContext::ListMap:
+  case NativeRecursiveMapValueStructContext::ListStructMap:
+    return std::int16_t{2};
+  }
+  return std::int16_t{1};
+}
+
 sanitize::Result<std::int64_t>
 map_entry_record_count_for_context(NativeRecursiveMapValueStructContext context,
                                    const ColumnChunkInfo &column) {
   const auto entry_present_level =
       map_entry_present_definition_level_for_context(context, column);
+  const auto entry_repetition_level =
+      map_entry_repetition_level_for_context(context);
   std::int64_t element_count = 0;
   for (const auto &page : column.pages) {
     if (page.is_dictionary_page) {
       continue;
     }
     if (page.decoded_definition_level_values.size() !=
-        static_cast<std::size_t>(page.num_values)) {
+            static_cast<std::size_t>(page.num_values) ||
+        page.decoded_repetition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values)) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: recursive map-entry record definition level "
+          "native Parquet reader: recursive map-entry record level "
           "count mismatch");
     }
     for (std::int32_t row = 0; row < page.num_values; ++row) {
       const auto definition =
           page.decoded_definition_level_values[static_cast<std::size_t>(row)];
-      if (definition > entry_present_level) {
+      const auto repetition =
+          page.decoded_repetition_level_values[static_cast<std::size_t>(row)];
+      if (definition > entry_present_level &&
+          repetition <= entry_repetition_level) {
         ++element_count;
       }
     }
@@ -11046,6 +11070,8 @@ materialize_map_entry_struct_validity_at_definition_level(
   validity->assign(static_cast<std::size_t>(validity_bytes), 0);
   const auto entry_present_level =
       map_entry_present_definition_level_for_context(context, column);
+  const auto entry_repetition_level =
+      map_entry_repetition_level_for_context(context);
   std::int64_t null_count = 0;
   std::int64_t element_index = 0;
   for (const auto &page : column.pages) {
@@ -11053,15 +11079,20 @@ materialize_map_entry_struct_validity_at_definition_level(
       continue;
     }
     if (page.decoded_definition_level_values.size() !=
-        static_cast<std::size_t>(page.num_values)) {
+            static_cast<std::size_t>(page.num_values) ||
+        page.decoded_repetition_level_values.size() !=
+            static_cast<std::size_t>(page.num_values)) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: recursive map-entry struct definition level "
+          "native Parquet reader: recursive map-entry struct level "
           "count mismatch");
     }
     for (std::int32_t row = 0; row < page.num_values; ++row) {
       const auto definition =
           page.decoded_definition_level_values[static_cast<std::size_t>(row)];
-      if (definition <= entry_present_level) {
+      const auto repetition =
+          page.decoded_repetition_level_values[static_cast<std::size_t>(row)];
+      if (definition <= entry_present_level ||
+          repetition > entry_repetition_level) {
         continue;
       }
       if (element_index >= element_count) {

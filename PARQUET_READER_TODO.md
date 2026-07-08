@@ -88,6 +88,7 @@ replacement. Remaining work:
      - [x] Recursive list-struct element materialization now supports nested ordinary struct children with scalar list/list-chain children using generic footer-derived repeated layouts.
      - [x] Native readiness and stream creation now share merged recursive output-field layout validation, so unsupported mixed recursive layouts fall back before native batch consumption.
      - [x] Top-level recursive struct materialization now supports nested ordinary struct children with scalar list/list-chain children using generic footer-derived repeated layouts and row-level struct validity reconstruction.
+     - [x] Map and list-map recursive value materialization now supports nested ordinary struct children with scalar list/list-chain children using map-entry-aware generic repeated layouts.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
@@ -97,9 +98,10 @@ replacement. Remaining work:
        effort is multiple focused engineering days, plus generated deep-shape
        fixtures, because every recursive level must preserve memory safety and
        exact null/empty-list semantics.
-       Current concrete blocker: child lists under map/list-map entry values
-       still need map-entry-rooted offsets and validity at each recursive node;
-       they cannot be promoted just by relaxing planner classifiers.
+       Current concrete blocker: arbitrary mixed recursive repeated shapes
+       beyond the validated top-level/list/map/list-map/list-struct-map
+       families still need a fully node-context-driven layout planner; they
+       cannot be promoted just by relaxing planner classifiers.
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
      - [x] Merge per-leaf recursive trees into one validated output-field tree.

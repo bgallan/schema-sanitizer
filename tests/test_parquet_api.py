@@ -4555,12 +4555,11 @@ def test_native_parquet_stream_materializes_map_with_nested_struct_values(
 
 
 @_requires_pyarrow
-def test_native_parquet_stream_falls_back_for_map_nested_struct_list_values(
+def test_native_parquet_stream_materializes_map_nested_struct_list_values(
     tmp_path: Path,
 ) -> None:
-    """Verify unsupported merged recursive map/list layouts fall back cleanly."""
+    """Verify native reader materializes map values with nested struct lists."""
     from schema_sanitizer.adapters.pyarrow_parquet_direct import (
-        last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
         native_parquet_footer_info,
         open_parquet_record_batch_stream_factory,
@@ -4568,7 +4567,7 @@ def test_native_parquet_stream_falls_back_for_map_nested_struct_list_values(
     from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
 
     require_native()
-    path = tmp_path / "native-map-nested-struct-list-values-fallback.parquet"
+    path = tmp_path / "native-map-nested-struct-list-values.parquet"
     inner_type = pa.struct(
         [
             pa.field("ids", pa.list_(pa.int64())),
@@ -4588,6 +4587,8 @@ def test_native_parquet_stream_falls_back_for_map_nested_struct_list_values(
                     {"a": {"inner": {"ids": [1, 2], "label": "x"}, "kind": "ok"}},
                     None,
                     {"b": {"inner": {"ids": [], "label": None}, "kind": None}},
+                    {"c": {"inner": None, "kind": "z"}},
+                    {"d": {"inner": {"ids": None, "label": "q"}, "kind": "r"}},
                 ],
                 type=pa.map_(pa.string(), value_type),
             )
@@ -4603,26 +4604,15 @@ def test_native_parquet_stream_falls_back_for_map_nested_struct_list_values(
     info = native_parquet_footer_info(path)
 
     assert info is not None
-    assert info["native_reader_ready"] == 0
-    assert any(
-        "recursive output layout is not materializable" in blocker
-        and "map leaf repetition layouts differ" in blocker
-        for blocker in info["native_reader_blockers"]
-    )
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)
     out = reader.read_all()
 
     assert out.schema.equals(table.schema)
     assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "pyarrow_dataset_scanner"
-    diagnostics = last_parquet_native_reader_diagnostics()
-    assert diagnostics["reason"] == "not_ready"
-    assert any(
-        "recursive output layout is not materializable" in blocker
-        and "map leaf repetition layouts differ" in blocker
-        for blocker in diagnostics["blockers"]
-    )
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -4726,6 +4716,138 @@ def test_native_parquet_stream_materializes_struct_nested_struct_list_chain_chil
                     {"inner": {"groups": None, "label": "q"}, "kind": "r"},
                 ],
                 type=outer_type,
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_map_nested_struct_list_chain_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes map values with nested struct list chains."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map-nested-struct-list-chain-values.parquet"
+    inner_type = pa.struct(
+        [
+            pa.field("groups", pa.list_(pa.list_(pa.int64()))),
+            pa.field("label", pa.string()),
+        ]
+    )
+    value_type = pa.struct(
+        [
+            pa.field("inner", inner_type),
+            pa.field("kind", pa.string()),
+        ]
+    )
+    table = pa.table(
+        {
+            "attrs": pa.array(
+                [
+                    {
+                        "a": {
+                            "inner": {"groups": [[1, 2], [], None], "label": "x"},
+                            "kind": "ok",
+                        }
+                    },
+                    None,
+                    {"b": {"inner": {"groups": [], "label": None}, "kind": None}},
+                    {"c": {"inner": None, "kind": "z"}},
+                    {"d": {"inner": {"groups": None, "label": "q"}, "kind": "r"}},
+                ],
+                type=pa.map_(pa.string(), value_type),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_map_nested_struct_list_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes list-map values with nested struct lists."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-map-nested-struct-list-values.parquet"
+    inner_type = pa.struct(
+        [
+            pa.field("ids", pa.list_(pa.int64())),
+            pa.field("label", pa.string()),
+        ]
+    )
+    value_type = pa.struct(
+        [
+            pa.field("inner", inner_type),
+            pa.field("kind", pa.string()),
+        ]
+    )
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [
+                        {"a": {"inner": {"ids": [1, 2], "label": "x"}, "kind": "ok"}},
+                        {"b": {"inner": {"ids": [], "label": None}, "kind": None}},
+                    ],
+                    None,
+                    [],
+                    [
+                        {"c": {"inner": None, "kind": "z"}},
+                        {"d": {"inner": {"ids": None, "label": "q"}, "kind": "r"}},
+                    ],
+                ],
+                type=pa.list_(pa.map_(pa.string(), value_type)),
             )
         }
     )
