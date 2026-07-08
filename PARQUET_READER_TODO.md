@@ -90,6 +90,8 @@ replacement. Remaining work:
      - [x] Top-level recursive struct materialization now supports nested ordinary struct children with scalar list/list-chain children using generic footer-derived repeated layouts and row-level struct validity reconstruction.
      - [x] Map and list-map recursive value materialization now supports nested ordinary struct children with scalar list/list-chain children using map-entry-aware generic repeated layouts.
      - [x] Recursive list-node materialization now supports list-of-struct children under map and list-map values, including scalar/list children inside the struct element.
+     - [x] Recursive complex-list schema construction now supports nested list children instead of failing after the first complex list node.
+     - [x] Recursive complex-list array materialization now supports `list<list<struct<...>>>` shapes at top level, inside map values, and inside list-map values, including scalar-list children inside the struct element.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
@@ -99,10 +101,10 @@ replacement. Remaining work:
        effort is multiple focused engineering days, plus generated deep-shape
        fixtures, because every recursive level must preserve memory safety and
        exact null/empty-list semantics.
-       Current concrete blocker: arbitrary mixed recursive repeated shapes
-       beyond the validated top-level/list/map/list-map/list-struct-map
-       families still need a fully node-context-driven layout planner; they
-       cannot be promoted just by relaxing planner classifiers.
+       Current concrete blocker: arbitrary mixed recursive repeated shapes that
+       introduce map nodes inside nested complex-list nodes still need a fully
+       node-context-driven repeated-layout planner; they cannot be promoted
+       just by relaxing planner classifiers.
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
      - [x] Merge per-leaf recursive trees into one validated output-field tree.
