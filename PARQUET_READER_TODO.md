@@ -76,6 +76,8 @@ replacement. Remaining work:
      - [x] Recursive native scalar list/list-chain outputs share one Arrow array construction path.
      - [x] Supported nested list/map/struct wrappers share common Arrow list/struct shell builders.
      - [x] Recursive list-chain materializer consumes both generic and legacy repeated-level layouts.
+     - [x] Recursive struct-child assembly drives scalar and scalar-list-chain children for supported struct nodes.
+     - [x] Recursive map-entry assembly drives supported top-level, list-map, list-struct-map, and struct-map entries.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
        Remaining honest effort: large. The next real finish line is a recursive
        materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
