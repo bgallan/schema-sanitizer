@@ -103,20 +103,100 @@ replacement. Remaining work:
      - [x] Removed the old branch-specific scalar-list/list-struct/list-map output materializers after migrating their layout handling into recursive context helpers.
      - [x] Top-level scalar list, list-of-struct, list-of-map, and complex-list schemas now share one recursive list-schema builder.
      - [x] Removed the old branch-specific scalar-list/list-struct/list-map schema construction helpers after unifying list schema construction.
+     - [x] Recursive map array materialization now builds top-level, struct-map, list-map, list-struct-map, and generic map shells from one repeated-layout context helper.
+     - [x] Recursive struct node materialization now obtains length/null-count/validity from one context helper for map-value, list-element, and row-group struct contexts.
+     - [x] Recursive map-value struct length now comes from repeated-layout metadata instead of a separate definition/repetition recount.
+     - [x] Recursive list-element struct length now comes from child-context repeated-layout metadata instead of field-shape counters.
+     - [x] Recursive map contexts now carry explicit repeated-layout indexes, so map shell construction no longer derives layout indexes from branch-specific enum names.
+     - [x] Recursive list-element struct validity now uses the active child repeated-layout index instead of the legacy first-list validity path.
+     - [x] Recursive map-value struct validity now uses one level-driven scanner for top-level, struct-map, list-map, list-struct-map, and generic nested map contexts.
+     - [x] Recursive list shells now use one repeated-layout helper for top-level list output, nested complex-list nodes, and scalar list-chain materialization.
+     - [x] Direct struct children under recursive list nodes now materialize through the shared recursive struct-node materializer instead of a list-specific struct assembly branch.
+     - [x] Recursive map-entry level thresholds now live in map layout contexts, removing the branch-specific map-entry definition/repetition switch from validity reconstruction.
+     - [x] Recursive map-value struct layout-column selection now uses repeated-layout depth instead of top-level/list-map/struct-map path classifiers.
+     - [x] Recursive map runtime context no longer carries branch-specific enum names; legacy entry thresholds are construction-time data only.
+     - [x] Recursive list-struct child validity now uses the shared repeated-layout accessor instead of reading repeated-layout storage directly.
+     - [x] Recursive child dispatch now uses an explicit parent-context enum instead of `allow_map_child` / `allow_struct_map_value` booleans.
+     - [x] Recursive child contexts are now created through named transitions and boundary aggregates instead of a raw boolean factory.
+     - [x] Recursive list/map shell Arrow array configuration now goes through one repeated-layout-view helper.
+     - [x] Recursive map-entry and struct-child appending now share one child-appender loop with caller-provided node context.
+     - [x] Top-level struct layout-column selection now prefers non-repeated leaves using generic repeated-level metadata instead of struct-map path classifiers.
+     - [x] Recursive map-entry and top-level struct boundary contexts now use named constructors.
+     - [x] Direct map children under map-entry contexts now advance through recursive repeated-layout context, covering map-valued map entries.
+     - [x] Recursive planner materializability now comes from a materialization-tree walk instead of the old branch-specific path whitelist.
+     - [x] Repeated-layout validators now trust the recursive planner materializability decision instead of rechecking a separate path classifier.
+     - [x] Added recursive parity coverage for top-level map-value structs with map children, map-valued maps, map-valued map-valued maps, and list-map values containing maps.
+     - [x] Added generated recursive parity coverage for struct-map-map, list-struct-map-map, map-list-map-map, list-map-list-map-map, map-list-struct-map-map, and list-list-struct-map-map shapes.
+     - [x] Nested map child layout selection now lives on recursive child context transitions instead of the central child dispatcher.
+     - [x] Recursive Arrow schema leaf nullability now uses footer-derived path definition levels instead of hard-coded top-level shape formulas.
+     - [x] Native readiness for repeated paths now uses recursive planner materializability and decoded repeated-layout state instead of the old repeated-path whitelist.
+     - [x] Repeated-layout decoding now prefers the generic footer-derived repeated-level path for every supported repeated column, leaving branch-specific decoders as fallback only.
+     - [x] Row-group repeated-layout validation now walks recursive list/map nodes and compares only the shared structural layout under each repeated node, instead of dispatching through top-level list/map/list-map validators.
+     - [x] Map-entry definition/repetition thresholds now always come from footer-derived repeated-level metadata; legacy fixed top-level/list-map/struct-map offsets were removed.
+     - [x] Recursive output-field schema and array materialization now dispatch from the recursive tree root kind instead of cached branch-specific shape flags.
+     - [x] Recursive output-field grouping no longer stores list/map/struct/list-depth classifier flags; compatibility is enforced through recursive tree merging.
+     - [x] Added native parity coverage for deep multi-column list-chain struct leaves that were previously blocked by generic nested-list depth guards.
+     - [x] Recursive list-node materialization now delegates leaf, list, map, and struct children through the same child dispatcher using an explicit list-element context.
+     - [x] Removed the remaining list-struct-specific child materializer entry point after migrating list child transitions to recursive context helpers.
+     - [x] Added deeper generated parity coverage for list/map/list/list/struct/list/map/struct/list/map recursion under the native route.
+     - [x] Repeated leaf value counts now prefer deepest decoded repeated-layout metadata instead of branch-specific top-level list/list-map/list-struct shape counters.
+     - [x] Repeated leaf parent definition levels now use footer-derived generic repeated path levels instead of legacy top-level shape formulas.
+     - [x] Native repeated-path support detection now delegates to the recursive materialization planner instead of enumerating supported top-level repeated shapes.
+     - [x] Generic repeated-layout decoding now derives repeated boundaries from footer path definition levels instead of legacy top-level shape formulas.
+     - [x] Repeated native read planning now routes supported repeated paths directly into the generic recursive repeated-layout decoder at runtime.
+     - [x] Removed unreachable branch-specific repeated-layout dispatch from the runtime repeated read-planning path.
+     - [x] Removed obsolete top-level repeated depth classifier wrappers after the recursive planner became the native materializability gate.
+     - [x] Leaf value materialization now resolves element counts from decoded recursive repeated-layout metadata instead of legacy top-level shape classifiers.
+     - [x] Legacy nested/deep repeated-layout decoders were deleted; the generic recursive decoder is the single runtime repeated-layout source, with legacy fields populated only as synced compatibility views.
+     - [x] List BYTE_STREAM_SPLIT value materialization now uses footer-derived parent definition levels like the other list value decoders.
+     - [x] List leaf value materializers now validate against decoded recursive leaf layout metadata instead of the legacy first repeated-layout flag.
+     - [x] List leaf value counts no longer fall back to synced legacy layout fields; runtime materialization requires decoded recursive repeated-layout metadata.
+     - [x] Native repeated-layout lookup now reads only recursive repeated-layout storage; synced legacy repeated fields are no longer fallback inputs.
+     - [x] Native reader memory budgeting now sizes all repeated levels from recursive repeated-layout storage instead of special-casing the first three legacy levels.
+     - [x] Native readiness now requires decoded recursive repeated-layout storage for the full repetition depth.
+     - [x] Footer diagnostics now expose all recursive repeated-level layouts as a depth-preserving array instead of only the first three synced legacy views.
+     - [x] Added recursive sibling repeated-branch coverage to prove struct children reuse layout cursors independently for separate repeated subtrees.
+     - [x] Recursive materialization nodes now persist their repeated-layout index; list/map materialization and repeated-layout validation consume node metadata instead of a caller-maintained next-index cursor.
+     - [x] Recursive struct nodes now persist their validity domain and repeated parent layout; struct validity and layout-column selection consume node metadata instead of runtime parent-kind hints.
+     - [x] Removed the recursive child-layout context from materialization traversal after list/map layout indexes and struct validity domains became node-owned.
+     - [x] Replaced representative struct layout-column selectors with one recursive node-path/footer-metadata selector used by root and nested structs.
+     - [x] Replaced list/map array layout-column selection with recursive node-path/footer-metadata selection instead of first-leaf or repeated-count heuristics.
+     - [x] Added adversarial recursive fixtures for mixed nullable struct siblings under root/list/map repeated ancestors.
+     - [x] Added projected recursive multi-row-group coverage to verify accepted nested shapes reset offsets and validity independently per row group.
+     - [x] Added generated-style recursive null/empty matrix coverage for list/map/struct combinations across every supported container level.
+     - [x] Added deterministic generated extreme recursive fixtures for depth-8 list chains, alternating list/map recursion, and wide branch-count stress.
+     - [x] Recursive metadata validation now verifies list/map layout indexes match their recursive repeated depth, not just that they are locally in range.
+     - [x] Recursive metadata validation now enforces materializer arity assumptions for struct/list/map nodes before native readiness is accepted.
+     - [x] Added multi-root recursive projection coverage to verify independent recursive output trees do not share traversal state.
+     - [x] Recursive native-readiness planning now uses a status-returning recursive support validator instead of a permissive boolean walker, so unsupported recursive grammar failures are reported precisely.
+     - [x] Added independent recursive-root subset projection coverage with reordered projected roots across multiple row groups.
+     - [x] Scalar list-chain schema construction now uses the same recursive list schema builder as complex lists; the old private chain schema helper was removed.
+     - [x] Scalar list-chain array materialization now uses the same recursive list-node materializer as complex lists; the old chain array shortcut was removed.
+     - [x] Root list outputs now use the same recursive list-node materializer as nested list nodes.
+     - [x] Added generated depth-10 scalar list-chain coverage to prove high-depth scalar lists stay on the native recursive route after removing the special path.
+     - [x] Root struct outputs now use the same recursive struct-node materializer as nested structs; the old top-level optional-struct validity helper was removed.
+     - [x] Added required/optional root-struct parity coverage to prove top-level struct nullability still follows footer definition levels.
+     - [x] Recursive struct-node and map-entry child assembly now share the same child-appender loop, removing the last manual struct child traversal.
      - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
-       Remaining honest effort: large. The next real finish line is a recursive
-       materialization tree (`struct`/`list`/`map`/`leaf`) that owns buffer
-       allocation, repetition/definition-level interpretation, Arrow schema
-       construction, and Arrow array construction. Until that exists, supported
-       shapes still depend on several branch-specific materializers. Expected
-       effort is multiple focused engineering days, plus generated deep-shape
-       fixtures, because every recursive level must preserve memory safety and
-       exact null/empty-list semantics.
+       Remaining honest effort: medium-small. The recursive tree now drives
+       native readiness, output layout, Arrow schema construction, Arrow array
+       construction, repeated-layout decoding, repeated-layout validation, and
+       the final materializability gate. List/map repeated-layout indexes and
+       struct validity domains are stored on recursive materialization nodes
+       and consumed by materialization/validation. Scalar and complex list
+       chains now share the same recursive schema and array builders, and root
+       structs use the same recursive materializer as nested structs. The hard
+       runtime split has been removed for schema-sanitizer's native writer
+       grammar. Remaining work is mostly proving and documenting the exact
+       production support contract instead of keeping the stronger
+       mathematical-arbitrariness claim.
        Current concrete blocker: mathematically arbitrary mixed recursive
-       shapes still need generated deep-shape fixtures and a fully
-       node-context-driven materializer that no longer carries branch-specific
-       map/list context names; they cannot be promoted just by relaxing planner
-       classifiers.
+       shapes are now covered by hand-written stress cases plus deterministic
+       generated depth/branch/null-empty fixtures for the supported recursive
+       path grammar. The remaining work is to downgrade the literal
+       "mathematically arbitrary" wording to a bounded production support
+       statement, then add compatibility fixtures for externally written
+       Parquet files that use equivalent but non-native list/map encodings.
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
      - [x] Merge per-leaf recursive trees into one validated output-field tree.

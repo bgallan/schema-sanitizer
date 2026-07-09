@@ -2144,6 +2144,18 @@ def test_native_parquet_footer_info_captures_repeated_level_values(
     assert column["path_in_schema"] == ["scores", "list", "element"]
     assert column["max_definition_level"] == 3
     assert column["max_repetition_level"] == 1
+    assert column["repeated_level_layouts"] == [
+        {
+            "layout_index": 0,
+            "decoded": 1,
+            "row_count": 4,
+            "null_count": 1,
+            "element_count": 3,
+            "non_null_value_count": 3,
+            "offsets": [0, 2, 2, 2, 3],
+            "validity_hex_preview": "0d",
+        }
+    ]
     assert column["repeated_level_layout_decoded"] == 1
     assert column["repeated_level_row_count"] == 4
     assert column["repeated_level_null_count"] == 1
@@ -5459,6 +5471,61 @@ def test_native_parquet_stream_materializes_list_list_struct_values(
 
 
 @_requires_pyarrow
+def test_native_parquet_stream_materializes_deep_list_chain_struct_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes deep list chains with struct leaves."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-deep-list-chain-struct-values.parquet"
+    struct_type = pa.struct(
+        [
+            pa.field("x", pa.int64()),
+            pa.field("name", pa.string()),
+        ]
+    )
+    item_type = pa.list_(pa.list_(pa.list_(pa.list_(struct_type))))
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [[[[{"x": 1, "name": "a"}, None], []]]],
+                    None,
+                    [[[[]]]],
+                    [[[[{"x": None, "name": None}]]]],
+                ],
+                type=item_type,
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_list_list_map_values(
     tmp_path: Path,
 ) -> None:
@@ -5616,6 +5683,318 @@ def test_native_parquet_stream_materializes_list_list_map_struct_map_values(
     assert out.schema.equals(table.schema)
     assert out.to_pylist() == table.to_pylist()
     assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_map_struct_map_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader advances map context inside top-level map-value structs."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map-struct-map-values.parquet"
+    value_type = pa.struct(
+        [
+            pa.field("n", pa.int64()),
+            pa.field("m", pa.map_(pa.string(), pa.int64())),
+        ]
+    )
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    {
+                        "a": {"n": 1, "m": {"x": 2}},
+                        "b": {"n": None, "m": None},
+                    },
+                    None,
+                    {"c": {"n": 3, "m": {}}},
+                ],
+                type=pa.map_(pa.string(), value_type),
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_map_map_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes maps whose values are maps."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map-map-values.parquet"
+    item_type = pa.map_(pa.string(), pa.map_(pa.string(), pa.int64()))
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    {"a": {"x": 1}, "b": {}},
+                    None,
+                    {"c": None, "d": {"z": None}},
+                ],
+                type=item_type,
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_map_map_map_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader recursively materializes map-valued map entries."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-map-map-map-values.parquet"
+    item_type = pa.map_(pa.string(), pa.map_(pa.string(), pa.map_(pa.string(), pa.int64())))
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    {"a": {"x": {"i": 1}, "y": {}}, "b": None},
+                    None,
+                    {"c": {"z": None}},
+                ],
+                type=item_type,
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_list_map_map_values(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader materializes list-map values that are maps."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-list-map-map-values.parquet"
+    item_type = pa.list_(pa.map_(pa.string(), pa.map_(pa.string(), pa.int64())))
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [{"a": {"x": 1}, "b": {}}, None],
+                    None,
+                    [],
+                    [{"c": None, "d": {"z": None}}],
+                ],
+                type=item_type,
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_deeper_map_list_recursion(
+    tmp_path: Path,
+) -> None:
+    """Verify native reader handles deeper recursive map/list/struct combinations."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    map_int_type = pa.map_(pa.string(), pa.int64())
+    map_map_type = pa.map_(pa.string(), map_int_type)
+    struct_map_type = pa.struct(
+        [
+            pa.field("m", map_map_type),
+            pa.field("n", pa.int64()),
+        ]
+    )
+    cases = [
+        (
+            "struct-map-map",
+            pa.struct([pa.field("k", map_map_type)]),
+            [
+                {"k": [("a", [("x", 1)]), ("b", [])]},
+                None,
+                {"k": None},
+            ],
+        ),
+        (
+            "list-struct-map-map",
+            pa.list_(pa.struct([pa.field("k", map_map_type)])),
+            [
+                [{"k": [("a", [("x", 1)])]}],
+                None,
+                [],
+                [{"k": None}],
+            ],
+        ),
+        (
+            "map-list-map-map",
+            pa.map_(pa.string(), pa.list_(map_map_type)),
+            [
+                [("a", [[("x", [("i", 1)])], []]), ("b", None)],
+                None,
+                [("c", [])],
+            ],
+        ),
+        (
+            "list-map-list-map-map",
+            pa.list_(pa.map_(pa.string(), pa.list_(map_map_type))),
+            [
+                [[("a", [[("x", [("i", 1)])]]), ("b", [])]],
+                None,
+                [],
+                [[("c", None)]],
+            ],
+        ),
+        (
+            "map-list-struct-map-map",
+            pa.map_(pa.string(), pa.list_(struct_map_type)),
+            [
+                [
+                    ("a", [{"m": [("x", [("i", 1)])], "n": 2}, None]),
+                    ("b", []),
+                ],
+                None,
+                [("c", None)],
+            ],
+        ),
+        (
+            "list-list-struct-map-map",
+            pa.list_(pa.list_(struct_map_type)),
+            [
+                [[{"m": [("x", [("i", 1)])], "n": 2}, None]],
+                None,
+                [[]],
+            ],
+        ),
+    ]
+
+    for name, item_type, values in cases:
+        path = tmp_path / f"native-{name}.parquet"
+        try:
+            items = pa.array(values, type=item_type)
+        except (pa.ArrowInvalid, pa.ArrowTypeError) as exc:
+            raise AssertionError(name) from exc
+        table = pa.table({"items": items})
+        write_parquet_native_first_stream(
+            pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+            path,
+            feature="test",
+            parquet_compression="uncompressed",
+        )
+
+        info = native_parquet_footer_info(path)
+
+        assert info is not None
+        assert info["native_reader_ready"] == 1
+        assert info["native_reader_blockers"] == []
+        factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+        reader = pa.RecordBatchReader.from_stream(factory)
+        out = reader.read_all()
+
+        assert out.schema.equals(table.schema), name
+        assert out.to_pylist() == table.to_pylist(), name
+        assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -5867,6 +6246,30 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
     )
     list_list_struct_map_list_map = pa.list_(pa.list_(nested_map_struct))
     map_list_list_struct_map = pa.map_(pa.string(), list_list_struct_map)
+    deep_list_map_struct = pa.struct(
+        [
+            pa.field(
+                "payload",
+                pa.list_(
+                    pa.map_(
+                        pa.string(),
+                        pa.struct(
+                            [
+                                pa.field(
+                                    "scores",
+                                    pa.list_(pa.map_(pa.string(), pa.int64())),
+                                )
+                            ]
+                        ),
+                    )
+                ),
+            ),
+            pa.field("flag", pa.int64()),
+        ]
+    )
+    list_map_list_list_deep_struct = pa.list_(
+        pa.map_(pa.string(), pa.list_(pa.list_(deep_list_map_struct)))
+    )
     cases = [
         (
             "struct-list-list-struct-map",
@@ -5944,8 +6347,38 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
                 {"k": None},
             ],
         ),
+        (
+            "list-map-list-list-struct-list-map-struct-list-map",
+            list_map_list_list_deep_struct,
+            [
+                [
+                    {
+                        "outer": [
+                            [
+                                {
+                                    "payload": [
+                                        {
+                                            "p": {
+                                                "scores": [{"s": 1}, {}],
+                                            }
+                                        }
+                                    ],
+                                    "flag": 7,
+                                },
+                                None,
+                            ],
+                            [],
+                        ]
+                    }
+                ],
+                None,
+                [],
+                [{"empty": None}],
+            ],
+        ),
     ]
 
+    deepest_reported_repeated_layout_count = 0
     for name, item_type, values in cases:
         path = tmp_path / f"native-{name}.parquet"
         table = pa.table({"items": pa.array(values, type=item_type)})
@@ -5961,12 +6394,1023 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
         assert info is not None
         assert info["native_reader_ready"] == 1
         assert info["native_reader_blockers"] == []
+        for column in info["row_groups"][0]["columns"]:
+            max_repetition_level = column["max_repetition_level"]
+            if max_repetition_level <= 0:
+                continue
+            layouts = column["repeated_level_layouts"]
+            deepest_reported_repeated_layout_count = max(
+                deepest_reported_repeated_layout_count, len(layouts)
+            )
+            assert len(layouts) == max_repetition_level, name
+            assert [layout["layout_index"] for layout in layouts] == list(
+                range(max_repetition_level)
+            ), name
+            assert all(layout["decoded"] == 1 for layout in layouts), name
         factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
         reader = pa.RecordBatchReader.from_stream(factory)
         out = reader.read_all()
 
         assert out.schema.equals(table.schema), name
         assert out.to_pylist() == table.to_pylist(), name
+        assert last_parquet_stream_factory_route() == "native_parquet_stream"
+    assert deepest_reported_repeated_layout_count > 3
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_required_and_optional_root_structs(
+    tmp_path: Path,
+) -> None:
+    """Verify root structs use the generic recursive struct materializer."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    root_struct = pa.struct(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("labels", pa.list_(pa.string())),
+            pa.field("meta", pa.struct([pa.field("score", pa.float64())])),
+        ]
+    )
+    schema = pa.schema(
+        [
+            pa.field("required_root", root_struct, nullable=False),
+            pa.field("optional_root", root_struct),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {
+                "required_root": {
+                    "id": 1,
+                    "labels": ["a", None],
+                    "meta": {"score": 1.5},
+                },
+                "optional_root": None,
+            },
+            {
+                "required_root": {
+                    "id": None,
+                    "labels": [],
+                    "meta": None,
+                },
+                "optional_root": {
+                    "id": 2,
+                    "labels": None,
+                    "meta": {"score": None},
+                },
+            },
+        ],
+        schema=schema,
+    )
+    path = tmp_path / "native-required-optional-root-structs.parquet"
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_recursive_sibling_repeated_branches(
+    tmp_path: Path,
+) -> None:
+    """Verify sibling repeated subtrees keep independent recursive layout cursors."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-recursive-sibling-repeated-branches.parquet"
+    left_value_type = pa.list_(
+        pa.map_(
+            pa.string(),
+            pa.list_(
+                pa.struct(
+                    [
+                        pa.field(
+                            "meta",
+                            pa.struct(
+                                [
+                                    pa.field("codes", pa.list_(pa.int64())),
+                                    pa.field("tag", pa.string()),
+                                ]
+                            ),
+                        ),
+                        pa.field("x", pa.int64()),
+                        pa.field("ys", pa.list_(pa.int64())),
+                    ]
+                )
+            ),
+        )
+    )
+    right_value_type = pa.map_(pa.string(), pa.list_(pa.list_(pa.map_(pa.string(), pa.int64()))))
+    item_type = pa.struct(
+        [
+            pa.field("left", left_value_type),
+            pa.field("plain", pa.int64()),
+            pa.field("right", right_value_type),
+        ]
+    )
+    table = pa.table(
+        {
+            "items": pa.array(
+                [
+                    {
+                        "left": [
+                            {
+                                "a": [
+                                    {
+                                        "meta": {"codes": [4, None], "tag": "a"},
+                                        "x": 1,
+                                        "ys": [1, None],
+                                    },
+                                    None,
+                                    {"meta": None, "x": None, "ys": []},
+                                ],
+                            },
+                            {},
+                        ],
+                        "plain": 10,
+                        "right": {"r": [[{"z": 3}, {}], []], "empty": None},
+                    },
+                    None,
+                    {"left": None, "plain": None, "right": {}},
+                    {
+                        "left": [{"b": [{"meta": {"codes": [], "tag": None}, "x": 2, "ys": None}]}],
+                        "plain": 20,
+                        "right": {"s": None},
+                    },
+                ],
+                type=item_type,
+            )
+        }
+    )
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    assert (
+        max(
+            len(column["repeated_level_layouts"])
+            for column in info["row_groups"][0]["columns"]
+            if column["max_repetition_level"] > 0
+        )
+        > 3
+    )
+    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(table.schema)
+    assert out.to_pylist() == table.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_adversarial_recursive_struct_siblings(
+    tmp_path: Path,
+) -> None:
+    """Verify nullable struct siblings under different repeated ancestors."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    primitive_map = pa.map_(pa.string(), pa.int64())
+    leaf_struct = pa.struct(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("tags", pa.list_(pa.string())),
+        ]
+    )
+    branch_struct = pa.struct(
+        [
+            pa.field("alpha", pa.list_(leaf_struct)),
+            pa.field("beta", pa.map_(pa.string(), leaf_struct)),
+            pa.field("gamma", pa.list_(pa.map_(pa.string(), pa.list_(leaf_struct)))),
+        ]
+    )
+    root_struct = pa.struct(
+        [
+            pa.field("left", pa.list_(branch_struct)),
+            pa.field("middle", pa.map_(pa.string(), branch_struct)),
+            pa.field("right", pa.list_(pa.list_(primitive_map))),
+        ]
+    )
+    cases = [
+        (
+            "root-struct-siblings",
+            root_struct,
+            [
+                {
+                    "left": [
+                        {
+                            "alpha": [{"id": 1, "tags": ["a", None]}, None],
+                            "beta": [
+                                ("b", {"id": 2, "tags": []}),
+                                ("n", None),
+                            ],
+                            "gamma": [
+                                [
+                                    (
+                                        "g",
+                                        [
+                                            {"id": 3, "tags": ["x"]},
+                                            None,
+                                        ],
+                                    )
+                                ]
+                            ],
+                        },
+                        None,
+                    ],
+                    "middle": [
+                        (
+                            "m",
+                            {
+                                "alpha": [],
+                                "beta": [],
+                                "gamma": [[("z", [])]],
+                            },
+                        )
+                    ],
+                    "right": [[{"r": 4}], [], None],
+                },
+                None,
+                {"left": None, "middle": [], "right": None},
+            ],
+        ),
+        (
+            "list-struct-siblings",
+            pa.list_(branch_struct),
+            [
+                [
+                    {
+                        "alpha": [{"id": 10, "tags": None}],
+                        "beta": [("x", None)],
+                        "gamma": [],
+                    },
+                    None,
+                ],
+                None,
+                [],
+                [{"alpha": None, "beta": [], "gamma": [[("deep", None)]]}],
+            ],
+        ),
+        (
+            "map-struct-siblings",
+            pa.map_(pa.string(), branch_struct),
+            [
+                [
+                    (
+                        "root",
+                        {
+                            "alpha": [None, {"id": 20, "tags": ["m"]}],
+                            "beta": [("k", {"id": None, "tags": [None]})],
+                            "gamma": [[("inner", [{"id": 21, "tags": []}])]],
+                        },
+                    )
+                ],
+                None,
+                [("empty", {"alpha": [], "beta": [], "gamma": []})],
+            ],
+        ),
+    ]
+
+    for name, item_type, values in cases:
+        path = tmp_path / f"native-adversarial-{name}.parquet"
+        table = pa.table({"items": pa.array(values, type=item_type)})
+        write_parquet_native_first_stream(
+            pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+            path,
+            feature="test",
+            parquet_compression="uncompressed",
+        )
+
+        info = native_parquet_footer_info(path)
+
+        assert info is not None
+        assert info["native_reader_ready"] == 1, name
+        assert info["native_reader_blockers"] == [], name
+        factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+        reader = pa.RecordBatchReader.from_stream(factory)
+        out = reader.read_all()
+
+        assert out.schema.equals(table.schema), name
+        assert out.to_pylist() == table.to_pylist(), name
+        assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_recursive_shapes_across_row_groups(
+    tmp_path: Path,
+) -> None:
+    """Verify projected recursive shapes materialize independently per row group."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    path = tmp_path / "native-recursive-projection-row-groups.parquet"
+    payload_type = pa.list_(
+        pa.struct(
+            [
+                pa.field("attrs", pa.map_(pa.string(), pa.list_(pa.int64()))),
+                pa.field(
+                    "children",
+                    pa.list_(
+                        pa.struct(
+                            [
+                                pa.field("name", pa.string()),
+                                pa.field("scores", pa.list_(pa.float64())),
+                            ]
+                        )
+                    ),
+                ),
+            ]
+        )
+    )
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("payload", payload_type),
+        ]
+    )
+    batches = [
+        pa.record_batch(
+            [
+                pa.array([1, 2], type=pa.int64()),
+                pa.array(
+                    [
+                        [
+                            {
+                                "attrs": [("a", [1, None]), ("empty", [])],
+                                "children": [
+                                    {"name": "x", "scores": [1.5]},
+                                    None,
+                                ],
+                            }
+                        ],
+                        None,
+                    ],
+                    type=payload_type,
+                ),
+            ],
+            schema=schema,
+        ),
+        pa.record_batch(
+            [
+                pa.array([3, 4], type=pa.int64()),
+                pa.array(
+                    [
+                        [],
+                        [
+                            {
+                                "attrs": None,
+                                "children": [
+                                    {"name": None, "scores": []},
+                                ],
+                            }
+                        ],
+                    ],
+                    type=payload_type,
+                ),
+            ],
+            schema=schema,
+        ),
+    ]
+    expected = pa.Table.from_batches(batches).select(["payload"])
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(schema, batches),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    assert info["row_group_count"] == 2
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["payload"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_recursive_null_empty_matrix(
+    tmp_path: Path,
+) -> None:
+    """Verify recursive native materialization over generated null/empty cases."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    leaf = pa.struct(
+        [
+            pa.field("value", pa.int64()),
+            pa.field("notes", pa.list_(pa.string())),
+        ]
+    )
+    branch = pa.struct(
+        [
+            pa.field("list_leaf", pa.list_(leaf)),
+            pa.field("map_leaf", pa.map_(pa.string(), leaf)),
+            pa.field("list_map_leaf", pa.list_(pa.map_(pa.string(), pa.list_(leaf)))),
+        ]
+    )
+    cases = [
+        (
+            "list-branch",
+            pa.list_(branch),
+            [
+                [
+                    {
+                        "list_leaf": [
+                            {"value": 1, "notes": ["a", None]},
+                            None,
+                            {"value": None, "notes": []},
+                        ],
+                        "map_leaf": [
+                            ("x", {"value": 2, "notes": None}),
+                            ("empty", None),
+                        ],
+                        "list_map_leaf": [
+                            [("lm", [{"value": 3, "notes": ["z"]}, None])],
+                            [],
+                        ],
+                    },
+                    None,
+                ],
+                None,
+                [],
+                [{"list_leaf": None, "map_leaf": [], "list_map_leaf": None}],
+            ],
+        ),
+        (
+            "map-branch",
+            pa.map_(pa.string(), branch),
+            [
+                [
+                    (
+                        "root",
+                        {
+                            "list_leaf": [],
+                            "map_leaf": [("k", {"value": 4, "notes": []})],
+                            "list_map_leaf": [[("deep", [])]],
+                        },
+                    ),
+                    ("null_value", None),
+                ],
+                None,
+                [],
+                [
+                    (
+                        "mixed",
+                        {
+                            "list_leaf": [None],
+                            "map_leaf": [],
+                            "list_map_leaf": [[("none", None)]],
+                        },
+                    )
+                ],
+            ],
+        ),
+        (
+            "struct-branch",
+            pa.struct(
+                [
+                    pa.field("left", pa.list_(branch)),
+                    pa.field("right", pa.map_(pa.string(), branch)),
+                ]
+            ),
+            [
+                {
+                    "left": [
+                        {
+                            "list_leaf": [{"value": 5, "notes": ["left"]}],
+                            "map_leaf": [],
+                            "list_map_leaf": [],
+                        }
+                    ],
+                    "right": [
+                        (
+                            "r",
+                            {
+                                "list_leaf": None,
+                                "map_leaf": [("leaf", None)],
+                                "list_map_leaf": None,
+                            },
+                        )
+                    ],
+                },
+                None,
+                {"left": [], "right": []},
+            ],
+        ),
+    ]
+
+    for name, item_type, values in cases:
+        path = tmp_path / f"native-recursive-null-empty-{name}.parquet"
+        table = pa.table({"items": pa.array(values, type=item_type)})
+        write_parquet_native_first_stream(
+            pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+            path,
+            feature="test",
+            parquet_compression="uncompressed",
+        )
+
+        info = native_parquet_footer_info(path)
+
+        assert info is not None
+        assert info["native_reader_ready"] == 1, name
+        assert info["native_reader_blockers"] == [], name
+        factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+        reader = pa.RecordBatchReader.from_stream(factory)
+        out = reader.read_all()
+
+        assert out.schema.equals(table.schema), name
+        assert out.to_pylist() == table.to_pylist(), name
+        assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_materializes_generated_extreme_recursive_shapes(
+    tmp_path: Path,
+) -> None:
+    """Verify deterministic high-depth and high-branch recursive shapes."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    def list_type(value_type: pa_types.DataType, depth: int) -> pa_types.DataType:
+        """Return a nested list type around value_type."""
+        out = value_type
+        for _ in range(depth):
+            out = pa.list_(out)
+        return out
+
+    def nested_list_value(value: object, depth: int) -> object:
+        """Return value wrapped in depth nested one-element lists."""
+        out = value
+        for _ in range(depth):
+            out = [out]
+        return out
+
+    def nested_empty_list(depth: int) -> object:
+        """Return an empty list nested at the requested list depth."""
+        out: object = []
+        for _ in range(depth - 1):
+            out = [out]
+        return out
+
+    require_native()
+    leaf = pa.struct(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("labels", pa.list_(pa.string())),
+        ]
+    )
+    scalar_deep_list_type = list_type(pa.int64(), 10)
+    deep_list_type = list_type(leaf, 8)
+    alternating_type = pa.list_(
+        pa.map_(
+            pa.string(),
+            pa.list_(
+                pa.map_(
+                    pa.string(),
+                    pa.list_(pa.map_(pa.string(), pa.list_(leaf))),
+                )
+            ),
+        )
+    )
+    branch_type = pa.struct(
+        [
+            pa.field("a", list_type(leaf, 4)),
+            pa.field("b", pa.map_(pa.string(), list_type(leaf, 3))),
+            pa.field("c", pa.list_(pa.map_(pa.string(), list_type(leaf, 2)))),
+            pa.field(
+                "d",
+                pa.map_(
+                    pa.string(),
+                    pa.struct(
+                        [
+                            pa.field("left", list_type(leaf, 2)),
+                            pa.field("right", pa.map_(pa.string(), leaf)),
+                        ]
+                    ),
+                ),
+            ),
+        ]
+    )
+    cases = [
+        (
+            "scalar-list-depth-10",
+            scalar_deep_list_type,
+            [
+                nested_list_value(11, 10),
+                None,
+                nested_empty_list(10),
+                nested_list_value(None, 10),
+            ],
+            10,
+        ),
+        (
+            "list-depth-8",
+            deep_list_type,
+            [
+                nested_list_value({"id": 1, "labels": ["deep", None]}, 8),
+                None,
+                nested_empty_list(8),
+                nested_list_value(None, 8),
+            ],
+            8,
+        ),
+        (
+            "alternating-list-map-depth",
+            alternating_type,
+            [
+                [
+                    [
+                        (
+                            "outer",
+                            [
+                                [
+                                    (
+                                        "middle",
+                                        [
+                                            [
+                                                (
+                                                    "inner",
+                                                    [
+                                                        {
+                                                            "id": 2,
+                                                            "labels": ["x"],
+                                                        },
+                                                        None,
+                                                    ],
+                                                )
+                                            ]
+                                        ],
+                                    )
+                                ],
+                                [],
+                            ],
+                        )
+                    ]
+                ],
+                None,
+                [],
+                [[("empty", [])]],
+            ],
+            6,
+        ),
+        (
+            "wide-branch-count-4",
+            branch_type,
+            [
+                {
+                    "a": nested_list_value({"id": 3, "labels": []}, 4),
+                    "b": [
+                        ("b0", nested_list_value({"id": 4, "labels": ["b"]}, 3)),
+                        ("b1", None),
+                    ],
+                    "c": [
+                        [
+                            (
+                                "c0",
+                                nested_list_value({"id": None, "labels": [None]}, 2),
+                            )
+                        ],
+                        [],
+                    ],
+                    "d": [
+                        (
+                            "d0",
+                            {
+                                "left": nested_empty_list(2),
+                                "right": [("r", {"id": 5, "labels": None})],
+                            },
+                        )
+                    ],
+                },
+                None,
+                {"a": None, "b": [], "c": None, "d": []},
+            ],
+            5,
+        ),
+    ]
+
+    for name, item_type, values, min_repeated_depth in cases:
+        path = tmp_path / f"native-recursive-generated-extreme-{name}.parquet"
+        table = pa.table({"items": pa.array(values, type=item_type)})
+        write_parquet_native_first_stream(
+            pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
+            path,
+            feature="test",
+            parquet_compression="uncompressed",
+        )
+
+        info = native_parquet_footer_info(path)
+
+        assert info is not None
+        assert info["native_reader_ready"] == 1, name
+        assert info["native_reader_blockers"] == [], name
+        assert (
+            max(
+                len(column["repeated_level_layouts"])
+                for column in info["row_groups"][0]["columns"]
+                if column["max_repetition_level"] > 0
+            )
+            >= min_repeated_depth
+        ), name
+        factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
+        reader = pa.RecordBatchReader.from_stream(factory)
+        out = reader.read_all()
+
+        assert out.schema.equals(table.schema), name
+        assert out.to_pylist() == table.to_pylist(), name
+        assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_multiple_recursive_roots(
+    tmp_path: Path,
+) -> None:
+    """Verify independent recursive roots survive projection and column reorder."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    left_type = pa.list_(
+        pa.struct(
+            [
+                pa.field("a", pa.list_(pa.int64())),
+                pa.field("b", pa.map_(pa.string(), pa.list_(pa.string()))),
+            ]
+        )
+    )
+    right_type = pa.map_(
+        pa.string(),
+        pa.struct(
+            [
+                pa.field("x", pa.list_(pa.map_(pa.string(), pa.int64()))),
+                pa.field("y", pa.list_(pa.list_(pa.float64()))),
+            ]
+        ),
+    )
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("left", left_type),
+            pa.field("right", right_type),
+            pa.field("tail", pa.string()),
+        ]
+    )
+    batches = [
+        pa.record_batch(
+            [
+                pa.array([1, 2], type=pa.int64()),
+                pa.array(
+                    [
+                        [{"a": [1, None], "b": [("k", ["v"])]}],
+                        None,
+                    ],
+                    type=left_type,
+                ),
+                pa.array(
+                    [
+                        [
+                            (
+                                "r",
+                                {
+                                    "x": [[("m", 3)], []],
+                                    "y": [[1.25], [], None],
+                                },
+                            )
+                        ],
+                        [],
+                    ],
+                    type=right_type,
+                ),
+                pa.array(["one", "two"]),
+            ],
+            schema=schema,
+        ),
+        pa.record_batch(
+            [
+                pa.array([3], type=pa.int64()),
+                pa.array([[{"a": [], "b": []}]], type=left_type),
+                pa.array([None], type=right_type),
+                pa.array(["three"]),
+            ],
+            schema=schema,
+        ),
+    ]
+    full_table = pa.Table.from_batches(batches)
+    expected = full_table.select(["right", "left"])
+    path = tmp_path / "native-multiple-recursive-roots.parquet"
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(schema, batches),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    assert info["row_group_count"] == 2
+    factory = open_parquet_record_batch_stream_factory(
+        path,
+        source="path",
+        feature="test",
+        columns=["right", "left"],
+    )
+    reader = pa.RecordBatchReader.from_stream(factory)
+    out = reader.read_all()
+
+    assert out.schema.equals(expected.schema)
+    assert out.to_pylist() == expected.to_pylist()
+    assert last_parquet_stream_factory_route() == "native_parquet_stream"
+
+
+@_requires_pyarrow
+def test_native_parquet_stream_projects_independent_recursive_roots_in_subsets(
+    tmp_path: Path,
+) -> None:
+    """Verify recursive roots and leaf order stay independent across projections."""
+    from schema_sanitizer.adapters.pyarrow_parquet_direct import (
+        last_parquet_stream_factory_route,
+        native_parquet_footer_info,
+        open_parquet_record_batch_stream_factory,
+    )
+    from schema_sanitizer.api_impl.native_file_output import write_parquet_native_first_stream
+
+    require_native()
+    alpha_type = pa.list_(
+        pa.struct(
+            [
+                pa.field("items", pa.list_(pa.map_(pa.string(), pa.int64()))),
+                pa.field("note", pa.string()),
+            ]
+        )
+    )
+    beta_type = pa.struct(
+        [
+            pa.field("left", pa.map_(pa.string(), pa.list_(pa.float64()))),
+            pa.field("right", pa.list_(pa.struct([pa.field("flag", pa.bool_())]))),
+        ]
+    )
+    gamma_type = pa.map_(
+        pa.string(),
+        pa.list_(
+            pa.struct(
+                [
+                    pa.field("labels", pa.list_(pa.string())),
+                    pa.field("score", pa.int64()),
+                ]
+            )
+        ),
+    )
+    schema = pa.schema(
+        [
+            pa.field("plain", pa.int64()),
+            pa.field("alpha", alpha_type),
+            pa.field("beta", beta_type),
+            pa.field("gamma", gamma_type),
+        ]
+    )
+    batches = [
+        pa.record_batch(
+            [
+                pa.array([1, 2], type=pa.int64()),
+                pa.array(
+                    [
+                        [{"items": [[("a", 10)], []], "note": "a"}],
+                        None,
+                    ],
+                    type=alpha_type,
+                ),
+                pa.array(
+                    [
+                        {
+                            "left": [("x", [1.25, None])],
+                            "right": [{"flag": True}, None],
+                        },
+                        None,
+                    ],
+                    type=beta_type,
+                ),
+                pa.array(
+                    [
+                        [("g", [{"labels": ["x", None], "score": 7}])],
+                        [],
+                    ],
+                    type=gamma_type,
+                ),
+            ],
+            schema=schema,
+        ),
+        pa.record_batch(
+            [
+                pa.array([3], type=pa.int64()),
+                pa.array([[{"items": None, "note": None}]], type=alpha_type),
+                pa.array([{"left": [], "right": []}], type=beta_type),
+                pa.array([None], type=gamma_type),
+            ],
+            schema=schema,
+        ),
+    ]
+    full_table = pa.Table.from_batches(batches)
+    path = tmp_path / "native-recursive-independent-root-subsets.parquet"
+    write_parquet_native_first_stream(
+        pa.RecordBatchReader.from_batches(schema, batches),
+        path,
+        feature="test",
+        parquet_compression="uncompressed",
+    )
+
+    info = native_parquet_footer_info(path)
+
+    assert info is not None
+    assert info["native_reader_ready"] == 1
+    assert info["native_reader_blockers"] == []
+    assert info["row_group_count"] == 2
+
+    for columns in (["gamma"], ["beta", "alpha"], ["gamma", "plain", "alpha"]):
+        factory = open_parquet_record_batch_stream_factory(
+            path,
+            source="path",
+            feature="test",
+            columns=columns,
+        )
+        reader = pa.RecordBatchReader.from_stream(factory)
+        out = reader.read_all()
+        expected = full_table.select(columns)
+
+        assert out.schema.equals(expected.schema), columns
+        assert out.to_pylist() == expected.to_pylist(), columns
         assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
