@@ -425,6 +425,7 @@ python benchmarks/bench_ingest.py --case jsonl --rows 100000 --repeats 3
 ```
 
 For architecture and ownership, see [responsibilities.md](responsibilities.md).
+For the production-readiness roadmap, see [todo.md](todo.md).
 
 ## License
 

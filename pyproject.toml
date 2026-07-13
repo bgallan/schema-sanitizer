@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "schema-sanitizer"
 dynamic = ["version"]
-description = "Data sanitization for CSV, JSON, JSONL, XML, Parquet, and Python objects incremental pipelines."
+description = "Path- and URI-based data sanitization for CSV, JSON, JSON arrays, JSON Lines, XML, and Parquet pipelines."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -135,6 +135,7 @@ include = [
   "README.md",
   "heuristics.md",
   "responsibilities.md",
+  "todo.md",
   "pyproject.toml"
 ]
 exclude = [

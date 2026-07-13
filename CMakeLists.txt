@@ -42,7 +42,7 @@ project(
   schema_sanitizer
   VERSION ${SCHEMA_SANITIZER_CMAKE_VERSION}
   DESCRIPTION
-    "Spec-driven data sanitization for CSV, JSON, JSONL, XML, Parquet, and Python objects"
+    "Spec-driven path and URI data sanitization for CSV, JSON, JSON arrays, JSON Lines, XML, and Parquet"
   HOMEPAGE_URL "https://github.com/bgallan/schema-sanitizer"
   LANGUAGES CXX)
 
