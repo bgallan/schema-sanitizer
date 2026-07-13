@@ -103,7 +103,7 @@ static bool read_value(std::string_view in, std::size_t *pos,
 // Returns whether a decoded integer belongs to an enum's wire domain.
 template <auto... Values> static bool enum_wire_value(int32_t value) {
   constexpr auto allowed = std::array{std::to_underlying(Values)...};
-  return std::ranges::contains(allowed, value);
+  return std::find(allowed.cbegin(), allowed.cend(), value) != allowed.cend();
 }
 
 template <class Enum> static bool valid_enum_value(int32_t value) {

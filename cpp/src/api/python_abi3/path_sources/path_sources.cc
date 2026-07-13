@@ -250,9 +250,6 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
   return input;
 }
 
-constexpr const char *kPathSourcePlanCapsuleName =
-    "schema_sanitizer.path_source_plan";
-
 } // namespace
 
 sanitize::Result<sanitize::FrontendHandle>
@@ -347,8 +344,10 @@ sanitize::Result<PathSourceInput>
 path_source_input(const sanitize::PreparedOptionsPtr &prepared,
                   const PathSourceSpec &source) {
   (void)prepared;
-  if (std::ranges::contains(kDirectPathSourceFrontends,
-                            std::string_view(source.frontend))) {
+  if (std::find(kDirectPathSourceFrontends.cbegin(),
+                kDirectPathSourceFrontends.cend(),
+                std::string_view(source.frontend)) !=
+      kDirectPathSourceFrontends.cend()) {
     SAN_ASSIGN_OR_RAISE(auto chunk_source,
                         sanitize::chunk_source_from_path_with_encoding(
                             source.path, prepared->spec.input_text_encoding));

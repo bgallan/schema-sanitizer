@@ -57,5 +57,6 @@ def test_coalescing_stream_releases_each_input_batch_after_copy() -> None:
     assert "std::vector<std::unique_ptr<sanitize::CArrayGuard>>" not in source
     assert "build_coalesced_array_state" not in source
     assert "integer_width_for_format" in schema
-    assert "std::ranges::contains(kInteger8Formats, format)" in schema
+    assert "std::find(kInteger8Formats.cbegin(), kInteger8Formats.cend(), format)" in schema
+    assert "std::ranges::contains" not in schema
     assert not (streaming / "coalesce_stream").exists()

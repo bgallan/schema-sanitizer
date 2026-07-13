@@ -91,8 +91,11 @@ def test_path_source_size_validation_is_native_and_one_time() -> None:
     assert "os.path.getsize" not in python_owner
     assert "check_document_size" not in python_owner
     assert "validate_path_source_sizes" in cpp_owner
-    assert "std::filesystem::file_size" in cpp_owner
+    assert "std::ifstream input(source.path, std::ios::binary | std::ios::ate)" in cpp_owner
+    assert "input.tellg()" in cpp_owner
+    assert "std::filesystem" not in cpp_owner
     assert "memory_limit_bytes limit exceeded during" in cpp_owner
     assert '"OLs:path_source_plan_create"' in cpp_owner
     assert '"O|Ls:path_source_plan_create"' not in cpp_owner
-    assert "std::ranges::contains(kDirectPathSourceFrontends" in input_owner
+    assert "std::find(kDirectPathSourceFrontends.cbegin()" in input_owner
+    assert "std::ranges::contains" not in input_owner

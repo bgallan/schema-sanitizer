@@ -14,16 +14,20 @@ constexpr std::array<std::string_view, 2> kInteger32Formats{"i", "I"};
 constexpr std::array<std::string_view, 2> kInteger64Formats{"l", "L"};
 
 std::size_t integer_width_for_format(std::string_view format) noexcept {
-  if (std::ranges::contains(kInteger8Formats, format)) {
+  if (std::find(kInteger8Formats.cbegin(), kInteger8Formats.cend(), format) !=
+      kInteger8Formats.cend()) {
     return 1;
   }
-  if (std::ranges::contains(kInteger16Formats, format)) {
+  if (std::find(kInteger16Formats.cbegin(), kInteger16Formats.cend(), format) !=
+      kInteger16Formats.cend()) {
     return 2;
   }
-  if (std::ranges::contains(kInteger32Formats, format)) {
+  if (std::find(kInteger32Formats.cbegin(), kInteger32Formats.cend(), format) !=
+      kInteger32Formats.cend()) {
     return 4;
   }
-  if (std::ranges::contains(kInteger64Formats, format)) {
+  if (std::find(kInteger64Formats.cbegin(), kInteger64Formats.cend(), format) !=
+      kInteger64Formats.cend()) {
     return 8;
   }
   return 0;

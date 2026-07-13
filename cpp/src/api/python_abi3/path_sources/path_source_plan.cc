@@ -6,7 +6,7 @@
 #include <array>
 #include <cctype>
 #include <cstddef>
-#include <filesystem>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <memory>
@@ -92,11 +92,16 @@ validate_path_source_sizes(const std::vector<PathSourceSpec> &sources,
     return sanitize::Status::OK();
   }
   for (const PathSourceSpec &source : sources) {
-    std::error_code error;
-    const std::uintmax_t size = std::filesystem::file_size(source.path, error);
-    if (error) {
+    std::ifstream input(source.path, std::ios::binary | std::ios::ate);
+    if (!input) {
       continue;
     }
+    const auto end = input.tellg();
+    if (end == std::ifstream::pos_type(-1)) {
+      continue;
+    }
+    const auto size =
+        static_cast<std::uintmax_t>(static_cast<std::streamoff>(end));
     if (size > static_cast<std::uintmax_t>(memory_limit_bytes)) {
       return sanitize::Status::Invalid(
           "memory_limit_bytes limit exceeded during ", stage, ": ", size,

@@ -116,7 +116,8 @@ sanitize::Status validate_native_recursive_output_layout(
     observed_leaf_count += field.recursive_counts.leaf_count;
   }
   if (observed_leaf_count != expected_leaf_count ||
-      std::ranges::contains(leaf_states, LeafState::Unseen)) {
+      std::find(leaf_states.cbegin(), leaf_states.cend(), LeafState::Unseen) !=
+          leaf_states.cend()) {
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive output layout leaf count mismatch");
   }

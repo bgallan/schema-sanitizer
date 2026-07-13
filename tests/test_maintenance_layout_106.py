@@ -70,13 +70,14 @@ def test_parquet_micro_fragments_are_consolidated_by_runtime_phase() -> None:
         assert retired not in translation_unit
 
 
-def test_recursive_output_validation_is_linear_and_uses_cxx23_ranges() -> None:
-    """Recursive output validation must avoid per-field sorting and copying."""
+def test_recursive_output_validation_is_linear_and_portable() -> None:
+    """Recursive output validation avoids copying and unsupported range algorithms."""
     layout = FOOTER / ("native_stream/schema/native_stream_output_layout.cc.inc")
     text = layout.read_text(encoding="utf-8")
 
     assert "enum class LeafState" in text
-    assert "std::ranges::contains(leaf_states, LeafState::Unseen)" in text
+    assert "std::find(leaf_states.cbegin(), leaf_states.cend(), LeafState::Unseen)" in text
+    assert "std::ranges::contains" not in text
     assert "std::ranges::sort(recursive_leaf_columns)" not in text
     assert "expected_leaf_columns" not in text
 

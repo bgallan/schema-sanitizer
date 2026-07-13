@@ -99,8 +99,9 @@ def test_abi_method_table_has_one_direct_static_owner() -> None:
     assert not (owner.parent / "module_methods").exists()
 
 
-def test_cpp23_enum_validation_uses_standard_ranges_and_underlying_values() -> None:
-    """Native wire enums use the C++23 standard library instead of repeated comparisons."""
+def test_enum_validation_uses_portable_search_and_underlying_values() -> None:
+    """Native wire enums avoid repeated comparisons and unavailable range algorithms."""
     owner = (ROOT / "cpp/src/planning/options_field_deserialization.cc").read_text(encoding="utf-8")
-    assert "std::ranges::contains" in owner
+    assert "std::find(allowed.cbegin(), allowed.cend(), value)" in owner
+    assert "std::ranges::contains" not in owner
     assert "std::to_underlying" in owner
