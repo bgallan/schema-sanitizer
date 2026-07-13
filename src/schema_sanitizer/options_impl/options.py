@@ -1,92 +1,148 @@
-"""Implements `schema_sanitizer.options_impl.options`."""
+"""Grouped wrapper around the native C++ options catalog."""
 
 from __future__ import annotations
 
 from enum import Enum
 from typing import Any
 
-from ..core_impl.options_bytes import Options as _RawOptions
-from ..core_impl.options_bytes import validate_options as _validate_options
-from ..core_impl.options_logical_schema import LogicalSchemaPayload
-from .options_groups import (
-    _ALLOWED_BY_GROUP,
-    _GROUP_BY_OPTION_NAME,
-    _GROUP_NAMES,
-    _coerce_enum_if_needed,
-    _coerce_option_value_if_needed,
-    _Proxy,
-)
+from ..core_impl.logical_schema import LogicalSchemaPayload
+from ..core_impl.native_options import ENUM_BY_KIND, OPTIONS, coerce_enum_member
+from ..core_impl.native_options import Options as _RawOptions
+from ..core_impl.native_options import validate_options as _validate_options
 
+_BOOL_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind == "bool")
+_INT_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind in {"i32", "i64"})
+_STRING_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind == "string")
+_STRING_LIST_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind == "string_list")
+_ENUM_BY_OPTION_NAME: dict[str, Any] = {
+    spec.name: ENUM_BY_KIND[spec.kind] for spec in OPTIONS if spec.kind in ENUM_BY_KIND
+}
+_ALLOWED_BY_GROUP: dict[str, frozenset[str]] = {
+    group: frozenset(spec.name for spec in OPTIONS if spec.group == group)
+    for group in {spec.group for spec in OPTIONS}
+}
+_GROUP_NAMES = frozenset(_ALLOWED_BY_GROUP)
+_GROUP_BY_OPTION_NAME = {
+    option_name: group_name
+    for group_name, option_names in _ALLOWED_BY_GROUP.items()
+    for option_name in option_names
+}
 _OPTION_NAMES = frozenset(_GROUP_BY_OPTION_NAME)
 _READ_ONLY_OPTION_ATTRS = frozenset({"_raw"}) | _GROUP_NAMES
 
 
+def _coerce_enum_if_needed(option_name: str, value: Any) -> Any:
+    """Coerce a catalog-backed enum option through the canonical helper."""
+    enum_type = _ENUM_BY_OPTION_NAME.get(option_name)
+    if enum_type is None:
+        return value
+    return coerce_enum_member(enum_type, value, label=f"option '{option_name}'")
+
+
+def _coerce_option_value_if_needed(option_name: str, value: Any) -> Any:
+    """Normalize and type-check one catalog-backed option value."""
+    if option_name in _BOOL_OPTION_NAMES and not isinstance(value, bool):
+        raise TypeError(f"Option '{option_name}' must be a bool")
+    if option_name in _INT_OPTION_NAMES and (isinstance(value, bool) or not isinstance(value, int)):
+        raise TypeError(f"Option '{option_name}' must be an integer")
+    if option_name in _STRING_OPTION_NAMES and not isinstance(value, str):
+        raise TypeError(f"Option '{option_name}' must be a string")
+    if option_name not in _STRING_LIST_OPTION_NAMES:
+        return value
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(f"Option '{option_name}' must be a sequence of strings, not a string")
+    try:
+        out = list(value)
+    except TypeError as e:
+        raise TypeError(f"Option '{option_name}' must be a sequence of strings") from e
+    if not all(isinstance(item, str) for item in out):
+        raise TypeError(f"Option '{option_name}' must contain only strings")
+    return out
+
+
+class _Proxy:
+    """Attribute proxy exposing one canonical native option group."""
+
+    __slots__ = ("_allowed", "_raw")
+
+    def __init__(self, raw: Any, allowed: frozenset[str]) -> None:
+        """Create a proxy over an immutable set of option names."""
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_allowed", allowed)
+
+    def _resolve_target(self, option_name: str) -> str:
+        """Resolve an allowed option name or raise a clear error."""
+        if option_name in self._allowed:
+            return option_name
+        raise AttributeError(
+            f"Unknown option '{option_name}' for this group. "
+            "If you recently changed native options, rebuild the native extension."
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        """Return an option value from the raw options object."""
+        return getattr(self._raw, self._resolve_target(name))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Normalize and set an option value on the raw object."""
+        if name in _Proxy.__slots__:
+            object.__setattr__(self, name, value)
+            return
+        target = self._resolve_target(name)
+        value = _coerce_option_value_if_needed(target, value)
+        setattr(self._raw, target, _coerce_enum_if_needed(target, value))
+
+    def __dir__(self) -> list[str]:
+        """Return the option names exposed by this proxy."""
+        return sorted(self._allowed)
+
+
 class Options:
-    """Internal wrapper for the native C++ options object.
+    """Grouped wrapper for the flat native C++ options object.
 
-    The underlying C++ options struct is intentionally flat. This wrapper provides
-    grouped accessors (`schema`, `inference`, `io`, ...) for per-call option
-    normalization before C++ runtime dispatch.
-
-    Construction supports grouped initialization:
-
-        >>> Options(schema={"schema_evolution": "STRICT"},
-        ...         errors={"on_error": "STOP"})
-
-    Each group value must be a `dict` mapping canonical option names to values.
-    Canonical names are the ones in ``cpp/src/sanitize/options/options_catalog.def``.
-
-    Unknown keys raise `TypeError`.
+    Construction accepts canonical group dictionaries such as
+    ``Options(schema={"schema_evolution": "STRICT"})``. Unknown groups and
+    unknown option names are rejected rather than translated through aliases.
     """
 
     _raw: _RawOptions
 
-    def _bind_groups(self, raw: _RawOptions) -> None:
-        """Bind this wrapper to a raw options instance."""
-
-        object.__setattr__(self, "_raw", raw)
-
-        # High-level, grouped proxies (catalog-driven; canonical names only).
-        for group_name, allowed in _ALLOWED_BY_GROUP.items():
-            object.__setattr__(self, group_name, _Proxy(self._raw, allowed=allowed))
-
     def __init__(self, **kwargs: Any) -> None:
         """Create grouped options from canonical option dictionaries."""
         self._bind_groups(_RawOptions())
+        for group_name, values in kwargs.items():
+            if group_name not in _GROUP_NAMES:
+                raise TypeError(
+                    f"Unknown option {group_name!r}. "
+                    "Use grouped kwargs (schema=..., inference=..., ...)."
+                )
+            if not isinstance(values, dict):
+                raise TypeError(f"Options.{group_name} must be a dict of group fields")
+            proxy = getattr(self, group_name)
+            for option_name, value in values.items():
+                setattr(proxy, option_name, value)
 
-        if kwargs:
-            self._apply_kwargs(kwargs)
-
-    def _apply_kwargs(self, kwargs: dict[str, Any]) -> None:
-        """Apply grouped constructor keyword arguments."""
-        for k, v in kwargs.items():
-            if k in _GROUP_NAMES:
-                if not isinstance(v, dict):
-                    raise TypeError(f"Options.{k} must be a dict of group fields")
-                proxy = getattr(self, k)
-                for subk, subv in v.items():
-                    setattr(proxy, subk, subv)
-                continue
-
-            raise TypeError(
-                f"Unknown option {k!r}. Use grouped kwargs (schema=..., inference=..., ...)."
-            )
+    def _bind_groups(self, raw: _RawOptions) -> None:
+        """Bind this wrapper and all grouped proxies to a raw options instance."""
+        object.__setattr__(self, "_raw", raw)
+        for group_name, allowed in _ALLOWED_BY_GROUP.items():
+            object.__setattr__(self, group_name, _Proxy(raw, allowed))
 
     @property
     def raw(self) -> _RawOptions:
-        """The backing native Options instance."""
+        """Return the backing native options instance."""
         return self._raw
 
     def __getattr__(self, name: str) -> Any:
         """Return a canonical raw option value."""
-        # Convenience: allow accessing raw fields directly (advanced usage).
         if name not in _OPTION_NAMES:
             raise AttributeError(f"Unknown option attribute {name!r}")
         return getattr(self._raw, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Set and normalize a canonical raw option value."""
-        # Keep proxies immutable once created.
         if name in _READ_ONLY_OPTION_ATTRS:
             raise AttributeError(f"'{type(self).__name__}' attribute '{name}' is read-only")
         if name not in _OPTION_NAMES:
@@ -98,69 +154,49 @@ class Options:
         """Return a compact grouped options representation."""
         return "Options(schema=..., inference=..., io=..., performance=...)"
 
-    # ---- Serialization -------------------------------------------------
-
     @staticmethod
-    def _encode_value_for_json(v: Any) -> Any:
+    def _encode_value_for_json(value: Any) -> Any:
         """Convert an option value to a JSON-friendly representation."""
-        if isinstance(v, Enum):
-            return v.name
-
-        if isinstance(v, (list, tuple)):
-            return [Options._encode_value_for_json(x) for x in v]
-        if isinstance(v, dict):
-            return {str(k): Options._encode_value_for_json(val) for k, val in v.items()}
-
-        if isinstance(v, LogicalSchemaPayload):
-            return v
-
-        # Arrow schema is not JSON-serializable in a stable way.
-        if v is not None and hasattr(v, "__arrow_c_schema__"):
+        if isinstance(value, Enum):
+            return value.name
+        if isinstance(value, (list, tuple)):
+            return [Options._encode_value_for_json(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): Options._encode_value_for_json(item) for key, item in value.items()}
+        if isinstance(value, LogicalSchemaPayload):
+            return value
+        if value is not None and hasattr(value, "__arrow_c_schema__"):
             raise TypeError(
                 "arrow_schema_contract cannot be serialized to JSON. "
                 "Pass it programmatically (pyarrow.Schema) instead."
             )
-        return v
+        return value
 
     def to_flat_dict(self, *, include_defaults: bool = False) -> dict[str, Any]:
-        """Serialize the underlying C++ options as a flat dict.
-
-        Values are JSON-friendly (enums are rendered as their name).
-        """
-
+        """Serialize the native options as a flat dictionary."""
         default = _RawOptions() if not include_defaults else None
         out: dict[str, Any] = {}
         for name in sorted(_OPTION_NAMES):
-            v = getattr(self._raw, name)
-            if default is not None and v == getattr(default, name):
+            value = getattr(self._raw, name)
+            if default is not None and value == getattr(default, name):
                 continue
-            out[name] = self._encode_value_for_json(v)
+            out[name] = self._encode_value_for_json(value)
         return out
 
     def to_dict(self, *, include_defaults: bool = False) -> dict[str, Any]:
-        """Serialize options into the grouped kwargs form accepted by Options(...)."""
-
+        """Serialize options into the grouped form accepted by ``Options``."""
         grouped: dict[str, dict[str, Any]] = {}
-
-        # Group by catalog metadata. Import-time validation guarantees coverage.
-        for k, v in self.to_flat_dict(include_defaults=include_defaults).items():
-            grouped.setdefault(_GROUP_BY_OPTION_NAME[k], {})[k] = v
-
-        return {group: grouped[group] for group in sorted(_GROUP_NAMES) if group in grouped}
-
-    # ---------------------------------------------------------------------
-    # Native validation / compilation
-    # ---------------------------------------------------------------------
+        for name, value in self.to_flat_dict(include_defaults=include_defaults).items():
+            grouped.setdefault(_GROUP_BY_OPTION_NAME[name], {})[name] = value
+        return {group: grouped[group] for group in sorted(grouped)}
 
     def validate_native(self) -> None:
-        """Validate options against the native engine (raises on error)."""
-
+        """Validate options against the native engine."""
         _validate_options(self.raw)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Options:
-        """Create Options from a grouped dict."""
-
+        """Create options from a grouped dictionary."""
         if not isinstance(d, dict):
             raise TypeError("Options.from_dict expects a dict")
         return cls(**d)

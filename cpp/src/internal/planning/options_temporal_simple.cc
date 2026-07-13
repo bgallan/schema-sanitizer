@@ -4,8 +4,8 @@
 
 #include <cstddef>
 
-#include "internal/planning/options_temporal_regex_parts.hh"
 #include "internal/planning/options_temporal_simple_parts.hh"
+#include "internal/planning/temporal/parts.hh"
 #include "sanitize/core/primitives.hh"
 
 namespace sanitize::internal {

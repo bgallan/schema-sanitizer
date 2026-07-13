@@ -3,6 +3,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace sanitize::internal {
@@ -17,6 +18,10 @@ struct VersionedFieldName {
 /// Parse <base>_v<version>_<semantic_type>, requiring version >= 2.
 std::optional<VersionedFieldName>
 parse_versioned_field_name(std::string_view name) noexcept;
+
+/// Render <base>_v<version>_<semantic_type> with one exact allocation.
+std::string make_versioned_field_name(std::string_view base, int version,
+                                      std::string_view semantic_type);
 
 /// Return the unversioned base for hybrid version names, or empty when absent.
 std::string_view versioned_field_base(std::string_view name) noexcept;

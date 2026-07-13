@@ -113,14 +113,12 @@ jobs:
           CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
           CIBW_TEST_REQUIRES: pyarrow
           CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import pyarrow as
-            pa,
+            python -c "import tempfile; from pathlib import Path; import
             pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
-            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
-            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
-            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
-            p, feature='wheel-gzip-smoke');
+            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
+            source=d/'input.csv'; p=d/'gzip.parquet';
+            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
+            s.to_parquet(source, p, input_format='csv');
             c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
             assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
         run: cibuildwheel --output-dir wheelhouse
@@ -135,14 +133,12 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static"
           CIBW_TEST_REQUIRES: pyarrow
           CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import pyarrow as
-            pa,
+            python -c "import tempfile; from pathlib import Path; import
             pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
-            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
-            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
-            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
-            p, feature='wheel-gzip-smoke');
+            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
+            source=d/'input.csv'; p=d/'gzip.parquet';
+            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
+            s.to_parquet(source, p, input_format='csv');
             c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
             assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
         run: cibuildwheel --output-dir wheelhouse
@@ -156,14 +152,12 @@ jobs:
           CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
           CIBW_TEST_REQUIRES: pyarrow
           CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import pyarrow as
-            pa,
+            python -c "import tempfile; from pathlib import Path; import
             pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
-            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
-            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
-            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
-            p, feature='wheel-gzip-smoke');
+            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
+            source=d/'input.csv'; p=d/'gzip.parquet';
+            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
+            s.to_parquet(source, p, input_format='csv');
             c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
             assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
         run: cibuildwheel --output-dir wheelhouse

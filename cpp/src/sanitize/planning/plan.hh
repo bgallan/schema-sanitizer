@@ -107,13 +107,13 @@ struct StructLayout {
 
 struct ColumnPlan {
   std::string name;
+  uint64_t name_hash = 0;
   LogicalType logical_type;
   bool nullable = true;
 
   detail::PathId path_id = 0;
 
   // Schema-registry version-family metadata, precomputed for sibling routing.
-  std::string variant_family_base;
   bool has_variant_sibling = false;
   std::vector<int32_t> variant_sibling_indices;
 

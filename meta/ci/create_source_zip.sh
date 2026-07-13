@@ -28,7 +28,7 @@ root = Path(sys.argv[1])
 out = Path(sys.argv[2])
 
 # Root build/cache outputs are excluded. Do not exclude every path segment named
-# "build": cpp/src/internal/build contains real source files used by CMake.
+# "build": cpp/src/internal/materialization contains real source files used by CMake.
 ROOT_DIR_EXCLUDES = {
     ".git",
     ".mypy_cache",
@@ -68,7 +68,13 @@ for path in root.rglob("*"):
     rel = path.relative_to(root)
     if not rel.parts:
         continue
-    if rel.parts[0] in ROOT_DIR_EXCLUDES:
+    root_dir = rel.parts[0]
+    if (
+        root_dir in ROOT_DIR_EXCLUDES
+        or root_dir.startswith(".build")
+        or root_dir.startswith("build-")
+        or root_dir.startswith("cmake-build-")
+    ):
         continue
     if any(part in ANY_DIR_EXCLUDES or part.endswith(".egg-info") for part in rel.parts):
         continue

@@ -101,6 +101,24 @@ jobs:
               raise SystemExit(f"detect-secrets found {total} potential secret(s) in {len(findings)} file(s)")
           print("detect-secrets: no findings")
           PY
+  quality:
+    name: lint and static typing
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install development tools
+        run: python -m pip install -U pip '.[dev]'
+      - name: Pre-commit checks
+        run: pre-commit run --all-files
+      - name: MyPy
+        run: python -m mypy
+      - name: Benchmark suite smoke
+        run: python benchmarks/bench_ingest.py --rows 8 --width 2 --repeats 1
 
   # Core lane: must build and import without pyarrow installed and without Arrow C++ linkage.
   core-only:
@@ -124,7 +142,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Upgrade pip
-        run: python -m pip install -U pip
+        run: python -m pip install -U pip pytest
       - name: Assert pyarrow is NOT installed
         run: |
           python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('pyarrow') is None else 1)"
@@ -142,6 +160,12 @@ jobs:
       - name: Import smoke (no adapters)
         run: |
           python -c "import schema_sanitizer as s; print('import ok', s.__version__)"
+      - name: Parquet contract collection smoke (no pyarrow)
+        run: >-
+          pytest --collect-only -q
+          tests/test_parquet_contract_gates_part01.py
+          tests/test_parquet_contract_gates_part02.py
+          tests/test_parquet_contract_gates_part03.py
       - name: Verify extension does not link libarrow/libparquet
         if: runner.os != 'Windows'
         shell: bash
@@ -225,6 +249,27 @@ jobs:
           python -m pip install -U ".[dev,pyarrow]"
       - name: Compileall
         run: python -m compileall -q src
+      - name: Parquet contract runtime readiness
+        run: python meta/ci/check_parquet_contract_runtime.py
+      - name: Parquet contract runtime gates
+        run: >-
+          pytest -q
+          tests/test_parquet_contract_gates_part01.py
+          tests/test_parquet_contract_gates_part02.py
+          tests/test_parquet_contract_gates_part03.py
+          -k "parquet_contract_runtime_readiness_status or parquet_contract_certification_status
+          or native_parquet_writer_contract_status or native_parquet_nested_contract_status"
+      - name: Parquet contract runtime suite
+        run: |
+          mkdir -p artifacts
+          python meta/ci/check_parquet_contract_runtime_suite.py --certificate-output artifacts/parquet-contract-runtime-certificate.json
+      - name: Upload Parquet contract certificate
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parquet-contract-runtime-certificate
+          path: artifacts/parquet-contract-runtime-certificate.json
+          if-no-files-found: ignore
       - name: Gate tests
         run: |
           pytest -q tests/test_api.py::test_public_api_contract tests/test_contracts.py::test_skip_row_does_not_partially_append_columns tests/test_contracts.py::test_result_does_not_expose_bad_rows
@@ -309,14 +354,12 @@ jobs:
           CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
           CIBW_TEST_REQUIRES: pyarrow
           CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import pyarrow as
-            pa,
+            python -c "import tempfile; from pathlib import Path; import
             pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
-            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
-            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
-            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
-            p, feature='wheel-gzip-smoke');
+            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
+            source=d/'input.csv'; p=d/'gzip.parquet';
+            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
+            s.to_parquet(source, p, input_format='csv');
             c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
             assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
         run: cibuildwheel --output-dir wheelhouse
@@ -331,14 +374,12 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static"
           CIBW_TEST_REQUIRES: pyarrow
           CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import pyarrow as
-            pa,
+            python -c "import tempfile; from pathlib import Path; import
             pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
-            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
-            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
-            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
-            p, feature='wheel-gzip-smoke');
+            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
+            source=d/'input.csv'; p=d/'gzip.parquet';
+            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
+            s.to_parquet(source, p, input_format='csv');
             c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
             assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
         run: cibuildwheel --output-dir wheelhouse
@@ -352,14 +393,12 @@ jobs:
           CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
           CIBW_TEST_REQUIRES: pyarrow
           CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import pyarrow as
-            pa,
+            python -c "import tempfile; from pathlib import Path; import
             pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; from schema_sanitizer.api_impl import
-            native_file_output as n; p=Path(tempfile.mkdtemp())/'gzip.parquet';
-            b=pa.record_batch({'s': pa.array(['x']*32, type=pa.string())});
-            n.write_parquet_native_first_stream(pa.RecordBatchReader.from_batches(b.schema,[b]),
-            p, feature='wheel-gzip-smoke');
+            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
+            source=d/'input.csv'; p=d/'gzip.parquet';
+            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
+            s.to_parquet(source, p, input_format='csv');
             c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
             assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
         run: cibuildwheel --output-dir wheelhouse

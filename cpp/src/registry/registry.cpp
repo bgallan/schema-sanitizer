@@ -5,7 +5,7 @@
 #include <string_view>
 #include <utility>
 
-#include "internal/frontends/builtin_frontends.hh"
+#include "frontends/builtin_frontends.hh"
 #include "sanitize/core/row_stream.hh"
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/options/options.hh"

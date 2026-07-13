@@ -4,7 +4,7 @@
 // scalar values while reusing the project's civil-date primitives.
 
 #include "internal/planning/options_temporal_regex.hh"
-#include "internal/planning/options_temporal_regex_parts.hh"
+#include "internal/planning/temporal/parts.hh"
 
 #include <cstdint>
 #include <regex>

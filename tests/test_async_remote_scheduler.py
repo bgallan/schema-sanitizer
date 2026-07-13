@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from schema_sanitizer.api_impl.async_remote_scheduler import (
+from schema_sanitizer.core_impl.async_scheduler import (
     ordered_indexed_results,
     retry_async,
     unordered_indexed_results,
@@ -126,5 +126,35 @@ def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None
                 raise AssertionError("failed task should not yield")
 
         assert cancelled == [1]
+
+    asyncio.run(run())
+
+
+def test_unordered_indexed_results_reuses_fixed_worker_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify large batches create only the configured worker count."""
+
+    async def run() -> None:
+        """Run a large trivial batch while counting task construction."""
+        created = 0
+        original_create_task = asyncio.create_task
+
+        def counted_create_task(coro: object) -> asyncio.Task[object]:
+            """Count scheduler-owned task construction."""
+            nonlocal created
+            created += 1
+            return original_create_task(coro)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(asyncio, "create_task", counted_create_task)
+
+        async def fetch(index: int) -> int:
+            """Return one result after yielding control once."""
+            await asyncio.sleep(0)
+            return index
+
+        values = [value async for _index, value in unordered_indexed_results(100, fetch, window=4)]
+        assert sorted(values) == list(range(100))
+        assert created == 4
 
     asyncio.run(run())

@@ -76,6 +76,8 @@ public:
   [[nodiscard]] double as_float() const;
   // Returns the value as a string view.
   [[nodiscard]] std::string_view as_string_view() const;
+  // Reports whether an object or array has no children.
+  Status container_is_empty(bool *out) const;
 
   // Visits each object field.
   template <class Fn> Status for_each_object_field(Fn &&fn) const {

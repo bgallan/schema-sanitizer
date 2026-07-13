@@ -1,6 +1,6 @@
 // Builds XML node projections exposed through generic ValueView objects.
 
-#include "internal/parsing/xml_document.hh"
+#include "internal/parsing/xml/document.hh"
 
 #include <algorithm>
 #include <cctype>
@@ -27,6 +27,11 @@ std::string trim_copy(std::string_view text) {
   return std::string(text);
 }
 
+void append_xml_field(XmlNode *node, XmlField field) {
+  field.key_hash = sanitize::detail::hash_key64(field.key);
+  node->fields.push_back(std::move(field));
+}
+
 /// Visit XML array-group elements through the generic value-view ABI.
 sanitize::Status xml_array_for_each(const void *self, void *ctx,
                                     ValueView::ArrayEachFn fn) {
@@ -42,9 +47,8 @@ sanitize::Status xml_object_for_each(const void *self, void *ctx,
                                      ValueView::ObjectEachFn fn) {
   auto *node = static_cast<const XmlNode *>(self);
   for (const XmlField &field : node->fields) {
-    const std::string_view key(field.key);
-    SAN_RETURN_NOT_OK(fn(ctx, key, sanitize::detail::hash_key64(key),
-                         xml_field_to_value(field)));
+    SAN_RETURN_NOT_OK(
+        fn(ctx, field.key, field.key_hash, xml_field_to_value(field)));
   }
   return sanitize::Status::OK();
 }
@@ -95,28 +99,28 @@ void build_xml_node_model(XmlNode *node) {
   node->fields.reserve(node->attrs.size() + node->children.size() +
                        (text.empty() ? 0u : 1u));
   for (const auto &attr : node->attrs) {
-    node->fields.push_back(XmlField{
-        .key = "@" + attr.name,
-        .kind = XmlField::Kind::kScalar,
-        .scalar = attr.value,
-    });
+    append_xml_field(node, XmlField{
+                               .key = "@" + attr.name,
+                               .kind = XmlField::Kind::kScalar,
+                               .scalar = attr.value,
+                           });
   }
   if (!text.empty()) {
-    node->fields.push_back(XmlField{
-        .key = "#text",
-        .kind = XmlField::Kind::kScalar,
-        .scalar = text,
-    });
+    append_xml_field(node, XmlField{
+                               .key = "#text",
+                               .kind = XmlField::Kind::kScalar,
+                               .scalar = text,
+                           });
   }
 
   if (node->children.size() == 1) {
     const XmlNode *child = node->children.front().get();
-    node->fields.push_back(XmlField{
-        .key = child->name,
-        .kind = XmlField::Kind::kNode,
-        .scalar = {},
-        .node = child,
-    });
+    append_xml_field(node, XmlField{
+                               .key = child->name,
+                               .kind = XmlField::Kind::kNode,
+                               .scalar = {},
+                               .node = child,
+                           });
     return;
   }
 
@@ -136,25 +140,25 @@ void build_xml_node_model(XmlNode *node) {
   for (std::string_view name : order) {
     const auto &items = by_name[name];
     if (items.size() == 1) {
-      node->fields.push_back(XmlField{
-          .key = std::string(name),
-          .kind = XmlField::Kind::kNode,
-          .scalar = {},
-          .node = items.front(),
-      });
+      append_xml_field(node, XmlField{
+                                 .key = std::string(name),
+                                 .kind = XmlField::Kind::kNode,
+                                 .scalar = {},
+                                 .node = items.front(),
+                             });
       continue;
     }
     auto group = std::make_unique<XmlArrayGroup>();
     group->elements = items;
     const XmlArrayGroup *group_ptr = group.get();
     node->groups.push_back(std::move(group));
-    node->fields.push_back(XmlField{
-        .key = std::string(name),
-        .kind = XmlField::Kind::kGroup,
-        .scalar = {},
-        .node = nullptr,
-        .group = group_ptr,
-    });
+    append_xml_field(node, XmlField{
+                               .key = std::string(name),
+                               .kind = XmlField::Kind::kGroup,
+                               .scalar = {},
+                               .node = nullptr,
+                               .group = group_ptr,
+                           });
   }
 }
 

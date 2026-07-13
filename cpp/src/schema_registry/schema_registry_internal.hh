@@ -30,23 +30,25 @@ TopLevelKind top_level_kind(const LogicalType &type) noexcept;
 bool same_top_level_kind(const LogicalType &left,
                          const LogicalType &right) noexcept;
 
-// Returns a stable unversioned name for names such as field_v2_string.
-std::optional<std::string> variant_base_name(std::string_view name);
-
-// Returns the numeric version from names such as field_v2_string.
-std::optional<int> variant_version(std::string_view name);
-
 // Returns the stable semantic suffix used in a generated version name.
 std::string variant_semantic_type(const LogicalType &type);
 
-// Returns the dirty source segment for one output segment.
-std::string source_segment_for_output(std::string_view output_segment);
+// Returns the borrowed dirty source segment for one output segment.
+std::string_view
+source_segment_for_output(std::string_view output_segment) noexcept;
 
 // Joins nested field names into a source path.
 std::string join_path(std::string_view parent, std::string_view child);
 
 // Returns whether two logical type trees are exactly equivalent.
 bool logical_type_equal(const LogicalType &left, const LogicalType &right);
+
+// Merges incoming fields into the previous canonical field tree.
+std::vector<LogicalField> merge_registry_fields(
+    const std::vector<LogicalField> &base_fields,
+    const std::vector<LogicalField> &incoming_fields,
+    std::string_view parent_path, std::vector<DriftEvent> &drifts,
+    std::string_view detected_at, std::string_view default_key_name);
 
 // Collapses integer/float sibling variants so float is the durable numeric
 // representation for one source field family.

@@ -40,29 +40,22 @@ from .errors import (
 __version__ = _version_str()
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .api_impl.file_api import (
-        to_csv,
-        to_duckdb,
-        to_jsonl,
-        to_pandas,
-        to_parquet,
-        to_polars,
-        to_pyarrow,
-    )
-    from .api_impl.ingest_runtime_types import Result
-    from .api_impl.schema_registry import new_schema_registry
+    from .api_impl.analytical import to_duckdb, to_pandas, to_polars, to_pyarrow
+    from .api_impl.file_conversion.converters import to_csv, to_jsonl, to_parquet
+    from .api_impl.results import Result
+    from .core_impl.schema_registry import new_schema_registry
 
 
 _LAZY: dict[str, tuple[str, str]] = {
-    "Result": (".api_impl.ingest_runtime_types", "Result"),
-    "new_schema_registry": (".api_impl.schema_registry", "new_schema_registry"),
-    "to_csv": (".api_impl.file_api", "to_csv"),
-    "to_duckdb": (".api_impl.file_api", "to_duckdb"),
-    "to_jsonl": (".api_impl.file_api", "to_jsonl"),
-    "to_pandas": (".api_impl.file_api", "to_pandas"),
-    "to_parquet": (".api_impl.file_api", "to_parquet"),
-    "to_polars": (".api_impl.file_api", "to_polars"),
-    "to_pyarrow": (".api_impl.file_api", "to_pyarrow"),
+    "Result": (".api_impl.results", "Result"),
+    "new_schema_registry": (".core_impl.schema_registry", "new_schema_registry"),
+    "to_csv": (".api_impl.file_conversion.converters", "to_csv"),
+    "to_duckdb": (".api_impl.analytical", "to_duckdb"),
+    "to_jsonl": (".api_impl.file_conversion.converters", "to_jsonl"),
+    "to_pandas": (".api_impl.analytical", "to_pandas"),
+    "to_parquet": (".api_impl.file_conversion.converters", "to_parquet"),
+    "to_polars": (".api_impl.analytical", "to_polars"),
+    "to_pyarrow": (".api_impl.analytical", "to_pyarrow"),
 }
 
 
@@ -78,7 +71,7 @@ def __getattr__(name: str) -> Any:  # pragma: no cover
         return getattr(import_module(f"{__name__}{mod_name}"), attr)
     except Exception as e:
         # Always wrap native-backed access failures with loader diagnostics.
-        from .public_impl.loader_debug import collect_loader_debug
+        from .core_impl.loader_debug import collect_loader_debug
 
         raise SchemaSanitizerImportError(str(e), detail=collect_loader_debug()) from e
 

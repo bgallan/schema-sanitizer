@@ -64,7 +64,8 @@ def test_streaming_writer_result_closes_sink_after_diagnostics_snapshot(
     monkeypatch, tmp_path: Path
 ) -> None:
     """Verify streaming writer result closes sink after diagnostics snapshot."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class Raw:
         """Test helper for Raw."""
@@ -133,10 +134,10 @@ def test_streaming_writer_result_closes_sink_after_diagnostics_snapshot(
     monkeypatch.setattr(pool, "default_pool", lambda: _Pool(sink_out))
     written = []
 
-    result = pool._write_table_or_stream(
+    result = stream_output.write_table_or_stream(
         object(),
         tmp_path / "out",
-        options=None,
+        call_options=None,
         format="python",
         source="python",
         write_stream=lambda stream, path: written.append((stream, path)),
@@ -152,7 +153,8 @@ def test_streaming_writer_result_closes_sink_after_diagnostics_snapshot(
 
 def test_streaming_writer_stats_use_diagnostics_snapshot(monkeypatch, tmp_path: Path) -> None:
     """Verify writer stats use diagnostics snapshot."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class Diagnostics:
         """Test helper for Diagnostics."""
@@ -201,10 +203,10 @@ def test_streaming_writer_stats_use_diagnostics_snapshot(monkeypatch, tmp_path: 
     raw = Raw()
     monkeypatch.setattr(pool, "default_pool", lambda: _Pool(SinkOut(raw)))
 
-    result = pool._write_table_or_stream(
+    result = stream_output.write_table_or_stream(
         object(),
         tmp_path / "out",
-        options=None,
+        call_options=None,
         format="python",
         source="python",
         write_stream=lambda _stream, _path: None,
@@ -215,7 +217,8 @@ def test_streaming_writer_stats_use_diagnostics_snapshot(monkeypatch, tmp_path: 
 
 def test_streaming_writer_missing_stream_closes_sink(monkeypatch, tmp_path: Path) -> None:
     """Verify streaming writer missing stream closes sink."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class SinkOut:
         """Test helper for SinkOut."""
@@ -244,10 +247,10 @@ def test_streaming_writer_missing_stream_closes_sink(monkeypatch, tmp_path: Path
     monkeypatch.setattr(pool, "default_pool", lambda: _Pool(sink_out))
 
     with pytest.raises(RuntimeError, match="did not produce a stream"):
-        pool._write_table_or_stream(
+        stream_output.write_table_or_stream(
             object(),
             tmp_path / "out",
-            options=None,
+            call_options=None,
             format="python",
             source="python",
             write_stream=lambda _stream, _path: None,
@@ -258,7 +261,8 @@ def test_streaming_writer_missing_stream_closes_sink(monkeypatch, tmp_path: Path
 
 def test_streaming_writer_failure_closes_full_sink(monkeypatch, tmp_path: Path) -> None:
     """Verify streaming writer failure closes full sink."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class Raw:
         """Test helper for Raw."""
@@ -320,10 +324,10 @@ def test_streaming_writer_failure_closes_full_sink(monkeypatch, tmp_path: Path) 
         raise RuntimeError("writer failed")
 
     with pytest.raises(RuntimeError, match="writer failed"):
-        pool._write_table_or_stream(
+        stream_output.write_table_or_stream(
             object(),
             tmp_path / "out",
-            options=None,
+            call_options=None,
             format="python",
             source="python",
             write_stream=fail_writer,
@@ -337,7 +341,8 @@ def test_streaming_writer_failure_preserves_writer_exception_when_cleanup_fails(
     monkeypatch, tmp_path: Path
 ) -> None:
     """Verify streaming writer failure preserves writer exception when cleanup fails."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class Stream:
         """Test helper for Stream."""
@@ -370,10 +375,10 @@ def test_streaming_writer_failure_preserves_writer_exception_when_cleanup_fails(
         raise ValueError("writer failed")
 
     with pytest.raises(ValueError, match="writer failed"):
-        pool._write_table_or_stream(
+        stream_output.write_table_or_stream(
             object(),
             tmp_path / "out",
-            options=None,
+            call_options=None,
             format="python",
             source="python",
             write_stream=fail_writer,
@@ -382,7 +387,8 @@ def test_streaming_writer_failure_preserves_writer_exception_when_cleanup_fails(
 
 def test_streaming_writer_stream_property_error_closes_sink(monkeypatch, tmp_path: Path) -> None:
     """Verify streaming writer stream property error closes sink."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class SinkOut:
         """Test helper for SinkOut."""
@@ -410,10 +416,10 @@ def test_streaming_writer_stream_property_error_closes_sink(monkeypatch, tmp_pat
     monkeypatch.setattr(pool, "default_pool", lambda: _Pool(sink_out))
 
     with pytest.raises(ValueError, match="stream construction failed"):
-        pool._write_table_or_stream(
+        stream_output.write_table_or_stream(
             object(),
             tmp_path / "out",
-            options=None,
+            call_options=None,
             format="python",
             source="python",
             write_stream=lambda _stream, _path: None,
@@ -426,7 +432,8 @@ def test_streaming_writer_stream_property_error_preserved_when_cleanup_fails(
     monkeypatch, tmp_path: Path
 ) -> None:
     """Verify streaming writer stream property error preserved when cleanup fails."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class SinkOut:
         """Test helper for SinkOut."""
@@ -448,10 +455,10 @@ def test_streaming_writer_stream_property_error_preserved_when_cleanup_fails(
     monkeypatch.setattr(pool, "default_pool", lambda: _Pool(SinkOut()))
 
     with pytest.raises(ValueError, match="stream construction failed"):
-        pool._write_table_or_stream(
+        stream_output.write_table_or_stream(
             object(),
             tmp_path / "out",
-            options=None,
+            call_options=None,
             format="python",
             source="python",
             write_stream=lambda _stream, _path: None,
@@ -462,7 +469,8 @@ def test_streaming_writer_missing_stream_preserves_contract_error_when_cleanup_f
     monkeypatch, tmp_path: Path
 ) -> None:
     """Verify streaming writer missing stream preserves contract error when cleanup fails."""
-    from schema_sanitizer.api_impl import pool
+    from schema_sanitizer.api_impl import execution_context as pool
+    from schema_sanitizer.api_impl import stream_output
 
     class SinkOut:
         """Test helper for SinkOut."""
@@ -484,10 +492,10 @@ def test_streaming_writer_missing_stream_preserves_contract_error_when_cleanup_f
     monkeypatch.setattr(pool, "default_pool", lambda: _Pool(SinkOut()))
 
     with pytest.raises(RuntimeError, match="did not produce a stream"):
-        pool._write_table_or_stream(
+        stream_output.write_table_or_stream(
             object(),
             tmp_path / "out",
-            options=None,
+            call_options=None,
             format="python",
             source="python",
             write_stream=lambda _stream, _path: None,

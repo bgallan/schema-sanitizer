@@ -19,12 +19,12 @@ from conftest import (
 pa = pytest.importorskip("pyarrow")
 
 import schema_sanitizer
-from schema_sanitizer.api_impl.context import ExecutionContext
-from schema_sanitizer.api_impl.ingest_runtime_selectors import _resolve_source_and_format
-from schema_sanitizer.core_impl.path_uris import (
+from schema_sanitizer.api_impl.execution_context import ExecutionContext
+from schema_sanitizer.core_impl.uris import (
     local_path_from_file_uri,
     local_path_or_reject_remote,
 )
+from schema_sanitizer.input_impl.selection import resolve_source_and_format
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 
@@ -69,19 +69,19 @@ def test_local_path_from_file_uri_normalizes_windows_drive_uri(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify Windows file URI drive paths do not keep a leading slash."""
-    from schema_sanitizer.core_impl import path_uris
+    from schema_sanitizer.core_impl import uris
 
-    monkeypatch.setattr(path_uris.os, "name", "nt")
+    monkeypatch.setattr(uris.os, "name", "nt")
 
     assert (
-        path_uris.local_path_from_file_uri("file:///C:/Users/runner/AppData/out%20file.parquet")
+        uris.local_path_from_file_uri("file:///C:/Users/runner/AppData/out%20file.parquet")
         == r"C:\Users\runner\AppData\out file.parquet"
     )
 
 
 def test_file_uri_auto_format_uses_platform_path_normalization() -> None:
     """Verify file URI format detection uses native path normalization."""
-    data, source, format_name = _resolve_source_and_format(
+    data, source, format_name = resolve_source_and_format(
         "file:///tmp/events.jsonl",
         format="auto",
         source="uri",
@@ -296,9 +296,9 @@ def test_schema_contract_rejects_logical_schema_payload_bytes(tmp_path: Path) ->
     path = tmp_path / "rows.csv"
     path.write_text(csv_text, encoding="utf-8")
     schema = pa.schema([("a", pa.int64()), ("b", pa.string())])
-    from schema_sanitizer.core_impl import options_logical_schema as _schema_codec
+    from schema_sanitizer.core_impl import logical_schema as _logical_schema
 
-    schema_payload = _schema_codec._encode_logical_schema_payload_from_schema(schema)
+    schema_payload = _logical_schema.encode_arrow_schema_payload(schema)
     with pytest.raises(TypeError, match="schema_contract"):
         _read_with_contract(
             path, schema_contract=schema_payload, format="csv", schema_mode="strict"
@@ -424,7 +424,7 @@ def test_input_text_encoding_decodes_non_utf8_path_csv(tmp_path: Path) -> None:
     """Verify input text encoding decodes non utf8 path csv."""
     path = tmp_path / "names.csv"
     path.write_bytes("name\ncafé\n".encode("latin-1"))
-    result = read_test_csv(path, input_text_encoding="latin-1")
+    result = read_test_csv(path, input_text_encoding="iso8859-1")
     assert result.clean_data.to_pylist() == [{"name": "café"}]
 
 
@@ -442,14 +442,14 @@ def test_input_text_encoding_streams_non_utf8_path_csv(
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
 
-    result = read_test_csv(path, input_text_encoding="latin-1")
+    result = read_test_csv(path, input_text_encoding="iso8859-1")
 
     assert result.clean_data.to_pylist() == [{"name": "café"}, {"name": "mañana"}]
 
 
 def test_input_text_encoding_native_supported_path_stays_path(tmp_path: Path) -> None:
     """Verify native-supported encodings do not route local paths through Python streams."""
-    from schema_sanitizer.api_impl.public_input import prepare_public_input
+    from schema_sanitizer.api_impl.input.preparation import prepare_public_input
 
     path = tmp_path / "names.csv"
     path.write_bytes("name\ncafé\n".encode("latin-1"))
@@ -458,7 +458,7 @@ def test_input_text_encoding_native_supported_path_stays_path(tmp_path: Path) ->
         path,
         input_format="csv",
         input_mode="single_file",
-        input_text_encoding="latin-1",
+        input_text_encoding="iso8859-1",
         xml_row_tag=None,
         csv_delimiter=",",
         csv_has_header=True,
@@ -487,7 +487,7 @@ def test_execution_context_streams_non_utf8_path_csv(
         path,
         format="csv",
         source="path",
-        options=normalize_call_options(input_text_encoding="latin-1"),
+        options=normalize_call_options(input_text_encoding="iso8859-1"),
     )
 
     assert result.clean_data.to_pylist() == [{"name": "café"}]
@@ -507,7 +507,7 @@ def test_input_text_encoding_streams_non_utf8_path_jsonl(
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
 
-    result = read_test_jsonl(path, input_text_encoding="latin-1")
+    result = read_test_jsonl(path, input_text_encoding="iso8859-1")
 
     assert result.clean_data.to_pylist() == [{"name": "café"}, {"name": "mañana"}]
 
@@ -526,7 +526,7 @@ def test_input_text_encoding_streams_non_utf8_path_json_array(
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
 
-    result = read_test_path(path, input_format="json_array", input_text_encoding="latin-1")
+    result = read_test_path(path, input_format="json_array", input_text_encoding="iso8859-1")
 
     assert result.clean_data.to_pylist() == [{"name": "café"}, {"name": "mañana"}]
 

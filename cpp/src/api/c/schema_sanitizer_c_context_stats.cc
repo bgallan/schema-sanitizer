@@ -11,7 +11,7 @@
 #include <string>
 
 #include "internal/abi/schema_sanitizer_c_bridge.hh"
-#include "internal/json/json_write.hh"
+#include "internal/json_encoding/token_writer.hh"
 #include "internal/memory/memory_pool.hh"
 #include "sanitize/runtime/execution_context.hh"
 
@@ -37,12 +37,12 @@ int schema_sanitizer_context_memory_stats_json(schema_sanitizer_context *ctx,
     json.reserve(128);
     json.push_back('{');
     bool first = true;
-    sanitize::internal::json_write::append_string_field(
+    sanitize::internal::json_encoding::append_string_field(
         json, first, "backend_name", pool ? pool->backend_name() : "");
-    sanitize::internal::json_write::append_int_field(
+    sanitize::internal::json_encoding::append_int_field(
         json, first, "bytes_allocated",
         pool ? pool->bytes_allocated() : int64_t{0});
-    sanitize::internal::json_write::append_int_field(
+    sanitize::internal::json_encoding::append_int_field(
         json, first, "max_memory", pool ? pool->max_memory() : int64_t{0});
     json.push_back('}');
 

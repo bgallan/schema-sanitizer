@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from ..api_impl.schema_registry import _normalize_registry_json
+from ..core_impl.schema_registry import _normalize_registry_json
 
 
 @dataclass(frozen=True, init=False)
@@ -66,20 +66,16 @@ class PartitionRunPlan:
         output_uri: str | None = None,
         logical_hour: int | None = None,
         *,
-        source_jsonl_uri: str | None = None,
-        silver_parquet_uri: str | None = None,
         discovered_input: Any | None = None,
     ):
-        """Initialize from clean URI names or legacy example aliases."""
-        resolved_source = source_uri if source_uri is not None else source_jsonl_uri
-        resolved_output = output_uri if output_uri is not None else silver_parquet_uri
-        if resolved_source is None:
+        """Initialize a partition run plan."""
+        if source_uri is None:
             raise TypeError("source_uri is required")
-        if resolved_output is None:
+        if output_uri is None:
             raise TypeError("output_uri is required")
         object.__setattr__(self, "logical_date", logical_date)
-        object.__setattr__(self, "source_uri", resolved_source)
-        object.__setattr__(self, "output_uri", resolved_output)
+        object.__setattr__(self, "source_uri", source_uri)
+        object.__setattr__(self, "output_uri", output_uri)
         object.__setattr__(self, "logical_hour", logical_hour)
         object.__setattr__(self, "discovered_input", discovered_input)
 
@@ -101,16 +97,6 @@ class PartitionRunPlan:
         if self.logical_hour is not None:
             return f"{self.logical_date.isoformat()}/hour={self.logical_hour:02d}"
         return self.logical_date.isoformat()
-
-    @property
-    def source_jsonl_uri(self) -> str:
-        """Backward-compatible source URI alias used by older examples."""
-        return self.source_uri
-
-    @property
-    def silver_parquet_uri(self) -> str:
-        """Backward-compatible output URI alias used by older examples."""
-        return self.output_uri
 
 
 @dataclass(frozen=True)

@@ -43,21 +43,46 @@ done < <(
     sort
 )
 
-# Check quoted project includes against the configured include roots. System
-# includes (<...>) are intentionally ignored.
-while IFS= read -r include_path; do
-  [[ -z "${include_path}" ]] && continue
-  if [[ -f "cpp/src/${include_path}" || -f "cpp/thirdparty/${include_path}" ]]; then
-    continue
-  fi
-  report_missing "include ${include_path} (searched cpp/src and cpp/thirdparty)"
-done < <(
-  find cpp/src -type f \( -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.hh' -o -name '*.hpp' -o -name '*.h' \) \
-    -print0 |
-    xargs -0 grep -hoE '^[[:space:]]*#[[:space:]]*include[[:space:]]+"[^"]+"' |
-    sed -E 's/.*"([^"]+)".*/\1/' |
-    sort -u
-)
+# Check quoted project includes against both configured include roots and the
+# directory of the including file. Local .cc.inc fragments are intentionally
+# colocated with their translation unit and must not be resolved from cpp/src.
+if ! python - "${ROOT}" <<'PYINCLUDES'; then
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+source_root = root / "cpp" / "src"
+thirdparty_root = root / "cpp" / "thirdparty"
+pattern = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
+extensions = {".cc", ".cpp", ".cxx", ".hh", ".hpp", ".h"}
+missing: list[tuple[Path, str]] = []
+
+for source in sorted(path for path in source_root.rglob("*") if path.suffix in extensions):
+    for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        include_path = match.group(1)
+        candidates = (
+            source.parent / include_path,
+            source_root / include_path,
+            thirdparty_root / include_path,
+        )
+        if not any(candidate.is_file() for candidate in candidates):
+            missing.append((source.relative_to(root), include_path))
+
+for source, include_path in missing:
+    print(
+        f"ERROR: missing quoted include {include_path!r} referenced by {source}",
+        file=sys.stderr,
+    )
+raise SystemExit(bool(missing))
+PYINCLUDES
+  missing=1
+fi
 
 if [[ "${missing}" -ne 0 ]]; then
   exit 1

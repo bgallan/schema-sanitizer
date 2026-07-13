@@ -2,9 +2,9 @@
 
 #include "internal/csv/csv_stream_writer.hh"
 
-#include "internal/json/jsonl_stream_writer_schema.hh"
-#include "internal/json/jsonl_value_writer.hh"
-#include "internal/parsing/json_string_decode.hh"
+#include "internal/json_output/jsonl_value_writer.hh"
+#include "internal/json_output/schema/model.hh"
+#include "internal/parsing/json/string_decode.hh"
 #include "sanitize/abi/cdata_types.hh"
 
 #include <algorithm>

@@ -1,0 +1,1 @@
+"""Public input preparation domain."""

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -10,6 +11,16 @@
 #include "sanitize/options/options.hh"
 
 namespace sanitize::internal {
+
+// Returns whether a raw policy string preserves source names.
+bool uses_preserve_policy(std::string_view field_name_policy) noexcept;
+
+// Returns whether a policy string asks for lower snake-case names.
+bool uses_lower_snake_policy(std::string_view field_name_policy) noexcept;
+
+// Appends a deterministic collision suffix to a clean base name.
+std::string clean_with_suffix(std::string_view dirty, std::string_view base,
+                              std::size_t length);
 
 // Returns whether a top-level name is reserved for generated ETL metadata.
 bool is_reserved_etl_column_name(std::string_view name) noexcept;
