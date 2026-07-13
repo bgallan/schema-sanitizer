@@ -6,7 +6,8 @@ This folder contains end-to-end tutorial notebooks and scripts for
 1. `01_ingestion_and_core_api.ipynb`
    - Supported inputs, analytical `to_*` functions, per-call options, and result stats
 1. `02_options_and_stats.ipynb`
-   - Per-call options, result stats, and idempotent reads
+   - Per-call options, result stats, and repeatable business-data reads with
+     intentionally dynamic ETL metadata
 1. `03_adapters_and_converters.ipynb`
    - Pandas/Polars/DuckDB adapters, `Result` stats, and CSV/JSONL/Parquet converters
 1. `04_streaming_large_csv_to_parquet.ipynb`
@@ -57,6 +58,9 @@ pip install -e .[dev]
 pip install pandas polars duckdb pyarrow
 jupyter lab
 ```
+
+CI also executes every tutorial notebook code cell in an isolated temporary
+working directory, so public API changes cannot silently stale the examples.
 
 Run the GCS/BigQuery registry CLI example with Google ADC configured for GCS
 and BigQuery ADBC:
