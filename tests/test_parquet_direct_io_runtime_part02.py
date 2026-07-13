@@ -256,7 +256,7 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         src,
         out,
         input_format="parquet",
-        parquet_compression="uncompressed",
+        parquet_compression="gzip",
     )
     info = native_parquet_footer_info(out)
 
@@ -265,12 +265,10 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         column for column in info["row_groups"][0]["columns"] if column["path_in_schema"] == ["f"]
     )
     page = column["pages"][0]
-    if page["value_encoding"] != 9:
-        pytest.skip("native writer did not choose BYTE_STREAM_SPLIT on this platform")
     assert page["value_encoding"] == 9
     assert page["decoded_non_null_values"] == 1000
     assert column["native_read_value_buffer_kind"] == "byte_stream_split"
-    assert column["native_read_value_width_bytes"] == 4
+    assert column["native_read_value_width_bytes"] == 8
     assert column["native_read_arrow_n_buffers"] == 2
     assert page["values_decoded"] == 1
     assert page["values_decode_skipped"] == 0
