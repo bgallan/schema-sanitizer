@@ -112,7 +112,7 @@ def test_native_parquet_stream_materializes_simple_float_lists(
     assert info["native_reader_ready"] == 1
     assert info["native_reader_blockers"] == []
     column = info["row_groups"][0]["columns"][0]
-    assert column["native_read_value_buffer_kind"] == "fixed_width"
+    assert column["native_read_value_buffer_kind"] == "byte_stream_split"
     assert column["native_read_value_width_bytes"] == 8
     assert column["repeated_level_layouts"][0]["offsets"] == [0, 2, 2, 2, 3]
     assert column["repeated_level_layouts"][0]["validity_hex_preview"] == "0d"

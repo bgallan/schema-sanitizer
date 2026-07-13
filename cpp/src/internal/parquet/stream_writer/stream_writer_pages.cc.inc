@@ -110,10 +110,11 @@ choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
           compress_payload(candidate.dictionary->dictionary_values, codec));
       candidate_size += compressed_dictionary.size();
     }
-    const bool dictionary_tie_break = candidate.dictionary &&
-                                      candidate_size == best_size &&
-                                      prefers_dictionary_tie_break(column);
-    if (!best || candidate_size < best_size || dictionary_tie_break) {
+    const bool encoding_tie_break =
+        candidate_size == best_size &&
+        ((candidate.dictionary && prefers_dictionary_tie_break(column)) ||
+         candidate.encoding == kEncodingByteStreamSplit);
+    if (!best || candidate_size < best_size || encoding_tie_break) {
       best_size = candidate_size;
       best = PreparedPagePayload{
           .candidate = std::move(candidate),

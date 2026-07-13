@@ -249,14 +249,14 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
     require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
-    values = [float(value % 7) for value in range(1000)]
+    values = [float(value) for value in range(1000)]
     pq.write_table(pa.table({"f": pa.array(values, type=pa.float32())}), src)
 
     ss.to_parquet(
         src,
         out,
         input_format="parquet",
-        parquet_compression="gzip",
+        parquet_compression="uncompressed",
     )
     info = native_parquet_footer_info(out)
 
@@ -280,7 +280,7 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         "4.000000",
         "5.000000",
         "6.000000",
-        "0.000000",
+        "7.000000",
     ]
 
     factory = open_parquet_record_batch_stream_factory(out, source="path", feature="test")
