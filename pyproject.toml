@@ -137,6 +137,8 @@ include = [
   "CMakeLists.txt",
   "LICENSE",
   "README.md",
+  "heuristics.md",
+  "responsibilities.md",
   "pyproject.toml"
 ]
 exclude = [
