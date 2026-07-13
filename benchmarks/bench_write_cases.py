@@ -27,7 +27,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
         def _to_jsonl_once():
             """Write JSONL output once, removing any prior repeat output."""
             output_path.unlink(missing_ok=True)
-            return ss.to_jsonl(jsonl_path, output_path)
+            return ss.to_jsonl(jsonl_path, output_path, input_format="jsonl")
 
         time_call(
             "to_jsonl",
@@ -45,7 +45,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
         def _to_csv_once():
             """Write CSV output once, removing any prior repeat output."""
             output_path.unlink(missing_ok=True)
-            return ss.to_csv(jsonl_path, output_path)
+            return ss.to_csv(jsonl_path, output_path, input_format="jsonl")
 
         time_call(
             "to_csv",
@@ -63,7 +63,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
         def _parquet_to_jsonl_once():
             """Write Parquet input to JSONL once, removing any prior output."""
             output_path.unlink(missing_ok=True)
-            return ss.to_jsonl(parquet_path, output_path)
+            return ss.to_jsonl(parquet_path, output_path, input_format="parquet")
 
         time_call(
             "to_jsonl parquet direct",
@@ -83,7 +83,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
         def _wide_parquet_to_jsonl_once():
             """Write wide Parquet input to JSONL once."""
             output_path.unlink(missing_ok=True)
-            return ss.to_jsonl(parquet_path, output_path)
+            return ss.to_jsonl(parquet_path, output_path, input_format="parquet")
 
         time_call(
             "to_jsonl parquet direct wide",
@@ -106,8 +106,8 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             return ss.to_jsonl(
                 parquet_path,
                 output_path,
+                input_format="parquet",
                 schema_registry={},
-                schema_drift_date="2026-01-01",
             )
 
         time_call(

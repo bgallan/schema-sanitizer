@@ -9,20 +9,20 @@ WARM_UP_DATE_ARGS = ("start_date_warm_up", "end_date_warm_up")
 WARM_UP_HOUR_ARGS = ("start_hour_warm_up", "end_hour_warm_up")
 
 try:
+    from examples.example_07.cli_sanitizer_args import add_sanitizer_args
     from examples.example_07.cli_sections import (
         add_bigquery_args,
         add_external_table_args,
         add_logging_args,
     )
-    from examples.example_07.cli_sanitizer_args import add_sanitizer_args
     from examples.example_07.cli_source_args import add_source_args
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
+    from cli_sanitizer_args import add_sanitizer_args
     from cli_sections import (
         add_bigquery_args,
         add_external_table_args,
         add_logging_args,
     )
-    from cli_sanitizer_args import add_sanitizer_args
     from cli_source_args import add_source_args
 
 
@@ -49,9 +49,7 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             "--start-date-warm-up and --end-date-warm-up."
         )
 
-    if warm_up_dates_set and (
-        args.start_date_warm_up is None or args.end_date_warm_up is None
-    ):
+    if warm_up_dates_set and (args.start_date_warm_up is None or args.end_date_warm_up is None):
         parser.error("Pass both --start-date-warm-up and --end-date-warm-up, or neither.")
 
     if args.partition_granularity != "hourly":
@@ -63,9 +61,7 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error(f"--start-hour must be <= --end-hour. Got {start_hour} > {end_hour}.")
 
     if warm_up_dates_set:
-        start_hour_warm_up = (
-            0 if args.start_hour_warm_up is None else args.start_hour_warm_up
-        )
+        start_hour_warm_up = 0 if args.start_hour_warm_up is None else args.start_hour_warm_up
         end_hour_warm_up = 23 if args.end_hour_warm_up is None else args.end_hour_warm_up
         if start_hour_warm_up > end_hour_warm_up:
             parser.error(

@@ -412,7 +412,16 @@ Run checks:
 ```bash
 python -m pytest -q
 python -m ruff check .
+python -m mypy
 pre-commit run --all-files
+```
+
+Run the end-to-end benchmark suite with a small smoke workload or a focused
+case:
+
+```bash
+python benchmarks/bench_ingest.py --rows 100 --width 4 --repeats 1
+python benchmarks/bench_ingest.py --case jsonl --rows 100000 --repeats 3
 ```
 
 For architecture and ownership, see [responsibilities.md](responsibilities.md).

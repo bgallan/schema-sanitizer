@@ -109,32 +109,3 @@ def write_parquet(path: Path, rows: int, width: int) -> None:
     for col in range(width):
         data[f"value_{col}"] = [row_id * (col + 1) for row_id in range(rows)]
     pq.write_table(pa.table(data), path)
-
-
-def python_rows_fixture(rows: int, width: int) -> list[dict[str, Any]]:
-    """Build Python row dictionaries for read_python benchmarks."""
-    data: list[dict[str, Any]] = []
-    for row_id in range(rows):
-        row: dict[str, Any] = {"id": row_id, "source": f"file-{row_id % 8}"}
-        for col in range(width):
-            row[f"value_{col}"] = row_id * (col + 1)
-        data.append(row)
-    return data
-
-
-def python_nested_rows_fixture(rows: int, width: int) -> list[dict[str, Any]]:
-    """Build nested Python rows that stress native Python JSON encoding."""
-    data: list[dict[str, Any]] = []
-    for row_id in range(rows):
-        row: dict[str, Any] = {
-            "id": row_id,
-            "groups": [
-                {
-                    "name": f"group_{group}",
-                    "values": [row_id * (col + 1) for col in range(width)],
-                }
-                for group in range(3)
-            ],
-        }
-        data.append(row)
-    return data

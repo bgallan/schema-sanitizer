@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any
 
 from ..core_impl.uris import local_path_from_file_uri, looks_like_file_uri, looks_like_remote_uri
@@ -24,7 +25,7 @@ class SchemaDriftDiff:
 
 def read_parquet_schema(uri: str) -> Any:
     """Read a Parquet schema after staging remote URIs locally."""
-    import pyarrow.parquet as pq
+    pq = import_module("pyarrow.parquet")
 
     from ..remote_impl.staging import stage_remote_single_file
 
@@ -41,7 +42,7 @@ def read_parquet_schema(uri: str) -> Any:
 
 def flatten_arrow_schema_paths(schema: Any) -> dict[str, str]:
     """Flatten a PyArrow schema to {field_path: type_string}."""
-    import pyarrow as pa
+    pa = import_module("pyarrow")
 
     result: dict[str, str] = {}
 

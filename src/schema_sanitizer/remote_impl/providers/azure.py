@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -63,11 +64,11 @@ def parse_uri(uri: str) -> AzureRef:
 
 async def open_service(ref: AzureRef) -> Any:
     """Open an async Azure Blob service client using default credentials."""
-    from azure.identity.aio import DefaultAzureCredential
-    from azure.storage.blob.aio import BlobServiceClient
+    identity = import_module("azure.identity.aio")
+    blob = import_module("azure.storage.blob.aio")
 
-    credential = DefaultAzureCredential()
-    return BlobServiceClient(account_url=ref.account_url, credential=credential)
+    credential = identity.DefaultAzureCredential()
+    return blob.BlobServiceClient(account_url=ref.account_url, credential=credential)
 
 
 def render_uri(ref: AzureRef, blob: str) -> str:

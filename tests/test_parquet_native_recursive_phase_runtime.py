@@ -194,9 +194,9 @@ def test_native_parquet_stream_materializes_recursive_null_empty_matrix_corpus(
         assert "#" in field["shape_signature"], name
         assert "#" not in field["structural_shape_signature"], name
         assert len(field["leaf_paths"]) == field["leaf_count"], name
-        assert (
-            len(field["repeated_node_paths"]) >= metrics["list_count"] + metrics["map_count"]
-        ), name
+        assert len(field["repeated_node_paths"]) >= metrics["list_count"] + metrics["map_count"], (
+            name
+        )
 
         factory = open_parquet_record_batch_stream_factory(
             path,

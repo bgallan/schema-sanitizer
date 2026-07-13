@@ -24,6 +24,7 @@ from schema_sanitizer.pipeline import (
 from schema_sanitizer.pipeline.types import PartitionRunPlan as DateRunPlan
 from schema_sanitizer.pipeline.types import PartitionRunResult as DateRunResult
 from schema_sanitizer.pipeline.types import SchemaRegistryState
+
 try:
     from examples.example_07.runtime_reporting import (
         LOGGER,

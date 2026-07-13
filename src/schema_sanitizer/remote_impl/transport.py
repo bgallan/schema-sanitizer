@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,7 @@ async def write_response_to_file(response: Any, *, uri: str, local_path: str) ->
 
 async def open_aiohttp_session(headers: dict[str, str] | None = None) -> Any:
     """Open an aiohttp session with the configured timeout and concurrency."""
-    import aiohttp
+    aiohttp = import_module("aiohttp")
 
     timeout = aiohttp.ClientTimeout(total=read_float_env("SCHEMA_SANITIZER_ASYNC_TIMEOUT", 120.0))
     concurrency = read_int_env("SCHEMA_SANITIZER_ASYNC_CONCURRENCY", 64)

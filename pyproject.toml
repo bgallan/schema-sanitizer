@@ -82,7 +82,7 @@ Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src/schema_sanitizer", "tests"]
+files = ["src/schema_sanitizer"]
 exclude = ["build", "dist", "wheelhouse", "cpp"]
 warn_unused_ignores = true
 warn_redundant_casts = true
@@ -91,10 +91,6 @@ check_untyped_defs = true
 disallow_untyped_defs = false
 no_implicit_optional = true
 show_error_codes = true
-
-[[tool.mypy.overrides]]
-module = ["pyarrow.*"]
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]

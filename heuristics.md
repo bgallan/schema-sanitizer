@@ -455,8 +455,7 @@ and uncompressed output also supported.
 
 Detailed native-reader contract diagnostics and certification helpers are
 implementation-facing adapter concerns. Their code ownership is mapped in
-[responsibilities.md](responsibilities.md#parquet-adapter-and-contracts), and
-ongoing reader work is tracked in [PARQUET_READER_TODO.md](PARQUET_READER_TODO.md).
+[responsibilities.md](responsibilities.md#parquet-adapter-and-contracts).
 
 ## Remote staging heuristics
 

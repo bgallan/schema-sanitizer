@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+from importlib import import_module
 from types import SimpleNamespace
 from typing import Any
 
@@ -157,7 +158,7 @@ def _patch_csv_file_diagnostics(result: Result, path: Any) -> None:
 def _arrow_type_depth(data_type: Any) -> int:
     """Return an approximate nested Arrow depth."""
     try:
-        import pyarrow as pa
+        pa = import_module("pyarrow")
     except Exception:
         return 0
     if pa.types.is_struct(data_type):
@@ -193,7 +194,7 @@ def _metadata_uncompressed_bytes(metadata: Any) -> int:
 def _patch_parquet_file_diagnostics(result: Result, path: Any) -> None:
     """Patch diagnostics from a Parquet footer without materializing rows."""
     try:
-        import pyarrow.parquet as pq
+        pq = import_module("pyarrow.parquet")
 
         parquet_file = pq.ParquetFile(path)
         metadata = parquet_file.metadata

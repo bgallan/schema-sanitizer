@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
 from ...core_impl.generated_metadata import ETL_GENERATED_COLUMN_NAMES
@@ -45,7 +46,7 @@ def _iter_root_arrow_fields(schema: Any, *, sort_alphabetically: bool) -> list[A
 
 def arrow_type_to_bq_sql(data_type: Any, *, sort_fields_alphabetically: bool = False) -> str:
     """Convert a PyArrow type to a BigQuery Standard SQL type."""
-    import pyarrow as pa
+    pa = import_module("pyarrow")
 
     if pa.types.is_dictionary(data_type):
         return arrow_type_to_bq_sql(
@@ -149,7 +150,7 @@ def remove_hive_partition_fields(
     partition_names: set[str],
 ) -> Any:
     """Remove Hive partition fields from a PyArrow schema."""
-    import pyarrow as pa
+    pa = import_module("pyarrow")
 
     return pa.schema(
         [field for field in schema if field.name not in partition_names],
@@ -159,7 +160,7 @@ def remove_hive_partition_fields(
 
 def remove_embedded_metadata_fields(schema: Any) -> Any:
     """Remove schema-sanitizer embedded metadata columns from a schema."""
-    import pyarrow as pa
+    pa = import_module("pyarrow")
 
     metadata_names = set(ETL_GENERATED_COLUMN_NAMES)
     return pa.schema(

@@ -167,8 +167,8 @@ def _parquet_contract_certification_status_from_parts(
             issues.append("nested contract is applicable but not satisfied")
 
     projection_applicable = projection is not None
-    projection_satisfied = not projection_applicable or projection.get("stable") is True
-    if projection_applicable and not projection_satisfied:
+    projection_satisfied = projection is None or projection.get("stable") is True
+    if projection is not None and not projection_satisfied:
         issues.extend(f"projection: {issue}" for issue in projection.get("mismatches", []))
         if not projection.get("mismatches"):
             issues.append("projection contract audit is not stable")

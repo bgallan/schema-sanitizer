@@ -143,9 +143,9 @@ def test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus(
         assert "#" in field["shape_signature"], name
         assert "#" not in field["structural_shape_signature"], name
         assert len(field["leaf_paths"]) == field["leaf_count"], name
-        assert (
-            len(field["repeated_node_paths"]) >= metrics["list_count"] + metrics["map_count"]
-        ), name
+        assert len(field["repeated_node_paths"]) >= metrics["list_count"] + metrics["map_count"], (
+            name
+        )
         assert field["node_count"] >= metrics["node_count"], name
         assert field["leaf_count"] >= metrics["leaf_count"], name
         assert field["repetition_depth"] >= metrics["repetition_depth"], name

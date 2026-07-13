@@ -103,6 +103,7 @@ def add_external_table_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
+
 def add_logging_args(parser: argparse.ArgumentParser) -> None:
     """Add logging verbosity arguments."""
     parser.add_argument(

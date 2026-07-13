@@ -227,15 +227,15 @@ def test_native_parquet_stream_preserves_recursive_root_fingerprints_under_proje
         )
         assert audit["stable"] is True, projection
         assert audit["projection_order_matches"] is True, projection
-        assert audit["root_contract_matches_by_name"] == {
-            name: True for name in projection
-        }, projection
-        assert audit["leaf_contract_matches_by_name"] == {
-            name: True for name in projection
-        }, projection
-        assert audit["field_fingerprint_matches_by_name"] == {
-            name: True for name in projection
-        }, projection
+        assert audit["root_contract_matches_by_name"] == {name: True for name in projection}, (
+            projection
+        )
+        assert audit["leaf_contract_matches_by_name"] == {name: True for name in projection}, (
+            projection
+        )
+        assert audit["field_fingerprint_matches_by_name"] == {name: True for name in projection}, (
+            projection
+        )
         assert (
             audit["canonical_expected_root_contract_fingerprint"]
             == audit["canonical_actual_root_contract_fingerprint"]
@@ -251,12 +251,12 @@ def test_native_parquet_stream_preserves_recursive_root_fingerprints_under_proje
         )
         assert chain_audit["stable"] is True, projection
         assert chain_audit["projected_columns_subset_of_source"] is True, projection
-        assert (
-            chain_audit["direct_vs_chained_root_contract_fingerprint_matches"] is True
-        ), projection
-        assert (
-            chain_audit["direct_vs_chained_leaf_contract_fingerprint_matches"] is True
-        ), projection
+        assert chain_audit["direct_vs_chained_root_contract_fingerprint_matches"] is True, (
+            projection
+        )
+        assert chain_audit["direct_vs_chained_leaf_contract_fingerprint_matches"] is True, (
+            projection
+        )
         assert chain_audit["direct_vs_chained_field_fingerprint_matches"] is True, projection
         assert chain_audit["root_contract_transitive_matches_by_name"] == {
             name: True for name in projection

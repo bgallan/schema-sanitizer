@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -47,12 +48,12 @@ def object_uri(bucket: str, object_name: str) -> str:
 
 def access_token() -> str:
     """Return a Google ADC token for object I/O."""
-    import google.auth
-    from google.auth.transport.requests import Request
+    google_auth = import_module("google.auth")
+    google_requests = import_module("google.auth.transport.requests")
 
-    credentials, _ = google.auth.default(scopes=[_GCS_READ_ONLY_SCOPE])
+    credentials, _ = google_auth.default(scopes=[_GCS_READ_ONLY_SCOPE])
     if not credentials.valid:
-        credentials.refresh(Request())
+        credentials.refresh(google_requests.Request())
     if not credentials.token:
         raise RuntimeError("Google ADC did not return an access token")
     return credentials.token

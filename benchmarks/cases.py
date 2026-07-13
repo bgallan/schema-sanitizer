@@ -12,8 +12,6 @@ READ_CASES = (
     "json-folder",
     "json-folder-many",
     "xml-folder",
-    "python-rows",
-    "python-rows-nested",
     "csv",
 )
 WRITE_CASES = (

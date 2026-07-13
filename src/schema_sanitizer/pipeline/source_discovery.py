@@ -47,6 +47,7 @@ _REMOTE_DISCOVERY: dict[RemoteProvider, _DirectoryDiscoveryModule] = {
     "s3": s3,
     "azure": azure,
 }
+_LOCAL_LOCATION_KINDS: tuple[LocationKind, ...] = ("path", "file")
 
 
 def _source_extensions(
@@ -159,7 +160,7 @@ async def _discover_directories(
         checked.update(uris)
 
     local_locations: dict[str, LocationKind] = {
-        uri: kind for kind in ("path", "file") for uri in grouped.get(kind, ())
+        uri: kind for kind in _LOCAL_LOCATION_KINDS for uri in grouped.get(kind, ())
     }
     if local_locations:
         local_result = _local_directories_containing_files(local_locations, extensions)

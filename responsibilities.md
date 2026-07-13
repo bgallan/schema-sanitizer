@@ -34,7 +34,6 @@ The major boundary is intentional:
 | `README.md` | User introduction, API/options, pipeline, and BigQuery guide. |
 | `heuristics.md` | Normative explanation of sanitization and registry behavior. |
 | `responsibilities.md` | Architecture and ownership map. |
-| `PARQUET_READER_TODO.md` | Native-reader gaps and planned Parquet contract work. |
 | `pyproject.toml` | Python metadata, extras, lint/type/test settings, scikit-build packaging. |
 | `CMakeLists.txt` | Native targets, compiler policy, ABI3 extension installation, zlib integration. |
 | `cmake/SchemaSanitizerSources.cmake` | Authoritative C++ translation-unit manifest. |
@@ -42,6 +41,7 @@ The major boundary is intentional:
 | `meta/VERSION` | Single package/project version source. |
 | `meta/ci/` | Build-layout, linkage, documentation, packaging, and Parquet runtime gates. |
 | `examples/` | Notebook API examples and the production-shaped example 7 pipeline. |
+| `benchmarks/` | Public-API end-to-end ingestion and file-output performance workloads. |
 | `tests/` | Python, native-runtime, layout-contract, pipeline, integration, and packaging tests. |
 
 ## Python package

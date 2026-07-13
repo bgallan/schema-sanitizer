@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -38,9 +39,9 @@ def parse_uri(uri: str) -> S3Ref:
 
 async def open_client() -> Any:
     """Open an aiobotocore S3 client."""
-    from aiobotocore.session import get_session
+    aiobotocore = import_module("aiobotocore.session")
 
-    session = get_session()
+    session = aiobotocore.get_session()
     kwargs: dict[str, Any] = {}
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
     if region:

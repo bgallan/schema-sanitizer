@@ -86,7 +86,9 @@ def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--parse-float-decimal-separator", default=".")
     parser.add_argument("--parse-float-thousands-separator", default=",")
-    parser.add_argument("--parse-iso-timestamps", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--parse-iso-timestamps", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--parse-iso-dates", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--parse-iso-times", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
