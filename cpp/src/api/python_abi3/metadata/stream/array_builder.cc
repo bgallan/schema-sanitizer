@@ -2,7 +2,6 @@
 #include "api/python_abi3/metadata/stream/stream.hh"
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
-#include "internal/string_lookup.hh"
 #include "sanitize/abi/cdata_types.hh"
 
 #include <algorithm>
@@ -345,42 +344,26 @@ sanitize::Status build_timestamp_micros_array(TimestampMicrosColumnData *out,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_metadata_schema_children(MetadataSchemaState *state) {
+void build_metadata_schema_children(MetadataSchemaState *state,
+                                    MetadataStreamState *stream_state) {
   ArrowSchema &base = state->base.value();
-  if (base.n_children < 0) {
-    return sanitize::Status::Invalid(
-        "metadata stream base schema has invalid children");
-  }
-  sanitize::internal::BorrowedStringLookupSet names;
-  names.reserve(static_cast<std::size_t>(base.n_children) +
-                state->metadata.size());
+  state->children.resize(static_cast<std::size_t>(base.n_children) +
+                         state->metadata.size());
   for (std::int64_t i = 0; i < base.n_children; ++i) {
-    const char *name = base.children[i] ? base.children[i]->name : nullptr;
-    if (name && !names.emplace(name).second) {
-      return sanitize::Status::Invalid(
-          "metadata stream base schema has duplicate column names");
-    }
+    state->children
+        [stream_state->base_child_output_indices[static_cast<std::size_t>(i)]] =
+        base.children[i];
   }
-  for (const auto &child : state->metadata) {
-    if (!names.emplace(child.name).second) {
-      return sanitize::Status::Invalid("generated metadata column '" +
-                                       child.name +
-                                       "' already exists in output schema");
-    }
-  }
-  state->children.reserve(static_cast<std::size_t>(base.n_children) +
-                          state->metadata.size());
-  state->children.insert(state->children.end(), base.children,
-                         base.children + base.n_children);
-  for (auto &child : state->metadata) {
+  for (std::size_t i = 0; i < state->metadata.size(); ++i) {
+    auto &child = state->metadata[i];
     clear_schema(&child.schema);
     child.schema.format = child.format;
     child.schema.name = child.name.c_str();
     child.schema.flags = ARROW_FLAG_NULLABLE;
     child.schema.release = &metadata_schema_child_release;
-    state->children.push_back(&child.schema);
+    state->children[stream_state->metadata_child_output_indices[i]] =
+        &child.schema;
   }
-  return sanitize::Status::OK();
 }
 
 } // namespace
@@ -409,8 +392,9 @@ sanitize::Status build_metadata_schema(MetadataStreamState *stream_state,
       0) {
     return sanitize::Status::IOError("metadata stream inner get_schema failed");
   }
-  SAN_RETURN_NOT_OK(append_metadata_schema_children(state.get()));
   ArrowSchema &base = state->base.value();
+  SAN_RETURN_NOT_OK(prepare_metadata_child_layout(stream_state, base));
+  build_metadata_schema_children(state.get(), stream_state);
   clear_schema(out);
   out->format = base.format;
   out->name = base.name;
@@ -428,6 +412,16 @@ sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
                                       ArrowArray *out) {
   if (!stream_state || !stream_state->inner) {
     return sanitize::Status::Invalid("metadata stream is closed");
+  }
+  if (!stream_state->child_layout_ready) {
+    sanitize::CSchemaGuard base_schema;
+    if (stream_state->inner->get_schema(stream_state->inner,
+                                        base_schema.get()) != 0) {
+      return sanitize::Status::IOError(
+          "metadata stream inner get_schema failed");
+    }
+    SAN_RETURN_NOT_OK(
+        prepare_metadata_child_layout(stream_state, base_schema.value()));
   }
   auto state = std::unique_ptr<MetadataArrayState>(new (std::nothrow)
                                                        MetadataArrayState());
@@ -455,22 +449,29 @@ sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
       }));
   state->timestamp_columns.reserve(timestamp_count);
   state->utf8_columns.reserve(stream_state->columns.size() - timestamp_count);
-  state->children.reserve(static_cast<std::size_t>(base.n_children) +
-                          stream_state->columns.size());
-  state->children.insert(state->children.end(), base.children,
-                         base.children + base.n_children);
+  state->children.resize(static_cast<std::size_t>(base.n_children) +
+                         stream_state->columns.size());
+  for (std::int64_t i = 0; i < base.n_children; ++i) {
+    state->children
+        [stream_state->base_child_output_indices[static_cast<std::size_t>(i)]] =
+        base.children[i];
+  }
 
-  for (auto &column : stream_state->columns) {
+  for (std::size_t i = 0; i < stream_state->columns.size(); ++i) {
+    auto &column = stream_state->columns[i];
+    ArrowArray *metadata_child = nullptr;
     if (column.placement == MetadataColumnPlacement::AllRowsTimestampMicros) {
       auto &data = state->timestamp_columns.emplace_back();
       SAN_RETURN_NOT_OK(build_timestamp_micros_array(&data, base.length));
-      state->children.push_back(&data.array);
+      metadata_child = &data.array;
     } else {
       auto &data = state->utf8_columns.emplace_back();
       SAN_RETURN_NOT_OK(build_utf8_metadata_array(
           &data, &column, base.length, stream_state->first_row_pending));
-      state->children.push_back(&data.array);
+      metadata_child = &data.array;
     }
+    state->children[stream_state->metadata_child_output_indices[i]] =
+        metadata_child;
   }
 
   clear_array(out);

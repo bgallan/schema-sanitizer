@@ -18,6 +18,12 @@ _GENERATED_METADATA_COLUMNS = {
     "source_file",
     "ingestion_timestamp",
 }
+_GENERATED_METADATA_COLUMN_ORDER = (
+    "schema_registry",
+    "schema_drifts",
+    "source_file",
+    "ingestion_timestamp",
+)
 
 
 def _write_csv(path: Path, text: str = "a,b\n1,2\n3,4\n") -> Path:
@@ -85,6 +91,62 @@ def test_embedded_metadata_uses_fixed_native_source_path_column(tmp_path: Path) 
     assert row["source_file"] == str(source)
     assert isinstance(row["ingestion_timestamp"], str)
     assert row["ingestion_timestamp"]
+
+
+@pytest.mark.parametrize(
+    ("column_order", "data_columns"),
+    [("alphabetically", ["a", "z"]), ("schema_contract_first", ["z", "a"])],
+)
+def test_generated_etl_columns_are_materialized_last_for_grouped_sources(
+    tmp_path: Path,
+    column_order: str,
+    data_columns: list[str],
+) -> None:
+    """Verify every output keeps generated ETL columns at the schema tail."""
+    require_native()
+    pq = pytest.importorskip("pyarrow.parquet")
+    source = tmp_path / "parts"
+    source.mkdir()
+    (source / "one.jsonl").write_text('{"z":1,"a":2}\n', encoding="utf-8")
+    (source / "two.jsonl").write_text('{"z":3,"a":4}\n', encoding="utf-8")
+    expected = [*data_columns, *_GENERATED_METADATA_COLUMN_ORDER]
+
+    table = ss.to_pyarrow(
+        source, input_format="jsonl", input_mode="directory", column_order=column_order
+    ).clean_data
+    assert table.schema.names == expected
+
+    parquet_out = tmp_path / "out.parquet"
+    ss.to_parquet(
+        source,
+        parquet_out,
+        input_format="jsonl",
+        input_mode="directory",
+        column_order=column_order,
+    )
+    assert pq.read_schema(parquet_out).names == expected
+
+    csv_out = tmp_path / "out.csv"
+    ss.to_csv(
+        source,
+        csv_out,
+        input_format="jsonl",
+        input_mode="directory",
+        column_order=column_order,
+    )
+    with csv_out.open(newline="", encoding="utf-8") as csv_file:
+        assert next(csv.reader(csv_file)) == expected
+
+    jsonl_out = tmp_path / "out.jsonl"
+    ss.to_jsonl(
+        source,
+        jsonl_out,
+        input_format="jsonl",
+        input_mode="directory",
+        column_order=column_order,
+    )
+    first_row = json.loads(jsonl_out.read_text(encoding="utf-8").splitlines()[0])
+    assert list(first_row) == expected
 
 
 @pytest.mark.parametrize(

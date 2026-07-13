@@ -6,6 +6,7 @@
 #include "nanoarrow/nanoarrow.h"
 #include "sanitize/core/status.hh"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -16,10 +17,17 @@ struct MetadataStreamState {
   PyObject *stream_obj = nullptr;
   PyObject *stream_capsule = nullptr;
   std::vector<MetadataColumn> columns;
+  std::vector<std::size_t> base_child_output_indices;
+  std::vector<std::size_t> metadata_child_output_indices;
   std::string last_error;
+  bool child_layout_ready = false;
   bool first_row_pending = true;
   bool closed = false;
 };
+
+sanitize::Status
+prepare_metadata_child_layout(MetadataStreamState *stream_state,
+                              const ArrowSchema &base_schema);
 
 sanitize::Status build_metadata_schema(MetadataStreamState *stream_state,
                                        ArrowSchema *out);

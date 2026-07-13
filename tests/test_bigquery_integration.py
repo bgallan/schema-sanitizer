@@ -75,6 +75,51 @@ def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> 
     ) in ddl
 
 
+@pytest.mark.parametrize("sort_fields_alphabetically", [False, True])
+def test_bigquery_external_table_ddl_keeps_etl_columns_last(
+    sort_fields_alphabetically: bool,
+) -> None:
+    """Verify generated ETL columns trail user columns in canonical order."""
+    pa = __import__("pyarrow")
+    from schema_sanitizer.integrations.bigquery import (
+        BigQueryTableRef,
+        ExternalTableSpec,
+        external_table_ddl,
+    )
+
+    ddl, _skipped = external_table_ddl(
+        BigQueryTableRef("project", "dataset", "events"),
+        pa.schema(
+            [
+                pa.field("source_file", pa.string()),
+                pa.field("z", pa.int64()),
+                pa.field("ingestion_timestamp", pa.timestamp("us")),
+                pa.field("schema_drifts", pa.string()),
+                pa.field("a", pa.string()),
+                pa.field("schema_registry", pa.string()),
+            ]
+        ),
+        ExternalTableSpec(
+            source_uris=["gs://silver/events/*"],
+            hive_uri_prefix="gs://silver/events",
+            partition_columns=(("date", "DATE"),),
+        ),
+        sort_fields_alphabetically=sort_fields_alphabetically,
+    )
+
+    data_names = ["a", "z"] if sort_fields_alphabetically else ["z", "a"]
+    expected_names = [
+        *data_names,
+        "schema_registry",
+        "schema_drifts",
+        "source_file",
+        "ingestion_timestamp",
+    ]
+    assert [ddl.index(f"`{name}`") for name in expected_names] == sorted(
+        ddl.index(f"`{name}`") for name in expected_names
+    )
+
+
 def test_bigquery_registry_sidecar_partition_queries() -> None:
     """Verify BigQuery registry sidecar SQL uses encoded Hive partition keys."""
     from schema_sanitizer.integrations.bigquery import (

@@ -462,10 +462,14 @@ Every analytical and file conversion adds these fixed top-level columns:
 
 | Column | Behavior | Generic value |
 |---|---|---|
-| `source_file` | Full local/cloud file path for every row. Directory mode uses the specific child file that produced that row. | `"gs://example-bucket/raw/2026-06-25/events.jsonl"` |
-| `ingestion_timestamp` | Per-row materialization timestamp with Arrow/Parquet `TIMESTAMP_MICROS` type. Text sinks serialize it as an ISO timestamp string. | `2026-06-25T09:05:08.947122` |
 | `schema_registry` | Canonical schema and field-version registry serialized as JSON | `{"registry_version":1,"schema_generation":2,...}` |
 | `schema_drifts` | Drift events generated for this input, serialized as JSON | `[{"source_path":"amount","output_name":"amount_v2_float",...}]` |
+| `source_file` | Full local/cloud file path for every row. Directory mode uses the specific child file that produced that row. | `"gs://example-bucket/raw/2026-06-25/events.jsonl"` |
+| `ingestion_timestamp` | Per-row materialization timestamp with Arrow/Parquet `TIMESTAMP_MICROS` type. Text sinks serialize it as an ISO timestamp string. | `2026-06-25T09:05:08.947122` |
+
+These four columns always occupy the end of analytical schemas, physical file
+schemas, and generated BigQuery external-table schemas in the order shown,
+regardless of `column_order`. That option applies only to source data fields.
 
 `source_file` and `ingestion_timestamp` contain values in every output row.
 `schema_registry` and `schema_drifts` contain values only in the first output

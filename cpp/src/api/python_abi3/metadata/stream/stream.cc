@@ -5,15 +5,35 @@
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/string_lookup.hh"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
+#include <string_view>
 #include <utility>
 
 namespace core_abi3_internal {
 namespace {
+
+constexpr std::array<std::string_view, 4> kEtlColumnOrder{
+    "schema_registry", "schema_drifts", "source_file", "ingestion_timestamp"};
+
+bool is_etl_column(std::string_view name) noexcept {
+  return std::ranges::find(kEtlColumnOrder, name) != kEtlColumnOrder.end();
+}
+
+std::string_view base_child_name(const ArrowSchema &base,
+                                 std::size_t index) noexcept {
+  const ArrowSchema *child = base.children[index];
+  return child && child->name ? std::string_view(child->name)
+                              : std::string_view{};
+}
 
 void close_metadata_stream(MetadataStreamState *state) noexcept {
   if (!state || state->closed) {
@@ -126,6 +146,62 @@ ArrowArrayStream *make_stream(std::unique_ptr<MetadataStreamState> state) {
 }
 
 } // namespace
+
+sanitize::Status
+prepare_metadata_child_layout(MetadataStreamState *stream_state,
+                              const ArrowSchema &base_schema) {
+  if (!stream_state || base_schema.n_children < 0) {
+    return sanitize::Status::Invalid(
+        "metadata stream base schema has invalid children");
+  }
+  const auto base_count = static_cast<std::size_t>(base_schema.n_children);
+  sanitize::internal::BorrowedStringLookupSet names;
+  names.reserve(base_count + stream_state->columns.size());
+  for (std::size_t i = 0; i < base_count; ++i) {
+    const auto name = base_child_name(base_schema, i);
+    if (!name.empty() && !names.emplace(name).second) {
+      return sanitize::Status::Invalid(
+          "metadata stream base schema has duplicate column names");
+    }
+  }
+  for (const auto &column : stream_state->columns) {
+    if (!names.emplace(column.name).second) {
+      return sanitize::Status::Invalid("generated metadata column '" +
+                                       column.name +
+                                       "' already exists in output schema");
+    }
+  }
+
+  constexpr std::size_t kUnset = std::numeric_limits<std::size_t>::max();
+  stream_state->base_child_output_indices.assign(base_count, kUnset);
+  stream_state->metadata_child_output_indices.assign(
+      stream_state->columns.size(), kUnset);
+  std::size_t output_index = 0;
+  for (std::size_t i = 0; i < base_count; ++i) {
+    if (!is_etl_column(base_child_name(base_schema, i))) {
+      stream_state->base_child_output_indices[i] = output_index++;
+    }
+  }
+  for (std::size_t i = 0; i < stream_state->columns.size(); ++i) {
+    if (!is_etl_column(stream_state->columns[i].name)) {
+      stream_state->metadata_child_output_indices[i] = output_index++;
+    }
+  }
+  for (const auto etl_name : kEtlColumnOrder) {
+    for (std::size_t i = 0; i < base_count; ++i) {
+      if (base_child_name(base_schema, i) == etl_name) {
+        stream_state->base_child_output_indices[i] = output_index++;
+      }
+    }
+    for (std::size_t i = 0; i < stream_state->columns.size(); ++i) {
+      if (stream_state->columns[i].name == etl_name) {
+        stream_state->metadata_child_output_indices[i] = output_index++;
+      }
+    }
+  }
+  stream_state->child_layout_ready = true;
+  return sanitize::Status::OK();
+}
 
 ArrowArrayStream *make_metadata_stream_wrapper(PyObject *stream_obj,
                                                PyObject *first_row_columns,

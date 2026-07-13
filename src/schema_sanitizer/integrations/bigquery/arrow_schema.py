@@ -28,6 +28,21 @@ def _iter_arrow_fields(data_type_or_schema: Any, *, sort_alphabetically: bool) -
     return fields
 
 
+def _iter_root_arrow_fields(schema: Any, *, sort_alphabetically: bool) -> list[Any]:
+    """Return root fields with generated ETL columns in canonical trailing order."""
+    fields = list(schema)
+    metadata_names = set(ETL_GENERATED_COLUMN_NAMES)
+    data_fields = [field for field in fields if field.name not in metadata_names]
+    if sort_alphabetically:
+        data_fields.sort(key=lambda field: field.name)
+    return data_fields + [
+        field
+        for metadata_name in ETL_GENERATED_COLUMN_NAMES
+        for field in fields
+        if field.name == metadata_name
+    ]
+
+
 def arrow_type_to_bq_sql(data_type: Any, *, sort_fields_alphabetically: bool = False) -> str:
     """Convert a PyArrow type to a BigQuery Standard SQL type."""
     import pyarrow as pa
@@ -117,7 +132,7 @@ def arrow_schema_to_bq_column_ddl(
     """Convert a PyArrow schema to BigQuery column DDL."""
     lines: list[str] = []
     skipped_partition_fields: list[str] = []
-    for field in _iter_arrow_fields(schema, sort_alphabetically=sort_fields_alphabetically):
+    for field in _iter_root_arrow_fields(schema, sort_alphabetically=sort_fields_alphabetically):
         if field.name in partition_names:
             skipped_partition_fields.append(field.name)
             continue

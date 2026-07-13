@@ -28,7 +28,8 @@ def test_metadata_stream_allocates_state_by_column_kind() -> None:
     assert "std::vector<Utf8ColumnData> utf8_columns" in source
     assert "std::vector<TimestampMicrosColumnData> timestamp_columns" in source
     assert "std::ranges::count_if" in source
-    assert "BorrowedStringLookupSet names" in source
+    layout = (owner.parent / "stream.cc").read_text(encoding="utf-8")
+    assert "BorrowedStringLookupSet names" in layout
 
 
 def test_retired_metadata_stream_micro_units_stay_absent() -> None:
