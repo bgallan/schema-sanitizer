@@ -23,20 +23,6 @@ bool same_top_level_kind(const LogicalType &left,
   return top_level_kind(left) == top_level_kind(right);
 }
 
-std::optional<std::string> variant_base_name(std::string_view name) {
-  const auto parsed = sanitize::internal::parse_versioned_field_name(name);
-  if (!parsed)
-    return std::nullopt;
-  return std::string(parsed->base);
-}
-
-std::optional<int> variant_version(std::string_view name) {
-  const auto parsed = sanitize::internal::parse_versioned_field_name(name);
-  if (!parsed)
-    return std::nullopt;
-  return parsed->version;
-}
-
 std::string variant_semantic_type(const LogicalType &type) {
   switch (type.kind) {
   case LogicalKind::kNull:
@@ -65,18 +51,19 @@ std::string variant_semantic_type(const LogicalType &type) {
   return "string";
 }
 
-std::string source_segment_for_output(std::string_view output_segment) {
-  if (auto base = variant_base_name(output_segment))
-    return *base;
-  return std::string(output_segment);
+std::string_view
+source_segment_for_output(std::string_view output_segment) noexcept {
+  return sanitize::internal::variant_family_base(output_segment);
 }
 
 std::string join_path(std::string_view parent, std::string_view child) {
   if (parent.empty())
     return std::string(child);
-  std::string out(parent);
+  std::string out;
+  out.reserve(parent.size() + 1U + child.size());
+  out.append(parent);
   out.push_back('.');
-  out += child;
+  out.append(child);
   return out;
 }
 

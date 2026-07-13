@@ -13,17 +13,17 @@ try:
         add_bigquery_args,
         add_external_table_args,
         add_logging_args,
-        add_sanitizer_args,
-        add_source_args,
     )
+    from examples.example_07.cli_sanitizer_args import add_sanitizer_args
+    from examples.example_07.cli_source_args import add_source_args
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from cli_sections import (
         add_bigquery_args,
         add_external_table_args,
         add_logging_args,
-        add_sanitizer_args,
-        add_source_args,
     )
+    from cli_sanitizer_args import add_sanitizer_args
+    from cli_source_args import add_source_args
 
 
 def _any_set(args: argparse.Namespace, names: tuple[str, ...]) -> bool:

@@ -1,11 +1,35 @@
 # Native Parquet Reader TODO
 
-The Parquet input pipeline is production-safe because native reader failures
-fall back to PyArrow. The native reader itself is not yet a complete PyArrow
+The Parquet input pipeline is production-safe when PyArrow is installed:
+native reader skips/failures fall back to PyArrow, successful and failed
+fallback attempts are observable, diagnostics preserve the native reason
+that triggered recovery, local-path fallback is laddered from native to
+PyArrow Dataset and then to `ParquetFile.iter_batches` when filters are absent,
+and final diagnostics expose explicit contract booleans for native success,
+safe fallback success, and failed fallback outcomes. `last_parquet_pipeline_contract_status()`
+turns those fields into a compact fail-closed gate for the most recent read, and
+`native_parquet_writer_contract_status()` provides a preflight gate for
+schema-sanitizer-native files before relying on the native stream, and
+`parquet_preflight_contract_status()` combines that writer-native gate with
+PyArrow availability and the same runtime filter contract used by the reader, so
+operators can fail closed before reading if neither native nor fallback can cover
+the file. `parquet_contract_certification_status()`
+now combines the preflight gate, writer-native gate, applicable nested contract,
+and optional recursive projection coverage audits into one fail-closed production
+certificate for native-or-PyArrow coverage. Native recursive diagnostics now also
+have a compact `native_parquet_nested_contract_status()`
+gate for the schema-sanitizer writer grammar: every decoded row group, layout
+fingerprint, definition/repetition level fingerprint, repeated-ancestor fingerprint,
+leaf contract, root contract, and ownership map must be stable/collision-free before
+`satisfied=True`. Schema-sanitizer-native files whose nested contract is applicable
+but not satisfied are treated as native-read blockers and fall back to PyArrow
+instead of being streamed natively. The native reader itself is not yet a complete PyArrow
 replacement. Remaining work:
 
 1. Materialize all native-planned encodings:
 
+   - [x] Native Snappy page decompression for footer verification and runtime
+     materialization.
    - [x] RLE dictionary byte-array/string pages.
    - [x] RLE dictionary pages for non-byte-array physical types.
    - [x] DELTA_BINARY_PACKED integer pages.
@@ -50,7 +74,8 @@ replacement. Remaining work:
    - [x] Native materialization for top-level map with scalar list values.
    - [x] Native materialization for top-level list-of-struct with scalar list-chain children.
    - [x] Native materialization for top-level map with scalar list-chain values.
-   - Native materialization for arbitrary recursive mixed repeated struct/map shapes.
+   - [x] Native materialization for recursive mixed repeated struct/map shapes
+     within the bounded schema-sanitizer native writer grammar.
      - [x] Top-level list-of-struct with scalar map children.
      - [x] Top-level list-of-struct with scalar map children containing scalar list values.
      - [x] Top-level list-of-struct with scalar map children containing scalar list-chain values.
@@ -177,37 +202,64 @@ replacement. Remaining work:
      - [x] Root struct outputs now use the same recursive struct-node materializer as nested structs; the old top-level optional-struct validity helper was removed.
      - [x] Added required/optional root-struct parity coverage to prove top-level struct nullability still follows footer definition levels.
      - [x] Recursive struct-node and map-entry child assembly now share the same child-appender loop, removing the last manual struct child traversal.
-     - Native recursive Arrow array construction for mathematically arbitrary mixed repeated struct/map/list shapes.
-       Remaining honest effort: medium-small. The recursive tree now drives
-       native readiness, output layout, Arrow schema construction, Arrow array
+     - [x] Footer diagnostics now expose the recursive output layout tree per row group, including root kind, leaf/struct/list/map counts, node depth, branching, source-column indices, physical leaf paths, repeated-node paths, a deterministic physical recursive shape signature, and a structural signature independent of leaf column indexes for production debugging.
+     - [x] Added deterministic recursive shape-fuzzer coverage across generated list/map/struct chains of varying depth, root kinds, branch counts, nulls, empties, and map/list/struct leaves.
+     - [x] Added bounded Cartesian recursive grammar coverage for every `list`/`map`/`struct` operation word up to depth 3 plus deeper frontier shapes, with multi-row-group native round trips and shape-signature assertions.
+     - [x] Added adversarial generated recursive null/empty/full matrix coverage that injects null outer containers, empty repeated nodes, null list elements/map values, and sparse structs across every container kind while asserting native structural diagnostics.
+     - [x] Added per-row-group recursive phase-matrix coverage that isolates all-null, empty-only, sparse, and full values into separate row groups for deep list/map/struct shapes, proving offsets, validity, and structural signatures reset cleanly between row groups.
+     - [x] Added projected multi-root recursive phase-matrix coverage that combines several generated deep roots in one file, projects reordered subsets across every phase row group, and asserts native footer layout fields match the requested projection order.
+     - [x] Added a public native recursive layout summary that folds row-group recursive diagnostics into a compact stability report for shape-signature drift, structural-signature drift, leaf-path drift, repeated-node-path drift, and projected-root invariance checks.
+     - [x] Added generated recursive projection-with-noise coverage that keeps one deep target root projected while many unprojected Cartesian recursive roots are present, proving unprojected arbitrary nested branches do not perturb the projected native root layout.
+     - [x] Recursive layout summaries now expose stable per-field/layout fingerprints, order-independent canonical fingerprints, field-name lookup maps, leaf/repeated-node ownership maps, and duplicate physical leaf/repeated-node ownership across projected roots, so production diagnostics can compare arbitrary nested layouts without scanning full row-group JSON.
+     - [x] Footer diagnostics and recursive summaries now expose component-wise leaf/repeated-node paths in addition to legacy dot-joined labels, avoiding false collisions for arbitrary nested field names that themselves contain dots or separator-like characters.
+     - [x] Footer diagnostics and recursive summaries now include per-leaf maximum definition/repetition levels plus path-definition-level vectors, with drift detection and canonical fingerprints for required/optional/nullability profiles across row groups.
+     - [x] Footer diagnostics and recursive summaries now expose path-repetition-level vectors and canonical leaf repetition-path fingerprints, making repeated-container topology drift visible for mathematically arbitrary list/map nesting across row groups and projections.
+     - [x] Recursive summaries now expose per-row-group layout, leaf-level, and repetition-path fingerprints plus stability flags, making row-group segmentation drift visible without scanning full footer JSON.
+     - [x] Recursive summaries now expose leaf-to-repeated-ancestor fingerprints and per-row-group stability flags, tying each physical leaf back to the named list/map containers that own its repetition levels so deep topology drift is diagnosable beyond raw repetition vectors.
+     - [x] Leaf-to-repeated-ancestor fingerprints now include the complete leaf repetition-level vector as well as named ancestor ownership, catching deep list/map topology drift even when sampled ancestor levels happen to match.
+     - [x] Recursive summaries now expose per-leaf recursive contracts combining component paths, max definition/repetition levels, path-level vectors, and repeated ancestors, plus canonical row-group fingerprints and drift detection for those contracts.
+     - [x] Recursive summaries now expose root-level recursive contracts that aggregate leaf contracts, repeated containers, level topology, shape signatures, and depth/branching metrics per projected top-level field, with canonical fingerprints and row-group drift detection.
+     - [x] Added a public recursive projection-contract audit that compares projected field/leaf/root contracts against the full-file recursive layout, detecting missing, unexpected, reordered, or drifted arbitrary nested roots without hand-diffing footer JSON.
+     - [x] Added a recursive projection-chain contract audit that verifies `full -> source projection -> target projection` preserves the same field/leaf/root contracts as direct `full -> target projection`, catching non-subset, reordering, and contract-drift bugs in chained deep nested projections.
+     - [x] Added a recursive projection-partition contract audit that verifies multiple disjoint projected reads exactly cover the full recursive root set, catching missing, duplicated, unknown, or drifted arbitrary nested root contracts before production recomposition.
+     - [x] Added a recursive projection-coverage contract audit for partial or intentionally overlapping projected reads, reporting gaps/overlaps separately while still failing on unknown columns or field/leaf/root contract drift for every requested arbitrary nested root.
+     - [x] Added recursive segmentation-invariance coverage that writes the same deep null/empty/sparse/full nested table with single, paired, irregular, and per-row row-group cuts, then asserts native projected reads and canonical fingerprints are identical.
+     - [x] Added deep requiredness-level matrix coverage for recursive native-writer structs/lists with mixed required roots, required list elements, nullable repeated values, and optional deep chains, asserting native round trip and stable definition/repetition-level diagnostics.
+     - [x] Added deterministic seeded recursive fuzz coverage with irregular bounded tree shapes, varied branch widths, repeated sibling subtrees, null/empty/sparse/full values, projected native round trips, and fingerprint assertions.
+     - [x] Added recursive projection-permutation coverage that writes several independent irregular deep roots into one file, projects reordered subsets, and asserts every projected root keeps the same canonical fingerprint and ownership maps as the full native footer.
+     - [x] Native recursive Arrow array construction for the bounded
+       schema-sanitizer native writer grammar across mixed repeated
+       struct/map/list shapes.
+       Production support contract: the recursive tree now drives native
+       readiness, output layout, Arrow schema construction, Arrow array
        construction, repeated-layout decoding, repeated-layout validation, and
-       the final materializability gate. List/map repeated-layout indexes and
-       struct validity domains are stored on recursive materialization nodes
-       and consumed by materialization/validation. Scalar and complex list
-       chains now share the same recursive schema and array builders, and root
-       structs use the same recursive materializer as nested structs. The hard
-       runtime split has been removed for schema-sanitizer's native writer
-       grammar. Remaining work is mostly proving and documenting the exact
-       production support contract instead of keeping the stronger
-       mathematical-arbitrariness claim.
-       Current concrete blocker: mathematically arbitrary mixed recursive
-       shapes are now covered by hand-written stress cases plus deterministic
-       generated depth/branch/null-empty fixtures for the supported recursive
-       path grammar. The remaining work is to downgrade the literal
-       "mathematically arbitrary" wording to a bounded production support
-       statement, then add compatibility fixtures for externally written
-       Parquet files that use equivalent but non-native list/map encodings.
+       the final materializability gate for schema-sanitizer native-writer
+       paths. List/map repeated-layout indexes and struct validity domains are
+       stored on recursive materialization nodes and consumed by
+       materialization/validation. Scalar and complex list chains now share the
+       same recursive schema and array builders, root list/struct outputs use
+       the same recursive materializers as nested list/struct nodes, and the
+       old branch-specific runtime split has been removed.
+       Compatibility boundary: mathematically arbitrary external encodings are
+       not promised on the native route. Externally written files that encode
+       equivalent list/map/struct semantics with non-native path conventions
+       remain production-supported through PyArrow fallback with explicit
+       native-readiness diagnostics.
      - [x] Start recursive materialization tree construction from Parquet paths.
      - [x] Persist recursive materialization trees in native output layout.
      - [x] Merge per-leaf recursive trees into one validated output-field tree.
      - [x] Drive native struct/list allocation counts from recursive output-field trees.
      - [x] Store and validate source column indices on recursive materialization leaves.
-   - Repeated fields.
-   - Full definition/repetition level reconstruction.
+   - [x] Repeated fields within the bounded schema-sanitizer native writer
+     grammar.
+   - [x] Full definition/repetition level reconstruction within the bounded
+     schema-sanitizer native writer grammar.
    - [x] Production fallback for nested/repeated files through PyArrow.
 
 1. Broaden row-group and page coverage:
 
+   - [x] Native Snappy page verification and value decoding for common external
+     writer payloads.
    - [x] Multi-row-group parity tests.
    - [x] Simple top-level lists across multiple row groups.
    - [x] Multiple data pages per column.
@@ -219,7 +271,13 @@ replacement. Remaining work:
 1. Expand input source support:
 
    - [x] File-like objects through PyArrow fallback.
+   - [x] Local file-backed streams can enter the native path by resolving the
+     stream's local filename before falling back to PyArrow for anonymous
+     streams.
    - [x] Buffers through PyArrow fallback.
+   - [x] Buffer-backed Parquet bytes can be staged to a temporary local
+     `.parquet` file so native-writer buffers can use the native reader while
+     external buffers still keep PyArrow fallback with native diagnostics.
    - [x] Local `file://` filesystem URIs through the direct Arrow path.
    - [x] Remote filesystem/cloud single-file and directory URIs through
      bounded local staging and shared Arrow-source execution.
@@ -230,6 +288,12 @@ replacement. Remaining work:
    - [x] Native projection support for top-level scalar columns.
    - [x] Native projection support for supported top-level struct columns.
    - [x] Native projection support for supported top-level list columns.
+   - [x] Native projection planning decodes page headers/payloads only for
+     selected top-level fields, so unsupported/corrupt/large unprojected
+     columns do not block projected native reads.
+   - [x] Native projected footer diagnostics are exposed through the same ABI
+     helper as full-footers, keeping readiness checks aligned with projected
+     stream creation.
    - [x] Native projection support for empty supported file schemas.
    - [x] Projection support through PyArrow fallback when native cannot satisfy
      projected column reads.
@@ -237,6 +301,8 @@ replacement. Remaining work:
    - [x] Batch-size control, including PyArrow fallback when native row-group
      batches would exceed the requested batch size.
    - [x] Predicate/filter integration through PyArrow dataset scanner fallback.
+   - [x] Parquet API tests collect and skip cleanly when PyArrow is absent,
+     preserving the package's optional-PyArrow contract in CI.
    - Native predicate pushdown if direct native reads become dataset-aware.
 
 1. Harden large-file behavior:
@@ -244,13 +310,23 @@ replacement. Remaining work:
    - [x] Reuse the native input file handle across row groups.
    - [x] Reuse native page payload buffers during row-group materialization.
    - Streaming materialization instead of whole-row-group buffering where possible.
+   - [x] Projected native planning skips unprojected page decoding, reducing
+     CPU and memory before row-group materialization.
+   - [x] Buffer-backed native-writer reads can stage once to a temporary local
+     file instead of forcing the non-path PyArrow iter-batches route.
    - [x] Memory-budget checks for decoded/materialized buffers.
 
 1. Add cross-writer compatibility:
 
+   - [x] Native reader/writer Snappy codec support for schema-sanitizer files.
+   - [x] PyArrow/Spark/BigQuery-like Snappy page payloads are decoded and
+     verified by native footer diagnostics before falling back for non-native
+     writer/layout reasons.
    - [x] PyArrow-written files through PyArrow fallback.
    - [x] Spark-compatible INT96 timestamp variants through PyArrow fallback.
    - [x] Spark-flavored nested PyArrow fixtures through PyArrow fallback.
+   - [x] PyArrow legacy/non-compliant nested list/map encoding fixtures through
+     PyArrow fallback.
    - Spark-written files.
    - [x] DuckDB-written files through PyArrow fallback.
    - [x] BigQuery-compatible standard scalar/logical variants without Arrow
@@ -264,3 +340,64 @@ replacement. Remaining work:
    - [x] Preserve clear route labels for native vs PyArrow reads.
    - [x] Log unsupported native-reader cases at a useful level.
    - [x] Add counters/diagnostics if native reader adoption becomes user-visible.
+   - [x] Expose a defensive Parquet route/fallback observability snapshot with
+     route counts, native-reader reason counts, last route, and last native
+     diagnostic details.
+   - [x] Harden safe-fallback behavior so ordinary native footer/native stream
+     exceptions (`RuntimeError`, `ValueError`, `OSError`, etc.) never escape the
+     pipeline before PyArrow gets a chance to read; diagnostics now preserve the
+     original native reason plus `fallback_expected`, `fallback_route`,
+     `fallback_attempted`, and `fallback_succeeded`.
+   - [x] Record successful PyArrow fallback route annotations for both dataset
+     scanner and `ParquetFile.iter_batches` routes, so production observability
+     can prove that unsupported native reads actually recovered through fallback.
+   - [x] Record failed PyArrow fallback attempts before re-raising, including
+     `fallback_attempted=True`, `fallback_succeeded=False`, `fallback_route`,
+     and `fallback_error`, so the safe pipeline never hides whether recovery
+     was attempted or whether PyArrow itself rejected the input.
+   - [x] Add fallback attempt history and a local-path fallback ladder: native
+     reader -> PyArrow Dataset scanner -> `ParquetFile.iter_batches` when no
+     filters are present. This makes the pipeline resilient to Dataset-specific
+     open/scan failures while preserving fail-closed behavior for filters, which
+     require the Dataset scanner route.
+   - [x] Add aggregate fallback attempt/success/failure counters per PyArrow
+     route in the defensive observability snapshot, so production can prove the
+     safe fallback contract over more than the last read.
+   - [x] Record the Parquet `created_by` marker and
+     `native_writer_detected`/`native_writer_contract_satisfied` diagnostics on
+     native successes, making the schema-sanitizer native-writer route explicit
+     instead of implicit in `native_stream`.
+   - [x] Add `parquet_contract_certification_status()` as a single fail-closed
+     certificate that combines safe pipeline preflight, schema-sanitizer native
+     writer certification, applicable nested-recursive contract status, and
+     optional projection-coverage audits for arbitrary nested roots.
+   - [x] Add batch-size preflight/certification to the schema-sanitizer-native
+     writer gate, so a native file is only certified for runtime parameters that
+     the native reader can actually serve without splitting row groups; otherwise
+     the safe PyArrow fallback remains available but the native guarantee fails
+     closed.
+   - [x] Add filter-aware preflight/certification to the schema-sanitizer-native
+     writer gate: predicate filters intentionally fail the native guarantee and
+     certify only the PyArrow Dataset fallback route, matching runtime behavior
+     and preventing a filtered read from being mis-certified as native.
+   - [x] Add a runtime-readiness gate (`parquet_contract_runtime_readiness_status()`
+     plus `meta/ci/check_parquet_contract_runtime.py`) so CI and production
+     startup checks fail closed when PyArrow fallback or native footer/stream
+     hooks are unavailable instead of relying on silently skipped runtime tests.
+   - [x] Add `meta/ci/check_parquet_contract_runtime_suite.py`, a stricter
+     PyArrow/native CI gate that executes selected end-to-end Parquet contract
+     tests for native schema-sanitizer reads, safe fallback, and arbitrary nested
+     grammar coverage, and fails closed if any selected test is skipped.
+   - [x] Add a grouped runtime-suite manifest and pre-pytest selection validator
+     so the PyArrow/native CI gate also fails closed if a contract family loses
+     coverage, a selected nodeid is duplicated, or a selected runtime test is
+     renamed/removed before the suite executes.
+   - [x] Add per-contract-family execution verification to the runtime suite,
+     so the PyArrow/native CI gate fails closed if any selected contract group
+     does not produce passing reports, even when aggregate pytest totals look
+     plausible.
+   - [x] Add a durable JSON runtime-contract certificate emitted by
+     `meta/ci/check_parquet_contract_runtime_suite.py --certificate-output`,
+     covering manifest selection, runtime readiness, per-group execution, and
+     the three top-level guarantees, and upload it from CI for release/audit
+     review.

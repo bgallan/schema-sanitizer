@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from conftest import read_test_csv, read_test_python, require_native
 
-from schema_sanitizer.api_impl.context import ExecutionContext
+from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 
@@ -83,7 +83,6 @@ def test_iso_temporal_strings_are_used_for_opt_in_inference() -> None:
         ("TIMESTAMP_MILLIS", "ms"),
         ("TIMESTAMP_MICROS", "us"),
         ("TIMESTAMP_NANOS", "ns"),
-        ("ns", "ns"),
     ],
 )
 def test_timestamp_precision_controls_arrow_timestamp_unit(

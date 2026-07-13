@@ -7,7 +7,7 @@ from conftest import read_test_csv
 
 pa = pytest.importorskip("pyarrow")
 
-from schema_sanitizer.api_impl.context import ExecutionContext
+from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 _CSV_INPUT_CASES = [

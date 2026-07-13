@@ -4,6 +4,7 @@
 
 #include "internal/planning/schema_evolution.hh"
 #include "internal/planning/variant_field_names.hh"
+#include "internal/string_lookup.hh"
 #include "sanitize/metadata/file_metadata.hh"
 #include "schema_registry/schema_registry_internal.hh"
 
@@ -12,76 +13,46 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace sanitize {
 namespace {
-
 using schema_registry_internal::DriftEvent;
 
-struct TransparentStringHash {
-  using is_transparent = void;
+using internal::BorrowedStringLookupMap;
 
-  // Hashes owned and borrowed string keys identically.
-  [[nodiscard]] std::size_t operator()(std::string_view value) const noexcept {
-    return std::hash<std::string_view>{}(value);
-  }
-
-  [[nodiscard]] std::size_t
-  operator()(const std::string &value) const noexcept {
-    return (*this)(std::string_view(value));
-  }
-
-  [[nodiscard]] std::size_t operator()(const char *value) const noexcept {
-    return (*this)(std::string_view(value));
-  }
+struct VariantFamilyIndex {
+  std::vector<std::size_t> positions;
+  int next_version = 2;
 };
-
-struct TransparentStringEqual {
-  using is_transparent = void;
-
-  // Compares owned and borrowed string keys without materializing new strings.
-  [[nodiscard]] bool operator()(std::string_view lhs,
-                                std::string_view rhs) const noexcept {
-    return lhs == rhs;
-  }
-};
-
-template <typename T>
-using StringLookupMap =
-    std::unordered_map<std::string, T, TransparentStringHash,
-                       TransparentStringEqual>;
 
 struct FieldMergeIndex {
-  StringLookupMap<std::size_t> by_name;
-  StringLookupMap<std::vector<std::size_t>> variants_by_base;
-  StringLookupMap<int> next_variant_version;
+  BorrowedStringLookupMap<std::size_t> by_name;
+  BorrowedStringLookupMap<VariantFamilyIndex> families;
 };
 
 void register_field(FieldMergeIndex &index, const LogicalField &field,
                     std::size_t position) {
-  index.by_name[field.name] = position;
-  auto base = schema_registry_internal::variant_base_name(field.name);
-  const std::string family_base = base.value_or(field.name);
-  index.variants_by_base[family_base].push_back(position);
-  auto parsed_version = schema_registry_internal::variant_version(field.name);
-  if (!parsed_version)
-    return;
-  const int next_version = *parsed_version + 1;
-  auto &current_next = index.next_variant_version[family_base];
-  current_next = std::max(current_next, next_version);
+  index.by_name.insert_or_assign(std::string_view(field.name), position);
+  const auto parsed = internal::parse_versioned_field_name(field.name);
+  const std::string_view family_base = parsed ? parsed->base : field.name;
+  auto [family_it, _] = index.families.try_emplace(family_base);
+  family_it->second.positions.push_back(position);
+  if (parsed) {
+    family_it->second.next_version =
+        std::max(family_it->second.next_version, parsed->version + 1);
+  }
 }
 
-FieldMergeIndex
-build_field_merge_index(const std::vector<LogicalField> &fields) {
+FieldMergeIndex build_field_merge_index(const std::vector<LogicalField> &fields,
+                                        std::size_t expected_size) {
   FieldMergeIndex index;
-  index.by_name.reserve(fields.size());
-  index.variants_by_base.reserve(fields.size());
-  index.next_variant_version.reserve(fields.size());
+  index.by_name.reserve(expected_size);
+  index.families.reserve(expected_size);
   for (std::size_t i = 0; i < fields.size(); ++i) {
     register_field(index, fields[i], i);
   }
@@ -92,15 +63,14 @@ std::string next_variant_name(const FieldMergeIndex &index,
                               std::string_view base_name,
                               const LogicalType &incoming_type) {
   int version = 2;
-  if (auto it = index.next_variant_version.find(base_name);
-      it != index.next_variant_version.end()) {
-    version = it->second;
+  if (auto it = index.families.find(base_name); it != index.families.end()) {
+    version = it->second.next_version;
   }
   const std::string semantic_type =
       schema_registry_internal::variant_semantic_type(incoming_type);
   while (true) {
-    std::string candidate = std::string(base_name) + "_v" +
-                            std::to_string(version) + "_" + semantic_type;
+    std::string candidate =
+        internal::make_versioned_field_name(base_name, version, semantic_type);
     if (!index.by_name.contains(std::string_view(candidate)))
       return candidate;
     ++version;
@@ -111,135 +81,16 @@ bool is_scalar_type(const LogicalType &type) noexcept {
   return type.kind != LogicalKind::kStruct && type.kind != LogicalKind::kList;
 }
 
-bool is_scalar_integer_type(const LogicalField &field) noexcept {
-  return field.type && field.type->kind == LogicalKind::kInt64;
-}
-
-bool is_scalar_float_type(const LogicalField &field) noexcept {
-  return field.type && field.type->kind == LogicalKind::kFloat64;
-}
-
-bool is_scalar_numeric_type(const LogicalField &field) noexcept {
-  return is_scalar_integer_type(field) || is_scalar_float_type(field);
-}
-
-bool is_unversioned_field(const LogicalField &field) {
-  return !schema_registry_internal::variant_base_name(field.name).has_value();
-}
-
-std::string family_base_name(const LogicalField &field) {
-  auto base = schema_registry_internal::variant_base_name(field.name);
-  return base.value_or(field.name);
-}
-
-std::string canonical_versioned_name_for_type(const LogicalField &field) {
-  const auto parsed =
-      sanitize::internal::parse_versioned_field_name(field.name);
-  if (!parsed || !field.type)
-    return field.name;
-  return std::string(parsed->base) + "_v" + std::to_string(parsed->version) +
-         "_" + schema_registry_internal::variant_semantic_type(*field.type);
-}
-
-void normalize_integer_float_type(LogicalType &type);
-
-struct NumericFamilyPlan {
-  bool has_float = false;
-  std::optional<std::size_t> numeric_keep_position;
-};
-
-void normalize_integer_float_fields(std::vector<LogicalField> &fields) {
-  for (auto &field : fields) {
-    if (field.type)
-      normalize_integer_float_type(*field.type);
-  }
-
-  StringLookupMap<std::vector<std::size_t>> positions_by_family;
-  positions_by_family.reserve(fields.size());
-  for (std::size_t i = 0; i < fields.size(); ++i) {
-    positions_by_family[family_base_name(fields[i])].push_back(i);
-  }
-
-  StringLookupMap<NumericFamilyPlan> plans;
-  plans.reserve(positions_by_family.size());
-  for (const auto &[family, positions] : positions_by_family) {
-    NumericFamilyPlan plan;
-    std::optional<std::size_t> first_float;
-    for (std::size_t position : positions) {
-      const LogicalField &field = fields[position];
-      if (is_scalar_float_type(field)) {
-        plan.has_float = true;
-        if (!first_float)
-          first_float = position;
-      }
-    }
-    if (!plan.has_float) {
-      plans.emplace(family, plan);
-      continue;
-    }
-
-    for (std::size_t position : positions) {
-      const LogicalField &field = fields[position];
-      if (is_unversioned_field(field) && is_scalar_numeric_type(field)) {
-        plan.numeric_keep_position = position;
-        break;
-      }
-    }
-    if (!plan.numeric_keep_position)
-      plan.numeric_keep_position = first_float;
-    plans.emplace(family, plan);
-  }
-
-  std::vector<LogicalField> out;
-  out.reserve(fields.size());
-  StringLookupMap<std::size_t> emitted_by_name;
-  for (std::size_t i = 0; i < fields.size(); ++i) {
-    LogicalField field = std::move(fields[i]);
-    const std::string family = family_base_name(field);
-    const auto plan_it = plans.find(family);
-    if (plan_it != plans.end() && plan_it->second.has_float &&
-        is_scalar_numeric_type(field)) {
-      if (!plan_it->second.numeric_keep_position ||
-          i != *plan_it->second.numeric_keep_position) {
-        continue;
-      }
-      if (is_scalar_integer_type(field)) {
-        field.type = std::make_unique<LogicalType>(LogicalType::Float64());
-      }
-    }
-
-    field.name = canonical_versioned_name_for_type(field);
-    if (auto duplicate = emitted_by_name.find(field.name);
-        duplicate != emitted_by_name.end()) {
-      LogicalField &previous = out[duplicate->second];
-      if (previous.type && field.type &&
-          schema_registry_internal::logical_type_equal(*previous.type,
-                                                       *field.type)) {
-        continue;
-      }
-    }
-    emitted_by_name[field.name] = out.size();
-    out.push_back(std::move(field));
-  }
-  fields = std::move(out);
-}
-
-void normalize_integer_float_type(LogicalType &type) {
-  if (type.kind == LogicalKind::kStruct) {
-    normalize_integer_float_fields(type.fields);
-  } else if (type.kind == LogicalKind::kList && type.value) {
-    normalize_integer_float_type(*type.value);
-  }
-}
-
 std::optional<std::size_t>
 find_field_index(const std::vector<LogicalField> &fields,
                  std::string_view name) noexcept {
-  for (std::size_t i = 0; i < fields.size(); ++i) {
-    if (fields[i].name == name)
-      return i;
-  }
-  return std::nullopt;
+  const auto field =
+      std::ranges::find_if(fields, [name](const LogicalField &candidate) {
+        return candidate.name == name;
+      });
+  if (field == fields.end())
+    return std::nullopt;
+  return static_cast<std::size_t>(std::distance(fields.begin(), field));
 }
 
 LogicalField make_nullable_field(std::string name, const LogicalType &type) {
@@ -262,14 +113,14 @@ bool merge_into_existing_family_variant(
     const LogicalType &incoming_type, std::string_view source_path,
     std::vector<DriftEvent> &drifts, std::string_view detected_at,
     std::string_view default_key_name) {
-  auto family_it = index.variants_by_base.find(base_name);
-  if (family_it == index.variants_by_base.end())
+  auto family_it = index.families.find(base_name);
+  if (family_it == index.families.end())
     return false;
 
   // Reprocessing must reuse an exact historical shape before considering a
   // newer family member that would need nested evolution.
-  for (auto position_it = family_it->second.rbegin();
-       position_it != family_it->second.rend(); ++position_it) {
+  for (auto position_it = family_it->second.positions.rbegin();
+       position_it != family_it->second.positions.rend(); ++position_it) {
     const std::size_t position = *position_it;
     if (position >= fields.size() ||
         (skipped_position && position == *skipped_position)) {
@@ -285,8 +136,8 @@ bool merge_into_existing_family_variant(
   // The registry marks the newest equally compatible variant as current.
   // Probe in reverse order so incremental and past-date reprocessing use the
   // same deterministic target without cloning an already versioned ancestor.
-  for (auto position_it = family_it->second.rbegin();
-       position_it != family_it->second.rend(); ++position_it) {
+  for (auto position_it = family_it->second.positions.rbegin();
+       position_it != family_it->second.positions.rend(); ++position_it) {
     const std::size_t position = *position_it;
     if (position >= fields.size() ||
         (skipped_position && position == *skipped_position)) {
@@ -381,7 +232,11 @@ merge_fields(const std::vector<LogicalField> &base_fields,
              std::string_view parent_path, std::vector<DriftEvent> &drifts,
              std::string_view detected_at, std::string_view default_key_name) {
   std::vector<LogicalField> out = base_fields;
-  FieldMergeIndex index = build_field_merge_index(out);
+  const std::size_t maximum_field_count =
+      base_fields.size() + incoming_fields.size();
+  out.reserve(maximum_field_count);
+  drifts.reserve(drifts.size() + incoming_fields.size());
+  FieldMergeIndex index = build_field_merge_index(out, maximum_field_count);
 
   for (const auto &incoming : incoming_fields) {
     const std::string source_path = schema_registry_internal::join_path(
@@ -394,19 +249,19 @@ merge_fields(const std::vector<LogicalField> &base_fields,
             : std::optional<std::size_t>(base_it->second);
     LogicalField *base = base_position ? &out[*base_position] : nullptr;
     if (!base) {
-      auto incoming_family_base =
-          schema_registry_internal::variant_base_name(incoming.name);
-      if (incoming_family_base && incoming.type &&
-          index.variants_by_base.contains(*incoming_family_base)) {
+      const std::string_view incoming_family_base =
+          internal::versioned_field_base(incoming.name);
+      if (!incoming_family_base.empty() && incoming.type &&
+          index.families.contains(incoming_family_base)) {
         if (merge_into_existing_family_variant(
-                out, index, *incoming_family_base, std::nullopt, *incoming.type,
+                out, index, incoming_family_base, std::nullopt, *incoming.type,
                 source_path, drifts, detected_at, default_key_name)) {
           continue;
         }
 
         LogicalField variant = incoming;
         variant.name =
-            next_variant_name(index, *incoming_family_base, *incoming.type);
+            next_variant_name(index, incoming_family_base, *incoming.type);
         variant.nullable = true;
         out.push_back(variant);
         register_field(index, out.back(), out.size() - 1);
@@ -456,9 +311,8 @@ merge_fields(const std::vector<LogicalField> &base_fields,
       continue;
     }
 
-    const std::string family_base =
-        schema_registry_internal::variant_base_name(incoming.name)
-            .value_or(incoming.name);
+    const std::string_view family_base =
+        internal::variant_family_base(incoming.name);
     if (merge_into_existing_family_variant(
             out, index, family_base, base_position, *incoming.type, source_path,
             drifts, detected_at, default_key_name)) {
@@ -535,92 +389,19 @@ merge_types(const LogicalType &base_type, const LogicalType &incoming_type,
 
   return std::nullopt;
 }
-
 } // namespace
 
 namespace schema_registry_internal {
 
-void normalize_integer_float_schema(LogicalSchema &schema) {
-  normalize_integer_float_fields(schema.fields);
+std::vector<LogicalField> merge_registry_fields(
+    const std::vector<LogicalField> &base_fields,
+    const std::vector<LogicalField> &incoming_fields,
+    std::string_view parent_path, std::vector<DriftEvent> &drifts,
+    std::string_view detected_at, std::string_view default_key_name) {
+  return merge_fields(base_fields, incoming_fields, parent_path, drifts,
+                      detected_at, default_key_name);
 }
 
 } // namespace schema_registry_internal
-
-Result<bool>
-schema_registry_has_canonical_schema(std::string_view registry_json) {
-  SAN_ASSIGN_OR_RAISE(
-      auto schema,
-      schema_registry_internal::canonical_schema_from_registry_json(
-          registry_json));
-  return schema && !schema->fields.empty();
-}
-
-Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous(
-    const SchemaRegistryMergeInput &input,
-    std::optional<LogicalSchema> previous_schema) {
-  if (input.field_name_policy.empty()) {
-    return Status::Invalid("schema registry merge: field_name_policy is empty");
-  }
-  if (input.default_key_name.empty()) {
-    return Status::Invalid("schema registry merge: default_key_name is empty");
-  }
-
-  std::string detected_at = input.detected_at;
-  if (detected_at.empty()) {
-    SAN_ASSIGN_OR_RAISE(detected_at, current_utc_iso_timestamp());
-  }
-
-  std::vector<DriftEvent> drifts;
-  LogicalSchema schema;
-  if (!previous_schema || previous_schema->fields.empty()) {
-    schema = input.inferred_schema;
-    schema_registry_internal::normalize_integer_float_schema(schema);
-    for (const auto &field : schema.fields) {
-      drifts.push_back(DriftEvent{
-          .source_path = field.name,
-          .output_name = field.name,
-          .drift_type = "newly_added",
-          .previous_schema = std::nullopt,
-          .new_schema = schema_registry_internal::field_type_string(field)});
-    }
-  } else {
-    schema_registry_internal::normalize_integer_float_schema(*previous_schema);
-    LogicalSchema inferred_schema = input.inferred_schema;
-    schema_registry_internal::normalize_integer_float_schema(inferred_schema);
-    schema.fields =
-        merge_fields(previous_schema->fields, inferred_schema.fields, "",
-                     drifts, detected_at, input.default_key_name);
-  }
-  schema_registry_internal::normalize_integer_float_schema(schema);
-  if (input.field_order == FieldOrderPolicy::kAlphabetically) {
-    schema =
-        internal::reorder_schema_fields(schema, nullptr, input.field_order);
-  }
-
-  SchemaRegistryMergeResult out;
-  out.schema = std::move(schema);
-  out.drifts_json =
-      schema_registry_internal::drift_events_json(drifts, detected_at);
-  out.registry_json = schema_registry_internal::registry_json(
-      out.schema, input.registry_json, input.field_name_policy,
-      !drifts.empty());
-  out.detected_at = std::move(detected_at);
-  return out;
-}
-
-Result<SchemaRegistryMergeResult>
-merge_schema_registry(const SchemaRegistryMergeInput &input) {
-  SAN_ASSIGN_OR_RAISE(
-      auto previous_schema,
-      schema_registry_internal::canonical_schema_from_registry_json(
-          input.registry_json));
-  return merge_schema_registry_with_previous(input, std::move(previous_schema));
-}
-
-Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous_schema(
-    const SchemaRegistryMergeInput &input,
-    const LogicalSchema &previous_schema) {
-  return merge_schema_registry_with_previous(input, previous_schema);
-}
 
 } // namespace sanitize

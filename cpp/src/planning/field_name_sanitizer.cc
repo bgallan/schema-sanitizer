@@ -1,20 +1,20 @@
-// Implements output field-name sanitization helpers.
+// Implements output and logical-schema field-name sanitization.
 
 #include "internal/planning/field_name_sanitizer.hh"
 
+#include "internal/planning/variant_field_names.hh"
+#include "internal/string_lookup.hh"
+#include "sanitize/detail/hash.hh"
+
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include "internal/planning/field_name_collision.hh"
-#include "internal/planning/field_name_policy.hh"
-#include "internal/planning/variant_field_names.hh"
 
 namespace sanitize::internal {
 namespace {
@@ -23,8 +23,25 @@ constexpr std::size_t kInitialSuffixLength = 6;
 constexpr std::size_t kMaxSuffixLength = 16;
 constexpr std::string_view kFlattenedSuffix = "_flattened";
 constexpr std::string_view kSanitizedFlattenedSuffix = "flattened";
+constexpr std::string_view kPolicyPreserve = "preserve";
+constexpr std::string_view kPolicyLowerSnake = "lower_snake";
 
-// Returns whether prepared options preserve source names.
+char lower_alpha(unsigned char c) noexcept {
+  if (c >= 'A' && c <= 'Z')
+    return static_cast<char>(c + ('a' - 'A'));
+  if (c >= 'a' && c <= 'z')
+    return static_cast<char>(c);
+  return '\0';
+}
+
+char lower_snake(unsigned char c) noexcept {
+  if (c >= 'A' && c <= 'Z')
+    return static_cast<char>(c + ('a' - 'A'));
+  if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')
+    return static_cast<char>(c);
+  return '_';
+}
+
 bool prepared_uses_preserve_policy(
     const sanitize::PreparedOptions &opts) noexcept {
   return uses_preserve_policy(opts.spec.field_name_policy);
@@ -34,34 +51,32 @@ sanitize::LogicalType
 sanitize_logical_type_names(const sanitize::LogicalType &type,
                             const sanitize::PreparedOptions &opts);
 
-// Sanitizes all fields in one sibling scope while resolving collisions.
 std::vector<sanitize::LogicalField>
 sanitize_logical_fields(const std::vector<sanitize::LogicalField> &fields,
                         const sanitize::PreparedOptions &opts) {
   std::vector<std::string_view> dirty_names;
   dirty_names.reserve(fields.size());
-  for (const auto &field : fields)
+  for (const auto &field : fields) {
     dirty_names.push_back(field.name);
+  }
 
   const std::vector<std::string> clean_names =
       clean_sibling_field_names(dirty_names, opts);
-
   std::vector<sanitize::LogicalField> out;
   out.reserve(fields.size());
-  for (std::size_t i = 0; i < fields.size(); ++i) {
+  for (std::size_t index = 0; index < fields.size(); ++index) {
     sanitize::LogicalField field;
-    field.name = clean_names[i];
-    field.nullable = fields[i].nullable;
-    if (fields[i].type) {
+    field.name = clean_names[index];
+    field.nullable = fields[index].nullable;
+    if (fields[index].type) {
       field.type = std::make_unique<sanitize::LogicalType>(
-          sanitize_logical_type_names(*fields[i].type, opts));
+          sanitize_logical_type_names(*fields[index].type, opts));
     }
     out.push_back(std::move(field));
   }
   return out;
 }
 
-// Sanitizes nested logical type field names recursively.
 sanitize::LogicalType
 sanitize_logical_type_names(const sanitize::LogicalType &type,
                             const sanitize::PreparedOptions &opts) {
@@ -83,6 +98,32 @@ sanitize_logical_type_names(const sanitize::LogicalType &type,
 
 } // namespace
 
+bool uses_preserve_policy(std::string_view field_name_policy) noexcept {
+  return field_name_policy == kPolicyPreserve;
+}
+
+bool uses_lower_snake_policy(std::string_view field_name_policy) noexcept {
+  return field_name_policy == kPolicyLowerSnake;
+}
+
+std::string clean_with_suffix(std::string_view dirty, std::string_view base,
+                              std::size_t length) {
+  std::string out;
+  out.reserve(base.size() + length);
+  out.append(base);
+  const std::size_t suffix_start = out.size();
+  uint64_t hash = sanitize::detail::hash_key64(dirty);
+  for (std::size_t i = 0; i < length; ++i) {
+    out.push_back(static_cast<char>('a' + (hash % 26u)));
+    hash /= 26u;
+    if (hash == 0) {
+      hash = sanitize::detail::hash_key64(
+          std::string_view(out).substr(suffix_start));
+    }
+  }
+  return out;
+}
+
 bool is_reserved_etl_column_name(std::string_view name) noexcept {
   return name == "schema_registry" || name == "schema_drifts" ||
          name == "source_file" || name == "ingestion_timestamp";
@@ -98,7 +139,7 @@ std::string clean_field_name_base(std::string_view dirty,
   if (uses_lower_snake_policy(field_name_policy)) {
     bool previous_underscore = false;
     for (unsigned char c : dirty) {
-      char clean = lower_snake(c);
+      const char clean = lower_snake(c);
       if (clean == '_') {
         if (!previous_underscore && !out.empty())
           out.push_back(clean);
@@ -113,11 +154,8 @@ std::string clean_field_name_base(std::string_view dirty,
     if (out.empty())
       out = "field";
     if (out.front() >= '0' && out.front() <= '9') {
-      std::string prefixed;
-      prefixed.reserve(out.size() + std::string_view("field_").size());
-      prefixed = "field_";
-      prefixed += out;
-      return prefixed;
+      out.reserve(out.size() + std::string_view("field_").size());
+      out.insert(0, "field_");
     }
     return out;
   }
@@ -182,23 +220,28 @@ unflattened_output_name(std::string_view output_name) noexcept {
 std::vector<std::string>
 clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
                           const sanitize::PreparedOptions &opts) {
-  std::vector<std::string> out(dirty_names.size());
   if (prepared_uses_preserve_policy(opts)) {
-    for (std::size_t i = 0; i < dirty_names.size(); ++i)
-      out[i] = std::string(dirty_names[i]);
-    return out;
+    std::vector<std::string> preserved;
+    preserved.reserve(dirty_names.size());
+    for (std::string_view dirty : dirty_names)
+      preserved.emplace_back(dirty);
+    return preserved;
   }
 
   std::vector<std::string> bases;
   bases.reserve(dirty_names.size());
-  std::unordered_map<std::string, std::size_t> base_counts;
+  BorrowedStringLookupMap<std::size_t> base_counts;
   base_counts.reserve(dirty_names.size());
   for (std::string_view dirty : dirty_names) {
-    std::string base = clean_field_name_base(dirty, opts);
-    base_counts[base] += 1;
-    bases.push_back(std::move(base));
+    bases.push_back(clean_field_name_base(dirty, opts));
+    auto [count, _] =
+        base_counts.try_emplace(std::string_view(bases.back()), 0U);
+    ++count->second;
   }
+  if (base_counts.size() == dirty_names.size())
+    return bases;
 
+  std::vector<std::string> out(dirty_names.size());
   std::vector<std::size_t> order(dirty_names.size());
   for (std::size_t i = 0; i < order.size(); ++i)
     order[i] = i;
@@ -208,14 +251,16 @@ clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
     return dirty_names[lhs] < dirty_names[rhs];
   });
 
-  std::unordered_set<std::string> used;
+  BorrowedStringLookupSet used;
   used.reserve(dirty_names.size());
   for (std::size_t idx : order) {
     const std::string &base = bases[idx];
     std::string candidate = base;
-    if (base_counts[base] > 1)
+    const auto count = base_counts.find(base);
+    if (count != base_counts.end() && count->second > 1) {
       candidate =
           clean_with_suffix(dirty_names[idx], base, kInitialSuffixLength);
+    }
 
     for (std::size_t len = kInitialSuffixLength;
          used.contains(candidate) && len <= kMaxSuffixLength; ++len) {
@@ -224,8 +269,8 @@ clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
     while (used.contains(candidate))
       candidate.push_back('z');
 
-    out[idx] = candidate;
-    used.insert(std::move(candidate));
+    out[idx] = std::move(candidate);
+    used.emplace(out[idx]);
   }
 
   return out;
@@ -236,9 +281,10 @@ sanitize_logical_schema_field_names(const sanitize::LogicalSchema &schema,
                                     const sanitize::PreparedOptions &opts) {
   sanitize::LogicalSchema out;
   out.fields = sanitize_logical_fields(schema.fields, opts);
-  for (std::size_t i = 0; i < schema.fields.size(); ++i) {
-    if (is_reserved_etl_column_name(schema.fields[i].name))
-      out.fields[i].name = schema.fields[i].name;
+  for (std::size_t index = 0; index < schema.fields.size(); ++index) {
+    if (is_reserved_etl_column_name(schema.fields[index].name)) {
+      out.fields[index].name = schema.fields[index].name;
+    }
   }
   return out;
 }

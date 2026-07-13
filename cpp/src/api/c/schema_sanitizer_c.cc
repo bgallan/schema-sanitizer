@@ -73,7 +73,8 @@ int code_for_status(const sanitize::Status &st) {
 }
 void schema_sanitizer_free_string(char *p) { std::free(p); }
 sanitize::Result<sanitize::PreparedOptionsPtr> default_prepared_options() {
-  return sanitize::prepare_options(sanitize::Options{});
+  static const auto prepared = sanitize::prepare_options(sanitize::Options{});
+  return prepared;
 }
 int schema_sanitizer_options_prepare_bytes(
     const std::uint8_t *bytes, std::size_t len,

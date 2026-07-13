@@ -2,7 +2,7 @@
 
 #include "schema_registry/schema_registry_json_schema_write.hh"
 
-#include "internal/json/json_write.hh"
+#include "internal/json_encoding/token_writer.hh"
 
 #include <string>
 #include <string_view>
@@ -44,10 +44,10 @@ void append_logical_type_json(std::string &out, const LogicalType &type);
 void append_logical_field_json(std::string &out, const LogicalField &field) {
   out.push_back('{');
   bool first = true;
-  internal::json_write::append_string_field(out, first, "name", field.name);
-  internal::json_write::append_key(out, first, "nullable");
+  internal::json_encoding::append_string_field(out, first, "name", field.name);
+  internal::json_encoding::append_key(out, first, "nullable");
   out += field.nullable ? "true" : "false";
-  internal::json_write::append_key(out, first, "type");
+  internal::json_encoding::append_key(out, first, "type");
   if (field.type) {
     append_logical_type_json(out, *field.type);
   } else {
@@ -73,13 +73,13 @@ void append_logical_fields_json(std::string &out,
 void append_logical_type_json(std::string &out, const LogicalType &type) {
   out.push_back('{');
   bool first = true;
-  internal::json_write::append_string_field(out, first, "kind",
-                                            logical_type_kind_name(type));
+  internal::json_encoding::append_string_field(out, first, "kind",
+                                               logical_type_kind_name(type));
   if (type.kind == LogicalKind::kStruct) {
-    internal::json_write::append_key(out, first, "fields");
+    internal::json_encoding::append_key(out, first, "fields");
     append_logical_fields_json(out, type.fields);
   } else if (type.kind == LogicalKind::kList) {
-    internal::json_write::append_key(out, first, "value");
+    internal::json_encoding::append_key(out, first, "value");
     if (type.value) {
       append_logical_type_json(out, *type.value);
     } else {
@@ -95,7 +95,7 @@ void append_canonical_schema_json(std::string &out,
                                   const LogicalSchema &schema) {
   out.push_back('{');
   bool first = true;
-  internal::json_write::append_key(out, first, "fields");
+  internal::json_encoding::append_key(out, first, "fields");
   append_logical_fields_json(out, schema.fields);
   out.push_back('}');
 }

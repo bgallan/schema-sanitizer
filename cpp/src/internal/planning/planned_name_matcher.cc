@@ -4,8 +4,6 @@
 
 #include <string>
 
-#include "internal/planning/field_name_collision.hh"
-#include "internal/planning/field_name_policy.hh"
 #include "internal/planning/field_name_sanitizer.hh"
 #include "sanitize/detail/hash.hh"
 

@@ -2,7 +2,7 @@
 
 #include "schema_registry/schema_registry_internal.hh"
 
-#include "internal/parsing/json_ondemand.hh"
+#include "internal/parsing/json/ondemand/document.hh"
 #include "sanitize/core/value_view.hh"
 
 #include <memory>

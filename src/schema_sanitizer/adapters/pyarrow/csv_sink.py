@@ -1,0 +1,132 @@
+"""PyArrow CSV sink for record-batch streams."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ...core_impl.dependencies import ensure_pyarrow
+from ...core_impl.native_symbols import (
+    CSV_NESTED_STREAM_WRAP,
+    CSV_SCHEMA_SUPPORTED,
+    CSV_STREAM_WRITE,
+)
+from ...core_impl.uris import local_output_path_or_reject_remote
+from .file_metadata import prepare_file_output_metadata_stream
+from .metadata_native import CapsuleArrowStream
+from .metadata_specs import (
+    AllRowColumns,
+    FirstRowColumns,
+    RowSpanColumns,
+    TimestampColumns,
+)
+
+_LAST_CSV_STREAM_ROUTE = "none"
+_LAST_CSV_NESTED_ROUTE = "none"
+
+
+def last_csv_stream_route() -> str:
+    """Return the route used by the most recent CSV stream write."""
+    return _LAST_CSV_STREAM_ROUTE
+
+
+def last_csv_nested_route() -> str:
+    """Return the most recent CSV nested rendering route."""
+    return _LAST_CSV_NESTED_ROUTE
+
+
+def mark_csv_nested_route(route: str) -> None:
+    """Record the most recent CSV nested rendering route."""
+    global _LAST_CSV_NESTED_ROUTE
+    _LAST_CSV_NESTED_ROUTE = route
+
+
+def native_csv_nested_reader(stream: Any, *, pa: Any) -> Any:
+    """Return a reader that renders top-level nested columns as JSON strings."""
+    capsule = CSV_NESTED_STREAM_WRAP(stream)
+    mark_csv_nested_route("native")
+    return pa.RecordBatchReader.from_stream(CapsuleArrowStream(capsule))
+
+
+def _schema_has_nested_columns(schema: Any, *, pa: Any) -> bool:
+    """Return whether CSV output needs native nested-value rendering."""
+    return any(pa.types.is_nested(field.type) for field in schema)
+
+
+def mark_csv_stream_route(route: str) -> None:
+    """Record the route used by a direct CSV writer."""
+    global _LAST_CSV_STREAM_ROUTE
+    _LAST_CSV_STREAM_ROUTE = route
+
+
+def _native_csv_schema_supported(schema: Any) -> bool:
+    """Return whether the native CSV writer can serialize a schema."""
+    try:
+        return bool(CSV_SCHEMA_SUPPORTED(schema))
+    except TypeError:
+        return False
+
+
+def _write_native_csv(
+    stream: Any,
+    metadata: Any,
+    out_path: Any,
+    *,
+    has_metadata: bool,
+) -> Any:
+    """Write through the native CSV writer or fail before fallback materialization."""
+    native_write = CSV_STREAM_WRITE
+    native_stream = metadata.reader if metadata.reader is not None else stream
+    if has_metadata and metadata.reader is None:
+        raise RuntimeError(
+            "CSV output metadata columns require the native C++ metadata stream wrapper."
+        )
+    if not _native_csv_schema_supported(metadata.schema):
+        raise RuntimeError("CSV output requires a schema supported by the native C++ CSV writer.")
+    return (
+        native_write(native_stream, local_output_path_or_reject_remote(out_path, sink_name="CSV"))
+        or True
+    )
+
+
+def write_csv_stream(
+    stream: Any,
+    out_path: Any,
+    *,
+    feature: str,
+    first_row_columns: FirstRowColumns = None,
+    all_row_columns: AllRowColumns = None,
+    row_span_columns: RowSpanColumns = None,
+    timestamp_columns: TimestampColumns = None,
+) -> Any:
+    """Write an Arrow batch stream to CSV."""
+    global _LAST_CSV_NESTED_ROUTE, _LAST_CSV_STREAM_ROUTE
+    _LAST_CSV_STREAM_ROUTE = "none"
+    _LAST_CSV_NESTED_ROUTE = "none"
+    pa = ensure_pyarrow(feature=feature)
+    if _schema_has_nested_columns(stream.schema, pa=pa):
+        native_base = native_csv_nested_reader(stream, pa=pa)
+        if native_base is None:
+            raise RuntimeError("CSV nested columns require the native C++ CSV nested renderer.")
+        stream = native_base
+    else:
+        mark_csv_nested_route("not_needed")
+    metadata = prepare_file_output_metadata_stream(
+        stream,
+        first_row_columns,
+        all_row_columns,
+        row_span_columns,
+        timestamp_columns,
+        pa=pa,
+    )
+
+    try:
+        stats = _write_native_csv(
+            stream,
+            metadata,
+            out_path,
+            has_metadata=metadata.has_metadata,
+        )
+        _LAST_CSV_STREAM_ROUTE = "native"
+        return stats
+    finally:
+        metadata.close()

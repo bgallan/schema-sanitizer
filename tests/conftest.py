@@ -11,7 +11,7 @@ import pytest
 def native_available() -> bool:
     """Return native available for the test."""
     try:
-        from schema_sanitizer.api_impl.context import ExecutionContext
+        from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
         ExecutionContext().memory_stats()
         return True
@@ -34,9 +34,9 @@ def read_test_path(
     **options,
 ):
     """Exercise internal path ingestion after public reader removal."""
-    from schema_sanitizer.api_impl.pool import to_table
-    from schema_sanitizer.api_impl.public_input import prepare_public_input
-    from schema_sanitizer.api_impl.table_output import convert_arrow_table_output
+    from schema_sanitizer.api_impl.execution_context import to_table
+    from schema_sanitizer.api_impl.input.preparation import prepare_public_input
+    from schema_sanitizer.api_impl.results import convert_arrow_table_output
     from schema_sanitizer.options_impl.call_options import normalize_call_options_or_none
 
     prepared = prepare_public_input(
@@ -72,8 +72,8 @@ def read_test_path(
 
 def read_test_python(rows, *, output_format: str = "pyarrow", **options):
     """Exercise internal Python-row ingestion after its public reader removal."""
-    from schema_sanitizer.api_impl.pool import to_table
-    from schema_sanitizer.api_impl.table_output import convert_arrow_table_output
+    from schema_sanitizer.api_impl.execution_context import to_table
+    from schema_sanitizer.api_impl.results import convert_arrow_table_output
     from schema_sanitizer.options_impl.call_options import normalize_call_options_or_none
 
     result = to_table(

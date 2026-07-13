@@ -1,0 +1,102 @@
+// Shared state and operations for path-source registry sink methods.
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <vector>
+
+#ifndef Py_LIMITED_API
+#define Py_LIMITED_API 0x030A0000
+#endif
+#include <Python.h>
+
+#include "api/c/schema_sanitizer_c_sink_internal.hh"
+#include "api/python_abi3/metadata/columns/api.hh"
+#include "api/python_abi3/metadata/stream/stream.hh"
+#include "api/python_abi3/path_sources/path_sources.hh"
+#include "api/python_abi3/registry/plan/plan.hh"
+#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "sanitize/core/status.hh"
+#include "sanitize/options/options.hh"
+#include "sanitize/registry/registry.hh"
+
+struct ArrowArrayStream;
+
+namespace core_abi3_internal::path_registry_detail {
+
+struct PyRegistrySinkOutputs {
+  ArrowArrayStream *main_stream = nullptr;
+  schema_sanitizer_diagnostics *diagnostics = nullptr;
+  char *registry_json = nullptr;
+  char *drifts_json = nullptr;
+  char *conversion_timestamp = nullptr;
+  char *err = nullptr;
+};
+
+struct NativePathSourcesStreamState {
+  schema_sanitizer_context *ctx = nullptr;
+  sanitize::PreparedOptionsPtr prepared;
+  std::string sink_name;
+  bool registry_enabled = true;
+  bool source_file_column = true;
+  std::string registry_json;
+  std::string drifts_json;
+  std::string conversion_timestamp;
+  std::string field_name_policy;
+  std::string schema_mode;
+  std::vector<PathSourceSpec> sources;
+  std::vector<MetadataColumn> first_row_columns;
+  std::vector<MetadataColumn> timestamp_columns;
+  std::shared_ptr<const NativeRegistryPlan> registry_plan;
+  std::shared_ptr<const NativeRegistryPlan> source_file_registry_plan;
+  std::size_t index = 0;
+  bool first_row_pending = true;
+  PyObject *chunk_provider = nullptr;
+  bool chunk_provider_exhausted = false;
+  ArrowArrayStream *inner = nullptr;
+  schema_sanitizer_diagnostics *diagnostics = nullptr;
+  std::unique_ptr<MetadataStreamState> metadata;
+  std::string last_error;
+};
+
+void release_registry_outputs(PyRegistrySinkOutputs *outputs);
+void close_chunk_provider(NativePathSourcesStreamState *state) noexcept;
+[[nodiscard]] bool
+path_source_input_empty(const PathSourceInput &input) noexcept;
+sanitize::Status load_next_provider_chunk(NativePathSourcesStreamState *state);
+std::vector<MetadataColumn>
+metadata_columns_for_child(const NativePathSourcesStreamState *state,
+                           const PathSourceSpec &source,
+                           bool source_file_in_inner = false);
+std::string path_source_error_message(const PathSourceSpec &source,
+                                      const std::string &message);
+PyObject *pack_registry_or_raise_with_metadata(int status, PyObject *keepalive,
+                                               PyRegistrySinkOutputs *outputs,
+                                               PyObject *first_row_columns,
+                                               PyObject *all_row_columns,
+                                               PyObject *row_span_columns,
+                                               PyObject *timestamp_columns);
+
+bool provider_has_next_sources(PyObject *provider_obj);
+sanitize::Result<sanitize::SchemaRegistryMergeResult>
+merge_path_source_provider_schemas(
+    schema_sanitizer_context *ctx, PyObject *provider_obj,
+    const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
+    const char *field_name_policy, bool skip_invalid_json_sources,
+    const sanitize::LogicalSchema *previous_schema = nullptr);
+
+const char *path_sources_last_error(ArrowArrayStream *stream);
+void path_sources_release(ArrowArrayStream *stream);
+int path_sources_get_schema(ArrowArrayStream *stream, ArrowSchema *out);
+int path_sources_get_next(ArrowArrayStream *stream, ArrowArray *out);
+
+PyObject *pack_chunk_provider_registry_stream(
+    PyObject *ctx_obj, schema_sanitizer_context *ctx, const char *sink_name,
+    PyObject *stream_provider_obj,
+    const sanitize::PreparedOptionsPtr &prepared_options,
+    std::shared_ptr<NativeRegistryPlan> registry_plan,
+    const char *field_name_policy, const char *schema_mode,
+    PyObject *first_row_columns, PyObject *timestamp_columns);
+
+} // namespace core_abi3_internal::path_registry_detail

@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from conftest import require_native
 
+from schema_sanitizer.core_impl.native_options import OPTIONS
 from schema_sanitizer.options_impl.call_options import (
     normalize_call_options,
     normalize_call_options_or_none,
 )
 from schema_sanitizer.options_impl.options import Options as InternalOptions
-from schema_sanitizer.public_impl.options_catalog import OPTIONS_CATALOG
 
 
 def _macro_calls(text: str, macro_name: str) -> list[tuple[int, str]]:
@@ -128,20 +128,20 @@ def _cpp_options_catalog() -> list[tuple[str, str, str, str, str]]:
     return [entry for _, entry in sorted(entries)]
 
 
-def test_python_options_catalog_matches_cpp_source_of_truth() -> None:
-    """Verify python options catalog matches cpp source of truth."""
-    python_catalog = [
-        (
-            spec["cxx_type"],
-            spec["name"],
-            _normalize_cxx_default_expr(spec["default_expr"]),
-            spec["group"],
-            spec["doc"],
-        )
-        for spec in OPTIONS_CATALOG
+def test_native_options_catalog_matches_cpp_source_order_and_groups() -> None:
+    """Verify native option metadata follows the C++ catalog without a Python copy."""
+    cpp_catalog = _cpp_options_catalog()
+    assert [(spec.name, spec.group) for spec in OPTIONS] == [
+        (name, group) for _, name, _, group, _ in cpp_catalog
     ]
+    assert len(OPTIONS) == len({spec.name for spec in OPTIONS})
 
-    assert python_catalog == _cpp_options_catalog()
+
+def test_python_options_catalog_facades_are_removed() -> None:
+    """Verify the former generated catalog and default parser stay retired."""
+    package = Path(__file__).resolve().parents[1] / "src/schema_sanitizer/core_impl/native_options"
+    assert not (package / "catalog.py").exists()
+    assert not (package / "defaults.py").exists()
 
 
 def test_options_validate_native_rejects_bad_enum() -> None:
@@ -228,7 +228,7 @@ def test_public_call_options_reject_strict_without_schema_contract() -> None:
 def test_native_options_reject_strict_without_schema_contract() -> None:
     """Verify native execution rejects strict schema mode without a contract."""
     require_native()
-    from schema_sanitizer.api_impl.context import ExecutionContext
+    from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     with pytest.raises(Exception, match="schema contract"):
         ExecutionContext().to_table(
@@ -347,7 +347,7 @@ def test_public_call_options_reject_invalid_string_options() -> None:
 
 def test_public_call_options_validate_input_text_encoding() -> None:
     """Verify public call options validate input text encoding."""
-    opt = normalize_call_options(input_text_encoding=" latin-1 ")
+    opt = normalize_call_options(input_text_encoding=" iso8859-1 ")
 
     assert opt.io.input_text_encoding == "iso8859-1"
 
@@ -431,13 +431,12 @@ def test_column_order_defaults_to_alphabetically() -> None:
     assert internal.schema.field_order.name == "ALPHABETICALLY"
 
 
-def test_column_order_accepts_sorted_as_compatibility_alias() -> None:
-    """Verify old sorted spelling maps to the alphabetical order policy."""
-    public = normalize_call_options(column_order="sorted")
-    internal = InternalOptions(schema={"field_order": "sorted"})
-
-    assert public.schema.field_order.name == "ALPHABETICALLY"
-    assert internal.schema.field_order.name == "ALPHABETICALLY"
+def test_column_order_rejects_removed_sorted_alias() -> None:
+    """Verify the removed sorted spelling is not accepted."""
+    with pytest.raises(ValueError, match="column_order"):
+        normalize_call_options(column_order="sorted")
+    with pytest.raises(ValueError, match="field_order"):
+        InternalOptions(schema={"field_order": "sorted"})
 
 
 def test_field_name_policy_defaults_to_lower_alpha() -> None:
@@ -449,17 +448,15 @@ def test_field_name_policy_defaults_to_lower_alpha() -> None:
     assert internal.schema.field_name_policy == "lower_alpha"
 
 
-def test_public_field_name_policy_normalizes_aliases() -> None:
-    """Verify public field-name policy aliases normalize to native values."""
-    dashed = normalize_call_options(field_name_policy="lower-alpha")
-    compact = normalize_call_options(field_name_policy="loweralpha")
-    snake = normalize_call_options(field_name_policy="lower-snake")
-    preserve = normalize_call_options(field_name_policy=" PRESERVE ")
-
-    assert dashed.schema.field_name_policy == "lower_alpha"
-    assert compact.schema.field_name_policy == "lower_alpha"
-    assert snake.schema.field_name_policy == "lower_snake"
-    assert preserve.schema.field_name_policy == "preserve"
+def test_public_field_name_policy_accepts_only_canonical_names() -> None:
+    """Verify removed compact and dashed policy spellings are rejected."""
+    assert (
+        normalize_call_options(field_name_policy=" PRESERVE ").schema.field_name_policy
+        == "preserve"
+    )
+    for value in ("lower-alpha", "loweralpha", "lower-snake"):
+        with pytest.raises(ValueError, match="field_name_policy"):
+            normalize_call_options(field_name_policy=value)
 
 
 def test_public_field_name_policy_rejects_invalid_values() -> None:

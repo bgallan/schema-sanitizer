@@ -1,61 +1,52 @@
-// Reconciles inferred schemas with optional schema-contract contracts.
+// Reconciles inferred schemas with contracts and applies recursive field order.
 
 #include "internal/planning/schema_evolution.hh"
 
 #include <algorithm>
 #include <memory>
 #include <string_view>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
+#include "internal/string_lookup.hh"
 #include "sanitize/core/logical_schema.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/options/options.hh"
 
 namespace sanitize::internal {
-
 namespace {
+using FieldMap = BorrowedStringLookupMap<const sanitize::LogicalField *>;
 
-using FieldMap =
-    std::unordered_map<std::string_view, const sanitize::LogicalField *>;
-
-// Finds a field by name in a logical field list.
-static const sanitize::LogicalField *
-find_field(const std::vector<sanitize::LogicalField> &fields,
-           std::string_view name) {
-  for (const auto &f : fields) {
-    if (f.name == name)
-      return &f;
+FieldMap build_field_map(const std::vector<sanitize::LogicalField> &fields) {
+  FieldMap out;
+  out.reserve(fields.size());
+  for (const auto &field : fields) {
+    out.emplace(field.name, &field);
   }
-  return nullptr;
+  return out;
 }
 
-// Checks that an inferred schema satisfies a strict schema-contract contract.
-static sanitize::Status
+sanitize::Status
 check_strict_compatible(const sanitize::LogicalSchema &base,
                         const sanitize::LogicalSchema &inferred) {
   if (base.fields.empty()) {
     return sanitize::Status::Invalid(
         "Strict schema evolution requires a non-empty schema_contract");
   }
-
-  // Inferred cannot contain extra root fields.
-  for (const auto &f : inferred.fields) {
-    if (!find_field(base.fields, f.name)) {
+  const FieldMap base_fields = build_field_map(base.fields);
+  for (const auto &field : inferred.fields) {
+    if (!base_fields.contains(field.name)) {
       return sanitize::Status::Invalid(
-          "Strict schema evolution: observed extra field '" + f.name + "'");
+          "Strict schema evolution: observed extra field '" + field.name + "'");
     }
   }
-
   return sanitize::Status::OK();
 }
 
-static sanitize::LogicalType
+sanitize::LogicalType
 merge_type_additive(const sanitize::LogicalType &base,
                     const sanitize::LogicalType &inferred);
 
-static sanitize::LogicalField
+sanitize::LogicalField
 merge_field_additive(const sanitize::LogicalField &base,
                      const sanitize::LogicalField &inferred) {
   sanitize::LogicalField out = base;
@@ -66,33 +57,30 @@ merge_field_additive(const sanitize::LogicalField &base,
   return out;
 }
 
-// Appends inferred fields that are absent from the schema contract, recursively
-// merging matching struct/list fields.
-static std::vector<sanitize::LogicalField> merge_fields_additive(
+std::vector<sanitize::LogicalField> merge_fields_additive(
     const std::vector<sanitize::LogicalField> &base_fields,
     const std::vector<sanitize::LogicalField> &inferred_fields) {
+  const FieldMap base_by_name = build_field_map(base_fields);
+  const FieldMap inferred_by_name = build_field_map(inferred_fields);
   std::vector<sanitize::LogicalField> out;
   out.reserve(base_fields.size() + inferred_fields.size());
-
-  std::unordered_set<std::string_view> base_names;
-  base_names.reserve(base_fields.size());
   for (const auto &base_field : base_fields) {
-    base_names.insert(base_field.name);
-    if (const auto *inferred = find_field(inferred_fields, base_field.name)) {
-      out.push_back(merge_field_additive(base_field, *inferred));
-    } else {
+    const auto inferred = inferred_by_name.find(base_field.name);
+    if (inferred == inferred_by_name.end()) {
       out.push_back(base_field);
+    } else {
+      out.push_back(merge_field_additive(base_field, *inferred->second));
     }
   }
-
   for (const auto &field : inferred_fields) {
-    if (!base_names.contains(field.name))
+    if (!base_by_name.contains(field.name)) {
       out.push_back(field);
+    }
   }
   return out;
 }
 
-static sanitize::LogicalType
+sanitize::LogicalType
 merge_type_additive(const sanitize::LogicalType &base,
                     const sanitize::LogicalType &inferred) {
   if (base.kind == sanitize::LogicalKind::kStruct &&
@@ -101,7 +89,6 @@ merge_type_additive(const sanitize::LogicalType &base,
     out.fields = merge_fields_additive(base.fields, inferred.fields);
     return out;
   }
-
   if (base.kind == sanitize::LogicalKind::kList &&
       inferred.kind == sanitize::LogicalKind::kList && base.value &&
       inferred.value) {
@@ -110,30 +97,27 @@ merge_type_additive(const sanitize::LogicalType &base,
         merge_type_additive(*base.value, *inferred.value));
     return out;
   }
-
   return base;
 }
 
-// Appends inferred root fields that are absent from the schema contract.
-static sanitize::LogicalSchema
+sanitize::LogicalSchema
 merge_schema_additive(const sanitize::LogicalSchema &base,
                       const sanitize::LogicalSchema &inferred) {
-  if (base.fields.empty())
+  if (base.fields.empty()) {
     return inferred;
+  }
   sanitize::LogicalSchema out;
   out.fields = merge_fields_additive(base.fields, inferred.fields);
   return out;
 }
 
-// Reorders nested logical types according to a schema-contract ordering policy.
-static sanitize::LogicalType reorder_type(const sanitize::LogicalType &cur,
-                                          const sanitize::LogicalType *base,
-                                          FieldOrderPolicy order);
+sanitize::LogicalType reorder_type(const sanitize::LogicalType &current,
+                                   const sanitize::LogicalType *base,
+                                   FieldOrderPolicy order);
 
-// Reorders a logical field while preserving its metadata.
-static sanitize::LogicalField reorder_field(const sanitize::LogicalField &field,
-                                            const sanitize::LogicalType *base,
-                                            FieldOrderPolicy order) {
+sanitize::LogicalField reorder_field(const sanitize::LogicalField &field,
+                                     const sanitize::LogicalType *base,
+                                     FieldOrderPolicy order) {
   sanitize::LogicalField out = field;
   if (field.type) {
     out.type = std::make_unique<sanitize::LogicalType>(
@@ -142,153 +126,144 @@ static sanitize::LogicalField reorder_field(const sanitize::LogicalField &field,
   return out;
 }
 
-// Builds a name-to-field lookup for current struct fields.
-static FieldMap
-build_field_map(const std::vector<sanitize::LogicalField> &cur_fields) {
-  FieldMap cur_map;
-  cur_map.reserve(cur_fields.size());
-  for (const auto &f : cur_fields)
-    cur_map.emplace(f.name, &f);
-  return cur_map;
-}
-
-// Returns sorted current field names.
-static std::vector<std::string_view>
+std::vector<std::string_view>
 sorted_field_names(const std::vector<sanitize::LogicalField> &fields) {
   std::vector<std::string_view> names;
   names.reserve(fields.size());
-  for (const auto &field : fields)
+  for (const auto &field : fields) {
     names.push_back(field.name);
+  }
   std::ranges::sort(names);
   return names;
 }
 
-// Returns the matching base field type for a struct field name.
-static const sanitize::LogicalType *
-base_field_type(const sanitize::LogicalType *base_struct,
-                std::string_view name) {
-  if (!base_struct || base_struct->kind != sanitize::LogicalKind::kStruct) {
+const sanitize::LogicalType *
+field_type_or_none(const FieldMap &fields, std::string_view name) noexcept {
+  const auto found = fields.find(name);
+  if (found == fields.end() || !found->second->type) {
     return nullptr;
   }
-  const auto *base_field = find_field(base_struct->fields, name);
-  if (!base_field || !base_field->type) {
-    return nullptr;
-  }
-  return base_field->type.get();
+  return found->second->type.get();
 }
 
-// Appends fields present in the schema contract, preserving base order.
-static void append_base_ordered_fields(
-    std::vector<sanitize::LogicalField> *out, const FieldMap &cur_map,
-    const sanitize::LogicalType &base_struct,
-    std::unordered_set<std::string_view> *used, FieldOrderPolicy order) {
+void append_base_ordered_fields(std::vector<sanitize::LogicalField> *out,
+                                const FieldMap &current_by_name,
+                                const sanitize::LogicalType &base_struct,
+                                BorrowedStringLookupSet *used,
+                                FieldOrderPolicy order) {
   for (const auto &base_field : base_struct.fields) {
-    auto it = cur_map.find(base_field.name);
-    if (it == cur_map.end())
+    const auto current = current_by_name.find(base_field.name);
+    if (current == current_by_name.end()) {
       continue;
-    const auto *field = it->second;
+    }
+    const auto *field = current->second;
     used->insert(field->name);
     out->push_back(reorder_field(
         *field, base_field.type ? base_field.type.get() : nullptr, order));
   }
 }
 
-// Appends fields not already used, sorted by name.
-static void append_unused_sorted_fields(
+void append_unused_sorted_fields(
     std::vector<sanitize::LogicalField> *out,
-    const std::vector<sanitize::LogicalField> &cur_fields,
-    const FieldMap &cur_map, const std::unordered_set<std::string_view> &used,
+    const std::vector<sanitize::LogicalField> &current_fields,
+    const FieldMap &current_by_name, const BorrowedStringLookupSet &used,
     FieldOrderPolicy order) {
   std::vector<std::string_view> extra;
-  extra.reserve(cur_fields.size());
-  for (const auto &field : cur_fields) {
-    if (!used.contains(field.name))
+  extra.reserve(current_fields.size() - used.size());
+  for (const auto &field : current_fields) {
+    if (!used.contains(field.name)) {
       extra.push_back(field.name);
+    }
   }
   std::ranges::sort(extra);
-  for (const auto &name : extra)
-    out->push_back(reorder_field(*cur_map.at(name), nullptr, order));
-}
-
-// Appends all current fields sorted by name.
-static void
-append_sorted_fields(std::vector<sanitize::LogicalField> *out,
-                     const std::vector<sanitize::LogicalField> &cur_fields,
-                     const FieldMap &cur_map,
-                     const sanitize::LogicalType *base_struct,
-                     FieldOrderPolicy order) {
-  const std::vector<std::string_view> names = sorted_field_names(cur_fields);
-  for (const auto &name : names) {
-    out->push_back(reorder_field(*cur_map.at(name),
-                                 base_field_type(base_struct, name), order));
+  for (const auto name : extra) {
+    out->push_back(reorder_field(*current_by_name.at(name), nullptr, order));
   }
 }
 
-// Reorders struct fields.
-static std::vector<sanitize::LogicalField>
-reorder_struct_fields(const std::vector<sanitize::LogicalField> &cur_fields,
+void append_sorted_fields(
+    std::vector<sanitize::LogicalField> *out,
+    const std::vector<sanitize::LogicalField> &current_fields,
+    const FieldMap &current_by_name, const FieldMap &base_by_name,
+    FieldOrderPolicy order) {
+  for (const auto name : sorted_field_names(current_fields)) {
+    out->push_back(reorder_field(*current_by_name.at(name),
+                                 field_type_or_none(base_by_name, name),
+                                 order));
+  }
+}
+
+std::vector<sanitize::LogicalField>
+reorder_struct_fields(const std::vector<sanitize::LogicalField> &current_fields,
                       const sanitize::LogicalType *base_struct,
                       FieldOrderPolicy order) {
-  const FieldMap cur_map = build_field_map(cur_fields);
   std::vector<sanitize::LogicalField> out;
-  out.reserve(cur_fields.size());
-
-  if (order == FieldOrderPolicy::kSchemaContractFirst && base_struct &&
-      base_struct->kind == sanitize::LogicalKind::kStruct) {
-    std::unordered_set<std::string_view> used;
-    used.reserve(cur_fields.size());
-    append_base_ordered_fields(&out, cur_map, *base_struct, &used, order);
-    append_unused_sorted_fields(&out, cur_fields, cur_map, used, order);
-    return out;
-  }
+  out.reserve(current_fields.size());
+  const bool has_base_struct =
+      base_struct && base_struct->kind == sanitize::LogicalKind::kStruct;
 
   if (order == FieldOrderPolicy::kSchemaContractFirst) {
-    for (const auto &field : cur_fields)
-      out.push_back(reorder_field(field, nullptr, order));
+    if (!has_base_struct) {
+      for (const auto &field : current_fields) {
+        out.push_back(reorder_field(field, nullptr, order));
+      }
+      return out;
+    }
+    const FieldMap current_by_name = build_field_map(current_fields);
+    BorrowedStringLookupSet used;
+    used.reserve(current_fields.size());
+    append_base_ordered_fields(&out, current_by_name, *base_struct, &used,
+                               order);
+    append_unused_sorted_fields(&out, current_fields, current_by_name, used,
+                                order);
     return out;
   }
 
-  append_sorted_fields(&out, cur_fields, cur_map, base_struct, order);
+  const FieldMap current_by_name = build_field_map(current_fields);
+  const FieldMap base_by_name =
+      has_base_struct ? build_field_map(base_struct->fields) : FieldMap{};
+  append_sorted_fields(&out, current_fields, current_by_name, base_by_name,
+                       order);
   return out;
 }
 
-static sanitize::LogicalType reorder_type(const sanitize::LogicalType &cur,
-                                          const sanitize::LogicalType *base,
-                                          FieldOrderPolicy order) {
-  if (cur.kind == sanitize::LogicalKind::kStruct) {
+sanitize::LogicalType reorder_type(const sanitize::LogicalType &current,
+                                   const sanitize::LogicalType *base,
+                                   FieldOrderPolicy order) {
+  if (current.kind == sanitize::LogicalKind::kStruct) {
     sanitize::LogicalType out(sanitize::LogicalKind::kStruct);
-    out.fields = reorder_struct_fields(cur.fields, base, order);
+    out.fields = reorder_struct_fields(current.fields, base, order);
     return out;
   }
-  if (cur.kind == sanitize::LogicalKind::kList) {
+  if (current.kind == sanitize::LogicalKind::kList) {
     sanitize::LogicalType out(sanitize::LogicalKind::kList);
-    const sanitize::LogicalType *base_v = nullptr;
-    if (base && base->kind == sanitize::LogicalKind::kList && base->value)
-      base_v = base->value.get();
-    if (cur.value)
+    const sanitize::LogicalType *base_value = nullptr;
+    if (base && base->kind == sanitize::LogicalKind::kList && base->value) {
+      base_value = base->value.get();
+    }
+    if (current.value) {
       out.value = std::make_unique<sanitize::LogicalType>(
-          reorder_type(*cur.value, base_v, order));
+          reorder_type(*current.value, base_value, order));
+    }
     return out;
   }
-  return cur;
+  return current;
 }
-
 } // namespace
 
 sanitize::LogicalSchema
 reorder_schema_fields(const sanitize::LogicalSchema &schema,
                       const sanitize::LogicalSchema *base,
                       FieldOrderPolicy field_order) {
-  if (schema.fields.empty())
+  if (schema.fields.empty()) {
     return schema;
-
+  }
   sanitize::LogicalType base_root(sanitize::LogicalKind::kStruct);
   const sanitize::LogicalType *base_root_ptr = nullptr;
   if (base && !base->fields.empty()) {
     base_root.fields = base->fields;
     base_root_ptr = &base_root;
   }
-
   sanitize::LogicalSchema out = schema;
   out.fields = reorder_struct_fields(out.fields, base_root_ptr, field_order);
   return out;
@@ -299,21 +274,20 @@ evolve_schema(const sanitize::LogicalSchema &base,
               const sanitize::LogicalSchema &inferred, SchemaEvolutionMode mode,
               FieldOrderPolicy field_order) {
   sanitize::LogicalSchema merged;
-
   switch (mode) {
-  case SchemaEvolutionMode::kStrict: {
+  case SchemaEvolutionMode::kStrict:
     SAN_RETURN_NOT_OK(check_strict_compatible(base, inferred));
+    if (field_order == FieldOrderPolicy::kSchemaContractFirst) {
+      return base;
+    }
     merged = base;
     break;
-  }
   case SchemaEvolutionMode::kAdditive:
   default:
     merged = merge_schema_additive(base, inferred);
     break;
   }
-
   return reorder_schema_fields(merged, base.fields.empty() ? nullptr : &base,
                                field_order);
 }
-
 } // namespace sanitize::internal

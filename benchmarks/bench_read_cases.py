@@ -28,7 +28,7 @@ def run_support_case(root: Path, rows: int, repeats: int, case: str) -> None:
     """Run option/schema-support microbenchmarks."""
     del root
     if case in {"all", "options"}:
-        from schema_sanitizer.options_impl.call_options import normalize_call_options
+        from schema_sanitizer.options_impl.call_options.normalize import normalize_call_options
 
         time_call(
             "normalize_call_options",
@@ -38,7 +38,7 @@ def run_support_case(root: Path, rows: int, repeats: int, case: str) -> None:
         )
 
     if case in {"all", "options-default"}:
-        from schema_sanitizer.options_impl.call_options import normalize_call_options_or_none
+        from schema_sanitizer.options_impl.call_options.normalize import normalize_call_options_or_none
 
         time_call(
             "normalize_call_options_or_none default",
@@ -50,7 +50,7 @@ def run_support_case(root: Path, rows: int, repeats: int, case: str) -> None:
     if case in {"all", "schema-support"}:
         import pyarrow as pa
 
-        from schema_sanitizer.adapters.pyarrow_jsonl_sink import (
+        from schema_sanitizer.adapters.pyarrow.jsonl_sink import (
             _schema_supports_native_jsonl,
         )
 

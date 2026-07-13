@@ -23,7 +23,7 @@ def test_public_version_nonempty() -> None:
 
 def test_import_error_loader_debug_omits_environment_by_default(monkeypatch) -> None:
     """Verify import error loader debug omits environment by default."""
-    from schema_sanitizer.public_impl.loader_debug import collect_loader_debug, loader_debug
+    from schema_sanitizer.core_impl.loader_debug import collect_loader_debug, loader_debug
 
     monkeypatch.setenv("PYTHONPATH", "secret-project-path")
 
@@ -51,7 +51,7 @@ def test_native_loader_does_not_scan_current_working_directory(tmp_path: Path) -
             sys.executable,
             "-c",
             (
-                "from schema_sanitizer.api_impl.context import ExecutionContext; "
+                "from schema_sanitizer.api_impl.execution_context import ExecutionContext; "
                 "print(ExecutionContext().memory_stats()['backend_name'])"
             ),
         ],

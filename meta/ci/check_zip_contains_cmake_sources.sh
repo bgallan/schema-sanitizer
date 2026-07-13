@@ -50,6 +50,9 @@ fi
 artifact="$(
   find "${root}" \
     \( -path "${root}/build/*" \
+    -o -path "${root}/.build*" \
+    -o -path "${root}/build-*" \
+    -o -path "${root}/cmake-build-*" \
     -o -path "${root}/dist/*" \
     -o -path "${root}/wheelhouse/*" \
     -o -path "${root}/.git/*" \

@@ -282,13 +282,13 @@ accept later integer-only batches without creating an integer field version.
 |---|---|---|---|
 | `csv_has_header` | `True` | `True`, `False` | Treat the first CSV row as field names. In directory mode, repeated matching headers are removed. |
 | `csv_delimiter` | `","` | `","`, `";"`, `"\t"`, `"|"` | One-character CSV delimiter. Values containing the delimiter must be quoted according to CSV rules. |
-| `input_text_encoding` | `"utf-8"` | `"utf-8"`, `"utf-16"`, `"latin-1"` | Decode text inputs. Python codec names and aliases are accepted and normalized. It does not affect Parquet input. |
+| `input_text_encoding` | `"utf-8"` | `"utf-8"`, `"utf-16"`, `"utf-16-le"`, `"utf-16-be"`, `"iso8859-1"` | Decode text inputs using canonical encoding names. It does not affect Parquet input. |
 | `xml_row_tag` | `None` | `None`, `"row"`, `"item"` | Stream each direct matching XML element as one row. `None` treats the complete XML document as one row. |
 
-Native path readers decode `utf-8`, `utf-16`, and `latin-1`/`iso-8859-1`
-directly for CSV, JSON, JSON-array, and XML inputs, including directory and
-warm-up source plans. Other Python codecs keep the compatibility stream
-fallback.
+Native path readers decode the five canonical names listed above directly for
+CSV, JSON, JSON-array, and XML inputs, including directory and warm-up source
+plans. Unsupported or alternate codec spellings are rejected consistently by
+Python and C++.
 
 ### [Errors And Resources](#index)
 
@@ -304,8 +304,8 @@ These options apply only to `to_parquet`.
 
 | Parameter | Default | Accepted values / example | Use |
 |---|---|---|---|
-| `parquet_compression` | `"gzip"` | `"gzip"`, `"uncompressed"` | Compression codec used for Parquet pages. `gzip` is the default for both native output and PyArrow fallback. |
-| `parquet_gzip_level` | `None` | `0` through `9`, or `None` | Optional zlib gzip compression level. `None` uses the writer/zlib default. Ignored when `parquet_compression="uncompressed"`. |
+| `parquet_compression` | `"gzip"` | `"gzip"`, `"snappy"`, `"uncompressed"` | Compression codec used for Parquet pages. `gzip` is the default for both native output and PyArrow fallback; `snappy` is supported by the native reader/writer and PyArrow fallback. |
+| `parquet_gzip_level` | `None` | `0` through `9`, or `None` | Optional zlib gzip compression level. `None` uses the writer/zlib default. Ignored when `parquet_compression` is `"snappy"` or `"uncompressed"`. |
 
 Default GZIP output does not require passing either option:
 
@@ -731,11 +731,164 @@ Trade-offs:
 
 - Lower `batch_memory_limit_bytes` reduces peak memory and may reduce speed.
 - Lower `read_chunk_bytes` reduces transient input buffers and increases read calls.
-- Parquet path decoding uses PyArrow's native dataset scanner and exports a
-  bounded Arrow C stream to the sanitizer. This avoids Python per-batch
-  `ParquetFile.iter_batches` iteration for local and staged path inputs while
-  still scanning every row. Byte and file-like Parquet inputs keep the
-  compatibility `ParquetFile` fallback.
+- Parquet decoding first attempts the guarded native Parquet reader for
+  schema-sanitizer native-writer files, including supported recursive
+  list/map/struct projections. Native footer diagnostics expose the recursive
+  output-layout tree used for each row group, including root kind, repetition
+  depth, leaf/container counts, branch width, source-column indices, physical
+  leaf paths, repeated-node paths, a deterministic physical recursive shape
+  signature, and a structural signature that is independent of leaf column
+  indexes, so deep nested readiness is inspectable instead of inferred from
+  route names. The recursive test corpus includes a bounded Cartesian grammar
+  over `list`/`map`/`struct` operation words, deeper frontier shapes, and a
+  null/empty/full matrix that injects missing outer containers, empty repeated
+  nodes, null repeated elements/values, and sparse structs across recursive
+  layers. A per-row-group phase matrix also isolates all-null, empty-only, sparse,
+  and full recursive values into separate row groups, including projected
+  multi-root subsets, so offsets, validity, structural signatures, and projection
+  order stay honest across deep native-writer nesting. The public
+  `native_parquet_recursive_layout_summary()` diagnostic folds those per-row-group
+  recursive trees into a compact stability report, making shape drift, leaf-path
+  drift, repeated-node drift, projected-root invariance, stable layout/field
+  fingerprints, order-independent canonical fingerprints, field-name lookup
+  maps, leaf/repeated-node ownership maps, unambiguous component-wise path
+  ownership maps, canonical requiredness/nullability level fingerprints, and
+  duplicate leaf-path or repeated-node ownership visible without manually scanning
+  every row group. Footer diagnostics also expose per-leaf maximum definition and
+  repetition levels plus path-definition- and path-repetition-level vectors, so
+  production checks can detect required/optional drift and repeated-container
+  topology drift in mathematically arbitrary nested trees, not just shape drift.
+  The recursive summary also publishes per-row-group layout, leaf-level,
+  repetition-path, and leaf-to-repeated-ancestor fingerprints, so production
+  checks can prove the same nested tree stays stable under different row-group
+  segmentations and batch cuts. Leaf-to-repeated-ancestor fingerprints tie each
+  physical leaf back to the named list/map containers that own its repetition
+  levels, which catches topology drift that plain path lists or raw repetition
+  vectors can be hard to audit in deeply arbitrary nested trees. Per-leaf
+  recursive contracts also combine component paths, max definition/repetition
+  levels, path-level vectors, and repeated ancestors into an inspectable record
+  for each physical leaf, making production debugging of arbitrary nested trees
+  possible without parsing compact fingerprints by hand. Root-level recursive
+  contracts aggregate those leaf contracts, repeated containers, level topology,
+  shape signatures, and depth/branching metrics per projected top-level field,
+  so production checks can prove each arbitrary nested root keeps the same
+  contract across row groups and projection permutations.
+  `native_parquet_recursive_projection_contract_audit()` now compares a
+  projected recursive plan against the full-file root/leaf/field contracts,
+  reporting missing, unexpected, reordered, or drifted projected roots without
+  manually diffing footer JSON.
+  `native_parquet_recursive_projection_chain_contract_audit()` also verifies
+  projection composition: a nested plan such as `full -> [A, B, C] -> [C, A]`
+  must preserve the same root, leaf, and field contracts as `full -> [C, A]`
+  directly. That makes deep recursive projection bugs visible when production
+  code chains or reuses projected readers.
+  `native_parquet_recursive_projection_partition_contract_audit()` verifies the
+  complementary wide-file invariant: several disjoint projected reads must cover
+  the full recursive root set exactly, without duplicated, missing, unknown, or
+  drifted root/leaf/field contracts. That is useful when production code splits
+  a mathematically arbitrary nested schema into projection shards and later
+  recomposes them. `native_parquet_recursive_projection_coverage_contract_audit()`
+  covers the looser production pattern where several projected reads may be
+  partial or intentionally overlap on shared nested roots; it reports gaps and
+  overlaps separately while still proving every requested root keeps the same
+  field, leaf, and root contracts as the full native plan.
+  `native_parquet_nested_contract_status()` reduces the detailed recursive
+  summary to a production yes/no gate: every row group must be decoded, all
+  layout/level/repetition/ancestor/leaf/root fingerprints must be stable, and
+  leaf or repeated-node ownership collisions must be absent before
+  `satisfied=True` is reported. Component-wise path
+  diagnostics keep
+  arbitrary nested field names distinct even when names contain dots or other
+  separator-like characters, so `a.b/c`-style paths do not produce false layout
+  collisions. The recursive
+  corpus also includes deterministic seeded fuzz shapes with irregular branch
+  widths and mixed repeated sibling subtrees, projected through null/empty/sparse/
+  full row groups to catch bugs that regular Cartesian shapes can miss. A
+  projection-permutation corpus keeps several independent deep recursive roots in
+  one file and validates reordered projected subsets against the full-file
+  canonical fingerprints, proving projected roots do not borrow leaf or repeated
+  state from sibling arbitrary nested roots. A deep requiredness-level matrix also
+  covers mixed required roots, required list elements, nullable repeated values,
+  and optional deep chains across multiple row groups. The recursive summary also
+  publishes canonical leaf repetition-path and repeated-ancestor fingerprints,
+  making list/map cardinality topology comparable across row groups and
+  projections. Repeated-ancestor fingerprints include the complete leaf
+  repetition-level vector, so deep topology drift remains visible even when
+  ancestor-level samples alone would look unchanged.
+  Projected native reads plan and decode page payloads only for the requested
+  top-level fields, so unprojected columns do not drive native readiness, CPU,
+  or memory. Local paths, local `file://` URIs,
+  file-backed streams, and staged byte buffers can use the native reader.
+  Unsupported external writers, filters, over-large native batches, anonymous
+  streams, and non-materializable buffers keep the PyArrow dataset/`ParquetFile`
+  compatibility fallback with native diagnostics. Native footer/stream failures
+  from ordinary exceptions are fail-closed into the same PyArrow fallback path
+  instead of escaping before recovery; observability records the original native
+  reason, fallback route (`pyarrow_dataset_scanner` or
+  `pyarrow_parquetfile_iter_batches`), whether fallback was attempted, whether it
+  succeeded, the PyArrow fallback error when PyArrow itself rejects the input,
+  aggregate attempt/success/failure counters per fallback route, and an ordered
+  fallback-attempt history. Diagnostics also expose explicit contract booleans:
+  `pipeline_contract_satisfied`, `pipeline_contract_route`,
+  `pipeline_contract_error`, `native_reader_contract_satisfied`, and
+  `safe_fallback_contract_satisfied`, so production code can gate on a final
+  native-or-fallback outcome instead of inferring success from route names.
+  `last_parquet_pipeline_contract_status()` condenses those fields into a
+  defensive yes/no report for the most recent read, rejecting inconsistent states
+  such as a claimed PyArrow fallback success with no recorded fallback attempt.
+  `parquet_preflight_contract_status(path, columns=..., batch_size=..., filters=...)` performs the matching
+  pre-read check: it succeeds when a file satisfies the schema-sanitizer native
+  writer contract under the same row-group-versus-batch-size and filter constraints
+  used by the runtime native reader, or when PyArrow is importable and can provide
+  the compatibility fallback, and fails closed when neither route can cover the file.
+  `parquet_contract_certification_status(path, columns=..., batch_size=..., filters=..., projections=...)`
+  combines the pre-read pipeline gate, the schema-sanitizer native-writer gate,
+  the applicable nested-recursive contract, and optional recursive projection
+  coverage audits into one fail-closed certificate. This lets production code
+  certify that a file is covered by native or PyArrow fallback and, when it is a
+  schema-sanitizer-native nested file, that root/leaf/projection contracts remain
+  stable before treating the native path as guaranteed.
+  `parquet_contract_runtime_readiness_status()` is the matching environment gate
+  for CI/startup: it fails closed unless PyArrow is importable for the safe
+  fallback contract and the native extension exposes both Parquet footer
+  diagnostics and the native Arrow C Stream reader required to certify
+  schema-sanitizer-native and nested-recursive contracts. The CI helper
+  `meta/ci/check_parquet_contract_runtime.py` runs the same gate before the
+  PyArrow adapter lane executes the Parquet contract tests, preventing a
+  green build that only passed because runtime tests were skipped. The stricter
+  `meta/ci/check_parquet_contract_runtime_suite.py` then runs a selected
+  end-to-end runtime suite and treats any selected skip as a hard failure, so
+  native writer reads, safe PyArrow fallback, and arbitrary nested grammar
+  roundtrips must actually execute in the PyArrow/native CI lane. The selected
+  suite is grouped by contract family (`schema_sanitizer_native_reader`,
+  `safe_pyarrow_fallback`, recursive grammar, null/empty row-group phases,
+  level/repetition topology, and projection contracts), validates the
+  selected nodeids before pytest runs, and verifies after pytest that every
+  selected contract family produced passing reports. It therefore fails closed
+  if a group is dropped, a selected test is renamed/removed, a selected test is
+  skipped, or aggregate pytest totals hide a missing contract-family pass. The
+  same runtime suite accepts `--certificate-output <path>` and writes a stable
+  JSON certificate covering selection, readiness, per-group execution, and the
+  three high-level guarantees (`pipeline_safe_fallback_with_pyarrow`,
+  `schema_sanitizer_native_reader`, and `nested_arbitrary_native_grammar`). CI
+  uploads that artifact so release checks can archive or inspect the exact
+  contract proof instead of relying only on console output.
+  Successful native reads also report the Parquet
+  `created_by` marker plus `native_writer_detected`/
+  `native_writer_contract_satisfied`, making the schema-sanitizer native-writer
+  contract observable in production diagnostics. `native_parquet_writer_contract_status()`
+  provides the matching preflight gate for local files: it requires the
+  schema-sanitizer `created_by` marker, native readiness, a present native stream
+  function, an optional batch-size contract that does not require splitting native
+  row groups, a filter contract that fails the native guarantee whenever predicate
+  filters require the PyArrow Dataset route, and a satisfied recursive nested
+  contract when the file contains nested roots. If a schema-sanitizer-native nested file reports recursive drift
+  or contract collisions, the native path is blocked and the pipeline uses the
+  PyArrow fallback instead of trusting an unsafe native stream. For local path-backed reads without
+  filters, fallback is laddered from native to PyArrow Dataset and then to
+  `ParquetFile.iter_batches`, so Dataset-specific failures do not prevent a safe
+  ParquetFile recovery path. Filtered reads fail closed if the Dataset route is
+  unavailable, because `ParquetFile.iter_batches` cannot apply the filter.
 - Parquet decoding enables threads only when the memory budget is large enough.
 - Native Parquet output splits large Arrow batches into bounded row groups. The
   default native writer limit is 65,536 rows per row group; override it for a
@@ -758,6 +911,7 @@ Trade-offs:
   repetition-level accounting.
 - `to_parquet` uses `parquet_compression="gzip"` by default. Published wheels
   require zlib and smoke-test GZIP output in CI. Use
+  `parquet_compression="snappy"` for Snappy-compatible pages,
   `parquet_compression="uncompressed"` to disable compression or
   `parquet_gzip_level=0..9` to tune the zlib level. The native writer still
   honors `SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION` and

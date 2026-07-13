@@ -1,18 +1,14 @@
-/*
- * ABI3 Python module method table.
- *
- * This file owns the Python-callable native method list and the PyModuleDef so
- * the extension initializer can stay focused on module creation.
- */
-#include "api/python_abi3/_core_abi3_module.hh"
+/* ABI3 module initializer, definition, and method table. */
+#include "internal/abi/python_abi3/base.hh"
 
-#include "internal/abi/core_abi3_internal.hh"
+#include "internal/abi/python_abi3/methods.hh"
+
+#include <array>
 
 namespace core_abi3_internal {
+namespace {
 
-// ------------------------------ method table --------------------------------
-
-static PyMethodDef kMethods[] = {
+auto kMethods = std::to_array<PyMethodDef>({
     // Context
     {.ml_name = "context_new",
      .ml_meth = _PyCFunction_CAST(py_context_new),
@@ -28,6 +24,11 @@ static PyMethodDef kMethods[] = {
      .ml_doc = "Return live diagnostics JSON for a diagnostics capsule."},
 
     // Options
+    {.ml_name = "options_catalog",
+     .ml_meth = _PyCFunction_CAST(py_options_catalog),
+     .ml_flags = METH_NOARGS,
+     .ml_doc =
+         "Return canonical option names, wire kinds, defaults, and groups."},
     {.ml_name = "options_prepare_bytes",
      .ml_meth = _PyCFunction_CAST(py_options_prepare_bytes),
      .ml_flags = METH_VARARGS,
@@ -41,10 +42,6 @@ static PyMethodDef kMethods[] = {
      .ml_meth = _PyCFunction_CAST(py_schema_registry_empty),
      .ml_flags = METH_VARARGS,
      .ml_doc = "Return an empty schema-registry JSON document."},
-    {.ml_name = "schema_registry_has_canonical_schema",
-     .ml_meth = _PyCFunction_CAST(py_schema_registry_has_canonical_schema),
-     .ml_flags = METH_VARARGS,
-     .ml_doc = "Return whether registry JSON has a usable canonical schema."},
     {.ml_name = "schema_registry_contract_payload",
      .ml_meth = _PyCFunction_CAST(py_schema_registry_contract_payload),
      .ml_flags = METH_VARARGS,
@@ -55,10 +52,18 @@ static PyMethodDef kMethods[] = {
      .ml_flags = METH_VARARGS,
      .ml_doc = "Compile registry JSON into a reusable native registry-state "
                "capsule."},
+    {.ml_name = "logical_schema_payload_validate",
+     .ml_meth = _PyCFunction_CAST(py_logical_schema_payload_validate),
+     .ml_flags = METH_VARARGS,
+     .ml_doc = "Validate a native logical schema payload."},
     {.ml_name = "logical_schema_payload_field_names",
      .ml_meth = _PyCFunction_CAST(py_logical_schema_payload_field_names),
      .ml_flags = METH_VARARGS,
      .ml_doc = "Return top-level field names from a logical schema payload."},
+    {.ml_name = "logical_schema_payload_arrow_c_schema",
+     .ml_meth = _PyCFunction_CAST(py_logical_schema_payload_arrow_c_schema),
+     .ml_flags = METH_VARARGS,
+     .ml_doc = "Export a logical schema payload as an Arrow C schema capsule."},
     {.ml_name = "context_schema_probe_from_source",
      .ml_meth = _PyCFunction_CAST(py_context_schema_probe_from_source),
      .ml_flags = METH_VARARGS,
@@ -222,7 +227,6 @@ static PyMethodDef kMethods[] = {
      .ml_meth = _PyCFunction_CAST(py_arrow_schema_contract_payload),
      .ml_flags = METH_VARARGS,
      .ml_doc = "Encode a PyArrow schema as a logical schema contract payload."},
-
     // to_sink (context)
     {.ml_name = "context_to_sink_from_source",
      .ml_meth = _PyCFunction_CAST(py_context_to_sink_from_source),
@@ -356,22 +360,26 @@ static PyMethodDef kMethods[] = {
      .ml_flags = METH_VARARGS,
      .ml_doc = "Infer and merge registry state from multiple Arrow C stream "
                "sources using a compiled native registry-state capsule."},
-
     {.ml_name = nullptr, .ml_meth = nullptr, .ml_flags = 0, .ml_doc = nullptr},
-};
+});
 
-static struct PyModuleDef kModule = {
+PyModuleDef kModule = {
     .m_base = PyModuleDef_HEAD_INIT,
     .m_name = "schema_sanitizer._core_abi3",
     .m_doc = "schema-sanitizer minimal ABI3 bindings (limited API)",
     .m_size = -1,
-    .m_methods = kMethods,
+    .m_methods = kMethods.data(),
     .m_slots = nullptr,
     .m_traverse = nullptr,
     .m_clear = nullptr,
     .m_free = nullptr,
 };
 
-PyModuleDef *module_definition() noexcept { return &kModule; }
+PyObject *create_module() noexcept { return PyModule_Create(&kModule); }
 
+} // namespace
 } // namespace core_abi3_internal
+
+PyMODINIT_FUNC PyInit__core_abi3(void) {
+  return core_abi3_internal::create_module();
+}
