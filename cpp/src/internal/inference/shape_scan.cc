@@ -58,7 +58,6 @@ sanitize::Status scan_shapes_value(InferenceContext *ctx, const ValueView &v,
   *out_has_evidence = false;
 
   if (v.is_null()) {
-    *out_has_evidence = true;
     return sanitize::Status::OK();
   }
 

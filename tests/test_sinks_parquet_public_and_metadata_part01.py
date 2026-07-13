@@ -274,14 +274,15 @@ def test_parquet_sink_rejects_changed_dictionary_during_native_coalescing() -> N
     assert writer.wrote is False
 
 
-def test_to_parquet_omits_empty_container_only_fields(tmp_path: Path) -> None:
-    """Verify empty objects and lists do not create inferred source columns."""
+def test_to_parquet_omits_null_and_empty_container_only_fields(tmp_path: Path) -> None:
+    """Verify nulls and empty containers do not create inferred source columns."""
     require_native()
     pq = pytest.importorskip("pyarrow.parquet")
 
     source = tmp_path / "rows.jsonl"
     source.write_text(
-        '{"writer":{},"items":[],"wrapper":{"child":{}},"nested_items":[{}]}\n',
+        '{"null_value":null,"writer":{},"items":[],"null_wrapper":{"child":null},'
+        '"wrapper":{"child":{}},"null_items":[null],"nested_items":[{}]}\n',
         encoding="utf-8",
     )
     out = tmp_path / "out.parquet"
@@ -289,22 +290,26 @@ def test_to_parquet_omits_empty_container_only_fields(tmp_path: Path) -> None:
     ss.to_parquet(source, out, input_format="jsonl")
 
     table = pq.read_table(out)
+    assert "nullvalue" not in table.schema.names
     assert "writer" not in table.schema.names
     assert "items" not in table.schema.names
+    assert "nullwrapper" not in table.schema.names
     assert "wrapper" not in table.schema.names
+    assert "nullitems" not in table.schema.names
     assert "nesteditems" not in table.schema.names
     assert _without_generated_metadata_rows(table.to_pylist()) == [{}]
 
 
-def test_to_parquet_writes_mixed_empty_and_populated_objects(tmp_path: Path) -> None:
-    """Verify established fields materialize empty containers as null."""
+def test_to_parquet_writes_mixed_null_empty_and_populated_values(tmp_path: Path) -> None:
+    """Verify non-empty evidence types fields while nullish values remain null."""
     require_native()
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
     source = tmp_path / "rows.jsonl"
     source.write_text(
-        '{"writer":{},"items":[]}\n{"writer":{"name":"Alex"},"items":[1,2]}\n',
+        '{"score":null,"writer":{},"items":[]}\n'
+        '{"score":3,"writer":{"name":"Alex"},"items":[1,2]}\n',
         encoding="utf-8",
     )
     out = tmp_path / "out.parquet"
@@ -312,11 +317,12 @@ def test_to_parquet_writes_mixed_empty_and_populated_objects(tmp_path: Path) -> 
     ss.to_parquet(source, out, input_format="jsonl")
 
     table = pq.read_table(out)
+    assert pa.types.is_int64(table.schema.field("score").type)
     assert pa.types.is_struct(table.schema.field("writer").type)
     assert pa.types.is_list(table.schema.field("items").type)
     assert _without_generated_metadata_rows(table.to_pylist()) == [
-        {"items": None, "writer": None},
-        {"items": [1, 2], "writer": {"name": "Alex"}},
+        {"items": None, "score": None, "writer": None},
+        {"items": [1, 2], "score": 3, "writer": {"name": "Alex"}},
     ]
 
 
@@ -330,6 +336,7 @@ def test_registry_keeps_existing_fields_for_empty_containers(tmp_path: Path) -> 
         inferred_schema=pa.schema(
             [
                 pa.field("items", pa.list_(pa.int64())),
+                pa.field("score", pa.int64()),
                 pa.field("writer", pa.struct([pa.field("id", pa.int64())])),
             ]
         ),
@@ -337,7 +344,7 @@ def test_registry_keeps_existing_fields_for_empty_containers(tmp_path: Path) -> 
         field_name_policy="lower_snake",
     )
     source = tmp_path / "rows.jsonl"
-    source.write_text('{"items":[],"writer":{}}\n', encoding="utf-8")
+    source.write_text('{"items":[],"score":null,"writer":{}}\n', encoding="utf-8")
     out = tmp_path / "out.parquet"
 
     result = ss.to_parquet(
@@ -350,7 +357,7 @@ def test_registry_keeps_existing_fields_for_empty_containers(tmp_path: Path) -> 
     )
 
     row = _without_generated_metadata_rows(pq.read_table(out).to_pylist())[0]
-    assert row == {"items": None, "writer": None}
+    assert row == {"items": None, "score": None, "writer": None}
     assert result.schema_drifts == []
     assert (
         result.schema_registry["schema_generation"] == previous.schema_registry["schema_generation"]
@@ -363,7 +370,10 @@ def test_empty_first_partition_does_not_destabilize_registry(tmp_path: Path) -> 
     pq = pytest.importorskip("pyarrow.parquet")
 
     empty_source = tmp_path / "empty.jsonl"
-    empty_source.write_text('{"items":[],"writer":{}}\n', encoding="utf-8")
+    empty_source.write_text(
+        '{"items":[],"score":null,"writer":{}}\n',
+        encoding="utf-8",
+    )
     empty_out = tmp_path / "empty.parquet"
     empty_result = ss.to_parquet(
         empty_source,
@@ -374,7 +384,7 @@ def test_empty_first_partition_does_not_destabilize_registry(tmp_path: Path) -> 
 
     populated_source = tmp_path / "populated.jsonl"
     populated_source.write_text(
-        '{"items":[1],"writer":{"id":2}}\n',
+        '{"items":[1],"score":3,"writer":{"id":2}}\n',
         encoding="utf-8",
     )
     populated_out = tmp_path / "populated.parquet"
@@ -387,10 +397,11 @@ def test_empty_first_partition_does_not_destabilize_registry(tmp_path: Path) -> 
     )
 
     populated_names = pq.read_table(populated_out).schema.names
-    assert {"items", "writer"}.issubset(populated_names)
-    assert not any(name.startswith(("items_v", "writer_v")) for name in populated_names)
+    assert {"items", "score", "writer"}.issubset(populated_names)
+    assert not any(name.startswith(("items_v", "score_v", "writer_v")) for name in populated_names)
     assert [drift["output_name"] for drift in populated_result.schema_drifts] == [
         "items",
+        "score",
         "writer",
     ]
 
@@ -405,7 +416,7 @@ def test_empty_first_partition_does_not_destabilize_registry(tmp_path: Path) -> 
     )
 
     replay_row = _without_generated_metadata_rows(pq.read_table(replay_out).to_pylist())[0]
-    assert replay_row == {"items": None, "writer": None}
+    assert replay_row == {"items": None, "score": None, "writer": None}
     assert replay_result.schema_drifts == []
     assert (
         replay_result.schema_registry["schema_generation"]

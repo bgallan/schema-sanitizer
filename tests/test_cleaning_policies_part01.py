@@ -338,6 +338,25 @@ def test_field_name_policy_preserve_keeps_source_key_names() -> None:
 
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
+def test_null_only_fields_do_not_infer_fields(input_case, tmp_path) -> None:
+    """Verify root and nested null-only paths provide no type evidence."""
+    rows = [
+        {
+            "id": 1,
+            "root_null": None,
+            "wrapper": {"child": None},
+            "items": [None],
+        }
+    ]
+
+    res = _read_result(rows, options={}, case=input_case, tmp_path=tmp_path)
+
+    assert res.clean_data is not None
+    assert res.clean_data.schema.names == ["id"]
+    assert res.clean_data.to_pylist() == [{"id": 1}]
+
+
+@pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_empty_container_elements_do_not_infer_fields(input_case, tmp_path) -> None:
     """Verify empty nested containers provide no type evidence."""
     rows = [

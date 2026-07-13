@@ -105,7 +105,7 @@ Inference combines evidence within one field as follows:
 | Only one non-null scalar kind | That kind. |
 | Integers and floats | `float64`. |
 | Any other mixture of scalar kinds | UTF-8 string. |
-| Only null evidence | UTF-8 string for materialization. |
+| Only null values | No type evidence; the field is omitted unless a source schema or registry supplies its type. |
 
 Across registry-backed runs, an existing float accepts an integer-only batch.
 An existing integer is promoted to float when float evidence appears. Durable
@@ -129,15 +129,52 @@ with BigQuery.
 Invalid calendar or clock values do not become temporal values. If no other
 enabled scalar parser accepts them, they remain strings.
 
-## Containers and empty values
+## Nulls, empty containers, and missing fields
 
 Objects infer as structs and arrays infer as lists. Struct fields are nullable
 because a field may be absent from another row.
 
-Empty arrays and empty objects provide no child type evidence and are skipped
-during shape discovery. Later non-empty observations determine their type.
-Null is compatible with an already known type and does not force a new field
-version.
+Inference treats an explicit null, an empty array, and an empty object as
+having no type evidence. Missing fields likewise provide no evidence. The
+effect depends on whether any other source of type information exists:
+
+| Observations for one field | Inferred-schema behavior | Materialized value |
+|---|---|---|
+| Only `null` | Field is omitted. | No output column. |
+| Only `[]` | Field is omitted. | No output column. |
+| Only `{}` | Field is omitted. | No output column. |
+| Missing from every row | Field is absent. | No output column. |
+| Null/empty observations plus a non-empty value | The non-empty value determines the field type. | Null and empty-container observations become null, except the typed nested cases below. |
+| Existing registry or explicit schema | The established type is retained. | A root null, `[]`, or `{}` becomes null without changing the schema. |
+
+This policy is recursive. An object such as `{"wrapper":{"child":null}}`
+and a list such as `{"items":[null]}` provide no usable descendant type
+evidence. If those are the only observations, `wrapper` and `items` are both
+omitted. The same applies to descendants containing only empty objects or
+empty lists.
+
+Once another row or a schema establishes the type, values are handled against
+that type:
+
+- a scalar null materializes as null;
+- an empty list materializes as null, not `[]`;
+- an empty object materializes as null, not an all-null struct;
+- `[null]` for an established list materializes as a list containing a null
+  element because the list itself is not empty;
+- `{"child":null}` for an established struct materializes as a non-null struct
+  whose `child` is null because the object itself is not empty.
+
+A typed input schema is evidence even when its data pages contain only nulls.
+Consequently, a typed all-null Parquet or Arrow column is retained with its
+declared type. A registry-backed strict conversion behaves the same way: the
+registered field remains, nullish input does not create drift, and the schema
+generation does not change. Unknown null or empty-container fields in strict
+input behave like absent fields and do not trigger the extra-field error.
+
+For schema-less inputs, this prevents the first empty or all-null partition
+from guessing `string`, `list<string>`, or an empty struct. A later partition
+with real evidence receives the original sanitized field name rather than an
+unnecessary versioned name.
 
 ### Scalar and list reconciliation
 

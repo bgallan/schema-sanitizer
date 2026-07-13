@@ -36,8 +36,6 @@ sanitize::Status update_stats_value(InferenceContext *ctx, StatsNode *stats,
   *out_has_evidence = false;
 
   if (v.is_null()) {
-    stats->has_evidence = true;
-    *out_has_evidence = true;
     return sanitize::Status::OK();
   }
 
