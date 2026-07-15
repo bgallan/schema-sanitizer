@@ -74,18 +74,20 @@ def test_hardened_allocator_claims_ownership_before_reading_headers() -> None:
     source = (root / "cpp/src/internal/memory/memory_pool.cc").read_text()
     registry = (root / "cpp/src/internal/memory/memory_pool_registry.cc.inc").read_text()
     tracking = (root / "cpp/src/internal/memory/tracking_memory_pool.cc.inc").read_text()
+    compact_source = " ".join(source.split())
+    compact_tracking = " ".join(tracking.split())
 
     assert "bool hardened_allocation_registry_enabled() noexcept" in registry
     assert "return true;" in registry
     assert "getenv" not in registry
-    default_free = source.split(
+    default_free = compact_source.split(
         "void Free(uint8_t *buffer, int64_t size, int64_t alignment) noexcept override",
         maxsplit=1,
     )[1]
     assert default_free.index("claim_allocation(buffer, &record)") < default_free.index(
         "reinterpret_cast<DefaultAllocationHeader *>"
     )
-    tracking_free = tracking.split(
+    tracking_free = compact_tracking.split(
         "void Free(uint8_t *buffer, int64_t size, int64_t alignment) noexcept override",
         maxsplit=1,
     )[1]

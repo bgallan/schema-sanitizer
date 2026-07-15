@@ -42,10 +42,14 @@ def test_parquet_page_splitter_is_single_pass() -> None:
     text = (ROOT / "cpp/src/internal/parquet/stream_writer/stream_writer_pages.cc.inc").read_text(
         encoding="utf-8"
     )
+    compact_text = " ".join(text.split()).replace("( ", "(")
     assert "build_page_slice_index" in text
     assert "page_row_incremental_bytes" in text
     assert "ranges.emplace_back" in text
-    assert "slice_column_page_data(column, page_data, index" in text
+    assert (
+        "slice_column_page_data(column, page_data, index, range.begin, range.end, "
+        "range.value_begin, range.value_end, range.byte_begin, range.byte_end)" in compact_text
+    )
     assert "ColumnPageData candidate" not in text
     assert "best = std::move(candidate)" not in text
 

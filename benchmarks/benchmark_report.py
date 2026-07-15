@@ -57,7 +57,14 @@ def process_peak_rss_bytes() -> int | None:
             psapi = ctypes.WinDLL("psapi", use_last_error=True)
             get_current_process = kernel32.GetCurrentProcess
             get_current_process.restype = wintypes.HANDLE
-            ok = psapi.GetProcessMemoryInfo(
+            get_process_memory_info = psapi.GetProcessMemoryInfo
+            get_process_memory_info.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(ProcessMemoryCounters),
+                wintypes.DWORD,
+            ]
+            get_process_memory_info.restype = wintypes.BOOL
+            ok = get_process_memory_info(
                 get_current_process(),
                 ctypes.byref(counters),
                 counters.cb,

@@ -76,6 +76,7 @@ def test_decompressors_write_into_reusable_outputs() -> None:
 def test_release_wheels_share_one_bundled_zlib_provider() -> None:
     """Windows, Linux, and macOS wheels must build GZIP from one pinned source."""
     cmake = (ROOT / "cmake/SchemaSanitizerCompression.cmake").read_text(encoding="utf-8")
+    compact_cmake = " ".join(cmake.split()).replace("( ", "(")
     project = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     workflows = "\n".join(
@@ -87,8 +88,8 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
     assert 'set(_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT "bundled")' in cmake
     assert "zlib132.zip" in cmake
     assert "SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28" in cmake
-    assert "set(ZLIB_BUILD_SHARED OFF" in cmake
-    assert "set(ZLIB_BUILD_STATIC ON" in cmake
+    assert 'set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)' in compact_cmake
+    assert 'set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)' in compact_cmake
     assert "ZLIB::ZLIBSTATIC" in cmake
     assert "SchemaSanitizerCompression.cmake" in project
     assert 'SCHEMA_SANITIZER_ZLIB_PROVIDER = "bundled"' in pyproject

@@ -60,7 +60,8 @@ def test_metadata_root_offset_is_rejected_before_child_generation() -> None:
     source = (ROOT / "cpp/src/api/python_abi3/metadata/stream/stream.cc").read_text(
         encoding="utf-8"
     )
-    validator = source.split("sanitize::Status validate_metadata_base_array", 1)[1]
+    compact_source = " ".join(source.split())
+    validator = compact_source.split("sanitize::Status validate_metadata_base_array", 1)[1]
 
     assert validator.index("base.offset != 0") < validator.index("base.offset + base.length")
     assert "root offset must be zero" in validator

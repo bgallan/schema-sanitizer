@@ -32,7 +32,7 @@ def test_regression_runner_discovers_stable_cases_and_commands(
 
     for target in module.TARGETS:
         build_root.mkdir(exist_ok=True)
-        (build_root / f"schema_sanitizer_fuzz_{target}").write_bytes(b"binary")
+        module.fuzzer_binary(build_root, target).write_bytes(b"binary")
         target_root = regression_root / target
         target_root.mkdir(parents=True)
         (target_root / "case.bin").write_bytes(target.encode())
@@ -47,9 +47,9 @@ def test_regression_runner_discovers_stable_cases_and_commands(
     assert module.run_regressions(build_root, regression_root) == len(module.TARGETS)
     assert len(calls) == len(module.TARGETS)
     for target, command in zip(module.TARGETS, calls, strict=True):
-        assert command[0].endswith(f"schema_sanitizer_fuzz_{target}")
+        assert Path(command[0]) == module.fuzzer_binary(build_root, target)
         assert command[1] == "-runs=1"
-        assert command[2].endswith(f"regressions/{target}/case.bin")
+        assert Path(command[2]) == regression_root / target / "case.bin"
 
 
 def test_regression_runner_rejects_empty_regression_set(tmp_path: Path) -> None:
@@ -59,7 +59,7 @@ def test_regression_runner_rejects_empty_regression_set(tmp_path: Path) -> None:
     regression_root = tmp_path / "regressions"
     build_root.mkdir()
     for target in module.TARGETS:
-        (build_root / f"schema_sanitizer_fuzz_{target}").write_bytes(b"binary")
+        module.fuzzer_binary(build_root, target).write_bytes(b"binary")
         (regression_root / target).mkdir(parents=True)
 
     with pytest.raises(RuntimeError, match="no fuzz regression inputs"):

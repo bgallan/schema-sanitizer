@@ -15,6 +15,7 @@ def test_chunk_sources_share_a_finite_request_ceiling() -> None:
     """Every built-in source rejects a single oversized chunk request."""
     limits = (ROOT / "cpp/src/ingest/chunk_source_detail.hh").read_text(encoding="utf-8")
     budget = (ROOT / "cpp/src/internal/memory/memory_budget.hh").read_text(encoding="utf-8")
+    compact_budget = " ".join(budget.split())
     sources = [
         ROOT / "cpp/src/ingest/chunk_source_file.cc",
         ROOT / "cpp/src/ingest/chunk_source_memory.cc",
@@ -23,7 +24,7 @@ def test_chunk_sources_share_a_finite_request_ceiling() -> None:
     ]
     assert "kMaxChunkRequestBytes" in limits
     assert "std::int64_t{256} * 1024 * 1024" in limits
-    assert "io_chunk_bytes = bounded_fraction" in budget
+    assert "out.io_chunk_bytes = bounded_fraction" in compact_budget
     for source in sources:
         assert "validate_chunk_request" in source.read_text(encoding="utf-8")
 

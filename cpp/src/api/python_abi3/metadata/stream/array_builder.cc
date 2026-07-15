@@ -42,7 +42,6 @@ struct TimestampMicrosColumnData {
   const void *buffers[2]{nullptr, nullptr};
   ArrowArray array{};
 };
-
 struct MetadataArrayState {
   sanitize::CArrayGuard base;
   std::vector<Utf8ColumnData> utf8_columns;

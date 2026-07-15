@@ -20,15 +20,25 @@ def _write_source(path: Path, rows: int = 1024) -> list[str]:
     return values
 
 
-def _text_column_metadata(path: Path):
-    """Return the Parquet file and metadata chunks for its text column."""
+def _parquet_metadata(path: Path) -> tuple[set[str], int, int]:
+    """Read codec names and text-column sizes without retaining a file handle."""
     parquet_file = pq.ParquetFile(path)
-    text_index = parquet_file.schema_arrow.names.index("text")
-    chunks = [
-        parquet_file.metadata.row_group(index).column(text_index)
-        for index in range(parquet_file.metadata.num_row_groups)
-    ]
-    return parquet_file, chunks
+    try:
+        text_index = parquet_file.schema_arrow.names.index("text")
+        actual_names = {
+            parquet_file.metadata.row_group(row_group).column(column).compression
+            for row_group in range(parquet_file.metadata.num_row_groups)
+            for column in range(parquet_file.metadata.row_group(row_group).num_columns)
+        }
+        text_chunks = [
+            parquet_file.metadata.row_group(index).column(text_index)
+            for index in range(parquet_file.metadata.num_row_groups)
+        ]
+        compressed = sum(chunk.total_compressed_size for chunk in text_chunks)
+        uncompressed = sum(chunk.total_uncompressed_size for chunk in text_chunks)
+        return actual_names, compressed, uncompressed
+    finally:
+        parquet_file.close()
 
 
 def main() -> None:
@@ -50,12 +60,7 @@ def main() -> None:
                 kwargs["parquet_gzip_level"] = 6
             ss.to_parquet(source, output, input_format="csv", **kwargs)
 
-            parquet_file, text_chunks = _text_column_metadata(output)
-            actual_names = {
-                parquet_file.metadata.row_group(row_group).column(column).compression
-                for row_group in range(parquet_file.metadata.num_row_groups)
-                for column in range(parquet_file.metadata.row_group(row_group).num_columns)
-            }
+            actual_names, compressed, uncompressed = _parquet_metadata(output)
             if actual_names != {expected_name}:
                 raise AssertionError(
                     f"{codec}: expected {expected_name}, got {sorted(actual_names)}"
@@ -65,8 +70,6 @@ def main() -> None:
             if values != expected_values:
                 raise AssertionError(f"{codec}: round-trip values differ")
 
-            compressed = sum(chunk.total_compressed_size for chunk in text_chunks)
-            uncompressed = sum(chunk.total_uncompressed_size for chunk in text_chunks)
             if codec in {"gzip", "snappy"} and compressed >= uncompressed:
                 raise AssertionError(
                     f"{codec}: payload was not reduced ({compressed} >= {uncompressed})"

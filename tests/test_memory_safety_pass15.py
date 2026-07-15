@@ -28,7 +28,17 @@ def test_repository_has_no_environment_configuration_hooks() -> None:
         "GH_" + "TOKEN",
         "GITHUB_" + "ENV",
     )
-    ignored = {".git", "__pycache__", ".pytest_cache", "build"}
+    ignored = {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "wheelhouse",
+    }
     offenders: list[str] = []
     yaml_env_blocks: list[str] = []
     for path in ROOT.rglob("*"):
@@ -79,7 +89,7 @@ def test_direct_csv_scratch_cleanup_preserves_decoded_values(tmp_path: Path) -> 
 
     require_native()
     path = tmp_path / "direct.csv"
-    path.write_text('payload\n"alpha""beta"\n"line one\r\nline two"\n', encoding="utf-8")
+    path.write_bytes(b'payload\n"alpha""beta"\n"line one\r\nline two"\n')
     result = read_test_csv(
         path,
         schema_contract=pa.schema([pa.field("payload", pa.string())]),
