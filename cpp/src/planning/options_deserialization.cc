@@ -15,11 +15,16 @@ namespace sanitize {
 namespace {
 
 constexpr std::string_view kMagic = "SZOPT16";
+constexpr std::size_t kMaxOptionsPayloadBytes = 64U * 1024U * 1024U;
 using internal::options_io::read_u32;
 
 } // namespace
 
 sanitize::Result<Options> deserialize_options(std::string_view bytes) {
+  if (bytes.size() > kMaxOptionsPayloadBytes) {
+    return sanitize::Status::Invalid(
+        "deserialize_options: payload exceeds safety limit");
+  }
   if (bytes.size() < kMagic.size() + 4) {
     return sanitize::Status::Invalid("deserialize_options: buffer too small");
   }

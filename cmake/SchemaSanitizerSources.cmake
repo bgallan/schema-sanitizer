@@ -9,6 +9,7 @@ target_sources(
     cpp/src/api/python_abi3/_core_abi3_module.cc
     cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct.cc
     cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_batch.cc
+    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_validate.cc
     cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_finalize.cc
     cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_formatters.cc
     cpp/src/api/python_abi3/arrow_direct/schema/logical.cc
@@ -156,6 +157,7 @@ target_sources(
     cpp/src/internal/json_encoding/token_writer.cc
     cpp/src/internal/json_output/jsonl_stream_writer.cc
     cpp/src/internal/json_output/schema/field.cc
+    cpp/src/internal/json_output/schema/array_validation.cc
     cpp/src/internal/json_output/schema/format.cc
     cpp/src/internal/json_output/jsonl_value_writer.cc
     cpp/src/internal/json_output/jsonl_value_writer_nested.cc

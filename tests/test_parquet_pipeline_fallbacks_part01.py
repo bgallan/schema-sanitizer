@@ -28,6 +28,7 @@ def _make_native_try_factory(factory_module: object) -> object:
     factory._native_source_kind = "path"
     factory._columns = None
     factory._batch_size = 1024
+    factory._memory_limit_bytes = None
     factory._keepalive = ()
     return factory
 
@@ -183,7 +184,7 @@ def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
 
     monkeypatch.setattr(
         stream_factory,
-        "native_parquet_footer_info",
+        "native_parquet_stream_preflight_info",
         lambda *args, **kwargs: {
             "created_by": "schema-sanitizer native parquet writer",
             "native_reader_ready": 1,
@@ -227,7 +228,7 @@ def test_parquet_native_reader_non_runtime_errors_fall_back(
 
     monkeypatch.setattr(
         stream_factory,
-        "native_parquet_footer_info",
+        "native_parquet_stream_preflight_info",
         lambda *args, **kwargs: {
             "native_reader_ready": 1,
             "row_group_count": 1,
@@ -270,7 +271,7 @@ def test_parquet_native_footer_errors_fall_back(monkeypatch: pytest.MonkeyPatch)
         """Internal test helper."""
         raise OSError("footer read failed")
 
-    monkeypatch.setattr(stream_factory, "native_parquet_footer_info", failing_footer_info)
+    monkeypatch.setattr(stream_factory, "native_parquet_stream_preflight_info", failing_footer_info)
     monkeypatch.setattr(stream_factory, "PARQUET_STREAM_READ", object())
 
     assert factory._try_native_stream() is None

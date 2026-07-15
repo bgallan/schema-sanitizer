@@ -131,8 +131,8 @@ def test_schema_registry_uses_one_version_name_parser_and_borrowed_indexes() -> 
     assert "std::string_view\nsource_segment_for_output" in types
 
 
-def test_parquet_dictionary_encoding_borrows_values_and_reserves_row_count() -> None:
-    """Dictionary indexing avoids one owned key per observed string and index reallocations."""
+def test_parquet_dictionary_encoding_borrows_values_without_per_row_indices() -> None:
+    """Dictionary indexing retains unique keys and emits row indices directly."""
     writer = (
         ROOT / "cpp/src/internal/parquet/stream_writer/stream_writer_value_encodings.cc.inc"
     ).read_text(encoding="utf-8")
@@ -141,7 +141,9 @@ def test_parquet_dictionary_encoding_borrows_values_and_reserves_row_count() -> 
     )
 
     assert "BorrowedStringLookupMap<std::uint32_t> index_by_value" in writer
-    assert "indices.reserve(estimated_count)" in writer
+    assert "dictionary.reserve(initial_unique_capacity)" in writer
+    assert "std::vector<std::uint32_t> indices" not in writer
+    assert "append_rle_run_u32(out.encoded_indices" in writer
     assert '"internal/string_lookup.hh"' in entry
 
 

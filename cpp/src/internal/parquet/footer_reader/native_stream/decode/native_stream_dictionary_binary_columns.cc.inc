@@ -3,7 +3,8 @@
 // ---- native_stream_decode_dictionary_binary ----
 sanitize::Status materialize_simple_list_dictionary_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+    const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
   if (!out ||
       column.native_read_value_buffer_kind !=
           NativeValueBufferKind::dictionary_byte_array ||
@@ -16,7 +17,7 @@ sanitize::Status materialize_simple_list_dictionary_byte_array_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: missing list dictionary byte-array values");
   }
-  const auto element_count = list_leaf_value_count(column);
+  const auto element_count = window.elements.count;
   out->offsets.assign(static_cast<std::size_t>(element_count + 1), 0);
   if (column.native_read_total_nulls > 0) {
     out->validity.assign(static_cast<std::size_t>((element_count + 7) / 8), 0);
@@ -28,14 +29,21 @@ sanitize::Status materialize_simple_list_dictionary_byte_array_column(
         "native Parquet reader: list dictionary byte-array buffer is too "
         "large");
   }
-  out->values.reserve(
-      static_cast<std::size_t>(column.native_read_materialized_value_bytes));
+  if (window.total_elements > 0 && element_count > 0) {
+    const auto scaled =
+        static_cast<long double>(column.native_read_materialized_value_bytes) *
+        static_cast<long double>(element_count) /
+        static_cast<long double>(window.total_elements);
+    const auto reserve_bytes = static_cast<std::size_t>(std::min<long double>(
+        scaled + 1.0L,
+        static_cast<long double>(std::numeric_limits<std::size_t>::max())));
+    out->values.reserve(reserve_bytes);
+  }
 
   DictionaryPageState dictionary;
   dictionary.decoded = true;
   dictionary.value_count =
       static_cast<std::int32_t>(column.decoded_dictionary_values.size());
-  dictionary.byte_array_values = column.decoded_dictionary_values;
 
   const auto list_defined_level = list_leaf_value_parent_defined_level(column);
   std::int64_t element_index = 0;
@@ -80,7 +88,7 @@ sanitize::Status materialize_simple_list_dictionary_byte_array_column(
       if (definition <= list_defined_level) {
         continue;
       }
-      if (element_index >= element_count) {
+      if (element_index >= window.total_elements) {
         return sanitize::Status::Invalid(
             "native Parquet reader: list dictionary byte-array element span "
             "exceeds row group");
@@ -108,14 +116,20 @@ sanitize::Status materialize_simple_list_dictionary_byte_array_column(
               "native Parquet reader: list dictionary byte-array offsets "
               "exceed int32");
         }
-        out->values.insert(out->values.end(), value.begin(), value.end());
-        current_offset += static_cast<std::int32_t>(value.size());
-        if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, element_index);
+        if (window.elements.contains(element_index)) {
+          const auto output_index = window.elements.local(element_index);
+          out->values.insert(out->values.end(), value.begin(), value.end());
+          current_offset += static_cast<std::int32_t>(value.size());
+          if (!out->validity.empty()) {
+            set_output_validity_bit(&out->validity, output_index);
+          }
         }
       }
-      out->offsets[static_cast<std::size_t>(element_index + 1)] =
-          current_offset;
+      if (window.elements.contains(element_index)) {
+        const auto output_index = window.elements.local(element_index);
+        out->offsets[static_cast<std::size_t>(output_index + 1)] =
+            current_offset;
+      }
       ++element_index;
     }
     if (index_offset != indices.size()) {
@@ -123,7 +137,7 @@ sanitize::Status materialize_simple_list_dictionary_byte_array_column(
           "native Parquet reader: trailing list dictionary byte-array indices");
     }
   }
-  if (element_index != element_count) {
+  if (element_index != window.total_elements) {
     return sanitize::Status::Invalid(
         "native Parquet reader: list dictionary byte-array element count "
         "mismatch");
@@ -133,48 +147,45 @@ sanitize::Status materialize_simple_list_dictionary_byte_array_column(
 
 // ---- native_stream_decode_dictionary_byte_array ----
 sanitize::Status materialize_dictionary_byte_array_column(
-    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
-  if (!out || row_count < 0 ||
-      row_count >
-          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    std::ifstream &file, const ColumnChunkInfo &column,
+    const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
+  SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
+  if (!out) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: invalid dictionary byte-array row count");
+        "native Parquet reader: dictionary byte-array output is null");
   }
   if (column.decoded_dictionary_values.empty()) {
     return sanitize::Status::Invalid(
         "native Parquet reader: missing decoded dictionary values");
   }
-  out->offsets.assign(static_cast<std::size_t>(row_count + 1), 0);
-  if (column.native_read_total_nulls > 0) {
-    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
-  }
-  if (column.native_read_materialized_value_bytes < 0 ||
-      static_cast<std::uint64_t>(column.native_read_materialized_value_bytes) >
-          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+  if (column.decoded_dictionary_values.size() >
+      static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: dictionary byte-array buffer is too large");
+        "native Parquet reader: dictionary value count exceeds int32");
   }
-  out->values.reserve(
-      static_cast<std::size_t>(column.native_read_materialized_value_bytes));
-
+  out->offsets.assign(static_cast<std::size_t>(window.row_count + 1), 0);
+  if (column.native_read_total_nulls > 0) {
+    out->validity.assign(static_cast<std::size_t>((window.row_count + 7) / 8),
+                         0);
+  }
   DictionaryPageState dictionary;
   dictionary.decoded = true;
   dictionary.value_count =
       static_cast<std::int32_t>(column.decoded_dictionary_values.size());
-  dictionary.byte_array_values = column.decoded_dictionary_values;
-
   std::int32_t current_offset = 0;
   std::int64_t next_expected_row = 0;
   for (const auto &span : column.native_read_page_spans) {
     if (span.page_index < 0 ||
-        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+        static_cast<std::size_t>(span.page_index) >= column.pages.size() ||
+        span.row_count < 0 || span.first_row_index != next_expected_row ||
+        span.first_row_index > window.row_group_rows - span.row_count) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid dictionary page span index");
+          "native Parquet reader: invalid dictionary page span");
     }
-    if (span.first_row_index != next_expected_row) {
-      return sanitize::Status::NotImplemented(
-          "native Parquet reader: non-contiguous dictionary page spans");
+    next_expected_row += span.row_count;
+    if (!window.overlaps(span.first_row_index, span.row_count)) {
+      continue;
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
     if (!page.has_value_encoding ||
@@ -206,21 +217,24 @@ sanitize::Status materialize_dictionary_byte_array_column(
     std::size_t index_offset = 0;
     for (std::int32_t row = 0; row < span.row_count; ++row) {
       const auto global_row = span.first_row_index + row;
-      if (global_row < 0 || global_row >= row_count) {
-        return sanitize::Status::Invalid("native Parquet reader: dictionary "
-                                         "page row span exceeds row group");
-      }
       const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      std::uint32_t dictionary_index = 0;
       if (valid) {
         if (index_offset >= indices.size()) {
           return sanitize::Status::Invalid(
               "native Parquet reader: missing dictionary index");
         }
-        const auto dictionary_index = indices[index_offset++];
+        dictionary_index = indices[index_offset++];
         if (dictionary_index >= column.decoded_dictionary_values.size()) {
           return sanitize::Status::Invalid(
               "native Parquet reader: dictionary index out of range");
         }
+      }
+      if (!window.contains(global_row)) {
+        continue;
+      }
+      const auto output_row = window.local_row(global_row);
+      if (valid) {
         const auto &value =
             column.decoded_dictionary_values[static_cast<std::size_t>(
                 dictionary_index)];
@@ -228,22 +242,25 @@ sanitize::Status materialize_dictionary_byte_array_column(
                                std::numeric_limits<std::int32_t>::max()) ||
             current_offset > std::numeric_limits<std::int32_t>::max() -
                                  static_cast<std::int32_t>(value.size())) {
-          return sanitize::Status::Invalid("native Parquet reader: dictionary "
-                                           "byte-array offsets exceed int32");
+          return sanitize::Status::Invalid(
+              "native Parquet reader: dictionary offsets exceed int32");
         }
         out->values.insert(out->values.end(), value.begin(), value.end());
         current_offset += static_cast<std::int32_t>(value.size());
         if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, global_row);
+          set_output_validity_bit(&out->validity, output_row);
         }
       }
-      out->offsets[static_cast<std::size_t>(global_row + 1)] = current_offset;
+      out->offsets[static_cast<std::size_t>(output_row + 1)] = current_offset;
     }
     if (index_offset != indices.size()) {
       return sanitize::Status::Invalid(
           "native Parquet reader: trailing dictionary indices");
     }
-    next_expected_row += span.row_count;
+  }
+  if (next_expected_row != window.row_group_rows) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: incomplete dictionary page spans");
   }
   return {};
 }

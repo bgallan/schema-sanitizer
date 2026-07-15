@@ -34,6 +34,7 @@ def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> Non
         chunk_size = 1
         files = [object(), object()]
         input_format = "json"
+        memory_limit_bytes = 1
 
         def __init__(self) -> None:
             """Initialize call tracking."""
@@ -51,7 +52,7 @@ def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> Non
             return staged
 
     manifest = FakeManifest()
-    with iter_staged_remote_chunks(manifest, prefetch_chunks=1) as chunks:
+    with iter_staged_remote_chunks(manifest) as chunks:
         first = next(chunks)
         assert first.start == 0
         assert manifest.second_started.wait(timeout=2.0)
@@ -112,8 +113,6 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
         "stage_remote_files_to_directory",
         fake_stage_remote_files_to_directory,
     )
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_STAGE_FILES", "1")
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_RETAINED_STAGE_CHUNKS", "1")
 
     out_path = tmp_path / "out.jsonl"
     ss.to_jsonl(
@@ -129,7 +128,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
         "s3://bucket/partition/a.json",
         "s3://bucket/partition/b.json",
     ]
-    assert staged_calls == [["a.json"], ["b.json"], ["a.json"], ["b.json"]]
+    assert staged_calls == [["a.json", "b.json"], ["a.json", "b.json"]]
 
 
 def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
@@ -184,9 +183,6 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
         fake_stage_remote_files_to_directory,
     )
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_STAGE_FILES", "1")
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_RETAINED_STAGE_CHUNKS", "1")
-
     result = ss.to_pyarrow(
         "s3://bucket/partition/",
         input_format="json",
@@ -199,7 +195,7 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
         "s3://bucket/partition/a.json",
         "s3://bucket/partition/b.json",
     ]
-    assert staged_calls == [["a.json"], ["b.json"], ["a.json"], ["b.json"]]
+    assert staged_calls == [["a.json", "b.json"], ["a.json", "b.json"]]
 
 
 def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
@@ -271,8 +267,6 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
         "open_source_plan_registry_stream",
         tracking_registry_stream,
     )
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_STAGE_FILES", "1")
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_RETAINED_STAGE_CHUNKS", "1")
 
     out_path = tmp_path / "remote-single-pass.jsonl"
     ss.to_jsonl(
@@ -286,4 +280,4 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
     rows = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()]
     assert registry_stream_calls == 1
     assert [row["id"] for row in rows] == ["a", "b"]
-    assert staged_calls == [["a.json"], ["b.json"], ["a.json"], ["b.json"]]
+    assert staged_calls == [["a.json", "b.json"], ["a.json", "b.json"]]

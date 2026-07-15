@@ -6,8 +6,11 @@ from pathlib import Path
 
 from bench_timer import time_call
 from fixtures import (
+    write_all_null_jsonl,
     write_csv,
+    write_deeply_nested_jsonl,
     write_dirty_jsonl,
+    write_empty_container_jsonl,
     write_json_folder,
     write_jsonl,
     write_nested_jsonl,
@@ -21,6 +24,13 @@ from route_details import (
 import schema_sanitizer as ss
 
 
+def _path_bytes(path: Path) -> int:
+    """Return bytes occupied by one fixture file or directory tree."""
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
 def run_support_case(root: Path, rows: int, repeats: int, case: str) -> None:
     """Run option/schema-support microbenchmarks."""
     del root
@@ -29,7 +39,7 @@ def run_support_case(root: Path, rows: int, repeats: int, case: str) -> None:
 
         time_call(
             "normalize_call_options",
-            lambda: normalize_call_options(read_chunk_bytes=1 << 20),
+            lambda: normalize_call_options(memory_limit_bytes=64 << 20),
             rows,
             repeats,
         )
@@ -78,6 +88,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             lambda: ss.to_pyarrow(jsonl_path, input_format="jsonl"),
             rows,
             repeats,
+            input_bytes=jsonl_path,
             describe=lambda _result: sink_source_route_detail(),
         )
 
@@ -89,6 +100,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             lambda: ss.to_pyarrow(dirty_path, input_format="jsonl"),
             rows,
             repeats,
+            input_bytes=dirty_path,
         )
 
     if case in {"all", "nested-jsonl"}:
@@ -99,6 +111,51 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             lambda: ss.to_pyarrow(nested_path, input_format="jsonl"),
             rows,
             repeats,
+            input_bytes=nested_path,
+        )
+
+    if case in {"all", "wide-jsonl"}:
+        wide_path = root / "wide.jsonl"
+        write_jsonl(wide_path, rows, max(width, 128))
+        time_call(
+            "to_pyarrow wide jsonl",
+            lambda: ss.to_pyarrow(wide_path, input_format="jsonl"),
+            rows,
+            repeats,
+            input_bytes=wide_path,
+        )
+
+    if case in {"all", "deep-jsonl"}:
+        deep_path = root / "deep.jsonl"
+        write_deeply_nested_jsonl(deep_path, rows)
+        time_call(
+            "to_pyarrow deeply nested jsonl",
+            lambda: ss.to_pyarrow(deep_path, input_format="jsonl"),
+            rows,
+            repeats,
+            input_bytes=deep_path,
+        )
+
+    if case in {"all", "all-null-jsonl"}:
+        null_path = root / "all_null.jsonl"
+        write_all_null_jsonl(null_path, rows, width)
+        time_call(
+            "to_pyarrow all-null jsonl",
+            lambda: ss.to_pyarrow(null_path, input_format="jsonl"),
+            rows,
+            repeats,
+            input_bytes=null_path,
+        )
+
+    if case in {"all", "empty-container-jsonl"}:
+        empty_path = root / "empty_containers.jsonl"
+        write_empty_container_jsonl(empty_path, rows)
+        time_call(
+            "to_pyarrow empty-container jsonl",
+            lambda: ss.to_pyarrow(empty_path, input_format="jsonl"),
+            rows,
+            repeats,
+            input_bytes=empty_path,
         )
 
     if case in {"all", "json-folder"}:
@@ -113,6 +170,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             ),
             rows,
             repeats,
+            input_bytes=lambda: _path_bytes(folder_path),
             describe=lambda _result: native_directory_route_detail(),
         )
 
@@ -128,6 +186,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             ),
             max(rows, 256),
             repeats,
+            input_bytes=lambda: _path_bytes(folder_path),
             describe=lambda _result: native_directory_route_detail(),
         )
 
@@ -144,6 +203,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             ),
             rows,
             repeats,
+            input_bytes=lambda: _path_bytes(folder_path),
             describe=lambda _result: (
                 f"{sink_source_route_detail()} {native_directory_route_detail()}"
             ),
@@ -157,4 +217,5 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             lambda: ss.to_pyarrow(csv_path, input_format="csv"),
             rows,
             repeats,
+            input_bytes=csv_path,
         )

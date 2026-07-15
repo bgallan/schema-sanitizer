@@ -1,127 +1,79 @@
 // Selects, writes, estimates, and slices native Parquet pages.
 
-struct EncodedValueCandidate {
-  std::int32_t encoding = kEncodingPlain;
-  std::string values;
-  std::optional<DictionaryEncodingData> dictionary;
-};
+sanitize::Result<PreparedPagePayload>
+choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
+                    CompressionCodec codec, int gzip_level,
+                    bool allow_dictionary) {
+  std::optional<PreparedPagePayload> best;
+  std::size_t best_size = std::numeric_limits<std::size_t>::max();
 
-std::vector<EncodedValueCandidate>
-encoded_value_candidates(const LeafColumn &column,
-                         const ColumnPageData &page_data,
-                         bool allow_dictionary) {
-  std::vector<EncodedValueCandidate> candidates;
-  candidates.push_back(EncodedValueCandidate{
-      .encoding = kEncodingPlain,
-      .values = std::string(page_data.values),
-      .dictionary = std::nullopt,
-  });
+  const auto consider =
+      [&](std::int32_t encoding, std::string_view encoded_values,
+          const DictionaryEncodingData *dictionary) -> sanitize::Status {
+    // Candidates are built, compressed, compared, and released one at a time.
+    // Keeping only the winner avoids retaining PLAIN plus every alternate
+    // encoding and their compressed forms simultaneously.
+    std::string payload =
+        encode_page_levels_and_values(column, page_data, encoded_values);
+    SAN_ASSIGN_OR_RAISE(auto compressed_payload,
+                        compress_payload(payload, codec, gzip_level));
+    std::string compressed_dictionary;
+    std::size_t candidate_size = compressed_payload.size();
+    std::optional<PreparedDictionaryInfo> dictionary_info;
+    if (dictionary) {
+      SAN_ASSIGN_OR_RAISE(
+          compressed_dictionary,
+          compress_payload(dictionary->dictionary_values, codec, gzip_level));
+      candidate_size =
+          saturating_size_add(candidate_size, compressed_dictionary.size());
+      dictionary_info = PreparedDictionaryInfo{
+          .value_count = dictionary->dictionary_size,
+          .uncompressed_payload_size = dictionary->dictionary_values.size(),
+      };
+    }
+    const bool encoding_tie_break =
+        candidate_size == best_size &&
+        ((dictionary && prefers_dictionary_tie_break(column)) ||
+         encoding == kEncodingByteStreamSplit);
+    if (!best || candidate_size < best_size || encoding_tie_break) {
+      best_size = candidate_size;
+      best = PreparedPagePayload{
+          .encoding = encoding,
+          .dictionary = dictionary_info,
+          .uncompressed_payload_size = payload.size(),
+          .compressed_payload = std::move(compressed_payload),
+          .compressed_dictionary = std::move(compressed_dictionary),
+      };
+    }
+    return {};
+  };
+
+  // PLAIN is already present in page_data, so evaluate it through a view
+  // instead of making the previous unconditional full-size copy.
+  SAN_RETURN_NOT_OK(consider(kEncodingPlain, page_data.values, nullptr));
 
   if (allow_dictionary) {
     if (auto dictionary =
             try_dictionary_encode_column(column, page_data.values)) {
-      candidates.push_back(EncodedValueCandidate{
-          .encoding = kEncodingRleDictionary,
-          .values = dictionary->encoded_indices,
-          .dictionary = std::move(dictionary),
-      });
+      const std::string_view indices(dictionary->encoded_indices);
+      SAN_RETURN_NOT_OK(
+          consider(kEncodingRleDictionary, indices, &*dictionary));
     }
   }
   if (is_float_column(column)) {
     if (auto encoded = encode_byte_stream_split(page_data.values,
                                                 float_value_width(column))) {
-      candidates.push_back(EncodedValueCandidate{
-          .encoding = kEncodingByteStreamSplit,
-          .values = std::move(*encoded),
-          .dictionary = std::nullopt,
-      });
+      SAN_RETURN_NOT_OK(consider(kEncodingByteStreamSplit, *encoded, nullptr));
     }
   }
   if (auto encoded =
           encode_delta_binary_packed_column(column, page_data.values)) {
-    candidates.push_back(EncodedValueCandidate{
-        .encoding = kEncodingDeltaBinaryPacked,
-        .values = std::move(*encoded),
-        .dictionary = std::nullopt,
-    });
+    SAN_RETURN_NOT_OK(consider(kEncodingDeltaBinaryPacked, *encoded, nullptr));
   }
   if (is_byte_array_kind(leaf_value_kind(column))) {
     if (auto encoded = encode_delta_length_byte_array(page_data.values)) {
-      candidates.push_back(EncodedValueCandidate{
-          .encoding = kEncodingDeltaLengthByteArray,
-          .values = std::move(*encoded),
-          .dictionary = std::nullopt,
-      });
-    }
-  }
-  return candidates;
-}
-
-std::string encode_page_levels_and_values(const LeafColumn &column,
-                                          const ColumnPageData &page_data,
-                                          std::string_view encoded_values) {
-  std::string payload;
-  if (column.max_repetition_level > 0) {
-    payload.append(encode_levels(page_data.repetition_levels,
-                                 column.max_repetition_level));
-  }
-  if (column.max_definition_level > 0) {
-    payload.append(encode_levels(page_data.definition_levels,
-                                 column.max_definition_level));
-  }
-  payload.append(encoded_values);
-  return payload;
-}
-
-struct PreparedPagePayload {
-  EncodedValueCandidate candidate;
-  std::string payload;
-  std::string compressed_payload;
-  std::string compressed_dictionary;
-};
-
-bool prefers_dictionary_tie_break(const LeafColumn &column) {
-  if (column.path.empty()) {
-    return false;
-  }
-  const auto &name = column.path.back();
-  return name == "source_file" || name == "schema_registry" ||
-         name == "schema_drifts" || name == "year" || name == "month" ||
-         name == "date" || name == "hour";
-}
-
-sanitize::Result<PreparedPagePayload>
-choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
-                    CompressionCodec codec, bool allow_dictionary) {
-  auto candidates =
-      encoded_value_candidates(column, page_data, allow_dictionary);
-  std::optional<PreparedPagePayload> best;
-  std::size_t best_size = std::numeric_limits<std::size_t>::max();
-  for (auto &candidate : candidates) {
-    std::string payload =
-        encode_page_levels_and_values(column, page_data, candidate.values);
-    SAN_ASSIGN_OR_RAISE(auto compressed_payload,
-                        compress_payload(payload, codec));
-    std::string compressed_dictionary;
-    std::size_t candidate_size = compressed_payload.size();
-    if (candidate.dictionary) {
-      SAN_ASSIGN_OR_RAISE(
-          compressed_dictionary,
-          compress_payload(candidate.dictionary->dictionary_values, codec));
-      candidate_size += compressed_dictionary.size();
-    }
-    const bool encoding_tie_break =
-        candidate_size == best_size &&
-        ((candidate.dictionary && prefers_dictionary_tie_break(column)) ||
-         candidate.encoding == kEncodingByteStreamSplit);
-    if (!best || candidate_size < best_size || encoding_tie_break) {
-      best_size = candidate_size;
-      best = PreparedPagePayload{
-          .candidate = std::move(candidate),
-          .payload = std::move(payload),
-          .compressed_payload = std::move(compressed_payload),
-          .compressed_dictionary = std::move(compressed_dictionary),
-      };
+      SAN_RETURN_NOT_OK(
+          consider(kEncodingDeltaLengthByteArray, *encoded, nullptr));
     }
   }
   if (!best) {
@@ -132,15 +84,14 @@ choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
 }
 
 // Writes one column data page and returns its file offsets and sizes.
-sanitize::Result<PageInfo> write_column_page(CountingOutput &out,
-                                             const LeafColumn &column,
-                                             const ColumnPageData &page_data,
-                                             CompressionCodec codec,
-                                             bool allow_dictionary) {
-  SAN_ASSIGN_OR_RAISE(
-      auto prepared,
-      choose_page_payload(column, page_data, codec, allow_dictionary));
-  if (prepared.payload.size() >
+sanitize::Result<PageInfo>
+write_column_page(CountingOutput &out, const LeafColumn &column,
+                  const ColumnPageData &page_data, CompressionCodec codec,
+                  int gzip_level, bool allow_dictionary) {
+  SAN_ASSIGN_OR_RAISE(auto prepared,
+                      choose_page_payload(column, page_data, codec, gzip_level,
+                                          allow_dictionary));
+  if (prepared.uncompressed_payload_size >
           static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
       page_data.definition_levels.size() >
           static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -154,20 +105,20 @@ sanitize::Result<PageInfo> write_column_page(CountingOutput &out,
   }
   std::string header = encode_data_page_header(
       static_cast<std::int32_t>(page_data.definition_levels.size()),
-      static_cast<std::int32_t>(prepared.payload.size()),
+      static_cast<std::int32_t>(prepared.uncompressed_payload_size),
       static_cast<std::int32_t>(prepared.compressed_payload.size()),
-      prepared.candidate.encoding);
+      prepared.encoding);
   PageInfo info;
-  info.value_encoding = prepared.candidate.encoding;
-  info.has_plain_encoding = prepared.candidate.encoding == kEncodingPlain;
+  info.value_encoding = prepared.encoding;
+  info.has_plain_encoding = prepared.encoding == kEncodingPlain;
   info.has_delta_binary_packed_encoding =
-      prepared.candidate.encoding == kEncodingDeltaBinaryPacked;
+      prepared.encoding == kEncodingDeltaBinaryPacked;
   info.has_delta_length_byte_array_encoding =
-      prepared.candidate.encoding == kEncodingDeltaLengthByteArray;
+      prepared.encoding == kEncodingDeltaLengthByteArray;
   info.has_byte_stream_split_encoding =
-      prepared.candidate.encoding == kEncodingByteStreamSplit;
-  if (prepared.candidate.dictionary) {
-    if (prepared.candidate.dictionary->dictionary_values.size() >
+      prepared.encoding == kEncodingByteStreamSplit;
+  if (prepared.dictionary) {
+    if (prepared.dictionary->uncompressed_payload_size >
         static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
       return sanitize::Status::Invalid(
           "native Parquet writer: dictionary page is too large");
@@ -178,9 +129,9 @@ sanitize::Result<PageInfo> write_column_page(CountingOutput &out,
           "native Parquet writer: compressed dictionary page is too large");
     }
     std::string dictionary_header = encode_dictionary_page_header(
-        prepared.candidate.dictionary->dictionary_size,
+        prepared.dictionary->value_count,
         static_cast<std::int32_t>(
-            prepared.candidate.dictionary->dictionary_values.size()),
+            prepared.dictionary->uncompressed_payload_size),
         static_cast<std::int32_t>(prepared.compressed_dictionary.size()));
     info.dictionary_encoded = true;
     info.dictionary_page_offset = out.offset();
@@ -188,7 +139,7 @@ sanitize::Result<PageInfo> write_column_page(CountingOutput &out,
     info.dictionary_header_size =
         static_cast<std::int64_t>(dictionary_header.size());
     info.dictionary_uncompressed_payload_size = static_cast<std::int64_t>(
-        prepared.candidate.dictionary->dictionary_values.size());
+        prepared.dictionary->uncompressed_payload_size);
     info.dictionary_compressed_payload_size =
         static_cast<std::int64_t>(prepared.compressed_dictionary.size());
     SAN_RETURN_NOT_OK(out.Write(dictionary_header));
@@ -196,12 +147,12 @@ sanitize::Result<PageInfo> write_column_page(CountingOutput &out,
   }
 
   info.offset = out.offset();
-  if (!prepared.candidate.dictionary) {
+  if (!prepared.dictionary) {
     info.first_page_offset = info.offset;
   }
   info.header_size = static_cast<std::int64_t>(header.size());
   info.uncompressed_payload_size =
-      static_cast<std::int64_t>(prepared.payload.size());
+      static_cast<std::int64_t>(prepared.uncompressed_payload_size);
   info.compressed_payload_size =
       static_cast<std::int64_t>(prepared.compressed_payload.size());
   info.num_values =
@@ -227,70 +178,45 @@ std::size_t fixed_value_width_for_leaf(const LeafColumn &column) {
 }
 
 std::size_t estimate_column_page_data_bytes(const ColumnPageData &page_data) {
-  return page_data.values.size() + page_data.bool_values.size() +
-         page_data.definition_levels.size() * sizeof(std::int16_t) +
-         page_data.repetition_levels.size() * sizeof(std::int16_t);
+  auto total = saturating_size_add(page_data.values.size(),
+                                   page_data.bool_values.size());
+  total = saturating_size_add(
+      total, saturating_size_multiply(page_data.definition_levels.size(),
+                                      sizeof(std::int16_t)));
+  return saturating_size_add(
+      total, saturating_size_multiply(page_data.repetition_levels.size(),
+                                      sizeof(std::int16_t)));
 }
 
-std::size_t
-estimate_row_group_page_data_bytes(const std::vector<ColumnPageData> &pages) {
-  std::size_t total = 0;
-  for (const auto &page : pages) {
-    total += estimate_column_page_data_bytes(page);
+std::size_t byte_array_item_end(std::string_view values,
+                                std::size_t offset) noexcept {
+  if (offset > values.size() ||
+      values.size() - offset < sizeof(std::uint32_t)) {
+    return offset;
   }
-  return total;
-}
-
-std::vector<std::pair<std::size_t, std::size_t>>
-byte_array_value_offsets(std::string_view values) {
-  std::vector<std::pair<std::size_t, std::size_t>> offsets;
-  std::size_t offset = 0;
-  while (offset < values.size()) {
-    const auto start = offset;
-    if (values.size() - offset < sizeof(std::uint32_t)) {
-      return {};
-    }
-    const auto size = static_cast<std::size_t>(read_u32_le(values, offset));
-    offset += sizeof(std::uint32_t);
-    if (values.size() - offset < size) {
-      return {};
-    }
-    offset += size;
-    offsets.emplace_back(start, offset);
+  const auto size = static_cast<std::size_t>(read_u32_le(values, offset));
+  const auto payload_offset = offset + sizeof(std::uint32_t);
+  if (values.size() - payload_offset < size) {
+    return offset;
   }
-  return offsets;
+  return payload_offset + size;
 }
 
 struct PageSliceIndex {
   jsonl::JsonlKind kind = jsonl::JsonlKind::kNull;
   std::size_t fixed_width = 0;
-  std::vector<std::size_t> present_value_prefix;
-  std::vector<std::pair<std::size_t, std::size_t>> byte_offsets;
 };
 
-PageSliceIndex build_page_slice_index(const LeafColumn &column,
-                                      const ColumnPageData &page_data) {
-  PageSliceIndex index;
-  index.kind = leaf_value_kind(column);
-  index.fixed_width = fixed_value_width_for_leaf(column);
-  if (is_byte_array_kind(index.kind)) {
-    index.byte_offsets = byte_array_value_offsets(page_data.values);
-  }
-
-  index.present_value_prefix.reserve(page_data.definition_levels.size() + 1);
-  index.present_value_prefix.push_back(0);
-  std::size_t present_values = 0;
-  for (const auto level : page_data.definition_levels) {
-    present_values += level == column.max_definition_level ? 1U : 0U;
-    index.present_value_prefix.push_back(present_values);
-  }
-  return index;
+PageSliceIndex build_page_slice_index(const LeafColumn &column) {
+  return PageSliceIndex{.kind = leaf_value_kind(column),
+                        .fixed_width = fixed_value_width_for_leaf(column)};
 }
 
-ColumnPageData slice_column_page_data(const LeafColumn &column,
-                                      const ColumnPageData &page_data,
-                                      const PageSliceIndex &index,
-                                      std::size_t begin, std::size_t end) {
+ColumnPageData slice_column_page_data(
+    const LeafColumn &column, const ColumnPageData &page_data,
+    const PageSliceIndex &index, std::size_t begin, std::size_t end,
+    std::size_t value_begin, std::size_t value_end, std::size_t byte_begin,
+    std::size_t byte_end) {
   ColumnPageData out;
   out.definition_levels.insert(out.definition_levels.end(),
                                page_data.definition_levels.begin() + begin,
@@ -301,8 +227,6 @@ ColumnPageData slice_column_page_data(const LeafColumn &column,
                                  page_data.repetition_levels.begin() + end);
   }
 
-  const auto value_begin = index.present_value_prefix[begin];
-  const auto value_end = index.present_value_prefix[end];
   if (index.kind == jsonl::JsonlKind::kBool) {
     const auto available_end =
         std::min(value_end, page_data.bool_values.size());
@@ -316,11 +240,11 @@ ColumnPageData slice_column_page_data(const LeafColumn &column,
   }
 
   if (is_byte_array_kind(index.kind)) {
-    const auto available_end = std::min(value_end, index.byte_offsets.size());
-    if (value_begin < available_end) {
-      const auto start = index.byte_offsets[value_begin].first;
-      const auto stop = index.byte_offsets[available_end - 1].second;
-      out.values.append(page_data.values, start, stop - start);
+    const auto available_begin = std::min(byte_begin, page_data.values.size());
+    const auto available_end = std::min(byte_end, page_data.values.size());
+    if (available_begin < available_end) {
+      out.values.append(page_data.values, available_begin,
+                        available_end - available_begin);
     }
     return out;
   }
@@ -341,7 +265,12 @@ std::size_t page_row_incremental_bytes(const LeafColumn &column,
                                        const ColumnPageData &page_data,
                                        const PageSliceIndex &index,
                                        std::size_t row, std::size_t value_index,
-                                       std::size_t page_bool_values) {
+                                       std::size_t value_byte_offset,
+                                       std::size_t page_bool_values,
+                                       std::size_t *next_value_byte_offset) {
+  if (next_value_byte_offset) {
+    *next_value_byte_offset = value_byte_offset;
+  }
   std::size_t bytes = sizeof(std::int16_t);
   if (column.max_repetition_level > 0) {
     bytes += sizeof(std::int16_t);
@@ -351,76 +280,98 @@ std::size_t page_row_incremental_bytes(const LeafColumn &column,
   }
 
   if (index.kind == jsonl::JsonlKind::kBool) {
-    // The estimator counts only staged bool values and their PLAIN bytes.
     if (value_index >= page_data.bool_values.size()) {
       return bytes;
     }
     return bytes + 1 + (page_bool_values % 8 == 0 ? 1 : 0);
   }
   if (is_byte_array_kind(index.kind)) {
-    if (value_index < index.byte_offsets.size()) {
-      const auto [start, stop] = index.byte_offsets[value_index];
-      bytes += stop - start;
+    const auto item_end =
+        byte_array_item_end(page_data.values, value_byte_offset);
+    if (item_end > value_byte_offset) {
+      bytes = saturating_size_add(bytes, item_end - value_byte_offset);
+      if (next_value_byte_offset) {
+        *next_value_byte_offset = item_end;
+      }
     }
     return bytes;
   }
   if (index.fixed_width > 0 &&
       value_index < page_data.values.size() / index.fixed_width) {
-    bytes += index.fixed_width;
+    bytes = saturating_size_add(bytes, index.fixed_width);
   }
   return bytes;
 }
 
-std::vector<ColumnPageData>
-split_column_page_data(const LeafColumn &column,
-                       const ColumnPageData &page_data,
-                       std::int64_t target_page_bytes) {
+struct ColumnPageRange {
+  std::size_t begin = 0;
+  std::size_t end = 0;
+  std::size_t value_begin = 0;
+  std::size_t value_end = 0;
+  std::size_t byte_begin = 0;
+  std::size_t byte_end = 0;
+};
+
+std::vector<ColumnPageRange> split_column_page_ranges(
+    const LeafColumn &column, const ColumnPageData &page_data,
+    const PageSliceIndex &index, std::int64_t target_page_bytes) {
+  const auto count = page_data.definition_levels.size();
   if (target_page_bytes <= 0 ||
       static_cast<std::int64_t>(estimate_column_page_data_bytes(page_data)) <=
           target_page_bytes ||
-      page_data.definition_levels.size() <= 1) {
-    return {page_data};
+      count <= 1) {
+    return {{.begin = 0, .end = count, .byte_end = page_data.values.size()}};
   }
 
-  const auto index = build_page_slice_index(column, page_data);
-  std::vector<std::pair<std::size_t, std::size_t>> ranges;
+  std::vector<ColumnPageRange> ranges;
   std::size_t begin = 0;
   std::size_t page_bytes = 0;
   std::size_t page_bool_values = 0;
   std::size_t value_index = 0;
-  const auto count = page_data.definition_levels.size();
+  std::size_t begin_value_index = 0;
+  std::size_t value_byte_offset = 0;
+  std::size_t begin_value_byte_offset = 0;
   for (std::size_t row = 0; row < count; ++row) {
     const bool has_value =
         page_data.definition_levels[row] == column.max_definition_level;
-    auto increment = page_row_incremental_bytes(column, page_data, index, row,
-                                                value_index, page_bool_values);
-    if (row > begin &&
-        page_bytes + increment > static_cast<std::size_t>(target_page_bytes)) {
-      ranges.emplace_back(begin, row);
+    std::size_t next_value_byte_offset = value_byte_offset;
+    auto increment = page_row_incremental_bytes(
+        column, page_data, index, row, value_index, value_byte_offset,
+        page_bool_values, &next_value_byte_offset);
+    if (row > begin && saturating_size_add(page_bytes, increment) >
+                           static_cast<std::size_t>(target_page_bytes)) {
+      ranges.emplace_back(ColumnPageRange{.begin = begin,
+                                          .end = row,
+                                          .value_begin = begin_value_index,
+                                          .value_end = value_index,
+                                          .byte_begin = begin_value_byte_offset,
+                                          .byte_end = value_byte_offset});
       begin = row;
+      begin_value_index = value_index;
+      begin_value_byte_offset = value_byte_offset;
       page_bytes = 0;
       page_bool_values = 0;
-      increment = page_row_incremental_bytes(column, page_data, index, row,
-                                             value_index, page_bool_values);
+      increment = page_row_incremental_bytes(
+          column, page_data, index, row, value_index, value_byte_offset,
+          page_bool_values, &next_value_byte_offset);
     }
-    page_bytes += increment;
+    page_bytes = saturating_size_add(page_bytes, increment);
     if (has_value) {
       if (index.kind == jsonl::JsonlKind::kBool &&
           value_index < page_data.bool_values.size()) {
         ++page_bool_values;
       }
+      value_byte_offset = next_value_byte_offset;
       ++value_index;
     }
   }
-  ranges.emplace_back(begin, count);
-
-  std::vector<ColumnPageData> out;
-  out.reserve(ranges.size());
-  for (const auto &[slice_begin, slice_end] : ranges) {
-    out.push_back(slice_column_page_data(column, page_data, index, slice_begin,
-                                         slice_end));
-  }
-  return out;
+  ranges.emplace_back(ColumnPageRange{.begin = begin,
+                                      .end = count,
+                                      .value_begin = begin_value_index,
+                                      .value_end = value_index,
+                                      .byte_begin = begin_value_byte_offset,
+                                      .byte_end = value_byte_offset});
+  return ranges;
 }
 
 void merge_page_info(PageInfo &target, const PageInfo &page) {
@@ -462,14 +413,33 @@ void merge_page_info(PageInfo &target, const PageInfo &page) {
 sanitize::Result<ColumnChunkInfo>
 write_column_pages(CountingOutput &out, const LeafColumn &column,
                    const ColumnPageData &page_data, CompressionCodec codec,
-                   std::int64_t target_page_bytes) {
-  auto pages = split_column_page_data(column, page_data, target_page_bytes);
+                   int gzip_level, std::int64_t target_page_bytes) {
+  const auto index = build_page_slice_index(column);
+  const auto ranges =
+      split_column_page_ranges(column, page_data, index, target_page_bytes);
   ColumnChunkInfo chunk;
-  const bool allow_dictionary = pages.size() == 1;
-  for (const auto &page_data_part : pages) {
+  chunk.pages.reserve(ranges.size());
+  const bool allow_dictionary = ranges.size() == 1;
+  for (const auto &range : ranges) {
+    // The common one-page case writes the original buffers directly. Split
+    // columns materialize only the current slice, so memory is bounded by one
+    // page instead of all copied page fragments at once.
+    const bool whole_page =
+        range.begin == 0 && range.end == page_data.definition_levels.size();
+    if (whole_page) {
+      SAN_ASSIGN_OR_RAISE(auto page,
+                          write_column_page(out, column, page_data, codec,
+                                            gzip_level, allow_dictionary));
+      merge_page_info(chunk.aggregate, page);
+      chunk.pages.push_back(std::move(page));
+      continue;
+    }
+    auto page_data_part = slice_column_page_data(
+        column, page_data, index, range.begin, range.end, range.value_begin,
+        range.value_end, range.byte_begin, range.byte_end);
     SAN_ASSIGN_OR_RAISE(auto page,
                         write_column_page(out, column, page_data_part, codec,
-                                          allow_dictionary));
+                                          gzip_level, false));
     merge_page_info(chunk.aggregate, page);
     chunk.pages.push_back(std::move(page));
   }

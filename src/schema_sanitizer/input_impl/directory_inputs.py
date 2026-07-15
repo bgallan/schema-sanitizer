@@ -11,7 +11,15 @@ from operator import attrgetter
 from pathlib import Path
 from typing import Generic, Protocol, TypeVar
 
-from ..core_impl.uris import local_path_from_file_uri, looks_like_file_uri, looks_like_remote_uri
+from ..core_impl.generated_bytes import (
+    _secure_cleanup_enabled,
+    _zero_bytearray_range,
+)
+from ..core_impl.uris import (
+    local_path_from_file_uri,
+    looks_like_file_uri,
+    looks_like_remote_uri,
+)
 from ..errors import SchemaSanitizerResourceError
 
 FOLDER_READ_CHUNK_BYTES = 1024 * 1024
@@ -279,22 +287,29 @@ def read_folder_file_bytes(
     try:
         if memory_limit_bytes is None or memory_limit_bytes <= 0:
             return stream.read()
-        chunks: list[bytes] = []
+        payload = bytearray()
         total = 0
-        while True:
-            remaining = memory_limit_bytes + 1 - total
-            chunk = stream.read(min(FOLDER_READ_CHUNK_BYTES, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            check_document_size(
-                file.display_name,
-                total,
-                memory_limit_bytes=memory_limit_bytes,
-                stage=stage,
-            )
-        return b"".join(chunks)
+        try:
+            while True:
+                remaining = memory_limit_bytes + 1 - total
+                chunk = stream.read(min(FOLDER_READ_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                chunk_size = len(chunk)
+                next_total = total + chunk_size
+                check_document_size(
+                    file.display_name,
+                    next_total,
+                    memory_limit_bytes=memory_limit_bytes,
+                    stage=stage,
+                )
+                payload.extend(chunk)
+                total = next_total
+            return bytes(payload)
+        finally:
+            if payload and _secure_cleanup_enabled():
+                _zero_bytearray_range(payload, 0, len(payload))
+            payload.clear()
     finally:
         close = getattr(stream, "close", None)
         if close is not None:

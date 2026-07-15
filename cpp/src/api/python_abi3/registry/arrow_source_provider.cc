@@ -167,8 +167,9 @@ arrow_source_logical_schema(PyObject *stream_obj,
   sanitize::LogicalSchema input_schema;
   auto frontend_r = make_arrow_frontend(
       stream_obj, &input_schema,
-      ArrowDirectOptions{.timestamp_precision =
-                             prepared->spec.timestamp_precision});
+      ArrowDirectOptions{
+          .timestamp_precision = prepared->spec.timestamp_precision,
+          .memory_limit_bytes = prepared->spec.memory_limit_bytes});
   if (!frontend_r.ok()) {
     return frontend_r.status();
   }

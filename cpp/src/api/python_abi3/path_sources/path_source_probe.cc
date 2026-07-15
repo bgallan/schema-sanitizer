@@ -73,7 +73,8 @@ prepare_path_source_group_ingest(schema_sanitizer_context *ctx,
   };
   SAN_ASSIGN_OR_RAISE(
       auto input, path_source_group_input(sources, group,
-                                          prepared->spec.input_text_encoding));
+                                          prepared->spec.input_text_encoding,
+                                          prepared->spec.memory_limit_bytes));
   const std::string frontend_name(
       path_source_materializer_frontend(input.frontend));
   SAN_ASSIGN_OR_RAISE(auto frontend,

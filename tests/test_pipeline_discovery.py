@@ -140,7 +140,10 @@ def test_pipeline_source_discovery_uses_gcs_bulk_directory_checks(monkeypatch) -
     captured: dict[str, object] = {}
 
     async def fake_bulk(
-        uris: list[str], extensions: tuple[str, ...]
+        uris: list[str],
+        extensions: tuple[str, ...],
+        *,
+        memory_limit_bytes: int | None = None,
     ) -> DirectoryDiscovery[RemoteFile]:
         """Capture bulk discovery inputs and return one missing hour."""
         captured["uris"] = uris
@@ -191,7 +194,10 @@ def test_pipeline_source_discovery_uses_s3_bulk_directory_checks(monkeypatch) ->
     captured: dict[str, object] = {}
 
     async def fake_bulk(
-        uris: list[str], extensions: tuple[str, ...]
+        uris: list[str],
+        extensions: tuple[str, ...],
+        *,
+        memory_limit_bytes: int | None = None,
     ) -> DirectoryDiscovery[RemoteFile]:
         """Capture bulk discovery inputs and return one missing hour."""
         captured["uris"] = uris
@@ -242,7 +248,10 @@ def test_pipeline_source_discovery_uses_azure_bulk_directory_checks(monkeypatch)
     captured: dict[str, object] = {}
 
     async def fake_bulk(
-        uris: list[str], extensions: tuple[str, ...]
+        uris: list[str],
+        extensions: tuple[str, ...],
+        *,
+        memory_limit_bytes: int | None = None,
     ) -> DirectoryDiscovery[RemoteFile]:
         """Capture bulk discovery inputs and return one missing hour."""
         captured["uris"] = uris

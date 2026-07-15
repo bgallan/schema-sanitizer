@@ -187,6 +187,7 @@ def _prepare_input_target(
         source=source_for_file_input(path),
         format_name=native_format,
         input_text_encoding=input_text_encoding,
+        memory_limit_bytes=memory_limit_bytes,
     )
     if native_source == "stream":
         reader_keepalive: Any = native_data

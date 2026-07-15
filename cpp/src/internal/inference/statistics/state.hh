@@ -95,6 +95,12 @@ struct StatsNode {
                 uint32_t entry_index);
     // Rebuilds open-addressing slots from canonical child entries.
     void build_from(const std::pmr::vector<ChildEntry> &entries);
+    // Disables the optional dispatch acceleration without affecting children.
+    void disable() noexcept {
+      mask = 0;
+      size = 0;
+      slots.clear();
+    }
   };
 
   std::pmr::vector<ChildEntry> children;
@@ -121,9 +127,11 @@ struct StatsNode {
 };
 
 struct InferenceContext {
+  // One monotonic owner keeps all inference-only containers inside the
+  // operation memory pool and releases them together at the end of inference.
+  std::pmr::monotonic_buffer_resource arena;
   StringInterner strings;
   PathInterner paths;
-  std::pmr::monotonic_buffer_resource arena;
 
   // Special component for list elements.
   StrId list_marker{};
@@ -131,14 +139,15 @@ struct InferenceContext {
   StrId default_key_id{};
 
   // Dense by PathId (PathInterner produces sequential ids).
-  std::vector<Shape> shapes;
+  std::pmr::vector<Shape> shapes;
   StatsNode root;
 
   // Caches synthetic "<key>_flattened" interned ids for over-depth fields.
-  std::unordered_map<StrId, StrId> flattened_key_cache;
+  std::pmr::unordered_map<StrId, StrId> flattened_key_cache;
 
-  // Creates an inference context.
-  InferenceContext();
+  // Creates an inference context using the supplied PMR upstream.
+  explicit InferenceContext(
+      std::pmr::memory_resource *upstream = std::pmr::get_default_resource());
   // Stores the per-run default key in the interner.
   void set_default_key(std::string_view key);
 

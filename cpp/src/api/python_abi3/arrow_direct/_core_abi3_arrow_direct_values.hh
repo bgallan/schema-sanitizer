@@ -24,15 +24,20 @@ struct ArrowValueRef {
   ArrowBatchStorage *storage = nullptr;
 };
 
-// Owns one ArrowArray batch and the ValueView storage referencing it.
-struct ArrowBatchStorage {
+// Owns the foreign ArrowArray and releases it exactly once.
+struct ArrowArrayStorage {
   ArrowArray array{};
+
+  ~ArrowArrayStorage();
+};
+
+// Owns one bounded RowBatch view while sharing the foreign Arrow buffers.
+struct ArrowBatchStorage {
+  std::shared_ptr<ArrowArrayStorage> array_owner;
   std::vector<sanitize::FieldRef> fields;
   std::vector<sanitize::RowRef> rows;
   std::deque<ArrowValueRef> values;
   std::deque<std::string> strings;
-
-  ~ArrowBatchStorage();
 };
 
 // Stores a value reference owned by the batch storage.
@@ -42,5 +47,11 @@ const ArrowValueRef *store_value_ref(ArrowBatchStorage *storage,
 
 // Converts one Arrow value reference into the internal ValueView model.
 sanitize::ValueView value_from_ref(const ArrowValueRef *ref);
+
+// Returns a value for one row, retaining a heap reference only when the
+// resulting ValueView is a nested container that must outlive this call.
+sanitize::ValueView value_at(ArrowBatchStorage *storage,
+                             const ArrowInputNode *node,
+                             const ArrowArray *array, int64_t row);
 
 } // namespace core_abi3_internal

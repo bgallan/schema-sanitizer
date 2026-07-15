@@ -256,7 +256,7 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
     )
     monkeypatch.setattr(
         stream_factory,
-        "native_parquet_footer_info",
+        "native_parquet_stream_preflight_info",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(

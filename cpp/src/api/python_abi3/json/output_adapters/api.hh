@@ -18,19 +18,23 @@ namespace core_abi3_internal {
 
 // Writes a Python Arrow stream to a local JSONL path.
 sanitize::Result<sanitize::internal::jsonl_stream_writer::WriteStats>
-jsonl_write_stream_to_path(PyObject *stream_obj, std::string path);
+jsonl_write_stream_to_path(PyObject *stream_obj, std::string path,
+                           std::int64_t memory_limit_bytes);
 
 // Writes an Arrow C stream to a local JSONL path.
 sanitize::Result<sanitize::internal::jsonl_stream_writer::WriteStats>
-jsonl_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path);
+jsonl_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
+                                 std::int64_t memory_limit_bytes);
 
 // Writes a Python Arrow stream to a Python object exposing write(bytes).
 sanitize::Result<sanitize::internal::jsonl_stream_writer::WriteStats>
-jsonl_write_stream_to_python(PyObject *stream_obj, PyObject *output_obj);
+jsonl_write_stream_to_python(PyObject *stream_obj, PyObject *output_obj,
+                             std::int64_t memory_limit_bytes);
 
 // Writes one Arrow C batch into a string buffer as JSON Lines bytes.
 sanitize::Status jsonl_write_batch_to_string(ArrowSchema &schema,
                                              ArrowArray &array,
-                                             std::string *out);
+                                             std::string *out,
+                                             std::int64_t memory_limit_bytes);
 
 } // namespace core_abi3_internal

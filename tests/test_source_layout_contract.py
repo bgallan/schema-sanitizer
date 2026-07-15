@@ -394,13 +394,16 @@ def test_native_parquet_reader_has_one_direct_owner() -> None:
     assert not (parquet / "direct_native.py").exists()
 
 
-def test_native_row_group_materialization_has_one_bounded_owner() -> None:
-    """The short consecutive row-group phases remain one readable owner."""
+def test_native_row_group_materialization_has_bounded_cohesive_owners() -> None:
+    """Row-group assembly and retained-capacity enforcement stay bounded."""
     materialization = ROOT / "cpp/src/internal/parquet/footer_reader/native_stream/materialization"
     row_group = materialization / "row_group"
     owners = list(row_group.glob("*.cc.inc"))
-    assert {owner.name for owner in owners} == {"native_stream_row_group.cc.inc"}
-    assert len(owners[0].read_text(encoding="utf-8").splitlines()) <= 500
+    assert {owner.name for owner in owners} == {
+        "native_stream_retained_budget.cc.inc",
+        "native_stream_row_group.cc.inc",
+    }
+    assert all(len(owner.read_text(encoding="utf-8").splitlines()) <= 500 for owner in owners)
     assert not (materialization / "native_stream_row_group.cc.inc").exists()
 
 

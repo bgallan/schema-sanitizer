@@ -7,28 +7,22 @@ from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from ...core_impl.async_scheduler import read_int_env
+from ...core_impl.memory_budget import memory_budget
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from ...input_impl.selection import unsupported_native_directory_ingestion
 from ..input.directory_preparation import RemoteNativeDirectorySourceManifest
 from .attached import source_plan_from_native_manifest
 
 
-def remote_chunk_prefetch_count() -> int:
-    """Return how many remote directory chunks to stage ahead."""
-    return read_int_env("SCHEMA_SANITIZER_REMOTE_CHUNK_PREFETCH_CHUNKS", 1)
-
-
 class RemoteChunkPrefetchIterator:
     """Iterate staged remote chunks while prefetching bounded lookahead."""
 
-    def __init__(self, manifest: Any, *, prefetch_chunks: int | None = None) -> None:
+    def __init__(self, manifest: Any) -> None:
         """Create a staging iterator for a remote native manifest."""
         self._manifest = manifest
-        self._prefetch_chunks = max(
-            0,
-            remote_chunk_prefetch_count() if prefetch_chunks is None else prefetch_chunks,
-        )
+        self._prefetch_chunks = memory_budget(
+            getattr(manifest, "memory_limit_bytes", None)
+        ).remote_chunk_prefetch
         self._executor: ThreadPoolExecutor | None = None
         self._futures: deque[Future[Any]] = deque()
         self._next_start = 0
@@ -124,13 +118,9 @@ class RemoteChunkPrefetchIterator:
             self._executor = None
 
 
-def iter_staged_remote_chunks(
-    manifest: Any,
-    *,
-    prefetch_chunks: int | None = None,
-) -> Iterator[Any]:
+def iter_staged_remote_chunks(manifest: Any) -> Iterator[Any]:
     """Return a context-managed iterator over staged native remote chunks."""
-    return RemoteChunkPrefetchIterator(manifest, prefetch_chunks=prefetch_chunks)
+    return RemoteChunkPrefetchIterator(manifest)
 
 
 def open_staged_remote_chunks(manifest: RemoteNativeDirectorySourceManifest) -> Any:

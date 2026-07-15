@@ -102,6 +102,7 @@ def native_ingest_plan(
         source=source,
         format_name=format,
         input_text_encoding=input_text_encoding,
+        memory_limit_bytes=memory_limit_bytes,
     )
     return NativeIngestPlan(
         data=native_data,

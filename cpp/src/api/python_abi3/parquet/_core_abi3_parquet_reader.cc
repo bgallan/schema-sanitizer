@@ -91,11 +91,50 @@ PyObject *py_parquet_footer_info_json(PyObject *, PyObject *args) {
                                      static_cast<Py_ssize_t>(json.size()));
 }
 
+PyObject *py_parquet_stream_preflight_json(PyObject *, PyObject *args) {
+  PyObject *path_obj = nullptr;
+  PyObject *columns_obj = Py_None;
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "O|OL:parquet_stream_preflight_json", &path_obj,
+                        &columns_obj, &memory_limit_bytes)) {
+    return nullptr;
+  }
+  PyObject *encoded = fsencode_path(path_obj);
+  if (!encoded) {
+    return nullptr;
+  }
+  std::unique_ptr<PyObject, decltype(&Py_DECREF)> encoded_owner(encoded,
+                                                                Py_DECREF);
+  char *path_data = nullptr;
+  Py_ssize_t path_size = 0;
+  if (PyBytes_AsStringAndSize(encoded, &path_data, &path_size) != 0) {
+    return nullptr;
+  }
+
+  std::vector<std::string> projected_columns;
+  if (!parse_projected_columns(columns_obj, &projected_columns)) {
+    return nullptr;
+  }
+
+  auto result =
+      sanitize::internal::parquet_footer_reader::read_stream_preflight_json(
+          std::string(path_data, static_cast<std::size_t>(path_size)),
+          projected_columns, memory_limit_bytes);
+  if (!result.ok()) {
+    PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
+    return nullptr;
+  }
+  const auto json = std::move(result).ValueOrDie();
+  return PyUnicode_FromStringAndSize(json.data(),
+                                     static_cast<Py_ssize_t>(json.size()));
+}
+
 PyObject *py_parquet_stream_read(PyObject *, PyObject *args) {
   PyObject *path_obj = nullptr;
-  PyObject *columns_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "O|O:parquet_stream_read", &path_obj,
-                        &columns_obj)) {
+  PyObject *columns_obj = Py_None;
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "O|OL:parquet_stream_read", &path_obj,
+                        &columns_obj, &memory_limit_bytes)) {
     return nullptr;
   }
   PyObject *encoded = fsencode_path(path_obj);
@@ -117,7 +156,7 @@ PyObject *py_parquet_stream_read(PyObject *, PyObject *args) {
 
   auto result = sanitize::internal::parquet_footer_reader::make_arrow_stream(
       std::string(path_data, static_cast<std::size_t>(path_size)),
-      projected_columns);
+      projected_columns, memory_limit_bytes);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;

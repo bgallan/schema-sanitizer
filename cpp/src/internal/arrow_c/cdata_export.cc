@@ -98,8 +98,7 @@ static void stream_release(ArrowArrayStream *stream) {
 void ArrowArrayStreamDeleter::operator()(ArrowArrayStream *p) const noexcept {
   if (!p)
     return;
-  if (p->release)
-    p->release(p);
+  sanitize::internal::cdata_stream::release_stream_nothrow(p);
   delete p;
 }
 

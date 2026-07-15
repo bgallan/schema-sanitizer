@@ -4,6 +4,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <limits>
+#include <string>
+
+#include "internal/memory/memory_pool.hh"
 
 namespace sanitize::internal {
 
@@ -23,6 +28,27 @@ XmlRowTagScanner::enforce_buffer_limit(std::size_t incoming) const {
   return sanitize::Status::OK();
 }
 
+std::size_t XmlRowTagScanner::retained_buffer_limit() const noexcept {
+  constexpr std::size_t kMinimumRetainedBytes = 8U << 20;
+  const auto chunk = static_cast<std::uint64_t>(
+      chunk_bytes_ > 0 ? chunk_bytes_ : (int64_t{1} << 20));
+  if (chunk > std::numeric_limits<std::size_t>::max() / 2U) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return std::max(kMinimumRetainedBytes, static_cast<std::size_t>(chunk * 2U));
+}
+
+void XmlRowTagScanner::discard_buffer() {
+  if (secure_memory_cleanup_enabled() && !buffer_.empty()) {
+    secure_zero_memory(buffer_.data(), buffer_.size());
+  }
+  buffer_.clear();
+  if (buffer_.capacity() > retained_buffer_limit()) {
+    std::string empty;
+    buffer_.swap(empty);
+  }
+}
+
 bool XmlRowTagScanner::should_compact_before_refill() const noexcept {
   const std::size_t keep_from =
       (row_start_pos_ == npos) ? scan_pos_ : row_start_pos_;
@@ -38,7 +64,8 @@ bool XmlRowTagScanner::should_compact_before_refill() const noexcept {
   }
   const auto chunk_threshold = static_cast<std::size_t>(
       chunk_bytes_ > 0 ? chunk_bytes_ : (int64_t{1} << 20));
-  return keep_from >= chunk_threshold && keep_from * 2 >= buffer_.size();
+  return keep_from >= chunk_threshold &&
+         keep_from >= buffer_.size() - keep_from;
 }
 
 void XmlRowTagScanner::compact_buffer() {
@@ -49,14 +76,21 @@ void XmlRowTagScanner::compact_buffer() {
   }
   if (keep_from >= buffer_.size()) {
     buffer_start_offset_ += keep_from;
-    buffer_.clear();
+    discard_buffer();
     scan_pos_ = 0;
     if (row_start_pos_ != npos) {
       row_start_pos_ = 0;
     }
     return;
   }
-  buffer_.erase(0, keep_from);
+  if (secure_memory_cleanup_enabled()) {
+    const auto remaining = buffer_.size() - keep_from;
+    std::memmove(buffer_.data(), buffer_.data() + keep_from, remaining);
+    secure_zero_memory(buffer_.data() + remaining, keep_from);
+    buffer_.resize(remaining);
+  } else {
+    buffer_.erase(0, keep_from);
+  }
   buffer_start_offset_ += keep_from;
   scan_pos_ -= std::min(scan_pos_, keep_from);
   if (row_start_pos_ != npos) {

@@ -40,7 +40,7 @@ def test_uri_input_uses_async_local_staging(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(remote_staging, "stage_remote_single_file", fake_stage)
 
-    result = read_test_jsonl("s3://bucket/events.jsonl", read_chunk_bytes=5)
+    result = read_test_jsonl("s3://bucket/events.jsonl", memory_limit_bytes=1 << 20)
 
     assert result.clean_data.to_pylist() == [{"a": 1}, {"a": 2}]
     assert staged_paths == [str(tmp_path / "staged.jsonl")]
@@ -80,7 +80,7 @@ def test_uri_input_staging_works_with_converters(monkeypatch, tmp_path) -> None:
         "s3://bucket/events.jsonl",
         out,
         input_format="jsonl",
-        read_chunk_bytes=6,
+        memory_limit_bytes=1 << 20,
     )
 
     rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
@@ -136,7 +136,7 @@ def test_remote_parquet_directory_stages_children_concurrently(monkeypatch, tmp_
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
 
-    async def fake_list(uri, suffixes):
+    async def fake_list(uri, suffixes, *, memory_limit_bytes=None):
         """Return deterministic remote Parquet children."""
         assert uri == "s3://bucket/partition/"
         assert ".parquet" in suffixes
@@ -145,7 +145,7 @@ def test_remote_parquet_directory_stages_children_concurrently(monkeypatch, tmp_
             RemoteFile("s3://bucket/partition/b.parquet", "b.parquet", None),
         ]
 
-    async def fake_client(files):
+    async def fake_client(files, *, memory_limit_bytes=None):
         """Return a reusable fake provider client."""
         assert len(files) == 2
         return object()
@@ -328,7 +328,7 @@ def test_remote_text_directory_stages_child_sources_concurrently(monkeypatch) ->
         RemoteFile("s3://bucket/partition/b.jsonl", "b.jsonl", None),
     ]
 
-    async def fake_client(files):
+    async def fake_client(files, *, memory_limit_bytes=None):
         """Return a reusable fake provider client."""
         assert len(files) == 2
         return object()

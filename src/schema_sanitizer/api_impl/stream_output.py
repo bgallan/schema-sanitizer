@@ -82,6 +82,7 @@ def write_raw_stream_to_file(
     timestamp_columns: tuple[str, ...] = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> Result:
     """Write an already-open native stream using the best available writer."""
     stream = None
@@ -101,6 +102,7 @@ def write_raw_stream_to_file(
             timestamp_columns=timestamp_columns,
             parquet_compression=parquet_compression,
             parquet_gzip_level=parquet_gzip_level,
+            memory_limit_bytes=memory_limit_bytes,
         )
         if native_stats:
             result = diagnostics_only_result(raw)
@@ -117,6 +119,7 @@ def write_raw_stream_to_file(
             row_span_columns=row_span_columns,
             timestamp_columns=timestamp_columns,
             **_parquet_writer_kwargs(parquet_compression, parquet_gzip_level),
+            memory_limit_bytes=memory_limit_bytes,
         )
         close_consumed_stream(stream)
         result = diagnostics_only_result(raw)
@@ -162,6 +165,9 @@ def write_table_or_stream(
             source=source,
         )
     )
+    memory_limit_bytes = (
+        getattr(call_options, "memory_limit_bytes", None) if call_options is not None else None
+    )
     replay = None
     try:
         raw_for_native = sink_out.raw
@@ -187,6 +193,7 @@ def write_table_or_stream(
                 timestamp_columns=timestamp_columns,
                 parquet_compression=parquet_compression,
                 parquet_gzip_level=parquet_gzip_level,
+                memory_limit_bytes=memory_limit_bytes,
             )
             if raw_writer is not None
             else False

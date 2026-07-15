@@ -437,14 +437,11 @@ unfiltered local reads can additionally fall back to
 the filter.
 
 The native writer bounds rows, estimated uncompressed column bytes, and staged
-page bytes. Defaults are 65,536 rows per row group, 64 MiB estimated row-group
-bytes, and 1 MiB uncompressed page target. They can be tuned with:
-
-```text
-SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_ROWS
-SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_BYTES
-SCHEMA_SANITIZER_NATIVE_PARQUET_PAGE_BYTES
-```
+page bytes. Row-group rows, row-group bytes, page bytes, reader windows, and
+footer retention are derived together from the operation's single
+`memory_limit_bytes`. They are intentionally not independent tuning knobs: this
+keeps the derived limits mutually consistent and prevents one subsystem from
+consuming the full operation budget in isolation.
 
 Pages choose encodings by compressed size. Profitable repeated scalars use
 dictionary encoding; signed integer and temporal pages may use

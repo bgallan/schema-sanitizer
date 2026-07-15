@@ -115,7 +115,6 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
         "stage_remote_files_to_directory",
         fake_stage_remote_files_to_directory,
     )
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_STAGE_FILES", "1")
 
     registry = infer_warm_up_schema_registry(
         [
@@ -213,7 +212,7 @@ def test_pipeline_observability_helpers_are_reusable() -> None:
 
 def test_pipeline_read_parquet_schema_handles_local_paths(tmp_path) -> None:
     """Verify reusable Parquet schema reads local output schemas."""
-    pa = __import__("pyarrow")
+    pa = pytest.importorskip("pyarrow")
     pq = __import__("pyarrow.parquet").parquet
     target = tmp_path / "rows.parquet"
     schema = pa.schema([pa.field("id", pa.int64())])

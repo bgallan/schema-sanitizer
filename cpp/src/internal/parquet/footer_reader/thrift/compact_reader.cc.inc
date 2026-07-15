@@ -14,6 +14,9 @@ sanitize::Result<std::uint64_t> CompactReader::read_varint() {
   for (int index = 0; index < 10; ++index) {
     std::uint8_t byte = 0;
     SAN_ASSIGN_OR_RAISE(byte, read_byte());
+    if (index == 9 && (byte & 0xFEU) != 0) {
+      return sanitize::Status::Invalid("Parquet footer: varint overflow");
+    }
     out |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
     if ((byte & 0x80U) == 0)
       return out;
@@ -49,6 +52,48 @@ sanitize::Result<std::int64_t> CompactReader::read_i64() {
   return unzigzag(raw);
 }
 
+sanitize::Status
+CompactReader::charge_materialized_bytes(std::uint64_t bytes,
+                                         std::string_view label) {
+  if (bytes >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::Invalid("Parquet metadata: ", label,
+                                     " allocation size out of range");
+  }
+  const auto amount = static_cast<std::size_t>(bytes);
+  if (amount > materialized_limit_ -
+                   std::min(materialized_bytes_, materialized_limit_)) {
+    return sanitize::Status::Invalid(
+        "Parquet metadata: materialized-memory budget exceeded while reading ",
+        label);
+  }
+  materialized_bytes_ += amount;
+  return {};
+}
+
+sanitize::Status validate_metadata_list(CompactReader &reader,
+                                        std::uint64_t count,
+                                        std::uint64_t max_count,
+                                        std::size_t element_bytes,
+                                        std::string_view label) {
+  if (count > max_count) {
+    return sanitize::Status::Invalid("Parquet metadata: ", label,
+                                     " count exceeds security limit");
+  }
+  // Every compact-protocol list element consumes at least one byte. Reject the
+  // declaration before reserving memory when the payload cannot possibly fit.
+  if (count > reader.remaining_bytes()) {
+    return sanitize::Status::Invalid("Parquet metadata: ", label,
+                                     " count exceeds remaining input bytes");
+  }
+  if (element_bytes != 0 &&
+      count > std::numeric_limits<std::uint64_t>::max() / element_bytes) {
+    return sanitize::Status::Invalid("Parquet metadata: ", label,
+                                     " allocation size overflow");
+  }
+  return reader.charge_materialized_bytes(count * element_bytes, label);
+}
+
 sanitize::Result<std::string> CompactReader::read_binary() {
   std::uint64_t size = 0;
   SAN_ASSIGN_OR_RAISE(size, read_varint());
@@ -56,9 +101,29 @@ sanitize::Result<std::string> CompactReader::read_binary() {
     return sanitize::Status::Invalid(
         "Parquet footer: binary value exceeds footer");
   }
+  if (size > kMaxMetadataBinaryBytes) {
+    return sanitize::Status::Invalid(
+        "Parquet footer: binary metadata value exceeds security limit");
+  }
+  SAN_RETURN_NOT_OK(charge_materialized_bytes(size, "binary value"));
   std::string out(data_.data() + pos_, static_cast<std::size_t>(size));
   pos_ += static_cast<std::size_t>(size);
   return out;
+}
+
+sanitize::Status CompactReader::skip_binary() {
+  std::uint64_t size = 0;
+  SAN_ASSIGN_OR_RAISE(size, read_varint());
+  if (size > data_.size() - pos_) {
+    return sanitize::Status::Invalid(
+        "Parquet footer: binary value exceeds footer");
+  }
+  if (size > kMaxMetadataBinaryBytes) {
+    return sanitize::Status::Invalid(
+        "Parquet footer: binary metadata value exceeds security limit");
+  }
+  pos_ += static_cast<std::size_t>(size);
+  return {};
 }
 
 sanitize::Status CompactReader::read_list_header(std::uint8_t *element_type,
@@ -75,6 +140,16 @@ sanitize::Status CompactReader::read_list_header(std::uint8_t *element_type,
   }
   if (*size > kMaxContainerElements) {
     return sanitize::Status::Invalid("Parquet footer: container too large");
+  }
+  if (*size > 0 && *element_type == kTypeStop) {
+    return sanitize::Status::Invalid(
+        "Parquet footer: non-empty container has STOP element type");
+  }
+  // Every compact-protocol collection element consumes at least one byte.
+  // Reject impossible declarations before entering a potentially huge loop.
+  if (*size > remaining_bytes()) {
+    return sanitize::Status::Invalid(
+        "Parquet footer: container count exceeds remaining input bytes");
   }
   return {};
 }
@@ -118,12 +193,8 @@ sanitize::Status CompactReader::skip_type(std::uint8_t type, int depth) {
       return sanitize::Status::Invalid("Parquet footer: truncated double");
     pos_ += 8;
     return {};
-  case kTypeBinary: {
-    std::string ignored;
-    SAN_ASSIGN_OR_RAISE(ignored, read_binary());
-    (void)ignored;
-    return {};
-  }
+  case kTypeBinary:
+    return skip_binary();
   case kTypeList:
   case kTypeSet:
     return skip_list(depth + 1);
@@ -191,6 +262,16 @@ sanitize::Status CompactReader::skip_map(int depth) {
   SAN_ASSIGN_OR_RAISE(types, read_byte());
   const auto key_type = static_cast<std::uint8_t>((types >> 4U) & 0x0FU);
   const auto value_type = static_cast<std::uint8_t>(types & 0x0FU);
+  if (key_type == kTypeStop || value_type == kTypeStop) {
+    return sanitize::Status::Invalid(
+        "Parquet footer: non-empty map has STOP key/value type");
+  }
+  // Each map entry contains at least one byte for its key and one for its
+  // value, even when either side is an empty nested container.
+  if (size > remaining_bytes() / 2U) {
+    return sanitize::Status::Invalid(
+        "Parquet footer: map count exceeds remaining input bytes");
+  }
   for (std::uint64_t index = 0; index < size; ++index) {
     SAN_RETURN_NOT_OK(skip_container_value(key_type, depth));
     SAN_RETURN_NOT_OK(skip_container_value(value_type, depth));

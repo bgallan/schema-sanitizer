@@ -4,8 +4,35 @@ constexpr std::string_view kUnsupportedPrefix =
     "native Parquet writer: unsupported";
 constexpr std::string_view kMagic = "PAR1";
 constexpr std::int64_t kDefaultMaxRowsPerRowGroup = 64 * 1024;
+constexpr std::int64_t kHardMaxRowsPerRowGroup = 1024 * 1024;
 constexpr std::int64_t kDefaultMaxBytesPerRowGroup = 64LL * 1024LL * 1024LL;
+constexpr std::int64_t kHardMaxBytesPerRowGroup = 512LL * 1024LL * 1024LL;
 constexpr std::int64_t kDefaultTargetPageBytes = 1024LL * 1024LL;
+constexpr std::int64_t kHardMaxTargetPageBytes = 64LL * 1024LL * 1024LL;
+constexpr std::int64_t kDefaultMaxRowGroups = 65'536;
+constexpr std::int64_t kHardMaxRowGroups = kDefaultMaxRowGroups;
+constexpr std::int64_t kDefaultMaxFooterMetadataBytes = 256LL * 1024LL * 1024LL;
+constexpr std::int64_t kHardMaxFooterMetadataBytes =
+    kDefaultMaxFooterMetadataBytes;
+constexpr std::size_t kMaxDictionaryCandidateEntries = 262'144;
+constexpr std::size_t kMaxDictionaryCandidateScratchBytes = 64U * 1024U * 1024U;
+
+std::size_t saturating_size_add(std::size_t left, std::size_t right) noexcept {
+  return right > std::numeric_limits<std::size_t>::max() - left
+             ? std::numeric_limits<std::size_t>::max()
+             : left + right;
+}
+
+std::size_t saturating_size_multiply(std::size_t left,
+                                     std::size_t right) noexcept {
+  if (left == 0 || right == 0) {
+    return 0;
+  }
+  return left > std::numeric_limits<std::size_t>::max() / right
+             ? std::numeric_limits<std::size_t>::max()
+             : left * right;
+}
+
 constexpr std::int32_t kEncodingPlain = 0;
 constexpr std::int32_t kEncodingDeltaBinaryPacked = 5;
 constexpr std::int32_t kEncodingDeltaLengthByteArray = 6;
@@ -120,6 +147,19 @@ struct PageInfo {
   std::int32_t value_encoding = kEncodingPlain;
 };
 
+struct PreparedDictionaryInfo {
+  std::int32_t value_count = 0;
+  std::size_t uncompressed_payload_size = 0;
+};
+
+struct PreparedPagePayload {
+  std::int32_t encoding = kEncodingPlain;
+  std::optional<PreparedDictionaryInfo> dictionary;
+  std::size_t uncompressed_payload_size = 0;
+  std::string compressed_payload;
+  std::string compressed_dictionary;
+};
+
 struct ColumnChunkInfo {
   PageInfo aggregate;
   std::vector<PageInfo> pages;
@@ -141,6 +181,13 @@ public:
 
   // Writes bytes and advances the logical file offset.
   sanitize::Status Write(std::string_view data) {
+    if (data.size() > static_cast<std::size_t>(
+                          std::numeric_limits<std::int64_t>::max()) ||
+        offset_ > std::numeric_limits<std::int64_t>::max() -
+                      static_cast<std::int64_t>(data.size())) {
+      return sanitize::Status::Invalid(
+          "native Parquet writer: output offset exceeds int64 range");
+    }
     SAN_RETURN_NOT_OK(out_.Write(data));
     offset_ += static_cast<std::int64_t>(data.size());
     return sanitize::Status::OK();

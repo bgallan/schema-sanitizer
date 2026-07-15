@@ -3,7 +3,8 @@
 // ---- native_stream_decode_simple_list_fixed_width ----
 sanitize::Status materialize_simple_list_fixed_width_column(
     std::ifstream &file, const ColumnChunkInfo &column,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+    const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
   if (!out ||
       column.native_read_value_buffer_kind !=
           NativeValueBufferKind::fixed_width ||
@@ -11,7 +12,7 @@ sanitize::Status materialize_simple_list_fixed_width_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid list fixed-width layout");
   }
-  const auto element_count = list_leaf_value_count(column);
+  const auto element_count = window.elements.count;
   const auto arrow_width = column.native_read_value_width_bytes;
   const auto physical_width = fixed_width_for_plain_values(column);
   if (!physical_width || *physical_width <= 0 || arrow_width <= 0) {
@@ -59,7 +60,7 @@ sanitize::Status materialize_simple_list_fixed_width_column(
       if (definition <= list_defined_level) {
         continue;
       }
-      if (element_index >= element_count) {
+      if (element_index >= window.total_elements) {
         return sanitize::Status::Invalid(
             "native Parquet reader: list fixed-width element span exceeds row "
             "group");
@@ -70,16 +71,19 @@ sanitize::Status materialize_simple_list_fixed_width_column(
           return sanitize::Status::Invalid(
               "native Parquet reader: truncated list fixed-width payload");
         }
-        auto *target =
-            out->values.data() + static_cast<std::size_t>(element_index) *
-                                     static_cast<std::size_t>(arrow_width);
-        SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
-            target, values.data() + value_offset, column, *physical_width,
-            arrow_width));
-        value_offset += static_cast<std::size_t>(*physical_width);
-        if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, element_index);
+        if (window.elements.contains(element_index)) {
+          const auto output_index = window.elements.local(element_index);
+          auto *target =
+              out->values.data() + static_cast<std::size_t>(output_index) *
+                                       static_cast<std::size_t>(arrow_width);
+          SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
+              target, values.data() + value_offset, column, *physical_width,
+              arrow_width));
+          if (!out->validity.empty()) {
+            set_output_validity_bit(&out->validity, output_index);
+          }
         }
+        value_offset += static_cast<std::size_t>(*physical_width);
       }
       ++element_index;
     }
@@ -88,7 +92,7 @@ sanitize::Status materialize_simple_list_fixed_width_column(
           "native Parquet reader: trailing list fixed-width payload bytes");
     }
   }
-  if (element_index != element_count) {
+  if (element_index != window.total_elements) {
     return sanitize::Status::Invalid(
         "native Parquet reader: list fixed-width element count mismatch");
   }
@@ -98,7 +102,8 @@ sanitize::Status materialize_simple_list_fixed_width_column(
 // ---- native_stream_decode_simple_list_boolean ----
 sanitize::Status materialize_simple_list_boolean_column(
     std::ifstream &file, const ColumnChunkInfo &column,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+    const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
   if (!out ||
       column.native_read_value_buffer_kind !=
           NativeValueBufferKind::bit_packed_boolean ||
@@ -107,7 +112,7 @@ sanitize::Status materialize_simple_list_boolean_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid list boolean layout");
   }
-  const auto element_count = list_leaf_value_count(column);
+  const auto element_count = window.elements.count;
   SAN_ASSIGN_OR_RAISE(const auto value_buffer_bytes,
                       arrow_boolean_value_buffer_bytes(
                           static_cast<std::int32_t>(element_count)));
@@ -151,7 +156,7 @@ sanitize::Status materialize_simple_list_boolean_column(
       if (definition <= list_defined_level) {
         continue;
       }
-      if (element_index >= element_count) {
+      if (element_index >= window.total_elements) {
         return sanitize::Status::Invalid(
             "native Parquet reader: list boolean element span exceeds row "
             "group");
@@ -161,13 +166,16 @@ sanitize::Status materialize_simple_list_boolean_column(
           return sanitize::Status::Invalid(
               "native Parquet reader: missing list boolean value");
         }
-        if (bit_stream_value_is_set(values, value_index)) {
-          set_output_validity_bit(&out->values, element_index);
+        if (window.elements.contains(element_index)) {
+          const auto output_index = window.elements.local(element_index);
+          if (bit_stream_value_is_set(values, value_index)) {
+            set_output_validity_bit(&out->values, output_index);
+          }
+          if (!out->validity.empty()) {
+            set_output_validity_bit(&out->validity, output_index);
+          }
         }
         ++value_index;
-        if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, element_index);
-        }
       }
       ++element_index;
     }
@@ -176,7 +184,7 @@ sanitize::Status materialize_simple_list_boolean_column(
           "native Parquet reader: trailing list boolean values");
     }
   }
-  if (element_index != element_count) {
+  if (element_index != window.total_elements) {
     return sanitize::Status::Invalid(
         "native Parquet reader: list boolean element count mismatch");
   }
@@ -186,7 +194,8 @@ sanitize::Status materialize_simple_list_boolean_column(
 // ---- native_stream_decode_list_byte_stream_split ----
 sanitize::Status materialize_simple_list_byte_stream_split_column(
     std::ifstream &file, const ColumnChunkInfo &column,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+    const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
   if (!out ||
       column.native_read_value_buffer_kind !=
           NativeValueBufferKind::byte_stream_split ||
@@ -194,7 +203,7 @@ sanitize::Status materialize_simple_list_byte_stream_split_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid list BYTE_STREAM_SPLIT layout");
   }
-  const auto element_count = list_leaf_value_count(column);
+  const auto element_count = window.elements.count;
   const auto width = column.native_read_value_width_bytes;
   if ((column.physical_type != kPhysicalFloat &&
        column.physical_type != kPhysicalDouble) ||
@@ -254,7 +263,7 @@ sanitize::Status materialize_simple_list_byte_stream_split_column(
       if (definition <= list_defined_level) {
         continue;
       }
-      if (element_index >= element_count) {
+      if (element_index >= window.total_elements) {
         return sanitize::Status::Invalid(
             "native Parquet reader: list BYTE_STREAM_SPLIT element span "
             "exceeds row group");
@@ -264,21 +273,24 @@ sanitize::Status materialize_simple_list_byte_stream_split_column(
           return sanitize::Status::Invalid(
               "native Parquet reader: missing list BYTE_STREAM_SPLIT value");
         }
-        auto *target =
-            out->values.data() + static_cast<std::size_t>(element_index) *
-                                     static_cast<std::size_t>(width);
-        for (std::int32_t byte_index = 0; byte_index < width; ++byte_index) {
-          const auto source_offset =
-              static_cast<std::size_t>(byte_index) *
-                  static_cast<std::size_t>(page.decoded_non_null_values) +
-              static_cast<std::size_t>(value_index);
-          target[static_cast<std::size_t>(byte_index)] =
-              static_cast<std::uint8_t>(values[source_offset]);
+        if (window.elements.contains(element_index)) {
+          const auto output_index = window.elements.local(element_index);
+          auto *target =
+              out->values.data() + static_cast<std::size_t>(output_index) *
+                                       static_cast<std::size_t>(width);
+          for (std::int32_t byte_index = 0; byte_index < width; ++byte_index) {
+            const auto source_offset =
+                static_cast<std::size_t>(byte_index) *
+                    static_cast<std::size_t>(page.decoded_non_null_values) +
+                static_cast<std::size_t>(value_index);
+            target[static_cast<std::size_t>(byte_index)] =
+                static_cast<std::uint8_t>(values[source_offset]);
+          }
+          if (!out->validity.empty()) {
+            set_output_validity_bit(&out->validity, output_index);
+          }
         }
         ++value_index;
-        if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, element_index);
-        }
       }
       ++element_index;
     }
@@ -287,7 +299,7 @@ sanitize::Status materialize_simple_list_byte_stream_split_column(
           "native Parquet reader: trailing list BYTE_STREAM_SPLIT values");
     }
   }
-  if (element_index != element_count) {
+  if (element_index != window.total_elements) {
     return sanitize::Status::Invalid(
         "native Parquet reader: list BYTE_STREAM_SPLIT element count mismatch");
   }
@@ -297,7 +309,8 @@ sanitize::Status materialize_simple_list_byte_stream_split_column(
 // ---- native_stream_decode_list_delta_binary ----
 sanitize::Status materialize_simple_list_delta_binary_packed_column(
     std::ifstream &file, const ColumnChunkInfo &column,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+    const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
   if (!out ||
       column.native_read_value_buffer_kind !=
           NativeValueBufferKind::delta_binary_packed ||
@@ -305,7 +318,7 @@ sanitize::Status materialize_simple_list_delta_binary_packed_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid list DELTA_BINARY_PACKED layout");
   }
-  const auto row_count = list_leaf_value_count(column);
+  const auto row_count = window.elements.count;
   const auto width = column.native_read_value_width_bytes;
   if ((column.physical_type != kPhysicalInt32 &&
        column.physical_type != kPhysicalInt64) ||
@@ -381,7 +394,7 @@ sanitize::Status materialize_simple_list_delta_binary_packed_column(
       if (definition <= list_defined_level) {
         continue;
       }
-      if (element_index >= row_count) {
+      if (element_index >= window.total_elements) {
         return sanitize::Status::Invalid(
             "native Parquet reader: list element span exceeds row group");
       }
@@ -390,15 +403,18 @@ sanitize::Status materialize_simple_list_delta_binary_packed_column(
           return sanitize::Status::Invalid(
               "native Parquet reader: missing list DELTA_BINARY_PACKED value");
         }
-        const auto target =
-            out->values.data() + static_cast<std::size_t>(element_index) *
-                                     static_cast<std::size_t>(width);
-        SAN_RETURN_NOT_OK(write_arrow_integer_value(
-            target, column, decoded_values[value_index]));
-        ++value_index;
-        if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, element_index);
+        if (window.elements.contains(element_index)) {
+          const auto output_index = window.elements.local(element_index);
+          const auto target =
+              out->values.data() + static_cast<std::size_t>(output_index) *
+                                       static_cast<std::size_t>(width);
+          SAN_RETURN_NOT_OK(write_arrow_integer_value(
+              target, column, decoded_values[value_index]));
+          if (!out->validity.empty()) {
+            set_output_validity_bit(&out->validity, output_index);
+          }
         }
+        ++value_index;
       }
       ++element_index;
     }
@@ -407,7 +423,7 @@ sanitize::Status materialize_simple_list_delta_binary_packed_column(
           "native Parquet reader: trailing list DELTA_BINARY_PACKED values");
     }
   }
-  if (element_index != row_count) {
+  if (element_index != window.total_elements) {
     return sanitize::Status::Invalid(
         "native Parquet reader: list element count mismatch");
   }

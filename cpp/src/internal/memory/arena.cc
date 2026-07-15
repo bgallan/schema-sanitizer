@@ -59,9 +59,36 @@ BumpArena::~BumpArena() {
 }
 
 void BumpArena::reset() noexcept {
-  for (auto &b : blocks_) {
-    b.used = 0;
+  // Retain enough ordinary capacity for reuse, but release exceptional blocks
+  // allocated by one unusually large record. The previous arena kept its
+  // lifetime high-water mark forever.
+  const auto retained_limit =
+      block_size_ > std::numeric_limits<std::size_t>::max() / 4
+          ? block_size_
+          : block_size_ * 4;
+  auto *pool = memory_pool_from_handle(pool_handle_);
+  std::size_t retained = 0;
+  std::size_t write_index = 0;
+  for (auto &block : blocks_) {
+    const bool keep = block.data && block.size <= retained_limit &&
+                      retained <= retained_limit - block.size;
+    if (!keep) {
+      if (block.data) {
+        pool->Free(block.data, static_cast<int64_t>(block.size));
+      }
+      continue;
+    }
+    if (secure_memory_cleanup_enabled() && block.used > 0) {
+      secure_zero_memory(block.data, block.used);
+    }
+    block.used = 0;
+    retained += block.size;
+    if (write_index != static_cast<std::size_t>(&block - blocks_.data())) {
+      blocks_[write_index] = block;
+    }
+    ++write_index;
   }
+  blocks_.resize(write_index);
   block_index_ = 0;
 }
 
@@ -125,7 +152,12 @@ void BumpArena::add_block(std::size_t want) {
   if (!st.ok()) {
     throw std::bad_alloc();
   }
-  blocks_.push_back(Block{.data = p, .size = want, .used = 0});
+  try {
+    blocks_.push_back(Block{.data = p, .size = want, .used = 0});
+  } catch (...) {
+    pool->Free(p, static_cast<int64_t>(want));
+    throw;
+  }
 }
 
 } // namespace sanitize::internal

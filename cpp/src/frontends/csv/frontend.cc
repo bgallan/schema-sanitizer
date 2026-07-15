@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "internal/memory/arena.hh"
+#include "internal/memory/memory_budget.hh"
 #include "internal/parsing/csv_parse.hh"
 #include "internal/parsing/flat_row_batch.hh"
 
@@ -20,26 +21,31 @@ struct CsvBatchStorage {
   FlatRowBatch batch;
   std::vector<std::string_view> cells;
   std::vector<std::shared_ptr<const void>> keepalive;
-  const void *last_owner_ptr = nullptr;
+  const void *last_data_owner_ptr = nullptr;
+  const void *last_source_name_owner_ptr = nullptr;
 
-  void keep(const std::shared_ptr<const void> &owner) {
-    if (!owner || owner.get() == last_owner_ptr) {
+  void keep_data_owner(const std::shared_ptr<const void> &owner) {
+    if (!owner || owner.get() == last_data_owner_ptr) {
       return;
     }
-    last_owner_ptr = owner.get();
+    last_data_owner_ptr = owner.get();
     keepalive.push_back(owner);
   }
 
   void keep_source_name(const std::shared_ptr<const std::string> &owner) {
-    keep(std::static_pointer_cast<const void>(owner));
+    if (!owner || owner.get() == last_source_name_owner_ptr) {
+      return;
+    }
+    last_source_name_owner_ptr = owner.get();
+    keepalive.push_back(std::static_pointer_cast<const void>(owner));
   }
 };
 
 CsvFrontend::CsvFrontend(ChunkSourcePtr src, const Options &options)
     : source_(std::move(src)), delimiter_(resolved_delimiter(options)),
       projection_(options, delimiter_) {
-  chunk_bytes_ =
-      options.io_chunk_bytes > 0 ? options.io_chunk_bytes : (int64_t{1} << 20);
+  chunk_bytes_ = internal::memory_budget_from_limit(options.memory_limit_bytes)
+                     .io_chunk_bytes;
   scanner_ = std::make_unique<CsvStreamingScanner>(source_, chunk_bytes_);
   reset_status_ = scanner_->Reset();
 }
@@ -88,7 +94,7 @@ sanitize::Result<RowBatch> CsvFrontend::next_batch(int64_t capacity) {
     if (is_header) {
       continue;
     }
-    append_record(storage.get(), record);
+    SAN_RETURN_NOT_OK(append_record(storage.get(), record));
     ++produced;
   }
 
@@ -97,23 +103,25 @@ sanitize::Result<RowBatch> CsvFrontend::next_batch(int64_t capacity) {
   return out;
 }
 
-void CsvFrontend::append_record(CsvBatchStorage *storage,
-                                const TextSlice &record) {
-  storage->keep(record.owner);
+sanitize::Status CsvFrontend::append_record(CsvBatchStorage *storage,
+                                            const TextSlice &record) {
+  storage->keep_data_owner(record.owner);
   storage->keep_source_name(record.source_file_owner);
   if (projection_.can_use_raw_only()) {
     storage->batch.start_row(record.view, record.base_offset,
                              std::to_underlying(RowFlags::kRawOnly),
                              projection_.direct_context(), record.source_file);
     storage->batch.end_row();
-    return;
+    return sanitize::Status::OK();
   }
 
   storage->batch.start_row(record.view, record.base_offset, 0, nullptr,
                            record.source_file);
-  parse_csv_cells(record.view, delimiter_, &storage->cells, &storage->arena);
+  SAN_RETURN_NOT_OK(parse_csv_cells(record.view, delimiter_, &storage->cells,
+                                    &storage->arena));
   projection_.append_parsed_cells(&storage->batch, storage->cells);
   storage->batch.end_row();
+  return sanitize::Status::OK();
 }
 
 sanitize::Result<bool>
@@ -142,7 +150,7 @@ sanitize::Status CsvFrontend::process_header_record(const TextSlice &record) {
   BumpArena arena;
   std::vector<std::string_view> cells;
   cells.reserve(projection_.column_count_hint());
-  parse_csv_cells(record.view, delimiter_, &cells, &arena);
+  SAN_RETURN_NOT_OK(parse_csv_cells(record.view, delimiter_, &cells, &arena));
   SAN_RETURN_NOT_OK(projection_.validate_header_cells(cells));
   if (projection_.header_ready()) {
     if (!projection_.header_cells_equal(cells)) {

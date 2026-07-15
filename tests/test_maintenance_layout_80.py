@@ -37,14 +37,14 @@ def test_parquet_python_routes_have_direct_bounded_owners() -> None:
     assert not (parquet / "direct_routes").exists()
 
 
-def test_arrow_source_chunks_do_not_copy_descriptor_slices() -> None:
-    """Chunk iteration uses a view over the canonical descriptor tuple."""
+def test_arrow_source_chunks_do_not_retain_all_descriptors() -> None:
+    """Chunk iteration consumes one bounded slice from a source iterator."""
     text = (ROOT / "src/schema_sanitizer/api_impl/parquet/arrow_sources.py").read_text(
         encoding="utf-8"
     )
-    assert "self._sources = tuple(sources)" in text
-    assert "chunk = islice(self._sources, self._index, end)" in text
-    assert "self._sources[self._index" not in text
+    assert "self._sources = iter(sources)" in text
+    assert "chunk = list(islice(self._sources, self._chunk_size))" in text
+    assert "tuple(sources)" not in text
 
 
 def test_parquet_writer_encoding_phases_have_bounded_owners() -> None:
@@ -88,7 +88,8 @@ def test_delta_length_encoding_has_no_payload_staging_buffer() -> None:
     ).read_text(encoding="utf-8")
     assert "std::string bytes" not in text
     assert "out.append(values.substr(offset" in text
-    assert "lengths.size() * sizeof(std::uint32_t)" in text
+    assert "saturating_size_multiply(value_count, sizeof(std::uint32_t))" in text
+    assert "std::vector<std::int64_t> lengths" not in text
 
 
 def test_byte_stream_split_uses_cxx23_uninitialized_fill() -> None:

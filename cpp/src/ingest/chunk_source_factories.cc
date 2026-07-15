@@ -43,64 +43,68 @@ validate_source_names(const std::vector<std::string> &paths,
 } // namespace
 
 sanitize::Result<ChunkSourcePtr>
-chunk_source_from_path(const std::string &path) {
+chunk_source_from_path(const std::string &path,
+                       std::int64_t memory_limit_bytes) {
   SAN_RETURN_NOT_OK(
       internal::ensure_uncompressed_file(path, "chunk_source_from_path"));
-  return internal::make_file_chunk_source(path);
+  return internal::make_file_chunk_source(path, memory_limit_bytes);
 }
 
 sanitize::Result<ChunkSourcePtr>
 chunk_source_from_path_with_encoding(const std::string &path,
-                                     std::string_view encoding) {
+                                     std::string_view encoding,
+                                     std::int64_t memory_limit_bytes) {
   SAN_ASSIGN_OR_RAISE(const auto parsed, validated_text_encoding(encoding));
   if (parsed == internal::TextEncoding::kUtf8) {
-    return chunk_source_from_path(path);
+    return chunk_source_from_path(path, memory_limit_bytes);
   }
   SAN_RETURN_NOT_OK(internal::ensure_uncompressed_file(
       path, "chunk_source_from_path_with_encoding"));
-  return internal::make_transcoding_file_chunk_source(path, parsed);
+  return internal::make_transcoding_file_chunk_source(path, parsed,
+                                                      memory_limit_bytes);
 }
 
 sanitize::Result<ChunkSourcePtr>
-chunk_source_from_paths(std::vector<std::string> paths, std::string separator) {
+chunk_source_from_paths(std::vector<std::string> paths, std::string separator,
+                        std::int64_t memory_limit_bytes) {
   SAN_RETURN_NOT_OK(validate_paths(paths, "chunk_source_from_paths"));
-  return internal::make_multi_path_chunk_source(std::move(paths), {},
-                                                std::move(separator),
-                                                internal::TextEncoding::kUtf8);
+  return internal::make_multi_path_chunk_source(
+      std::move(paths), {}, std::move(separator), internal::TextEncoding::kUtf8,
+      memory_limit_bytes);
 }
 
-sanitize::Result<ChunkSourcePtr>
-chunk_source_from_paths_with_encoding(std::vector<std::string> paths,
-                                      std::string separator,
-                                      std::string_view encoding) {
+sanitize::Result<ChunkSourcePtr> chunk_source_from_paths_with_encoding(
+    std::vector<std::string> paths, std::string separator,
+    std::string_view encoding, std::int64_t memory_limit_bytes) {
   SAN_RETURN_NOT_OK(
       validate_paths(paths, "chunk_source_from_paths_with_encoding"));
   SAN_ASSIGN_OR_RAISE(const auto parsed, validated_text_encoding(encoding));
-  return internal::make_multi_path_chunk_source(std::move(paths), {},
-                                                std::move(separator), parsed);
+  return internal::make_multi_path_chunk_source(
+      std::move(paths), {}, std::move(separator), parsed, memory_limit_bytes);
 }
 
-sanitize::Result<ChunkSourcePtr>
-chunk_source_from_paths_with_source_names(std::vector<std::string> paths,
-                                          std::vector<std::string> source_names,
-                                          std::string separator) {
+sanitize::Result<ChunkSourcePtr> chunk_source_from_paths_with_source_names(
+    std::vector<std::string> paths, std::vector<std::string> source_names,
+    std::string separator, std::int64_t memory_limit_bytes) {
   SAN_RETURN_NOT_OK(validate_source_names(
       paths, source_names, "chunk_source_from_paths_with_source_names"));
   return internal::make_multi_path_chunk_source(
       std::move(paths), std::move(source_names), std::move(separator),
-      internal::TextEncoding::kUtf8);
+      internal::TextEncoding::kUtf8, memory_limit_bytes);
 }
 
 sanitize::Result<ChunkSourcePtr>
 chunk_source_from_paths_with_source_names_encoding(
     std::vector<std::string> paths, std::vector<std::string> source_names,
-    std::string separator, std::string_view encoding) {
+    std::string separator, std::string_view encoding,
+    std::int64_t memory_limit_bytes) {
   SAN_RETURN_NOT_OK(validate_source_names(
       paths, source_names,
       "chunk_source_from_paths_with_source_names_encoding"));
   SAN_ASSIGN_OR_RAISE(const auto parsed, validated_text_encoding(encoding));
   return internal::make_multi_path_chunk_source(
-      std::move(paths), std::move(source_names), std::move(separator), parsed);
+      std::move(paths), std::move(source_names), std::move(separator), parsed,
+      memory_limit_bytes);
 }
 
 } // namespace sanitize

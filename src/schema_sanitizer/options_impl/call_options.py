@@ -9,6 +9,7 @@ from typing import Any
 
 from ..core_impl.dependencies import ensure_pyarrow
 from ..core_impl.logical_schema import LogicalSchemaPayload
+from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.native_options import Options as NativeOptions
 from ..core_impl.native_options import normalize_field_name_policy_option
 from .options import Options
@@ -79,6 +80,11 @@ def _normalize_schema_contract(value: Any) -> Any:
     """Validate the internal registry-derived schema contract option."""
     if value is None or isinstance(value, LogicalSchemaPayload):
         return value
+    if not hasattr(value, "__arrow_c_schema__"):
+        raise TypeError(
+            "Internal option 'schema_contract' must be a pyarrow.Schema "
+            "or native logical schema payload"
+        )
     pa = ensure_pyarrow(feature="schema_contract")
     if not isinstance(value, pa.Schema):
         raise TypeError(
@@ -174,8 +180,7 @@ class _CallOptions:
     xml_row_tag: str | None = None
 
     on_error: str = "emit_null_row"
-    batch_memory_limit_bytes: int | None = None
-    read_chunk_bytes: int = 1 << 20
+    memory_limit_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Normalize and validate all call option values."""
@@ -184,8 +189,8 @@ class _CallOptions:
     def to_options(self) -> Options:
         """Convert flat call options to grouped internal options."""
         performance: dict[str, Any] = {}
-        if self.batch_memory_limit_bytes is not None:
-            performance["memory_limit_bytes"] = self.batch_memory_limit_bytes
+        if self.memory_limit_bytes is not None:
+            performance["memory_limit_bytes"] = self.memory_limit_bytes
 
         return Options(
             schema={
@@ -212,10 +217,7 @@ class _CallOptions:
                 "parquet_max_depth": self.parquet_max_depth,
                 "default_key_name": self.scalar_object_key,
             },
-            io={
-                "io_chunk_bytes": self.read_chunk_bytes,
-                "input_text_encoding": self.input_text_encoding,
-            },
+            io={"input_text_encoding": self.input_text_encoding},
             csv={
                 "csv_has_header": self.csv_has_header,
                 "csv_delimiter": self.csv_delimiter,
@@ -321,17 +323,8 @@ def _normalize_call_option_values(options: _CallOptions) -> None:
     )
     object.__setattr__(options, "parse_float_decimal_separator", decimal_separator)
     object.__setattr__(options, "parse_float_thousands_separator", thousands_separator)
-    object.__setattr__(
-        options,
-        "batch_memory_limit_bytes",
-        _normalize_int(
-            "batch_memory_limit_bytes",
-            options.batch_memory_limit_bytes,
-            none_ok=True,
-            min_value=0,
-            min_inclusive=False,
-        ),
-    )
+    if options.memory_limit_bytes is not None:
+        normalize_memory_limit(options.memory_limit_bytes)
     object.__setattr__(
         options,
         "arrow_max_depth",
@@ -342,39 +335,75 @@ def _normalize_call_option_values(options: _CallOptions) -> None:
         "parquet_max_depth",
         _normalize_int("parquet_max_depth", options.parquet_max_depth, min_value=0),
     )
-    object.__setattr__(
-        options,
-        "read_chunk_bytes",
-        _normalize_int(
-            "read_chunk_bytes",
-            options.read_chunk_bytes,
-            min_value=0,
-            min_inclusive=False,
-        ),
-    )
 
 
-def _hashable_option_value(value: Any) -> Any:
-    """Return a cache-safe representation for simple option values."""
-    if isinstance(value, list):
-        return ("list", tuple(value))
-    if isinstance(value, tuple):
-        return ("tuple", value)
-    if isinstance(value, (str, int, bool, type(None))):
-        return (type(value).__name__, value)
+_MAX_CALL_OPTIONS_CACHE_KEY_BYTES = 64 * 1024
+_MAX_CALL_OPTIONS_CACHE_ITEMS = 4096
+
+
+def _bounded_utf8_size(value: str, remaining: int) -> int | None:
+    """Return the UTF-8 size when it fits without encoding an enormous string."""
+    if remaining < 0 or len(value) > remaining:
+        return None
+    encoded_size = len(value.encode("utf-8"))
+    return encoded_size if encoded_size <= remaining else None
+
+
+def _hashable_option_value(
+    value: Any, *, remaining_bytes: int, remaining_items: int
+) -> tuple[Any, int, int] | None:
+    """Return one bounded cache representation and its retained cost."""
+    if isinstance(value, (list, tuple)):
+        if len(value) > remaining_items:
+            return None
+        retained: list[str] = []
+        used_bytes = 0
+        for item in value:
+            if not isinstance(item, str):
+                return None
+            item_bytes = _bounded_utf8_size(item, remaining_bytes - used_bytes)
+            if item_bytes is None:
+                return None
+            retained.append(item)
+            used_bytes += item_bytes
+        kind = "list" if isinstance(value, list) else "tuple"
+        return (kind, tuple(retained)), used_bytes, len(retained)
+    if isinstance(value, str):
+        string_bytes = _bounded_utf8_size(value, remaining_bytes)
+        if string_bytes is None or remaining_items < 1:
+            return None
+        return ("str", value), string_bytes, 1
+    if isinstance(value, (int, bool, type(None))):
+        if remaining_items < 1:
+            return None
+        return (type(value).__name__, value), 0, 1
     return None
 
 
 def _call_options_cache_key(
     kwargs: dict[str, Any],
 ) -> tuple[tuple[str, Any], ...] | None:
-    """Return a stable cache key for simple call-option dictionaries."""
+    """Return a stable cache key only when its retained cost is safely bounded."""
     items: list[tuple[str, Any]] = []
+    used_bytes = 0
+    used_items = 0
     for name, value in sorted(kwargs.items()):
-        cached = _hashable_option_value(value)
-        if cached is None and value is not None:
+        name_bytes = _bounded_utf8_size(name, _MAX_CALL_OPTIONS_CACHE_KEY_BYTES - used_bytes)
+        if name_bytes is None or used_items >= _MAX_CALL_OPTIONS_CACHE_ITEMS:
             return None
-        items.append((name, cached))
+        used_bytes += name_bytes
+        used_items += 1
+        cached = _hashable_option_value(
+            value,
+            remaining_bytes=_MAX_CALL_OPTIONS_CACHE_KEY_BYTES - used_bytes,
+            remaining_items=_MAX_CALL_OPTIONS_CACHE_ITEMS - used_items,
+        )
+        if cached is None:
+            return None
+        tagged, value_bytes, value_items = cached
+        used_bytes += value_bytes
+        used_items += value_items
+        items.append((name, tagged))
     return tuple(items)
 
 

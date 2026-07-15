@@ -35,6 +35,13 @@ def native_nested_contract_blockers(info: dict[str, Any]) -> list[str]:
     """Return blockers when a native-writer nested contract is unsafe."""
     if not native_writer_detected(info):
         return []
+    if info.get("bounded_preflight") == 1:
+        if info.get("native_reader_ready") == 1:
+            return []
+        issues = [str(issue) for issue in list(info.get("native_reader_blockers") or [])]
+        if not issues:
+            issues = ["bounded native stream preflight was not satisfied"]
+        return [f"native nested contract: {issue}" for issue in issues]
     status = _native_nested_contract_status_from_summary(
         _native_recursive_layout_summary_from_footer_info(info)
     )
@@ -84,7 +91,11 @@ def prepare_native_parquet_read(
         return None
     native_read = native_stream_read_hook
     try:
-        info = footer_info(factory._local_path, columns=factory._columns)
+        info = footer_info(
+            factory._local_path,
+            columns=factory._columns,
+            memory_limit_bytes=factory._memory_limit_bytes,
+        )
     except Exception as exc:
         set_parquet_native_reader_diagnostics(
             attempted=True,
@@ -145,7 +156,8 @@ def prepare_native_parquet_read(
         )
         return None
     blockers = list(info.get("native_reader_blockers") or [])
-    if info.get("native_reader_ready") != 1 and factory._columns is None:
+    bounded_preflight = info.get("bounded_preflight") == 1
+    if info.get("native_reader_ready") != 1 and (bounded_preflight or factory._columns is None):
         _record_not_ready(factory, info, blockers)
         logger.debug(
             "Native Parquet reader skipped; retrying input with PyArrow: %s",
@@ -196,10 +208,10 @@ def try_native_parquet_stream(
         return None
     info = plan.footer_info
     try:
-        capsule = (
-            plan.read(factory._local_path)
-            if factory._columns is None
-            else plan.read(factory._local_path, list(factory._columns))
+        capsule = plan.read(
+            factory._local_path,
+            None if factory._columns is None else list(factory._columns),
+            -1 if factory._memory_limit_bytes is None else factory._memory_limit_bytes,
         )
     except Exception as exc:
         _record_native_open_error(factory, info, exc, logger)

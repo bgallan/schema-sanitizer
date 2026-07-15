@@ -44,7 +44,7 @@ def _native_parquet_zlib_available(pa: object, tmp_path: Path) -> bool:
     batch = pa.record_batch({"text": pa.array(["probe"], type=pa.string())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     try:
-        write(stream, str(tmp_path / "native-zlib-probe.parquet"))
+        write(stream, str(tmp_path / "native-zlib-probe.parquet"), "gzip", -1, -1)
     except RuntimeError as exc:
         if "zlib is not available" in str(exc):
             return False
@@ -100,7 +100,6 @@ def test_parquet_sink_native_coalesces_flat_arrow_batches(tmp_path: Path) -> Non
             reader,
             schema=batches[0].schema,
             pa=pa,
-            row_group_rows=1024,
         )
     finally:
         writer.close()
@@ -175,7 +174,6 @@ def test_parquet_sink_native_coalesces_nested_arrow_batches(tmp_path: Path) -> N
             reader,
             schema=schema,
             pa=pa,
-            row_group_rows=1024,
         )
     finally:
         writer.close()
@@ -217,7 +215,6 @@ def test_parquet_sink_native_coalesces_dictionary_arrow_batches(
             reader,
             schema=schema,
             pa=pa,
-            row_group_rows=1024,
         )
     finally:
         writer.close()
@@ -269,7 +266,7 @@ def test_parquet_sink_rejects_changed_dictionary_during_native_coalescing() -> N
 
     writer = Writer()
     with pytest.raises(Exception, match="dictionary values changed"):
-        _write_coalesced_batches(writer, reader, schema=schema, pa=pa, row_group_rows=1024)
+        _write_coalesced_batches(writer, reader, schema=schema, pa=pa)
 
     assert writer.wrote is False
 

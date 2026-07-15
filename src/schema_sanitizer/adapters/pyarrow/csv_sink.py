@@ -40,9 +40,11 @@ def mark_csv_nested_route(route: str) -> None:
     _LAST_CSV_NESTED_ROUTE = route
 
 
-def native_csv_nested_reader(stream: Any, *, pa: Any) -> Any:
+def native_csv_nested_reader(stream: Any, *, pa: Any, memory_limit_bytes: int | None = None) -> Any:
     """Return a reader that renders top-level nested columns as JSON strings."""
-    capsule = CSV_NESTED_STREAM_WRAP(stream)
+    capsule = CSV_NESTED_STREAM_WRAP(
+        stream, -1 if memory_limit_bytes is None else memory_limit_bytes
+    )
     mark_csv_nested_route("native")
     return pa.RecordBatchReader.from_stream(CapsuleArrowStream(capsule))
 
@@ -72,6 +74,7 @@ def _write_native_csv(
     out_path: Any,
     *,
     has_metadata: bool,
+    memory_limit_bytes: int | None,
 ) -> Any:
     """Write through the native CSV writer or fail before fallback materialization."""
     native_write = CSV_STREAM_WRITE
@@ -83,7 +86,11 @@ def _write_native_csv(
     if not _native_csv_schema_supported(metadata.schema):
         raise RuntimeError("CSV output requires a schema supported by the native C++ CSV writer.")
     return (
-        native_write(native_stream, local_output_path_or_reject_remote(out_path, sink_name="CSV"))
+        native_write(
+            native_stream,
+            local_output_path_or_reject_remote(out_path, sink_name="CSV"),
+            -1 if memory_limit_bytes is None else memory_limit_bytes,
+        )
         or True
     )
 
@@ -97,6 +104,7 @@ def write_csv_stream(
     all_row_columns: AllRowColumns = None,
     row_span_columns: RowSpanColumns = None,
     timestamp_columns: TimestampColumns = None,
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write an Arrow batch stream to CSV."""
     global _LAST_CSV_NESTED_ROUTE, _LAST_CSV_STREAM_ROUTE
@@ -104,7 +112,7 @@ def write_csv_stream(
     _LAST_CSV_NESTED_ROUTE = "none"
     pa = ensure_pyarrow(feature=feature)
     if _schema_has_nested_columns(stream.schema, pa=pa):
-        native_base = native_csv_nested_reader(stream, pa=pa)
+        native_base = native_csv_nested_reader(stream, pa=pa, memory_limit_bytes=memory_limit_bytes)
         if native_base is None:
             raise RuntimeError("CSV nested columns require the native C++ CSV nested renderer.")
         stream = native_base
@@ -125,6 +133,7 @@ def write_csv_stream(
             metadata,
             out_path,
             has_metadata=metadata.has_metadata,
+            memory_limit_bytes=memory_limit_bytes,
         )
         _LAST_CSV_STREAM_ROUTE = "native"
         return stats

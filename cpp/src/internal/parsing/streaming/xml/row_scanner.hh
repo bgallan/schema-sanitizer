@@ -16,7 +16,8 @@ namespace sanitize::internal {
 class XmlRowTagScanner {
 public:
   struct RowSlice {
-    std::string text;
+    // Valid until the next next_row() or Reset() call.
+    std::string_view text;
     std::size_t base_offset = 0;
   };
 
@@ -36,6 +37,8 @@ private:
   sanitize::Status invalid(std::string_view message) const;
   sanitize::Status enforce_buffer_limit(std::size_t incoming) const;
   [[nodiscard]] bool should_compact_before_refill() const noexcept;
+  [[nodiscard]] std::size_t retained_buffer_limit() const noexcept;
+  void discard_buffer();
   void compact_buffer();
   sanitize::Result<bool> ensure_data();
   sanitize::Status refill();

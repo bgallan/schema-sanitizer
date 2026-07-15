@@ -80,6 +80,16 @@ Repository = "https://github.com/bgallan/schema-sanitizer"
 Changelog = "https://github.com/bgallan/schema-sanitizer/releases"
 Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 
+[tool.cibuildwheel]
+build = "cp311-*"
+build-verbosity = 1
+test-requires = ["pyarrow"]
+test-command = "python {project}/meta/ci/check_parquet_compression_matrix.py"
+
+[tool.cibuildwheel.linux]
+skip = "*-musllinux_*"
+manylinux-x86_64-image = "manylinux_2_28"
+
 [tool.mypy]
 python_version = "3.11"
 files = ["src/schema_sanitizer"]
@@ -116,38 +126,46 @@ verbose = true
 [tool.scikit-build.cmake]
 version = ">=4.3,<4.4"
 
+[tool.scikit-build.cmake.define]
+SCHEMA_SANITIZER_REQUIRE_ZLIB = "ON"
+SCHEMA_SANITIZER_ZLIB_PROVIDER = "bundled"
+
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"
 input = "meta/VERSION"
 regex = '^(?P<value>\d+\.\d+(?:\.\d+)?(?:\.post\d+)?)$'
 
 [tool.scikit-build.sdist]
+# Let scikit-build-core collect the source tree through .gitignore semantics.
+# Broad force-includes override exclusions in 0.11.x and can accidentally pull
+# local caches/build trees into release artifacts.
 include = [
-  "cpp/**",
-  "src/**",
-  "tests/**",
-  "examples/**",
-  "meta/**",
-  "meta/VERSION",
-  ".github/**",
-  "CMakeLists.txt",
-  "LICENSE",
-  "README.md",
-  "heuristics.md",
-  "responsibilities.md",
-  "todo.md",
-  "pyproject.toml"
+  "/CMakeLists.txt",
+  "/CHANGELOG.md",
+  "/COMPATIBILITY.md",
+  "/cmake/SchemaSanitizerCompression.cmake",
+  "/meta/ci/check_parquet_compression_matrix.py",
+  "/LICENSE",
+  "/README.md",
+  "/HEURISTICS.md",
+  "/RESPONSIBILITIES.md",
+  "/meta/VERSION",
+  "/pyproject.toml"
 ]
 exclude = [
-  "**/__pycache__/**",
+  "**/__pycache__/",
   "**/*.pyc",
   "**/*.pyo",
-  ".pytest_cache/**",
-  ".mypy_cache/**",
-  ".ruff_cache/**",
-  "build/**",
-  "dist/**",
-  "wheelhouse/**"
+  "/.pytest_cache/",
+  "/.mypy_cache/",
+  "/.ruff_cache/",
+  "/build/",
+  "/build-*/",
+  "/cmake-build-*/",
+  "/.build*/",
+  "/dist/",
+  "/release-dist/",
+  "/wheelhouse/"
 ]
 
 [tool.scikit-build.wheel]

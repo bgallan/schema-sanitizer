@@ -64,52 +64,47 @@ def test_xml_input_format_is_supported_by_converters(tmp_path) -> None:
 
 
 def test_read_xml_memory_limit_rejects_large_dom_input(tmp_path) -> None:
-    """Verify xml parsing respects configured memory limit."""
+    """Verify whole-document XML parsing respects the operation budget."""
     require_native()
 
     path = tmp_path / "large.xml"
     path.write_text(
-        "<rows>" + "".join(f"<row><a>{i}</a></row>" for i in range(50)) + "</rows>",
+        "<rows><row><a>" + ("x" * (2 * 1024 * 1024)) + "</a></row></rows>",
         encoding="utf-8",
     )
 
-    with pytest.raises(ss.SchemaSanitizerResourceError) as excinfo:
-        read_test_xml(path, batch_memory_limit_bytes=64)
-
-    err = excinfo.value
-    assert err.detail is not None
-    assert err.detail["stage"] == "xml_parse"
-    assert err.detail["limit_name"] == "memory_limit_bytes"
+    with pytest.raises(ss.SchemaSanitizerResourceError):
+        read_test_xml(path, memory_limit_bytes=1024 * 1024)
 
 
 def test_read_xml_row_tag_streams_file_larger_than_memory_limit(tmp_path) -> None:
-    """Verify xml row streaming allows large files made of small row elements."""
+    """Verify row streaming handles a file larger than the operation budget."""
     pytest.importorskip("pyarrow")
     require_native()
 
     path = tmp_path / "stream.xml"
     path.write_text(
-        "<rows>" + "".join(f"<row><a>{i}</a></row>" for i in range(30)) + "</rows>",
+        "<rows><row><a>0</a></row>" + (" " * (2 * 1024 * 1024)) + "<row><a>1</a></row></rows>",
         encoding="utf-8",
     )
 
-    result = read_test_xml(path, xml_row_tag="row", batch_memory_limit_bytes=128)
+    result = read_test_xml(path, xml_row_tag="row", memory_limit_bytes=1024 * 1024)
 
-    assert result.clean_data.num_rows == 30
-    assert result.clean_data.to_pylist()[0] == {"a": "0"}
-    assert result.clean_data.to_pylist()[-1] == {"a": "29"}
+    assert result.clean_data.to_pylist() == [{"a": "0"}, {"a": "1"}]
 
 
 def test_read_xml_row_tag_streams_rows_split_across_chunks(tmp_path) -> None:
-    """Verify xml row streaming handles row spans split across tiny chunks."""
+    """Verify row spans split across derived input chunks remain intact."""
     pytest.importorskip("pyarrow")
     require_native()
 
-    path = tmp_path / "tiny_chunks.xml"
+    lower_payload = "a" * 40_000
+    upper_payload = "B" * 40_000
+    path = tmp_path / "split-chunks.xml"
     path.write_text(
         "<rows>"
-        "<row><id>1</id><payload>abcdefghijklmnopqrstuvwxyz</payload></row>"
-        "<row><id>2</id><payload>ABCDEFGHIJKLMNOPQRSTUVWXYZ</payload></row>"
+        f"<row><id>1</id><payload>{lower_payload}</payload></row>"
+        f"<row><id>2</id><payload>{upper_payload}</payload></row>"
         "</rows>",
         encoding="utf-8",
     )
@@ -117,13 +112,12 @@ def test_read_xml_row_tag_streams_rows_split_across_chunks(tmp_path) -> None:
     result = read_test_xml(
         path,
         xml_row_tag="row",
-        read_chunk_bytes=7,
-        batch_memory_limit_bytes=256,
+        memory_limit_bytes=1024 * 1024,
     )
 
     assert result.clean_data.to_pylist() == [
-        {"id": "1", "payload": "abcdefghijklmnopqrstuvwxyz"},
-        {"id": "2", "payload": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+        {"id": "1", "payload": lower_payload},
+        {"id": "2", "payload": upper_payload},
     ]
 
 
@@ -136,13 +130,8 @@ def test_read_xml_row_tag_rejects_single_row_larger_than_memory_limit(tmp_path) 
         "<rows><row><payload>" + ("x" * 300) + "</payload></row></rows>", encoding="utf-8"
     )
 
-    with pytest.raises(ss.SchemaSanitizerResourceError) as excinfo:
-        read_test_xml(path, xml_row_tag="row", batch_memory_limit_bytes=128)
-
-    err = excinfo.value
-    assert err.detail is not None
-    assert err.detail["stage"] == "xml_parse"
-    assert err.detail["limit_name"] == "memory_limit_bytes"
+    with pytest.raises(ss.SchemaSanitizerOutOfMemoryError):
+        read_test_xml(path, xml_row_tag="row", memory_limit_bytes=128)
 
 
 def test_read_xml_rejects_dtd_declarations(tmp_path) -> None:
@@ -204,12 +193,15 @@ def test_all_public_to_functions_share_input_options() -> None:
 
 
 def test_file_input_can_exceed_memory_limit_bytes(tmp_path) -> None:
-    """Verify file input can exceed memory limit bytes."""
+    """Verify streamed input size may exceed the operation memory budget."""
     pytest.importorskip("pyarrow")
     path = tmp_path / "data.jsonl"
-    path.write_text("".join(f'{{"a":{i}}}\n' for i in range(20)), encoding="utf-8")
+    path.write_text(
+        ("\n" * (2 * 1024 * 1024)) + "".join(f'{{"a":{i}}}\n' for i in range(20)),
+        encoding="utf-8",
+    )
 
-    result = read_test_jsonl(path, batch_memory_limit_bytes=64)
+    result = read_test_jsonl(path, memory_limit_bytes=1024 * 1024)
 
     assert result.clean_data.num_rows == 20
 
@@ -245,6 +237,7 @@ def test_reader_returns_result_with_clean_data(tmp_path) -> None:
 
 def test_analytical_function_selects_clean_data_type(tmp_path) -> None:
     """Verify analytical function names select the in-memory output type."""
+    pytest.importorskip("pyarrow")
     path = tmp_path / "data.jsonl"
     path.write_text('{"a": 1}\n', encoding="utf-8")
 

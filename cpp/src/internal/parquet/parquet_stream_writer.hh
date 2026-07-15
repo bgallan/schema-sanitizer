@@ -6,6 +6,8 @@
 
 #include "sanitize/core/status.hh"
 
+#include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace sanitize::internal::parquet_stream_writer {
@@ -20,7 +22,14 @@ public:
   virtual sanitize::Status Flush() = 0;
 };
 
+struct WriterOptions {
+  std::int64_t memory_limit_bytes = -1;
+  std::string compression;
+  int gzip_level = -1;
+};
+
 // Writes supported Arrow C streams as native Parquet.
-sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file);
+sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
+                              const WriterOptions &options = {});
 
 } // namespace sanitize::internal::parquet_stream_writer

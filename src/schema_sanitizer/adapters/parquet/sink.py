@@ -16,7 +16,6 @@ from ..pyarrow.metadata_specs import (
     TimestampColumns,
 )
 from .compression import pyarrow_parquet_writer_options
-from .memory import DEFAULT_PARQUET_BATCH_ROWS
 
 _LAST_PARQUET_COALESCE_ROUTE = "none"
 _COALESCING_UNAVAILABLE_MESSAGES = (
@@ -34,12 +33,14 @@ def _native_coalesced_reader(
     batches: Any,
     *,
     pa: Any,
-    row_group_rows: int,
+    memory_limit_bytes: int | None,
 ) -> Any:
     """Return a native coalescing reader or fail before Python buffering."""
     if not hasattr(batches, "__arrow_c_stream__"):
         raise RuntimeError("Parquet output coalescing requires an Arrow C stream.")
-    capsule = COALESCING_STREAM_WRAP(batches, row_group_rows)
+    capsule = COALESCING_STREAM_WRAP(
+        batches, -1 if memory_limit_bytes is None else memory_limit_bytes
+    )
     if capsule is None:
         raise RuntimeError(
             "Parquet output requires a schema supported by the native C++ coalescing "
@@ -54,7 +55,7 @@ def _write_coalesced_batches(
     *,
     schema: Any,
     pa: Any,
-    row_group_rows: int = DEFAULT_PARQUET_BATCH_ROWS,
+    memory_limit_bytes: int | None = None,
 ) -> None:
     """Write small incoming batches as bounded native-coalesced Parquet row groups."""
     global _LAST_PARQUET_COALESCE_ROUTE
@@ -64,7 +65,7 @@ def _write_coalesced_batches(
         native_reader = _native_coalesced_reader(
             batches,
             pa=pa,
-            row_group_rows=row_group_rows,
+            memory_limit_bytes=memory_limit_bytes,
         )
     except RuntimeError as exc:
         if not any(message in str(exc) for message in _COALESCING_UNAVAILABLE_MESSAGES):
@@ -89,6 +90,7 @@ def write_parquet_stream(
     timestamp_columns: TimestampColumns = None,
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> None:
     """Write an Arrow batch stream to Parquet."""
     pa = ensure_pyarrow(feature=feature)
@@ -124,6 +126,7 @@ def write_parquet_stream(
             metadata.batches,
             schema=metadata.schema,
             pa=pa,
+            memory_limit_bytes=memory_limit_bytes,
         )
     finally:
         try:

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -19,6 +20,9 @@
 
 namespace core_abi3_internal::csv_nested_stream {
 namespace {
+
+constexpr std::int64_t kMaxCsvNestedColumns = 65'536;
+constexpr std::int64_t kMaxCsvNestedRows = std::int64_t{1} << 24;
 
 bool validity_bit_is_set(const std::uint8_t *bitmap, std::int64_t index) {
   return (bitmap[index >> 3] & static_cast<std::uint8_t>(1u << (index & 7))) !=
@@ -33,9 +37,10 @@ bool array_is_null(const ArrowArray &array, std::int64_t row) {
   return !validity_bit_is_set(bitmap, array.offset + row);
 }
 
-void set_validity_bit(std::vector<std::uint8_t> *validity, std::int64_t index) {
-  (*validity)[static_cast<std::size_t>(index >> 3)] |=
-      static_cast<std::uint8_t>(1u << (index & 7));
+void clear_validity_bit(std::vector<std::uint8_t> *validity,
+                        std::int64_t index) {
+  (*validity)[static_cast<std::size_t>(index >> 3)] &=
+      static_cast<std::uint8_t>(~(1u << (index & 7)));
 }
 
 bool is_nested_kind(jsonl::JsonlKind kind) {
@@ -87,8 +92,17 @@ sanitize::Status load_csv_nested_schema(CsvNestedStreamState *stream_state,
                                         ArrowSchema *base_schema) {
   stream_state->columns.clear();
   stream_state->nested_column_count = 0;
-  if (base_schema->n_children < 0) {
-    return sanitize::Status::Invalid("CSV nested stream: invalid schema");
+  if (!base_schema->format || std::strcmp(base_schema->format, "+s") != 0 ||
+      base_schema->n_children < 0) {
+    return sanitize::Status::Invalid("CSV nested stream: invalid root schema");
+  }
+  if (base_schema->n_children > kMaxCsvNestedColumns) {
+    return sanitize::Status::OutOfMemory(
+        "CSV nested stream: schema child count exceeds safety limit");
+  }
+  if (base_schema->n_children > 0 && !base_schema->children) {
+    return sanitize::Status::Invalid(
+        "CSV nested stream: schema children are missing");
   }
   stream_state->columns.reserve(
       static_cast<std::size_t>(base_schema->n_children));
@@ -149,27 +163,38 @@ sanitize::Status build_nested_utf8_array(CsvNestedUtf8Array *out,
     return sanitize::Status::Invalid(
         "CSV nested stream: negative array length");
   }
-  out->validity.assign(static_cast<std::size_t>((length + 7) / 8), 0);
+  if (length > kMaxCsvNestedRows) {
+    return sanitize::Status::OutOfMemory(
+        "CSV nested stream: row count exceeds safety limit");
+  }
+  if (static_cast<std::uint64_t>(length) >=
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return sanitize::Status::OutOfMemory(
+        "CSV nested stream: offset count exceeds platform limits");
+  }
   out->offsets.reserve(static_cast<std::size_t>(length) + 1);
   out->offsets.push_back(0);
   std::int64_t null_count = 0;
+  const auto validity_bytes = static_cast<std::size_t>((length + 7) / 8);
   for (std::int64_t row = 0; row < length; ++row) {
     if (array_is_null(array, row)) {
+      if (out->validity.empty()) {
+        out->validity.assign(validity_bytes, 0xFF);
+      }
+      clear_validity_bit(&out->validity, row);
       ++null_count;
       out->offsets.push_back(out->offsets.back());
       continue;
     }
-    set_validity_bit(&out->validity, row);
     const std::size_t before = out->data.size();
     SAN_RETURN_NOT_OK(jsonl::append_value(out->data, field, array, row));
     const auto added = out->data.size() - before;
-    const auto next_offset = static_cast<std::int64_t>(out->offsets.back()) +
-                             static_cast<std::int64_t>(added);
-    if (next_offset > INT32_MAX) {
-      return sanitize::Status::Invalid(
-          "CSV nested stream: UTF-8 data too large");
+    const auto previous = static_cast<std::size_t>(out->offsets.back());
+    if (added > static_cast<std::size_t>(INT32_MAX) - previous) {
+      return sanitize::Status::OutOfMemory(
+          "CSV nested stream: UTF-8 data exceeds 32-bit offset limit");
     }
-    out->offsets.push_back(static_cast<std::int32_t>(next_offset));
+    out->offsets.push_back(static_cast<std::int32_t>(previous + added));
   }
 
   out->buffers[0] = out->validity.empty()
@@ -302,13 +327,33 @@ int get_next(ArrowArrayStream *stream, ArrowArray *out) {
           clear_array(array);
           return sanitize::Status::OK();
         }
-        if (base_array.n_children !=
-            static_cast<std::int64_t>(stream_state->columns.size())) {
+        if (base_array.length < 0 || base_array.offset != 0 ||
+            base_array.null_count < -1 ||
+            base_array.null_count > base_array.length ||
+            base_array.n_buffers != 1 || !base_array.buffers ||
+            (base_array.null_count > 0 && !base_array.buffers[0]) ||
+            base_array.n_children !=
+                static_cast<std::int64_t>(stream_state->columns.size()) ||
+            (base_array.n_children > 0 && !base_array.children)) {
           return sanitize::Status::Invalid(
               "CSV nested stream array/schema mismatch");
         }
 
         const std::int64_t length = base_array.length;
+        if (length > kMaxCsvNestedRows) {
+          return sanitize::Status::OutOfMemory(
+              "CSV nested stream: row count exceeds safety limit");
+        }
+        for (std::size_t i = 0; i < stream_state->columns.size(); ++i) {
+          if (!base_array.children[i]) {
+            return sanitize::Status::Invalid(
+                "CSV nested stream: array child is missing");
+          }
+          SAN_RETURN_NOT_OK(jsonl::validate_array_slice(
+              stream_state->columns[i].field, *base_array.children[i], 0,
+              length, stream_state->validation_limits));
+        }
+
         state->nested_arrays.resize(stream_state->nested_column_count);
         state->children.reserve(stream_state->columns.size());
         for (std::size_t i = 0; i < stream_state->columns.size(); ++i) {
@@ -326,7 +371,7 @@ int get_next(ArrowArrayStream *stream, ArrowArray *out) {
         clear_array(array);
         array->length = length;
         array->null_count = base_array.null_count;
-        array->offset = base_array.offset;
+        array->offset = 0;
         array->n_buffers = base_array.n_buffers;
         array->buffers =
             base_array.buffers ? base_array.buffers : state->struct_buffers;
@@ -346,7 +391,9 @@ namespace core_abi3_internal {
 
 PyObject *py_csv_nested_stream_wrap(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "O:csv_nested_stream_wrap", &stream_obj)) {
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "O|L:csv_nested_stream_wrap", &stream_obj,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
 
@@ -356,6 +403,8 @@ PyObject *py_csv_nested_stream_wrap(PyObject *, PyObject *args) {
     PyErr_NoMemory();
     return nullptr;
   }
+  state->validation_limits =
+      csv_nested_stream::jsonl::array_validation_limits(memory_limit_bytes);
 
   PyObject *capsule = nullptr;
   ArrowArrayStream *inner = nullptr;

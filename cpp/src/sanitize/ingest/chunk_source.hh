@@ -65,38 +65,40 @@ ChunkSourcePtr chunk_source_from_bytes(std::string bytes);
 
 // Creates a source from file bytes.
 sanitize::Result<ChunkSourcePtr>
-chunk_source_from_path(const std::string &path);
+chunk_source_from_path(const std::string &path,
+                       std::int64_t memory_limit_bytes = -1);
 
 // Creates a source from file bytes, transcoding supported text encodings to
 // UTF-8 before frontend parsing.
 sanitize::Result<ChunkSourcePtr>
 chunk_source_from_path_with_encoding(const std::string &path,
-                                     std::string_view encoding);
+                                     std::string_view encoding,
+                                     std::int64_t memory_limit_bytes = -1);
 
 // Creates a source that reads multiple local files as one logical byte stream.
 // A separator is emitted between adjacent files.
 sanitize::Result<ChunkSourcePtr>
-chunk_source_from_paths(std::vector<std::string> paths, std::string separator);
+chunk_source_from_paths(std::vector<std::string> paths, std::string separator,
+                        std::int64_t memory_limit_bytes = -1);
 
 // Creates a source that reads multiple local files as one logical UTF-8 byte
 // stream, transcoding supported per-file text encodings.
-sanitize::Result<ChunkSourcePtr>
-chunk_source_from_paths_with_encoding(std::vector<std::string> paths,
-                                      std::string separator,
-                                      std::string_view encoding);
+sanitize::Result<ChunkSourcePtr> chunk_source_from_paths_with_encoding(
+    std::vector<std::string> paths, std::string separator,
+    std::string_view encoding, std::int64_t memory_limit_bytes = -1);
 
 // Creates a source that reads multiple local files as one logical byte stream
 // and annotates chunks with caller-provided display names.
-sanitize::Result<ChunkSourcePtr>
-chunk_source_from_paths_with_source_names(std::vector<std::string> paths,
-                                          std::vector<std::string> source_names,
-                                          std::string separator);
+sanitize::Result<ChunkSourcePtr> chunk_source_from_paths_with_source_names(
+    std::vector<std::string> paths, std::vector<std::string> source_names,
+    std::string separator, std::int64_t memory_limit_bytes = -1);
 
 // Creates a source that reads multiple local files as one logical UTF-8 byte
 // stream, transcoding supported text encodings and annotating source names.
 sanitize::Result<ChunkSourcePtr>
 chunk_source_from_paths_with_source_names_encoding(
     std::vector<std::string> paths, std::vector<std::string> source_names,
-    std::string separator, std::string_view encoding);
+    std::string separator, std::string_view encoding,
+    std::int64_t memory_limit_bytes = -1);
 
 } // namespace sanitize

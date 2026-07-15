@@ -21,7 +21,7 @@ from .native_reader import (
     native_writer_diagnostics,
     try_native_parquet_stream,
 )
-from .status import native_parquet_footer_info
+from .status import native_parquet_stream_preflight_info
 from .telemetry import (
     record_parquet_fallback_attempt,
     record_parquet_fallback_failure,
@@ -327,6 +327,7 @@ class ParquetRecordBatchStreamFactory:
         use_threads: bool = False,
         columns: list[str] | tuple[str, ...] | None = None,
         filters: Any | None = None,
+        memory_limit_bytes: int | None = None,
     ) -> None:
         """Store the Parquet source and read its schema once."""
         self._data = data
@@ -336,6 +337,7 @@ class ParquetRecordBatchStreamFactory:
         self._use_threads = use_threads
         self._columns = None if columns is None else tuple(columns)
         self._filters = filters
+        self._memory_limit_bytes = memory_limit_bytes
 
         prepared = prepare_parquet_factory_source(
             data, source=source, feature=feature, logger=_LOGGER
@@ -386,7 +388,7 @@ class ParquetRecordBatchStreamFactory:
         return try_native_parquet_stream(
             self,
             native_stream_read_hook=PARQUET_STREAM_READ,
-            footer_info=native_parquet_footer_info,
+            footer_info=native_parquet_stream_preflight_info,
             logger=_LOGGER,
         )
 
@@ -421,6 +423,7 @@ def open_parquet_record_batch_stream_factory(
     use_threads: bool = False,
     columns: list[str] | tuple[str, ...] | None = None,
     filters: Any | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> ParquetRecordBatchStreamFactory:
     """Open Parquet input as a reusable Arrow C Stream factory."""
     return ParquetRecordBatchStreamFactory(
@@ -431,4 +434,5 @@ def open_parquet_record_batch_stream_factory(
         use_threads=use_threads,
         columns=columns,
         filters=filters,
+        memory_limit_bytes=memory_limit_bytes,
     )

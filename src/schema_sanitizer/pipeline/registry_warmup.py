@@ -51,7 +51,7 @@ def prepare_schema_warm_up_input(
     xml_row_tag: str | None = None,
     csv_delimiter: str = ",",
     csv_has_header: bool = True,
-    batch_memory_limit_bytes: int | None = None,
+    memory_limit_bytes: int | None = None,
     _enable_parquet_native: bool = True,
     after_source_prepared: WarmUpProgressCallback | None = None,
 ) -> PreparedPublicInput:
@@ -79,7 +79,7 @@ def prepare_schema_warm_up_input(
                     xml_row_tag=xml_row_tag,
                     csv_delimiter=csv_delimiter,
                     csv_has_header=csv_has_header,
-                    memory_limit_bytes=batch_memory_limit_bytes,
+                    memory_limit_bytes=memory_limit_bytes,
                 )
             prepared_inputs.append(prepared)
             if after_source_prepared is not None:
@@ -97,7 +97,7 @@ def prepare_schema_warm_up_input(
             xml_row_tag=xml_row_tag,
             csv_delimiter=csv_delimiter,
             csv_has_header=csv_has_header,
-            memory_limit_bytes=batch_memory_limit_bytes,
+            memory_limit_bytes=memory_limit_bytes,
         )
     if source_plan is None:
         prepared_formats = sorted({prepared.format for prepared in prepared_inputs})
@@ -159,7 +159,7 @@ def infer_warm_up_schema_registry_state(
         xml_row_tag=options.get("xml_row_tag"),
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
-        batch_memory_limit_bytes=options.get("batch_memory_limit_bytes"),
+        memory_limit_bytes=options.get("memory_limit_bytes"),
         after_source_prepared=after_source_prepared,
     )
     try:

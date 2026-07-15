@@ -354,7 +354,7 @@ def test_seekable_filelike_is_rejected():
         read_test_json(src)
 
 
-def _run_csv(path: Path, chunk_bytes: int) -> pa.Table:
+def _run_csv(path: Path, memory_limit_bytes: int) -> pa.Table:
     """Run csv."""
     schema = pa.schema([("a", pa.int64()), ("b", pa.string())])
     return _read_with_contract(
@@ -362,7 +362,7 @@ def _run_csv(path: Path, chunk_bytes: int) -> pa.Table:
         format="csv",
         schema_contract=schema,
         schema_mode="strict",
-        read_chunk_bytes=chunk_bytes,
+        memory_limit_bytes=memory_limit_bytes,
     ).clean_data
 
 
@@ -372,8 +372,8 @@ def test_chunking_invariance_csv(tmp_path: Path) -> None:
     path = tmp_path / "rows.csv"
     path.write_text(csv_text, encoding="utf-8")
 
-    t1 = _run_csv(path, chunk_bytes=1024 * 1024)
-    t2 = _run_csv(path, chunk_bytes=17)
+    t1 = _run_csv(path, memory_limit_bytes=1024 * 1024)
+    t2 = _run_csv(path, memory_limit_bytes=64 * 1024 * 1024)
 
     assert t1.schema == t2.schema
     assert t1.equals(t2)
@@ -387,8 +387,8 @@ def test_inference_invariance_json(tmp_path: Path) -> None:
     path = tmp_path / "rows.jsonl"
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
-    t_a = read_test_jsonl(path, read_chunk_bytes=97).clean_data
-    t_b = read_test_jsonl(path, read_chunk_bytes=4096).clean_data
+    t_a = read_test_jsonl(path, memory_limit_bytes=1 << 20).clean_data
+    t_b = read_test_jsonl(path, memory_limit_bytes=64 << 20).clean_data
 
     assert t_a.schema == t_b.schema
     assert t_a.equals(t_b)
@@ -554,7 +554,7 @@ def test_memory_limit_bytes_raises_typed_error() -> None:
     payload = [{"a": "x" * 200_000}]
 
     with pytest.raises(schema_sanitizer.SchemaSanitizerResourceError) as excinfo:
-        read_test_python(payload, batch_memory_limit_bytes=64 * 1024)
+        read_test_python(payload, memory_limit_bytes=64 * 1024)
 
     err = excinfo.value
     assert getattr(err, "code", None) == "E_RESOURCE_LIMIT"

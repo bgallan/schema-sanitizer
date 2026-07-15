@@ -3,10 +3,209 @@
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 
+#include <algorithm>
+#include <cstddef>
+#include <limits>
 #include <memory>
 
 namespace core_abi3_internal::coalesce_detail {
 namespace {
+
+std::size_t saturating_add(std::size_t left, std::size_t right) noexcept {
+  return right > std::numeric_limits<std::size_t>::max() - left
+             ? std::numeric_limits<std::size_t>::max()
+             : left + right;
+}
+
+std::size_t saturating_multiply(std::size_t left, std::size_t right) noexcept {
+  return left != 0 && right > std::numeric_limits<std::size_t>::max() / left
+             ? std::numeric_limits<std::size_t>::max()
+             : left * right;
+}
+
+std::size_t retained_bytes_impl(const CoalescedNode &node) noexcept {
+  std::size_t total = node.validity.capacity();
+  total = saturating_add(total, node.data.capacity());
+  total = saturating_add(total, saturating_multiply(node.offsets32.capacity(),
+                                                    sizeof(std::int32_t)));
+  total = saturating_add(total, saturating_multiply(node.offsets64.capacity(),
+                                                    sizeof(std::int64_t)));
+  total = saturating_add(total, saturating_multiply(node.children.capacity(),
+                                                    sizeof(CoalescedNode)));
+  total = saturating_add(total, saturating_multiply(node.child_ptrs.capacity(),
+                                                    sizeof(ArrowArray *)));
+  for (const auto &child : node.children) {
+    total = saturating_add(total, retained_bytes_impl(child));
+  }
+  if (node.dictionary) {
+    total = saturating_add(total, sizeof(CoalescedNode));
+    total = saturating_add(total, retained_bytes_impl(*node.dictionary));
+  }
+  return total;
+}
+
+template <class Offset>
+std::size_t variable_width_slice_bytes(const ArrowArray &array,
+                                       const ArraySlice &slice) noexcept {
+  if (!array.buffers || !array.buffers[1]) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  const auto *offsets = static_cast<const Offset *>(array.buffers[1]);
+  const auto begin_index = array.offset + slice.offset;
+  const auto end_index = begin_index + slice.length;
+  if (begin_index < 0 || end_index < begin_index) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  const auto begin = offsets[static_cast<std::size_t>(begin_index)];
+  const auto end = offsets[static_cast<std::size_t>(end_index)];
+  if (begin < 0 || end < begin) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  const auto length = static_cast<std::size_t>(slice.length);
+  const auto offsets_bytes = saturating_multiply(
+      saturating_add(length, std::size_t{1}), sizeof(Offset));
+  return saturating_add(offsets_bytes, static_cast<std::size_t>(end - begin));
+}
+
+std::size_t estimated_slice_bytes(const CoalesceNodeSpec &spec,
+                                  const ArraySlice &slice,
+                                  bool force_validity = false) noexcept {
+  if (!slice.array || slice.length < 0) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  const auto length = static_cast<std::size_t>(slice.length);
+  const bool needs_validity =
+      force_validity || (slice.array->null_count != 0 && slice.array->buffers &&
+                         slice.array->buffers[0]);
+  std::size_t total = needs_validity ? (length + 7U) / 8U : 0;
+  switch (spec.kind) {
+  case CoalesceKind::kFixedWidth:
+  case CoalesceKind::kDictionary:
+    total =
+        saturating_add(total, saturating_multiply(length, spec.fixed_width));
+    break;
+  case CoalesceKind::kBool:
+    total = saturating_add(total, (length + 7U) / 8U);
+    break;
+  case CoalesceKind::kUtf8:
+  case CoalesceKind::kBinary:
+    total = saturating_add(
+        total, variable_width_slice_bytes<std::int32_t>(*slice.array, slice));
+    break;
+  case CoalesceKind::kLargeUtf8:
+  case CoalesceKind::kLargeBinary:
+    total = saturating_add(
+        total, variable_width_slice_bytes<std::int64_t>(*slice.array, slice));
+    break;
+  case CoalesceKind::kStruct:
+    if (!slice.array->children ||
+        slice.array->n_children !=
+            static_cast<std::int64_t>(spec.children.size())) {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    for (std::size_t index = 0; index < spec.children.size(); ++index) {
+      const auto *child = slice.array->children[index];
+      total = saturating_add(
+          total, estimated_slice_bytes(
+                     spec.children[index],
+                     ArraySlice{child, slice.array->offset + slice.offset,
+                                slice.length},
+                     needs_validity));
+    }
+    break;
+  case CoalesceKind::kList32:
+  case CoalesceKind::kList64: {
+    if (spec.children.size() != 1 || !slice.array->children ||
+        !slice.array->children[0] || !slice.array->buffers ||
+        !slice.array->buffers[1]) {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    if (spec.kind == CoalesceKind::kList32) {
+      const auto *offsets =
+          static_cast<const std::int32_t *>(slice.array->buffers[1]);
+      const auto begin_index = slice.array->offset + slice.offset;
+      const auto end_index = begin_index + slice.length;
+      if (begin_index < 0 || end_index < begin_index) {
+        return std::numeric_limits<std::size_t>::max();
+      }
+      const auto begin = offsets[static_cast<std::size_t>(begin_index)];
+      const auto end = offsets[static_cast<std::size_t>(end_index)];
+      if (begin < 0 || end < begin) {
+        return std::numeric_limits<std::size_t>::max();
+      }
+      total = saturating_add(
+          total, saturating_multiply(saturating_add(length, std::size_t{1}),
+                                     sizeof(std::int32_t)));
+      total = saturating_add(
+          total, estimated_slice_bytes(
+                     spec.children[0],
+                     ArraySlice{slice.array->children[0], begin, end - begin}));
+    } else {
+      const auto *offsets =
+          static_cast<const std::int64_t *>(slice.array->buffers[1]);
+      const auto begin_index = slice.array->offset + slice.offset;
+      const auto end_index = begin_index + slice.length;
+      if (begin_index < 0 || end_index < begin_index) {
+        return std::numeric_limits<std::size_t>::max();
+      }
+      const auto begin = offsets[static_cast<std::size_t>(begin_index)];
+      const auto end = offsets[static_cast<std::size_t>(end_index)];
+      if (begin < 0 || end < begin) {
+        return std::numeric_limits<std::size_t>::max();
+      }
+      total = saturating_add(
+          total, saturating_multiply(saturating_add(length, std::size_t{1}),
+                                     sizeof(std::int64_t)));
+      total = saturating_add(
+          total, estimated_slice_bytes(
+                     spec.children[0],
+                     ArraySlice{slice.array->children[0], begin, end - begin}));
+    }
+    break;
+  }
+  }
+  if (spec.kind == CoalesceKind::kDictionary && slice.array->dictionary &&
+      !spec.children.empty()) {
+    total = saturating_add(
+        total,
+        estimated_slice_bytes(spec.children[0],
+                              ArraySlice{slice.array->dictionary, 0,
+                                         slice.array->dictionary->length}));
+  }
+  return total;
+}
+
+std::int64_t fitting_slice_rows_impl(const CoalesceNodeSpec &spec,
+                                     const ArrowArray &array,
+                                     std::int64_t offset, std::int64_t max_rows,
+                                     std::size_t max_bytes) noexcept {
+  const auto available = array.length - offset;
+  if (available <= 0 || max_rows <= 0) {
+    return 0;
+  }
+  const auto upper = std::min(available, max_rows);
+  if (max_bytes == 0) {
+    return 0;
+  }
+  const auto full_bytes =
+      estimated_slice_bytes(spec, ArraySlice{&array, offset, upper});
+  if (full_bytes <= max_bytes) {
+    return upper;
+  }
+  std::int64_t low = 0;
+  std::int64_t high = upper;
+  while (low < high) {
+    const auto middle = low + (high - low + 1) / 2;
+    const auto bytes =
+        estimated_slice_bytes(spec, ArraySlice{&array, offset, middle});
+    if (bytes <= max_bytes) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return low;
+}
 
 void coalesced_child_release(ArrowArray *array) {
   if (!array || !array->release) {
@@ -25,6 +224,17 @@ void coalesced_array_release(ArrowArray *array) {
 }
 
 } // namespace
+
+std::size_t retained_bytes(const CoalescedNode &node) {
+  return retained_bytes_impl(node);
+}
+
+std::int64_t fitting_slice_rows(const CoalesceNodeSpec &spec,
+                                const ArrowArray &array, std::int64_t offset,
+                                std::int64_t max_rows,
+                                std::size_t max_bytes) noexcept {
+  return fitting_slice_rows_impl(spec, array, offset, max_rows, max_bytes);
+}
 
 sanitize::Status finish_node(CoalescedNode *node, const CoalesceNodeSpec &spec,
                              bool root) {

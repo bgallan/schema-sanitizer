@@ -22,6 +22,7 @@ namespace core_abi3_internal {
 
 struct ArrowDirectOptions {
   std::string_view timestamp_precision = "TIMESTAMP_MICROS";
+  std::int64_t memory_limit_bytes = -1;
 };
 
 // Returns whether an Arrow C schema can be consumed by the direct frontend.

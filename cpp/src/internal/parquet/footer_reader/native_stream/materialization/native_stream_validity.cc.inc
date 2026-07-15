@@ -1,10 +1,16 @@
 // ---- struct_rows ----
 
 sanitize::Result<std::int64_t> materialize_struct_validity_at_definition_level(
-    const ColumnChunkInfo &column, std::int64_t row_count,
+    const ColumnChunkInfo &column, const NativeFlatRowWindow &window,
     std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
+  SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
   if (column.max_repetition_level > 0) {
-    return materialize_row_struct_validity_from_levels(column, row_count,
+    if (window.first_row != 0 || window.row_count != window.row_group_rows) {
+      return sanitize::Status::NotImplemented(
+          "native Parquet reader: repeated struct validity cannot use row "
+          "windows");
+    }
+    return materialize_row_struct_validity_from_levels(column, window.row_count,
                                                        defined_level, validity);
   }
   if (!validity) {
@@ -15,15 +21,17 @@ sanitize::Result<std::int64_t> materialize_struct_validity_at_definition_level(
     validity->clear();
     return std::int64_t{0};
   }
-  if (row_count < 0 ||
-      row_count > std::numeric_limits<std::int64_t>::max() - 7) {
+  if (window.row_count > std::numeric_limits<std::int64_t>::max() - 7) {
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive struct row count is invalid");
   }
-  const auto validity_bytes = (row_count + 7) / 8;
+  const auto validity_bytes = (window.row_count + 7) / 8;
   validity->assign(static_cast<std::size_t>(validity_bytes), 0);
-  std::int64_t null_count = row_count;
+  std::int64_t null_count = window.row_count;
   for (const auto &span : column.native_read_page_spans) {
+    if (!window.overlaps(span.first_row_index, span.row_count)) {
+      continue;
+    }
     if (span.page_index < 0 ||
         static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
       return sanitize::Status::Invalid(
@@ -36,16 +44,20 @@ sanitize::Result<std::int64_t> materialize_struct_validity_at_definition_level(
           "native Parquet reader: recursive struct definition level count "
           "mismatch");
     }
-    for (std::int32_t row = 0; row < span.row_count; ++row) {
-      const auto global_row = span.first_row_index + row;
-      if (global_row < 0 || global_row >= row_count) {
+    const auto first = std::max(window.first_row, span.first_row_index);
+    const auto last =
+        std::min(window.end_row(), span.first_row_index + span.row_count);
+    for (auto global_row = first; global_row < last; ++global_row) {
+      const auto page_row = global_row - span.first_row_index;
+      if (page_row < 0 ||
+          page_row >= static_cast<std::int64_t>(
+                          page.decoded_definition_level_values.size())) {
         return sanitize::Status::Invalid(
-            "native Parquet reader: recursive struct row span exceeds row "
-            "group");
+            "native Parquet reader: recursive struct page row is invalid");
       }
-      if (page.decoded_definition_level_values[static_cast<std::size_t>(row)] >=
-          defined_level) {
-        set_output_validity_bit(validity, global_row);
+      if (page.decoded_definition_level_values[static_cast<std::size_t>(
+              page_row)] >= defined_level) {
+        set_output_validity_bit(validity, window.local_row(global_row));
         --null_count;
       }
     }
@@ -239,46 +251,36 @@ materialize_list_struct_child_validity_at_definition_level(
 // ---- native_stream_container_validity ----
 
 struct NativeRecursiveMapArrayLayout {
-  NativeRepeatedLevelLayoutView repeated_layout;
+  NativeRepeatedLevelLayoutWindow repeated_layout;
 };
 
 struct NativeRecursiveListArrayLayout {
-  NativeRepeatedLevelLayoutView repeated_layout;
+  NativeRepeatedLevelLayoutWindow repeated_layout;
 };
 
 sanitize::Result<NativeRecursiveMapArrayLayout>
 native_recursive_map_array_layout(const ColumnChunkInfo &column,
-                                  std::size_t layout_index) {
-  SAN_ASSIGN_OR_RAISE(const auto layout,
-                      native_repeated_level_layout(column, layout_index));
-  if (!layout.decoded) {
-    return sanitize::Status::NotImplemented(
-        "native Parquet reader: recursive map layout was not decoded");
-  }
-  return NativeRecursiveMapArrayLayout{layout};
+                                  std::size_t layout_index,
+                                  const NativeFlatRowWindow &window) {
+  SAN_ASSIGN_OR_RAISE(auto layout, native_repeated_level_layout_window(
+                                       column, layout_index, window));
+  return NativeRecursiveMapArrayLayout{std::move(layout)};
 }
 
 sanitize::Result<NativeRecursiveListArrayLayout>
 native_recursive_list_array_layout(const ColumnChunkInfo &column,
-                                   std::size_t layout_index) {
-  SAN_ASSIGN_OR_RAISE(const auto layout,
-                      native_repeated_level_layout(column, layout_index));
-  if (!layout.decoded) {
-    return sanitize::Status::NotImplemented(
-        "native Parquet reader: recursive list layout was not decoded");
-  }
-  return NativeRecursiveListArrayLayout{layout};
+                                   std::size_t layout_index,
+                                   const NativeFlatRowWindow &window) {
+  SAN_ASSIGN_OR_RAISE(auto layout, native_repeated_level_layout_window(
+                                       column, layout_index, window));
+  return NativeRecursiveListArrayLayout{std::move(layout)};
 }
 
 sanitize::Status configure_native_recursive_list_array(
     NativeParquetListArray *list_array,
-    const NativeRepeatedLevelLayoutView &layout, ArrowArray *child) {
-  if (!layout.validity_bitmap || !layout.offsets) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: recursive list layout buffers are invalid");
-  }
-  return configure_native_list_array(list_array, *layout.validity_bitmap,
-                                     *layout.offsets, child, layout.row_count,
+    const NativeRepeatedLevelLayoutWindow &layout, ArrowArray *child) {
+  return configure_native_list_array(list_array, layout.validity_bitmap,
+                                     layout.offsets, child, layout.row_count,
                                      layout.null_count);
 }
 
@@ -290,31 +292,40 @@ struct NativeRecursiveStructValidity {
 sanitize::Result<NativeRecursiveStructValidity>
 materialize_native_recursive_map_value_struct_validity(
     const ColumnChunkInfo &column, std::size_t map_layout_index,
-    std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
-  SAN_ASSIGN_OR_RAISE(const auto map_layout, native_recursive_map_array_layout(
-                                                 column, map_layout_index));
-  const auto &layout = map_layout.repeated_layout;
+    const NativeFlatRowWindow &window, std::int16_t defined_level,
+    std::vector<std::uint8_t> *validity) {
+  SAN_ASSIGN_OR_RAISE(const auto full_layout,
+                      native_repeated_level_layout(column, map_layout_index));
+  SAN_ASSIGN_OR_RAISE(const auto range, native_repeated_element_range(
+                                            column, map_layout_index, window));
   SAN_ASSIGN_OR_RAISE(
       const auto entry_levels,
       native_recursive_map_entry_level_context(column, map_layout_index));
-  SAN_ASSIGN_OR_RAISE(
-      const auto null_count,
-      materialize_map_entry_struct_validity_at_levels(
-          column, entry_levels, defined_level, layout.element_count, validity));
-  return NativeRecursiveStructValidity{layout.element_count, null_count};
+  std::vector<std::uint8_t> full_validity;
+  SAN_ASSIGN_OR_RAISE(const auto ignored_null_count,
+                      materialize_map_entry_struct_validity_at_levels(
+                          column, entry_levels, defined_level,
+                          full_layout.element_count, &full_validity));
+  (void)ignored_null_count;
+  std::int64_t null_count = 0;
+  copy_validity_bitmap_range(full_validity, range, validity, &null_count);
+  return NativeRecursiveStructValidity{range.count, null_count};
 }
 
 sanitize::Result<NativeRecursiveStructValidity>
 materialize_native_recursive_list_element_struct_validity(
     const ColumnChunkInfo &column, std::size_t list_layout_index,
-    std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
+    const NativeFlatRowWindow &window, std::int16_t defined_level,
+    std::vector<std::uint8_t> *validity) {
+  SAN_ASSIGN_OR_RAISE(const auto range, native_repeated_element_range(
+                                            column, list_layout_index, window));
+  std::vector<std::uint8_t> full_validity;
   SAN_ASSIGN_OR_RAISE(
-      const auto list_array_layout,
-      native_recursive_list_array_layout(column, list_layout_index));
-  const auto &list_layout = list_array_layout.repeated_layout;
-  SAN_ASSIGN_OR_RAISE(
-      const auto null_count,
+      const auto ignored_null_count,
       materialize_list_struct_child_validity_at_definition_level(
-          column, list_layout_index, defined_level, validity));
-  return NativeRecursiveStructValidity{list_layout.element_count, null_count};
+          column, list_layout_index, defined_level, &full_validity));
+  (void)ignored_null_count;
+  std::int64_t null_count = 0;
+  copy_validity_bitmap_range(full_validity, range, validity, &null_count);
+  return NativeRecursiveStructValidity{range.count, null_count};
 }

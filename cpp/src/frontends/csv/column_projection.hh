@@ -63,10 +63,6 @@ public:
                            const std::vector<std::string_view> &cells);
 
 private:
-  // Finds a planned root field addressable by a source column key.
-  [[nodiscard]] const sanitize::FieldIndex *
-  find_root_field(std::string_view key) const noexcept;
-
   // Performs one uncached root field lookup.
   [[nodiscard]] const sanitize::FieldIndex *
   find_root_field_uncached(std::string_view key) const noexcept;
@@ -82,6 +78,9 @@ private:
 
   // Ensures source-key hashes exist up to the requested column count.
   void ensure_column_hashes(std::size_t column_count);
+
+  // Resolves each source column once without duplicating owned key strings.
+  void ensure_resolved_fields(std::size_t column_count);
 
   // Ensures the per-column keep mask matches the active plan.
   void ensure_keep_mask(std::size_t column_count);
@@ -99,8 +98,8 @@ private:
   std::vector<std::string> headers_;
   std::vector<std::string> numeric_keys_;
   std::vector<std::uint64_t> column_hashes_;
+  std::vector<const sanitize::FieldIndex *> resolved_fields_;
   std::vector<uint8_t> keep_mask_;
-  mutable StringLookupMap<const sanitize::FieldIndex *> root_field_cache_;
 };
 
 } // namespace sanitize::internal

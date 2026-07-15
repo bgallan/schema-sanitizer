@@ -23,7 +23,7 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
 
     staged_calls = []
 
-    async def fake_list_remote_directory_files(uri, suffixes):
+    async def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
         """Return deterministic remote children without staging them."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".json",)
@@ -56,7 +56,6 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
         "stage_remote_files_to_directory",
         fake_stage_remote_files_to_directory,
     )
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_STAGE_FILES", "1")
 
     prepared = public_input.prepare_public_input(
         "s3://bucket/partition/",
@@ -76,14 +75,19 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
         assert staged_calls == []
         first = manifest.stage_chunk(0)
         assert first is not None
-        assert staged_calls == [["a.json"]]
+        assert staged_calls == [["a.json", "b.json"]]
         assert first.manifest.source_batch is not None
         assert path_source_tuples(first.manifest.source_batch) == [
             (
                 "json",
                 str(tmp_path / "staged-1" / "a.json"),
                 "s3://bucket/partition/a.json",
-            )
+            ),
+            (
+                "json",
+                str(tmp_path / "staged-1" / "b.json"),
+                "s3://bucket/partition/b.json",
+            ),
         ]
         first.close()
     finally:
@@ -114,7 +118,6 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         raise AssertionError("discovered remote directory should not be relisted")
 
     monkeypatch.setattr(remote_routing, "list_remote_directory", fail_listing)
-    monkeypatch.setenv("SCHEMA_SANITIZER_REMOTE_STAGE_FILES", "7")
 
     with discovered_directory_inputs(
         {
@@ -145,6 +148,6 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         assert plan.route_name == "remote_native_manifest_chunks"
         assert manifest is not None
         assert manifest.files == list(files)
-        assert manifest.chunk_size == 7
+        assert manifest.chunk_size == 256
     finally:
         prepared.close()

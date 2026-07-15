@@ -44,7 +44,7 @@ def _native_parquet_zlib_available(pa: object, tmp_path: Path) -> bool:
     batch = pa.record_batch({"text": pa.array(["probe"], type=pa.string())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     try:
-        write(stream, str(tmp_path / "native-zlib-probe.parquet"))
+        write(stream, str(tmp_path / "native-zlib-probe.parquet"), "gzip", -1, -1)
     except RuntimeError as exc:
         if "zlib is not available" in str(exc):
             return False
@@ -68,7 +68,6 @@ def test_parquet_native_file_output_writes_float_statistics_without_nan_bounds(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
         {
@@ -119,7 +118,6 @@ def test_parquet_native_file_output_skips_column_index_without_page_bounds(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch({"value": pa.array([float("nan"), float("nan")], type=pa.float64())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
@@ -156,13 +154,12 @@ def test_parquet_native_file_output_splits_large_batches_into_row_groups(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_ROWS", "2")
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
+    row_count = 400
     batch = pa.record_batch(
         {
-            "id": pa.array([1, 2, 3, 4, 5], type=pa.int64()),
-            "name": pa.array([f"name-{index}" for index in range(5)], type=pa.string()),
+            "id": pa.array(range(1, row_count + 1), type=pa.int64()),
+            "name": pa.array([f"name-{index}" for index in range(row_count)], type=pa.string()),
         }
     )
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
@@ -172,14 +169,20 @@ def test_parquet_native_file_output_splits_large_batches_into_row_groups(
         stream,
         out,
         feature="test_parquet_native_file_output_splits_large_batches_into_row_groups",
+        memory_limit_bytes=256 * 1024,
     )
 
     parquet_file = pq.ParquetFile(out)
-    assert parquet_file.metadata.num_rows == 5
-    assert parquet_file.metadata.num_row_groups == 3
-    assert [parquet_file.metadata.row_group(i).num_rows for i in range(3)] == [2, 2, 1]
+    assert parquet_file.metadata.num_rows == row_count
+    assert parquet_file.metadata.num_row_groups == 4
+    assert [parquet_file.metadata.row_group(i).num_rows for i in range(4)] == [
+        128,
+        128,
+        128,
+        16,
+    ]
     assert pq.read_table(out).to_pylist() == [
-        {"id": index + 1, "name": f"name-{index}"} for index in range(5)
+        {"id": index + 1, "name": f"name-{index}"} for index in range(row_count)
     ]
     assert native_file_output.last_parquet_stream_route() == "native"
 
@@ -197,7 +200,6 @@ def test_parquet_native_file_output_respects_uncompressed_override(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch({"text": pa.array(["same"] * 32, type=pa.string())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
@@ -207,11 +209,46 @@ def test_parquet_native_file_output_respects_uncompressed_override(
         stream,
         out,
         feature="test_parquet_native_file_output_respects_uncompressed_override",
+        parquet_compression="uncompressed",
     )
 
     parquet_file = pq.ParquetFile(out)
     assert parquet_file.metadata.row_group(0).column(0).compression == "UNCOMPRESSED"
     assert pq.read_table(out).to_pylist() == [{"text": "same"}] * 32
+    assert native_file_output.last_parquet_stream_route() == "native"
+
+
+def test_parquet_native_snappy_reduces_repeated_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify native Snappy emits copy records instead of literal-only blocks."""
+    require_native()
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
+
+    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
+        """Fail when the PyArrow Parquet sink fallback is called."""
+        raise AssertionError("PyArrow sink fallback should not be used")
+
+    monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
+    values = [f"shared-prefix-{'abc123' * 32}-{index:08d}" for index in range(1024)]
+    batch = pa.record_batch({"text": pa.array(values, type=pa.string())})
+    stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+    out = tmp_path / "snappy.parquet"
+
+    native_file_output.write_parquet_native_first_stream(
+        stream,
+        out,
+        feature="test_parquet_native_snappy_reduces_repeated_payload",
+        parquet_compression="snappy",
+    )
+
+    parquet_file = pq.ParquetFile(out)
+    column = parquet_file.metadata.row_group(0).column(0)
+    assert column.compression == "SNAPPY"
+    assert column.total_compressed_size < column.total_uncompressed_size
+    assert pq.read_table(out).column("text").to_pylist() == values
     assert native_file_output.last_parquet_stream_route() == "native"
 
 
@@ -228,8 +265,6 @@ def test_parquet_native_file_output_defaults_to_gzip_when_available(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.delenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", raising=False)
-    monkeypatch.delenv("SCHEMA_SANITIZER_NATIVE_PARQUET_GZIP_LEVEL", raising=False)
     if not _native_parquet_zlib_available(pa, tmp_path):
         pytest.skip("native Parquet writer was built without zlib")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
@@ -261,8 +296,6 @@ def test_parquet_native_file_output_accepts_gzip_level(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "gzip")
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_GZIP_LEVEL", "9")
     if not _native_parquet_zlib_available(pa, tmp_path):
         pytest.skip("native Parquet writer was built without zlib")
     batch = pa.record_batch({"text": pa.array(["compressible"] * 128, type=pa.string())})
@@ -273,6 +306,8 @@ def test_parquet_native_file_output_accepts_gzip_level(
         stream,
         out,
         feature="test_parquet_native_file_output_accepts_gzip_level",
+        parquet_compression="gzip",
+        parquet_gzip_level=9,
     )
 
     parquet_file = pq.ParquetFile(out)
@@ -288,19 +323,18 @@ def test_parquet_native_file_output_rejects_invalid_gzip_level(
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "gzip")
-    monkeypatch.delenv("SCHEMA_SANITIZER_NATIVE_PARQUET_GZIP_LEVEL", raising=False)
     if not _native_parquet_zlib_available(pa, tmp_path):
         pytest.skip("native Parquet writer was built without zlib")
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_GZIP_LEVEL", "fast")
     batch = pa.record_batch({"text": pa.array(["x"], type=pa.string())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
 
-    with pytest.raises(Exception, match="gzip level"):
+    with pytest.raises(ValueError, match="parquet_gzip_level"):
         native_file_output.write_parquet_native_first_stream(
             stream,
             tmp_path / "bad-gzip-level.parquet",
             feature="test_parquet_native_file_output_rejects_invalid_gzip_level",
+            parquet_compression="gzip",
+            parquet_gzip_level=10,
         )
 
 
@@ -313,15 +347,15 @@ def test_parquet_native_file_output_rejects_unknown_compression(
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", compression)
     batch = pa.record_batch({"text": pa.array(["x"], type=pa.string())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
 
-    with pytest.raises(Exception, match="unsupported compression"):
+    with pytest.raises(ValueError, match="parquet_compression"):
         native_file_output.write_parquet_native_first_stream(
             stream,
             tmp_path / "bad-compression.parquet",
             feature="test_parquet_native_file_output_rejects_unknown_compression",
+            parquet_compression=compression,
         )
     assert native_file_output.last_parquet_stream_route() == "none"
 

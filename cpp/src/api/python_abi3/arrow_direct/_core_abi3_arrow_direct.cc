@@ -8,9 +8,11 @@
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_batch.hh"
+#include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_validate.hh"
 #include "api/python_abi3/arrow_direct/schema/logical.hh"
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -19,6 +21,7 @@
 #include <vector>
 
 #include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/plan_compile.hh"
 #include "nanoarrow/nanoarrow.h"
 #include "sanitize/abi/cdata_types.hh"
@@ -28,6 +31,7 @@
 #include "sanitize/core/status.hh"
 #include "sanitize/ingest/ingest.hh"
 #include "sanitize/ingest/ingest_types.hh"
+#include "sanitize/runtime/execution_context.hh"
 
 namespace core_abi3_internal {
 namespace {
@@ -37,46 +41,94 @@ class ArrowDirectFrontend final {
 public:
   // Retains the Python capsule/keepalive objects for stream lifetime.
   ArrowDirectFrontend(ArrowArrayStream *stream, PyObject *capsule,
-                      PyObject *keepalive, std::vector<ArrowInputNode> fields)
+                      PyObject *keepalive, std::vector<ArrowInputNode> fields,
+                      std::int64_t memory_limit_bytes)
       : stream_(stream), capsule_(capsule), keepalive_(keepalive),
-        fields_(std::move(fields)) {
+        fields_(std::move(fields)), memory_limit_bytes_(memory_limit_bytes) {
     Py_XINCREF(keepalive_);
   }
 
-  // Releases retained Python objects.
+  // Releases foreign batches before dropping the Python stream keepalive.
   ~ArrowDirectFrontend() {
+    pending_.reset();
+    pending_offset_ = 0;
     decref_with_gil(capsule_);
+    capsule_ = nullptr;
     decref_with_gil(keepalive_);
+    keepalive_ = nullptr;
+    stream_ = nullptr;
   }
 
-  // Reads the next Arrow batch and exposes it as RowRef values.
+  // Reads at most capacity rows while retaining foreign buffers zero-copy.
   sanitize::Result<sanitize::RowBatch> next_batch(int64_t capacity) {
     sanitize::RowBatch out;
     if (done_ || capacity <= 0) {
       return out;
     }
-    auto storage = std::make_shared<ArrowBatchStorage>();
-    std::memset(&storage->array, 0, sizeof(storage->array));
-    const int code = stream_->get_next(stream_, &storage->array);
-    if (code != 0) {
-      const char *last_error =
-          stream_->get_last_error ? stream_->get_last_error(stream_) : nullptr;
-      return sanitize::Status::IOError(
-          last_error ? last_error : "Arrow direct stream get_next failed");
+
+    while (!pending_) {
+      std::shared_ptr<ArrowArrayStorage> storage;
+      try {
+        storage = std::make_shared<ArrowArrayStorage>();
+      } catch (const std::bad_alloc &) {
+        return sanitize::Status::OutOfMemory(
+            "Arrow direct input batch owner allocation failed");
+      }
+      sanitize::internal::cdata_stream::clear_array(&storage->array);
+
+      int code = 0;
+      try {
+        code = stream_->get_next(stream_, &storage->array);
+      } catch (...) {
+        return sanitize::internal::cdata_stream::status_from_current_exception(
+            "Arrow direct stream get_next");
+      }
+      if (code != 0) {
+        const char *last_error = nullptr;
+        try {
+          last_error = stream_->get_last_error
+                           ? stream_->get_last_error(stream_)
+                           : nullptr;
+        } catch (...) {
+          last_error = nullptr;
+        }
+        return sanitize::Status::IOError(
+            last_error ? last_error : "Arrow direct stream get_next failed");
+      }
+      if (!storage->array.release) {
+        done_ = true;
+        return out;
+      }
+      SAN_RETURN_NOT_OK(validate_arrow_direct_batch(storage->array, fields_,
+                                                    memory_limit_bytes_));
+      if (storage->array.length == 0) {
+        continue;
+      }
+      pending_ = std::move(storage);
+      pending_offset_ = 0;
     }
-    if (!storage->array.release) {
-      done_ = true;
-      return out;
+
+    const int64_t remaining = pending_->array.length - pending_offset_;
+    const int64_t row_count = std::min(capacity, remaining);
+    auto batch = build_arrow_direct_row_batch(pending_, fields_,
+                                              pending_offset_, row_count);
+    if (!batch.ok()) {
+      return batch.status();
     }
-    if (storage->array.n_children != static_cast<int64_t>(fields_.size())) {
-      return sanitize::Status::Invalid(
-          "Arrow direct batch column count does not match schema");
+    pending_offset_ += row_count;
+    if (pending_offset_ == pending_->array.length) {
+      pending_.reset();
+      pending_offset_ = 0;
     }
-    return build_arrow_direct_row_batch(std::move(storage), fields_);
+    return batch;
   }
 
-  // Marks the frontend exhausted.
-  void reset() noexcept { done_ = true; }
+  // Marks the frontend exhausted and releases any pending foreign batch.
+  void reset() noexcept {
+    pending_.reset();
+    pending_offset_ = 0;
+    done_ = true;
+  }
 
   // Direct Arrow rows already expose stable field references.
   void set_plan(const sanitize::CompiledPlan *) noexcept {}
@@ -86,6 +138,9 @@ private:
   PyObject *capsule_ = nullptr;
   PyObject *keepalive_ = nullptr;
   std::vector<ArrowInputNode> fields_;
+  std::int64_t memory_limit_bytes_ = -1;
+  std::shared_ptr<ArrowArrayStorage> pending_;
+  int64_t pending_offset_ = 0;
   bool done_ = false;
 };
 
@@ -132,13 +187,25 @@ make_arrow_frontend(PyObject *stream_obj, sanitize::LogicalSchema *schema,
     return sanitize::Status::Invalid(
         "Arrow direct input must expose __arrow_c_stream__");
   }
+  std::unique_ptr<PyObject, decltype(&decref_with_gil)> capsule_owner(
+      capsule, decref_with_gil);
 
   sanitize::CSchemaGuard c_schema;
-  const int code = stream->get_schema(stream, c_schema.get());
+  int code = 0;
+  try {
+    code = stream->get_schema(stream, c_schema.get());
+  } catch (...) {
+    return sanitize::internal::cdata_stream::status_from_current_exception(
+        "Arrow direct stream get_schema");
+  }
   if (code != 0) {
-    const char *last_error =
-        stream->get_last_error ? stream->get_last_error(stream) : nullptr;
-    Py_DECREF(capsule);
+    const char *last_error = nullptr;
+    try {
+      last_error =
+          stream->get_last_error ? stream->get_last_error(stream) : nullptr;
+    } catch (...) {
+      last_error = nullptr;
+    }
     return sanitize::Status::IOError(
         last_error ? last_error : "Arrow direct stream get_schema failed");
   }
@@ -146,17 +213,17 @@ make_arrow_frontend(PyObject *stream_obj, sanitize::LogicalSchema *schema,
   auto logical =
       logical_schema_from_arrow_schema(c_schema.get(), &fields, options);
   if (!logical.ok()) {
-    Py_DECREF(capsule);
     return logical.status();
   }
   *schema = std::move(logical).ValueOrDie();
 
   auto *frontend = new (std::nothrow)
-      ArrowDirectFrontend(stream, capsule, stream_obj, std::move(fields));
+      ArrowDirectFrontend(stream, capsule, stream_obj, std::move(fields),
+                          options.memory_limit_bytes);
   if (!frontend) {
-    Py_DECREF(capsule);
     return sanitize::Status::OutOfMemory("Arrow direct frontend OOM");
   }
+  (void)capsule_owner.release();
   return sanitize::FrontendHandle(frontend, &kArrowVTable);
 }
 
@@ -182,6 +249,17 @@ sanitize::Result<sanitize::IngestStream> ingest_direct_arrow_stream(
   prepared.frontend = std::move(frontend);
   prepared.owned_ctx = std::move(owned_ctx);
   prepared.ctx = prepared.owned_ctx.get();
+  if (!prepared.ctx) {
+    return sanitize::Status::Invalid(
+        "prepared ingest has no execution context");
+  }
+  prepared.operation_memory_pool =
+      prepared.ctx->make_operation_memory_pool_handle(
+          opts->spec.memory_limit_bytes);
+  if (!prepared.operation_memory_pool) {
+    return sanitize::Status::OutOfMemory(
+        "operation memory pool allocation failed");
+  }
   prepared.plan = plan;
   prepared.opts = std::move(opts);
   prepared.diagnostics = diag;

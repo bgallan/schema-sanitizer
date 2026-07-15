@@ -24,6 +24,7 @@ def write_jsonl_native_first_stream(
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
     timestamp_columns: tuple[str, ...] = (),
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write JSONL using direct native output or the PyArrow sink path."""
     stats = _native_output.try_write_jsonl_direct_native(
@@ -34,6 +35,7 @@ def write_jsonl_native_first_stream(
         all_row_columns=all_row_columns,
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
     )
     if stats:
         return stats
@@ -45,6 +47,7 @@ def write_jsonl_native_first_stream(
         all_row_columns=all_row_columns,
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
     )
 
 
@@ -57,6 +60,7 @@ def write_csv_native_first_stream(
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
     timestamp_columns: tuple[str, ...] = (),
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write CSV using direct native output or the PyArrow sink path."""
     stats = _native_output.try_write_csv_direct_native(
@@ -66,6 +70,7 @@ def write_csv_native_first_stream(
         all_row_columns=all_row_columns,
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
     )
     if stats:
         return stats
@@ -77,6 +82,7 @@ def write_csv_native_first_stream(
         all_row_columns=all_row_columns,
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
     )
 
 
@@ -120,6 +126,7 @@ def write_parquet_native_first_stream(
     timestamp_columns: tuple[str, ...] = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> None:
     """Write Parquet using direct native output or the PyArrow sink path."""
     set_last_parquet_stream_route("none")
@@ -135,6 +142,7 @@ def write_parquet_native_first_stream(
                 timestamp_columns=timestamp_columns,
                 parquet_compression=parquet_compression,
                 parquet_gzip_level=parquet_gzip_level,
+                memory_limit_bytes=memory_limit_bytes,
             )
         except RuntimeError as exc:
             if not should_retry_native_parquet_failure(exc):
@@ -155,6 +163,7 @@ def write_parquet_native_first_stream(
             timestamp_columns=timestamp_columns,
             parquet_compression=parquet_compression,
             parquet_gzip_level=parquet_gzip_level,
+            memory_limit_bytes=memory_limit_bytes,
         )
     finally:
         replay.close()
@@ -171,6 +180,7 @@ def try_write_raw_native_file_output(
     timestamp_columns: tuple[str, ...] = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write a raw native stream without PyArrow when supported."""
     if writer is write_jsonl_native_first_stream:
@@ -181,6 +191,7 @@ def try_write_raw_native_file_output(
             all_row_columns=all_row_columns,
             row_span_columns=row_span_columns,
             timestamp_columns=timestamp_columns,
+            memory_limit_bytes=memory_limit_bytes,
         )
     if writer is write_csv_native_first_stream:
         return _native_output.try_write_csv_raw_direct_native(
@@ -190,6 +201,7 @@ def try_write_raw_native_file_output(
             all_row_columns=all_row_columns,
             row_span_columns=row_span_columns,
             timestamp_columns=timestamp_columns,
+            memory_limit_bytes=memory_limit_bytes,
         )
     if writer is not write_parquet_native_first_stream:
         return False
@@ -203,6 +215,7 @@ def try_write_raw_native_file_output(
             timestamp_columns=timestamp_columns,
             parquet_compression=parquet_compression,
             parquet_gzip_level=parquet_gzip_level,
+            memory_limit_bytes=memory_limit_bytes,
         )
     except RuntimeError as exc:
         if not should_retry_native_parquet_failure(exc):

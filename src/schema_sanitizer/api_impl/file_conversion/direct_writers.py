@@ -6,7 +6,7 @@ import os
 from contextlib import suppress
 from typing import Any
 
-from ...adapters.parquet.compression import native_parquet_compression_environment
+from ...adapters.parquet.compression import native_parquet_writer_options
 from ...adapters.pyarrow.csv_sink import _native_csv_schema_supported, mark_csv_stream_route
 from ...adapters.pyarrow.file_metadata import (
     has_metadata_columns,
@@ -74,6 +74,7 @@ def try_write_csv_direct_native(
     all_row_columns: dict[str, Any] | None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
     timestamp_columns: tuple[str, ...],
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write CSV by composing native metadata injection and native output."""
     metadata_args = native_metadata_args_or_none(
@@ -91,6 +92,7 @@ def try_write_csv_direct_native(
         stream,
         output_path,
         *metadata_args,
+        -1 if memory_limit_bytes is None else memory_limit_bytes,
         output_path=output_path,
     )
     mark_metadata_route("native")
@@ -106,6 +108,7 @@ def try_write_csv_raw_direct_native(
     all_row_columns: dict[str, Any] | None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
     timestamp_columns: tuple[str, ...],
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write a raw native stream directly to CSV when supported."""
     metadata_args = native_metadata_args_or_none(
@@ -122,6 +125,7 @@ def try_write_csv_raw_direct_native(
             raw,
             output_path,
             *metadata_args,
+            -1 if memory_limit_bytes is None else memory_limit_bytes,
             output_path=output_path,
         )
         mark_metadata_route("native")
@@ -139,6 +143,7 @@ def try_write_csv_raw_direct_native(
         CSV_STREAM_WRITE,
         raw,
         output_path,
+        -1 if memory_limit_bytes is None else memory_limit_bytes,
         output_path=output_path,
     )
     mark_metadata_route("none")
@@ -155,6 +160,7 @@ def try_write_jsonl_direct_native(
     all_row_columns: dict[str, Any] | None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
     timestamp_columns: tuple[str, ...],
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write JSONL by composing native metadata injection and native output."""
     metadata_args = native_metadata_args_or_none(
@@ -175,6 +181,7 @@ def try_write_jsonl_direct_native(
         stream,
         output_path,
         *metadata_args,
+        -1 if memory_limit_bytes is None else memory_limit_bytes,
         output_path=output_path,
     )
     mark_metadata_route("native")
@@ -190,6 +197,7 @@ def try_write_jsonl_raw_direct_native(
     all_row_columns: dict[str, Any] | None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
     timestamp_columns: tuple[str, ...],
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write a raw native stream directly to JSONL when supported."""
     metadata_args = native_metadata_args_or_none(
@@ -206,6 +214,7 @@ def try_write_jsonl_raw_direct_native(
             raw,
             output_path,
             *metadata_args,
+            -1 if memory_limit_bytes is None else memory_limit_bytes,
             output_path=output_path,
         )
         mark_metadata_route("native")
@@ -223,6 +232,7 @@ def try_write_jsonl_raw_direct_native(
         JSONL_STREAM_WRITE,
         raw,
         output_path,
+        -1 if memory_limit_bytes is None else memory_limit_bytes,
         output_path=output_path,
     )
     mark_metadata_route("none")
@@ -240,6 +250,7 @@ def try_write_parquet_direct_native(
     timestamp_columns: tuple[str, ...],
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> bool:
     """Write Parquet directly through native output when supported."""
     metadata_stream = stream if hasattr(stream, "schema") else None
@@ -267,12 +278,20 @@ def try_write_parquet_direct_native(
         if metadata_args is not None
         else (stream, output_path)
     )
+    compression, gzip_level = native_parquet_writer_options(
+        parquet_compression=parquet_compression,
+        parquet_gzip_level=parquet_gzip_level,
+    )
+    native_memory_limit = -1 if memory_limit_bytes is None else memory_limit_bytes
     try:
-        with native_parquet_compression_environment(
-            parquet_compression=parquet_compression,
-            parquet_gzip_level=parquet_gzip_level,
-        ):
-            _call_native_writer(write, *args, output_path=output_path)
+        _call_native_writer(
+            write,
+            *args,
+            compression,
+            gzip_level,
+            native_memory_limit,
+            output_path=output_path,
+        )
     except RuntimeError as exc:
         if _is_native_parquet_unsupported(exc):
             return False
@@ -291,6 +310,7 @@ def try_write_parquet_raw_direct_native(
     timestamp_columns: tuple[str, ...],
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> bool:
     """Write a raw native stream directly to Parquet."""
     return try_write_parquet_direct_native(
@@ -302,4 +322,5 @@ def try_write_parquet_raw_direct_native(
         timestamp_columns=timestamp_columns,
         parquet_compression=parquet_compression,
         parquet_gzip_level=parquet_gzip_level,
+        memory_limit_bytes=memory_limit_bytes,
     )

@@ -178,15 +178,14 @@ def test_public_call_options_map_to_native_options() -> None:
         schema_contract=pa.schema([("a", pa.int64())]),
         schema_mode="strict",
         on_error="stop",
-        batch_memory_limit_bytes=1024 * 1024,
-        read_chunk_bytes=32 * 1024,
+        memory_limit_bytes=1024 * 1024,
         xml_row_tag="row",
     )
 
     assert opt.schema.schema_evolution.name == "STRICT"
     assert opt.errors.on_error.name == "STOP"
     assert opt.performance.memory_limit_bytes == 1024 * 1024
-    assert opt.io.io_chunk_bytes == 32 * 1024
+    assert opt.performance.memory_limit_bytes == 1024 * 1024
     assert opt.xml.xml_row_tag == "row"
 
 
@@ -270,8 +269,8 @@ def test_removed_temporal_pattern_names_are_rejected() -> None:
 def test_public_call_options_reject_non_positive_memory_limit() -> None:
     """Verify public call options reject non positive memory limit."""
     for value in (0, -1):
-        with pytest.raises(ValueError, match="batch_memory_limit_bytes"):
-            normalize_call_options(batch_memory_limit_bytes=value)
+        with pytest.raises(ValueError, match="memory_limit_bytes"):
+            normalize_call_options(memory_limit_bytes=value)
 
 
 def test_public_call_options_reject_invalid_numeric_limits() -> None:
@@ -280,7 +279,7 @@ def test_public_call_options_reject_invalid_numeric_limits() -> None:
         with pytest.raises(ValueError, match=key):
             normalize_call_options(**{key: -1})
     for value in (0, -1):
-        with pytest.raises(ValueError, match="read_chunk_bytes"):
+        with pytest.raises(TypeError, match="read_chunk_bytes"):
             normalize_call_options(read_chunk_bytes=value)
 
 
@@ -293,10 +292,9 @@ def test_public_call_options_reject_removed_max_depth() -> None:
 def test_public_call_options_reject_non_int_numeric_options() -> None:
     """Verify public call options reject non int numeric options."""
     for key in (
-        "batch_memory_limit_bytes",
+        "memory_limit_bytes",
         "arrow_max_depth",
         "parquet_max_depth",
-        "read_chunk_bytes",
     ):
         with pytest.raises(TypeError, match=key):
             normalize_call_options(**{key: True})
@@ -498,7 +496,6 @@ def test_internal_options_reject_non_int_integer_options() -> None:
     for group, key in (
         ("inference", "arrow_max_depth"),
         ("inference", "parquet_max_depth"),
-        ("io", "io_chunk_bytes"),
         ("performance", "memory_limit_bytes"),
     ):
         with pytest.raises(TypeError, match=key):

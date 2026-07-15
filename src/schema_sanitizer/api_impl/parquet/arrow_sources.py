@@ -16,8 +16,8 @@ from ...adapters.parquet.record_batch_factory import (
     open_parquet_record_batch_stream_factory,
 )
 from ...adapters.parquet.status import parquet_schema_is_direct_native_eligible
-from ...core_impl.async_scheduler import read_int_env
 from ...core_impl.dependencies import ensure_pyarrow
+from ...core_impl.memory_budget import memory_budget
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from ...input_impl.selection import _Source
 from ...options_impl.options import Options
@@ -87,6 +87,7 @@ def parquet_arrow_stream_factory_or_none(
             feature=feature,
             batch_size=parquet_batch_size_from_memory_limit(memory_limit_bytes),
             use_threads=parquet_use_threads_from_memory_limit(memory_limit_bytes),
+            memory_limit_bytes=memory_limit_bytes,
         )
     if not parquet_memory_limit_allows_direct_ingest(memory_limit_bytes):
         _set_route(set_route, "memory_limit")
@@ -106,9 +107,10 @@ def parquet_arrow_stream_factory_or_none(
     return factory
 
 
-def parquet_arrow_source_chunk_size() -> int:
-    """Return how many Parquet files to open per lazy Arrow-source chunk."""
-    return max(1, read_int_env("SCHEMA_SANITIZER_PARQUET_ARROW_SOURCE_CHUNK_FILES", 64))
+def parquet_arrow_source_chunk_size(call_options: Options | None) -> int:
+    """Derive the lazy Parquet file window from the memory budget."""
+    memory_limit_bytes, _timestamp_precision = _parquet_option_settings(call_options)
+    return min(4096, memory_budget(memory_limit_bytes).async_prefetch_files * 4)
 
 
 def parquet_arrow_sources_or_none(
@@ -148,18 +150,14 @@ class ParquetArrowSourceChunkProvider:
         *,
         call_options: Options | None,
         feature: str,
-        chunk_size: int | None = None,
         set_route: RouteCallback | None = None,
     ) -> None:
         """Store source descriptors without opening Parquet files yet."""
-        self._sources = tuple(sources)
+        self._sources = iter(sources)
         self._call_options = call_options
         self._feature = feature
-        self._chunk_size = (
-            parquet_arrow_source_chunk_size() if chunk_size is None else max(1, chunk_size)
-        )
+        self._chunk_size = parquet_arrow_source_chunk_size(call_options)
         self._set_route = set_route
-        self._index = 0
         self._current: list[tuple[Any, str]] = []
         self._closed = False
 
@@ -168,12 +166,10 @@ class ParquetArrowSourceChunkProvider:
         if self._closed:
             return None
         self._close_current()
-        if self._index >= len(self._sources):
+        chunk = list(islice(self._sources, self._chunk_size))
+        if not chunk:
             self.close()
             return None
-        end = min(self._index + self._chunk_size, len(self._sources))
-        chunk = islice(self._sources, self._index, end)
-        self._index = end
         current = parquet_arrow_sources_or_none(
             chunk,
             call_options=self._call_options,

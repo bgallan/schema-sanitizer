@@ -17,7 +17,7 @@ _ResultT = TypeVar("_ResultT")
 
 _RUNTIME_ERROR_TEXT_MATCHES: tuple[tuple[tuple[str, ...], type[SchemaSanitizerError]], ...] = (
     (("invalid:", "invalid argument"), SchemaSanitizerInvalidArgumentError),
-    (("out of memory",), SchemaSanitizerOutOfMemoryError),
+    (("out of memory", "outofmemory:"), SchemaSanitizerOutOfMemoryError),
     (("cancelled", "canceled"), SchemaSanitizerCancelledError),
 )
 

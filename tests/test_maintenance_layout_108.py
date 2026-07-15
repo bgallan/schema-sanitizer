@@ -19,13 +19,17 @@ def test_async_scheduler_has_a_neutral_core_owner() -> None:
     assert "async def ordered_indexed_results" in source
     assert "DirectoryDownloadTuning" not in source
 
+    pipeline = (SRC / "pipeline/source_discovery.py").read_text(encoding="utf-8")
+    assert "core_impl.async_scheduler" in pipeline
+    assert "remote_impl.scheduler" not in pipeline
+
     for relative in (
-        "pipeline/source_discovery.py",
         "api_impl/source_plan/remote.py",
         "api_impl/parquet/arrow_sources.py",
     ):
         consumer = (SRC / relative).read_text(encoding="utf-8")
-        assert "core_impl.async_scheduler" in consumer
+        assert "core_impl.memory_budget" in consumer
+        assert "core_impl.async_scheduler" not in consumer
         assert "remote_impl.scheduler" not in consumer
 
 

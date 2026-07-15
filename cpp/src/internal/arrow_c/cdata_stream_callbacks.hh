@@ -19,6 +19,8 @@ int errno_for_status(const sanitize::Status &st) noexcept;
 void release_schema_nothrow(ArrowSchema *schema) noexcept;
 // Releases an ArrowArray while suppressing callback exceptions.
 void release_array_nothrow(ArrowArray *array) noexcept;
+// Releases an ArrowArrayStream while suppressing callback exceptions.
+void release_stream_nothrow(ArrowArrayStream *stream) noexcept;
 // Clears an ArrowSchema into the empty released state.
 void clear_schema(ArrowSchema *schema) noexcept;
 // Clears an ArrowArray into the empty released state.

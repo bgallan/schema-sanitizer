@@ -74,6 +74,17 @@ void release_array_nothrow(ArrowArray *array) noexcept {
   }
 }
 
+void release_stream_nothrow(ArrowArrayStream *stream) noexcept {
+  if (!stream || !stream->release) {
+    return;
+  }
+  try {
+    stream->release(stream);
+  } catch (...) {
+    return;
+  }
+}
+
 void clear_schema(ArrowSchema *schema) noexcept {
   if (schema) {
     std::memset(schema, 0, sizeof(*schema));

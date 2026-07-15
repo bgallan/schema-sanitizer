@@ -97,6 +97,13 @@ sanitize::Result<RowGroupInfo> read_row_group(CompactReader &reader) {
         std::uint8_t element_type = 0;
         std::uint64_t count = 0;
         SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
+        if (count > kMaxColumnsPerRowGroup) {
+          return sanitize::Status::Invalid(
+              "Parquet footer: column count exceeds security limit");
+        }
+        SAN_RETURN_NOT_OK(validate_metadata_list(
+            reader, count, kMaxColumnsPerRowGroup, sizeof(ColumnChunkInfo),
+            "row-group columns"));
         row_group.columns.clear();
         row_group.columns.reserve(static_cast<std::size_t>(count));
         for (std::uint64_t i = 0; i < count; ++i) {
@@ -143,11 +150,14 @@ sanitize::Status read_row_groups(CompactReader &reader, FooterInfo *info) {
   std::uint8_t element_type = 0;
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
-  if (count >
-      static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
+  if (count > kMaxRowGroups ||
+      count > static_cast<std::uint64_t>(
+                  std::numeric_limits<std::int32_t>::max())) {
     return sanitize::Status::Invalid(
-        "Parquet footer: row group count out of range");
+        "Parquet footer: row group count exceeds security limit");
   }
+  SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, kMaxRowGroups,
+                                           sizeof(RowGroupInfo), "row groups"));
   info->row_group_count = static_cast<std::int32_t>(count);
   info->row_groups.clear();
   info->row_groups.reserve(static_cast<std::size_t>(count));

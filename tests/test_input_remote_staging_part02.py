@@ -62,7 +62,7 @@ def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
 
     fake_session = FakeSession()
 
-    async def fake_session_factory(headers):
+    async def fake_session_factory(headers, *, memory_limit_bytes=None):
         """Return the fake GCS session."""
         assert headers["Authorization"] == "Bearer token"
         return fake_session
@@ -135,7 +135,7 @@ def test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes(monkeypatch)
 
     fake_session = FakeSession()
 
-    async def fake_session_factory(headers):
+    async def fake_session_factory(headers, *, memory_limit_bytes=None):
         """Return the fake GCS session."""
         assert headers["Authorization"] == "Bearer token"
         return fake_session

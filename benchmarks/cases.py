@@ -9,6 +9,10 @@ READ_CASES = (
     "jsonl",
     "dirty-jsonl",
     "nested-jsonl",
+    "wide-jsonl",
+    "deep-jsonl",
+    "all-null-jsonl",
+    "empty-container-jsonl",
     "json-folder",
     "json-folder-many",
     "xml-folder",
@@ -25,5 +29,9 @@ WRITE_CASES = (
 FALLBACK_CASES = (
     "dirty-jsonl",
     "nested-jsonl",
+    "wide-jsonl",
+    "deep-jsonl",
+    "all-null-jsonl",
+    "empty-container-jsonl",
 )
 ALL_CASES = ("all", *READ_CASES, *WRITE_CASES)

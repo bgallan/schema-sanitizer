@@ -16,6 +16,9 @@ sanitize::Status JsonValueSpanScanner::push_segment(std::size_t end_pos) {
       total_bytes_ > kMaxValueBytes - part.size()) {
     return sanitize::Status::Invalid("JSON value exceeds max buffered size");
   }
+  if (segments_.size() >= kMaxSegments) {
+    return sanitize::Status::Invalid("JSON value spans too many input chunks");
+  }
   total_bytes_ += part.size();
   segments_.push_back(Segment{.owner = seg_owner_, .view = part});
   return sanitize::Status::OK();

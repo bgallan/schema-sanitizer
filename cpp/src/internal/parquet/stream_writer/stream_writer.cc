@@ -3,6 +3,7 @@
 #include "internal/parquet/parquet_stream_writer.hh"
 
 #include "internal/json_output/schema/model.hh"
+#include "internal/memory/memory_budget.hh"
 #include "internal/string_lookup.hh"
 #include "sanitize/abi/cdata_types.hh"
 
@@ -15,7 +16,6 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>

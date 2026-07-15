@@ -10,6 +10,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "ingest/chunk_source_detail.hh"
+#include "internal/memory/memory_budget.hh"
 #include "internal/planning/options_temporal_simple.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/detail/hash.hh"
@@ -17,6 +19,8 @@
 namespace sanitize {
 
 namespace {
+
+constexpr int32_t kMaxConfiguredNestingDepth = 512;
 
 // Validates scalar options before derived state is prepared.
 static sanitize::Status validate_option_values(const Options &opts) {
@@ -29,20 +33,26 @@ static sanitize::Status validate_option_values(const Options &opts) {
            separator.front() == 'e' || separator.front() == 'E';
   };
 
-  if (opts.io_chunk_bytes <= 0) {
-    return sanitize::Status::Invalid("io_chunk_bytes must be > 0");
-  }
-
   if (opts.memory_limit_bytes < -1) {
     return sanitize::Status::Invalid("memory_limit_bytes must be >= -1");
+  }
+  if (opts.memory_limit_bytes > internal::kHardMaxMemoryLimitBytes) {
+    return sanitize::Status::Invalid(
+        "memory_limit_bytes exceeds the absolute 64 GiB safety ceiling");
   }
 
   if (opts.arrow_max_depth < 0) {
     return sanitize::Status::Invalid("arrow_max_depth must be >= 0");
   }
+  if (opts.arrow_max_depth > kMaxConfiguredNestingDepth) {
+    return sanitize::Status::Invalid("arrow_max_depth exceeds safety limit");
+  }
 
   if (opts.parquet_max_depth < 0) {
     return sanitize::Status::Invalid("parquet_max_depth must be >= 0");
+  }
+  if (opts.parquet_max_depth > kMaxConfiguredNestingDepth) {
+    return sanitize::Status::Invalid("parquet_max_depth exceeds safety limit");
   }
 
   if (invalid_float_separator(opts.parse_float_decimal_separator)) {

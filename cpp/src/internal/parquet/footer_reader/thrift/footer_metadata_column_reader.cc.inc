@@ -1,10 +1,13 @@
 // Parses primitive lists and Parquet column metadata from compact Thrift.
 
 sanitize::Result<std::vector<std::int32_t>>
-read_i32_list(CompactReader &reader) {
+read_i32_list(CompactReader &reader, std::uint64_t max_count,
+              std::string_view label) {
   std::uint8_t element_type = 0;
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
+  SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, max_count,
+                                           sizeof(std::int32_t), label));
   std::vector<std::int32_t> out;
   out.reserve(static_cast<std::size_t>(count));
   for (std::uint64_t i = 0; i < count; ++i) {
@@ -20,10 +23,13 @@ read_i32_list(CompactReader &reader) {
 }
 
 sanitize::Result<std::vector<std::int64_t>>
-read_i64_list(CompactReader &reader) {
+read_i64_list(CompactReader &reader, std::uint64_t max_count,
+              std::string_view label) {
   std::uint8_t element_type = 0;
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
+  SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, max_count,
+                                           sizeof(std::int64_t), label));
   std::vector<std::int64_t> out;
   out.reserve(static_cast<std::size_t>(count));
   for (std::uint64_t i = 0; i < count; ++i) {
@@ -38,10 +44,15 @@ read_i64_list(CompactReader &reader) {
   return out;
 }
 
-sanitize::Result<std::vector<bool>> read_bool_list(CompactReader &reader) {
+sanitize::Result<std::vector<bool>> read_bool_list(CompactReader &reader,
+                                                   std::uint64_t max_count,
+                                                   std::string_view label) {
   std::uint8_t element_type = 0;
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
+  // Charge one byte per element conservatively even though vector<bool> packs
+  // bits; this leaves headroom for implementation-specific allocation.
+  SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, max_count, 1, label));
   std::vector<bool> out;
   out.reserve(static_cast<std::size_t>(count));
   for (std::uint64_t i = 0; i < count; ++i) {
@@ -64,10 +75,13 @@ sanitize::Result<std::vector<bool>> read_bool_list(CompactReader &reader) {
 }
 
 sanitize::Result<std::vector<std::string>>
-read_string_list(CompactReader &reader) {
+read_string_list(CompactReader &reader, std::uint64_t max_count,
+                 std::string_view label) {
   std::uint8_t element_type = 0;
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
+  SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, max_count,
+                                           sizeof(std::string), label));
   std::vector<std::string> out;
   out.reserve(static_cast<std::size_t>(count));
   for (std::uint64_t i = 0; i < count; ++i) {
@@ -112,14 +126,18 @@ sanitize::Result<ColumnChunkInfo> read_column_metadata(CompactReader &reader,
       break;
     case 2:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(column.encodings, read_i32_list(reader));
+        SAN_ASSIGN_OR_RAISE(
+            column.encodings,
+            read_i32_list(reader, kMaxColumnEncodingEntries, "encoding list"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
       break;
     case 3:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(column.path_in_schema, read_string_list(reader));
+        SAN_ASSIGN_OR_RAISE(
+            column.path_in_schema,
+            read_string_list(reader, kMaxSchemaPathEntries, "schema path"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }

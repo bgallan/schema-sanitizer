@@ -21,21 +21,27 @@ sanitize::Result<ColumnIndexInfo> parse_column_index(std::string_view bytes) {
     switch (field_id) {
     case 1:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(index.null_pages, read_bool_list(reader));
+        SAN_ASSIGN_OR_RAISE(index.null_pages,
+                            read_bool_list(reader, kMaxPagesPerColumn,
+                                           "column-index null pages"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
       break;
     case 2:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(index.min_values, read_string_list(reader));
+        SAN_ASSIGN_OR_RAISE(index.min_values,
+                            read_string_list(reader, kMaxPagesPerColumn,
+                                             "column-index values"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
       break;
     case 3:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(index.max_values, read_string_list(reader));
+        SAN_ASSIGN_OR_RAISE(index.max_values,
+                            read_string_list(reader, kMaxPagesPerColumn,
+                                             "column-index values"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
@@ -50,7 +56,9 @@ sanitize::Result<ColumnIndexInfo> parse_column_index(std::string_view bytes) {
       break;
     case 5:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(index.null_counts, read_i64_list(reader));
+        SAN_ASSIGN_OR_RAISE(index.null_counts,
+                            read_i64_list(reader, kMaxPagesPerColumn,
+                                          "column-index null counts"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
@@ -133,6 +141,9 @@ sanitize::Result<OffsetIndexInfo> parse_offset_index(std::string_view bytes) {
       std::uint8_t element_type = 0;
       std::uint64_t count = 0;
       SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
+      SAN_RETURN_NOT_OK(validate_metadata_list(
+          reader, count, kMaxPagesPerColumn, sizeof(PageLocationInfo),
+          "offset-index page locations"));
       index.locations.reserve(static_cast<std::size_t>(count));
       for (std::uint64_t i = 0; i < count; ++i) {
         if (element_type != kTypeStruct) {

@@ -25,7 +25,8 @@ public:
   sanitize::Result<RowBatch> next_batch(int64_t capacity);
 
 private:
-  void append_record(CsvBatchStorage *storage, const TextSlice &record);
+  sanitize::Status append_record(CsvBatchStorage *storage,
+                                 const TextSlice &record);
   sanitize::Result<bool> consume_header_record(const TextSlice &record);
   sanitize::Status process_header_record(const TextSlice &record);
   static char resolved_delimiter(const Options &options) noexcept;

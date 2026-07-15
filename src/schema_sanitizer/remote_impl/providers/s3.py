@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ...core_impl.async_scheduler import read_int_env, retry_async
+from ...core_impl.async_scheduler import retry_async
+from ...core_impl.memory_budget import memory_budget
 from ...core_impl.uris import name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
@@ -37,23 +37,27 @@ def parse_uri(uri: str) -> S3Ref:
     return S3Ref(parsed.netloc, parsed.path.lstrip("/"))
 
 
+def client_options() -> dict[str, Any]:
+    """Return explicit SDK options owned by Schema-Sanitizer.
+
+    Credential, region, and endpoint resolution are delegated to the SDK;
+    Schema-Sanitizer does not inspect process environment variables.
+    """
+    return {}
+
+
 async def open_client() -> Any:
     """Open an aiobotocore S3 client."""
     aiobotocore = import_module("aiobotocore.session")
-
-    session = aiobotocore.get_session()
-    kwargs: dict[str, Any] = {}
-    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-    if region:
-        kwargs["region_name"] = region
-    return session.create_client("s3", **kwargs)
+    return aiobotocore.get_session().create_client("s3", **client_options())
 
 
 async def download_bytes(client: Any, file: RemoteFile) -> bytes:
     """Download one S3 object into bytes using a shared client."""
     ref = parse_uri(file.uri)
     response = await client.get_object(Bucket=ref.bucket, Key=ref.key)
-    async with response["Body"] as body:
+    body = response["Body"]
+    async with body:
         return await body.read()
 
 
@@ -98,7 +102,8 @@ async def download_file_with_client(client: Any, file: RemoteFile, local_path: s
     """Download one S3 object to a local file using a shared client."""
     ref = parse_uri(file.uri)
     response = await client.get_object(Bucket=ref.bucket, Key=ref.key)
-    async with response["Body"] as body:
+    body = response["Body"]
+    async with body:
         with Path(local_path).open("wb") as file_handle:
             while chunk := await body.read(TRANSFER_CHUNK_BYTES):
                 file_handle.write(chunk)
@@ -152,6 +157,8 @@ async def list_files(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile]:
 async def directories_containing_files(
     uris: list[str],
     suffixes: tuple[str, ...],
+    *,
+    memory_limit_bytes: int | None = None,
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether S3 directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
@@ -169,11 +176,9 @@ async def directories_containing_files(
     if not groups:
         return discovery.finish()
 
-    concurrency = read_int_env("SCHEMA_SANITIZER_SOURCE_DISCOVERY_S3_BULK_CONCURRENCY", 16)
-    retries = read_int_env(
-        "SCHEMA_SANITIZER_SOURCE_DISCOVERY_S3_RETRIES",
-        read_int_env("SCHEMA_SANITIZER_ASYNC_RETRIES", 4),
-    )
+    budget = memory_budget(memory_limit_bytes)
+    concurrency = budget.source_discovery_concurrency
+    retries = budget.async_retries
     semaphore = asyncio.Semaphore(concurrency)
 
     async def scan_group(bucket: str, parent_prefix: str, children: dict[str, list[str]]) -> None:

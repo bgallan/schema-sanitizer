@@ -1,5 +1,6 @@
 // Materializes one JSON text slice into a planned row batch.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -10,6 +11,7 @@
 #include "frontends/builtin_frontends.hh"
 #include "frontends/json/root_field_filter.hh"
 #include "internal/memory/arena.hh"
+#include "internal/memory/memory_budget.hh"
 #include "internal/memory/pool_resource.hh"
 #include "internal/parsing/flat_row_batch.hh"
 #include "internal/parsing/json/ondemand/document.hh"
@@ -31,22 +33,29 @@ struct BatchStorage {
 
   BatchStorage() : arena(pmr_pool.pool()), doc(&pmr_pool) {}
 
-  // Keeps backing chunks alive when values alias ChunkSource buffers.
-  void keep(const std::shared_ptr<const void> &owner) {
-    if (!owner || owner.get() == last_owner_ptr) {
+  // Keeps each backing chunk once even when source-name ownership is retained
+  // between rows. A single shared last-owner pointer alternated between the
+  // data and source-name owners and therefore appended both again per row.
+  void keep_data_owner(const std::shared_ptr<const void> &owner) {
+    if (!owner || owner.get() == last_data_owner_ptr) {
       return;
     }
-    last_owner_ptr = owner.get();
+    last_data_owner_ptr = owner.get();
     keepalive.push_back(owner);
   }
 
-  // Retains source-name storage for generated row metadata.
+  // Retains each source-name owner once per contiguous source.
   void keep_source_name(const std::shared_ptr<const std::string> &owner) {
-    keep(std::static_pointer_cast<const void>(owner));
+    if (!owner || owner.get() == last_source_name_owner_ptr) {
+      return;
+    }
+    last_source_name_owner_ptr = owner.get();
+    keepalive.push_back(std::static_pointer_cast<const void>(owner));
   }
 
   std::vector<std::shared_ptr<const void>> keepalive;
-  const void *last_owner_ptr = nullptr;
+  const void *last_data_owner_ptr = nullptr;
+  const void *last_source_name_owner_ptr = nullptr;
 };
 
 class JsonTextRows final {
@@ -72,7 +81,7 @@ public:
     if (require_object_rows_ && !is_object_row) {
       return sanitize::Status::Invalid("json_array requires object elements");
     }
-    storage->keep(slice.owner);
+    storage->keep_data_owner(slice.owner);
     storage->keep_source_name(slice.source_file_owner);
     const uint8_t row_flags = (raw_only_ && is_object_row)
                                   ? std::to_underlying(RowFlags::kRawOnly)
@@ -91,6 +100,7 @@ private:
     FlatRowBatch *batch = nullptr;
     const CompiledPlan *plan = nullptr;
     const JsonTextRows *rows = nullptr;
+    std::size_t emitted_fields = 0;
   };
 
   [[nodiscard]] static sanitize::Status
@@ -117,8 +127,14 @@ private:
         (!ctx->rows || !ctx->rows->matches_root_field(key, key_hash))) {
       return sanitize::Status::OK();
     }
+    if (ctx->emitted_fields >= kMaxMaterializedFieldsPerRow) {
+      return sanitize::Status::Invalid(
+          "JSON object field count exceeds safety limit: ",
+          ctx->emitted_fields + 1U, " > ", kMaxMaterializedFieldsPerRow);
+    }
     ctx->batch->push(
         FieldRef{.key = key, .key_hash = key_hash, .value = value});
+    ++ctx->emitted_fields;
     return sanitize::Status::OK();
   }
 
@@ -190,8 +206,9 @@ public:
                    bool require_top_level_array = false,
                    bool require_object_rows = false)
       : src_(std::move(src)), rows_(options, require_object_rows) {
-    chunk_bytes_ = options.io_chunk_bytes > 0 ? options.io_chunk_bytes
-                                              : (int64_t{1} << 20);
+    chunk_bytes_ =
+        internal::memory_budget_from_limit(options.memory_limit_bytes)
+            .io_chunk_bytes;
     scanner_ = std::make_unique<JsonStreamingScanner>(src_, chunk_bytes_,
                                                       require_top_level_array);
     reset_status_ = scanner_->Reset();
@@ -338,7 +355,8 @@ private:
     source_names.push_back(source_names_[index_]);
     SAN_ASSIGN_OR_RAISE(auto src,
                         sanitize::chunk_source_from_paths_with_source_names(
-                            std::move(paths), std::move(source_names), "\n"));
+                            std::move(paths), std::move(source_names), "\n",
+                            options_.memory_limit_bytes));
     current_ = make_json_array_element_frontend(std::move(src), options_,
                                                 require_object_rows_);
     if (!current_) {

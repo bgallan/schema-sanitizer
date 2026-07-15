@@ -11,6 +11,7 @@ PyObject *py_context_new(PyObject *, PyObject *);
 PyObject *py_context_memory_stats_json(PyObject *, PyObject *);
 PyObject *py_diagnostics_json(PyObject *, PyObject *);
 PyObject *py_options_catalog(PyObject *, PyObject *);
+PyObject *py_memory_budget(PyObject *, PyObject *);
 PyObject *py_options_prepare_bytes(PyObject *, PyObject *);
 
 // Logical-schema payloads.
@@ -29,6 +30,7 @@ PyObject *py_csv_schema_supported(PyObject *, PyObject *);
 PyObject *py_parquet_stream_write(PyObject *, PyObject *);
 PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *);
 PyObject *py_parquet_footer_info_json(PyObject *, PyObject *);
+PyObject *py_parquet_stream_preflight_json(PyObject *, PyObject *);
 PyObject *py_parquet_stream_read(PyObject *, PyObject *);
 PyObject *py_jsonl_stream_write(PyObject *, PyObject *);
 PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *);

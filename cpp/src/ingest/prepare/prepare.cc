@@ -39,6 +39,12 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   if (!ctx) {
     return sanitize::Status::Invalid("prepare_ingest: ctx is null");
   }
+  auto operation_memory_pool =
+      ctx->make_operation_memory_pool_handle(opts->spec.memory_limit_bytes);
+  if (!operation_memory_pool) {
+    return sanitize::Status::OutOfMemory(
+        "prepare_ingest: operation memory pool allocation failed");
+  }
 
   const bool has_contract = static_cast<bool>(opts->spec.arrow_schema_contract);
   if (opts->spec.schema_evolution == SchemaEvolutionMode::kStrict &&
@@ -55,10 +61,11 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   LogicalSchema inferred_schema;
   bool inference_consumed = false;
   if (need_inference) {
-    SAN_ASSIGN_OR_RAISE(
-        inferred_schema,
-        ingest_internal::infer_schema_from_frontend(
-            frontend, *opts, diagnostics.get(), &inference_consumed, ctx));
+    SAN_ASSIGN_OR_RAISE(inferred_schema,
+                        ingest_internal::infer_schema_from_frontend(
+                            frontend, *opts, diagnostics.get(),
+                            &inference_consumed, ctx,
+                            operation_memory_pool.get()));
   }
 
   LogicalSchema final_schema;
@@ -78,6 +85,7 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   out.frontend = std::move(frontend);
   out.owned_ctx = std::move(owned_ctx);
   out.ctx = ctx;
+  out.operation_memory_pool = std::move(operation_memory_pool);
   out.plan = std::move(plan);
   out.opts = std::move(opts);
   out.diagnostics = std::move(diagnostics);

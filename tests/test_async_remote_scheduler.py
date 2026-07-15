@@ -158,3 +158,67 @@ def test_unordered_indexed_results_reuses_fixed_worker_tasks(
         assert created == 4
 
     asyncio.run(run())
+
+
+def test_retry_async_stops_on_non_retryable_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Permanent remote failures are not retried or delayed."""
+
+    async def run() -> None:
+        """Run a permanent-error retry scenario."""
+        attempts = 0
+        sleeps: list[float] = []
+
+        async def operation() -> bytes:
+            """Raise one non-retryable permission error."""
+            nonlocal attempts
+            attempts += 1
+            raise PermissionError("forbidden")
+
+        async def fake_sleep(delay: float) -> None:
+            """Record unexpected backoff calls."""
+            sleeps.append(delay)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        with pytest.raises(PermissionError, match="forbidden"):
+            await retry_async(
+                operation,
+                retries=5,
+                should_retry=lambda exc: not isinstance(exc, PermissionError),
+            )
+        assert attempts == 1
+        assert sleeps == []
+
+    asyncio.run(run())
+
+
+def test_retry_async_exhausts_selected_transient_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retryable failures stop after the configured number of retries."""
+
+    async def run() -> None:
+        """Run an exhausted transient-error retry scenario."""
+        attempts = 0
+        sleeps: list[float] = []
+
+        async def operation() -> bytes:
+            """Raise one retryable transient error."""
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("transient")
+
+        async def fake_sleep(delay: float) -> None:
+            """Record each configured backoff call."""
+            sleeps.append(delay)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        with pytest.raises(RuntimeError, match="transient"):
+            await retry_async(
+                operation,
+                retries=2,
+                should_retry=lambda exc: isinstance(exc, RuntimeError),
+            )
+        assert attempts == 3
+        assert len(sleeps) == 2
+
+    asyncio.run(run())

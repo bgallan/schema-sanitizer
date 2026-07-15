@@ -337,71 +337,21 @@ jobs:
           python-version: '3.11'
       - name: Install cibuildwheel
         run: python -m pip install -U pip cibuildwheel
-      - name: Install zlib (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: vcpkg install zlib:x64-windows-static
       - name: Build wheels (abi3, Linux)
         if: runner.os == 'Linux'
-        env:
-          # One build per platform: abi3 wheels, built with CPython 3.11.
-          CIBW_BUILD: cp311-*
-          CIBW_PROJECT_REQUIRES_PYTHON: '>=3.11'
-          CIBW_BUILD_VERBOSITY: 1
-          CIBW_SKIP: '*-musllinux_*'
-          CIBW_ARCHS_LINUX: ${{ matrix.arch_linux }}
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
-          CIBW_TEST_REQUIRES: pyarrow
-          CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import
-            pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
-            source=d/'input.csv'; p=d/'gzip.parquet';
-            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
-            s.to_parquet(source, p, input_format='csv');
-            c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
-            assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
-        run: cibuildwheel --output-dir wheelhouse
+        run: >-
+          python -m cibuildwheel --output-dir wheelhouse
+          --archs '${{ matrix.arch_linux }}'
       - name: Build wheels (abi3, Windows)
         if: runner.os == 'Windows'
-        env:
-          CIBW_BUILD: cp311-*
-          CIBW_PROJECT_REQUIRES_PYTHON: '>=3.11'
-          CIBW_BUILD_VERBOSITY: 1
-          CIBW_ARCHS_WINDOWS: ${{ matrix.arch_windows }}
-          CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static"
-          CIBW_TEST_REQUIRES: pyarrow
-          CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import
-            pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
-            source=d/'input.csv'; p=d/'gzip.parquet';
-            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
-            s.to_parquet(source, p, input_format='csv');
-            c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
-            assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
-        run: cibuildwheel --output-dir wheelhouse
+        run: >-
+          python -m cibuildwheel --output-dir wheelhouse
+          --archs '${{ matrix.arch_windows }}'
       - name: Build wheels (abi3, macOS)
         if: runner.os == 'macOS'
-        env:
-          CIBW_BUILD: cp311-*
-          CIBW_PROJECT_REQUIRES_PYTHON: '>=3.11'
-          CIBW_BUILD_VERBOSITY: 1
-          CIBW_ARCHS_MACOS: ${{ matrix.arch_macos }}
-          CIBW_ENVIRONMENT: CMAKE_ARGS="-DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON"
-          CIBW_TEST_REQUIRES: pyarrow
-          CIBW_TEST_COMMAND: >-
-            python -c "import tempfile; from pathlib import Path; import
-            pyarrow.parquet as pq; import schema_sanitizer as s,
-            schema_sanitizer._core_abi3 as m; d=Path(tempfile.mkdtemp());
-            source=d/'input.csv'; p=d/'gzip.parquet';
-            source.write_text('s\n' + 'x\n'*32, encoding='utf-8');
-            s.to_parquet(source, p, input_format='csv');
-            c=pq.ParquetFile(p).metadata.row_group(0).column(0).compression;
-            assert c == 'GZIP', c; print(s.__version__, m.__file__, c)"
-        run: cibuildwheel --output-dir wheelhouse
+        run: >-
+          python -m cibuildwheel --output-dir wheelhouse
+          --archs '${{ matrix.arch_macos }}'
       - uses: actions/upload-artifact@v6
         with:
           name: dist-wheels-${{ matrix.name }}

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.machinery
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,18 +20,18 @@ def test_public_version_nonempty() -> None:
     assert ss.__version__.strip()
 
 
-def test_import_error_loader_debug_omits_environment_by_default(monkeypatch) -> None:
-    """Verify import error loader debug omits environment by default."""
+def test_import_error_loader_debug_never_collects_environment() -> None:
+    """Verify loader diagnostics never inspect process environment state."""
     from schema_sanitizer.core_impl.loader_debug import collect_loader_debug, loader_debug
 
-    monkeypatch.setenv("PYTHONPATH", "secret-project-path")
-
     collected = collect_loader_debug()
-    explicit = loader_debug(include_env=True)
+    explicit = loader_debug()
 
     assert "env" not in collected
+    assert "environment" not in collected
+    assert "env" not in explicit
+    assert "environment" not in explicit
     assert Path(explicit["package"]["package_dir"]).name == "schema_sanitizer"
-    assert explicit["env"]["PYTHONPATH"] == "secret-project-path"
 
 
 def test_native_loader_does_not_scan_current_working_directory(tmp_path: Path) -> None:
@@ -43,20 +42,16 @@ def test_native_loader_does_not_scan_current_working_directory(tmp_path: Path) -
         (shadow_pkg / f"_core_abi3{suffix}").write_bytes(b"not a shared library")
 
     src_dir = Path(__file__).resolve().parents[1] / "src"
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.fspath(src_dir)
+    code = (
+        "import sys; "
+        f"sys.path.insert(0, {str(src_dir)!r}); "
+        "from schema_sanitizer.api_impl.execution_context import ExecutionContext; "
+        "print(ExecutionContext().memory_stats()['backend_name'])"
+    )
 
     proc = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "from schema_sanitizer.api_impl.execution_context import ExecutionContext; "
-                "print(ExecutionContext().memory_stats()['backend_name'])"
-            ),
-        ],
+        [sys.executable, "-c", code],
         cwd=tmp_path,
-        env=env,
         text=True,
         capture_output=True,
         check=False,

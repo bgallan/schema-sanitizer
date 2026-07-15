@@ -1,0 +1,102 @@
+---
+name: Downstream packaging
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sdist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Build source distribution
+        run: |
+          python -m pip install -U pip build
+          python -m build --sdist --outdir release-dist
+      - name: Validate source distribution contents
+        run: python meta/ci/check_distribution_contents.py release-dist/*.tar.gz
+      - uses: actions/upload-artifact@v6
+        with:
+          name: downstream-sdist
+          path: release-dist/*.tar.gz
+  downstream-wheel:
+    needs: sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v7
+        with:
+          name: downstream-sdist
+          path: release-dist
+      - name: Build wheel only from the generated sdist
+        run: |
+          python -m pip install -U pip
+          mkdir -p downstream-wheel
+          python -m pip wheel --no-deps --wheel-dir downstream-wheel release-dist/*.tar.gz
+      - name: Validate wheel contents
+        run: python meta/ci/check_distribution_contents.py downstream-wheel/*.whl
+      - name: Install outside the repository
+        shell: bash
+        run: |
+          python -m venv "${{ runner.temp }}/consumer-venv"
+          source "${{ runner.temp }}/consumer-venv/bin/activate"
+          python -m pip install -U pip mypy pyarrow downstream-wheel/*.whl
+          mkdir -p "${{ runner.temp }}/consumer-work"
+          cp meta/ci/downstream_smoke.py meta/ci/downstream_typecheck.py \
+            "${{ runner.temp }}/consumer-work/"
+          cd "${{ runner.temp }}/consumer-work"
+          python -I downstream_smoke.py
+          python -I -m mypy --strict downstream_typecheck.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: downstream-wheel
+          path: downstream-wheel/*.whl
+  optional-extra:
+    needs: downstream-wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [core, pyarrow, pandas, polars, duckdb, cloud]
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v7
+        with:
+          name: downstream-wheel
+          path: downstream-wheel
+      - name: Install one consumer extra in isolation
+        shell: bash
+        run: |-
+          python -m venv "${{ runner.temp }}/extra-venv"
+          source "${{ runner.temp }}/extra-venv/bin/activate"
+          python -m pip install -U pip
+          WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
+          if [[ "${{ matrix.extra }}" == "core" ]]; then
+            python -m pip install "${WHEEL}"
+          else
+            python -m pip install "${WHEEL}[${{ matrix.extra }}]"
+          fi
+          cd "${{ runner.temp }}"
+          python -I -c "import schema_sanitizer as s; print(s.__version__)"
+          case "${{ matrix.extra }}" in
+            pyarrow) python -I -c "import pyarrow" ;;
+            pandas) python -I -c "import pandas" ;;
+            polars) python -I -c "import polars" ;;
+            duckdb) python -I -c "import duckdb" ;;
+            cloud) python -I -c "import aiohttp, aiobotocore, azure.identity, azure.storage.blob, google.auth" ;;
+          esac

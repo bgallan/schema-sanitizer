@@ -80,9 +80,10 @@ def test_native_parquet_schema_state_is_not_monolithic() -> None:
 
 
 def test_json_writer_schema_has_explicit_subsystem() -> None:
-    """Arrow format mapping and recursive schema parsing remain separate units."""
+    """Schema parsing, format mapping, and array validation stay separate."""
     package = ROOT / "cpp/src/internal/json_output/schema"
     assert {path.name for path in package.iterdir() if path.is_file()} == {
+        "array_validation.cc",
         "field.cc",
         "format.cc",
         "model.hh",

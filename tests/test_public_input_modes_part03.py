@@ -324,12 +324,16 @@ def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
         "parquet_arrow_stream_factory_or_none",
         fake_factory_or_none,
     )
+    monkeypatch.setattr(
+        parquet_arrow_sources,
+        "parquet_arrow_source_chunk_size",
+        lambda _options: 2,
+    )
     sources = [ParquetArrowSource(f"file-{idx}.parquet", "path", f"file-{idx}") for idx in range(5)]
     provider = parquet_arrow_sources.ParquetArrowSourceChunkProvider(
         sources,
         call_options=None,
         feature="test",
-        chunk_size=2,
     )
 
     first = provider.next_sources()

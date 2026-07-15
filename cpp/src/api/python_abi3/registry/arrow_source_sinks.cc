@@ -26,6 +26,7 @@
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/options_schema_serialization.hh"
 #include "sanitize/registry/registry.hh"
+#include "sanitize/runtime/execution_context.hh"
 
 #include "api/python_abi3/registry/arrow_source_sinks_internal.hh"
 
@@ -57,6 +58,8 @@ finish_opened_source_metadata(NativeArrowSourcesStreamState *state,
     return sanitize::Status::Invalid("native Arrow source stream is null");
   }
   state->metadata = std::make_unique<MetadataStreamState>();
+  configure_metadata_stream_budget(state->metadata.get(),
+                                   state->prepared->spec.memory_limit_bytes);
   state->metadata->inner = state->inner;
   state->metadata->columns = metadata_columns_for_child(state, source);
   state->metadata->first_row_pending = state->first_row_pending;
@@ -79,24 +82,21 @@ try_open_passthrough_arrow_source(NativeArrowSourcesStreamState *state,
       return false;
     }
   }
+  std::unique_ptr<PyObject, decltype(&decref_with_gil)> capsule_owner(
+      capsule, decref_with_gil);
 
   auto compatible = arrow_stream_schema_matches_registry_plan(
       inner, *state->registry_plan, state->prepared->spec.timestamp_precision);
   if (!compatible.ok()) {
-    GilGuard gil;
-    Py_DECREF(capsule);
     return compatible.status();
   }
   if (!compatible.ValueOrDie()) {
-    GilGuard gil;
-    Py_DECREF(capsule);
     return false;
   }
 
-  auto *diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
+  auto diagnostics = std::unique_ptr<schema_sanitizer_diagnostics>(
+      new (std::nothrow) schema_sanitizer_diagnostics());
   if (!diagnostics) {
-    GilGuard gil;
-    Py_DECREF(capsule);
     return sanitize::Status::OutOfMemory(
         "context_to_registry_sink_arrow_sources: diagnostics allocation "
         "failed");
@@ -111,15 +111,13 @@ try_open_passthrough_arrow_source(NativeArrowSourcesStreamState *state,
   auto proxy = make_passthrough_arrow_stream(source.stream_obj, inner, capsule,
                                              diag_shared);
   if (!proxy.ok()) {
-    delete diagnostics;
-    GilGuard gil;
-    Py_DECREF(capsule);
     return proxy.status();
   }
+  (void)capsule_owner.release();
   diagnostics->diagnostics = std::move(diag_shared);
 
   state->inner = *proxy;
-  state->diagnostics = diagnostics;
+  state->diagnostics = diagnostics.release();
   return true;
 }
 
@@ -143,15 +141,22 @@ ingest_arrow_source_with_registry_plan(NativeArrowSourcesStreamState *state,
   prepared.frontend = std::move(frontend);
   prepared.owned_ctx = state->ctx ? state->ctx->ctx : nullptr;
   prepared.ctx = prepared.owned_ctx.get();
+  if (!prepared.ctx) {
+    return sanitize::Status::Invalid(
+        "prepared ingest has no execution context");
+  }
+  prepared.operation_memory_pool =
+      prepared.ctx->make_operation_memory_pool_handle(
+          state->prepared->spec.memory_limit_bytes);
+  if (!prepared.operation_memory_pool) {
+    return sanitize::Status::OutOfMemory(
+        "operation memory pool allocation failed");
+  }
   prepared.plan = state->registry_plan->plan;
   prepared.opts = state->prepared;
   prepared.diagnostics = std::move(diagnostics);
   prepared.logical_schema = state->registry_plan->schema;
   prepared.inference_consumed = false;
-  if (!prepared.ctx) {
-    return sanitize::Status::Invalid(
-        "native Arrow registry plan source has no execution context");
-  }
   return sanitize::ingest_to_stream(std::move(prepared));
 }
 sanitize::Status open_next_source(NativeArrowSourcesStreamState *state) {
@@ -182,8 +187,9 @@ sanitize::Status open_next_source(NativeArrowSourcesStreamState *state) {
     GilGuard gil;
     frontend_r = make_arrow_frontend(
         source.stream_obj, &input_schema,
-        ArrowDirectOptions{.timestamp_precision =
-                               state->prepared->spec.timestamp_precision});
+        ArrowDirectOptions{
+            .timestamp_precision = state->prepared->spec.timestamp_precision,
+            .memory_limit_bytes = state->prepared->spec.memory_limit_bytes});
   }
   SAN_ASSIGN_OR_RAISE(auto frontend, std::move(frontend_r));
   sanitize::Result<sanitize::IngestStream> out_r =

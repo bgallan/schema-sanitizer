@@ -6,19 +6,41 @@ A native C++23 engine performs schema inference, reconciliation, bounded
 streaming, and Arrow C Data materialization; the Python API provides file,
 dataframe, partitioned pipeline, and BigQuery integration helpers.
 
-Version 0.3.6 is still alpha software, with particular focus on Parquet files
+Version 0.3.7 is still alpha software, with particular focus on Parquet files
 used by BigQuery external tables.
 
-## Documentation
+## Index
+
+- [Documentation](#documentation)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Python API](#python-api)
+  - [Inputs and formats](#inputs-and-formats)
+  - [Generated ETL columns](#generated-etl-columns)
+- [Options](#options)
+  - [Paths, selection, and schema](#paths-selection-and-schema)
+  - [String scalar parsing](#string-scalar-parsing)
+  - [Source parsing, errors, and resources](#source-parsing-errors-and-resources)
+  - [Parquet output](#parquet-output)
+- [Incremental schemas](#incremental-schemas)
+- [Partition pipeline](#partition-pipeline)
+- [BigQuery external tables](#bigquery-external-tables)
+  - [Registry sidecar table](#registry-sidecar-table)
+- [Local and cloud filesystems](#local-and-cloud-filesystems)
+- [Development](#development)
+- [License](#license)
+
+## [Documentation](#index)
 
 - This README is the installation, Python API, options, and pipeline guide.
-- [heuristics.md](heuristics.md) explains inference, field sanitization,
+- [HEURISTICS.md](HEURISTICS.md) explains inference, field sanitization,
   schema merging and versioning, the registry, drift records, and the BigQuery
   sidecar model.
-- [responsibilities.md](responsibilities.md) maps the Python and C++ source
+- [RESPONSIBILITIES.md](RESPONSIBILITIES.md) maps the Python and C++ source
   layout for contributors.
+- [COMPATIBILITY.md](COMPATIBILITY.md) defines supported runtimes and serialized-state guarantees.
 
-## Install
+## [Install](#index)
 
 Install the core package plus the output adapter you need:
 
@@ -34,7 +56,7 @@ pip install 'schema-sanitizer[cloud]'
 pip install 'schema-sanitizer[all]'
 ```
 
-## Quick start
+## [Quick start](#index)
 
 ```python
 import schema_sanitizer as ss
@@ -70,7 +92,7 @@ Every conversion returns a `schema_sanitizer.Result`.
 | `schema_registry` / `schema_registry_json` | Updated durable schema state. |
 | `schema_drifts` / `schema_drifts_json` | Drift events produced by this run. |
 
-## Python API
+## [Python API](#index)
 
 All public converters are named `to_*` and share the cleaning options described
 below.
@@ -92,7 +114,7 @@ depending on the registry JSON structure:
 registry = ss.new_schema_registry()
 ```
 
-### Inputs and formats
+### [Inputs and formats](#index)
 
 `input_format` is mandatory. It is never inferred from the extension or file
 contents, and `None` or `"auto"` is rejected.
@@ -119,7 +141,7 @@ result = ss.to_pandas(
 )
 ```
 
-### Generated ETL columns
+### [Generated ETL columns](#index)
 
 Every analytical and file conversion adds four top-level columns. They always
 occupy the end of the Arrow schema, physical output file, and generated
@@ -141,13 +163,13 @@ Source fields that use one of these reserved root names are rejected rather
 than allowed to replace the generated fields. See
 [heuristics.md](heuristics.md#generated-etl-fields).
 
-## Options
+## [Options](#index)
 
 This is the complete option set accepted by the seven public converters. File
 converters additionally require `output_path`; `to_parquet` also accepts its
 two output compression options.
 
-### Paths, selection, and schema
+### [Paths, selection, and schema](#index)
 
 | Option | Default | Purpose |
 |---|---:|---|
@@ -163,7 +185,7 @@ two output compression options.
 | `arrow_max_depth` | `32` | Maximum expanded Arrow container depth before flattening deeper values to strings. |
 | `parquet_max_depth` | `15` | Maximum Parquet/BigQuery RECORD depth; list wrappers do not add a RECORD level. |
 
-### String scalar parsing
+### [String scalar parsing](#index)
 
 These options affect strings such as CSV cells, XML text, and quoted JSON
 values. JSON numbers and booleans are already typed by JSON syntax. Parsing is
@@ -200,7 +222,7 @@ prices = ss.to_pyarrow(
 ).clean_data
 ```
 
-### Source parsing, errors, and resources
+### [Source parsing, errors, and resources](#index)
 
 | Option | Default | Purpose |
 |---|---:|---|
@@ -209,10 +231,28 @@ prices = ss.to_pyarrow(
 | `input_text_encoding` | `"utf-8"` | `utf-8`, `utf-16`, `utf-16-le`, `utf-16-be`, or `iso8859-1`. Not used for Parquet. |
 | `xml_row_tag` | `None` | Stream each matching direct XML element as a row; `None` treats the document as one row. |
 | `on_error` | `"emit_null_row"` | `stop`, `skip_row`, or `emit_null_row`. |
-| `batch_memory_limit_bytes` | `None` | Best-effort native inference/materialization budget per batch or document. |
-| `read_chunk_bytes` | `1024 * 1024` | Streaming source read-buffer size. |
+| `memory_limit_bytes` | `None` | The only public memory/resource control. `None` selects 512 MiB. The native extension derives all chunk, batch, coalescing, metadata, spool, concurrency, Arrow, and Parquet sub-budgets from this value. |
 
-### Parquet output
+`memory_limit_bytes` is local to one operation. It is validated before native
+execution, cannot exceed the absolute 64 GiB safety ceiling, and never mutates
+process-global state. There are no environment-variable overrides or secondary
+public memory knobs. Two concurrent calls may therefore use different budgets
+without interfering with each other. Schema-Sanitizer also contains no
+environment-access hooks in its runtime, build files, examples, tests, or
+project workflows; configuration is explicit or declarative. Provider SDKs may
+still use their own standard credential discovery outside the library.
+
+The native extension is the single source of truth for derived limits. Python
+queries that native budget and uses the returned values for input chunks, replay
+spooling, remote scheduling, metadata expansion, Arrow validation, coalescing,
+and Parquet reading/writing. Internal structural ceilings such as maximum schema
+depth, field cardinality, Arrow logical ranges, and row-group count remain
+non-configurable and cannot be raised by callers. Scratch cleanup and hardened
+allocation bookkeeping are always active. Best-effort overwriting cannot
+guarantee physical erasure on copy-on-write filesystems, SSD wear-leveling, or
+after data has been copied by a third-party Arrow consumer.
+
+### [Parquet output](#index)
 
 These options are accepted only by `to_parquet`:
 
@@ -231,7 +271,14 @@ ss.to_parquet(
 )
 ```
 
-## Incremental schemas
+Release wheels for Windows, Linux, and macOS build GZIP support from the same
+pinned zlib source and expose the same native output matrix: `gzip`, `snappy`,
+and `uncompressed`. Windows source builds default to that bundled static zlib,
+so GZIP does not depend on vcpkg or a machine-wide zlib installation. Set
+`-DSCHEMA_SANITIZER_ZLIB_PROVIDER=system` only when intentionally building against
+a system package.
+
+## [Incremental schemas](#index)
 
 Pass one result's registry into the next conversion to preserve schema history:
 
@@ -253,9 +300,9 @@ second = ss.to_parquet(
 
 Use `schema_mode="strict"` when a non-empty existing registry is mandatory and
 unexpected fields should fail. Detailed compatibility, version-family, and
-generation behavior is documented in [heuristics.md](heuristics.md).
+generation behavior is documented in [HEURISTICS.md](HEURISTICS.md).
 
-## Partition pipeline
+## [Partition pipeline](#index)
 
 `schema_sanitizer.pipeline` provides reusable single-writer building blocks for
 Hive-style daily or hourly pipelines:
@@ -307,7 +354,7 @@ It includes daily/hourly planning, directory inputs, missing-partition skips,
 warm-up, BigQuery registry bootstrap, external-table creation, and sidecar
 updates.
 
-## BigQuery external tables
+## [BigQuery external tables](#index)
 
 `schema_sanitizer.integrations.bigquery` translates a final PyArrow schema into
 explicit BigQuery external-table DDL. It removes fields supplied by Hive path
@@ -344,7 +391,7 @@ external table, retrieve its latest embedded `schema_registry`, and execute
 create/replace DDL. BigQuery and Arrow ADBC connections are supplied by the
 application; they are not hidden global clients.
 
-### Registry sidecar table
+### [Registry sidecar table](#index)
 
 Scanning a large external table solely to find its latest registry can be
 expensive. The optional sidecar is a native BigQuery table with one pointer per
@@ -372,7 +419,7 @@ The sidecar stores only the lookup pointer; the authoritative registry remains
 the `schema_registry` value embedded in the output data. See
 [heuristics.md](heuristics.md#bigquery-registry-sidecar).
 
-## Local and cloud filesystems
+## [Local and cloud filesystems](#index)
 
 Local paths, `file://`, `gs://`/`gcs://`, `s3://`, common Azure Blob/ABFS URIs,
 and single-file HTTP(S) sources are supported. Install cloud clients with:
@@ -386,13 +433,14 @@ local temporary files. File outputs are uploaded after conversion. Remote
 directory listing is bounded, deterministic, and non-recursive; generic HTTP
 directory listing is not supported.
 
-Useful tuning variables are `SCHEMA_SANITIZER_ASYNC_CONCURRENCY` (default 64),
-`SCHEMA_SANITIZER_ASYNC_PREFETCH_FILES` (default twice the concurrency),
-`SCHEMA_SANITIZER_ASYNC_TIMEOUT` (120 seconds),
-`SCHEMA_SANITIZER_ASYNC_RETRIES` (4), and `SCHEMA_SANITIZER_SPOOL_DIR` (the
-system temporary directory).
+Remote concurrency, file prefetch, retries, chunk lookahead, discovery workers,
+and replay-spool capacity are derived automatically from the operation's
+`memory_limit_bytes`. They are not separate API options and have no
+environment-variable overrides. Absolute internal ceilings remain in place so
+direct internal callers cannot create unbounded worker, queue, connection, or
+staging state.
 
-## Development
+## [Development](#index)
 
 Install development dependencies and compile the editable native extension:
 
@@ -424,9 +472,9 @@ python benchmarks/bench_ingest.py --rows 100 --width 4 --repeats 1
 python benchmarks/bench_ingest.py --case jsonl --rows 100000 --repeats 3
 ```
 
-For architecture and ownership, see [responsibilities.md](responsibilities.md).
+For architecture and ownership, see [RESPONSIBILITIES.md](RESPONSIBILITIES.md).
 For the production-readiness roadmap, see [todo.md](todo.md).
 
-## License
+## [License](#index)
 
 Apache License 2.0. See [LICENSE](LICENSE).

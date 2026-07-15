@@ -37,6 +37,7 @@ struct PassthroughArrowStreamState {
   PyObject *stream_obj = nullptr;
   PyObject *stream_capsule = nullptr;
   std::shared_ptr<sanitize::IngestDiagnostics> diagnostics;
+  std::string last_error;
   bool closed = false;
 };
 
@@ -58,9 +59,19 @@ bool dict_set_steal(PyObject *dict, const char *key, PyObject *value) {
 
 PyObject *pack_registry_probe(const sanitize::SchemaRegistryMergeResult &merged,
                               const sanitize::IngestDiagnostics &diagnostics) {
-  const std::string schema_payload =
+  auto schema_payload_result =
       sanitize::internal::options_io::serialize_logical_schema_bytes(
           merged.schema);
+  if (!schema_payload_result.ok()) {
+    const auto status = schema_payload_result.status();
+    if (status.code() == sanitize::StatusCode::kOutOfMemory) {
+      PyErr_NoMemory();
+    } else {
+      PyErr_SetString(PyExc_ValueError, status.ToString().c_str());
+    }
+    return nullptr;
+  }
+  std::string schema_payload = std::move(schema_payload_result).ValueOrDie();
   PyObject *dict = PyDict_New();
   if (!dict) {
     return nullptr;
@@ -121,11 +132,21 @@ field_layouts_from_logical_schema(const sanitize::LogicalSchema &schema) {
   return fields;
 }
 
-bool arrow_schema_node_matches(const ArrowSchema *actual,
-                               const ArrowSchema *expected) noexcept {
-  if (!actual || !expected || !actual->format || !expected->format) {
+bool arrow_schema_node_matches_impl(const ArrowSchema *actual,
+                                    const ArrowSchema *expected,
+                                    std::int64_t depth,
+                                    std::int64_t *nodes) noexcept {
+  constexpr std::int64_t kMaxSchemaDepth = 64;
+  constexpr std::int64_t kMaxSchemaChildren = 65'536;
+  constexpr std::int64_t kMaxSchemaNodes = 1'000'000;
+  if (!actual || !expected || !actual->format || !expected->format || !nodes ||
+      depth > kMaxSchemaDepth || *nodes >= kMaxSchemaNodes ||
+      actual->n_children < 0 || expected->n_children < 0 ||
+      actual->n_children > kMaxSchemaChildren ||
+      expected->n_children > kMaxSchemaChildren) {
     return false;
   }
+  ++*nodes;
   const std::string_view actual_format(actual->format);
   const std::string_view expected_format(expected->format);
   if (actual_format != expected_format) {
@@ -144,7 +165,8 @@ bool arrow_schema_node_matches(const ArrowSchema *actual,
     return false;
   }
   if (actual->dictionary &&
-      !arrow_schema_node_matches(actual->dictionary, expected->dictionary)) {
+      !arrow_schema_node_matches_impl(actual->dictionary, expected->dictionary,
+                                      depth + 1, nodes)) {
     return false;
   }
   if (actual->n_children != expected->n_children) {
@@ -152,12 +174,18 @@ bool arrow_schema_node_matches(const ArrowSchema *actual,
   }
   for (int64_t i = 0; i < actual->n_children; ++i) {
     if (!actual->children || !expected->children ||
-        !arrow_schema_node_matches(actual->children[i],
-                                   expected->children[i])) {
+        !arrow_schema_node_matches_impl(
+            actual->children[i], expected->children[i], depth + 1, nodes)) {
       return false;
     }
   }
   return true;
+}
+
+bool arrow_schema_node_matches(const ArrowSchema *actual,
+                               const ArrowSchema *expected) noexcept {
+  std::int64_t nodes = 0;
+  return arrow_schema_node_matches_impl(actual, expected, 0, &nodes);
 }
 
 sanitize::Result<bool> arrow_stream_schema_matches_registry_plan(
@@ -168,10 +196,21 @@ sanitize::Result<bool> arrow_stream_schema_matches_registry_plan(
   }
 
   sanitize::CSchemaGuard actual;
-  const int code = stream->get_schema(stream, actual.get());
+  int code = 0;
+  try {
+    code = stream->get_schema(stream, actual.get());
+  } catch (...) {
+    return sanitize::internal::cdata_stream::status_from_current_exception(
+        "Arrow passthrough get_schema");
+  }
   if (code != 0) {
-    const char *last_error =
-        stream->get_last_error ? stream->get_last_error(stream) : nullptr;
+    const char *last_error = nullptr;
+    try {
+      last_error =
+          stream->get_last_error ? stream->get_last_error(stream) : nullptr;
+    } catch (...) {
+      last_error = nullptr;
+    }
     return sanitize::Status::IOError(
         last_error ? last_error : "Arrow passthrough get_schema failed");
   }
@@ -183,7 +222,8 @@ sanitize::Result<bool> arrow_stream_schema_matches_registry_plan(
   return arrow_schema_node_matches(actual.get(), expected.get());
 }
 
-int passthrough_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
+int passthrough_get_schema(ArrowArrayStream *stream,
+                           ArrowSchema *out) noexcept {
   if (!stream || !out) {
     return EINVAL;
   }
@@ -192,10 +232,17 @@ int passthrough_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
   if (!state || !state->inner || !state->inner->get_schema) {
     return EINVAL;
   }
-  return state->inner->get_schema(state->inner, out);
+  try {
+    return state->inner->get_schema(state->inner, out);
+  } catch (...) {
+    return sanitize::internal::cdata_stream::fail_schema(
+        out, state->last_error,
+        sanitize::internal::cdata_stream::status_from_current_exception(
+            "Arrow passthrough get_schema"));
+  }
 }
 
-int passthrough_get_next(ArrowArrayStream *stream, ArrowArray *out) {
+int passthrough_get_next(ArrowArrayStream *stream, ArrowArray *out) noexcept {
   if (!stream || !out) {
     return EINVAL;
   }
@@ -204,15 +251,22 @@ int passthrough_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   if (!state || !state->inner || !state->inner->get_next) {
     return EINVAL;
   }
-  const int code = state->inner->get_next(state->inner, out);
-  if (code == 0 && out && out->release && state->diagnostics) {
-    state->diagnostics->batches += 1;
-    state->diagnostics->materialized_rows += out->length;
+  try {
+    const int code = state->inner->get_next(state->inner, out);
+    if (code == 0 && out->release && state->diagnostics) {
+      state->diagnostics->batches += 1;
+      state->diagnostics->materialized_rows += out->length;
+    }
+    return code;
+  } catch (...) {
+    return sanitize::internal::cdata_stream::fail_array(
+        out, state->last_error,
+        sanitize::internal::cdata_stream::status_from_current_exception(
+            "Arrow passthrough get_next"));
   }
-  return code;
 }
 
-const char *passthrough_get_last_error(ArrowArrayStream *stream) {
+const char *passthrough_get_last_error(ArrowArrayStream *stream) noexcept {
   if (!stream) {
     return "invalid Arrow passthrough stream";
   }
@@ -221,9 +275,20 @@ const char *passthrough_get_last_error(ArrowArrayStream *stream) {
   if (!state || !state->inner) {
     return "closed Arrow passthrough stream";
   }
-  return state->inner->get_last_error
-             ? state->inner->get_last_error(state->inner)
-             : nullptr;
+  if (!state->last_error.empty()) {
+    return sanitize::internal::cdata_stream::last_error_ptr(state->last_error);
+  }
+  try {
+    return state->inner->get_last_error
+               ? state->inner->get_last_error(state->inner)
+               : nullptr;
+  } catch (...) {
+    sanitize::internal::cdata_stream::set_last_error_nothrow(
+        state->last_error,
+        sanitize::internal::cdata_stream::status_from_current_exception(
+            "Arrow passthrough get_last_error"));
+    return sanitize::internal::cdata_stream::last_error_ptr(state->last_error);
+  }
 }
 
 void passthrough_release(ArrowArrayStream *stream) {

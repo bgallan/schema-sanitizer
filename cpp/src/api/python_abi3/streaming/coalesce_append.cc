@@ -22,6 +22,11 @@ void set_bit(std::vector<std::uint8_t> *bitmap, std::int64_t index) {
       static_cast<std::uint8_t>(1U) << (index & 7);
 }
 
+void clear_bit(std::vector<std::uint8_t> *bitmap, std::int64_t index) {
+  (*bitmap)[static_cast<std::size_t>(index >> 3)] &= static_cast<std::uint8_t>(
+      ~(static_cast<std::uint8_t>(1U) << (index & 7)));
+}
+
 sanitize::Status validate_slice(const ArraySlice &slice,
                                 std::string_view context) {
   if (!slice.array || !slice.array->release) {
@@ -52,12 +57,30 @@ sanitize::Status append_validity(CoalescedNode *out, const ArraySlice &slice) {
   if (total < start) {
     return sanitize::Status::Invalid("coalescing stream length overflow");
   }
-  out->validity.resize(static_cast<std::size_t>((total + 7) / 8), 0);
-  for (std::int64_t row = 0; row < slice.length; ++row) {
-    if (row_is_valid(*slice.array, slice.offset + row)) {
-      set_bit(&out->validity, start + row);
+  bool has_null = false;
+  if (slice.array->null_count != 0 && slice.array->buffers &&
+      slice.array->buffers[0]) {
+    for (std::int64_t row = 0; row < slice.length; ++row) {
+      if (!row_is_valid(*slice.array, slice.offset + row)) {
+        has_null = true;
+        break;
+      }
+    }
+  }
+  if (!out->validity.empty() || has_null) {
+    const auto bitmap_bytes = static_cast<std::size_t>((total + 7) / 8);
+    if (out->validity.empty()) {
+      out->validity.resize(bitmap_bytes, 0xFFU);
     } else {
-      ++out->array.null_count;
+      out->validity.resize(bitmap_bytes, 0);
+    }
+    for (std::int64_t row = 0; row < slice.length; ++row) {
+      if (row_is_valid(*slice.array, slice.offset + row)) {
+        set_bit(&out->validity, start + row);
+      } else {
+        clear_bit(&out->validity, start + row);
+        ++out->array.null_count;
+      }
     }
   }
   out->array.length = total;
@@ -110,6 +133,11 @@ sanitize::Status append_fixed_width(CoalescedNode *out, const ArraySlice &slice,
   values +=
       static_cast<std::size_t>(slice.array->offset + slice.offset) * width;
   const std::size_t old_size = out->data.size();
+  if (static_cast<std::size_t>(bytes) >
+      std::numeric_limits<std::size_t>::max() - old_size) {
+    return sanitize::Status::Invalid(
+        "coalescing stream fixed-width output size overflows");
+  }
   out->data.resize(old_size + static_cast<std::size_t>(bytes));
   std::memcpy(out->data.data() + old_size, values,
               static_cast<std::size_t>(bytes));
@@ -336,12 +364,23 @@ sanitize::Status append_nulls_node(const CoalesceNodeSpec &spec,
     return sanitize::Status::Invalid(
         "coalescing stream cannot append negative null count");
   }
+  if (length == 0) {
+    return sanitize::Status::OK();
+  }
   const std::int64_t start = out->array.length;
   const std::int64_t total = start + length;
   if (total < start) {
     return sanitize::Status::Invalid("coalescing stream length overflow");
   }
-  out->validity.resize(static_cast<std::size_t>((total + 7) / 8), 0);
+  const auto bitmap_bytes = static_cast<std::size_t>((total + 7) / 8);
+  if (out->validity.empty()) {
+    out->validity.resize(bitmap_bytes, 0xFFU);
+  } else {
+    out->validity.resize(bitmap_bytes, 0);
+  }
+  for (std::int64_t row = start; row < total; ++row) {
+    clear_bit(&out->validity, row);
+  }
   out->array.length = total;
   out->array.null_count += length;
   switch (spec.kind) {

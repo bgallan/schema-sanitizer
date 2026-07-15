@@ -118,6 +118,25 @@ def _native_nested_contract_status_from_summary(
 
 def _native_nested_contract_diagnostics(info: dict[str, Any] | None) -> dict[str, Any]:
     """Return native nested contract fields suitable for last-read diagnostics."""
+    if isinstance(info, dict) and info.get("bounded_preflight") == 1:
+        try:
+            row_group_count = int(info.get("row_group_count") or 0)
+        except (TypeError, ValueError):
+            row_group_count = 0
+        applicable = (
+            info.get("created_by") == _NATIVE_PARQUET_WRITER_CREATED_BY and row_group_count > 0
+        )
+        satisfied = applicable and info.get("native_reader_ready") == 1
+        issues = (
+            []
+            if satisfied or not applicable
+            else [str(item) for item in list(info.get("native_reader_blockers") or [])]
+        )
+        return {
+            "native_nested_contract_applicable": applicable,
+            "native_nested_contract_satisfied": satisfied,
+            "native_nested_contract_issues": issues,
+        }
     status = _native_nested_contract_status_from_summary(
         _native_recursive_layout_summary_from_footer_info(info)
     )

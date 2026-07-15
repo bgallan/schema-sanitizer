@@ -67,8 +67,7 @@ def _build_to_parquet_kwargs(
         "parse_iso_dates": args.parse_iso_dates,
         "parse_iso_times": args.parse_iso_times,
         "on_error": args.on_error,
-        "batch_memory_limit_bytes": args.batch_memory_limit_bytes,
-        "read_chunk_bytes": args.read_chunk_bytes,
+        "memory_limit_bytes": args.memory_limit_bytes,
         "arrow_max_depth": args.arrow_max_depth,
         "parquet_max_depth": args.parquet_max_depth,
         "input_text_encoding": args.input_text_encoding,
@@ -77,6 +76,34 @@ def _build_to_parquet_kwargs(
         kwargs["parquet_compression"] = getattr(args, "parquet_compression", "gzip")
         kwargs["parquet_gzip_level"] = getattr(args, "parquet_gzip_level", None)
     return kwargs
+
+
+def _schema_warm_up_plan_for_run(
+    args: argparse.Namespace,
+    run_plan: list[DateRunPlan],
+    requested_warm_up_plan: list[DateRunPlan],
+) -> list[DateRunPlan]:
+    """Return sources that must be probed before partition materialization.
+
+    Additive partition writes can promote a logical type after an earlier
+    Parquet file has already been committed. BigQuery external tables require
+    one compatible physical type across every file, so probe the complete
+    current write range before the first additive output. Strict runs keep
+    their existing contract and only use an explicitly requested warm-up
+    range.
+    """
+    plans = list(requested_warm_up_plan)
+    if args.schema_mode == "additive":
+        plans.extend(run_plan)
+
+    unique: list[DateRunPlan] = []
+    seen_sources: set[str] = set()
+    for plan in plans:
+        if plan.source_uri in seen_sources:
+            continue
+        seen_sources.add(plan.source_uri)
+        unique.append(plan)
+    return unique
 
 
 def _infer_warm_up_schema_registry(
@@ -215,6 +242,7 @@ def _filter_available_date_plans(
         input_mode=args.input_mode,
         input_format=args.input_format,
         source_file_extension=args.source_file_extension,
+        memory_limit_bytes=args.memory_limit_bytes,
     )
 
     LOGGER.info(

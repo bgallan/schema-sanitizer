@@ -179,7 +179,7 @@ def test_parquet_conversion_enforces_memory_limit_bytes(tmp_path: Path) -> None:
     pq.write_table(sample_table(pa), path)
 
     with pytest.raises(ss.SchemaSanitizerResourceError) as excinfo:
-        read_test_parquet(path, batch_memory_limit_bytes=1)
+        read_test_parquet(path, memory_limit_bytes=1)
 
     err = excinfo.value
     assert getattr(err, "code", None) == "E_RESOURCE_LIMIT"

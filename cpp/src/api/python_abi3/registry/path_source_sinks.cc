@@ -26,6 +26,7 @@
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/ingest/ingest.hh"
 #include "sanitize/registry/registry.hh"
+#include "sanitize/runtime/execution_context.hh"
 #include "sanitize/schema_registry/schema_registry.hh"
 
 namespace core_abi3_internal::path_registry_detail {
@@ -65,15 +66,22 @@ sanitize::Result<sanitize::IngestStream> ingest_path_source_with_registry_plan(
   prepared.frontend = std::move(frontend);
   prepared.owned_ctx = state->ctx ? state->ctx->ctx : nullptr;
   prepared.ctx = prepared.owned_ctx.get();
+  if (!prepared.ctx) {
+    return sanitize::Status::Invalid(
+        "prepared ingest has no execution context");
+  }
+  prepared.operation_memory_pool =
+      prepared.ctx->make_operation_memory_pool_handle(
+          state->prepared->spec.memory_limit_bytes);
+  if (!prepared.operation_memory_pool) {
+    return sanitize::Status::OutOfMemory(
+        "operation memory pool allocation failed");
+  }
   prepared.plan = registry_plan->plan;
   prepared.opts = state->prepared;
   prepared.diagnostics = std::move(diagnostics);
   prepared.logical_schema = registry_plan->schema;
   prepared.inference_consumed = false;
-  if (!prepared.ctx) {
-    return sanitize::Status::Invalid(
-        "native registry plan source has no execution context");
-  }
   (void)source;
   return sanitize::ingest_to_stream(std::move(prepared));
 }
@@ -106,10 +114,10 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
                                     PathSourceGroupPurpose::kMaterialization,
                                     state->prepared->spec.input_text_encoding));
     if (group.grouped) {
-      SAN_ASSIGN_OR_RAISE(
-          input,
-          path_source_group_input(state->sources, group,
-                                  state->prepared->spec.input_text_encoding));
+      SAN_ASSIGN_OR_RAISE(input, path_source_group_input(
+                                     state->sources, group,
+                                     state->prepared->spec.input_text_encoding,
+                                     state->prepared->spec.memory_limit_bytes));
       if (!state->source_file_registry_plan) {
         SAN_ASSIGN_OR_RAISE(
             auto augmented_plan,
@@ -192,6 +200,8 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
     state->diagnostics = diagnostics;
   }
   state->metadata = std::make_unique<MetadataStreamState>();
+  configure_metadata_stream_budget(state->metadata.get(),
+                                   state->prepared->spec.memory_limit_bytes);
   state->metadata->inner = state->inner;
   state->metadata->columns =
       metadata_columns_for_child(state, source, source_file_in_inner);

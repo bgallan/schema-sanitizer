@@ -13,11 +13,51 @@
 #include "internal/memory/arena.hh"
 #include "internal/parsing/csv_direct.hh"
 #include "internal/parsing/csv_parse.hh"
+#include "internal/parsing/flat_row_batch.hh"
 #include "internal/parsing/json/ondemand/document.hh"
 #include "sanitize/core/value_view.hh"
 
 namespace sanitize::internal {
 namespace {
+
+constexpr std::size_t kRetainedDirectCsvCellCapacity = 4096;
+
+class CsvDirectScratchReset final {
+public:
+  CsvDirectScratchReset(BumpArena *arena,
+                        std::vector<std::string_view> *cells) noexcept
+      : arena_(arena), cells_(cells) {}
+
+  ~CsvDirectScratchReset() noexcept {
+    if (cells_) {
+      cells_->clear();
+      if (cells_->capacity() > kRetainedDirectCsvCellCapacity) {
+        std::vector<std::string_view>().swap(*cells_);
+      }
+    }
+    if (arena_) {
+      arena_->reset();
+    }
+  }
+
+private:
+  BumpArena *arena_ = nullptr;
+  std::vector<std::string_view> *cells_ = nullptr;
+};
+
+class JsonDirectScratchReset final {
+public:
+  explicit JsonDirectScratchReset(JsonOnDemandDoc *doc) noexcept : doc_(doc) {}
+
+  ~JsonDirectScratchReset() noexcept {
+    if (doc_) {
+      doc_->Reset();
+    }
+  }
+
+private:
+  JsonOnDemandDoc *doc_ = nullptr;
+};
 
 bool should_snapshot_root_fields(const sanitize::CompiledPlan &plan) noexcept {
   constexpr std::size_t kWideRootThreshold = 8;
@@ -84,7 +124,7 @@ append_materialized_row(BatchAppender *app, const sanitize::RowRef &row,
     SAN_RETURN_NOT_OK(snapshot.build(row, plan, opts));
   }
 
-  std::vector<Cell> cells(plan.columns.size());
+  auto &cells = app->prepare_row_cells(plan.columns.size());
   CoerceError err;
   ConvertCtx ctx{
       .opts = opts,
@@ -157,7 +197,7 @@ append_materialized_row(BatchAppender *app, const sanitize::RowRef &row,
     return result_for_policy(app, opts, diagnostics, err);
   }
 
-  SAN_RETURN_NOT_OK(app->append_cells(std::move(cells)));
+  SAN_RETURN_NOT_OK(app->append_prepared_cells());
   return AppendRowResult{};
 }
 
@@ -176,11 +216,11 @@ append_row_csv_text(BatchAppender *app, const CsvDirectContext &ctx,
   if (arena) {
     arena->reset();
   }
-  parse_csv_cells(raw, ctx.delimiter, cells, arena);
+  CsvDirectScratchReset scratch_reset(arena, cells);
+  SAN_RETURN_NOT_OK(parse_csv_cells(raw, ctx.delimiter, cells, arena));
 
   const auto &plan = app->plan();
-  std::vector<sanitize::FieldRef> fields;
-  fields.reserve(plan.columns.size());
+  auto &fields = app->prepare_field_refs(plan.columns.size());
   for (std::size_t i = 0; i < plan.columns.size(); ++i) {
     int32_t csv_index = -1;
     if (i < ctx.col_to_csv.size()) {
@@ -216,13 +256,19 @@ append_row_json_text(BatchAppender *app, JsonOnDemandDoc *doc,
     return Status::Invalid("append_row_json_text: doc is null");
   }
   doc->Reset();
+  JsonDirectScratchReset scratch_reset(doc);
   SAN_ASSIGN_OR_RAISE(ValueView root, doc->ParseValue(raw, base_offset));
 
-  std::vector<sanitize::FieldRef> fields;
+  auto &fields = app->prepare_field_refs(16);
   if (root.is_object()) {
     SAN_RETURN_NOT_OK(
         root.for_each_object_field([&](std::string_view key, uint64_t key_hash,
                                        ValueView value) -> Status {
+          if (fields.size() >= kMaxMaterializedFieldsPerRow) {
+            return Status::Invalid(
+                "JSON object field count exceeds safety limit: ",
+                fields.size() + 1U, " > ", kMaxMaterializedFieldsPerRow);
+          }
           fields.push_back(sanitize::FieldRef{
               .key = key,
               .key_hash = key_hash,

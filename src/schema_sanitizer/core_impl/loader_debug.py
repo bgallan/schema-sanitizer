@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import platform
 import sys
 from pathlib import Path
 from typing import Any
 
 
-def loader_debug(*, include_env: bool = True, run_linker_tools: bool = True) -> dict[str, Any]:
+def loader_debug(*, run_linker_tools: bool = True) -> dict[str, Any]:
     """Return a JSON-serializable snapshot useful for debugging import failures."""
 
     pkg_dir = Path(__file__).resolve().parents[1]
@@ -24,7 +23,7 @@ def loader_debug(*, include_env: bool = True, run_linker_tools: bool = True) -> 
             "implementation": platform.python_implementation(),
         },
         "platform": {
-            "os": os.name,
+            "os": platform.system(),
             "sys_platform": sys.platform,
             "machine": platform.machine(),
             "release": platform.release(),
@@ -35,18 +34,6 @@ def loader_debug(*, include_env: bool = True, run_linker_tools: bool = True) -> 
         },
     }
 
-    if include_env:
-        out["env"] = {
-            k: os.environ.get(k)
-            for k in [
-                "PATH",
-                "PYTHONPATH",
-                "LD_LIBRARY_PATH",
-                "DYLD_LIBRARY_PATH",
-                "DYLD_FALLBACK_LIBRARY_PATH",
-            ]
-        }
-
     del run_linker_tools
 
     return out
@@ -55,9 +42,7 @@ def loader_debug(*, include_env: bool = True, run_linker_tools: bool = True) -> 
 def collect_loader_debug() -> dict[str, Any]:
     """Stable helper used by SchemaSanitizerImportError.
 
-    Automatic exception details must not include process environment search
-    paths. Call ``loader_debug(include_env=True)`` explicitly for local support
-    diagnostics when those paths are needed.
+    Schema-Sanitizer never reads process environment variables for diagnostics.
     """
 
-    return loader_debug(include_env=False)
+    return loader_debug()
