@@ -8,6 +8,65 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
+    """Sized reads must target aiobotocore's wrapper, not its context value."""
+    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
+    from schema_sanitizer.remote_impl.providers import s3
+    from schema_sanitizer.remote_impl.transport import TRANSFER_CHUNK_BYTES
+
+    class RawResponse:
+        """Model aiohttp's response, whose read method accepts no size."""
+
+        async def read(self) -> bytes:
+            """Fail if the context-manager return value is used for streaming."""
+            raise AssertionError("chunk reads must use the streaming-body wrapper")
+
+    class StreamingBody:
+        """Model aiobotocore's wrapper around an aiohttp response."""
+
+        def __init__(self) -> None:
+            """Create deterministic chunks and record requested sizes."""
+            self.chunks = [b"first", b"second", b""]
+            self.read_sizes: list[int] = []
+            self.exited = False
+
+        async def __aenter__(self) -> RawResponse:
+            """Return the wrapped response, as aiobotocore does."""
+            return RawResponse()
+
+        async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+            """Record release of the response body."""
+            self.exited = True
+
+        async def read(self, size: int) -> bytes:
+            """Return one chunk through the sized wrapper API."""
+            self.read_sizes.append(size)
+            return self.chunks.pop(0)
+
+    body = StreamingBody()
+
+    class Client:
+        """Return the streaming response for one S3 object."""
+
+        async def get_object(self, **kwargs) -> dict[str, object]:
+            """Validate the parsed S3 reference."""
+            assert kwargs == {"Bucket": "bucket", "Key": "input/data.json"}
+            return {"Body": body}
+
+    output = tmp_path / "data.json"
+    asyncio.run(
+        s3.download_file_with_client(
+            Client(),
+            RemoteFile("s3://bucket/input/data.json", "data.json"),
+            str(output),
+        )
+    )
+
+    assert output.read_bytes() == b"firstsecond"
+    assert body.read_sizes == [TRANSFER_CHUNK_BYTES] * 3
+    assert body.exited is True
+
+
 def test_s3_delegates_sdk_configuration() -> None:
     """Schema-Sanitizer does not synthesize endpoint, region, or credential options."""
     from schema_sanitizer.remote_impl.providers import s3

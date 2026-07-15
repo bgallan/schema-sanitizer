@@ -56,7 +56,8 @@ async def download_bytes(client: Any, file: RemoteFile) -> bytes:
     """Download one S3 object into bytes using a shared client."""
     ref = parse_uri(file.uri)
     response = await client.get_object(Bucket=ref.bucket, Key=ref.key)
-    async with response["Body"] as body:
+    body = response["Body"]
+    async with body:
         return await body.read()
 
 
@@ -101,7 +102,8 @@ async def download_file_with_client(client: Any, file: RemoteFile, local_path: s
     """Download one S3 object to a local file using a shared client."""
     ref = parse_uri(file.uri)
     response = await client.get_object(Bucket=ref.bucket, Key=ref.key)
-    async with response["Body"] as body:
+    body = response["Body"]
+    async with body:
         with Path(local_path).open("wb") as file_handle:
             while chunk := await body.read(TRANSFER_CHUNK_BYTES):
                 file_handle.write(chunk)

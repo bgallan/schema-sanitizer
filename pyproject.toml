@@ -143,16 +143,12 @@ include = [
   "/CMakeLists.txt",
   "/CHANGELOG.md",
   "/COMPATIBILITY.md",
-  "/CONTRIBUTING.md",
-  "/RELEASING.md",
-  "/SECURITY.md",
   "/cmake/SchemaSanitizerCompression.cmake",
   "/meta/ci/check_parquet_compression_matrix.py",
   "/LICENSE",
   "/README.md",
   "/HEURISTICS.md",
   "/RESPONSIBILITIES.md",
-  "/TODO.md",
   "/meta/VERSION",
   "/pyproject.toml"
 ]

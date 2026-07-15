@@ -22,9 +22,11 @@ extra independently. New minimums require a minor release and changelog entry.
 ## Public API
 
 Public names exported from `schema_sanitizer` and documented pipeline APIs
-follow the deprecation policy in `RELEASING.md`. Modules below `api_impl`,
-`core_impl`, `input_impl`, `options_impl`, `remote_impl`, and `adapters` are
-internal unless explicitly documented otherwise.
+follow Semantic Versioning. Public APIs are deprecated for at least one minor
+release before removal unless retaining the behavior would preserve a security
+or correctness defect. Modules below `api_impl`, `core_impl`, `input_impl`,
+`options_impl`, `remote_impl`, and `adapters` are internal unless explicitly
+documented otherwise.
 
 Memory and resource configuration has one public control:
 `memory_limit_bytes`. Internal chunk, batch, spool, concurrency, Arrow, and

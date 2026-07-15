@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+AZURITE_API_VERSION = "2025-07-05"
+
 
 @pytest.fixture(autouse=True)
 def _require_cloud_emulators(pytestconfig: pytest.Config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,14 +33,17 @@ def _require_cloud_emulators(pytestconfig: pytest.Config, monkeypatch: pytest.Mo
             "endpoint_url": s3_endpoint,
             "region_name": "us-east-1",
             "aws_access_key_id": "minioadmin",
-            "aws_secret_access_key": "minioadmin",
+            "aws_secret_access_key": "minioadmin",  # pragma: allowlist secret
             "config": Config(s3={"addressing_style": "path"}),
         },
     )
 
     async def open_azurite_service(_ref: object) -> object:
         """Open Azurite from the explicit connection string."""
-        return BlobServiceClient.from_connection_string(azure_connection)
+        return BlobServiceClient.from_connection_string(
+            azure_connection,
+            api_version=AZURITE_API_VERSION,
+        )
 
     monkeypatch.setattr(azure, "open_service", open_azurite_service)
     monkeypatch.setattr(gcs, "api_base", lambda: gcs_endpoint)
