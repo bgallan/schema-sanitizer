@@ -79,6 +79,7 @@ jobs:
           python -m pip install -U pytest pyarrow
           mkdir -p coverage-native/raw
           python -m pip install --no-build-isolation -v \
+            --config-settings=install.strip=false \
             --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18 \
             --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18 \
             --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
