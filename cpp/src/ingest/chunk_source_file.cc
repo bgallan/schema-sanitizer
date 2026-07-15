@@ -98,7 +98,8 @@ sanitize::Result<std::shared_ptr<MappedFile>>
 map_file_read_only(const std::string &path, std::uint64_t limit) {
   auto mapped = std::make_shared<MappedFile>();
 #if defined(_WIN32)
-  const auto native_path = std::filesystem::u8path(path).wstring();
+  const auto utf8_path = std::u8string(path.begin(), path.end());
+  const auto native_path = std::filesystem::path(utf8_path).wstring();
   mapped->file =
       CreateFileW(native_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                   OPEN_EXISTING,

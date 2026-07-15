@@ -59,21 +59,28 @@ jobs:
             coverage-python.json
             coverage-python-risk-gaps.txt
   native-llvm-coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+      - name: Install LLVM 18 coverage toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          clang-18 --version
+          llvm-profdata-18 --version
+          llvm-cov-18 --version
       - name: Install instrumented package
         run: |
           python -m pip install -U pip ninja 'cmake>=4.3,<4.4' scikit-build-core==0.11.6
           python -m pip install -U pytest pyarrow
           mkdir -p coverage-native/raw
           python -m pip install --no-build-isolation -v \
-            --config-settings=cmake.define.CMAKE_C_COMPILER=clang \
-            --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++ \
+            --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18 \
+            --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18 \
             --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
             --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_COVERAGE=ON \
             --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
@@ -83,11 +90,14 @@ jobs:
       - name: Run native coverage suites
         shell: bash
         run: |
-          mkdir -p coverage-native/raw
+          mkdir -p coverage-native/raw/regular
           pytest -q \
             tests/test_api.py \
             tests/test_input_xml_and_public_api.py \
             tests/test_sinks_csv_jsonl.py
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            coverage-native/raw/regular/
+          mkdir -p coverage-native/raw/adversarial
           pytest -q \
             tests/test_contracts.py \
             tests/test_runtime_lifecycle_part01.py \
@@ -97,12 +107,17 @@ jobs:
             tests/test_async_remote_scheduler.py \
             tests/test_high_risk_coverage_gaps.py \
             tests/test_parquet_native_recursive_fuzz_runtime.py
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            coverage-native/raw/adversarial/
+          mkdir -p coverage-native/raw/integration
           pytest -q \
             tests/test_input_remote_staging_part01.py \
             tests/test_input_remote_staging_part02.py \
             tests/test_input_remote_staging_part03.py \
             tests/test_cloud_emulator_configuration.py \
             tests/test_bigquery_integration.py
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            coverage-native/raw/integration/
       - name: Render LLVM reports
         shell: bash
         run: |
@@ -112,20 +127,20 @@ jobs:
           PY
           )
           for suite in regular adversarial integration; do
-            llvm-profdata merge -sparse coverage-native/raw/${suite}-*.profraw \
+            llvm-profdata-18 merge -sparse coverage-native/raw/${suite}/*.profraw \
               -o coverage-native/${suite}.profdata
-            llvm-cov report "${EXTENSION}" \
+            llvm-cov-18 report "${EXTENSION}" \
               -instr-profile=coverage-native/${suite}.profdata \
               > coverage-native/${suite}-summary.txt
           done
-          llvm-profdata merge -sparse coverage-native/raw/*.profraw \
+          llvm-profdata-18 merge -sparse coverage-native/raw/*/*.profraw \
             -o coverage-native/combined.profdata
-          llvm-cov show "${EXTENSION}" \
+          llvm-cov-18 show "${EXTENSION}" \
             -instr-profile=coverage-native/combined.profdata \
             -format=html \
             -show-branches=count \
             -output-dir=coverage-native/html
-          llvm-cov report "${EXTENSION}" \
+          llvm-cov-18 report "${EXTENSION}" \
             -instr-profile=coverage-native/combined.profdata \
             > coverage-native/combined-summary.txt
           cat coverage-native/combined-summary.txt
