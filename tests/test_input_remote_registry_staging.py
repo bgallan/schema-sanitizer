@@ -183,7 +183,6 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
         fake_stage_remote_files_to_directory,
     )
 
-
     result = ss.to_pyarrow(
         "s3://bucket/partition/",
         input_format="json",

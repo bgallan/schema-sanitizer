@@ -208,14 +208,10 @@ def try_native_parquet_stream(
         return None
     info = plan.footer_info
     try:
-        capsule = (
-            plan.read(
-                factory._local_path,
-                None if factory._columns is None else list(factory._columns),
-                -1
-                if factory._memory_limit_bytes is None
-                else factory._memory_limit_bytes,
-            )
+        capsule = plan.read(
+            factory._local_path,
+            None if factory._columns is None else list(factory._columns),
+            -1 if factory._memory_limit_bytes is None else factory._memory_limit_bytes,
         )
     except Exception as exc:
         _record_native_open_error(factory, info, exc, logger)

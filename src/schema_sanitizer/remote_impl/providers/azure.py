@@ -188,9 +188,7 @@ async def directories_containing_files(
     if not groups:
         return discovery.finish()
 
-    concurrency = memory_budget(
-        memory_limit_bytes
-    ).source_discovery_concurrency
+    concurrency = memory_budget(memory_limit_bytes).source_discovery_concurrency
     semaphore = asyncio.Semaphore(concurrency)
 
     async def scan_group(

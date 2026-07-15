@@ -27,7 +27,6 @@ jobs:
         with:
           name: downstream-sdist
           path: release-dist/*.tar.gz
-
   downstream-wheel:
     needs: sdist
     runs-on: ubuntu-latest
@@ -64,7 +63,6 @@ jobs:
         with:
           name: downstream-wheel
           path: downstream-wheel/*.whl
-
   optional-extra:
     needs: downstream-wheel
     runs-on: ubuntu-latest
@@ -83,7 +81,7 @@ jobs:
           path: downstream-wheel
       - name: Install one consumer extra in isolation
         shell: bash
-        run: |
+        run: |-
           python -m venv "${{ runner.temp }}/extra-venv"
           source "${{ runner.temp }}/extra-venv/bin/activate"
           python -m pip install -U pip

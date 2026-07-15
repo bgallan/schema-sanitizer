@@ -49,7 +49,8 @@ constexpr std::size_t kMaxPayloadVerificationBytes = 256ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxValidityBitmapBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxFooterBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxMetadataBinaryBytes = 16ULL * 1024ULL * 1024ULL;
-constexpr std::size_t kMaxMaterializedMetadataBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxMaterializedMetadataBytes =
+    256ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMinMaterializedMetadataBytes = 1024ULL * 1024ULL;
 constexpr std::size_t kMetadataAmplificationFactor = 64ULL;
 constexpr std::uint64_t kMaxContainerElements = 4'000'000ULL;
@@ -71,7 +72,6 @@ constexpr std::int64_t kHardMaxNativeReaderBufferBytes =
     kDefaultNativeReaderMaxBufferBytes;
 constexpr std::int64_t kDefaultNativeReaderMaxBatchRows = 65'536;
 constexpr std::int64_t kHardMaxNativeReaderBatchRows = 1024 * 1024;
-
 
 std::size_t metadata_materialization_limit(std::size_t input_bytes) noexcept {
   std::size_t scaled = kMaxMaterializedMetadataBytes;

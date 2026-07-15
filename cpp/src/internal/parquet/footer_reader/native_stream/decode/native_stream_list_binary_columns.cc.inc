@@ -284,4 +284,3 @@ sanitize::Status materialize_simple_list_plain_byte_array_column(
   }
   return {};
 }
-

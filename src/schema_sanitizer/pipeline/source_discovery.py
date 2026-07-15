@@ -203,9 +203,7 @@ async def _discover_source(
                 else None
             )
             return bool(remote_files), discovered
-        return await routing.remote_file_exists(
-            uri, memory_limit_bytes=memory_limit_bytes
-        ), None
+        return await routing.remote_file_exists(uri, memory_limit_bytes=memory_limit_bytes), None
 
     if input_mode == "directory":
         local_files = _local_directory_matching_files(

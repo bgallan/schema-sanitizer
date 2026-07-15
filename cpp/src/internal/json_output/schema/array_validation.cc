@@ -17,13 +17,12 @@ constexpr std::int64_t kMaxArrowBatchRows = std::int64_t{1} << 24;
 constexpr std::size_t kMaxArrowValidationDepth = 64;
 
 sanitize::Status checked_logical_end(const ArrowArray &array,
-                                     std::int64_t offset,
-                                     std::int64_t length,
+                                     std::int64_t offset, std::int64_t length,
                                      std::int64_t *absolute_begin,
                                      std::int64_t *absolute_end,
                                      const ArrayValidationLimits &limits) {
-  if (!absolute_begin || !absolute_end || array.length < 0 || array.offset < 0 ||
-      offset < 0 || length < 0 || offset > array.length ||
+  if (!absolute_begin || !absolute_end || array.length < 0 ||
+      array.offset < 0 || offset < 0 || length < 0 || offset > array.length ||
       length > array.length - offset) {
     return sanitize::Status::Invalid(
         "JSONL writer: invalid Arrow array slice metadata");
@@ -49,9 +48,9 @@ sanitize::Status checked_logical_end(const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status validate_byte_endpoint(
-    std::int64_t slots, std::size_t width, std::string_view context,
-    const ArrayValidationLimits &limits) {
+sanitize::Status validate_byte_endpoint(std::int64_t slots, std::size_t width,
+                                        std::string_view context,
+                                        const ArrayValidationLimits &limits) {
   if (slots < 0 || width == 0) {
     return sanitize::Status::Invalid("JSONL writer: invalid ", context,
                                      " byte width");
@@ -176,10 +175,10 @@ sanitize::Status validate_common(const JsonlField &field,
 }
 
 template <class Offset>
-sanitize::Result<std::pair<std::int64_t, std::int64_t>> validate_offsets(
-    const ArrowArray &array, std::int64_t absolute_begin,
-    std::int64_t absolute_end, std::string_view context,
-    const ArrayValidationLimits &limits) {
+sanitize::Result<std::pair<std::int64_t, std::int64_t>>
+validate_offsets(const ArrowArray &array, std::int64_t absolute_begin,
+                 std::int64_t absolute_end, std::string_view context,
+                 const ArrayValidationLimits &limits) {
   if (absolute_begin == absolute_end) {
     return std::pair<std::int64_t, std::int64_t>{0, 0};
   }
@@ -212,8 +211,7 @@ sanitize::Result<std::pair<std::int64_t, std::int64_t>> validate_offsets(
   const auto first = offsets[static_cast<std::size_t>(absolute_begin)];
   if constexpr (std::is_unsigned_v<Offset>) {
     if (static_cast<std::uint64_t>(previous) >
-        static_cast<std::uint64_t>(
-            std::numeric_limits<std::int64_t>::max())) {
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
       return sanitize::Status::Invalid("JSONL writer: ", context,
                                        " offset exceeds int64 range");
     }
@@ -224,9 +222,9 @@ sanitize::Result<std::pair<std::int64_t, std::int64_t>> validate_offsets(
 
 template <class Index>
 sanitize::Status validate_dictionary_indices(const ArrowArray &array,
-                                              std::int64_t absolute_begin,
-                                              std::int64_t length,
-                                              std::int64_t dictionary_length) {
+                                             std::int64_t absolute_begin,
+                                             std::int64_t length,
+                                             std::int64_t dictionary_length) {
   if (length == 0) {
     return sanitize::Status::OK();
   }
@@ -261,12 +259,11 @@ sanitize::Status validate_dictionary_indices(const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status validate_array_slice_impl(const JsonlField &field,
-                                           const ArrowArray &array,
-                                           std::int64_t offset,
-                                           std::int64_t length,
-                                           std::size_t depth,
-                                           const ArrayValidationLimits &limits) {
+sanitize::Status
+validate_array_slice_impl(const JsonlField &field, const ArrowArray &array,
+                          std::int64_t offset, std::int64_t length,
+                          std::size_t depth,
+                          const ArrayValidationLimits &limits) {
   if (depth > kMaxArrowValidationDepth) {
     return sanitize::Status::OutOfMemory(
         "JSONL writer: Arrow nesting depth exceeds safety limit");
@@ -302,11 +299,11 @@ sanitize::Status validate_array_slice_impl(const JsonlField &field,
       return sanitize::Status::Invalid(
           "JSONL writer: unsupported dictionary index width");
     }
+    SAN_RETURN_NOT_OK(validate_byte_endpoint(absolute_end, width,
+                                             "dictionary indices", limits));
     SAN_RETURN_NOT_OK(
-        validate_byte_endpoint(absolute_end, width, "dictionary indices", limits));
-    SAN_RETURN_NOT_OK(validate_array_slice_impl(
-        field.children[0], *array.dictionary, 0, array.dictionary->length,
-        depth + 1, limits));
+        validate_array_slice_impl(field.children[0], *array.dictionary, 0,
+                                  array.dictionary->length, depth + 1, limits));
     switch (field.dictionary_index_kind) {
     case JsonlKind::kInt8:
       return validate_dictionary_indices<std::int8_t>(
@@ -354,8 +351,7 @@ sanitize::Status validate_array_slice_impl(const JsonlField &field,
   if (field.kind == JsonlKind::kList || field.kind == JsonlKind::kMap ||
       field.kind == JsonlKind::kLargeList) {
     if (field.children.size() != 1 || !array.children[0]) {
-      return sanitize::Status::Invalid(
-          "JSONL writer: list child is missing");
+      return sanitize::Status::Invalid("JSONL writer: list child is missing");
     }
     sanitize::Result<std::pair<std::int64_t, std::int64_t>> bounds =
         field.kind == JsonlKind::kLargeList
@@ -383,14 +379,14 @@ sanitize::Status validate_array_slice_impl(const JsonlField &field,
           "JSONL writer: fixed-size list/schema mismatch");
     }
     const auto width = static_cast<std::int64_t>(field.fixed_size_list_size);
-    if (width > 0 && absolute_begin >
-                         std::numeric_limits<std::int64_t>::max() / width) {
+    if (width > 0 &&
+        absolute_begin > std::numeric_limits<std::int64_t>::max() / width) {
       return sanitize::Status::Invalid(
           "JSONL writer: fixed-size list child offset overflow");
     }
     const auto child_begin = absolute_begin * width;
-    if (width > 0 && length >
-                         std::numeric_limits<std::int64_t>::max() / width) {
+    if (width > 0 &&
+        length > std::numeric_limits<std::int64_t>::max() / width) {
       return sanitize::Status::Invalid(
           "JSONL writer: fixed-size list child length overflow");
     }
@@ -401,11 +397,11 @@ sanitize::Status validate_array_slice_impl(const JsonlField &field,
           "JSONL writer: fixed-size list exceeds child length");
     }
     return validate_array_slice_impl(field.children[0], *array.children[0],
-                                     child_begin, child_length, depth + 1, limits);
+                                     child_begin, child_length, depth + 1,
+                                     limits);
   }
 
-  if (field.kind == JsonlKind::kString ||
-      field.kind == JsonlKind::kBinary ||
+  if (field.kind == JsonlKind::kString || field.kind == JsonlKind::kBinary ||
       field.kind == JsonlKind::kLargeString ||
       field.kind == JsonlKind::kLargeBinary) {
     sanitize::Result<std::pair<std::int64_t, std::int64_t>> bounds =
@@ -420,11 +416,9 @@ sanitize::Status validate_array_slice_impl(const JsonlField &field,
     }
     const auto [begin, end] = std::move(bounds).ValueOrDie();
     if (begin < 0 || end < begin) {
-      return sanitize::Status::Invalid(
-          "JSONL writer: invalid binary offsets");
+      return sanitize::Status::Invalid("JSONL writer: invalid binary offsets");
     }
-    SAN_RETURN_NOT_OK(
-        validate_byte_endpoint(end, 1, "binary data", limits));
+    SAN_RETURN_NOT_OK(validate_byte_endpoint(end, 1, "binary data", limits));
     if (end > begin && !array.buffers[2]) {
       return sanitize::Status::Invalid(
           "JSONL writer: binary data buffer is missing");
@@ -456,25 +450,25 @@ sanitize::Status validate_array_slice_impl(const JsonlField &field,
         "JSONL writer: unsupported fixed-width field metadata");
   }
   if (length > 0 && !array.buffers[1]) {
-    return sanitize::Status::Invalid(
-        "JSONL writer: values buffer is missing");
+    return sanitize::Status::Invalid("JSONL writer: values buffer is missing");
   }
-  return validate_byte_endpoint(absolute_end, width, "fixed-width values", limits);
+  return validate_byte_endpoint(absolute_end, width, "fixed-width values",
+                                limits);
 }
 
 } // namespace
 
-ArrayValidationLimits array_validation_limits(
-    std::int64_t memory_limit_bytes) {
+ArrayValidationLimits array_validation_limits(std::int64_t memory_limit_bytes) {
   const auto budget =
       sanitize::internal::memory_budget_from_limit(memory_limit_bytes);
   return {.logical_slots = budget.arrow_logical_slots,
           .logical_buffer_bytes = budget.arrow_logical_buffer_bytes};
 }
 
-sanitize::Status validate_array_slice(
-    const JsonlField &field, const ArrowArray &array, std::int64_t offset,
-    std::int64_t length, const ArrayValidationLimits &limits) {
+sanitize::Status validate_array_slice(const JsonlField &field,
+                                      const ArrowArray &array,
+                                      std::int64_t offset, std::int64_t length,
+                                      const ArrayValidationLimits &limits) {
   return validate_array_slice_impl(field, array, offset, length, 0, limits);
 }
 

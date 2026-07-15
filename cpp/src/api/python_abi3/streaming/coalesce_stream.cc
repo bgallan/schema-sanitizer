@@ -35,11 +35,9 @@ void release_pending_array(CoalesceStreamState *state) noexcept {
   state->pending_offset = 0;
 }
 
-
 sanitize::Status ensure_pending_batch(CoalesceStreamState *state) {
   if (!state || !state->inner) {
-    return sanitize::Status::Invalid(
-        "coalescing stream has no inner stream");
+    return sanitize::Status::Invalid("coalescing stream has no inner stream");
   }
   while (!state->pending_array.release && !state->inner_eof) {
     sanitize::CArrayGuard batch;
@@ -53,8 +51,8 @@ sanitize::Status ensure_pending_batch(CoalesceStreamState *state) {
       break;
     }
     if (batch.value().length < 0 || batch.value().offset < 0) {
-      return sanitize::Status::Invalid(
-          "coalescing stream received an Arrow batch with negative length or offset");
+      return sanitize::Status::Invalid("coalescing stream received an Arrow "
+                                       "batch with negative length or offset");
     }
     if (batch.value().length == 0) {
       continue;
@@ -140,9 +138,9 @@ int coalesce_get_next(ArrowArrayStream *stream, ArrowArray *out) {
           }
 
           const auto retained = retained_bytes(coalesced->root);
-          const auto remaining_bytes =
-              retained >= state->target_bytes ? std::size_t{0}
-                                              : state->target_bytes - retained;
+          const auto remaining_bytes = retained >= state->target_bytes
+                                           ? std::size_t{0}
+                                           : state->target_bytes - retained;
           const auto remaining_rows = state->target_rows - rows;
           auto slice_rows = fitting_slice_rows(
               state->root, state->pending_array, state->pending_offset,
@@ -151,10 +149,9 @@ int coalesce_get_next(ArrowArrayStream *stream, ArrowArray *out) {
             if (has_batch) {
               break;
             }
-            const auto hard_remaining =
-                retained >= state->max_batch_bytes
-                    ? std::size_t{0}
-                    : state->max_batch_bytes - retained;
+            const auto hard_remaining = retained >= state->max_batch_bytes
+                                            ? std::size_t{0}
+                                            : state->max_batch_bytes - retained;
             if (fitting_slice_rows(state->root, state->pending_array,
                                    state->pending_offset, 1,
                                    hard_remaining) == 0) {
@@ -166,10 +163,10 @@ int coalesce_get_next(ArrowArrayStream *stream, ArrowArray *out) {
             slice_rows = 1;
           }
 
-          SAN_RETURN_NOT_OK(append_node(
-              state->root, &coalesced->root,
-              ArraySlice{&state->pending_array, state->pending_offset,
-                         slice_rows}));
+          SAN_RETURN_NOT_OK(
+              append_node(state->root, &coalesced->root,
+                          ArraySlice{&state->pending_array,
+                                     state->pending_offset, slice_rows}));
           has_batch = true;
           rows += slice_rows;
           state->pending_offset += slice_rows;
@@ -208,8 +205,9 @@ PyObject *py_coalescing_stream_wrap(PyObject *, PyObject *args) {
   }
   if (memory_limit_bytes < -1 ||
       memory_limit_bytes > sanitize::internal::kHardMaxMemoryLimitBytes) {
-    PyErr_SetString(PyExc_ValueError,
-                    "memory_limit_bytes must be -1 or within the 64 GiB safety ceiling");
+    PyErr_SetString(
+        PyExc_ValueError,
+        "memory_limit_bytes must be -1 or within the 64 GiB safety ceiling");
     return nullptr;
   }
   const auto budget =
@@ -259,8 +257,8 @@ PyObject *py_coalescing_stream_wrap(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  auto state = std::unique_ptr<CoalesceStreamState>(
-      new (std::nothrow) CoalesceStreamState());
+  auto state = std::unique_ptr<CoalesceStreamState>(new (std::nothrow)
+                                                        CoalesceStreamState());
   if (!state) {
     return PyErr_NoMemory();
   }
@@ -270,7 +268,8 @@ PyObject *py_coalescing_stream_wrap(PyObject *, PyObject *args) {
   state->stream_obj = stream_obj;
   state->root = std::move(root);
   state->target_rows = budget.parquet_row_group_rows;
-  state->target_bytes = static_cast<std::size_t>(budget.parquet_row_group_bytes);
+  state->target_bytes =
+      static_cast<std::size_t>(budget.parquet_row_group_bytes);
   state->max_batch_bytes = static_cast<std::size_t>(budget.coalesce_max_bytes);
   state->max_logical_slots = budget.arrow_logical_slots;
   state->max_logical_buffer_bytes = budget.arrow_logical_buffer_bytes;

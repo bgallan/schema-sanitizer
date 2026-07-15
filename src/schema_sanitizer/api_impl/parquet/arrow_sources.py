@@ -16,8 +16,8 @@ from ...adapters.parquet.record_batch_factory import (
     open_parquet_record_batch_stream_factory,
 )
 from ...adapters.parquet.status import parquet_schema_is_direct_native_eligible
-from ...core_impl.memory_budget import memory_budget
 from ...core_impl.dependencies import ensure_pyarrow
+from ...core_impl.memory_budget import memory_budget
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from ...input_impl.selection import _Source
 from ...options_impl.options import Options

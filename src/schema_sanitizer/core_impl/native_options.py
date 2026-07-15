@@ -327,8 +327,7 @@ def _cached_options_capsule(encoded: bytes) -> Any:
             return cached
         while _PREPARED_OPTIONS_CACHE and (
             len(_PREPARED_OPTIONS_CACHE) >= _MAX_PREPARED_OPTIONS_CACHE_ENTRIES
-            or _PREPARED_OPTIONS_CACHE_BYTES
-            > _MAX_PREPARED_OPTIONS_CACHE_BYTES - len(encoded)
+            or _PREPARED_OPTIONS_CACHE_BYTES > _MAX_PREPARED_OPTIONS_CACHE_BYTES - len(encoded)
         ):
             evicted_key, _evicted_capsule = _PREPARED_OPTIONS_CACHE.popitem(last=False)
             _PREPARED_OPTIONS_CACHE_BYTES -= len(evicted_key)

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+
 @pytest.fixture(autouse=True)
 def _require_real_gcp(pytestconfig: pytest.Config) -> None:
     """Run only when explicitly enabled on the pytest command line."""

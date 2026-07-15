@@ -1,4 +1,5 @@
-// Encodes Arrow direct logical schemas into the canonical logical-schema wire format.
+// Encodes Arrow direct logical schemas into the canonical logical-schema wire
+// format.
 
 #include "api/python_abi3/arrow_direct/schema/payload.hh"
 

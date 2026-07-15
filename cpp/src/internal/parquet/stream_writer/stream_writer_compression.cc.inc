@@ -158,8 +158,8 @@ sanitize::Result<std::string> compress_payload(std::string_view payload,
     constexpr std::size_t kOutputChunkBytes = 64U << 10;
     std::array<unsigned char, kOutputChunkBytes> output_chunk{};
     std::string out;
-    out.reserve(std::min<std::size_t>(payload.size() / 4U + 64U,
-                                      kInputChunkBytes));
+    out.reserve(
+        std::min<std::size_t>(payload.size() / 4U + 64U, kInputChunkBytes));
     std::size_t input_offset = 0;
     do {
       if (stream.avail_in == 0 && input_offset < payload.size()) {
@@ -170,8 +170,7 @@ sanitize::Result<std::string> compress_payload(std::string_view payload,
         stream.avail_in = static_cast<uInt>(input_size);
         input_offset += input_size;
       }
-      const int flush =
-          input_offset == payload.size() ? Z_FINISH : Z_NO_FLUSH;
+      const int flush = input_offset == payload.size() ? Z_FINISH : Z_NO_FLUSH;
       do {
         stream.next_out = output_chunk.data();
         stream.avail_out = static_cast<uInt>(output_chunk.size());

@@ -174,9 +174,8 @@ bool arrow_schema_node_matches_impl(const ArrowSchema *actual,
   }
   for (int64_t i = 0; i < actual->n_children; ++i) {
     if (!actual->children || !expected->children ||
-        !arrow_schema_node_matches_impl(actual->children[i],
-                                        expected->children[i], depth + 1,
-                                        nodes)) {
+        !arrow_schema_node_matches_impl(
+            actual->children[i], expected->children[i], depth + 1, nodes)) {
       return false;
     }
   }
@@ -223,7 +222,8 @@ sanitize::Result<bool> arrow_stream_schema_matches_registry_plan(
   return arrow_schema_node_matches(actual.get(), expected.get());
 }
 
-int passthrough_get_schema(ArrowArrayStream *stream, ArrowSchema *out) noexcept {
+int passthrough_get_schema(ArrowArrayStream *stream,
+                           ArrowSchema *out) noexcept {
   if (!stream || !out) {
     return EINVAL;
   }

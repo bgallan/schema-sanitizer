@@ -19,11 +19,12 @@ namespace sanitize::internal {
 
 // Creates an Arrow C stream source from a prepared ingest pipeline.
 sanitize::Result<std::shared_ptr<sanitize::ExportBatchSource>>
-make_ingest_stream_source(
-    std::string_view frontend_name, FrontendHandle frontend,
-    std::shared_ptr<const CompiledPlan> plan, PreparedOptionsPtr opts,
-    std::shared_ptr<IngestDiagnostics> diagnostics,
-    std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
-    std::shared_ptr<void> operation_memory_pool);
+make_ingest_stream_source(std::string_view frontend_name,
+                          FrontendHandle frontend,
+                          std::shared_ptr<const CompiledPlan> plan,
+                          PreparedOptionsPtr opts,
+                          std::shared_ptr<IngestDiagnostics> diagnostics,
+                          std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
+                          std::shared_ptr<void> operation_memory_pool);
 
 } // namespace sanitize::internal

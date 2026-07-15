@@ -39,8 +39,7 @@ IngestStreamSource::IngestStreamSource(IngestStreamInit init)
       plan_keepalive_(std::move(init.plan)), opts_(std::move(init.opts)),
       diagnostics_(std::move(init.diagnostics)),
       owned_ctx_keepalive_(std::move(init.owned_ctx)),
-      operation_memory_pool_keepalive_(
-          std::move(init.operation_memory_pool)),
+      operation_memory_pool_keepalive_(std::move(init.operation_memory_pool)),
       app_(std::move(init.app)), pool_keepalive_(std::move(init.pool)),
       direct_(std::move(init.direct)) {}
 
@@ -96,12 +95,13 @@ sanitize::Status IngestStreamSource::Close() {
 }
 
 sanitize::Result<std::shared_ptr<sanitize::ExportBatchSource>>
-make_ingest_stream_source(
-    std::string_view frontend_name, FrontendHandle frontend,
-    std::shared_ptr<const CompiledPlan> plan, PreparedOptionsPtr opts,
-    std::shared_ptr<IngestDiagnostics> diagnostics,
-    std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
-    std::shared_ptr<void> operation_memory_pool) {
+make_ingest_stream_source(std::string_view frontend_name,
+                          FrontendHandle frontend,
+                          std::shared_ptr<const CompiledPlan> plan,
+                          PreparedOptionsPtr opts,
+                          std::shared_ptr<IngestDiagnostics> diagnostics,
+                          std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
+                          std::shared_ptr<void> operation_memory_pool) {
   if (!plan) {
     return sanitize::Status::Invalid("make_ingest_stream_source: plan is null");
   }

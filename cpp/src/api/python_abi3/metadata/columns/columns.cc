@@ -303,9 +303,8 @@ bool append_timestamp_columns_from_sequence(PyObject *sequence,
     }
     MetadataColumn column;
     column.placement = MetadataColumnPlacement::AllRowsTimestampMicros;
-    const bool ok =
-        py_unicode_to_string(item, "timestamp metadata columns", &column.name,
-                             &retained);
+    const bool ok = py_unicode_to_string(item, "timestamp metadata columns",
+                                         &column.name, &retained);
     Py_DECREF(item);
     if (!ok) {
       return false;

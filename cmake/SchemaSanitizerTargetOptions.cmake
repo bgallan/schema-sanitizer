@@ -37,9 +37,9 @@ function(schema_sanitizer_add_sanitizer target)
   endif()
 
   if(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan-ubsan")
-    target_compile_options(${target} PRIVATE -fsanitize=address,undefined
-                                             -fno-omit-frame-pointer
-                                             -fno-sanitize-recover=all)
+    target_compile_options(
+      ${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer
+                        -fno-sanitize-recover=all)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined
                         -fno-omit-frame-pointer -fno-sanitize-recover=all)
   else()
@@ -73,9 +73,8 @@ function(schema_sanitizer_add_coverage target)
      OR _coverage_target_type STREQUAL "MODULE_LIBRARY"
      OR _coverage_target_type STREQUAL "EXECUTABLE")
     target_link_options(
-      ${target}
-      PRIVATE
-        "-fprofile-instr-generate=${SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN}")
+      ${target} PRIVATE
+      "-fprofile-instr-generate=${SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN}")
   endif()
 endfunction()
 

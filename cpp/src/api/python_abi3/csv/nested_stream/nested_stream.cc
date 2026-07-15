@@ -168,16 +168,14 @@ sanitize::Status build_nested_utf8_array(CsvNestedUtf8Array *out,
         "CSV nested stream: row count exceeds safety limit");
   }
   if (static_cast<std::uint64_t>(length) >=
-      static_cast<std::uint64_t>(
-          std::numeric_limits<std::size_t>::max())) {
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::OutOfMemory(
         "CSV nested stream: offset count exceeds platform limits");
   }
   out->offsets.reserve(static_cast<std::size_t>(length) + 1);
   out->offsets.push_back(0);
   std::int64_t null_count = 0;
-  const auto validity_bytes =
-      static_cast<std::size_t>((length + 7) / 8);
+  const auto validity_bytes = static_cast<std::size_t>((length + 7) / 8);
   for (std::int64_t row = 0; row < length; ++row) {
     if (array_is_null(array, row)) {
       if (out->validity.empty()) {
@@ -196,8 +194,7 @@ sanitize::Status build_nested_utf8_array(CsvNestedUtf8Array *out,
       return sanitize::Status::OutOfMemory(
           "CSV nested stream: UTF-8 data exceeds 32-bit offset limit");
     }
-    out->offsets.push_back(
-        static_cast<std::int32_t>(previous + added));
+    out->offsets.push_back(static_cast<std::int32_t>(previous + added));
   }
 
   out->buffers[0] = out->validity.empty()

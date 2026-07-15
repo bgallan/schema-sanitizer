@@ -81,8 +81,9 @@ private:
   std::ofstream out_;
 };
 
-sanitize::Result<csv::WriteStats> csv_write_stream_to_path(
-    PyObject *stream_obj, std::string path, std::int64_t memory_limit_bytes) {
+sanitize::Result<csv::WriteStats>
+csv_write_stream_to_path(PyObject *stream_obj, std::string path,
+                         std::int64_t memory_limit_bytes) {
   FileCsvOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError("CSV writer: failed opening output");
@@ -145,8 +146,8 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
   long long memory_limit_bytes = -1;
   if (!PyArg_ParseTuple(args, "OOOOOO|L:csv_stream_write_with_metadata",
                         &stream_obj, &path_obj, &first_row_columns,
-                        &all_row_columns, &row_span_columns,
-                        &timestamp_columns, &memory_limit_bytes)) {
+                        &all_row_columns, &row_span_columns, &timestamp_columns,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;

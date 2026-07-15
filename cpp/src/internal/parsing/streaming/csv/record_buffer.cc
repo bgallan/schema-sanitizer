@@ -17,8 +17,7 @@ sanitize::Status CsvRecordSpanScanner::push_segment(std::size_t end_pos) {
     return sanitize::Status::Invalid("CSV record exceeds max buffered size");
   }
   if (scanner_.segments_.size() >= kMaxCsvRecordSegments) {
-    return sanitize::Status::Invalid(
-        "CSV record spans too many input chunks");
+    return sanitize::Status::Invalid("CSV record spans too many input chunks");
   }
   total_bytes_ += part.size();
   scanner_.segments_.push_back(CsvStreamingScanner::Segment{

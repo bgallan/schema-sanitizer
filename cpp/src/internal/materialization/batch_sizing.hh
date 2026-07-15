@@ -13,7 +13,8 @@ constexpr int64_t kInitialEstimatedRowBytes = 4096;
 
 // Keep headroom for parser state, row scratch, and ArrowArray ownership while
 // avoiding overflow for very large user-provided limits.
-inline int64_t batch_target_bytes_from_memory_limit(int64_t memory_limit_bytes) {
+inline int64_t
+batch_target_bytes_from_memory_limit(int64_t memory_limit_bytes) {
   if (memory_limit_bytes <= 0) {
     return memory_limit_bytes;
   }

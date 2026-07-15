@@ -8,12 +8,11 @@ set(_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT "auto")
 if(WIN32)
   set(_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT "bundled")
 endif()
-set(
-  SCHEMA_SANITIZER_ZLIB_PROVIDER
-  "${_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT}"
-  CACHE STRING "zlib provider for Parquet GZIP: auto|system|bundled|disabled")
+set(SCHEMA_SANITIZER_ZLIB_PROVIDER
+    "${_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT}"
+    CACHE STRING "zlib provider for Parquet GZIP: auto|system|bundled|disabled")
 set_property(CACHE SCHEMA_SANITIZER_ZLIB_PROVIDER PROPERTY STRINGS auto system
-                                                              bundled disabled)
+                                                           bundled disabled)
 
 function(schema_sanitizer_resolve_zlib out_target out_provider)
   string(TOLOWER "${SCHEMA_SANITIZER_ZLIB_PROVIDER}" _provider)
@@ -36,27 +35,37 @@ function(schema_sanitizer_resolve_zlib out_target out_provider)
       set(_target ZLIB::ZLIBSTATIC)
       set(_resolved_provider "system-static")
     elseif(_provider STREQUAL "system")
-      message(FATAL_ERROR "System zlib requested but no CMake zlib target was found")
+      message(
+        FATAL_ERROR "System zlib requested but no CMake zlib target was found")
     endif()
   endif()
 
-  if(NOT _target AND (_provider STREQUAL "auto" OR _provider STREQUAL "bundled"))
+  if(NOT _target AND (_provider STREQUAL "auto" OR _provider STREQUAL "bundled"
+                     ))
     include(FetchContent)
 
     # zlib 1.3.2 renamed its CMake options. Disable every auxiliary target and
     # installation rule so wheel builds only compile the static compression
     # library that is linked into the Python extension.
-    set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-    set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)
-    set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)
+    set(ZLIB_BUILD_TESTING
+        OFF
+        CACHE BOOL "" FORCE)
+    set(ZLIB_BUILD_SHARED
+        OFF
+        CACHE BOOL "" FORCE)
+    set(ZLIB_BUILD_STATIC
+        ON
+        CACHE BOOL "" FORCE)
+    set(ZLIB_INSTALL
+        OFF
+        CACHE BOOL "" FORCE)
 
     FetchContent_Declare(
       schema_sanitizer_zlib
       URL https://github.com/madler/zlib/releases/download/v1.3.2/zlib132.zip
-      URL_HASH SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-      EXCLUDE_FROM_ALL)
+      URL_HASH
+        SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE EXCLUDE_FROM_ALL)
     FetchContent_MakeAvailable(schema_sanitizer_zlib)
 
     if(TARGET zlibstatic)
@@ -80,11 +89,16 @@ function(schema_sanitizer_resolve_zlib out_target out_provider)
   endif()
 
   if(_target)
-    message(STATUS "Native Parquet GZIP backend: ${_resolved_provider} (${_target})")
+    message(
+      STATUS "Native Parquet GZIP backend: ${_resolved_provider} (${_target})")
   else()
     message(STATUS "Native Parquet GZIP backend: disabled")
   endif()
 
-  set(${out_target} "${_target}" PARENT_SCOPE)
-  set(${out_provider} "${_resolved_provider}" PARENT_SCOPE)
+  set(${out_target}
+      "${_target}"
+      PARENT_SCOPE)
+  set(${out_provider}
+      "${_resolved_provider}"
+      PARENT_SCOPE)
 endfunction()

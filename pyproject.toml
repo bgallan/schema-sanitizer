@@ -80,6 +80,16 @@ Repository = "https://github.com/bgallan/schema-sanitizer"
 Changelog = "https://github.com/bgallan/schema-sanitizer/releases"
 Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 
+[tool.cibuildwheel]
+build = "cp311-*"
+build-verbosity = 1
+test-requires = ["pyarrow"]
+test-command = "python {project}/meta/ci/check_parquet_compression_matrix.py"
+
+[tool.cibuildwheel.linux]
+skip = "*-musllinux_*"
+manylinux-x86_64-image = "manylinux_2_28"
+
 [tool.mypy]
 python_version = "3.11"
 files = ["src/schema_sanitizer"]
@@ -119,16 +129,6 @@ version = ">=4.3,<4.4"
 [tool.scikit-build.cmake.define]
 SCHEMA_SANITIZER_REQUIRE_ZLIB = "ON"
 SCHEMA_SANITIZER_ZLIB_PROVIDER = "bundled"
-
-[tool.cibuildwheel]
-build = "cp311-*"
-build-verbosity = 1
-test-requires = ["pyarrow"]
-test-command = "python {project}/meta/ci/check_parquet_compression_matrix.py"
-
-[tool.cibuildwheel.linux]
-skip = "*-musllinux_*"
-manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"

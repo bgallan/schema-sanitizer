@@ -16,8 +16,8 @@ constexpr std::int64_t kMaxArrowSchemaChildren = 65'536;
 constexpr std::int64_t kMaxArrowSchemaNodes = 1'000'000;
 
 sanitize::Status validate_arrow_schema_shape(const ArrowSchema *schema,
-                                               std::int64_t depth,
-                                               std::int64_t *nodes) {
+                                             std::int64_t depth,
+                                             std::int64_t *nodes) {
   if (!schema || !schema->format || !nodes) {
     return sanitize::Status::Invalid(
         "Arrow direct input has an invalid schema node");
@@ -48,8 +48,8 @@ sanitize::Status validate_arrow_schema_shape(const ArrowSchema *schema,
       return sanitize::Status::Invalid(
           "Arrow direct schema has a null child pointer");
     }
-    SAN_RETURN_NOT_OK(validate_arrow_schema_shape(
-        schema->children[index], depth + 1, nodes));
+    SAN_RETURN_NOT_OK(
+        validate_arrow_schema_shape(schema->children[index], depth + 1, nodes));
   }
   if (schema->dictionary) {
     SAN_RETURN_NOT_OK(

@@ -174,8 +174,7 @@ private:
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
 make_struct_builder(std::vector<std::unique_ptr<ColumnBuilder>> children,
                     const std::shared_ptr<PoolResource> &pool) {
-  auto builder =
-      make_column_builder<StructBuilder>(std::move(children), pool);
+  auto builder = make_column_builder<StructBuilder>(std::move(children), pool);
   if (!builder)
     return Status::OutOfMemory("make_struct_builder: OOM builder");
   return builder;

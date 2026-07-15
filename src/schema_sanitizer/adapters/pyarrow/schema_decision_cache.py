@@ -69,16 +69,11 @@ class SchemaDecisionCache:
     def _record_fingerprint(self, fingerprint: bytes, supported: bool) -> None:
         """Store one stable fingerprint compatibility decision."""
         key_bytes = len(fingerprint)
-        if (
-            self._max_size == 0
-            or key_bytes > self._max_key_bytes
-            or self._max_key_bytes == 0
-        ):
+        if self._max_size == 0 or key_bytes > self._max_key_bytes or self._max_key_bytes == 0:
             return
         existing = fingerprint in self._by_fingerprint
-        if (
-            len(self._by_fingerprint) >= self._max_size
-            or (not existing and self._fingerprint_bytes > self._max_key_bytes - key_bytes)
+        if len(self._by_fingerprint) >= self._max_size or (
+            not existing and self._fingerprint_bytes > self._max_key_bytes - key_bytes
         ):
             self._by_fingerprint.clear()
             self._fingerprint_bytes = 0
@@ -90,16 +85,11 @@ class SchemaDecisionCache:
     def _record_text(self, key: str, supported: bool) -> None:
         """Store one schema-text compatibility decision."""
         key_bytes = len(key)
-        if (
-            self._max_size == 0
-            or key_bytes > self._max_key_bytes
-            or self._max_key_bytes == 0
-        ):
+        if self._max_size == 0 or key_bytes > self._max_key_bytes or self._max_key_bytes == 0:
             return
         existing = key in self._by_schema_text
-        if (
-            len(self._by_schema_text) >= self._max_size
-            or (not existing and self._schema_text_bytes > self._max_key_bytes - key_bytes)
+        if len(self._by_schema_text) >= self._max_size or (
+            not existing and self._schema_text_bytes > self._max_key_bytes - key_bytes
         ):
             self._by_schema_text.clear()
             self._schema_text_bytes = 0

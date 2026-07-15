@@ -2,8 +2,8 @@
 
 #pragma once
 
-#include "internal/parsing/streaming/json/scanner.hh"
 #include "internal/parsing/json/ondemand/scan.hh"
+#include "internal/parsing/streaming/json/scanner.hh"
 
 #include <cstddef>
 #include <cstdint>

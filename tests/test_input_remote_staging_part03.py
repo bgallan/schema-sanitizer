@@ -23,9 +23,7 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
 
     staged_calls = []
 
-    async def fake_list_remote_directory_files(
-        uri, suffixes, *, memory_limit_bytes=None
-    ):
+    async def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
         """Return deterministic remote children without staging them."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".json",)

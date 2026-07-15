@@ -166,9 +166,7 @@ def write_table_or_stream(
         )
     )
     memory_limit_bytes = (
-        getattr(call_options, "memory_limit_bytes", None)
-        if call_options is not None
-        else None
+        getattr(call_options, "memory_limit_bytes", None) if call_options is not None else None
     )
     replay = None
     try:

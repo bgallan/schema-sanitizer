@@ -23,9 +23,8 @@ void set_bit(std::vector<std::uint8_t> *bitmap, std::int64_t index) {
 }
 
 void clear_bit(std::vector<std::uint8_t> *bitmap, std::int64_t index) {
-  (*bitmap)[static_cast<std::size_t>(index >> 3)] &=
-      static_cast<std::uint8_t>(~(static_cast<std::uint8_t>(1U)
-                                  << (index & 7)));
+  (*bitmap)[static_cast<std::size_t>(index >> 3)] &= static_cast<std::uint8_t>(
+      ~(static_cast<std::uint8_t>(1U) << (index & 7)));
 }
 
 sanitize::Status validate_slice(const ArraySlice &slice,

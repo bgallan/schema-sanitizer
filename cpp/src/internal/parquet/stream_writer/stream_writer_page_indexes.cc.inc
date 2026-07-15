@@ -5,17 +5,20 @@ std::string encode_column_index(const std::vector<PageInfo> &pages) {
     const auto &page = pages[index];
     return page.num_values > 0 && page.null_count == page.num_values;
   });
-  writer.FieldListString(2, pages.size(), [&](std::size_t index) -> std::string_view {
-    const auto &value = pages[index].min_value;
-    return value ? std::string_view(*value) : std::string_view{};
-  });
-  writer.FieldListString(3, pages.size(), [&](std::size_t index) -> std::string_view {
-    const auto &value = pages[index].max_value;
-    return value ? std::string_view(*value) : std::string_view{};
-  });
+  writer.FieldListString(
+      2, pages.size(), [&](std::size_t index) -> std::string_view {
+        const auto &value = pages[index].min_value;
+        return value ? std::string_view(*value) : std::string_view{};
+      });
+  writer.FieldListString(
+      3, pages.size(), [&](std::size_t index) -> std::string_view {
+        const auto &value = pages[index].max_value;
+        return value ? std::string_view(*value) : std::string_view{};
+      });
   writer.FieldI32(4, 0); // UNORDERED
-  writer.FieldListI64(5, pages.size(),
-                      [&](std::size_t index) { return pages[index].null_count; });
+  writer.FieldListI64(5, pages.size(), [&](std::size_t index) {
+    return pages[index].null_count;
+  });
   writer.Stop();
   return out;
 }
@@ -56,9 +59,10 @@ std::string encode_offset_index(const std::vector<PageInfo> &pages) {
   return out;
 }
 
-sanitize::Status write_row_group_page_indexes(
-    CountingOutput &out, const std::vector<LeafColumn> &columns,
-    RowGroupInfo *row_group) {
+sanitize::Status
+write_row_group_page_indexes(CountingOutput &out,
+                             const std::vector<LeafColumn> &columns,
+                             RowGroupInfo *row_group) {
   if (!row_group) {
     return sanitize::Status::Invalid("native Parquet writer: null row group");
   }
@@ -91,8 +95,7 @@ sanitize::Status write_row_group_page_indexes(
           "native Parquet writer: offset index is too large");
     }
     chunk.offset_index_offset = out.offset();
-    chunk.offset_index_length =
-        static_cast<std::int32_t>(offset_index.size());
+    chunk.offset_index_length = static_cast<std::int32_t>(offset_index.size());
     SAN_RETURN_NOT_OK(out.Write(offset_index));
 
     // Footer metadata only needs aggregate chunk statistics and index offsets.
@@ -102,4 +105,3 @@ sanitize::Status write_row_group_page_indexes(
   }
   return sanitize::Status::OK();
 }
-

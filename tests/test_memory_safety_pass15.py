@@ -62,9 +62,7 @@ def test_frontends_deduplicate_chunk_and_source_owners_independently() -> None:
 
 def test_direct_row_scratch_is_retired_after_every_attempt() -> None:
     """CSV and JSON direct parsers release temporary storage on success or error."""
-    text = (
-        ROOT / "cpp/src/internal/materialization/row_appender.cc"
-    ).read_text(encoding="utf-8")
+    text = (ROOT / "cpp/src/internal/materialization/row_appender.cc").read_text(encoding="utf-8")
     assert "class CsvDirectScratchReset" in text
     assert "cells_->capacity() > kRetainedDirectCsvCellCapacity" in text
     assert "arena_->reset();" in text

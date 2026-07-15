@@ -21,9 +21,11 @@ sanitize::Status validate_chunk_request(std::int64_t max_bytes,
 
 // Validates current + additional without overflowing before a full input view
 // grows.
-sanitize::Status validate_materialized_input_growth(
-    std::string_view operation, std::string_view source, std::uint64_t current, std::uint64_t additional,
-    std::uint64_t limit);
+sanitize::Status validate_materialized_input_growth(std::string_view operation,
+                                                    std::string_view source,
+                                                    std::uint64_t current,
+                                                    std::uint64_t additional,
+                                                    std::uint64_t limit);
 
 enum class TextEncoding : std::uint8_t {
   kUtf8 = 0,
@@ -43,8 +45,9 @@ sanitize::Status ensure_uncompressed_file(const std::string &path,
 ChunkSourcePtr make_memory_chunk_source(std::string bytes);
 ChunkSourcePtr make_file_chunk_source(std::string path,
                                       std::int64_t memory_limit_bytes);
-ChunkSourcePtr make_transcoding_file_chunk_source(
-    std::string path, TextEncoding encoding, std::int64_t memory_limit_bytes);
+ChunkSourcePtr
+make_transcoding_file_chunk_source(std::string path, TextEncoding encoding,
+                                   std::int64_t memory_limit_bytes);
 ChunkSourcePtr
 make_multi_path_chunk_source(std::vector<std::string> paths,
                              std::vector<std::string> source_names,

@@ -24,7 +24,8 @@ public:
     return Allocate(size, 64, out);
   }
 
-  virtual void Free(uint8_t *buffer, int64_t size, int64_t alignment) noexcept = 0;
+  virtual void Free(uint8_t *buffer, int64_t size,
+                    int64_t alignment) noexcept = 0;
 
   void Free(uint8_t *buffer, int64_t size) noexcept { Free(buffer, size, 64); }
 

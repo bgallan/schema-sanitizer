@@ -58,8 +58,8 @@ PyObject *py_jsonl_stream_write(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  auto result = jsonl_write_stream_to_output(
-      stream_obj, output_obj, memory_limit_bytes);
+  auto result =
+      jsonl_write_stream_to_output(stream_obj, output_obj, memory_limit_bytes);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
@@ -77,8 +77,8 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
   long long memory_limit_bytes = -1;
   if (!PyArg_ParseTuple(args, "OOOOOO|L:jsonl_stream_write_with_metadata",
                         &stream_obj, &path_obj, &first_row_columns,
-                        &all_row_columns, &row_span_columns,
-                        &timestamp_columns, &memory_limit_bytes)) {
+                        &all_row_columns, &row_span_columns, &timestamp_columns,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;

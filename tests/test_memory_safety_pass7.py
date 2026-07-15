@@ -30,7 +30,7 @@ def test_retry_delay_bounds_exponent_work(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(async_scheduler.random, "uniform", lambda _a, _b: 0.0)
     assert async_scheduler.retry_delay(10**9) == 8.0
-    assert async_scheduler.retry_delay(-10**9) == 0.25
+    assert async_scheduler.retry_delay(-(10**9)) == 0.25
 
 
 def test_remote_prefetch_window_comes_from_memory_limit() -> None:
@@ -39,6 +39,7 @@ def test_remote_prefetch_window_comes_from_memory_limit() -> None:
 
     class Manifest:
         """Provide a lightweight test double."""
+
         files: tuple[()] = ()
         chunk_size = 1
 

@@ -84,15 +84,11 @@ def test_read_xml_row_tag_streams_file_larger_than_memory_limit(tmp_path) -> Non
 
     path = tmp_path / "stream.xml"
     path.write_text(
-        "<rows><row><a>0</a></row>"
-        + (" " * (2 * 1024 * 1024))
-        + "<row><a>1</a></row></rows>",
+        "<rows><row><a>0</a></row>" + (" " * (2 * 1024 * 1024)) + "<row><a>1</a></row></rows>",
         encoding="utf-8",
     )
 
-    result = read_test_xml(
-        path, xml_row_tag="row", memory_limit_bytes=1024 * 1024
-    )
+    result = read_test_xml(path, xml_row_tag="row", memory_limit_bytes=1024 * 1024)
 
     assert result.clean_data.to_pylist() == [{"a": "0"}, {"a": "1"}]
 
@@ -201,8 +197,7 @@ def test_file_input_can_exceed_memory_limit_bytes(tmp_path) -> None:
     pytest.importorskip("pyarrow")
     path = tmp_path / "data.jsonl"
     path.write_text(
-        ("\n" * (2 * 1024 * 1024))
-        + "".join(f'{{"a":{i}}}\n' for i in range(20)),
+        ("\n" * (2 * 1024 * 1024)) + "".join(f'{{"a":{i}}}\n' for i in range(20)),
         encoding="utf-8",
     )
 

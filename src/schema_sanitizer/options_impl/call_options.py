@@ -369,10 +369,10 @@ def _hashable_option_value(
         kind = "list" if isinstance(value, list) else "tuple"
         return (kind, tuple(retained)), used_bytes, len(retained)
     if isinstance(value, str):
-        used_bytes = _bounded_utf8_size(value, remaining_bytes)
-        if used_bytes is None or remaining_items < 1:
+        string_bytes = _bounded_utf8_size(value, remaining_bytes)
+        if string_bytes is None or remaining_items < 1:
             return None
-        return ("str", value), used_bytes, 1
+        return ("str", value), string_bytes, 1
     if isinstance(value, (int, bool, type(None))):
         if remaining_items < 1:
             return None
@@ -388,9 +388,7 @@ def _call_options_cache_key(
     used_bytes = 0
     used_items = 0
     for name, value in sorted(kwargs.items()):
-        name_bytes = _bounded_utf8_size(
-            name, _MAX_CALL_OPTIONS_CACHE_KEY_BYTES - used_bytes
-        )
+        name_bytes = _bounded_utf8_size(name, _MAX_CALL_OPTIONS_CACHE_KEY_BYTES - used_bytes)
         if name_bytes is None or used_items >= _MAX_CALL_OPTIONS_CACHE_ITEMS:
             return None
         used_bytes += name_bytes

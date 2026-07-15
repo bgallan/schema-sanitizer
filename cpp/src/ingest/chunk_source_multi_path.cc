@@ -115,8 +115,8 @@ public:
           bytes->append(*separator_);
         }
         for (;;) {
-          SAN_ASSIGN_OR_RAISE(
-              auto chunk, source->NextChunk(kMaterializationReadBytes));
+          SAN_ASSIGN_OR_RAISE(auto chunk,
+                              source->NextChunk(kMaterializationReadBytes));
           if (chunk.data.empty()) {
             break;
           }
@@ -139,8 +139,8 @@ public:
 private:
   sanitize::Result<Chunk> take_separator_chunk(std::int64_t max_bytes) {
     const auto available = separator_->size() - separator_pos_;
-    const auto take = std::min<std::size_t>(
-        available, static_cast<std::size_t>(max_bytes));
+    const auto take =
+        std::min<std::size_t>(available, static_cast<std::size_t>(max_bytes));
     if (take > std::numeric_limits<std::size_t>::max() - source_base_offset_) {
       return sanitize::Status::OutOfMemory(
           "MultiPathChunkSource: source offset overflow");

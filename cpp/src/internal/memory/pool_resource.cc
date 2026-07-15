@@ -6,9 +6,9 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <utility>
 #include <memory_resource>
 #include <new>
+#include <utility>
 
 #include "internal/memory/memory_pool.hh"
 
@@ -20,8 +20,9 @@ PoolResource::PoolResource(void *pool_handle)
 
 PoolResource::PoolResource(std::shared_ptr<void> pool_keepalive)
     : pool_keepalive_(std::move(pool_keepalive)),
-      pool_handle_(pool_keepalive_ ? pool_keepalive_.get()
-                                   : static_cast<void *>(default_memory_pool())) {}
+      pool_handle_(pool_keepalive_
+                       ? pool_keepalive_.get()
+                       : static_cast<void *>(default_memory_pool())) {}
 
 void *PoolResource::do_allocate(std::size_t bytes, std::size_t alignment) {
   if (bytes == 0) {

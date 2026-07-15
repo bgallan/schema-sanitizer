@@ -64,8 +64,7 @@ def _start_indexed_workers(
 ) -> list[asyncio.Task[None]]:
     """Start a fixed worker pool for indexed asynchronous work."""
     return [
-        asyncio.create_task(_indexed_worker(indices, results, fetch))
-        for _ in range(worker_count)
+        asyncio.create_task(_indexed_worker(indices, results, fetch)) for _ in range(worker_count)
     ]
 
 

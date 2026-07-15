@@ -187,9 +187,10 @@ sanitize::Status write_header(Output &out_file, const jsonl::JsonlField &root,
   return flush_buffer_if_large(out_file, buffer);
 }
 
-sanitize::Status write_batch_csv(
-    Output &out_file, const jsonl::JsonlField &root, const ArrowArray &array,
-    std::string &buffer, const jsonl::ArrayValidationLimits &limits) {
+sanitize::Status write_batch_csv(Output &out_file,
+                                 const jsonl::JsonlField &root,
+                                 const ArrowArray &array, std::string &buffer,
+                                 const jsonl::ArrayValidationLimits &limits) {
   SAN_RETURN_NOT_OK(jsonl::validate_batch(root, array, limits));
   if (array.length > 0) {
     constexpr int64_t kDefaultRowReserve = 96;
@@ -248,11 +249,9 @@ sanitize::Result<WriteStats> write_stream(ArrowArrayStream *stream,
     }
     if (batch.value().length < 0 ||
         stats.batches == std::numeric_limits<std::int64_t>::max() ||
-        batch.value().length >
-            std::numeric_limits<std::int64_t>::max() -
-                stats.materialized_rows) {
-      return sanitize::Status::Invalid(
-          "CSV writer: write statistics overflow");
+        batch.value().length > std::numeric_limits<std::int64_t>::max() -
+                                   stats.materialized_rows) {
+      return sanitize::Status::Invalid("CSV writer: write statistics overflow");
     }
     SAN_RETURN_NOT_OK(
         write_batch_csv(out_file, root, batch.value(), buffer, limits));

@@ -51,8 +51,8 @@ sanitize::Status materialize_byte_array_column(
           return sanitize::Status::Invalid(
               "native Parquet reader: truncated BYTE_ARRAY length");
         }
-        size = static_cast<std::size_t>(
-            read_u32_le(values.data() + value_offset));
+        size =
+            static_cast<std::size_t>(read_u32_le(values.data() + value_offset));
         value_offset += 4;
         if (values.size() - value_offset < size) {
           return sanitize::Status::Invalid(
@@ -138,7 +138,8 @@ sanitize::Status materialize_delta_length_byte_array_column(
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid DELTA_LENGTH_BYTE_ARRAY payload offset");
+          "native Parquet reader: invalid DELTA_LENGTH_BYTE_ARRAY payload "
+          "offset");
     }
     const auto values = std::string_view(payload).substr(
         static_cast<std::size_t>(page.value_payload_offset));
@@ -154,13 +155,15 @@ sanitize::Status materialize_delta_length_byte_array_column(
               if (length < 0 ||
                   length > std::numeric_limits<std::int32_t>::max()) {
                 return sanitize::Status::Invalid(
-                    "native Parquet reader: invalid DELTA_LENGTH_BYTE_ARRAY length");
+                    "native Parquet reader: invalid DELTA_LENGTH_BYTE_ARRAY "
+                    "length");
               }
               const auto size = static_cast<std::uint64_t>(length);
               if (page_value_bytes >
                   std::numeric_limits<std::uint64_t>::max() - size) {
                 return sanitize::Status::Invalid(
-                    "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY length overflow");
+                    "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY length "
+                    "overflow");
               }
               page_value_bytes += size;
               lengths.push_back(static_cast<std::int32_t>(length));
@@ -169,12 +172,14 @@ sanitize::Status materialize_delta_length_byte_array_column(
     if (lengths.size() != static_cast<std::size_t>(span.non_null_count) ||
         lengths_bytes > values.size()) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY length count mismatch");
+          "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY length count "
+          "mismatch");
     }
     const auto bytes = values.substr(lengths_bytes);
     if (page_value_bytes != static_cast<std::uint64_t>(bytes.size())) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY byte payload mismatch");
+          "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY byte payload "
+          "mismatch");
     }
     std::size_t length_offset = 0;
     std::size_t byte_offset = 0;
@@ -190,8 +195,8 @@ sanitize::Status materialize_delta_length_byte_array_column(
         }
         size = static_cast<std::size_t>(lengths[length_offset++]);
         if (bytes.size() - byte_offset < size) {
-          return sanitize::Status::Invalid(
-              "native Parquet reader: truncated DELTA_LENGTH_BYTE_ARRAY payload");
+          return sanitize::Status::Invalid("native Parquet reader: truncated "
+                                           "DELTA_LENGTH_BYTE_ARRAY payload");
         }
         value = bytes.data() + byte_offset;
         byte_offset += size;
@@ -206,7 +211,8 @@ sanitize::Status materialize_delta_length_byte_array_column(
             current_offset > std::numeric_limits<std::int32_t>::max() -
                                  static_cast<std::int32_t>(size)) {
           return sanitize::Status::Invalid(
-              "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY offsets exceed int32");
+              "native Parquet reader: DELTA_LENGTH_BYTE_ARRAY offsets exceed "
+              "int32");
         }
         out->values.insert(out->values.end(), value, value + size);
         current_offset += static_cast<std::int32_t>(size);

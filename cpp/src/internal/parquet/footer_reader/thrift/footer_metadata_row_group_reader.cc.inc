@@ -156,8 +156,8 @@ sanitize::Status read_row_groups(CompactReader &reader, FooterInfo *info) {
     return sanitize::Status::Invalid(
         "Parquet footer: row group count exceeds security limit");
   }
-  SAN_RETURN_NOT_OK(validate_metadata_list(
-      reader, count, kMaxRowGroups, sizeof(RowGroupInfo), "row groups"));
+  SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, kMaxRowGroups,
+                                           sizeof(RowGroupInfo), "row groups"));
   info->row_group_count = static_cast<std::int32_t>(count);
   info->row_groups.clear();
   info->row_groups.reserve(static_cast<std::size_t>(count));

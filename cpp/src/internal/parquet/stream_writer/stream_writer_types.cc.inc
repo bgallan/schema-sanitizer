@@ -11,16 +11,13 @@ constexpr std::int64_t kDefaultTargetPageBytes = 1024LL * 1024LL;
 constexpr std::int64_t kHardMaxTargetPageBytes = 64LL * 1024LL * 1024LL;
 constexpr std::int64_t kDefaultMaxRowGroups = 65'536;
 constexpr std::int64_t kHardMaxRowGroups = kDefaultMaxRowGroups;
-constexpr std::int64_t kDefaultMaxFooterMetadataBytes =
-    256LL * 1024LL * 1024LL;
+constexpr std::int64_t kDefaultMaxFooterMetadataBytes = 256LL * 1024LL * 1024LL;
 constexpr std::int64_t kHardMaxFooterMetadataBytes =
     kDefaultMaxFooterMetadataBytes;
 constexpr std::size_t kMaxDictionaryCandidateEntries = 262'144;
-constexpr std::size_t kMaxDictionaryCandidateScratchBytes =
-    64U * 1024U * 1024U;
+constexpr std::size_t kMaxDictionaryCandidateScratchBytes = 64U * 1024U * 1024U;
 
-std::size_t saturating_size_add(std::size_t left,
-                                std::size_t right) noexcept {
+std::size_t saturating_size_add(std::size_t left, std::size_t right) noexcept {
   return right > std::numeric_limits<std::size_t>::max() - left
              ? std::numeric_limits<std::size_t>::max()
              : left + right;
@@ -184,8 +181,8 @@ public:
 
   // Writes bytes and advances the logical file offset.
   sanitize::Status Write(std::string_view data) {
-    if (data.size() >
-            static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
+    if (data.size() > static_cast<std::size_t>(
+                          std::numeric_limits<std::int64_t>::max()) ||
         offset_ > std::numeric_limits<std::int64_t>::max() -
                       static_cast<std::int64_t>(data.size())) {
       return sanitize::Status::Invalid(

@@ -37,8 +37,7 @@ jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj,
                                       memory_limit_bytes);
 }
 
-sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj,
-                                          std::string *out,
+sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj, std::string *out,
                                           std::int64_t memory_limit_bytes) {
   ArrowSchema *schema = nullptr;
   ArrowArray *array = nullptr;
@@ -50,8 +49,7 @@ sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj,
     return status;
   }
 
-  return jsonl_write_batch_to_string(*schema, *array, out,
-                                    memory_limit_bytes);
+  return jsonl_write_batch_to_string(*schema, *array, out, memory_limit_bytes);
 }
 
 sanitize::Status jsonl_append_batches_bytes(PyObject *batches_obj,

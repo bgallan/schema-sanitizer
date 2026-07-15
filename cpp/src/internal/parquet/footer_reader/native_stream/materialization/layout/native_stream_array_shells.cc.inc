@@ -19,9 +19,10 @@ struct NativeRepeatedLevelLayoutWindow {
   std::vector<std::uint8_t> validity_bitmap;
 };
 
-sanitize::Result<NativeElementRange> native_repeated_domain_range(
-    const ColumnChunkInfo &column, std::size_t layout_index,
-    const NativeFlatRowWindow &window) {
+sanitize::Result<NativeElementRange>
+native_repeated_domain_range(const ColumnChunkInfo &column,
+                             std::size_t layout_index,
+                             const NativeFlatRowWindow &window) {
   SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
   if (layout_index >= column.repeated_level_layouts.size()) {
     return sanitize::Status::Invalid(
@@ -47,12 +48,12 @@ sanitize::Result<NativeElementRange> native_repeated_domain_range(
   return range;
 }
 
-sanitize::Result<NativeElementRange> native_repeated_element_range(
-    const ColumnChunkInfo &column, std::size_t layout_index,
-    const NativeFlatRowWindow &window) {
-  SAN_ASSIGN_OR_RAISE(auto domain,
-                      native_repeated_domain_range(column, layout_index,
-                                                   window));
+sanitize::Result<NativeElementRange>
+native_repeated_element_range(const ColumnChunkInfo &column,
+                              std::size_t layout_index,
+                              const NativeFlatRowWindow &window) {
+  SAN_ASSIGN_OR_RAISE(
+      auto domain, native_repeated_domain_range(column, layout_index, window));
   const auto &layout = column.repeated_level_layouts[layout_index];
   if (!layout.decoded || domain.end() < domain.first ||
       domain.end() >= static_cast<std::int64_t>(layout.offsets.size())) {
@@ -68,17 +69,17 @@ sanitize::Result<NativeElementRange> native_repeated_element_range(
   return NativeElementRange{first, last - first};
 }
 
-sanitize::Result<NativeRepeatedLeafWindow> native_repeated_leaf_window(
-    const ColumnChunkInfo &column, const NativeFlatRowWindow &window) {
+sanitize::Result<NativeRepeatedLeafWindow>
+native_repeated_leaf_window(const ColumnChunkInfo &column,
+                            const NativeFlatRowWindow &window) {
   if (column.repeated_level_layouts.empty()) {
     return sanitize::Status::Invalid(
         "native Parquet reader: repeated leaf has no layouts");
   }
   SAN_ASSIGN_OR_RAISE(
       const auto elements,
-      native_repeated_element_range(column,
-                                    column.repeated_level_layouts.size() - 1,
-                                    window));
+      native_repeated_element_range(
+          column, column.repeated_level_layouts.size() - 1, window));
   const auto &deepest = column.repeated_level_layouts.back();
   if (!deepest.decoded || deepest.element_count < 0 ||
       elements.end() > deepest.element_count) {
@@ -121,9 +122,8 @@ sanitize::Result<NativeRepeatedLevelLayoutWindow>
 native_repeated_level_layout_window(const ColumnChunkInfo &column,
                                     std::size_t layout_index,
                                     const NativeFlatRowWindow &window) {
-  SAN_ASSIGN_OR_RAISE(
-      const auto domain,
-      native_repeated_domain_range(column, layout_index, window));
+  SAN_ASSIGN_OR_RAISE(const auto domain, native_repeated_domain_range(
+                                             column, layout_index, window));
   const auto &layout = column.repeated_level_layouts[layout_index];
   if (!layout.decoded || domain.end() < domain.first ||
       domain.end() >= static_cast<std::int64_t>(layout.offsets.size())) {
@@ -137,7 +137,8 @@ native_repeated_level_layout_window(const ColumnChunkInfo &column,
   const auto base = layout.offsets[static_cast<std::size_t>(domain.first)];
   for (auto index = domain.first; index <= domain.end(); ++index) {
     const auto value = layout.offsets[static_cast<std::size_t>(index)];
-    if (value < base || value - base > std::numeric_limits<std::int32_t>::max()) {
+    if (value < base ||
+        value - base > std::numeric_limits<std::int32_t>::max()) {
       return sanitize::Status::Invalid(
           "native Parquet reader: repeated layout window offset overflow");
     }

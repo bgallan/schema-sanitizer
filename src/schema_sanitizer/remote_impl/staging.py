@@ -212,17 +212,13 @@ async def download_single_file(
         await azure.download_file(uri, local_path)
         return
     if provider == "http":
-        await download_http_file(
-            uri, local_path, memory_limit_bytes=memory_limit_bytes
-        )
+        await download_http_file(uri, local_path, memory_limit_bytes=memory_limit_bytes)
         return
     scheme = urlparse(uri).scheme.lower()
     raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
 
 
-async def upload_file(
-    local_path: str, uri: str, *, memory_limit_bytes: int | None
-) -> None:
+async def upload_file(local_path: str, uri: str, *, memory_limit_bytes: int | None) -> None:
     """Upload a local file to a supported remote URI."""
     provider = remote_provider(uri)
     if provider == "gcs":
@@ -235,9 +231,7 @@ async def upload_file(
         await azure.upload_file(local_path, uri)
         return
     if provider == "http":
-        await upload_http_file(
-            local_path, uri, memory_limit_bytes=memory_limit_bytes
-        )
+        await upload_http_file(local_path, uri, memory_limit_bytes=memory_limit_bytes)
         return
     scheme = urlparse(uri).scheme.lower()
     raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
@@ -259,9 +253,7 @@ async def download_files_to_directory(
         raise ValueError("remote directory input found no matching files")
     tuning = _directory_download_tuning(memory_limit_bytes)
     semaphore = asyncio.Semaphore(tuning.concurrency)
-    context = await provider_client_for_downloads(
-        files, memory_limit_bytes=memory_limit_bytes
-    )
+    context = await provider_client_for_downloads(files, memory_limit_bytes=memory_limit_bytes)
     if context is None:  # pragma: no cover - guarded by the non-empty check
         raise RuntimeError("remote download context was not created")
     target_root = Path(directory)
@@ -294,11 +286,7 @@ def stage_remote_single_file(uri: str, *, memory_limit_bytes: int | None) -> Sta
     """Download one remote file to a local temporary path."""
     temp = create_temp_file_path(suffix=suffix_from_uri(uri))
     try:
-        run_sync(
-            download_single_file(
-                uri, temp.path, memory_limit_bytes=memory_limit_bytes
-            )
-        )
+        run_sync(download_single_file(uri, temp.path, memory_limit_bytes=memory_limit_bytes))
         check_download_size(uri, Path(temp.path).stat().st_size, memory_limit_bytes)
     except Exception:
         temp.close()
@@ -345,9 +333,7 @@ def stage_remote_parquet_directory(
     return stage_remote_files_to_directory(files, memory_limit_bytes=memory_limit_bytes)
 
 
-def prepare_output_target(
-    path: Any, *, memory_limit_bytes: int | None
-) -> RemoteOutputTarget:
+def prepare_output_target(path: Any, *, memory_limit_bytes: int | None) -> RemoteOutputTarget:
     """Return a local target, staging remote destinations when needed."""
     raw = os.fspath(path)
     if looks_like_file_uri(raw):
@@ -356,9 +342,7 @@ def prepare_output_target(
             memory_limit_bytes=memory_limit_bytes,
         )
     if not looks_like_remote_uri(raw):
-        return RemoteOutputTarget(
-            local_path=raw, memory_limit_bytes=memory_limit_bytes
-        )
+        return RemoteOutputTarget(local_path=raw, memory_limit_bytes=memory_limit_bytes)
     temp = create_temp_file_path(suffix=suffix_from_uri(raw, default=".tmp"))
     return RemoteOutputTarget(
         local_path=temp.path,

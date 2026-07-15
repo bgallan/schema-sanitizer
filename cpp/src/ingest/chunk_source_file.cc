@@ -7,8 +7,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <filesystem>
+#include <fstream>
 #include <ios>
 #include <limits>
 #include <memory>
@@ -34,8 +34,8 @@ namespace {
 enum class DetectedCompression : std::uint8_t { kNone = 0, kGzip };
 
 sanitize::Status validate_mapped_file_size(const std::string &path,
-                                            std::uint64_t size,
-                                            std::uint64_t limit) {
+                                           std::uint64_t size,
+                                           std::uint64_t limit) {
   return internal::validate_materialized_input_growth(
       "FileChunkSource: mapped file", path, 0, size, limit);
 }
@@ -99,25 +99,23 @@ map_file_read_only(const std::string &path, std::uint64_t limit) {
   auto mapped = std::make_shared<MappedFile>();
 #if defined(_WIN32)
   const auto native_path = std::filesystem::u8path(path).wstring();
-  mapped->file = CreateFileW(native_path.c_str(), GENERIC_READ,
-                             FILE_SHARE_READ,
-                             nullptr, OPEN_EXISTING,
-                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-                             nullptr);
+  mapped->file =
+      CreateFileW(native_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                  OPEN_EXISTING,
+                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
   if (mapped->file == INVALID_HANDLE_VALUE) {
-    return sanitize::Status::IOError("FileChunkSource: CreateFileW failed for '",
-                                     path, "'");
+    return sanitize::Status::IOError(
+        "FileChunkSource: CreateFileW failed for '", path, "'");
   }
   if (GetFileType(mapped->file) != FILE_TYPE_DISK) {
     return sanitize::Status::Invalid(
-        "FileChunkSource: memory mapping requires a regular disk file: '",
-        path, "'");
+        "FileChunkSource: memory mapping requires a regular disk file: '", path,
+        "'");
   }
   LARGE_INTEGER file_size{};
   if (!GetFileSizeEx(mapped->file, &file_size) || file_size.QuadPart < 0 ||
       static_cast<std::uint64_t>(file_size.QuadPart) >
-          static_cast<std::uint64_t>(
-              std::numeric_limits<std::size_t>::max())) {
+          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::OutOfMemory(
         "FileChunkSource: mapped file size is out of range: '", path, "'");
   }
@@ -149,12 +147,11 @@ map_file_read_only(const std::string &path, std::uint64_t limit) {
     return sanitize::Status::IOError("FileChunkSource: open failed for '", path,
                                      "'");
   }
-  struct stat metadata {};
+  struct stat metadata{};
   if (fstat(mapped->file, &metadata) != 0 || metadata.st_size < 0 ||
       !S_ISREG(metadata.st_mode) ||
       static_cast<std::uint64_t>(metadata.st_size) >
-          static_cast<std::uint64_t>(
-              std::numeric_limits<std::size_t>::max())) {
+          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::OutOfMemory(
         "FileChunkSource: mapped file size is out of range: '", path, "'");
   }
@@ -164,8 +161,8 @@ map_file_read_only(const std::string &path, std::uint64_t limit) {
   if (mapped->size == 0) {
     return mapped;
   }
-  void *view = mmap(nullptr, mapped->size, PROT_READ, MAP_PRIVATE, mapped->file,
-                    0);
+  void *view =
+      mmap(nullptr, mapped->size, PROT_READ, MAP_PRIVATE, mapped->file, 0);
   if (view == MAP_FAILED) {
     return sanitize::Status::IOError("FileChunkSource: mmap failed for '", path,
                                      "'");
@@ -241,7 +238,8 @@ public:
 
   sanitize::Result<Chunk> View() override {
     if (!full_owner_) {
-      SAN_ASSIGN_OR_RAISE(auto mapped, map_file_read_only(path_, materialized_limit_));
+      SAN_ASSIGN_OR_RAISE(auto mapped,
+                          map_file_read_only(path_, materialized_limit_));
       full_data_ = mapped->size == 0
                        ? std::string_view{}
                        : std::string_view(mapped->data, mapped->size);
@@ -282,24 +280,25 @@ namespace internal {
 sanitize::Status validate_chunk_request(std::int64_t max_bytes,
                                         std::string_view operation) {
   if (max_bytes <= 0) {
-    return sanitize::Status::Invalid(operation,
-                                     ": max_bytes must be > 0");
+    return sanitize::Status::Invalid(operation, ": max_bytes must be > 0");
   }
   if (max_bytes > kMaxChunkRequestBytes) {
     return sanitize::Status::Invalid(
-        operation, ": max_bytes exceeds safety limit: ", max_bytes,
-        " bytes > ", kMaxChunkRequestBytes, " bytes");
+        operation, ": max_bytes exceeds safety limit: ", max_bytes, " bytes > ",
+        kMaxChunkRequestBytes, " bytes");
   }
   return {};
 }
 
-sanitize::Status validate_materialized_input_growth(
-    std::string_view operation, std::string_view source,
-    std::uint64_t current, std::uint64_t additional, std::uint64_t limit) {
+sanitize::Status validate_materialized_input_growth(std::string_view operation,
+                                                    std::string_view source,
+                                                    std::uint64_t current,
+                                                    std::uint64_t additional,
+                                                    std::uint64_t limit) {
   if (current > limit || additional > limit - current) {
     return sanitize::Status::OutOfMemory(
-        operation, " exceeds configured limit: ", current, " + ",
-        additional, " bytes > ", limit, " bytes for '", source, "'");
+        operation, " exceeds configured limit: ", current, " + ", additional,
+        " bytes > ", limit, " bytes for '", source, "'");
   }
   return {};
 }

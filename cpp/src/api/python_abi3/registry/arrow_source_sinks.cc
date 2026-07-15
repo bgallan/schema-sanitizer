@@ -58,8 +58,8 @@ finish_opened_source_metadata(NativeArrowSourcesStreamState *state,
     return sanitize::Status::Invalid("native Arrow source stream is null");
   }
   state->metadata = std::make_unique<MetadataStreamState>();
-  configure_metadata_stream_budget(
-      state->metadata.get(), state->prepared->spec.memory_limit_bytes);
+  configure_metadata_stream_budget(state->metadata.get(),
+                                   state->prepared->spec.memory_limit_bytes);
   state->metadata->inner = state->inner;
   state->metadata->columns = metadata_columns_for_child(state, source);
   state->metadata->first_row_pending = state->first_row_pending;
@@ -187,10 +187,9 @@ sanitize::Status open_next_source(NativeArrowSourcesStreamState *state) {
     GilGuard gil;
     frontend_r = make_arrow_frontend(
         source.stream_obj, &input_schema,
-        ArrowDirectOptions{.timestamp_precision =
-                               state->prepared->spec.timestamp_precision,
-                           .memory_limit_bytes =
-                               state->prepared->spec.memory_limit_bytes});
+        ArrowDirectOptions{
+            .timestamp_precision = state->prepared->spec.timestamp_precision,
+            .memory_limit_bytes = state->prepared->spec.memory_limit_bytes});
   }
   SAN_ASSIGN_OR_RAISE(auto frontend, std::move(frontend_r));
   sanitize::Result<sanitize::IngestStream> out_r =

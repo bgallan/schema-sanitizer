@@ -60,6 +60,7 @@ def test_folder_reader_checks_hostile_chunk_before_retaining_it() -> None:
 
     class OversizedReader:
         """Provide a lightweight test double."""
+
         def read(self, size: int = -1, /) -> bytes:
             """Provide a test helper implementation."""
             requested.append(size)
@@ -89,12 +90,15 @@ def test_folder_reader_wipes_temporary_accumulator(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(directory_inputs, "_zero_bytearray_range", capture)
     file = directory_inputs.FolderFile(
-        display_name="secret.bin", name="secret.bin", size=None,
-        open_binary=lambda: io.BytesIO(b"secret")
+        display_name="secret.bin",
+        name="secret.bin",
+        size=None,
+        open_binary=lambda: io.BytesIO(b"secret"),
     )
-    assert directory_inputs.read_folder_file_bytes(
-        file, memory_limit_bytes=64, stage="bounded read"
-    ) == b"secret"
+    assert (
+        directory_inputs.read_folder_file_bytes(file, memory_limit_bytes=64, stage="bounded read")
+        == b"secret"
+    )
     assert observed == [b"\x00" * 6]
 
 
@@ -120,12 +124,16 @@ def test_native_coalescer_rejects_one_row_over_budget(tmp_path: Path) -> None:
     """Verify the defensive regression contract."""
     require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
-    from schema_sanitizer.core_impl.native_symbols import COALESCING_STREAM_WRAP, PARQUET_STREAM_WRITE
+    from schema_sanitizer.core_impl.native_symbols import (
+        COALESCING_STREAM_WRAP,
+        PARQUET_STREAM_WRITE,
+    )
 
     source = ExecutionContext().to_sink_python("stream", [{"payload": "x" * 4096}], None)
     capsule = COALESCING_STREAM_WRAP(source, 512)
-    with pytest.raises(RuntimeError, match="(single row exceeds hard batch byte limit|logical byte limit)"):
+    with pytest.raises(
+        RuntimeError, match="(single row exceeds hard batch byte limit|logical byte limit)"
+    ):
         PARQUET_STREAM_WRITE(
-            _CapsuleStream(capsule), str(tmp_path / "bounded.parquet"),
-            "uncompressed", -1, 512
+            _CapsuleStream(capsule), str(tmp_path / "bounded.parquet"), "uncompressed", -1, 512
         )

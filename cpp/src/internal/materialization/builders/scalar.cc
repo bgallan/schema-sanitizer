@@ -170,9 +170,8 @@ public:
 
   // Returns the current byte usage.
   [[nodiscard]] int64_t bytes() const noexcept override {
-    return saturating_add_i64(
-        saturating_size_to_i64(validity_.capacity()),
-        saturating_size_to_i64(bits_.capacity()));
+    return saturating_add_i64(saturating_size_to_i64(validity_.capacity()),
+                              saturating_size_to_i64(bits_.capacity()));
   }
 
 protected:
@@ -198,7 +197,8 @@ class Utf8Builder final : public BaseBuilder {
 public:
   // Creates a Utf8Builder.
   explicit Utf8Builder(std::shared_ptr<PoolResource> pool)
-      : BaseBuilder(std::move(pool)), offsets_(pool_.get()), data_(pool_.get()) {
+      : BaseBuilder(std::move(pool)), offsets_(pool_.get()),
+        data_(pool_.get()) {
     offsets_.push_back(0);
   }
 

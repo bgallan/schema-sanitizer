@@ -45,7 +45,8 @@ struct alignas(std::max_align_t) TrackingAllocationHeader {
 };
 
 static_assert(sizeof(DefaultAllocationHeader) % alignof(std::max_align_t) == 0);
-static_assert(sizeof(TrackingAllocationHeader) % alignof(std::max_align_t) == 0);
+static_assert(sizeof(TrackingAllocationHeader) % alignof(std::max_align_t) ==
+              0);
 
 bool normalize_alignment(int64_t alignment, std::size_t *out) noexcept {
   if (!out) {
@@ -84,8 +85,8 @@ bool checked_allocation_size(std::size_t requested, std::size_t alignment,
     return false;
   }
   const auto with_header = requested + header_size;
-  if (with_header > std::numeric_limits<std::size_t>::max() -
-                        (alignment - 1U) ||
+  if (with_header >
+          std::numeric_limits<std::size_t>::max() - (alignment - 1U) ||
       with_header + (alignment - 1U) >
           std::numeric_limits<std::size_t>::max() - kAllocationGuardBytes) {
     return false;
@@ -109,17 +110,15 @@ bool allocation_guard_is_valid(const std::uint8_t *buffer,
 }
 
 std::uintptr_t align_up(std::uintptr_t value, std::size_t alignment) noexcept {
-  return (value + alignment - 1U) & ~(static_cast<std::uintptr_t>(alignment) - 1U);
+  return (value + alignment - 1U) &
+         ~(static_cast<std::uintptr_t>(alignment) - 1U);
 }
-
-
 
 void update_peak(std::atomic<int64_t> *peak, int64_t current) noexcept {
   auto observed = peak->load(std::memory_order_relaxed);
-  while (current > observed &&
-         !peak->compare_exchange_weak(observed, current,
-                                      std::memory_order_relaxed,
-                                      std::memory_order_relaxed)) {
+  while (current > observed && !peak->compare_exchange_weak(
+                                   observed, current, std::memory_order_relaxed,
+                                   std::memory_order_relaxed)) {
   }
 }
 
@@ -158,8 +157,8 @@ public:
     if (!raw) {
       return sanitize::Status::OutOfMemory("Allocate: out of memory");
     }
-    const auto base = reinterpret_cast<std::uintptr_t>(raw) +
-                      sizeof(DefaultAllocationHeader);
+    const auto base =
+        reinterpret_cast<std::uintptr_t>(raw) + sizeof(DefaultAllocationHeader);
     const auto aligned = align_up(base, normalized_alignment);
     auto *header = reinterpret_cast<DefaultAllocationHeader *>(
         aligned - sizeof(DefaultAllocationHeader));
@@ -175,8 +174,8 @@ public:
                       .upstream = static_cast<std::uint8_t *>(raw),
                       .upstream_size = static_cast<std::int64_t>(total),
                       .requested_size = size,
-                      .alignment = static_cast<std::int64_t>(
-                          normalized_alignment)})) {
+                      .alignment =
+                          static_cast<std::int64_t>(normalized_alignment)})) {
       header->magic = 0;
       header->raw = nullptr;
       std::free(raw);
@@ -191,7 +190,8 @@ public:
     return sanitize::Status::OK();
   }
 
-  void Free(uint8_t *buffer, int64_t size, int64_t alignment) noexcept override {
+  void Free(uint8_t *buffer, int64_t size,
+            int64_t alignment) noexcept override {
     if (!buffer) {
       return;
     }
@@ -222,15 +222,15 @@ public:
       size_mismatch_count_.fetch_add(1, std::memory_order_relaxed);
     }
     std::size_t normalized_alignment = 0;
-    if (alignment > 0 && normalize_alignment(alignment, &normalized_alignment) &&
+    if (alignment > 0 &&
+        normalize_alignment(alignment, &normalized_alignment) &&
         static_cast<std::int64_t>(normalized_alignment) !=
             (registry_enabled ? record.alignment
                               : static_cast<std::int64_t>(header->alignment))) {
       size_mismatch_count_.fetch_add(1, std::memory_order_relaxed);
     }
     void *raw = registry_enabled ? record.upstream : header->raw;
-    const auto actual =
-        registry_enabled ? record.requested_size : header->size;
+    const auto actual = registry_enabled ? record.requested_size : header->size;
     if (!allocation_guard_is_valid(buffer, static_cast<std::size_t>(actual))) {
       corruption_count_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -310,7 +310,7 @@ make_tracking_memory_pool(std::shared_ptr<MemoryPool> parent, int64_t limit,
     parent = shared_default_memory_pool();
   }
   return std::make_shared<TrackingMemoryPool>(std::move(parent), limit,
-                                               std::move(backend_name));
+                                              std::move(backend_name));
 }
 
 } // namespace sanitize::internal

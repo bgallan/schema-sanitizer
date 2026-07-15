@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 DEFAULT_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 MAX_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024 * 1024
+
+
 def normalize_memory_limit(memory_limit_bytes: int | None) -> int:
     """Return the effective positive per-operation memory limit.
 
@@ -19,11 +21,8 @@ def normalize_memory_limit(memory_limit_bytes: int | None) -> int:
     if memory_limit_bytes <= 0:
         raise ValueError("Option 'memory_limit_bytes' must be > 0")
     if memory_limit_bytes > MAX_MEMORY_LIMIT_BYTES:
-        raise ValueError(
-            "Option 'memory_limit_bytes' exceeds the absolute 64 GiB safety ceiling"
-        )
+        raise ValueError("Option 'memory_limit_bytes' exceeds the absolute 64 GiB safety ceiling")
     return memory_limit_bytes
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +63,6 @@ class MemoryBudget:
         if not isinstance(values, tuple) or len(values) != 19:
             raise RuntimeError("native memory budget returned an invalid contract")
         return cls(*values)
-
 
 
 def memory_budget(memory_limit_bytes: int | None) -> MemoryBudget:

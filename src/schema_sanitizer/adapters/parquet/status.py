@@ -249,15 +249,15 @@ def native_parquet_footer_info(
 
 
 def native_parquet_stream_preflight_info(
-    path: Any, *, columns: list[str] | tuple[str, ...] | None = None,
+    path: Any,
+    *,
+    columns: list[str] | tuple[str, ...] | None = None,
     memory_limit_bytes: int | None = None,
 ) -> dict[str, Any] | None:
     """Validate native stream readiness while retaining one row group at a time."""
     limit = -1 if memory_limit_bytes is None else memory_limit_bytes
     return json.loads(
-        PARQUET_STREAM_PREFLIGHT_JSON(
-            path, None if columns is None else list(columns), limit
-        )
+        PARQUET_STREAM_PREFLIGHT_JSON(path, None if columns is None else list(columns), limit)
     )
 
 

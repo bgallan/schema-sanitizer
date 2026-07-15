@@ -206,8 +206,9 @@ public:
                    bool require_top_level_array = false,
                    bool require_object_rows = false)
       : src_(std::move(src)), rows_(options, require_object_rows) {
-    chunk_bytes_ = internal::memory_budget_from_limit(options.memory_limit_bytes)
-                       .io_chunk_bytes;
+    chunk_bytes_ =
+        internal::memory_budget_from_limit(options.memory_limit_bytes)
+            .io_chunk_bytes;
     scanner_ = std::make_unique<JsonStreamingScanner>(src_, chunk_bytes_,
                                                       require_top_level_array);
     reset_status_ = scanner_->Reset();

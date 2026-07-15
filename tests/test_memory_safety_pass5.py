@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_metadata_collection_limits_precede_large_reservations() -> None:
     """Hostile Python collection sizes must be rejected before native reserve()."""
-    source = (
-        ROOT / "cpp/src/api/python_abi3/metadata/columns/columns.cc"
-    ).read_text(encoding="utf-8")
+    source = (ROOT / "cpp/src/api/python_abi3/metadata/columns/columns.cc").read_text(
+        encoding="utf-8"
+    )
 
     dict_parser = source.split("bool append_utf8_columns_from_dict", 1)[1].split(
         "bool py_value_to_metadata_span", 1
@@ -23,29 +23,27 @@ def test_metadata_collection_limits_precede_large_reservations() -> None:
     span_parser = source.split("bool append_row_span_columns_from_dict", 1)[1].split(
         "bool append_timestamp_columns_from_sequence", 1
     )[0]
-    timestamp_parser = source.split(
-        "bool append_timestamp_columns_from_sequence", 1
-    )[1].split("bool append_registry_metadata_columns", 1)[0]
+    timestamp_parser = source.split("bool append_timestamp_columns_from_sequence", 1)[1].split(
+        "bool append_registry_metadata_columns", 1
+    )[0]
 
     assert dict_parser.index("ensure_item_budget") < dict_parser.index("out->reserve")
     assert span_parser.index("ensure_item_budget") < span_parser.index("out->reserve")
     assert span_parser.index("ensure_item_budget(total_spans") < span_parser.index(
         "column.spans.reserve"
     )
-    assert timestamp_parser.index("ensure_item_budget") < timestamp_parser.index(
-        "out->reserve"
-    )
+    assert timestamp_parser.index("ensure_item_budget") < timestamp_parser.index("out->reserve")
     assert "kMaxMetadataInputUtf8Bytes" in source
 
 
 def test_generated_metadata_budget_precedes_batch_allocations() -> None:
     """Metadata expansion must be estimated before vectors allocate their payloads."""
-    builder = (
-        ROOT / "cpp/src/api/python_abi3/metadata/stream/array_builder.cc"
-    ).read_text(encoding="utf-8")
-    lifecycle = (
-        ROOT / "cpp/src/api/python_abi3/metadata/stream/stream.cc"
-    ).read_text(encoding="utf-8")
+    builder = (ROOT / "cpp/src/api/python_abi3/metadata/stream/array_builder.cc").read_text(
+        encoding="utf-8"
+    )
+    lifecycle = (ROOT / "cpp/src/api/python_abi3/metadata/stream/stream.cc").read_text(
+        encoding="utf-8"
+    )
     body = builder.split("sanitize::Status build_metadata_array", 1)[1]
 
     budget = body.index("validate_generated_metadata_budget")
@@ -59,25 +57,21 @@ def test_generated_metadata_budget_precedes_batch_allocations() -> None:
 
 def test_metadata_root_offset_is_rejected_before_child_generation() -> None:
     """A sliced struct root cannot index past newly generated zero-offset children."""
-    source = (
-        ROOT / "cpp/src/api/python_abi3/metadata/stream/stream.cc"
-    ).read_text(encoding="utf-8")
+    source = (ROOT / "cpp/src/api/python_abi3/metadata/stream/stream.cc").read_text(
+        encoding="utf-8"
+    )
     validator = source.split("sanitize::Status validate_metadata_base_array", 1)[1]
 
-    assert validator.index("base.offset != 0") < validator.index(
-        "base.offset + base.length"
-    )
+    assert validator.index("base.offset != 0") < validator.index("base.offset + base.length")
     assert "root offset must be zero" in validator
 
 
 def test_serializers_wipe_and_release_large_transient_buffers() -> None:
     """Flushed output and CSV decode buffers must not retain giant high-water marks."""
-    jsonl = (
-        ROOT / "cpp/src/internal/json_output/jsonl_stream_writer.cc"
-    ).read_text(encoding="utf-8")
-    csv = (ROOT / "cpp/src/internal/csv/csv_stream_writer.cc").read_text(
+    jsonl = (ROOT / "cpp/src/internal/json_output/jsonl_stream_writer.cc").read_text(
         encoding="utf-8"
     )
+    csv = (ROOT / "cpp/src/internal/csv/csv_stream_writer.cc").read_text(encoding="utf-8")
 
     for source in (jsonl, csv):
         flush = source.split("sanitize::Status flush_buffer", 1)[1].split(
@@ -100,6 +94,7 @@ def test_native_row_span_count_is_rejected_before_iteration() -> None:
 
     class HugeSequence:
         """Helper class used by this regression."""
+
         def __len__(self) -> int:
             """Helper used by this regression."""
             return 1_000_001
@@ -109,9 +104,7 @@ def test_native_row_span_count_is_rejected_before_iteration() -> None:
             raise AssertionError(f"element {index} must not be read")
 
     with pytest.raises(ValueError, match="row-span entry count"):
-        native_core.metadata_stream_wrap(
-            object(), {}, {}, {"source_file": HugeSequence()}, ()
-        )
+        native_core.metadata_stream_wrap(object(), {}, {}, {"source_file": HugeSequence()}, ())
 
 
 def test_native_generated_metadata_batch_budget_rejects_before_materialization(

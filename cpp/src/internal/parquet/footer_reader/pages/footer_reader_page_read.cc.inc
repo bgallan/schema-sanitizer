@@ -1,4 +1,5 @@
-constexpr std::size_t kRetainedPagePayloadScratchBytes = 8ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kRetainedPagePayloadScratchBytes =
+    8ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kRetainedPageHeaderScratchBytes = 64ULL * 1024ULL;
 
 void clear_or_release_page_scratch(std::string *value,
@@ -54,9 +55,10 @@ struct PageVerificationScratch {
   }
 };
 
-sanitize::Status charge_page_verification_budget(
-    PageVerificationScratch *scratch, std::size_t compressed,
-    std::size_t decompressed) {
+sanitize::Status
+charge_page_verification_budget(PageVerificationScratch *scratch,
+                                std::size_t compressed,
+                                std::size_t decompressed) {
   if (!scratch) {
     return sanitize::Status::Invalid(
         "Parquet page payload: verification scratch is null");
@@ -78,9 +80,8 @@ sanitize::Status charge_page_verification_budget(
   }
   constexpr std::uint64_t kSmallPayloadAllowance = 64ULL * 1024ULL * 1024ULL;
   const auto ratio_limit =
-      next_compressed >
-              std::numeric_limits<std::uint64_t>::max() /
-                  kMaxDecompressionExpansionRatio
+      next_compressed > std::numeric_limits<std::uint64_t>::max() /
+                            kMaxDecompressionExpansionRatio
           ? std::numeric_limits<std::uint64_t>::max()
           : next_compressed * kMaxDecompressionExpansionRatio;
   if (next_decompressed > std::max(kSmallPayloadAllowance, ratio_limit)) {
@@ -93,7 +94,7 @@ sanitize::Status charge_page_verification_budget(
 }
 
 sanitize::Status charge_page_derived_budget(PageVerificationScratch *scratch,
-                                             const PageHeaderInfo &page) {
+                                            const PageHeaderInfo &page) {
   if (!scratch) {
     return sanitize::Status::Invalid(
         "Parquet page payload: verification scratch is null");
@@ -123,14 +124,14 @@ sanitize::Status charge_page_derived_budget(PageVerificationScratch *scratch,
       static_cast<std::uint64_t>(page.decoded_repetition_level_values.size()) *
       sizeof(std::int16_t);
   if (definition_bytes > std::numeric_limits<std::uint64_t>::max() - bytes ||
-      repetition_bytes > std::numeric_limits<std::uint64_t>::max() -
-                             bytes - definition_bytes) {
+      repetition_bytes > std::numeric_limits<std::uint64_t>::max() - bytes -
+                             definition_bytes) {
     return sanitize::Status::Invalid(
         "Parquet page payload: derived level budget overflow");
   }
   bytes += definition_bytes + repetition_bytes;
-  if (bytes > std::numeric_limits<std::uint64_t>::max() -
-                  scratch->derived_bytes ||
+  if (bytes >
+          std::numeric_limits<std::uint64_t>::max() - scratch->derived_bytes ||
       scratch->derived_bytes + bytes > kMaxDerivedBytesPerRowGroup) {
     return sanitize::Status::Invalid(
         "Parquet page payload: row-group derived buffer budget exceeded");
@@ -249,8 +250,8 @@ sanitize::Status verify_page_payload(std::ifstream &file,
       static_cast<std::size_t>(page->compressed_page_size);
   const auto uncompressed_size =
       static_cast<std::size_t>(page->uncompressed_page_size);
-  SAN_RETURN_NOT_OK(charge_page_verification_budget(
-      scratch, compressed_size, uncompressed_size));
+  SAN_RETURN_NOT_OK(charge_page_verification_budget(scratch, compressed_size,
+                                                    uncompressed_size));
   if (compressed_size > kMaxPayloadVerificationBytes ||
       uncompressed_size > kMaxPayloadVerificationBytes) {
     page->payload_verification_skipped = true;
@@ -407,8 +408,7 @@ sanitize::Status read_page_headers(std::ifstream &file, FooterInfo *info) {
   for (auto &row_group : info->row_groups) {
     scratch.reset_budget();
     for (auto &column : row_group.columns) {
-      SAN_RETURN_NOT_OK(
-          read_page_headers_for_column(file, &column, &scratch));
+      SAN_RETURN_NOT_OK(read_page_headers_for_column(file, &column, &scratch));
     }
   }
   return {};

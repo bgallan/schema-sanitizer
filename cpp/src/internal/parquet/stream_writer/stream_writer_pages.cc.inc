@@ -7,10 +7,9 @@ choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
   std::optional<PreparedPagePayload> best;
   std::size_t best_size = std::numeric_limits<std::size_t>::max();
 
-  const auto consider = [&](std::int32_t encoding,
-                            std::string_view encoded_values,
-                            const DictionaryEncodingData *dictionary)
-      -> sanitize::Status {
+  const auto consider =
+      [&](std::int32_t encoding, std::string_view encoded_values,
+          const DictionaryEncodingData *dictionary) -> sanitize::Status {
     // Candidates are built, compressed, compared, and released one at a time.
     // Keeping only the winner avoids retaining PLAIN plus every alternate
     // encoding and their compressed forms simultaneously.
@@ -51,8 +50,7 @@ choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
 
   // PLAIN is already present in page_data, so evaluate it through a view
   // instead of making the previous unconditional full-size copy.
-  SAN_RETURN_NOT_OK(
-      consider(kEncodingPlain, page_data.values, nullptr));
+  SAN_RETURN_NOT_OK(consider(kEncodingPlain, page_data.values, nullptr));
 
   if (allow_dictionary) {
     if (auto dictionary =
@@ -65,14 +63,12 @@ choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
   if (is_float_column(column)) {
     if (auto encoded = encode_byte_stream_split(page_data.values,
                                                 float_value_width(column))) {
-      SAN_RETURN_NOT_OK(
-          consider(kEncodingByteStreamSplit, *encoded, nullptr));
+      SAN_RETURN_NOT_OK(consider(kEncodingByteStreamSplit, *encoded, nullptr));
     }
   }
   if (auto encoded =
           encode_delta_binary_packed_column(column, page_data.values)) {
-    SAN_RETURN_NOT_OK(
-        consider(kEncodingDeltaBinaryPacked, *encoded, nullptr));
+    SAN_RETURN_NOT_OK(consider(kEncodingDeltaBinaryPacked, *encoded, nullptr));
   }
   if (is_byte_array_kind(leaf_value_kind(column))) {
     if (auto encoded = encode_delta_length_byte_array(page_data.values)) {
@@ -88,15 +84,13 @@ choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
 }
 
 // Writes one column data page and returns its file offsets and sizes.
-sanitize::Result<PageInfo> write_column_page(CountingOutput &out,
-                                             const LeafColumn &column,
-                                             const ColumnPageData &page_data,
-                                             CompressionCodec codec,
-                                             int gzip_level,
-                                             bool allow_dictionary) {
-  SAN_ASSIGN_OR_RAISE(
-      auto prepared,
-      choose_page_payload(column, page_data, codec, gzip_level, allow_dictionary));
+sanitize::Result<PageInfo>
+write_column_page(CountingOutput &out, const LeafColumn &column,
+                  const ColumnPageData &page_data, CompressionCodec codec,
+                  int gzip_level, bool allow_dictionary) {
+  SAN_ASSIGN_OR_RAISE(auto prepared,
+                      choose_page_payload(column, page_data, codec, gzip_level,
+                                          allow_dictionary));
   if (prepared.uncompressed_payload_size >
           static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
       page_data.definition_levels.size() >
@@ -218,14 +212,11 @@ PageSliceIndex build_page_slice_index(const LeafColumn &column) {
                         .fixed_width = fixed_value_width_for_leaf(column)};
 }
 
-ColumnPageData slice_column_page_data(const LeafColumn &column,
-                                      const ColumnPageData &page_data,
-                                      const PageSliceIndex &index,
-                                      std::size_t begin, std::size_t end,
-                                      std::size_t value_begin,
-                                      std::size_t value_end,
-                                      std::size_t byte_begin,
-                                      std::size_t byte_end) {
+ColumnPageData slice_column_page_data(
+    const LeafColumn &column, const ColumnPageData &page_data,
+    const PageSliceIndex &index, std::size_t begin, std::size_t end,
+    std::size_t value_begin, std::size_t value_end, std::size_t byte_begin,
+    std::size_t byte_end) {
   ColumnPageData out;
   out.definition_levels.insert(out.definition_levels.end(),
                                page_data.definition_levels.begin() + begin,
@@ -295,8 +286,8 @@ std::size_t page_row_incremental_bytes(const LeafColumn &column,
     return bytes + 1 + (page_bool_values % 8 == 0 ? 1 : 0);
   }
   if (is_byte_array_kind(index.kind)) {
-    const auto item_end = byte_array_item_end(page_data.values,
-                                              value_byte_offset);
+    const auto item_end =
+        byte_array_item_end(page_data.values, value_byte_offset);
     if (item_end > value_byte_offset) {
       bytes = saturating_size_add(bytes, item_end - value_byte_offset);
       if (next_value_byte_offset) {
@@ -321,19 +312,15 @@ struct ColumnPageRange {
   std::size_t byte_end = 0;
 };
 
-std::vector<ColumnPageRange>
-split_column_page_ranges(const LeafColumn &column,
-                         const ColumnPageData &page_data,
-                         const PageSliceIndex &index,
-                         std::int64_t target_page_bytes) {
+std::vector<ColumnPageRange> split_column_page_ranges(
+    const LeafColumn &column, const ColumnPageData &page_data,
+    const PageSliceIndex &index, std::int64_t target_page_bytes) {
   const auto count = page_data.definition_levels.size();
   if (target_page_bytes <= 0 ||
       static_cast<std::int64_t>(estimate_column_page_data_bytes(page_data)) <=
           target_page_bytes ||
       count <= 1) {
-    return {{.begin = 0,
-             .end = count,
-             .byte_end = page_data.values.size()}};
+    return {{.begin = 0, .end = count, .byte_end = page_data.values.size()}};
   }
 
   std::vector<ColumnPageRange> ranges;
@@ -351,9 +338,8 @@ split_column_page_ranges(const LeafColumn &column,
     auto increment = page_row_incremental_bytes(
         column, page_data, index, row, value_index, value_byte_offset,
         page_bool_values, &next_value_byte_offset);
-    if (row > begin &&
-        saturating_size_add(page_bytes, increment) >
-            static_cast<std::size_t>(target_page_bytes)) {
+    if (row > begin && saturating_size_add(page_bytes, increment) >
+                           static_cast<std::size_t>(target_page_bytes)) {
       ranges.emplace_back(ColumnPageRange{.begin = begin,
                                           .end = row,
                                           .value_begin = begin_value_index,
@@ -438,24 +424,22 @@ write_column_pages(CountingOutput &out, const LeafColumn &column,
     // The common one-page case writes the original buffers directly. Split
     // columns materialize only the current slice, so memory is bounded by one
     // page instead of all copied page fragments at once.
-    const bool whole_page = range.begin == 0 &&
-                            range.end == page_data.definition_levels.size();
+    const bool whole_page =
+        range.begin == 0 && range.end == page_data.definition_levels.size();
     if (whole_page) {
-      SAN_ASSIGN_OR_RAISE(
-          auto page,
-          write_column_page(out, column, page_data, codec, gzip_level,
-                            allow_dictionary));
+      SAN_ASSIGN_OR_RAISE(auto page,
+                          write_column_page(out, column, page_data, codec,
+                                            gzip_level, allow_dictionary));
       merge_page_info(chunk.aggregate, page);
       chunk.pages.push_back(std::move(page));
       continue;
     }
-    auto page_data_part =
-        slice_column_page_data(column, page_data, index, range.begin,
-                               range.end, range.value_begin, range.value_end,
-                               range.byte_begin, range.byte_end);
-    SAN_ASSIGN_OR_RAISE(
-        auto page,
-        write_column_page(out, column, page_data_part, codec, gzip_level, false));
+    auto page_data_part = slice_column_page_data(
+        column, page_data, index, range.begin, range.end, range.value_begin,
+        range.value_end, range.byte_begin, range.byte_end);
+    SAN_ASSIGN_OR_RAISE(auto page,
+                        write_column_page(out, column, page_data_part, codec,
+                                          gzip_level, false));
     merge_page_info(chunk.aggregate, page);
     chunk.pages.push_back(std::move(page));
   }

@@ -34,15 +34,13 @@ bool is_low_surrogate(std::uint16_t value) {
   return value >= 0xdc00 && value <= 0xdfff;
 }
 
-sanitize::Result<std::size_t>
-latin1_output_size(std::string_view raw) {
+sanitize::Result<std::size_t> latin1_output_size(std::string_view raw) {
   std::size_t non_ascii = 0;
   for (const unsigned char ch : raw) {
     non_ascii += ch >= 0x80 ? 1U : 0U;
   }
   if (non_ascii > std::numeric_limits<std::size_t>::max() - raw.size()) {
-    return sanitize::Status::OutOfMemory(
-        "Latin-1 decode output size overflow");
+    return sanitize::Status::OutOfMemory("Latin-1 decode output size overflow");
   }
   return raw.size() + non_ascii;
 }
@@ -118,10 +116,9 @@ TranscodingDecoder::transcode_latin1(std::string_view raw) {
 
 sanitize::Result<std::string>
 TranscodingDecoder::transcode_utf16(std::string_view raw, bool final) {
-  SAN_ASSIGN_OR_RAISE(
-      const auto reserve_size,
-      utf16_reserve_size(raw.size(), pending_byte_.has_value(),
-                         pending_high_surrogate_.has_value()));
+  SAN_ASSIGN_OR_RAISE(const auto reserve_size,
+                      utf16_reserve_size(raw.size(), pending_byte_.has_value(),
+                                         pending_high_surrogate_.has_value()));
   std::string out;
   out.reserve(reserve_size);
 
@@ -142,9 +139,9 @@ TranscodingDecoder::transcode_utf16(std::string_view raw, bool final) {
   }
 
   while (pos + 1 < raw.size()) {
-    SAN_RETURN_NOT_OK(append_utf16_pair(
-        static_cast<unsigned char>(raw[pos]),
-        static_cast<unsigned char>(raw[pos + 1]), &out));
+    SAN_RETURN_NOT_OK(
+        append_utf16_pair(static_cast<unsigned char>(raw[pos]),
+                          static_cast<unsigned char>(raw[pos + 1]), &out));
     pos += 2;
   }
   if (pos < raw.size()) {
@@ -161,8 +158,9 @@ TranscodingDecoder::transcode_utf16(std::string_view raw, bool final) {
   return out;
 }
 
-sanitize::Status TranscodingDecoder::append_utf16_pair(
-    unsigned char b0, unsigned char b1, std::string *out) {
+sanitize::Status TranscodingDecoder::append_utf16_pair(unsigned char b0,
+                                                       unsigned char b1,
+                                                       std::string *out) {
   if (!bom_checked_) {
     bom_checked_ = true;
     if (b0 == 0xff && b1 == 0xfe) {

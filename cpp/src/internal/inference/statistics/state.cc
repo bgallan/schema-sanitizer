@@ -23,8 +23,7 @@ StatsNode *make_node(std::pmr::monotonic_buffer_resource *arena) {
   return std::construct_at(node, arena);
 }
 
-template <class T>
-void ensure_append_capacity(std::pmr::vector<T> *values) {
+template <class T> void ensure_append_capacity(std::pmr::vector<T> *values) {
   if (!values || values->size() < values->capacity()) {
     return;
   }
@@ -33,8 +32,9 @@ void ensure_append_capacity(std::pmr::vector<T> *values) {
   }
   const auto current = values->capacity();
   const auto maximum = values->max_size();
-  const auto doubled =
-      current > maximum / 2U ? maximum : std::max<std::size_t>(8U, current * 2U);
+  const auto doubled = current > maximum / 2U
+                           ? maximum
+                           : std::max<std::size_t>(8U, current * 2U);
   values->reserve(std::max(values->size() + 1U, doubled));
 }
 
@@ -51,8 +51,7 @@ void StatsNode::DispatchTable::build_from(
 
   const auto wanted = static_cast<std::uint32_t>(entries.size() * 2U);
   const auto capacity = std::bit_ceil(wanted);
-  std::pmr::vector<std::uint32_t> replacement(
-      slots.get_allocator().resource());
+  std::pmr::vector<std::uint32_t> replacement(slots.get_allocator().resource());
   replacement.assign(capacity, kEmptySlot);
 
   const auto replacement_mask = capacity - 1U;
@@ -116,8 +115,7 @@ StatsNode *StatsNode::child(StrId key,
     if (!table.enabled() && children.size() >= kThreshold) {
       table.build_from(children);
     } else if (table.enabled()) {
-      table.insert(children,
-                   static_cast<std::uint32_t>(children.size() - 1U));
+      table.insert(children, static_cast<std::uint32_t>(children.size() - 1U));
     }
   } catch (const std::bad_alloc &) {
     // The table is an optional acceleration structure. Preserve the canonical

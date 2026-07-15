@@ -38,7 +38,6 @@ struct ArrowBatchStorage {
   std::vector<sanitize::RowRef> rows;
   std::deque<ArrowValueRef> values;
   std::deque<std::string> strings;
-
 };
 
 // Stores a value reference owned by the batch storage.

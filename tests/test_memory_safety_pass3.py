@@ -79,16 +79,13 @@ def test_native_parquet_writer_bounds_retained_row_group_metadata(
 
 def test_schema_payload_and_page_indexes_avoid_duplicate_materialization() -> None:
     """Keep one schema codec and generate page-index lists from retained pages."""
-    payload_source = (
-        ROOT / "cpp/src/api/python_abi3/arrow_direct/schema/payload.cc"
-    ).read_text(encoding="utf-8")
-    page_index_source = (
-        ROOT
-        / "cpp/src/internal/parquet/stream_writer/stream_writer_page_indexes.cc.inc"
-    ).read_text(encoding="utf-8")
-    interner_source = (ROOT / "cpp/src/sanitize/detail/intern.hh").read_text(
+    payload_source = (ROOT / "cpp/src/api/python_abi3/arrow_direct/schema/payload.cc").read_text(
         encoding="utf-8"
     )
+    page_index_source = (
+        ROOT / "cpp/src/internal/parquet/stream_writer/stream_writer_page_indexes.cc.inc"
+    ).read_text(encoding="utf-8")
+    interner_source = (ROOT / "cpp/src/sanitize/detail/intern.hh").read_text(encoding="utf-8")
 
     assert "serialize_logical_schema_bytes" in payload_source
     assert "void append_u32" not in payload_source
@@ -118,19 +115,17 @@ def test_metadata_and_schema_payload_boundaries_are_explicit_results() -> None:
     metadata_builder = (
         ROOT / "cpp/src/api/python_abi3/metadata/stream/array_builder.cc"
     ).read_text(encoding="utf-8")
-    metadata_lifecycle = (
-        ROOT / "cpp/src/api/python_abi3/metadata/stream/stream.cc"
-    ).read_text(encoding="utf-8")
-    schema_header = (
-        ROOT / "cpp/src/internal/planning/options_schema_serialization.hh"
-    ).read_text(encoding="utf-8")
-    schema_codec = (
-        ROOT / "cpp/src/internal/planning/options_schema_serialization.cc"
-    ).read_text(encoding="utf-8")
+    metadata_lifecycle = (ROOT / "cpp/src/api/python_abi3/metadata/stream/stream.cc").read_text(
+        encoding="utf-8"
+    )
+    schema_header = (ROOT / "cpp/src/internal/planning/options_schema_serialization.hh").read_text(
+        encoding="utf-8"
+    )
+    schema_codec = (ROOT / "cpp/src/internal/planning/options_schema_serialization.cc").read_text(
+        encoding="utf-8"
+    )
 
-    array_builder = metadata_builder.split(
-        "sanitize::Status build_metadata_array", maxsplit=1
-    )[1]
+    array_builder = metadata_builder.split("sanitize::Status build_metadata_array", maxsplit=1)[1]
     assert "validate_metadata_base_array(*stream_state, base)" in array_builder
     assert array_builder.index(
         "validate_metadata_base_array(*stream_state, base)"

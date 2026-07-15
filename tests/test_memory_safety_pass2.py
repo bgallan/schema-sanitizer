@@ -72,12 +72,8 @@ def test_hardened_allocator_claims_ownership_before_reading_headers() -> None:
     """Optional double-free hardening must not inspect an unclaimed pointer."""
     root = Path(__file__).resolve().parents[1]
     source = (root / "cpp/src/internal/memory/memory_pool.cc").read_text()
-    registry = (
-        root / "cpp/src/internal/memory/memory_pool_registry.cc.inc"
-    ).read_text()
-    tracking = (
-        root / "cpp/src/internal/memory/tracking_memory_pool.cc.inc"
-    ).read_text()
+    registry = (root / "cpp/src/internal/memory/memory_pool_registry.cc.inc").read_text()
+    tracking = (root / "cpp/src/internal/memory/tracking_memory_pool.cc.inc").read_text()
 
     assert "bool hardened_allocation_registry_enabled() noexcept" in registry
     assert "return true;" in registry

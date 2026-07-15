@@ -21,30 +21,27 @@ sanitize::Result<ColumnIndexInfo> parse_column_index(std::string_view bytes) {
     switch (field_id) {
     case 1:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(
-            index.null_pages,
-            read_bool_list(reader, kMaxPagesPerColumn,
-                           "column-index null pages"));
+        SAN_ASSIGN_OR_RAISE(index.null_pages,
+                            read_bool_list(reader, kMaxPagesPerColumn,
+                                           "column-index null pages"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
       break;
     case 2:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(
-            index.min_values,
-            read_string_list(reader, kMaxPagesPerColumn,
-                             "column-index values"));
+        SAN_ASSIGN_OR_RAISE(index.min_values,
+                            read_string_list(reader, kMaxPagesPerColumn,
+                                             "column-index values"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
       break;
     case 3:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(
-            index.max_values,
-            read_string_list(reader, kMaxPagesPerColumn,
-                             "column-index values"));
+        SAN_ASSIGN_OR_RAISE(index.max_values,
+                            read_string_list(reader, kMaxPagesPerColumn,
+                                             "column-index values"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
@@ -59,10 +56,9 @@ sanitize::Result<ColumnIndexInfo> parse_column_index(std::string_view bytes) {
       break;
     case 5:
       if (type == kTypeList) {
-        SAN_ASSIGN_OR_RAISE(
-            index.null_counts,
-            read_i64_list(reader, kMaxPagesPerColumn,
-                          "column-index null counts"));
+        SAN_ASSIGN_OR_RAISE(index.null_counts,
+                            read_i64_list(reader, kMaxPagesPerColumn,
+                                          "column-index null counts"));
       } else {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }

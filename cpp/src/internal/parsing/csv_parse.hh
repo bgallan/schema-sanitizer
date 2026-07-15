@@ -27,8 +27,7 @@ inline std::string_view trim_csv_cell(std::string_view cell) {
 
 // Returns the decoded size and advances to the first byte after the closing
 // quote (or the end of a malformed unterminated field).
-inline std::size_t scan_quoted_csv_cell(std::string_view row,
-                                        std::size_t start,
+inline std::size_t scan_quoted_csv_cell(std::string_view row, std::size_t start,
                                         std::size_t *end_position) {
   std::size_t decoded_size = 0;
   std::size_t position = start + 1;
@@ -75,7 +74,8 @@ inline std::string_view parse_quoted_csv_cell(std::string_view row,
     return {};
   }
 
-  auto *destination = static_cast<char *>(arena->alloc(decoded_size, alignof(char)));
+  auto *destination =
+      static_cast<char *>(arena->alloc(decoded_size, alignof(char)));
   std::size_t source = start + 1;
   std::size_t written = 0;
   while (source < end_position && written < decoded_size) {
@@ -117,12 +117,12 @@ inline void advance_after_quoted_csv_cell(std::string_view row,
   }
 }
 
-inline sanitize::Status append_csv_cell(
-    std::vector<std::string_view> *out, std::string_view value) {
+inline sanitize::Status append_csv_cell(std::vector<std::string_view> *out,
+                                        std::string_view value) {
   if (out->size() >= kMaxCsvCellsPerRecord) {
     return sanitize::Status::Invalid(
-        "CSV record cell count exceeds safety limit: ",
-        out->size() + 1U, " > ", kMaxCsvCellsPerRecord);
+        "CSV record cell count exceeds safety limit: ", out->size() + 1U, " > ",
+        kMaxCsvCellsPerRecord);
   }
   out->push_back(value);
   return sanitize::Status::OK();
@@ -132,9 +132,9 @@ inline sanitize::Status append_csv_cell(
 // - unquoted cells are returned as views into `row`
 // - quoted cells are unescaped directly into `arena` and returned as views
 // - leading/trailing spaces/tabs in unquoted cells are trimmed
-inline sanitize::Status parse_csv_cells(
-    std::string_view row, char delimiter, std::vector<std::string_view> *out,
-    BumpArena *arena) {
+inline sanitize::Status parse_csv_cells(std::string_view row, char delimiter,
+                                        std::vector<std::string_view> *out,
+                                        BumpArena *arena) {
   if (out == nullptr) {
     return sanitize::Status::Invalid("CSV cell output vector is null");
   }

@@ -9,8 +9,8 @@
 #include <string_view>
 #include <utility>
 
-#include "sanitize/detail/hash.hh"
 #include "internal/memory/memory_budget.hh"
+#include "sanitize/detail/hash.hh"
 
 namespace sanitize::internal::xml_frontend_detail {
 
@@ -18,9 +18,9 @@ XmlFrontend::XmlFrontend(ChunkSourcePtr src, const Options &options)
     : src_(std::move(src)), default_key_(options.default_key_name),
       default_key_hash_(sanitize::detail::hash_key64(default_key_)),
       row_tag_(options.xml_row_tag),
-      chunk_bytes_(internal::memory_budget_from_limit(
-                       options.memory_limit_bytes)
-                       .io_chunk_bytes),
+      chunk_bytes_(
+          internal::memory_budget_from_limit(options.memory_limit_bytes)
+              .io_chunk_bytes),
       memory_limit_bytes_(options.memory_limit_bytes) {
   if (row_tag_.empty()) {
     parse_status_ = parse_once();
@@ -109,16 +109,16 @@ sanitize::Result<RowBatch> XmlFrontend::next_batch(int64_t capacity) {
 
   auto storage = std::make_shared<BatchStorage>();
   storage->batch.reset(capacity);
-  const auto reserve_rows = static_cast<std::size_t>(
-      std::min<int64_t>(capacity, int64_t{4096}));
+  const auto reserve_rows =
+      static_cast<std::size_t>(std::min<int64_t>(capacity, int64_t{4096}));
   if (!execution_mode_) {
     storage->raw_rows.reserve(reserve_rows);
   }
   storage->nodes.reserve(reserve_rows);
   const auto batch_byte_limit =
       memory_limit_bytes_ > 0
-          ? std::max<std::size_t>(1, static_cast<std::size_t>(
-                                        memory_limit_bytes_ / 3))
+          ? std::max<std::size_t>(
+                1, static_cast<std::size_t>(memory_limit_bytes_ / 3))
           : std::numeric_limits<std::size_t>::max();
   std::size_t retained_raw_bytes = 0;
 

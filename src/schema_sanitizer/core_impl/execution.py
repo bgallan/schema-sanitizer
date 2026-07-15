@@ -63,9 +63,7 @@ class PythonRowsJsonlByteReader(BufferedGeneratedBytesReader):
         self._replay_spool = False
         self._index = 0
         self._native_batch = PYTHON_ROWS_JSONL_BYTES
-        super().__init__(
-            "PythonRowsJsonlByteReader", default_chunk_bytes=budget.io_chunk_bytes
-        )
+        super().__init__("PythonRowsJsonlByteReader", default_chunk_bytes=budget.io_chunk_bytes)
 
     def _next_iterable_payload(self, target_bytes: int) -> bytes:
         """Encode one bounded part of a one-shot iterable without concatenating rows."""

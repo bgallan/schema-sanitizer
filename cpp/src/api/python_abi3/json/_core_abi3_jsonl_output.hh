@@ -21,8 +21,7 @@ jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj,
                              std::int64_t memory_limit_bytes);
 
 // Appends one record batch's JSONL bytes to out.
-sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj,
-                                          std::string *out,
+sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj, std::string *out,
                                           std::int64_t memory_limit_bytes);
 
 // Appends a Python sequence of record batches as JSONL bytes to out.

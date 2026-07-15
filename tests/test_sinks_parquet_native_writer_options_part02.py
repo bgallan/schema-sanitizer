@@ -159,9 +159,7 @@ def test_parquet_native_file_output_splits_large_batches_into_row_groups(
     batch = pa.record_batch(
         {
             "id": pa.array(range(1, row_count + 1), type=pa.int64()),
-            "name": pa.array(
-                [f"name-{index}" for index in range(row_count)], type=pa.string()
-            ),
+            "name": pa.array([f"name-{index}" for index in range(row_count)], type=pa.string()),
         }
     )
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])

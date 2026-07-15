@@ -6,9 +6,8 @@ bool leaf_belongs_to_subtree(const ParquetNode &node,
          target_leaf < node.first_leaf_index + node.leaf_count;
 }
 
-void emit_nulls_for_subtree(const ParquetNode &node,
-                            std::size_t target_leaf, ColumnPageData *page,
-                            std::int16_t definition_level,
+void emit_nulls_for_subtree(const ParquetNode &node, std::size_t target_leaf,
+                            ColumnPageData *page, std::int16_t definition_level,
                             std::int16_t repetition_level) {
   if (!page) {
     return;
@@ -23,10 +22,11 @@ void emit_nulls_for_subtree(const ParquetNode &node,
   }
 }
 
-sanitize::Status collect_node_for_leaf(
-    const ParquetNode &node, const ArrowArray &array, std::int64_t row,
-    std::size_t target_leaf, ColumnPageData *page,
-    std::int16_t definition_level, std::int16_t repetition_level);
+sanitize::Status
+collect_node_for_leaf(const ParquetNode &node, const ArrowArray &array,
+                      std::int64_t row, std::size_t target_leaf,
+                      ColumnPageData *page, std::int16_t definition_level,
+                      std::int16_t repetition_level);
 
 sanitize::Status collect_list_element_for_leaf(
     const ParquetNode &element, const ArrowArray &values, std::int64_t row,
@@ -36,17 +36,18 @@ sanitize::Status collect_list_element_for_leaf(
                                definition_level, repetition_level);
 }
 
-sanitize::Status collect_node_for_leaf(
-    const ParquetNode &node, const ArrowArray &array, std::int64_t row,
-    std::size_t target_leaf, ColumnPageData *page,
-    std::int16_t definition_level, std::int16_t repetition_level) {
+sanitize::Status
+collect_node_for_leaf(const ParquetNode &node, const ArrowArray &array,
+                      std::int64_t row, std::size_t target_leaf,
+                      ColumnPageData *page, std::int16_t definition_level,
+                      std::int16_t repetition_level) {
   if (!page || !leaf_belongs_to_subtree(node, target_leaf)) {
     return sanitize::Status::OK();
   }
   if (node.node_kind != NodeKind::kRoot && !node.required &&
       !bitmap_is_valid(array, row)) {
     emit_nulls_for_subtree(node, target_leaf, page, definition_level,
-                       repetition_level);
+                           repetition_level);
     return sanitize::Status::OK();
   }
   if (node.node_kind != NodeKind::kRoot && node.required &&
@@ -135,7 +136,7 @@ sanitize::Status collect_node_for_leaf(
     }
     if (begin == end) {
       emit_nulls_for_subtree(node, target_leaf, page, present_definition,
-                         repetition_level);
+                             repetition_level);
       return sanitize::Status::OK();
     }
     for (std::int64_t item = begin; item < end; ++item) {
@@ -168,7 +169,7 @@ sanitize::Status collect_node_for_leaf(
     }
     if (begin == end) {
       emit_nulls_for_subtree(node, target_leaf, page, present_definition,
-                         repetition_level);
+                             repetition_level);
       return sanitize::Status::OK();
     }
     for (std::int64_t item = begin; item < end; ++item) {
@@ -199,8 +200,8 @@ sanitize::Status collect_node_for_leaf(
     page->definition_levels.push_back(
         static_cast<std::int16_t>(definition_level + (node.required ? 0 : 1)));
     page->repetition_levels.push_back(repetition_level);
-    return append_primitive_value(page->values, &page->bool_values, node,
-                                  array, row);
+    return append_primitive_value(page->values, &page->bool_values, node, array,
+                                  row);
   }
   return sanitize::Status::Invalid(
       "native Parquet writer: target leaf is not reachable from schema root");
@@ -226,13 +227,12 @@ void encode_bool_values_plain(std::string *out,
   }
 }
 
-std::size_t logical_column_page_data_bytes(
-    const ColumnPageData &page_data) noexcept {
+std::size_t
+logical_column_page_data_bytes(const ColumnPageData &page_data) noexcept {
   const auto bool_bytes = (page_data.bool_values.size() + 7U) / 8U;
-  const auto levels = page_data.definition_levels.size() +
-                      page_data.repetition_levels.size();
-  if (levels > std::numeric_limits<std::size_t>::max() /
-                   sizeof(std::int16_t)) {
+  const auto levels =
+      page_data.definition_levels.size() + page_data.repetition_levels.size();
+  if (levels > std::numeric_limits<std::size_t>::max() / sizeof(std::int16_t)) {
     return std::numeric_limits<std::size_t>::max();
   }
   const auto level_bytes = levels * sizeof(std::int16_t);
@@ -284,10 +284,10 @@ sanitize::Result<std::int64_t> determine_bounded_row_group_count(
   return std::max<std::int64_t>(1, candidate_rows);
 }
 
-sanitize::Result<ColumnPageData> collect_column_page_data(
-    const ParquetNode &root, const LeafColumn &leaf, const ArrowArray &array,
-    std::int64_t row_offset, std::int64_t row_count,
-    std::size_t leaf_index) {
+sanitize::Result<ColumnPageData>
+collect_column_page_data(const ParquetNode &root, const LeafColumn &leaf,
+                         const ArrowArray &array, std::int64_t row_offset,
+                         std::int64_t row_count, std::size_t leaf_index) {
   ColumnPageData page;
   for (std::int64_t row = 0; row < row_count; ++row) {
     SAN_RETURN_NOT_OK(collect_node_for_leaf(root, array, row_offset + row,

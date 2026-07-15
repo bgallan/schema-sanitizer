@@ -76,9 +76,11 @@ struct CoalesceStreamState {
 [[nodiscard]] bool schema_supported(const ArrowSchema &schema,
                                     CoalesceNodeSpec *root);
 [[nodiscard]] std::size_t retained_bytes(const CoalescedNode &node);
-[[nodiscard]] std::int64_t fitting_slice_rows(
-    const CoalesceNodeSpec &spec, const ArrowArray &array, std::int64_t offset,
-    std::int64_t max_rows, std::size_t max_bytes) noexcept;
+[[nodiscard]] std::int64_t fitting_slice_rows(const CoalesceNodeSpec &spec,
+                                              const ArrowArray &array,
+                                              std::int64_t offset,
+                                              std::int64_t max_rows,
+                                              std::size_t max_bytes) noexcept;
 sanitize::Status validate_arrow_node(const CoalesceNodeSpec &spec,
                                      const ArrowArray &array,
                                      std::int64_t offset, std::int64_t length,

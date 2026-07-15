@@ -452,7 +452,8 @@ sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
         return column.placement ==
                MetadataColumnPlacement::AllRowsTimestampMicros;
       }));
-  SAN_RETURN_NOT_OK(validate_generated_metadata_budget(*stream_state, base, timestamp_count));
+  SAN_RETURN_NOT_OK(
+      validate_generated_metadata_budget(*stream_state, base, timestamp_count));
   state->timestamp_columns.reserve(timestamp_count);
   state->utf8_columns.reserve(stream_state->columns.size() - timestamp_count);
   state->children.resize(static_cast<std::size_t>(base.n_children) +

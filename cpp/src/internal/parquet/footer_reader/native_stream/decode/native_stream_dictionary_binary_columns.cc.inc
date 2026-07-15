@@ -235,8 +235,9 @@ sanitize::Status materialize_dictionary_byte_array_column(
       }
       const auto output_row = window.local_row(global_row);
       if (valid) {
-        const auto &value = column.decoded_dictionary_values[
-            static_cast<std::size_t>(dictionary_index)];
+        const auto &value =
+            column.decoded_dictionary_values[static_cast<std::size_t>(
+                dictionary_index)];
         if (value.size() > static_cast<std::size_t>(
                                std::numeric_limits<std::int32_t>::max()) ||
             current_offset > std::numeric_limits<std::int32_t>::max() -

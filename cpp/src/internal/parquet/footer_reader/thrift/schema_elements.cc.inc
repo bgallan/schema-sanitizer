@@ -161,9 +161,9 @@ sanitize::Status read_schema_elements(CompactReader &reader, FooterInfo *info) {
     return sanitize::Status::Invalid(
         "Parquet footer: schema element count exceeds security limit");
   }
-  SAN_RETURN_NOT_OK(validate_metadata_list(
-      reader, count, kMaxSchemaElements, sizeof(SchemaElementInfo),
-      "schema elements"));
+  SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, kMaxSchemaElements,
+                                           sizeof(SchemaElementInfo),
+                                           "schema elements"));
   info->schema_element_count = static_cast<std::int32_t>(count);
   info->schema_elements.clear();
   info->schema_elements.reserve(static_cast<std::size_t>(count));

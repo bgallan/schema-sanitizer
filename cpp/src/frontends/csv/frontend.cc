@@ -44,8 +44,7 @@ struct CsvBatchStorage {
 CsvFrontend::CsvFrontend(ChunkSourcePtr src, const Options &options)
     : source_(std::move(src)), delimiter_(resolved_delimiter(options)),
       projection_(options, delimiter_) {
-  chunk_bytes_ = internal::memory_budget_from_limit(
-                     options.memory_limit_bytes)
+  chunk_bytes_ = internal::memory_budget_from_limit(options.memory_limit_bytes)
                      .io_chunk_bytes;
   scanner_ = std::make_unique<CsvStreamingScanner>(source_, chunk_bytes_);
   reset_status_ = scanner_->Reset();
@@ -105,7 +104,7 @@ sanitize::Result<RowBatch> CsvFrontend::next_batch(int64_t capacity) {
 }
 
 sanitize::Status CsvFrontend::append_record(CsvBatchStorage *storage,
-                                const TextSlice &record) {
+                                            const TextSlice &record) {
   storage->keep_data_owner(record.owner);
   storage->keep_source_name(record.source_file_owner);
   if (projection_.can_use_raw_only()) {
@@ -118,8 +117,8 @@ sanitize::Status CsvFrontend::append_record(CsvBatchStorage *storage,
 
   storage->batch.start_row(record.view, record.base_offset, 0, nullptr,
                            record.source_file);
-  SAN_RETURN_NOT_OK(
-      parse_csv_cells(record.view, delimiter_, &storage->cells, &storage->arena));
+  SAN_RETURN_NOT_OK(parse_csv_cells(record.view, delimiter_, &storage->cells,
+                                    &storage->arena));
   projection_.append_parsed_cells(&storage->batch, storage->cells);
   storage->batch.end_row();
   return sanitize::Status::OK();

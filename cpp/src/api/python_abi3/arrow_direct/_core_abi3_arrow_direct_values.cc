@@ -171,9 +171,9 @@ sanitize::Status object_for_each(const void *self, void *ctx,
   }
   for (std::size_t i = 0; i < children.size(); ++i) {
     const ArrowArray *child_array = ref->array->children[i];
-    SAN_RETURN_NOT_OK(fn(ctx, children[i].name, 0,
-                         value_at(ref->storage, &children[i], child_array,
-                                  ref->row)));
+    SAN_RETURN_NOT_OK(
+        fn(ctx, children[i].name, 0,
+           value_at(ref->storage, &children[i], child_array, ref->row)));
   }
   return sanitize::Status::OK();
 }

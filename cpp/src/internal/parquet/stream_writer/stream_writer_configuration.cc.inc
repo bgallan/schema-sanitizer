@@ -6,9 +6,9 @@ WriterOptions normalized_writer_options(const WriterOptions &input) {
   return out;
 }
 
-std::int64_t adaptive_max_bytes_per_row_group(
-    const std::vector<LeafColumn> &columns,
-    std::int64_t configured_value) {
+std::int64_t
+adaptive_max_bytes_per_row_group(const std::vector<LeafColumn> &columns,
+                                 std::int64_t configured_value) {
   bool has_repeated = false;
   for (const auto &column : columns) {
     has_repeated = has_repeated || column.max_repetition_level > 0;

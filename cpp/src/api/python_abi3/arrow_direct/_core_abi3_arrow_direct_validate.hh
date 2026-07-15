@@ -13,8 +13,9 @@ namespace core_abi3_internal {
 // Validates one record-batch root and all child logical ranges. Arrow C Data
 // does not expose physical allocation sizes, so this rejects malformed logical
 // metadata but cannot authenticate arbitrary raw pointers from hostile code.
-sanitize::Status validate_arrow_direct_batch(
-    const ArrowArray &root, const std::vector<ArrowInputNode> &fields,
-    std::int64_t memory_limit_bytes);
+sanitize::Status
+validate_arrow_direct_batch(const ArrowArray &root,
+                            const std::vector<ArrowInputNode> &fields,
+                            std::int64_t memory_limit_bytes);
 
 } // namespace core_abi3_internal

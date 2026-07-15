@@ -96,8 +96,8 @@ sanitize::Status materialize_dictionary_fixed_width_column(
         }
         dictionary_index = indices[index_offset++];
         if (dictionary_index >= dictionary_value_count) {
-          return sanitize::Status::Invalid(
-              "native Parquet reader: fixed-width dictionary index out of range");
+          return sanitize::Status::Invalid("native Parquet reader: fixed-width "
+                                           "dictionary index out of range");
         }
       }
       if (!valid || !window.contains(global_row)) {
@@ -106,9 +106,9 @@ sanitize::Status materialize_dictionary_fixed_width_column(
       const auto output_row = window.local_row(global_row);
       const auto source_offset = static_cast<std::size_t>(dictionary_index) *
                                  static_cast<std::size_t>(*physical_width);
-      auto *target = out->values.data() +
-                     static_cast<std::size_t>(output_row) *
-                         static_cast<std::size_t>(arrow_width);
+      auto *target =
+          out->values.data() + static_cast<std::size_t>(output_row) *
+                                   static_cast<std::size_t>(arrow_width);
       SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
           target,
           reinterpret_cast<const char *>(

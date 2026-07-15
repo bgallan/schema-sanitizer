@@ -36,9 +36,6 @@ def test_native_parquet_reader_memory_budget_blocks_native_route(
         native_parquet_footer_info,
         native_parquet_stream_preflight_info,
     )
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
     from schema_sanitizer.api_impl.file_conversion.writers import (
         write_parquet_native_first_stream,
     )
@@ -62,9 +59,7 @@ def test_native_parquet_reader_memory_budget_blocks_native_route(
     assert info is not None
     assert info["native_reader_ready"] == 1
 
-    limited_info = native_parquet_stream_preflight_info(
-        path, memory_limit_bytes=1
-    )
+    limited_info = native_parquet_stream_preflight_info(path, memory_limit_bytes=1)
 
     assert limited_info is not None
     assert limited_info["native_reader_ready"] == 0

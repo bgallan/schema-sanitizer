@@ -13,15 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_json_scanners_share_a_finite_nesting_budget() -> None:
     """Streaming and on-demand JSON scans must reject stack-exhaustion inputs."""
-    limits = (
-        ROOT / "cpp/src/internal/parsing/json/ondemand/scan.hh"
-    ).read_text(encoding="utf-8")
-    recursive = (
-        ROOT / "cpp/src/internal/parsing/json/ondemand/scan.cc"
-    ).read_text(encoding="utf-8")
-    streaming = (
-        ROOT / "cpp/src/internal/parsing/streaming/json/value_span_scanner.cc"
-    ).read_text(encoding="utf-8")
+    limits = (ROOT / "cpp/src/internal/parsing/json/ondemand/scan.hh").read_text(encoding="utf-8")
+    recursive = (ROOT / "cpp/src/internal/parsing/json/ondemand/scan.cc").read_text(
+        encoding="utf-8"
+    )
+    streaming = (ROOT / "cpp/src/internal/parsing/streaming/json/value_span_scanner.cc").read_text(
+        encoding="utf-8"
+    )
 
     assert "kMaxJsonNestingDepth = 512" in limits
     assert "skip_value_at_depth" in recursive
@@ -78,12 +76,8 @@ def test_nested_json_below_safety_limit_still_round_trips() -> None:
 
 def test_csv_projection_resolves_columns_without_owned_key_cache() -> None:
     """Header names must not be duplicated into an additional hash map."""
-    header = (ROOT / "cpp/src/frontends/csv/column_projection.hh").read_text(
-        encoding="utf-8"
-    )
-    source = (ROOT / "cpp/src/frontends/csv/column_projection.cc").read_text(
-        encoding="utf-8"
-    )
+    header = (ROOT / "cpp/src/frontends/csv/column_projection.hh").read_text(encoding="utf-8")
+    source = (ROOT / "cpp/src/frontends/csv/column_projection.cc").read_text(encoding="utf-8")
 
     assert "root_field_cache_" not in header
     assert "std::vector<const sanitize::FieldIndex *> resolved_fields_" in header
@@ -100,6 +94,7 @@ def test_schema_decision_cache_bounds_retained_key_bytes() -> None:
 
     class FakeSchema:
         """Helper class used by this regression."""
+
         def __init__(self, text: str) -> None:
             """Helper used by this regression."""
             self.text = text
@@ -131,9 +126,7 @@ def test_configured_inference_depth_has_a_defensive_ceiling() -> None:
 
 
 @pytest.mark.parametrize("option_name", ["arrow_max_depth", "parquet_max_depth"])
-def test_native_rejects_configured_depth_above_ceiling(
-    tmp_path: Path, option_name: str
-) -> None:
+def test_native_rejects_configured_depth_above_ceiling(tmp_path: Path, option_name: str) -> None:
     """Depth options above the parser ceiling fail before recursive traversal."""
     require_native()
     import schema_sanitizer as ss

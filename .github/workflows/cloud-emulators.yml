@@ -41,7 +41,6 @@ jobs:
           python - <<'PY'
           import socket
           import time
-
           for port in (9000, 10000, 4443):
               deadline = time.monotonic() + 60
               while True:

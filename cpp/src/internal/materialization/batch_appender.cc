@@ -1,7 +1,7 @@
 // Public entry points for private Arrow C Data batch building.
 
-#include "internal/materialization/batch_appender_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/materialization/batch_appender_internal.hh"
 
 #include <cstring>
 #include <memory>

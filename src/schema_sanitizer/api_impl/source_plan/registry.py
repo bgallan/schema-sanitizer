@@ -321,8 +321,6 @@ def write_source_plan_registry_to_file(
         parquet_compression=parquet_compression,
         parquet_gzip_level=parquet_gzip_level,
         memory_limit_bytes=(
-            call_options.performance.memory_limit_bytes
-            if call_options is not None
-            else None
+            call_options.performance.memory_limit_bytes if call_options is not None else None
         ),
     )

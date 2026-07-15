@@ -6,23 +6,20 @@ from pathlib import Path
 
 import pytest
 
+
 @pytest.fixture(autouse=True)
-def _require_cloud_emulators(
-    pytestconfig: pytest.Config, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _require_cloud_emulators(pytestconfig: pytest.Config, monkeypatch: pytest.MonkeyPatch) -> None:
     """Configure emulator clients exclusively from explicit pytest options."""
     if not pytestconfig.getoption("--run-cloud-emulators"):
         pytest.skip("cloud emulators are not configured")
 
-    from botocore.config import Config
     from azure.storage.blob.aio import BlobServiceClient
+    from botocore.config import Config
 
     from schema_sanitizer.remote_impl.providers import azure, gcs, s3
 
     s3_endpoint = str(pytestconfig.getoption("--s3-emulator-endpoint")).strip()
-    azure_connection = str(
-        pytestconfig.getoption("--azure-emulator-connection-string")
-    ).strip()
+    azure_connection = str(pytestconfig.getoption("--azure-emulator-connection-string")).strip()
     gcs_endpoint = str(pytestconfig.getoption("--gcs-emulator-endpoint")).strip()
     if not s3_endpoint or not azure_connection or not gcs_endpoint:
         pytest.fail("all cloud emulator endpoint options are required")

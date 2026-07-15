@@ -32,9 +32,7 @@ async def list_remote_directory(
     raise ValueError(f"Unsupported remote directory URI scheme: {scheme!r}")
 
 
-async def remote_file_exists(
-    uri: str, *, memory_limit_bytes: int | None = None
-) -> bool:
+async def remote_file_exists(uri: str, *, memory_limit_bytes: int | None = None) -> bool:
     """Return whether one supported remote object exists."""
     provider = remote_provider(uri)
     if provider == "gcs":

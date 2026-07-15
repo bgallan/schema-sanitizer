@@ -40,9 +40,7 @@ def mark_csv_nested_route(route: str) -> None:
     _LAST_CSV_NESTED_ROUTE = route
 
 
-def native_csv_nested_reader(
-    stream: Any, *, pa: Any, memory_limit_bytes: int | None = None
-) -> Any:
+def native_csv_nested_reader(stream: Any, *, pa: Any, memory_limit_bytes: int | None = None) -> Any:
     """Return a reader that renders top-level nested columns as JSON strings."""
     capsule = CSV_NESTED_STREAM_WRAP(
         stream, -1 if memory_limit_bytes is None else memory_limit_bytes
@@ -114,9 +112,7 @@ def write_csv_stream(
     _LAST_CSV_NESTED_ROUTE = "none"
     pa = ensure_pyarrow(feature=feature)
     if _schema_has_nested_columns(stream.schema, pa=pa):
-        native_base = native_csv_nested_reader(
-            stream, pa=pa, memory_limit_bytes=memory_limit_bytes
-        )
+        native_base = native_csv_nested_reader(stream, pa=pa, memory_limit_bytes=memory_limit_bytes)
         if native_base is None:
             raise RuntimeError("CSV nested columns require the native C++ CSV nested renderer.")
         stream = native_base

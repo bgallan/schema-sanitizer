@@ -103,8 +103,8 @@ sanitize::Status XmlRowTagScanner::handle_text(std::string_view text) {
 sanitize::Result<XmlRowTagScanner::RowSlice>
 XmlRowTagScanner::make_row(std::size_t end_pos) {
   RowSlice row{
-      .text = std::string_view(buffer_).substr(
-          row_start_pos_, end_pos - row_start_pos_),
+      .text = std::string_view(buffer_).substr(row_start_pos_,
+                                               end_pos - row_start_pos_),
       .base_offset = buffer_start_offset_ + row_start_pos_,
   };
   row_start_pos_ = npos;

@@ -19,8 +19,7 @@ namespace sanitize::schema_registry_internal {
 namespace {
 
 struct RegistrySchemaBudget {
-  std::uint32_t remaining_nodes =
-      internal::options_io::kMaxLogicalSchemaNodes;
+  std::uint32_t remaining_nodes = internal::options_io::kMaxLogicalSchemaNodes;
 
   Status consume_node() {
     if (remaining_nodes == 0) {
@@ -59,11 +58,13 @@ Result<ValueView> required_object_member(ValueView object,
   return *value;
 }
 
-Result<LogicalType> logical_type_from_registry_node(
-    ValueView node, std::uint32_t depth, RegistrySchemaBudget *budget);
+Result<LogicalType>
+logical_type_from_registry_node(ValueView node, std::uint32_t depth,
+                                RegistrySchemaBudget *budget);
 
-Result<LogicalField> logical_field_from_registry_node(
-    ValueView node, std::uint32_t depth, RegistrySchemaBudget *budget) {
+Result<LogicalField>
+logical_field_from_registry_node(ValueView node, std::uint32_t depth,
+                                 RegistrySchemaBudget *budget) {
   if (!budget) {
     return Status::Invalid("schema registry canonical_schema budget is null");
   }
@@ -98,8 +99,8 @@ Result<LogicalField> logical_field_from_registry_node(
     nullable = nullable_value->as_bool();
   }
 
-  SAN_ASSIGN_OR_RAISE(
-      auto type, logical_type_from_registry_node(type_value, depth + 1U, budget));
+  SAN_ASSIGN_OR_RAISE(auto type, logical_type_from_registry_node(
+                                     type_value, depth + 1U, budget));
   LogicalField field;
   field.name = std::string(name_value.as_string_view());
   field.type = std::make_unique<LogicalType>(std::move(type));
@@ -107,11 +108,9 @@ Result<LogicalField> logical_field_from_registry_node(
   return field;
 }
 
-Result<std::vector<LogicalField>>
-logical_fields_from_registry_array(ValueView fields_value,
-                                   std::string_view context,
-                                   std::uint32_t depth,
-                                   RegistrySchemaBudget *budget) {
+Result<std::vector<LogicalField>> logical_fields_from_registry_array(
+    ValueView fields_value, std::string_view context, std::uint32_t depth,
+    RegistrySchemaBudget *budget) {
   if (!fields_value.is_array()) {
     return Status::Invalid("schema registry canonical_schema ", context,
                            " is missing fields");
@@ -121,24 +120,25 @@ logical_fields_from_registry_array(ValueView fields_value,
     return Status::Invalid("schema registry canonical_schema budget is null");
   }
   std::vector<LogicalField> fields;
-  SAN_RETURN_NOT_OK(
-      fields_value.for_each_array_element([&](ValueView field_value) -> Status {
-        if (fields.size() >=
-            internal::options_io::kMaxLogicalSchemaFieldsPerStruct) {
-          return Status::Invalid(
-              "schema registry canonical_schema field count exceeds safety limit");
-        }
-        SAN_ASSIGN_OR_RAISE(
-            auto field,
-            logical_field_from_registry_node(field_value, depth, budget));
-        fields.push_back(std::move(field));
-        return Status::OK();
-      }));
+  SAN_RETURN_NOT_OK(fields_value.for_each_array_element([&](ValueView
+                                                                field_value)
+                                                            -> Status {
+    if (fields.size() >=
+        internal::options_io::kMaxLogicalSchemaFieldsPerStruct) {
+      return Status::Invalid(
+          "schema registry canonical_schema field count exceeds safety limit");
+    }
+    SAN_ASSIGN_OR_RAISE(auto field, logical_field_from_registry_node(
+                                        field_value, depth, budget));
+    fields.push_back(std::move(field));
+    return Status::OK();
+  }));
   return fields;
 }
 
-Result<LogicalType> logical_type_from_registry_node(
-    ValueView node, std::uint32_t depth, RegistrySchemaBudget *budget) {
+Result<LogicalType>
+logical_type_from_registry_node(ValueView node, std::uint32_t depth,
+                                RegistrySchemaBudget *budget) {
   if (!budget) {
     return Status::Invalid("schema registry canonical_schema budget is null");
   }
@@ -184,17 +184,17 @@ Result<LogicalType> logical_type_from_registry_node(
       return Status::Invalid(
           "schema registry canonical_schema list type is missing value");
     }
-    SAN_ASSIGN_OR_RAISE(auto element_type,
-                        logical_type_from_registry_node(value, depth + 1U, budget));
+    SAN_ASSIGN_OR_RAISE(auto element_type, logical_type_from_registry_node(
+                                               value, depth + 1U, budget));
     return LogicalType::List(std::move(element_type));
   }
 
   if (kind == "struct") {
     SAN_ASSIGN_OR_RAISE(auto fields_value,
                         required_object_member(node, "fields", "struct type"));
-    SAN_ASSIGN_OR_RAISE(
-        auto fields, logical_fields_from_registry_array(
-                         fields_value, "struct type", depth, budget));
+    SAN_ASSIGN_OR_RAISE(auto fields,
+                        logical_fields_from_registry_array(
+                            fields_value, "struct type", depth, budget));
     return LogicalType::Struct(std::move(fields));
   }
 
@@ -210,8 +210,7 @@ canonical_schema_from_registry_json(std::string_view registry_json) {
     return std::nullopt;
   if (registry_json.size() >
       internal::options_io::kMaxLogicalSchemaPayloadBytes) {
-    return Status::Invalid(
-        "schema_registry JSON payload exceeds safety limit");
+    return Status::Invalid("schema_registry JSON payload exceeds safety limit");
   }
 
   internal::JsonOnDemandDoc doc(std::pmr::new_delete_resource());
@@ -233,9 +232,9 @@ canonical_schema_from_registry_json(std::string_view registry_json) {
       auto fields_value,
       required_object_member(*canonical_schema, "fields", "root schema"));
   RegistrySchemaBudget budget;
-  SAN_ASSIGN_OR_RAISE(
-      auto fields, logical_fields_from_registry_array(
-                       fields_value, "root schema", 0, &budget));
+  SAN_ASSIGN_OR_RAISE(auto fields,
+                      logical_fields_from_registry_array(
+                          fields_value, "root schema", 0, &budget));
 
   LogicalSchema schema;
   schema.fields = std::move(fields);

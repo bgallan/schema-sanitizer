@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from conftest import read_test_xml, require_native
 
 
@@ -50,7 +49,9 @@ def test_native_reader_restreams_multiple_row_groups_without_pyarrow(
 
     source_info = _footer(source)
     native_capsule = native_core.parquet_stream_read(str(source))
-    PARQUET_STREAM_WRITE(_CapsuleStream(native_capsule), str(rewritten), "uncompressed", -1, 128 << 20)
+    PARQUET_STREAM_WRITE(
+        _CapsuleStream(native_capsule), str(rewritten), "uncompressed", -1, 128 << 20
+    )
     rewritten_info = _footer(rewritten)
 
     assert source_info["num_rows"] == rewritten_info["num_rows"] == 70_000
@@ -253,7 +254,9 @@ def test_native_flat_parquet_reader_slices_large_row_group(
     assert len(_footer(path)["row_groups"]) == 1
 
     factory = open_parquet_record_batch_stream_factory(
-        path, source="path", feature="memory window regression",
+        path,
+        source="path",
+        feature="memory window regression",
         memory_limit_bytes=1 << 20,
     )
     reader = pa.RecordBatchReader.from_stream(factory)
@@ -346,9 +349,7 @@ def test_native_struct_parquet_reader_slices_large_row_group(
     )
 
     row_count = 2_049
-    payload_type = pa.struct(
-        [pa.field("id", pa.int64()), pa.field("label", pa.string())]
-    )
+    payload_type = pa.struct([pa.field("id", pa.int64()), pa.field("label", pa.string())])
     values = [
         None if index % 11 == 0 else {"id": index, "label": f"v-{index % 29}"}
         for index in range(row_count)
@@ -364,7 +365,9 @@ def test_native_struct_parquet_reader_slices_large_row_group(
     assert len(_footer(path)["row_groups"]) == 1
 
     factory = open_parquet_record_batch_stream_factory(
-        path, source="path", feature="nested memory window regression",
+        path,
+        source="path",
+        feature="nested memory window regression",
         memory_limit_bytes=514 * 1024,
     )
     batches = list(pa.RecordBatchReader.from_stream(factory))
@@ -372,7 +375,6 @@ def test_native_struct_parquet_reader_slices_large_row_group(
     assert len(batches) == 8
     assert max(batch.num_rows for batch in batches) <= 257
     assert pa.Table.from_batches(batches).to_pylist() == table.to_pylist()
-
 
 
 def test_native_list_parquet_reader_slices_large_row_group(
@@ -410,7 +412,9 @@ def test_native_list_parquet_reader_slices_large_row_group(
     assert len(_footer(path)["row_groups"]) == 1
 
     factory = open_parquet_record_batch_stream_factory(
-        path, source="path", feature="repeated memory window regression",
+        path,
+        source="path",
+        feature="repeated memory window regression",
         memory_limit_bytes=226 * 1024,
     )
     batches = list(pa.RecordBatchReader.from_stream(factory))
@@ -455,9 +459,7 @@ def test_native_nested_repeated_parquet_reader_slices_large_row_group(
                 entries.append(
                     {
                         "id": index * 10 + item,
-                        "tags": []
-                        if item % 3 == 0
-                        else [f"t-{index % 11}", None, f"i-{item}"],
+                        "tags": [] if item % 3 == 0 else [f"t-{index % 11}", None, f"i-{item}"],
                     }
                 )
         values.append(entries)
@@ -472,7 +474,9 @@ def test_native_nested_repeated_parquet_reader_slices_large_row_group(
     assert len(_footer(path)["row_groups"]) == 1
 
     factory = open_parquet_record_batch_stream_factory(
-        path, source="path", feature="nested repeated memory window regression",
+        path,
+        source="path",
+        feature="nested repeated memory window regression",
         memory_limit_bytes=194 * 1024,
     )
     batches = list(pa.RecordBatchReader.from_stream(factory))
@@ -482,9 +486,7 @@ def test_native_nested_repeated_parquet_reader_slices_large_row_group(
     assert pa.Table.from_batches(batches).to_pylist() == table.to_pylist()
 
 
-def test_native_map_parquet_reader_slices_large_row_group(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_native_map_parquet_reader_slices_large_row_group(tmp_path: Path, monkeypatch: Any) -> None:
     """Map entry offsets and nullable values must remain valid across windows."""
     require_native()
     pa = pytest.importorskip("pyarrow")
@@ -504,10 +506,7 @@ def test_native_map_parquet_reader_slices_large_row_group(
             values.append(None)
         else:
             values.append(
-                [
-                    (f"k-{item}", [] if item % 2 == 0 else [index, item])
-                    for item in range(index % 4)
-                ]
+                [(f"k-{item}", [] if item % 2 == 0 else [index, item]) for item in range(index % 4)]
             )
     table = pa.table({"attributes": pa.array(values, type=map_type)})
     path = tmp_path / "map-window.parquet"
@@ -520,7 +519,9 @@ def test_native_map_parquet_reader_slices_large_row_group(
     assert len(_footer(path)["row_groups"]) == 1
 
     factory = open_parquet_record_batch_stream_factory(
-        path, source="path", feature="map memory window regression",
+        path,
+        source="path",
+        feature="map memory window regression",
         memory_limit_bytes=142 * 1024,
     )
     batches = list(pa.RecordBatchReader.from_stream(factory))
@@ -540,16 +541,12 @@ def test_arrow_direct_rejects_batches_above_logical_slot_limit() -> None:
 
     logical_offset = 1_000_000
     values = pa.allocate_buffer((logical_offset + 1) * 8)
-    array = pa.Array.from_buffers(
-        pa.int64(), 1, [None, values], offset=logical_offset
-    )
+    array = pa.Array.from_buffers(pa.int64(), 1, [None, values], offset=logical_offset)
     batch = pa.record_batch([array], names=["value"])
     source = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     options = normalize_call_options(memory_limit_bytes=1).raw
 
-    output = ExecutionContext().to_sink_arrow_stream(
-        "stream", "arrow", source, options
-    )
+    output = ExecutionContext().to_sink_arrow_stream("stream", "arrow", source, options)
     with pytest.raises(pa.ArrowMemoryError, match="logical range exceeds slot limit"):
         pa.RecordBatchReader.from_stream(output).read_all()
 
@@ -562,17 +559,14 @@ def test_arrow_direct_rejects_variable_values_above_logical_byte_limit() -> None
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.options_impl.call_options import normalize_call_options
 
-    batch = pa.record_batch(
-        {"value": pa.array(["x" * (2 * 1024 * 1024)], type=pa.string())}
-    )
+    batch = pa.record_batch({"value": pa.array(["x" * (2 * 1024 * 1024)], type=pa.string())})
     source = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     options = normalize_call_options(memory_limit_bytes=1024 * 1024).raw
 
-    output = ExecutionContext().to_sink_arrow_stream(
-        "stream", "arrow", source, options
-    )
+    output = ExecutionContext().to_sink_arrow_stream("stream", "arrow", source, options)
     with pytest.raises(pa.ArrowMemoryError, match="logical byte limit"):
         pa.RecordBatchReader.from_stream(output).read_all()
+
 
 def test_native_parquet_reader_enforces_actual_retained_capacity(
     tmp_path: Path, monkeypatch: Any
@@ -597,7 +591,9 @@ def test_native_parquet_reader_enforces_actual_retained_capacity(
         parquet_compression="snappy",
     )
     factory = open_parquet_record_batch_stream_factory(
-        path, source="path", feature="actual retained capacity regression",
+        path,
+        source="path",
+        feature="actual retained capacity regression",
         memory_limit_bytes=64,
     )
 

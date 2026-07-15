@@ -19,8 +19,7 @@ sanitize::Result<std::string>
 read_footer_info_json(const std::string &path,
                       const std::vector<std::string> &projected_columns = {});
 
-sanitize::Result<std::string>
-read_stream_preflight_json(
+sanitize::Result<std::string> read_stream_preflight_json(
     const std::string &path,
     const std::vector<std::string> &projected_columns = {},
     std::int64_t memory_limit_bytes = -1);

@@ -158,9 +158,7 @@ def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
         for day in (1, 2, 3)
     ]
 
-    async def fake_remote_file_exists(
-        uri: str, *, memory_limit_bytes: int | None = None
-    ) -> bool:
+    async def fake_remote_file_exists(uri: str, *, memory_limit_bytes: int | None = None) -> bool:
         """Return false for one missing generated object."""
         return not uri.endswith("20260102.json")
 

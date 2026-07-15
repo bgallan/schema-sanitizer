@@ -5,7 +5,7 @@ sanitize::Status project_footer_row_group_columns(
 
 sanitize::Result<FooterInfo>
 read_footer_metadata_impl(const std::string &path,
-                      const std::vector<std::string> &projected_columns) {
+                          const std::vector<std::string> &projected_columns) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
     return sanitize::Status::IOError("Parquet footer: failed opening input");
@@ -141,8 +141,7 @@ make_arrow_stream(const std::string &path,
                   const std::vector<std::string> &projected_columns,
                   std::int64_t memory_limit_bytes) {
   FooterInfo info;
-  SAN_ASSIGN_OR_RAISE(info,
-                      read_footer_metadata_impl(path, projected_columns));
+  SAN_ASSIGN_OR_RAISE(info, read_footer_metadata_impl(path, projected_columns));
   if (info.created_by != "schema-sanitizer native parquet writer") {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: file was not written by schema-sanitizer "
@@ -189,8 +188,8 @@ make_arrow_stream(const std::string &path,
   return stream;
 }
 
-NativeReadinessInfo bounded_stream_preflight_readiness(
-    NativeParquetStreamState *state) {
+NativeReadinessInfo
+bounded_stream_preflight_readiness(NativeParquetStreamState *state) {
   NativeReadinessInfo readiness;
   if (!state) {
     add_readiness_blocker(&readiness, "stream state is null");
@@ -216,9 +215,8 @@ NativeReadinessInfo bounded_stream_preflight_readiness(
 
   const auto layout_status = initialize_native_stream_output_layout(state);
   if (!layout_status.ok()) {
-    add_readiness_blocker(
-        &readiness, "output layout is not materializable: " +
-                        layout_status.message());
+    add_readiness_blocker(&readiness, "output layout is not materializable: " +
+                                          layout_status.message());
     return readiness;
   }
 
@@ -240,8 +238,7 @@ NativeReadinessInfo bounded_stream_preflight_readiness(
       for (const auto &column : row_group.columns) {
         append_column_readiness_blockers(column, &readiness);
       }
-      add_readiness_blocker(&readiness,
-                            label + prepare_status.message());
+      add_readiness_blocker(&readiness, label + prepare_status.message());
       continue;
     }
     for (const auto &column : row_group.columns) {
@@ -249,22 +246,22 @@ NativeReadinessInfo bounded_stream_preflight_readiness(
     }
     auto estimated = native_reader_row_group_buffer_bytes(row_group);
     if (!estimated.ok()) {
-      add_readiness_blocker(
-          &readiness, label + "native buffer estimate failed: " +
-                          estimated.status().message());
+      add_readiness_blocker(&readiness, label +
+                                            "native buffer estimate failed: " +
+                                            estimated.status().message());
     } else if (*estimated > max_buffer_bytes) {
-      add_readiness_blocker(
-          &readiness,
-          label + "native buffer estimate " + std::to_string(*estimated) +
-              " exceeds configured limit " +
-              std::to_string(max_buffer_bytes));
+      add_readiness_blocker(&readiness, label + "native buffer estimate " +
+                                            std::to_string(*estimated) +
+                                            " exceeds configured limit " +
+                                            std::to_string(max_buffer_bytes));
     }
     const auto row_layout_status =
-        validate_native_recursive_row_group_output_layout(
-            row_group, state->output_layout);
+        validate_native_recursive_row_group_output_layout(row_group,
+                                                          state->output_layout);
     if (!row_layout_status.ok()) {
       add_readiness_blocker(
-          &readiness, label + "recursive output layout is not materializable: " +
+          &readiness, label +
+                          "recursive output layout is not materializable: " +
                           row_layout_status.message());
     }
     release_native_row_group_runtime_state(&row_group);
@@ -297,10 +294,10 @@ void append_stream_preflight_row_groups_json(std::string &out, bool &first,
   out.push_back(']');
 }
 
-sanitize::Result<std::string> read_stream_preflight_json(
-    const std::string &path,
-    const std::vector<std::string> &projected_columns,
-    std::int64_t memory_limit_bytes) {
+sanitize::Result<std::string>
+read_stream_preflight_json(const std::string &path,
+                           const std::vector<std::string> &projected_columns,
+                           std::int64_t memory_limit_bytes) {
   SAN_ASSIGN_OR_RAISE(auto info,
                       read_footer_metadata_impl(path, projected_columns));
   NativeParquetStreamState state;
@@ -321,8 +318,7 @@ sanitize::Result<std::string> read_stream_preflight_json(
   out.push_back('{');
   bool first = true;
   json_encoding::append_int_field(out, first, "bounded_preflight", 1);
-  json_encoding::append_int_field(out, first, "version",
-                                  state.footer.version);
+  json_encoding::append_int_field(out, first, "version", state.footer.version);
   json_encoding::append_int_field(out, first, "num_rows",
                                   state.footer.num_rows);
   json_encoding::append_int_field(out, first, "schema_element_count",

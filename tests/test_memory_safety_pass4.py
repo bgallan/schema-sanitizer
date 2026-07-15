@@ -18,6 +18,7 @@ def test_generated_byte_reader_releases_and_wipes_backing_buffer(
 
     class _Reader(BufferedGeneratedBytesReader):
         """Helper class used by this regression."""
+
         def __init__(self) -> None:
             """Helper used by this regression."""
             super().__init__("memory regression", default_chunk_bytes=16)
@@ -58,6 +59,7 @@ def test_generated_byte_reader_overwrites_before_clear(
 
     class _Reader(generated_bytes.BufferedGeneratedBytesReader):
         """Helper class used by this regression."""
+
         def __init__(self) -> None:
             """Helper used by this regression."""
             super().__init__("memory regression", default_chunk_bytes=16)
@@ -117,38 +119,31 @@ def test_csv_nested_stream_omits_validity_without_nulls() -> None:
 
 def test_arrow_json_validation_is_recursive_and_precedes_serialization() -> None:
     """The JSONL and CSV paths share one recursive hostile-metadata gate."""
-    validator = (
-        ROOT / "cpp/src/internal/json_output/schema/array_validation.cc"
-    ).read_text(encoding="utf-8")
-    writer = (
-        ROOT / "cpp/src/internal/json_output/jsonl_stream_writer.cc"
-    ).read_text(encoding="utf-8")
-    nested_csv = (
-        ROOT / "cpp/src/api/python_abi3/csv/nested_stream/nested_stream.cc"
-    ).read_text(encoding="utf-8")
+    validator = (ROOT / "cpp/src/internal/json_output/schema/array_validation.cc").read_text(
+        encoding="utf-8"
+    )
+    writer = (ROOT / "cpp/src/internal/json_output/jsonl_stream_writer.cc").read_text(
+        encoding="utf-8"
+    )
+    nested_csv = (ROOT / "cpp/src/api/python_abi3/csv/nested_stream/nested_stream.cc").read_text(
+        encoding="utf-8"
+    )
 
     assert "validate_array_slice_impl" in validator
     assert "validate_dictionary_indices" in validator
     assert "fixed-size list child offset overflow" in validator
     assert writer.index("validate_batch(root, array, limits)") < writer.index("append_value(")
     get_next = nested_csv.split("int get_next", maxsplit=1)[1]
-    assert get_next.index("jsonl::validate_array_slice") < get_next.index(
-        "build_nested_utf8_array"
-    )
-
+    assert get_next.index("jsonl::validate_array_slice") < get_next.index("build_nested_utf8_array")
 
 
 def test_tracking_pool_avoids_redundant_secure_wipes() -> None:
     """Nested pools delegate one final overwrite to a parent that guarantees it."""
-    header = (ROOT / "cpp/src/internal/memory/memory_pool.hh").read_text(
+    header = (ROOT / "cpp/src/internal/memory/memory_pool.hh").read_text(encoding="utf-8")
+    default_pool = (ROOT / "cpp/src/internal/memory/memory_pool.cc").read_text(encoding="utf-8")
+    tracking = (ROOT / "cpp/src/internal/memory/tracking_memory_pool.cc.inc").read_text(
         encoding="utf-8"
     )
-    default_pool = (ROOT / "cpp/src/internal/memory/memory_pool.cc").read_text(
-        encoding="utf-8"
-    )
-    tracking = (
-        ROOT / "cpp/src/internal/memory/tracking_memory_pool.cc.inc"
-    ).read_text(encoding="utf-8")
 
     assert "wipes_memory_on_free() const noexcept" in header
     assert "return secure_memory_cleanup_enabled();" in default_pool

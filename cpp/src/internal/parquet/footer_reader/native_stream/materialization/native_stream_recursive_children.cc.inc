@@ -57,8 +57,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
   const auto &struct_node = tree.nodes[struct_node_index];
   struct_array.children.reserve(struct_node.children.size());
   SAN_RETURN_NOT_OK(append_native_recursive_node_children(
-      state, row_group, tree, struct_node_index, window,
-      &cursor->struct_index, &cursor->list_index, &struct_array.children));
+      state, row_group, tree, struct_node_index, window, &cursor->struct_index,
+      &cursor->list_index, &struct_array.children));
   if (!struct_node.definition_level.has_value()) {
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive struct definition level is missing");
@@ -91,10 +91,10 @@ sanitize::Status append_native_recursive_node_children(
           "native Parquet reader: recursive child is invalid");
     }
     NativeRecursiveArrayCursor cursor{*struct_index, *list_index};
-    SAN_ASSIGN_OR_RAISE(auto *child_array,
-                        materialize_native_recursive_child_node(
-                            state, row_group, tree, child_node_index, window,
-                            &cursor));
+    SAN_ASSIGN_OR_RAISE(
+        auto *child_array,
+        materialize_native_recursive_child_node(
+            state, row_group, tree, child_node_index, window, &cursor));
     *struct_index = cursor.struct_index;
     *list_index = cursor.list_index;
     children->push_back(child_array);
@@ -118,10 +118,9 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
   SAN_ASSIGN_OR_RAISE(const auto *layout_column,
                       select_recursive_repeated_layout_column_for_node(
                           row_group, tree, map_node_index));
-  SAN_ASSIGN_OR_RAISE(
-      const auto map_array_layout,
-      native_recursive_map_array_layout(*layout_column, map_layout_index,
-                                        window));
+  SAN_ASSIGN_OR_RAISE(const auto map_array_layout,
+                      native_recursive_map_array_layout(
+                          *layout_column, map_layout_index, window));
   if (cursor->list_index >= state->lists.size() ||
       cursor->struct_index >= state->structs.size()) {
     return sanitize::Status::Invalid(
@@ -131,8 +130,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
   auto &entries_array = state->structs[cursor->struct_index++];
   entries_array.children.reserve(tree.nodes[map_node_index].children.size());
   SAN_RETURN_NOT_OK(append_native_recursive_node_children(
-      state, row_group, tree, map_node_index, window,
-      &cursor->struct_index, &cursor->list_index, &entries_array.children));
+      state, row_group, tree, map_node_index, window, &cursor->struct_index,
+      &cursor->list_index, &entries_array.children));
   const auto &layout = map_array_layout.repeated_layout;
   SAN_RETURN_NOT_OK(
       configure_native_struct_array(&entries_array, layout.element_count, 0));

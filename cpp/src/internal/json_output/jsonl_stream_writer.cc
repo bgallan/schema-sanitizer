@@ -75,9 +75,9 @@ sanitize::Status flush_buffer_if_large(Output &out_file, std::string &buffer) {
   return flush_buffer(out_file, buffer);
 }
 
-sanitize::Status write_batch_jsonl(
-    Output &out_file, const JsonlField &root, const ArrowArray &array,
-    const ArrayValidationLimits &limits) {
+sanitize::Status write_batch_jsonl(Output &out_file, const JsonlField &root,
+                                   const ArrowArray &array,
+                                   const ArrayValidationLimits &limits) {
   SAN_RETURN_NOT_OK(validate_batch(root, array, limits));
 
   std::string batch_text;
@@ -150,14 +150,12 @@ sanitize::Result<WriteStats> write_stream(ArrowArrayStream *stream,
     }
     if (batch.value().length < 0 ||
         stats.batches == std::numeric_limits<std::int64_t>::max() ||
-        batch.value().length >
-            std::numeric_limits<std::int64_t>::max() -
-                stats.materialized_rows) {
+        batch.value().length > std::numeric_limits<std::int64_t>::max() -
+                                   stats.materialized_rows) {
       return sanitize::Status::Invalid(
           "JSONL writer: write statistics overflow");
     }
-    SAN_RETURN_NOT_OK(
-        write_batch_jsonl(out_file, root, batch.value(), limits));
+    SAN_RETURN_NOT_OK(write_batch_jsonl(out_file, root, batch.value(), limits));
     ++stats.batches;
     stats.materialized_rows += batch.value().length;
   }

@@ -31,8 +31,7 @@ void require_output_growth(const std::string &out, std::size_t additional) {
   }
 }
 
-std::uint32_t checked_u32_size(std::size_t value,
-                               std::string_view label) {
+std::uint32_t checked_u32_size(std::size_t value, std::string_view label) {
   if (value > std::numeric_limits<std::uint32_t>::max()) {
     throw std::length_error(std::string(label) + " exceeds uint32 range");
   }
@@ -69,11 +68,9 @@ struct LogicalSchemaWriteBudget {
 };
 
 void append_logical_type(std::string &out, const sanitize::LogicalType &type,
-                         std::uint32_t depth,
-                         LogicalSchemaWriteBudget *budget);
+                         std::uint32_t depth, LogicalSchemaWriteBudget *budget);
 
-void append_logical_field(std::string &out,
-                          const sanitize::LogicalField &field,
+void append_logical_field(std::string &out, const sanitize::LogicalField &field,
                           std::uint32_t depth,
                           LogicalSchemaWriteBudget *budget) {
   if (!budget) {
@@ -103,7 +100,8 @@ void append_logical_type(std::string &out, const sanitize::LogicalType &type,
   append_u8(out, std::to_underlying(type.kind));
   if (type.kind == sanitize::LogicalKind::kStruct) {
     if (type.fields.size() > kMaxLogicalSchemaFieldsPerStruct) {
-      throw std::length_error("logical struct field count exceeds safety limit");
+      throw std::length_error(
+          "logical struct field count exceeds safety limit");
     }
     append_u32(out, checked_u32_size(type.fields.size(),
                                      "logical struct field count"));
@@ -153,8 +151,8 @@ public:
 private:
   sanitize::Status consume_node() {
     if (remaining_nodes_ == 0) {
-      return sanitize::Status::Invalid(
-          "deserialize_options: logical schema node count exceeds safety limit");
+      return sanitize::Status::Invalid("deserialize_options: logical schema "
+                                       "node count exceeds safety limit");
     }
     --remaining_nodes_;
     return sanitize::Status::OK();
@@ -234,8 +232,7 @@ private:
     }
     case sanitize::LogicalKind::kList: {
       SAN_ASSIGN_OR_RAISE(auto element, read_type(depth + 1U));
-      type.value =
-          std::make_unique<sanitize::LogicalType>(std::move(element));
+      type.value = std::make_unique<sanitize::LogicalType>(std::move(element));
       break;
     }
     case sanitize::LogicalKind::kNull:
@@ -270,8 +267,8 @@ serialize_logical_schema_bytes(const sanitize::LogicalSchema &schema) {
     }
     std::string out;
     LogicalSchemaWriteBudget budget;
-    append_u32(out, checked_u32_size(schema.fields.size(),
-                                     "logical schema fields"));
+    append_u32(out,
+               checked_u32_size(schema.fields.size(), "logical schema fields"));
     for (const auto &field : schema.fields) {
       append_logical_field(out, field, 0, &budget);
     }
@@ -281,11 +278,10 @@ serialize_logical_schema_bytes(const sanitize::LogicalSchema &schema) {
         "logical schema serialization ran out of memory");
   } catch (const std::length_error &error) {
     return sanitize::Status::Invalid(
-        "logical schema serialization exceeds safety limits: ",
-        error.what());
+        "logical schema serialization exceeds safety limits: ", error.what());
   } catch (const std::exception &error) {
-    return sanitize::Status::Invalid(
-        "logical schema serialization failed: ", error.what());
+    return sanitize::Status::Invalid("logical schema serialization failed: ",
+                                     error.what());
   }
 }
 

@@ -65,9 +65,7 @@ def test_arrow_direct_rejects_large_absolute_offset() -> None:
     source = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     options = normalize_call_options(memory_limit_bytes=1).raw
 
-    output = ExecutionContext().to_sink_arrow_stream(
-        "stream", "arrow", source, options
-    )
+    output = ExecutionContext().to_sink_arrow_stream("stream", "arrow", source, options)
     with pytest.raises(pa.ArrowMemoryError, match="absolute logical range"):
         pa.RecordBatchReader.from_stream(output).read_all()
 
@@ -130,12 +128,8 @@ def test_foreign_arrow_release_callbacks_are_suppressed() -> None:
         root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.cc"
     ).read_text()
     c_bridge = (root / "cpp/src/api/c/schema_sanitizer_c_sink_diagnostics.cc").read_text()
-    coalescer = (
-        root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc"
-    ).read_text()
-    payload = (
-        root / "cpp/src/api/python_abi3/logical_schema/payload.cc"
-    ).read_text()
+    coalescer = (root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc").read_text()
+    payload = (root / "cpp/src/api/python_abi3/logical_schema/payload.cc").read_text()
 
     assert "void release_stream_nothrow" in callbacks
     assert "release_array_nothrow(&array)" in values
@@ -147,9 +141,7 @@ def test_foreign_arrow_release_callbacks_are_suppressed() -> None:
 def test_coalescer_validates_before_transferring_ownership() -> None:
     """Malformed foreign batches must never enter the pending state."""
     root = Path(__file__).resolve().parents[1]
-    text = (
-        root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc"
-    ).read_text()
+    text = (root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc").read_text()
 
     validate_at = text.index("SAN_RETURN_NOT_OK(validate_arrow_node")
     move_at = text.index("move_array(batch.get(), &state->pending_array)")
@@ -163,8 +155,7 @@ def test_arrow_direct_frontend_materializes_bounded_slices() -> None:
         root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct.cc"
     ).read_text()
     batch_builder = (
-        root
-        / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_batch.cc"
+        root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_batch.cc"
     ).read_text()
 
     assert "const int64_t row_count = std::min(capacity, remaining);" in frontend
@@ -177,8 +168,7 @@ def test_arrow_direct_scalar_values_do_not_accumulate_heap_refs() -> None:
     """Only nested container views should require stable ArrowValueRef storage."""
     root = Path(__file__).resolve().parents[1]
     values = (
-        root
-        / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.cc"
+        root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.cc"
     ).read_text()
 
     assert "bool value_requires_stable_ref" in values
@@ -215,14 +205,10 @@ def test_arrow_capsule_keepalive_outlives_pending_arrays() -> None:
     frontend = (
         root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct.cc"
     ).read_text()
-    coalescer = (
-        root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc"
-    ).read_text()
+    coalescer = (root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc").read_text()
 
     destructor = frontend.split("~ArrowDirectFrontend()", maxsplit=1)[1]
-    assert destructor.index("pending_.reset();") < destructor.index(
-        "decref_with_gil(capsule_)"
-    )
+    assert destructor.index("pending_.reset();") < destructor.index("decref_with_gil(capsule_)")
     assert "capsule_owner" in frontend
     assert "capsule_owner" in coalescer
 
@@ -231,8 +217,7 @@ def test_fixed_size_list_validation_uses_parent_offset() -> None:
     """Validation must cover the exact child range later used by traversal."""
     root = Path(__file__).resolve().parents[1]
     validator = (
-        root
-        / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_validate.cc"
+        root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_validate.cc"
     ).read_text()
 
     assert "const auto parent_first = array.offset + first_row;" in validator

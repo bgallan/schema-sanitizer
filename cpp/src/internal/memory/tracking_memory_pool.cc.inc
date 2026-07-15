@@ -32,19 +32,19 @@ public:
       return sanitize::Status::OutOfMemory("Allocate: alignment out of range");
     }
     std::size_t total_size = 0;
-    if (!checked_allocation_size(static_cast<std::size_t>(size),
-                                 normalized_alignment,
-                                 sizeof(TrackingAllocationHeader),
-                                 &total_size) ||
-        total_size > static_cast<std::size_t>(
-                         std::numeric_limits<int64_t>::max())) {
+    if (!checked_allocation_size(
+            static_cast<std::size_t>(size), normalized_alignment,
+            sizeof(TrackingAllocationHeader), &total_size) ||
+        total_size >
+            static_cast<std::size_t>(std::numeric_limits<int64_t>::max())) {
       return sanitize::Status::OutOfMemory("Allocate: size overflow");
     }
     const auto quota_charge = static_cast<int64_t>(total_size);
     auto charged = charged_bytes_.load(std::memory_order_relaxed);
     for (;;) {
       if (charged > std::numeric_limits<int64_t>::max() - quota_charge) {
-        return sanitize::Status::OutOfMemory("memory quota accounting overflow");
+        return sanitize::Status::OutOfMemory(
+            "memory quota accounting overflow");
       }
       const auto next = charged + quota_charge;
       if (limit_ > 0 && next > limit_) {
@@ -52,9 +52,9 @@ public:
             "memory_limit_bytes limit exceeded including allocator overhead: ",
             next, " bytes > ", limit_, " bytes");
       }
-      if (charged_bytes_.compare_exchange_weak(
-              charged, next, std::memory_order_relaxed,
-              std::memory_order_relaxed)) {
+      if (charged_bytes_.compare_exchange_weak(charged, next,
+                                               std::memory_order_relaxed,
+                                               std::memory_order_relaxed)) {
         break;
       }
     }
@@ -66,9 +66,9 @@ public:
         return sanitize::Status::OutOfMemory("memory accounting overflow");
       }
       const auto next = current + size;
-      if (bytes_allocated_.compare_exchange_weak(
-              current, next, std::memory_order_relaxed,
-              std::memory_order_relaxed)) {
+      if (bytes_allocated_.compare_exchange_weak(current, next,
+                                                 std::memory_order_relaxed,
+                                                 std::memory_order_relaxed)) {
         current = next;
         break;
       }
@@ -98,11 +98,11 @@ public:
     *out = reinterpret_cast<uint8_t *>(aligned);
     write_allocation_guard(*out, static_cast<std::size_t>(size));
     if (!live_allocations_.register_allocation(
-            *out, LiveAllocationRecord{.upstream = upstream,
-                                       .upstream_size =
-                                           static_cast<std::int64_t>(total_size),
-                                       .requested_size = size,
-                                       .alignment = upstream_alignment})) {
+            *out, LiveAllocationRecord{
+                      .upstream = upstream,
+                      .upstream_size = static_cast<std::int64_t>(total_size),
+                      .requested_size = size,
+                      .alignment = upstream_alignment})) {
       header->magic = 0;
       header->upstream = nullptr;
       parent_->Free(upstream, static_cast<int64_t>(total_size),
@@ -118,7 +118,8 @@ public:
     return sanitize::Status::OK();
   }
 
-  void Free(uint8_t *buffer, int64_t size, int64_t alignment) noexcept override {
+  void Free(uint8_t *buffer, int64_t size,
+            int64_t alignment) noexcept override {
     if (!buffer || !parent_) {
       return;
     }
@@ -139,9 +140,8 @@ public:
           header->upstream_alignment != record.alignment) {
         corruption_count_.fetch_add(1, std::memory_order_relaxed);
       }
-    } else if (header->magic != kTrackingAllocationMagic ||
-               !header->upstream || header->requested_size <= 0 ||
-               header->upstream_size <= 0) {
+    } else if (header->magic != kTrackingAllocationMagic || !header->upstream ||
+               header->requested_size <= 0 || header->upstream_size <= 0) {
       invalid_free_count_.fetch_add(1, std::memory_order_relaxed);
       return;
     }
@@ -151,7 +151,8 @@ public:
       size_mismatch_count_.fetch_add(1, std::memory_order_relaxed);
     }
     std::size_t normalized_alignment = 0;
-    if (alignment > 0 && normalize_alignment(alignment, &normalized_alignment) &&
+    if (alignment > 0 &&
+        normalize_alignment(alignment, &normalized_alignment) &&
         static_cast<int64_t>(normalized_alignment) !=
             (registry_enabled ? record.alignment
                               : header->upstream_alignment)) {
@@ -164,12 +165,11 @@ public:
         registry_enabled ? record.requested_size : header->requested_size;
     const auto upstream_alignment =
         registry_enabled ? record.alignment : header->upstream_alignment;
-    if (!allocation_guard_is_valid(
-            buffer, static_cast<std::size_t>(requested_size))) {
+    if (!allocation_guard_is_valid(buffer,
+                                   static_cast<std::size_t>(requested_size))) {
       corruption_count_.fetch_add(1, std::memory_order_relaxed);
     }
-    if (secure_memory_cleanup_enabled() &&
-        !parent_->wipes_memory_on_free()) {
+    if (secure_memory_cleanup_enabled() && !parent_->wipes_memory_on_free()) {
       secure_zero_memory(buffer, static_cast<std::size_t>(requested_size));
     }
     header->magic = 0;

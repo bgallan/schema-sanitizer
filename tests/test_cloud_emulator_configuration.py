@@ -25,12 +25,14 @@ def test_azure_uses_default_sdk_credential_chain(monkeypatch: pytest.MonkeyPatch
 
     class FakeCredential:
         """Provide a lightweight test double."""
+
         def __new__(cls) -> object:
             """Implement the test-double protocol method."""
             return credential
 
     class FakeService:
         """Provide a lightweight test double."""
+
         def __new__(cls, *, account_url: str, credential: object) -> object:
             """Implement the test-double protocol method."""
             captured.update(account_url=account_url, credential=credential)
@@ -81,6 +83,7 @@ def test_gcs_list_directory_retries_and_paginates(monkeypatch: pytest.MonkeyPatc
 
     class FakeResponse:
         """Provide a lightweight test double."""
+
         def __init__(self, status: int, body: str) -> None:
             """Implement the test-double protocol method."""
             self.status = status
@@ -100,6 +103,7 @@ def test_gcs_list_directory_retries_and_paginates(monkeypatch: pytest.MonkeyPatc
 
     class FakeSession:
         """Provide a lightweight test double."""
+
         async def __aenter__(self):
             """Implement the test-double protocol method."""
             return self
@@ -144,6 +148,7 @@ def test_gcs_permission_errors_do_not_retry(monkeypatch: pytest.MonkeyPatch) -> 
 
     class FakeResponse:
         """Provide a lightweight test double."""
+
         status = 403
 
         async def __aenter__(self):
@@ -160,6 +165,7 @@ def test_gcs_permission_errors_do_not_retry(monkeypatch: pytest.MonkeyPatch) -> 
 
     class FakeSession:
         """Provide a lightweight test double."""
+
         async def __aenter__(self):
             """Implement the test-double protocol method."""
             return self
@@ -200,6 +206,7 @@ def test_gcs_adc_scope_supports_pipeline_uploads(monkeypatch: pytest.MonkeyPatch
 
     class Credentials:
         """Provide a lightweight test double."""
+
         valid = True
         token = "token"
 
@@ -219,6 +226,4 @@ def test_gcs_adc_scope_supports_pipeline_uploads(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(gcs, "import_module", fake_import)
 
     assert gcs.access_token() == "token"
-    assert captured["scopes"] == [
-        "https://www.googleapis.com/auth/devstorage.read_write"
-    ]
+    assert captured["scopes"] == ["https://www.googleapis.com/auth/devstorage.read_write"]

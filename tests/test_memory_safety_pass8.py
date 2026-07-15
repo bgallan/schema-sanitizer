@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -14,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_materialization_validity_is_allocated_only_after_first_null() -> None:
     """Null-free native columns must not pay for redundant validity bitmaps."""
-    source = (
-        ROOT / "cpp/src/internal/materialization/builders/detail.hh"
-    ).read_text(encoding="utf-8")
+    source = (ROOT / "cpp/src/internal/materialization/builders/detail.hh").read_text(
+        encoding="utf-8"
+    )
     validity = source.split("void push_validity", 1)[1].split(
         "static const void *validity_buffer", 1
     )[0]
@@ -65,18 +64,16 @@ def test_materialization_nested_late_null_round_trip(tmp_path: Path) -> None:
 
 def test_xml_row_stream_uses_borrowed_slices_and_bounded_retention() -> None:
     """Execution should not duplicate every XML row or pin exceptional buffers."""
-    header = (
-        ROOT / "cpp/src/internal/parsing/streaming/xml/row_scanner.hh"
-    ).read_text(encoding="utf-8")
-    scanner = (
-        ROOT / "cpp/src/internal/parsing/streaming/xml/row_scanner_buffer.cc"
-    ).read_text(encoding="utf-8")
-    lifecycle = (
-        ROOT / "cpp/src/internal/parsing/streaming/xml/row_scanner.cc"
-    ).read_text(encoding="utf-8")
-    frontend = (ROOT / "cpp/src/frontends/xml/frontend.cc").read_text(
+    header = (ROOT / "cpp/src/internal/parsing/streaming/xml/row_scanner.hh").read_text(
         encoding="utf-8"
     )
+    scanner = (ROOT / "cpp/src/internal/parsing/streaming/xml/row_scanner_buffer.cc").read_text(
+        encoding="utf-8"
+    )
+    lifecycle = (ROOT / "cpp/src/internal/parsing/streaming/xml/row_scanner.cc").read_text(
+        encoding="utf-8"
+    )
+    frontend = (ROOT / "cpp/src/frontends/xml/frontend.cc").read_text(encoding="utf-8")
 
     assert "std::string_view text" in header
     assert "retained_buffer_limit" in scanner
@@ -87,9 +84,7 @@ def test_xml_row_stream_uses_borrowed_slices_and_bounded_retention() -> None:
     assert "storage->raw_rows.emplace_back(slice.text)" in frontend
 
 
-def test_xml_borrowed_row_slice_round_trip_with_secure_cleanup(
-    tmp_path: Path
-) -> None:
+def test_xml_borrowed_row_slice_round_trip_with_secure_cleanup(tmp_path: Path) -> None:
     """Borrowed XML slices remain valid until parsing finishes."""
     require_native()
     import schema_sanitizer as ss
@@ -120,12 +115,12 @@ def test_xml_borrowed_row_slice_round_trip_with_secure_cleanup(
 
 def test_csv_multichunk_segments_release_owners_and_exceptional_capacity() -> None:
     """Materialized records must not retain every contributing source chunk."""
-    scanner = (
-        ROOT / "cpp/src/internal/parsing/streaming/csv/scanner.cc"
-    ).read_text(encoding="utf-8")
-    record = (
-        ROOT / "cpp/src/internal/parsing/streaming/csv/record_buffer.cc"
-    ).read_text(encoding="utf-8")
+    scanner = (ROOT / "cpp/src/internal/parsing/streaming/csv/scanner.cc").read_text(
+        encoding="utf-8"
+    )
+    record = (ROOT / "cpp/src/internal/parsing/streaming/csv/record_buffer.cc").read_text(
+        encoding="utf-8"
+    )
 
     assert "void CsvStreamingScanner::clear_segments() noexcept" in scanner
     assert "kMaxRetainedSegments = 1024" in scanner
@@ -133,9 +128,7 @@ def test_csv_multichunk_segments_release_owners_and_exceptional_capacity() -> No
     assert "kMaxCsvRecordSegments" in record
     assert "CSV record spans too many input chunks" in record
     assert "scanner_.clear_segments();" in record
-    assert record.index("scanner_.clear_segments();") < record.index(
-        "return make_text_slice"
-    )
+    assert record.index("scanner_.clear_segments();") < record.index("return make_text_slice")
 
 
 def test_csv_record_spanning_many_chunks_round_trip(tmp_path: Path) -> None:
@@ -162,12 +155,12 @@ def test_csv_record_spanning_many_chunks_round_trip(tmp_path: Path) -> None:
 
 def test_json_multichunk_metadata_amplification_is_bounded() -> None:
     """Tiny source chunks cannot amplify one JSON value into unbounded metadata."""
-    header = (
-        ROOT / "cpp/src/internal/parsing/streaming/json/value_span_scanner.hh"
-    ).read_text(encoding="utf-8")
-    buffer = (
-        ROOT / "cpp/src/internal/parsing/streaming/json/value_span_buffer.cc"
-    ).read_text(encoding="utf-8")
+    header = (ROOT / "cpp/src/internal/parsing/streaming/json/value_span_scanner.hh").read_text(
+        encoding="utf-8"
+    )
+    buffer = (ROOT / "cpp/src/internal/parsing/streaming/json/value_span_buffer.cc").read_text(
+        encoding="utf-8"
+    )
 
     assert "kMaxSegments = 65'536" in header
     assert "segments_.size() >= kMaxSegments" in buffer

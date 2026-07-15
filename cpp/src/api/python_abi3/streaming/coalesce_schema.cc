@@ -1,7 +1,6 @@
 /* Arrow C stream coalescing schema support. */
 #include "api/python_abi3/streaming/coalesce_stream_internal.hh"
 
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -55,10 +54,10 @@ sanitize::Status validate_logical_slice(const ArrowArray &array,
 }
 
 template <class Offset>
-sanitize::Result<std::pair<std::int64_t, std::int64_t>> validate_offsets(
-    const ArrowArray &array, std::int64_t offset, std::int64_t length,
-    std::string_view context,
-    std::int64_t max_logical_buffer_bytes) {
+sanitize::Result<std::pair<std::int64_t, std::int64_t>>
+validate_offsets(const ArrowArray &array, std::int64_t offset,
+                 std::int64_t length, std::string_view context,
+                 std::int64_t max_logical_buffer_bytes) {
   if (!array.buffers || !array.buffers[1]) {
     return sanitize::Status::Invalid("coalescing stream ", context,
                                      " has no offsets buffer");
@@ -93,9 +92,10 @@ sanitize::Result<std::pair<std::int64_t, std::int64_t>> validate_offsets(
 }
 
 template <class Index>
-sanitize::Status validate_dictionary_indices_typed(
-    const ArrowArray &array, std::int64_t offset, std::int64_t length,
-    std::int64_t dictionary_length) {
+sanitize::Status
+validate_dictionary_indices_typed(const ArrowArray &array, std::int64_t offset,
+                                  std::int64_t length,
+                                  std::int64_t dictionary_length) {
   if (!array.buffers || !array.buffers[1]) {
     return sanitize::Status::Invalid(
         "coalescing stream dictionary has no indices buffer");
@@ -128,18 +128,17 @@ sanitize::Status validate_dictionary_indices_typed(
   return sanitize::Status::OK();
 }
 
-sanitize::Status validate_arrow_node_impl(const CoalesceNodeSpec &spec,
-                                     const ArrowArray &array,
-                                     std::int64_t offset,
-                                     std::int64_t length,
-                                     std::size_t depth,
-                                     std::int64_t max_logical_slots,
-                                     std::int64_t max_logical_buffer_bytes) {
+sanitize::Status
+validate_arrow_node_impl(const CoalesceNodeSpec &spec, const ArrowArray &array,
+                         std::int64_t offset, std::int64_t length,
+                         std::size_t depth, std::int64_t max_logical_slots,
+                         std::int64_t max_logical_buffer_bytes) {
   if (depth > kMaxArrowValidationDepth) {
     return sanitize::Status::Invalid(
         "coalescing stream Arrow nesting depth exceeds security limit");
   }
-  SAN_RETURN_NOT_OK(validate_logical_slice(array, offset, length, "node", max_logical_slots));
+  SAN_RETURN_NOT_OK(
+      validate_logical_slice(array, offset, length, "node", max_logical_slots));
   std::int64_t expected_buffers = 0;
   switch (spec.kind) {
   case CoalesceKind::kStruct:
@@ -185,9 +184,9 @@ sanitize::Status validate_arrow_node_impl(const CoalesceNodeSpec &spec,
   switch (spec.kind) {
   case CoalesceKind::kUtf8:
   case CoalesceKind::kBinary: {
-    SAN_ASSIGN_OR_RAISE(
-        auto bounds,
-        validate_offsets<std::int32_t>(array, offset, length, "binary node", max_logical_buffer_bytes));
+    SAN_ASSIGN_OR_RAISE(auto bounds, validate_offsets<std::int32_t>(
+                                         array, offset, length, "binary node",
+                                         max_logical_buffer_bytes));
     if (bounds.second > bounds.first && !array.buffers[2]) {
       return sanitize::Status::Invalid(
           "coalescing stream binary data buffer is missing");
@@ -197,8 +196,9 @@ sanitize::Status validate_arrow_node_impl(const CoalesceNodeSpec &spec,
   case CoalesceKind::kLargeUtf8:
   case CoalesceKind::kLargeBinary: {
     SAN_ASSIGN_OR_RAISE(
-        auto bounds,
-        validate_offsets<std::int64_t>(array, offset, length, "large binary node", max_logical_buffer_bytes));
+        auto bounds, validate_offsets<std::int64_t>(array, offset, length,
+                                                    "large binary node",
+                                                    max_logical_buffer_bytes));
     if (bounds.second > bounds.first && !array.buffers[2]) {
       return sanitize::Status::Invalid(
           "coalescing stream large binary data buffer is missing");
@@ -213,7 +213,8 @@ sanitize::Status validate_arrow_node_impl(const CoalesceNodeSpec &spec,
     }
     sanitize::Result<std::pair<std::int64_t, std::int64_t>> bounds =
         spec.kind == CoalesceKind::kList32
-            ? validate_offsets<std::int32_t>(array, offset, length, "list node", max_logical_buffer_bytes)
+            ? validate_offsets<std::int32_t>(array, offset, length, "list node",
+                                             max_logical_buffer_bytes)
             : validate_offsets<std::int64_t>(array, offset, length,
                                              "large list node",
                                              max_logical_buffer_bytes);
@@ -293,7 +294,6 @@ sanitize::Status validate_arrow_node_impl(const CoalesceNodeSpec &spec,
   return sanitize::Status::OK();
 }
 
-
 constexpr std::array<std::string_view, 2> kInteger8Formats{"c", "C"};
 constexpr std::array<std::string_view, 2> kInteger16Formats{"s", "S"};
 constexpr std::array<std::string_view, 2> kInteger32Formats{"i", "I"};
@@ -345,8 +345,7 @@ dictionary_index_width_for_format(std::string_view format) noexcept {
 }
 
 bool parse_supported_schema_node(const ArrowSchema &schema,
-                                 CoalesceNodeSpec *out,
-                                 std::size_t depth = 0) {
+                                 CoalesceNodeSpec *out, std::size_t depth = 0) {
   if (!out || depth > kMaxArrowValidationDepth) {
     return false;
   }
@@ -368,7 +367,8 @@ bool parse_supported_schema_node(const ArrowSchema &schema,
     out->kind = CoalesceKind::kDictionary;
     out->fixed_width = width;
     out->children.resize(1);
-    if (!parse_supported_schema_node(*schema.dictionary, &out->children[0], depth + 1)) {
+    if (!parse_supported_schema_node(*schema.dictionary, &out->children[0],
+                                     depth + 1)) {
       out->children.clear();
       return false;
     }
@@ -382,7 +382,8 @@ bool parse_supported_schema_node(const ArrowSchema &schema,
     out->children.resize(static_cast<std::size_t>(schema.n_children));
     for (std::int64_t i = 0; i < schema.n_children; ++i) {
       const ArrowSchema *child = schema.children ? schema.children[i] : nullptr;
-      if (!child || !parse_supported_schema_node(*child, &out->children[i], depth + 1)) {
+      if (!child ||
+          !parse_supported_schema_node(*child, &out->children[i], depth + 1)) {
         out->children.clear();
         return false;
       }
@@ -395,7 +396,8 @@ bool parse_supported_schema_node(const ArrowSchema &schema,
     }
     out->kind = format == "+l" ? CoalesceKind::kList32 : CoalesceKind::kList64;
     out->children.resize(1);
-    if (!parse_supported_schema_node(*schema.children[0], &out->children[0], depth + 1)) {
+    if (!parse_supported_schema_node(*schema.children[0], &out->children[0],
+                                     depth + 1)) {
       out->children.clear();
       return false;
     }
@@ -437,14 +439,12 @@ bool parse_supported_schema_node(const ArrowSchema &schema,
 
 sanitize::Status validate_arrow_node(const CoalesceNodeSpec &spec,
                                      const ArrowArray &array,
-                                     std::int64_t offset,
-                                     std::int64_t length,
+                                     std::int64_t offset, std::int64_t length,
                                      std::size_t depth,
                                      std::int64_t max_logical_slots,
                                      std::int64_t max_logical_buffer_bytes) {
   return validate_arrow_node_impl(spec, array, offset, length, depth,
-                                  max_logical_slots,
-                                  max_logical_buffer_bytes);
+                                  max_logical_slots, max_logical_buffer_bytes);
 }
 
 bool schema_supported(const ArrowSchema &schema, CoalesceNodeSpec *root) {

@@ -263,12 +263,12 @@ NativeReadinessInfo native_reader_readiness(
         flat_window_fits = one_row.ok() && *one_row <= max_buffer_bytes;
       }
       if (!flat_window_fits) {
-        add_readiness_blocker(
-            &readiness,
-            "row group " + std::to_string(row_group_index) +
-                ": native buffer estimate " + std::to_string(*estimated) +
-                " exceeds configured limit " +
-                std::to_string(max_buffer_bytes));
+        add_readiness_blocker(&readiness, "row group " +
+                                              std::to_string(row_group_index) +
+                                              ": native buffer estimate " +
+                                              std::to_string(*estimated) +
+                                              " exceeds configured limit " +
+                                              std::to_string(max_buffer_bytes));
       }
     }
     if (output_layout_ready) {

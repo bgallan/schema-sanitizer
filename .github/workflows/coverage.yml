@@ -58,7 +58,6 @@ jobs:
             coverage-python.xml
             coverage-python.json
             coverage-python-risk-gaps.txt
-
   native-llvm-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 50

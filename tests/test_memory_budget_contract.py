@@ -120,10 +120,22 @@ def test_repository_contains_no_environment_access() -> None:
             continue
         if not path.is_file() or any(part in ignored for part in path.parts):
             continue
-        if path.suffix not in {
-            ".py", ".cc", ".cpp", ".c", ".hh", ".hpp", ".h",
-            ".yml", ".yaml", ".cmake",
-        } and path.name != "CMakeLists.txt":
+        if (
+            path.suffix
+            not in {
+                ".py",
+                ".cc",
+                ".cpp",
+                ".c",
+                ".hh",
+                ".hpp",
+                ".h",
+                ".yml",
+                ".yaml",
+                ".cmake",
+            }
+            and path.name != "CMakeLists.txt"
+        ):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if any(token in text for token in _ENV_ACCESS_TOKENS):

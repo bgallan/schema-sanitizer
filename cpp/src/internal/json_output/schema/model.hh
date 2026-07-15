@@ -81,15 +81,13 @@ sanitize::Result<JsonlKind> kind_from_format(std::string_view format);
 sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema);
 
 // Validates a root struct field against one record batch array.
-sanitize::Status validate_batch(const JsonlField &root,
-                                const ArrowArray &array,
+sanitize::Status validate_batch(const JsonlField &root, const ArrowArray &array,
                                 const ArrayValidationLimits &limits);
 
 // Validates one logical Arrow array slice against its parsed field schema.
 sanitize::Status validate_array_slice(const JsonlField &field,
                                       const ArrowArray &array,
-                                      std::int64_t offset,
-                                      std::int64_t length,
+                                      std::int64_t offset, std::int64_t length,
                                       const ArrayValidationLimits &limits);
 
 // Returns whether an Arrow C schema can be serialized by the native writer.

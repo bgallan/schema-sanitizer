@@ -62,31 +62,31 @@ std::int64_t estimate_row_span_data_bytes(const MetadataColumn &column,
   return total;
 }
 
-std::int64_t estimate_generated_metadata_bytes(
-    const MetadataStreamState &stream_state, const ArrowArray &base,
-    std::size_t timestamp_count) noexcept {
+std::int64_t
+estimate_generated_metadata_bytes(const MetadataStreamState &stream_state,
+                                  const ArrowArray &base,
+                                  std::size_t timestamp_count) noexcept {
   const auto length = static_cast<std::size_t>(base.length);
   std::int64_t total = sanitize::internal::saturating_capacity_bytes(
       static_cast<std::size_t>(base.n_children) + stream_state.columns.size(),
       sizeof(ArrowArray *));
-  total = add_estimated_bytes(
-      total, sanitize::internal::saturating_capacity_bytes(
-                 stream_state.columns.size(),
-                 kGeneratedColumnShellEstimateBytes));
+  total =
+      add_estimated_bytes(total, sanitize::internal::saturating_capacity_bytes(
+                                     stream_state.columns.size(),
+                                     kGeneratedColumnShellEstimateBytes));
   for (const auto &column : stream_state.columns) {
-    if (column.placement ==
-        MetadataColumnPlacement::AllRowsTimestampMicros) {
-      total = add_estimated_bytes(
-          total, sanitize::internal::saturating_capacity_bytes(
-                     length, sizeof(std::int64_t)));
+    if (column.placement == MetadataColumnPlacement::AllRowsTimestampMicros) {
+      total = add_estimated_bytes(total,
+                                  sanitize::internal::saturating_capacity_bytes(
+                                      length, sizeof(std::int64_t)));
       continue;
     }
-    total = add_estimated_bytes(
-        total, sanitize::internal::saturating_capacity_bytes(
-                   length + 1U, sizeof(std::int32_t)));
-    total = add_estimated_bytes(
-        total, sanitize::internal::saturating_capacity_bytes(
-                   (length + 7U) / 8U, sizeof(std::uint8_t)));
+    total = add_estimated_bytes(total,
+                                sanitize::internal::saturating_capacity_bytes(
+                                    length + 1U, sizeof(std::int32_t)));
+    total = add_estimated_bytes(total,
+                                sanitize::internal::saturating_capacity_bytes(
+                                    (length + 7U) / 8U, sizeof(std::uint8_t)));
     std::int64_t data_bytes = 0;
     if (!column.is_null &&
         column.placement == MetadataColumnPlacement::AllRowsUtf8) {
@@ -97,8 +97,8 @@ std::int64_t estimate_generated_metadata_bytes(
       data_bytes = estimate_row_span_data_bytes(column, base.length);
     } else if (!column.is_null && stream_state.first_row_pending &&
                base.length > 0) {
-      data_bytes = sanitize::internal::saturating_size_to_i64(
-          column.value.size());
+      data_bytes =
+          sanitize::internal::saturating_size_to_i64(column.value.size());
     }
     total = add_estimated_bytes(total, data_bytes);
   }
@@ -193,11 +193,10 @@ bool append_metadata_columns(PyObject *first_row_columns,
          append_timestamp_columns_from_sequence(timestamp_columns, columns);
 }
 
-std::unique_ptr<MetadataStreamState> make_state(PyObject *first_row_columns,
-                                                PyObject *all_row_columns,
-                                                PyObject *row_span_columns,
-                                                PyObject *timestamp_columns,
-                                                std::int64_t memory_limit_bytes) {
+std::unique_ptr<MetadataStreamState>
+make_state(PyObject *first_row_columns, PyObject *all_row_columns,
+           PyObject *row_span_columns, PyObject *timestamp_columns,
+           std::int64_t memory_limit_bytes) {
   auto state = std::unique_ptr<MetadataStreamState>(new (std::nothrow)
                                                         MetadataStreamState());
   if (!state) {
@@ -237,7 +236,8 @@ ArrowArrayStream *make_stream(std::unique_ptr<MetadataStreamState> state) {
 } // namespace
 
 void configure_metadata_stream_budget(
-    MetadataStreamState *stream_state, std::int64_t memory_limit_bytes) noexcept {
+    MetadataStreamState *stream_state,
+    std::int64_t memory_limit_bytes) noexcept {
   if (!stream_state) {
     return;
   }
@@ -314,9 +314,10 @@ prepare_metadata_child_layout(MetadataStreamState *stream_state,
   return sanitize::Status::OK();
 }
 
-sanitize::Status validate_generated_metadata_budget(
-    const MetadataStreamState &stream_state, const ArrowArray &base,
-    std::size_t timestamp_count) {
+sanitize::Status
+validate_generated_metadata_budget(const MetadataStreamState &stream_state,
+                                   const ArrowArray &base,
+                                   std::size_t timestamp_count) {
   const auto limit = stream_state.max_generated_metadata_bytes;
   const auto estimated =
       estimate_generated_metadata_bytes(stream_state, base, timestamp_count);
@@ -327,18 +328,17 @@ sanitize::Status validate_generated_metadata_budget(
   return sanitize::Status::OK();
 }
 
-sanitize::Status validate_metadata_base_array(
-    const MetadataStreamState &stream_state, const ArrowArray &base) {
+sanitize::Status
+validate_metadata_base_array(const MetadataStreamState &stream_state,
+                             const ArrowArray &base) {
   if (base.offset != 0) {
     return sanitize::Status::Invalid(
         "metadata stream base array root offset must be zero");
   }
   if (base.length < 0 || base.length > kMaxMetadataBatchRows ||
-      base.null_count < -1 ||
-      base.null_count > base.length || base.n_buffers < 0 ||
-      base.n_children < 0 ||
-      base.n_children >
-          static_cast<std::int64_t>(kMaxMetadataStreamColumns) ||
+      base.null_count < -1 || base.null_count > base.length ||
+      base.n_buffers < 0 || base.n_children < 0 ||
+      base.n_children > static_cast<std::int64_t>(kMaxMetadataStreamColumns) ||
       (base.n_children > 0 && !base.children)) {
     return sanitize::Status::Invalid(
         "metadata stream base array has invalid logical metadata");
@@ -354,8 +354,7 @@ sanitize::Status validate_metadata_base_array(
   }
   const auto base_children = static_cast<std::size_t>(base.n_children);
   if (base_children != stream_state.base_child_output_indices.size() ||
-      stream_state.columns.size() >
-          kMaxMetadataStreamColumns - base_children) {
+      stream_state.columns.size() > kMaxMetadataStreamColumns - base_children) {
     return sanitize::Status::Invalid(
         "metadata stream base array does not match its schema layout");
   }
@@ -368,12 +367,10 @@ sanitize::Status validate_metadata_base_array(
   return sanitize::Status::OK();
 }
 
-ArrowArrayStream *make_metadata_stream_wrapper(PyObject *stream_obj,
-                                               PyObject *first_row_columns,
-                                               PyObject *all_row_columns,
-                                               PyObject *row_span_columns,
-                                               PyObject *timestamp_columns,
-                                               std::int64_t memory_limit_bytes) {
+ArrowArrayStream *make_metadata_stream_wrapper(
+    PyObject *stream_obj, PyObject *first_row_columns,
+    PyObject *all_row_columns, PyObject *row_span_columns,
+    PyObject *timestamp_columns, std::int64_t memory_limit_bytes) {
   if (!stream_obj || !first_row_columns) {
     PyErr_SetString(PyExc_SystemError,
                     "metadata stream wrapper received null arguments");

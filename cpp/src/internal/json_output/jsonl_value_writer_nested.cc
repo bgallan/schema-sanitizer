@@ -122,8 +122,8 @@ sanitize::Status append_struct_value(std::string &out, const JsonlField &field,
       return sanitize::Status::Invalid(
           "JSONL writer: struct child row offset overflow");
     }
-    SAN_RETURN_NOT_OK(append_value(out, field.children[i],
-                                   *array.children[i], array.offset + row));
+    SAN_RETURN_NOT_OK(append_value(out, field.children[i], *array.children[i],
+                                   array.offset + row));
   }
   out.push_back('}');
   return sanitize::Status::OK();

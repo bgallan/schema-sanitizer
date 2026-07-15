@@ -21,8 +21,7 @@ void append_rle_run_u32(std::string &out, std::int64_t run_length,
 }
 
 template <class Fn>
-bool for_each_dictionary_item(const LeafColumn &column,
-                              jsonl::JsonlKind kind,
+bool for_each_dictionary_item(const LeafColumn &column, jsonl::JsonlKind kind,
                               std::string_view values, Fn &&fn) {
   if (is_byte_array_kind(kind)) {
     std::size_t offset = 0;
@@ -83,11 +82,11 @@ try_dictionary_encode_column(const LeafColumn &column,
   std::size_t value_count = 0;
 
   constexpr std::size_t kInitialUniqueReserve = 4096;
-  const auto estimated_count = is_byte_array_kind(kind)
-                                   ? std::max<std::size_t>(
-                                         1U, values.size() /
-                                                 (sizeof(std::uint32_t) + 4U))
-                                   : values.size();
+  const auto estimated_count =
+      is_byte_array_kind(kind)
+          ? std::max<std::size_t>(1U,
+                                  values.size() / (sizeof(std::uint32_t) + 4U))
+          : values.size();
   const auto initial_unique_capacity =
       std::min(estimated_count, kInitialUniqueReserve);
   dictionary.reserve(initial_unique_capacity);
@@ -102,8 +101,8 @@ try_dictionary_encode_column(const LeafColumn &column,
       return true;
     }
     if (dictionary.size() >= kMaxDictionaryCandidateEntries ||
-        dictionary.size() >=
-            static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+        dictionary.size() >= static_cast<std::size_t>(
+                                 std::numeric_limits<std::int32_t>::max())) {
       return false;
     }
     const auto next_dictionary_bytes =
@@ -322,7 +321,6 @@ jsonl::JsonlKind leaf_value_kind(const LeafColumn &column) {
              : column.node->arrow_kind;
 }
 
-
 // Encodes float values with Parquet BYTE_STREAM_SPLIT.
 std::optional<std::string> encode_byte_stream_split(std::string_view values,
                                                     std::size_t width) {
@@ -463,14 +461,14 @@ std::string encode_page_levels_and_values(const LeafColumn &column,
                                           std::string_view encoded_values) {
   std::string payload;
   if (column.max_repetition_level > 0) {
-    auto levels = encode_levels(page_data.repetition_levels,
-                                column.max_repetition_level);
+    auto levels =
+        encode_levels(page_data.repetition_levels, column.max_repetition_level);
     payload.reserve(levels.size() + encoded_values.size());
     payload.append(levels);
   }
   if (column.max_definition_level > 0) {
-    auto levels = encode_levels(page_data.definition_levels,
-                                column.max_definition_level);
+    auto levels =
+        encode_levels(page_data.definition_levels, column.max_definition_level);
     payload.reserve(payload.size() + levels.size() + encoded_values.size());
     payload.append(levels);
   }

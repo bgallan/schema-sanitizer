@@ -154,8 +154,7 @@ PyObject *py_logical_schema_payload_arrow_c_schema(PyObject *, PyObject *args) {
     PyErr_SetString(PyExc_RuntimeError, e.what());
     return nullptr;
   } catch (...) {
-    PyErr_SetString(PyExc_RuntimeError,
-                    "logical schema Arrow export failed");
+    PyErr_SetString(PyExc_RuntimeError, "logical schema Arrow export failed");
     return nullptr;
   }
 

@@ -250,7 +250,11 @@ def test_csv_stream_requires_native_nested_renderer(
     reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     out = tmp_path / "out.csv"
 
-    monkeypatch.setattr(pyarrow_csv_sink, "native_csv_nested_reader", lambda _stream, *, pa, memory_limit_bytes=None: None)
+    monkeypatch.setattr(
+        pyarrow_csv_sink,
+        "native_csv_nested_reader",
+        lambda _stream, *, pa, memory_limit_bytes=None: None,
+    )
     with pytest.raises(RuntimeError, match=r"native C\+\+ CSV nested renderer"):
         pyarrow_csv_sink.write_csv_stream(reader, out, feature="to_csv")
 

@@ -179,9 +179,9 @@ sanitize::Status materialize_fixed_width_column(
       }
       if (window.contains(global_row)) {
         const auto output_row = window.local_row(global_row);
-        auto *target = out->values.data() +
-                       static_cast<std::size_t>(output_row) *
-                           static_cast<std::size_t>(arrow_width);
+        auto *target =
+            out->values.data() + static_cast<std::size_t>(output_row) *
+                                     static_cast<std::size_t>(arrow_width);
         SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
             target, values.data() + value_offset, column, *physical_width,
             arrow_width));
@@ -199,10 +199,11 @@ sanitize::Status materialize_fixed_width_column(
   return {};
 }
 
-sanitize::Status materialize_boolean_column(
-    std::ifstream &file, const ColumnChunkInfo &column,
-    const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
-    NativeParquetChildArray *out) {
+sanitize::Status materialize_boolean_column(std::ifstream &file,
+                                            const ColumnChunkInfo &column,
+                                            const NativeFlatRowWindow &window,
+                                            NativeParquetPageScratch *scratch,
+                                            NativeParquetChildArray *out) {
   SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
   if (!out) {
     return sanitize::Status::Invalid(
@@ -212,10 +213,9 @@ sanitize::Status materialize_boolean_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: boolean materialization requires boolean type");
   }
-  SAN_ASSIGN_OR_RAISE(
-      const auto value_buffer_bytes,
-      arrow_boolean_value_buffer_bytes(
-          static_cast<std::int32_t>(window.row_count)));
+  SAN_ASSIGN_OR_RAISE(const auto value_buffer_bytes,
+                      arrow_boolean_value_buffer_bytes(
+                          static_cast<std::int32_t>(window.row_count)));
   out->values.assign(static_cast<std::size_t>(value_buffer_bytes), 0);
   if (column.native_read_total_nulls > 0) {
     out->validity.assign(static_cast<std::size_t>((window.row_count + 7) / 8),
@@ -376,9 +376,9 @@ sanitize::Status materialize_delta_binary_packed_column(
       }
       if (window.contains(global_row)) {
         const auto output_row = window.local_row(global_row);
-        auto *target = out->values.data() +
-                       static_cast<std::size_t>(output_row) *
-                           static_cast<std::size_t>(width);
+        auto *target =
+            out->values.data() + static_cast<std::size_t>(output_row) *
+                                     static_cast<std::size_t>(width);
         SAN_RETURN_NOT_OK(write_arrow_integer_value(
             target, column, decoded_values[value_offset]));
         if (!out->validity.empty()) {
@@ -472,9 +472,9 @@ sanitize::Status materialize_byte_stream_split_column(
       }
       if (window.contains(global_row)) {
         const auto output_row = window.local_row(global_row);
-        auto *target = out->values.data() +
-                       static_cast<std::size_t>(output_row) *
-                           static_cast<std::size_t>(width);
+        auto *target =
+            out->values.data() + static_cast<std::size_t>(output_row) *
+                                     static_cast<std::size_t>(width);
         for (std::int32_t byte_index = 0; byte_index < width; ++byte_index) {
           const auto source_offset =
               static_cast<std::size_t>(byte_index) *

@@ -2,8 +2,8 @@
 
 #include "internal/abi/python_abi3/methods.hh"
 
-#include "sanitize/options/options.hh"
 #include "internal/memory/memory_budget.hh"
+#include "sanitize/options/options.hh"
 
 #include <concepts>
 #include <cstdint>
@@ -109,7 +109,6 @@ constexpr Py_ssize_t kOptionCount = 0
 
 } // namespace
 
-
 PyObject *py_memory_budget(PyObject *, PyObject *args) {
   long long requested = -1;
   if (!PyArg_ParseTuple(args, "L", &requested)) {
@@ -124,8 +123,7 @@ PyObject *py_memory_budget(PyObject *, PyObject *args) {
   const auto set_i64 = [out](Py_ssize_t index, std::int64_t value) {
     return tuple_set_item_steal(out, index, PyLong_FromLongLong(value)) != 0;
   };
-  if (!set_i64(0, budget.total_bytes) ||
-      !set_i64(1, budget.io_chunk_bytes) ||
+  if (!set_i64(0, budget.total_bytes) || !set_i64(1, budget.io_chunk_bytes) ||
       !set_i64(2, budget.batch_target_bytes) ||
       !set_i64(3, budget.coalesce_max_bytes) ||
       !set_i64(4, budget.metadata_bytes) ||

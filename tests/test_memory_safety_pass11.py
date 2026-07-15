@@ -16,15 +16,9 @@ def test_call_option_cache_keys_have_byte_and_item_budgets() -> None:
     """Large strings and huge empty sequences must bypass the process cache."""
     from schema_sanitizer.options_impl import call_options
 
-    assert call_options._call_options_cache_key(
-        {"default_key_name": "x" * 65_537}
-    ) is None
-    assert call_options._call_options_cache_key(
-        {"true_tokens": [""] * 4097}
-    ) is None
-    assert call_options._call_options_cache_key(
-        {"true_tokens": ["yes", "true"]}
-    ) is not None
+    assert call_options._call_options_cache_key({"default_key_name": "x" * 65_537}) is None
+    assert call_options._call_options_cache_key({"true_tokens": [""] * 4097}) is None
+    assert call_options._call_options_cache_key({"true_tokens": ["yes", "true"]}) is not None
 
 
 def test_prepared_options_cache_is_bounded_by_aggregate_key_bytes(
@@ -65,12 +59,10 @@ def test_large_mutable_option_lists_do_not_duplicate_fingerprint_state() -> None
 
 def test_registry_schema_parser_shares_logical_schema_safety_budgets() -> None:
     """Registry JSON must be bounded before recursive logical-schema allocation."""
-    limits = (
-        ROOT / "cpp/src/internal/planning/options_schema_serialization.hh"
-    ).read_text(encoding="utf-8")
-    source = (ROOT / "cpp/src/schema_registry/schema_registry_json.cc").read_text(
+    limits = (ROOT / "cpp/src/internal/planning/options_schema_serialization.hh").read_text(
         encoding="utf-8"
     )
+    source = (ROOT / "cpp/src/schema_registry/schema_registry_json.cc").read_text(encoding="utf-8")
 
     assert "kMaxLogicalSchemaPayloadBytes" in limits
     assert "kMaxLogicalSchemaFieldsPerStruct = 65'536" in limits

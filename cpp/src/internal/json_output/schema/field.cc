@@ -65,8 +65,9 @@ bool parse_fixed_size_binary_format(std::string_view format,
 
 } // namespace
 
-sanitize::Result<JsonlField> parse_schema_field_impl(
-    const ArrowSchema &schema, std::int64_t depth, std::int64_t *nodes) {
+sanitize::Result<JsonlField> parse_schema_field_impl(const ArrowSchema &schema,
+                                                     std::int64_t depth,
+                                                     std::int64_t *nodes) {
   if (!schema.format || !nodes) {
     return sanitize::Status::Invalid("JSONL writer: schema format is null");
   }
@@ -115,17 +116,15 @@ sanitize::Result<JsonlField> parse_schema_field_impl(
     if (!schema.children || !schema.children[i]) {
       return sanitize::Status::Invalid("JSONL writer: missing schema child");
     }
-    SAN_ASSIGN_OR_RAISE(
-        auto child,
-        parse_schema_field_impl(*schema.children[i], depth + 1, nodes));
+    SAN_ASSIGN_OR_RAISE(auto child, parse_schema_field_impl(*schema.children[i],
+                                                            depth + 1, nodes));
     field.children.push_back(std::move(child));
   }
   if (schema.dictionary) {
     JsonlField dictionary;
     dictionary.name = "dictionary";
-    SAN_ASSIGN_OR_RAISE(
-        dictionary,
-        parse_schema_field_impl(*schema.dictionary, depth + 1, nodes));
+    SAN_ASSIGN_OR_RAISE(dictionary, parse_schema_field_impl(*schema.dictionary,
+                                                            depth + 1, nodes));
     field.dictionary_index_kind = field.kind;
     field.kind = JsonlKind::kDictionary;
     field.children.clear();
@@ -139,8 +138,7 @@ sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
   return parse_schema_field_impl(schema, 0, &nodes);
 }
 
-sanitize::Status validate_batch(const JsonlField &root,
-                                const ArrowArray &array,
+sanitize::Status validate_batch(const JsonlField &root, const ArrowArray &array,
                                 const ArrayValidationLimits &limits) {
   if (root.kind != JsonlKind::kStruct) {
     return sanitize::Status::Invalid("JSONL writer: root schema is not struct");

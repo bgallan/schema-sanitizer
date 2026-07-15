@@ -85,7 +85,8 @@ option(SCHEMA_SANITIZER_ENABLE_COVERAGE
        "Build native targets with LLVM source coverage instrumentation" OFF)
 set(SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN
     "schema-sanitizer-%p.profraw"
-    CACHE STRING "LLVM raw profile path pattern embedded in instrumented targets")
+    CACHE STRING
+          "LLVM raw profile path pattern embedded in instrumented targets")
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerTargetOptions.cmake")
 
@@ -179,7 +180,8 @@ endif()
 
 if(SCHEMA_SANITIZER_BUILD_FUZZERS)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(FATAL_ERROR "SCHEMA_SANITIZER_BUILD_FUZZERS requires Clang/libFuzzer")
+    message(
+      FATAL_ERROR "SCHEMA_SANITIZER_BUILD_FUZZERS requires Clang/libFuzzer")
   endif()
 
   function(schema_sanitizer_add_fuzzer target source)
@@ -203,7 +205,7 @@ if(SCHEMA_SANITIZER_BUILD_FUZZERS)
   schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_csv cpp/fuzz/fuzz_csv.cc)
   schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_xml cpp/fuzz/fuzz_xml.cc)
   schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_parquet
-                               cpp/fuzz/fuzz_parquet.cc)
+                              cpp/fuzz/fuzz_parquet.cc)
 endif()
 
 # Install extension into the schema_sanitizer package.

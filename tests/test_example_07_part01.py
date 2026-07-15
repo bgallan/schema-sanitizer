@@ -422,12 +422,8 @@ def test_example_07_additive_preflight_stabilizes_integer_float_parquet(
     example = _load_example_07_runtime_support()
     integer_source = tmp_path / "integer.jsonl"
     float_source = tmp_path / "float.jsonl"
-    integer_source.write_text(
-        '{"exitscreen":{"timeelapsed":0}}\n', encoding="utf-8"
-    )
-    float_source.write_text(
-        '{"exitscreen":{"timeelapsed":0.0}}\n', encoding="utf-8"
-    )
+    integer_source.write_text('{"exitscreen":{"timeelapsed":0}}\n', encoding="utf-8")
+    float_source.write_text('{"exitscreen":{"timeelapsed":0.0}}\n', encoding="utf-8")
     plans = [
         example.DateRunPlan(
             logical_date=date(2026, 6, 20),
@@ -468,9 +464,7 @@ def test_example_07_additive_preflight_stabilizes_integer_float_parquet(
         args,
         preflight,
         example.SchemaRegistryState(
-            schema_registry_json=json.dumps(
-                example._new_schema_registry(), separators=(",", ":")
-            )
+            schema_registry_json=json.dumps(example._new_schema_registry(), separators=(",", ":"))
         ),
     )
     run_partitioned_to_parquet_registry_state(
@@ -490,6 +484,9 @@ def test_example_07_strict_preflight_only_uses_requested_warm_up() -> None:
     current = [example.DateRunPlan(date(2026, 6, 21), "current", "current.parquet")]
     requested = [example.DateRunPlan(date(2026, 6, 20), "warm", "warm.parquet")]
 
-    assert example._schema_warm_up_plan_for_run(
-        SimpleNamespace(schema_mode="strict"), current, requested
-    ) == requested
+    assert (
+        example._schema_warm_up_plan_for_run(
+            SimpleNamespace(schema_mode="strict"), current, requested
+        )
+        == requested
+    )

@@ -61,11 +61,11 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   LogicalSchema inferred_schema;
   bool inference_consumed = false;
   if (need_inference) {
-    SAN_ASSIGN_OR_RAISE(
-        inferred_schema,
-        ingest_internal::infer_schema_from_frontend(
-            frontend, *opts, diagnostics.get(), &inference_consumed, ctx,
-            operation_memory_pool.get()));
+    SAN_ASSIGN_OR_RAISE(inferred_schema,
+                        ingest_internal::infer_schema_from_frontend(
+                            frontend, *opts, diagnostics.get(),
+                            &inference_consumed, ctx,
+                            operation_memory_pool.get()));
   }
 
   LogicalSchema final_schema;

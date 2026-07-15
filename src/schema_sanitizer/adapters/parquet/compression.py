@@ -13,9 +13,7 @@ def normalize_parquet_compression(value: Any) -> str | None:
         raise TypeError("Option 'parquet_compression' must be a string or None")
     compression = value.strip().lower()
     if compression not in {"gzip", "snappy", "uncompressed"}:
-        raise ValueError(
-            "Option 'parquet_compression' must be 'gzip', 'snappy', or 'uncompressed'"
-        )
+        raise ValueError("Option 'parquet_compression' must be 'gzip', 'snappy', or 'uncompressed'")
     return compression
 
 

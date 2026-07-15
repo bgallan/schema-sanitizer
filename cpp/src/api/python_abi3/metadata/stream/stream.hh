@@ -30,31 +30,31 @@ struct MetadataStreamState {
   bool closed = false;
 };
 
-void configure_metadata_stream_budget(
-    MetadataStreamState *stream_state, std::int64_t memory_limit_bytes) noexcept;
+void configure_metadata_stream_budget(MetadataStreamState *stream_state,
+                                      std::int64_t memory_limit_bytes) noexcept;
 
 sanitize::Status
 prepare_metadata_child_layout(MetadataStreamState *stream_state,
                               const ArrowSchema &base_schema);
 
-sanitize::Status validate_metadata_base_array(
-    const MetadataStreamState &stream_state, const ArrowArray &base);
+sanitize::Status
+validate_metadata_base_array(const MetadataStreamState &stream_state,
+                             const ArrowArray &base);
 
-sanitize::Status validate_generated_metadata_budget(
-    const MetadataStreamState &stream_state, const ArrowArray &base,
-    std::size_t timestamp_count);
+sanitize::Status
+validate_generated_metadata_budget(const MetadataStreamState &stream_state,
+                                   const ArrowArray &base,
+                                   std::size_t timestamp_count);
 
 sanitize::Status build_metadata_schema(MetadataStreamState *stream_state,
                                        ArrowSchema *out);
 sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
                                       ArrowArray *out);
 
-ArrowArrayStream *make_metadata_stream_wrapper(PyObject *stream_obj,
-                                               PyObject *first_row_columns,
-                                               PyObject *all_row_columns,
-                                               PyObject *row_span_columns,
-                                               PyObject *timestamp_columns,
-                                               std::int64_t memory_limit_bytes = -1);
+ArrowArrayStream *make_metadata_stream_wrapper(
+    PyObject *stream_obj, PyObject *first_row_columns,
+    PyObject *all_row_columns, PyObject *row_span_columns,
+    PyObject *timestamp_columns, std::int64_t memory_limit_bytes = -1);
 ArrowArrayStream *make_metadata_stream_wrapper_from_stream(
     ArrowArrayStream *inner, PyObject *first_row_columns,
     PyObject *all_row_columns, PyObject *row_span_columns,

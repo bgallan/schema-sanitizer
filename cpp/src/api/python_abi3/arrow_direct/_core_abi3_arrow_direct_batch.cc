@@ -37,10 +37,10 @@ sanitize::Result<std::size_t> checked_field_ref_count(int64_t row_count,
 
 } // namespace
 
-sanitize::Result<sanitize::RowBatch> build_arrow_direct_row_batch(
-    std::shared_ptr<ArrowArrayStorage> array_owner,
-    const std::vector<ArrowInputNode> &fields, int64_t row_offset,
-    int64_t row_count) {
+sanitize::Result<sanitize::RowBatch>
+build_arrow_direct_row_batch(std::shared_ptr<ArrowArrayStorage> array_owner,
+                             const std::vector<ArrowInputNode> &fields,
+                             int64_t row_offset, int64_t row_count) {
   if (!array_owner) {
     return sanitize::Status::Invalid(
         "Arrow direct row batch has no array owner");
@@ -75,8 +75,8 @@ sanitize::Result<sanitize::RowBatch> build_arrow_direct_row_batch(
         storage->fields.push_back(sanitize::FieldRef{
             .key = fields[col].name,
             .key_hash = 0,
-            .value = value_at(storage.get(), &fields[col], child_array,
-                              source_row),
+            .value =
+                value_at(storage.get(), &fields[col], child_array, source_row),
         });
       }
       storage->rows.push_back(sanitize::RowRef{

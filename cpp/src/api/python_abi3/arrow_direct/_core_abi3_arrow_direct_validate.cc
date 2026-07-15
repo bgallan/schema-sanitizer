@@ -23,9 +23,8 @@ sanitize::Status validate_slice(const ArrowArray &array, std::int64_t first,
                                 const ValidationLimits &limits) {
   if (array.length < 0 || array.offset < 0 || first < 0 || length < 0 ||
       first > array.length || length > array.length - first ||
-      array.null_count < -1 ||
-      array.null_count > array.length || array.n_buffers < 0 ||
-      array.n_children < 0) {
+      array.null_count < -1 || array.null_count > array.length ||
+      array.n_buffers < 0 || array.n_children < 0) {
     return sanitize::Status::Invalid("Arrow direct ", label,
                                      " has invalid logical metadata");
   }
@@ -35,7 +34,7 @@ sanitize::Status validate_slice(const ArrowArray &array, std::int64_t first,
   }
   if (array.length > limits.logical_slots) {
     return sanitize::Status::OutOfMemory("Arrow direct ", label,
-                                           " exceeds logical slot limit");
+                                         " exceeds logical slot limit");
   }
   if (array.offset > std::numeric_limits<std::int64_t>::max() - first ||
       array.offset + first >
@@ -46,14 +45,12 @@ sanitize::Status validate_slice(const ArrowArray &array, std::int64_t first,
   const auto logical_end = array.offset + first + length;
   if (logical_end > limits.logical_slots) {
     return sanitize::Status::OutOfMemory(
-        "Arrow direct ", label,
-        " absolute logical range exceeds slot limit");
+        "Arrow direct ", label, " absolute logical range exceeds slot limit");
   }
   return {};
 }
 
-sanitize::Status require_buffers(const ArrowArray &array,
-                                 std::int64_t expected,
+sanitize::Status require_buffers(const ArrowArray &array, std::int64_t expected,
                                  std::string_view label) {
   if (array.n_buffers != expected || (expected > 0 && !array.buffers)) {
     return sanitize::Status::Invalid("Arrow direct ", label,
@@ -73,10 +70,11 @@ sanitize::Status require_children(const ArrowArray &array,
 }
 
 template <typename OffsetT>
-sanitize::Result<std::pair<std::int64_t, std::int64_t>> validate_offsets(
-    const ArrowArray &array, std::int64_t first_row, std::int64_t length,
-    std::string_view label, std::int64_t expected_buffers,
-    bool require_values, bool bound_bytes, const ValidationLimits &limits) {
+sanitize::Result<std::pair<std::int64_t, std::int64_t>>
+validate_offsets(const ArrowArray &array, std::int64_t first_row,
+                 std::int64_t length, std::string_view label,
+                 std::int64_t expected_buffers, bool require_values,
+                 bool bound_bytes, const ValidationLimits &limits) {
   SAN_RETURN_NOT_OK(require_buffers(array, expected_buffers, label));
   if (length == 0) {
     return std::pair<std::int64_t, std::int64_t>{0, 0};
@@ -111,15 +109,14 @@ sanitize::Result<std::pair<std::int64_t, std::int64_t>> validate_offsets(
   return std::pair<std::int64_t, std::int64_t>{first, previous};
 }
 
-
 bool slot_is_valid(const ArrowArray &array, std::int64_t row) {
   if (array.null_count == 0 || !array.buffers || !array.buffers[0]) {
     return true;
   }
   const auto *bitmap = static_cast<const std::uint8_t *>(array.buffers[0]);
   const auto index = array.offset + row;
-  return (bitmap[index >> 3] &
-          static_cast<std::uint8_t>(1U << (index & 7))) != 0;
+  return (bitmap[index >> 3] & static_cast<std::uint8_t>(1U << (index & 7))) !=
+         0;
 }
 
 template <typename IndexT>
@@ -183,7 +180,8 @@ sanitize::Status validate_node(const ArrowInputNode &node,
     return sanitize::Status::OutOfMemory(
         "Arrow direct array nesting exceeds safety limit");
   }
-  SAN_RETURN_NOT_OK(validate_slice(array, first_row, length, node.name, limits));
+  SAN_RETURN_NOT_OK(
+      validate_slice(array, first_row, length, node.name, limits));
 
   switch (node.kind) {
   case ArrowNodeKind::kNull:
@@ -212,16 +210,14 @@ sanitize::Status validate_node(const ArrowInputNode &node,
   case ArrowNodeKind::kBinaryBase64:
     SAN_RETURN_NOT_OK(require_children(array, 0, node.name));
     if (node.storage_kind == ArrowStorageKind::kOffset64) {
-      SAN_ASSIGN_OR_RAISE(auto ignored,
-                          validate_offsets<std::int64_t>(array, first_row, length,
-                                                         node.name, 3, true,
-                                                         true, limits));
+      SAN_ASSIGN_OR_RAISE(auto ignored, validate_offsets<std::int64_t>(
+                                            array, first_row, length, node.name,
+                                            3, true, true, limits));
       (void)ignored;
     } else {
-      SAN_ASSIGN_OR_RAISE(auto ignored,
-                          validate_offsets<std::int32_t>(array, first_row, length,
-                                                         node.name, 3, true,
-                                                         true, limits));
+      SAN_ASSIGN_OR_RAISE(auto ignored, validate_offsets<std::int32_t>(
+                                            array, first_row, length, node.name,
+                                            3, true, true, limits));
       (void)ignored;
     }
     return {};
@@ -235,8 +231,8 @@ sanitize::Status validate_node(const ArrowInputNode &node,
                                          " has a null child pointer");
       }
       SAN_RETURN_NOT_OK(validate_node(node.children[index],
-                                      *array.children[index], first_row,
-                                      length, depth + 1, limits));
+                                      *array.children[index], first_row, length,
+                                      depth + 1, limits));
     }
     return {};
   case ArrowNodeKind::kList:
@@ -307,7 +303,8 @@ sanitize::Status validate_node(const ArrowInputNode &node,
       return sanitize::Status::Invalid("Arrow direct ", node.name,
                                        " has invalid dictionary storage");
     }
-    SAN_RETURN_NOT_OK(validate_dictionary_indices(node, array, first_row, length));
+    SAN_RETURN_NOT_OK(
+        validate_dictionary_indices(node, array, first_row, length));
     return validate_node(node.children[0], *array.dictionary, 0,
                          array.dictionary->length, depth + 1, limits);
   }
@@ -316,9 +313,10 @@ sanitize::Status validate_node(const ArrowInputNode &node,
 
 } // namespace
 
-sanitize::Status validate_arrow_direct_batch(
-    const ArrowArray &root, const std::vector<ArrowInputNode> &fields,
-    std::int64_t memory_limit_bytes) {
+sanitize::Status
+validate_arrow_direct_batch(const ArrowArray &root,
+                            const std::vector<ArrowInputNode> &fields,
+                            std::int64_t memory_limit_bytes) {
   const auto budget =
       sanitize::internal::memory_budget_from_limit(memory_limit_bytes);
   const ValidationLimits limits{budget.arrow_logical_slots,
@@ -333,9 +331,8 @@ sanitize::Status validate_arrow_direct_batch(
       return sanitize::Status::Invalid(
           "Arrow direct record batch has a null child pointer");
     }
-    SAN_RETURN_NOT_OK(
-        validate_node(fields[index], *root.children[index], 0, root.length, 1,
-                      limits));
+    SAN_RETURN_NOT_OK(validate_node(fields[index], *root.children[index], 0,
+                                    root.length, 1, limits));
   }
   return {};
 }

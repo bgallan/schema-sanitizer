@@ -33,7 +33,6 @@ def test_async_scheduler_has_a_neutral_core_owner() -> None:
         assert "remote_impl.scheduler" not in consumer
 
 
-
 def test_directory_discovery_has_one_input_model() -> None:
     """Local and remote discovery share one typed result and accumulator."""
     owner = SRC / "input_impl/directory_inputs.py"

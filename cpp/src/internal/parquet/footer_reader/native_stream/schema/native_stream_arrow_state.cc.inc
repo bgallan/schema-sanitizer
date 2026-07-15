@@ -99,7 +99,6 @@ struct NativeRepeatedLeafWindow {
   NativeElementRange elements;
 };
 
-
 struct NativeFlatRowWindow {
   std::int64_t row_group_rows = 0;
   std::int64_t first_row = 0;
@@ -131,8 +130,8 @@ struct NativeFlatRowWindow {
   }
 };
 
-sanitize::Status validate_native_flat_row_window(
-    const NativeFlatRowWindow &window) {
+sanitize::Status
+validate_native_flat_row_window(const NativeFlatRowWindow &window) {
   if (window.row_group_rows < 0 || window.first_row < 0 ||
       window.row_count < 0 || window.first_row > window.row_group_rows ||
       window.row_count > window.row_group_rows - window.first_row ||
@@ -148,16 +147,18 @@ bool native_recursive_tree_supports_row_windows(
     const NativeRecursiveMaterializationTree &tree) {
   return tree.valid && tree.traversal_plan_valid &&
          tree.root < tree.nodes.size() &&
-         std::ranges::all_of(tree.nodes, [](const auto &node) {
-           switch (node.kind) {
-           case NativeRecursiveMaterializationNodeKind::Leaf:
-           case NativeRecursiveMaterializationNodeKind::Struct:
-           case NativeRecursiveMaterializationNodeKind::List:
-           case NativeRecursiveMaterializationNodeKind::Map:
-             return true;
-           }
-           return false;
-         });
+         std::ranges::all_of(
+             tree.nodes,
+             [](const auto &node) {
+               switch (node.kind) {
+               case NativeRecursiveMaterializationNodeKind::Leaf:
+               case NativeRecursiveMaterializationNodeKind::Struct:
+               case NativeRecursiveMaterializationNodeKind::List:
+               case NativeRecursiveMaterializationNodeKind::Map:
+                 return true;
+               }
+               return false;
+             });
 }
 
 bool native_output_layout_supports_flat_windows(
@@ -198,8 +199,9 @@ sanitize::Result<NativeFlatRowWindow> next_native_flat_row_window(
   auto rows = std::min(remaining, max_batch_rows);
   const auto limit = max_buffer_bytes;
   if (rows > 0) {
-    SAN_ASSIGN_OR_RAISE(const auto one_row_bytes,
-                        native_reader_flat_window_buffer_bytes(row_group, first_row, 1));
+    SAN_ASSIGN_OR_RAISE(
+        const auto one_row_bytes,
+        native_reader_flat_window_buffer_bytes(row_group, first_row, 1));
     if (one_row_bytes > limit) {
       return sanitize::Status::NotImplemented(
           "native Parquet reader: one-row buffer estimate ", one_row_bytes,
@@ -207,8 +209,9 @@ sanitize::Result<NativeFlatRowWindow> next_native_flat_row_window(
     }
   }
   while (rows > 1) {
-    SAN_ASSIGN_OR_RAISE(const auto bytes,
-                        native_reader_flat_window_buffer_bytes(row_group, first_row, rows));
+    SAN_ASSIGN_OR_RAISE(
+        const auto bytes,
+        native_reader_flat_window_buffer_bytes(row_group, first_row, rows));
     if (bytes <= limit) {
       break;
     }
@@ -231,7 +234,6 @@ std::int64_t native_window_null_count(const NativeParquetChildArray &child,
   }
   return row_count - valid;
 }
-
 
 struct NativeParquetArrayState {
   std::vector<NativeParquetChildArray> columns;

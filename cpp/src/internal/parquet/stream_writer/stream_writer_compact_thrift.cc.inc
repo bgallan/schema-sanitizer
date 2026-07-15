@@ -96,9 +96,9 @@ public:
   // Writes a list of strings.
   void FieldListString(std::int16_t id,
                        const std::vector<std::string> &values) {
-    FieldListString(id, values.size(), [&](std::size_t index) -> std::string_view {
-      return values[index];
-    });
+    FieldListString(
+        id, values.size(),
+        [&](std::size_t index) -> std::string_view { return values[index]; });
   }
 
   // Writes generated strings without copying them into an auxiliary vector.

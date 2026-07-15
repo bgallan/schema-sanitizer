@@ -52,10 +52,11 @@ sanitize::Result<std::int64_t> CompactReader::read_i64() {
   return unzigzag(raw);
 }
 
-sanitize::Status CompactReader::charge_materialized_bytes(
-    std::uint64_t bytes, std::string_view label) {
-  if (bytes > static_cast<std::uint64_t>(
-                  std::numeric_limits<std::size_t>::max())) {
+sanitize::Status
+CompactReader::charge_materialized_bytes(std::uint64_t bytes,
+                                         std::string_view label) {
+  if (bytes >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::Invalid("Parquet metadata: ", label,
                                      " allocation size out of range");
   }

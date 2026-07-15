@@ -35,8 +35,7 @@ std::size_t XmlRowTagScanner::retained_buffer_limit() const noexcept {
   if (chunk > std::numeric_limits<std::size_t>::max() / 2U) {
     return std::numeric_limits<std::size_t>::max();
   }
-  return std::max(kMinimumRetainedBytes,
-                  static_cast<std::size_t>(chunk * 2U));
+  return std::max(kMinimumRetainedBytes, static_cast<std::size_t>(chunk * 2U));
 }
 
 void XmlRowTagScanner::discard_buffer() {

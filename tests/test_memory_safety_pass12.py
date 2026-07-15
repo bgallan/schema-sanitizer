@@ -13,12 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_chunk_sources_share_a_finite_request_ceiling() -> None:
     """Every built-in source rejects a single oversized chunk request."""
-    limits = (ROOT / "cpp/src/ingest/chunk_source_detail.hh").read_text(
-        encoding="utf-8"
-    )
-    budget = (ROOT / "cpp/src/internal/memory/memory_budget.hh").read_text(
-        encoding="utf-8"
-    )
+    limits = (ROOT / "cpp/src/ingest/chunk_source_detail.hh").read_text(encoding="utf-8")
+    budget = (ROOT / "cpp/src/internal/memory/memory_budget.hh").read_text(encoding="utf-8")
     sources = [
         ROOT / "cpp/src/ingest/chunk_source_file.cc",
         ROOT / "cpp/src/ingest/chunk_source_memory.cc",
@@ -34,9 +30,7 @@ def test_chunk_sources_share_a_finite_request_ceiling() -> None:
 
 def test_transcoding_decoder_avoids_a_second_utf16_input_copy() -> None:
     """UTF-16 decoding processes carried bytes and raw input without joining them."""
-    decoder = (ROOT / "cpp/src/ingest/transcoding/decoder.cc").read_text(
-        encoding="utf-8"
-    )
+    decoder = (ROOT / "cpp/src/ingest/transcoding/decoder.cc").read_text(encoding="utf-8")
     utf16 = decoder.split("TranscodingDecoder::transcode_utf16", 1)[1].split(
         "TranscodingDecoder::append_utf16_pair", 1
     )[0]
@@ -52,18 +46,10 @@ def test_transcoding_decoder_avoids_a_second_utf16_input_copy() -> None:
 
 def test_full_materialization_uses_the_operation_budget() -> None:
     """mmap, transcoding and multi-path views receive one explicit limit."""
-    detail = (ROOT / "cpp/src/ingest/chunk_source_detail.hh").read_text(
-        encoding="utf-8"
-    )
-    file_source = (ROOT / "cpp/src/ingest/chunk_source_file.cc").read_text(
-        encoding="utf-8"
-    )
-    transcoding = (ROOT / "cpp/src/ingest/transcoding/chunk_source.cc").read_text(
-        encoding="utf-8"
-    )
-    multi_path = (ROOT / "cpp/src/ingest/chunk_source_multi_path.cc").read_text(
-        encoding="utf-8"
-    )
+    detail = (ROOT / "cpp/src/ingest/chunk_source_detail.hh").read_text(encoding="utf-8")
+    file_source = (ROOT / "cpp/src/ingest/chunk_source_file.cc").read_text(encoding="utf-8")
+    transcoding = (ROOT / "cpp/src/ingest/transcoding/chunk_source.cc").read_text(encoding="utf-8")
+    multi_path = (ROOT / "cpp/src/ingest/chunk_source_multi_path.cc").read_text(encoding="utf-8")
     assert "validate_materialized_input_growth" in detail
     for source in (file_source, transcoding, multi_path):
         assert "materialized_limit_" in source
@@ -74,9 +60,7 @@ def test_full_materialization_uses_the_operation_budget() -> None:
 
 def test_secure_cleanup_wipes_transcoding_input_scratch() -> None:
     """Raw encoded input is cleared before temporary storage is released."""
-    source = (ROOT / "cpp/src/ingest/transcoding/chunk_source.cc").read_text(
-        encoding="utf-8"
-    )
+    source = (ROOT / "cpp/src/ingest/transcoding/chunk_source.cc").read_text(encoding="utf-8")
     assert "class SensitiveStringGuard" in source
     assert "secure_memory_cleanup_enabled" in source
     assert "secure_zero_memory(value_->data(), value_->size())" in source
@@ -120,9 +104,7 @@ def test_utf16_round_trip_under_explicit_budget(tmp_path: Path) -> None:
 
 def test_transcoded_output_is_sliced_without_copying_oversized_scalars() -> None:
     """Decoded UTF-8 is retained once and exposed through bounded views."""
-    source = (ROOT / "cpp/src/ingest/transcoding/chunk_source.cc").read_text(
-        encoding="utf-8"
-    )
+    source = (ROOT / "cpp/src/ingest/transcoding/chunk_source.cc").read_text(encoding="utf-8")
     assert "pending_utf8_" in source
     assert "take_pending_chunk(max_bytes)" in source
     assert "std::string_view(*owner).substr(pending_utf8_pos_, take)" in source

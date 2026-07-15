@@ -1,13 +1,11 @@
+---
 name: Native fuzz campaign
-
 on:
   schedule:
-    - cron: '23 3 * * 0'
+    - cron: 23 3 * * 0
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   fuzz:
     name: Bounded parser fuzzing
@@ -32,7 +30,8 @@ jobs:
           -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
           -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
       - name: Build fuzz targets
-        run: cmake --build build-fuzz --target schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet --parallel 2
+        run: cmake --build build-fuzz --target schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
+          schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet --parallel 2
       - name: Run deterministic promoted crash regressions
         run: python meta/ci/run_fuzz_regressions.py --build-root build-fuzz/fuzz
       - name: Prepare writable corpora and artifacts

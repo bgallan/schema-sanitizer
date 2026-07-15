@@ -1,8 +1,8 @@
 // Implements file-backed chunk sources with canonical text transcoding.
 
 #include "ingest/chunk_source_detail.hh"
-#include "internal/memory/memory_budget.hh"
 #include "ingest/transcoding/decoder.hh"
+#include "internal/memory/memory_budget.hh"
 
 #include <fstream>
 #include <ios>
@@ -81,8 +81,7 @@ public:
         input_.close();
       }
       if (!transcoded.empty()) {
-        pending_utf8_ =
-            std::make_shared<std::string>(std::move(transcoded));
+        pending_utf8_ = std::make_shared<std::string>(std::move(transcoded));
         pending_utf8_pos_ = 0;
         return take_pending_chunk(max_bytes);
       }
@@ -123,8 +122,8 @@ private:
           "TranscodingFileChunkSource: missing pending UTF-8 bytes");
     }
     const auto available = pending_utf8_->size() - pending_utf8_pos_;
-    const auto take = std::min<std::size_t>(
-        available, static_cast<std::size_t>(max_bytes));
+    const auto take =
+        std::min<std::size_t>(available, static_cast<std::size_t>(max_bytes));
     if (take > std::numeric_limits<std::size_t>::max() - utf8_pos_) {
       return sanitize::Status::OutOfMemory(
           "TranscodingFileChunkSource: UTF-8 offset overflow");
@@ -177,10 +176,11 @@ private:
 
 namespace internal {
 
-ChunkSourcePtr make_transcoding_file_chunk_source(
-    std::string path, TextEncoding encoding, std::int64_t memory_limit_bytes) {
-  return std::make_shared<TranscodingFileChunkSource>(
-      std::move(path), encoding, memory_limit_bytes);
+ChunkSourcePtr
+make_transcoding_file_chunk_source(std::string path, TextEncoding encoding,
+                                   std::int64_t memory_limit_bytes) {
+  return std::make_shared<TranscodingFileChunkSource>(std::move(path), encoding,
+                                                      memory_limit_bytes);
 }
 
 } // namespace internal

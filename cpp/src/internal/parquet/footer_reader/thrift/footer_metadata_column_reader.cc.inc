@@ -7,7 +7,7 @@ read_i32_list(CompactReader &reader, std::uint64_t max_count,
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
   SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, max_count,
-                                            sizeof(std::int32_t), label));
+                                           sizeof(std::int32_t), label));
   std::vector<std::int32_t> out;
   out.reserve(static_cast<std::size_t>(count));
   for (std::uint64_t i = 0; i < count; ++i) {
@@ -29,7 +29,7 @@ read_i64_list(CompactReader &reader, std::uint64_t max_count,
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
   SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, max_count,
-                                            sizeof(std::int64_t), label));
+                                           sizeof(std::int64_t), label));
   std::vector<std::int64_t> out;
   out.reserve(static_cast<std::size_t>(count));
   for (std::uint64_t i = 0; i < count; ++i) {
@@ -44,9 +44,9 @@ read_i64_list(CompactReader &reader, std::uint64_t max_count,
   return out;
 }
 
-sanitize::Result<std::vector<bool>>
-read_bool_list(CompactReader &reader, std::uint64_t max_count,
-               std::string_view label) {
+sanitize::Result<std::vector<bool>> read_bool_list(CompactReader &reader,
+                                                   std::uint64_t max_count,
+                                                   std::string_view label) {
   std::uint8_t element_type = 0;
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
@@ -81,7 +81,7 @@ read_string_list(CompactReader &reader, std::uint64_t max_count,
   std::uint64_t count = 0;
   SAN_RETURN_NOT_OK(reader.read_list_header(&element_type, &count));
   SAN_RETURN_NOT_OK(validate_metadata_list(reader, count, max_count,
-                                            sizeof(std::string), label));
+                                           sizeof(std::string), label));
   std::vector<std::string> out;
   out.reserve(static_cast<std::size_t>(count));
   for (std::uint64_t i = 0; i < count; ++i) {

@@ -99,7 +99,8 @@ public:
         done_ = true;
         return out;
       }
-      SAN_RETURN_NOT_OK(validate_arrow_direct_batch(storage->array, fields_, memory_limit_bytes_));
+      SAN_RETURN_NOT_OK(validate_arrow_direct_batch(storage->array, fields_,
+                                                    memory_limit_bytes_));
       if (storage->array.length == 0) {
         continue;
       }

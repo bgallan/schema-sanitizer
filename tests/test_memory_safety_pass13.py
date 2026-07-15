@@ -17,9 +17,7 @@ BUDGET = ROOT / "cpp/src/internal/memory/memory_budget.hh"
 def test_parquet_writer_limits_come_from_the_single_budget() -> None:
     """Writer pages, row groups and footer share the canonical budget source."""
     budget = BUDGET.read_text(encoding="utf-8")
-    config = (WRITER / "stream_writer_configuration.cc.inc").read_text(
-        encoding="utf-8"
-    )
+    config = (WRITER / "stream_writer_configuration.cc.inc").read_text(encoding="utf-8")
     api = (WRITER / "stream_writer_api.cc.inc").read_text(encoding="utf-8")
     for field in (
         "parquet_row_group_bytes",
@@ -75,9 +73,7 @@ def test_page_size_arithmetic_is_saturating() -> None:
 def test_native_reader_limits_come_from_the_operation_budget() -> None:
     """Verify the defensive regression contract."""
     limits = (READER / "runtime/native_buffer_limits.cc.inc").read_text()
-    state = (
-        READER / "native_stream/schema/native_stream_arrow_state.cc.inc"
-    ).read_text()
+    state = (READER / "native_stream/schema/native_stream_arrow_state.cc.inc").read_text()
     assert "memory_budget_from_limit(memory_limit_bytes)" in limits
     assert "parquet_reader_buffer_bytes" in limits
     assert "parquet_reader_rows" in limits
@@ -117,8 +113,7 @@ def test_streamed_dictionary_and_delta_encodings_remain_readable(tmp_path: Path)
     PARQUET_STREAM_WRITE(stream, str(output), "uncompressed", -1, 64 << 20)
     footer = json.loads(native_core.parquet_footer_info_json(str(output)))
     columns = {
-        column["path_in_schema"][-1]: column
-        for column in footer["row_groups"][0]["columns"]
+        column["path_in_schema"][-1]: column for column in footer["row_groups"][0]["columns"]
     }
     assert footer["num_rows"] == len(rows)
     assert 5 in columns["id"]["encodings"]

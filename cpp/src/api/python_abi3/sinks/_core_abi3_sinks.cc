@@ -60,10 +60,9 @@ PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
     sanitize::LogicalSchema input_schema;
     auto frontend_r = make_arrow_frontend(
         stream_obj, &input_schema,
-        ArrowDirectOptions{.timestamp_precision =
-                               prepared_options->spec.timestamp_precision,
-                           .memory_limit_bytes =
-                               prepared_options->spec.memory_limit_bytes});
+        ArrowDirectOptions{
+            .timestamp_precision = prepared_options->spec.timestamp_precision,
+            .memory_limit_bytes = prepared_options->spec.memory_limit_bytes});
     if (!frontend_r.ok()) {
       raise_status_error(code_for_status(frontend_r.status()),
                          dup_cstr(frontend_r.status().ToString()));

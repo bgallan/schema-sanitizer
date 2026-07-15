@@ -36,10 +36,9 @@ materialize_native_recursive_struct_validity_for_node(
         defined_level, validity);
   }
   case NativeRecursiveStructValidityDomain::RowGroup: {
-    SAN_ASSIGN_OR_RAISE(
-        const auto null_count,
-        materialize_struct_validity_at_definition_level(
-            layout_column, window, defined_level, validity));
+    SAN_ASSIGN_OR_RAISE(const auto null_count,
+                        materialize_struct_validity_at_definition_level(
+                            layout_column, window, defined_level, validity));
     return NativeRecursiveStructValidity{window.row_count, null_count};
   }
   case NativeRecursiveStructValidityDomain::None:
@@ -87,20 +86,19 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_node(
   SAN_ASSIGN_OR_RAISE(const auto *layout_column,
                       select_recursive_repeated_layout_column_for_node(
                           row_group, tree, list_node_index));
-  SAN_ASSIGN_OR_RAISE(
-      const auto list_array_layout,
-      native_recursive_list_array_layout(*layout_column, list_layout_index,
-                                         window));
+  SAN_ASSIGN_OR_RAISE(const auto list_array_layout,
+                      native_recursive_list_array_layout(
+                          *layout_column, list_layout_index, window));
   const auto &list_layout = list_array_layout.repeated_layout;
   if (cursor->list_index >= state->lists.size()) {
     return sanitize::Status::Invalid(
         "native Parquet reader: recursive complex list allocation mismatch");
   }
   auto &list_array = state->lists[cursor->list_index++];
-  SAN_ASSIGN_OR_RAISE(auto *child_array,
-                      materialize_native_recursive_child_node(
-                          state, row_group, tree, child_node_index, window,
-                          cursor));
+  SAN_ASSIGN_OR_RAISE(
+      auto *child_array,
+      materialize_native_recursive_child_node(
+          state, row_group, tree, child_node_index, window, cursor));
   SAN_RETURN_NOT_OK(configure_native_recursive_list_array(
       &list_array, list_layout, child_array));
   return &list_array.array;

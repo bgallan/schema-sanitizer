@@ -19,25 +19,24 @@ std::size_t retained_optional_string_bytes(
 
 std::size_t retained_page_metadata_bytes(const PageInfo &page) noexcept {
   auto total = retained_optional_string_bytes(page.min_value);
-  return saturating_size_add(
-      total, retained_optional_string_bytes(page.max_value));
+  return saturating_size_add(total,
+                             retained_optional_string_bytes(page.max_value));
 }
 
-std::size_t retained_row_group_metadata_bytes(
-    const RowGroupInfo &row_group) noexcept {
-  auto total = saturating_size_add(
-      sizeof(RowGroupInfo),
-      saturating_size_multiply(row_group.columns.capacity(),
-                               sizeof(ColumnChunkInfo)));
+std::size_t
+retained_row_group_metadata_bytes(const RowGroupInfo &row_group) noexcept {
+  auto total =
+      saturating_size_add(sizeof(RowGroupInfo),
+                          saturating_size_multiply(row_group.columns.capacity(),
+                                                   sizeof(ColumnChunkInfo)));
   for (const auto &column : row_group.columns) {
+    total = saturating_size_add(total,
+                                retained_page_metadata_bytes(column.aggregate));
     total = saturating_size_add(
-        total, retained_page_metadata_bytes(column.aggregate));
-    total = saturating_size_add(
-        total, saturating_size_multiply(column.pages.capacity(),
-                                        sizeof(PageInfo)));
+        total,
+        saturating_size_multiply(column.pages.capacity(), sizeof(PageInfo)));
     for (const auto &page : column.pages) {
-      total = saturating_size_add(total,
-                                  retained_page_metadata_bytes(page));
+      total = saturating_size_add(total, retained_page_metadata_bytes(page));
     }
   }
   return total;
@@ -81,13 +80,12 @@ sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
   const auto max_footer_metadata_bytes =
       static_cast<std::size_t>(budget.parquet_footer_bytes);
   std::size_t retained_footer_metadata_bytes = 0;
-  const auto max_bytes_per_row_group = adaptive_max_bytes_per_row_group(
-      columns, budget.parquet_row_group_bytes);
+  const auto max_bytes_per_row_group =
+      adaptive_max_bytes_per_row_group(columns, budget.parquet_row_group_bytes);
   const auto target_page_bytes = budget.parquet_page_bytes;
   SAN_ASSIGN_OR_RAISE(const auto compression_codec,
                       compression_codec_from_options(options));
-  SAN_ASSIGN_OR_RAISE(const auto gzip_level,
-                      gzip_level_from_options(options));
+  SAN_ASSIGN_OR_RAISE(const auto gzip_level, gzip_level_from_options(options));
   while (true) {
     sanitize::CArrayGuard batch;
     const int next_rc = stream->get_next(stream, batch.get());
@@ -107,14 +105,14 @@ sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
         return sanitize::Status::Invalid(
             "native Parquet writer: row-group count exceeds safety limit");
       }
-      SAN_ASSIGN_OR_RAISE(
-          const auto row_count,
-          determine_bounded_row_group_count(
-              root, columns, batch.value(), row_offset,
-              max_rows_per_row_group, max_bytes_per_row_group));
+      SAN_ASSIGN_OR_RAISE(const auto row_count,
+                          determine_bounded_row_group_count(
+                              root, columns, batch.value(), row_offset,
+                              max_rows_per_row_group, max_bytes_per_row_group));
       if (row_count <= 0) {
         return sanitize::Status::Invalid(
-            "native Parquet writer: bounded row-group collector made no progress");
+            "native Parquet writer: bounded row-group collector made no "
+            "progress");
       }
       if (total_rows > std::numeric_limits<std::int64_t>::max() - row_count) {
         return sanitize::Status::Invalid(
@@ -123,9 +121,9 @@ sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
       const auto fixed_row_group_metadata_bytes = saturating_size_add(
           sizeof(RowGroupInfo),
           saturating_size_multiply(columns.size(), sizeof(ColumnChunkInfo)));
-      if (metadata_budget_would_be_exceeded(
-              retained_footer_metadata_bytes, fixed_row_group_metadata_bytes,
-              max_footer_metadata_bytes)) {
+      if (metadata_budget_would_be_exceeded(retained_footer_metadata_bytes,
+                                            fixed_row_group_metadata_bytes,
+                                            max_footer_metadata_bytes)) {
         return sanitize::Status::Invalid(
             "native Parquet writer: footer metadata exceeds safety limit");
       }
@@ -133,10 +131,9 @@ sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
       row_group.num_rows = row_count;
       row_group.columns.reserve(columns.size());
       for (std::size_t i = 0; i < columns.size(); ++i) {
-        SAN_ASSIGN_OR_RAISE(
-            auto page_data,
-            collect_column_page_data(root, columns[i], batch.value(),
-                                     row_offset, row_count, i));
+        SAN_ASSIGN_OR_RAISE(auto page_data, collect_column_page_data(
+                                                root, columns[i], batch.value(),
+                                                row_offset, row_count, i));
         SAN_ASSIGN_OR_RAISE(auto page,
                             write_column_pages(out, columns[i], page_data,
                                                compression_codec, gzip_level,
@@ -146,13 +143,12 @@ sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
       // Page indexes belong immediately after the row group's column chunks.
       // Serialize them now and discard per-page metadata before retaining the
       // compact footer entry for the rest of the file.
-      SAN_RETURN_NOT_OK(
-          write_row_group_page_indexes(out, columns, &row_group));
+      SAN_RETURN_NOT_OK(write_row_group_page_indexes(out, columns, &row_group));
       const auto row_group_metadata_bytes =
           retained_row_group_metadata_bytes(row_group);
-      if (metadata_budget_would_be_exceeded(
-              retained_footer_metadata_bytes, row_group_metadata_bytes,
-              max_footer_metadata_bytes)) {
+      if (metadata_budget_would_be_exceeded(retained_footer_metadata_bytes,
+                                            row_group_metadata_bytes,
+                                            max_footer_metadata_bytes)) {
         return sanitize::Status::Invalid(
             "native Parquet writer: footer metadata exceeds safety limit");
       }

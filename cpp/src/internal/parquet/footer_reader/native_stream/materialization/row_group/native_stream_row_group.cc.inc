@@ -148,8 +148,8 @@ sanitize::Status materialize_native_flat_column(
     SAN_RETURN_NOT_OK(materialize_fixed_width_column(file, column, window,
                                                      page_scratch, child));
   } else if (kind == NativeValueBufferKind::bit_packed_boolean) {
-    SAN_RETURN_NOT_OK(materialize_boolean_column(file, column, window,
-                                                 page_scratch, child));
+    SAN_RETURN_NOT_OK(
+        materialize_boolean_column(file, column, window, page_scratch, child));
   } else if (kind == NativeValueBufferKind::delta_binary_packed) {
     SAN_RETURN_NOT_OK(materialize_delta_binary_packed_column(
         file, column, window, page_scratch, child));
@@ -206,8 +206,8 @@ sanitize::Status materialize_native_row_group_column(
         file, column, window, page_scratch, child, &arrow_length,
         &arrow_null_count));
   } else {
-    SAN_RETURN_NOT_OK(materialize_native_flat_column(
-        file, column, window, page_scratch, child));
+    SAN_RETURN_NOT_OK(materialize_native_flat_column(file, column, window,
+                                                     page_scratch, child));
     arrow_null_count = native_window_null_count(*child, window.row_count);
   }
   child->array.length = arrow_length;
@@ -349,11 +349,11 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
     trim_native_page_scratch(&stream->page_scratch);
     return layout_status;
   }
-  SAN_ASSIGN_OR_RAISE(
-      const auto window,
-      next_native_flat_row_window(
-          row_group, stream->output_layout, stream->row_group_row_offset,
-          stream->max_buffer_bytes, stream->max_batch_rows));
+  SAN_ASSIGN_OR_RAISE(const auto window,
+                      next_native_flat_row_window(
+                          row_group, stream->output_layout,
+                          stream->row_group_row_offset,
+                          stream->max_buffer_bytes, stream->max_batch_rows));
   auto state = std::unique_ptr<NativeParquetArrayState>(
       new (std::nothrow) NativeParquetArrayState());
   if (!state) {
@@ -367,9 +367,10 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
   state->columns.resize(row_group.columns.size());
   for (std::size_t i = 0; i < row_group.columns.size(); ++i) {
     SAN_RETURN_NOT_OK(materialize_native_row_group_column(
-        stream->file, row_group.columns[i], window,
-        &stream->page_scratch, &state->columns[i]));
-    SAN_RETURN_NOT_OK(enforce_native_array_retained_budget(*state, stream->max_buffer_bytes));
+        stream->file, row_group.columns[i], window, &stream->page_scratch,
+        &state->columns[i]));
+    SAN_RETURN_NOT_OK(
+        enforce_native_array_retained_budget(*state, stream->max_buffer_bytes));
   }
   state->structs.resize(stream->recursive_struct_array_count);
   state->lists.resize(stream->recursive_list_array_count);
@@ -380,7 +381,8 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
                         materialize_native_recursive_output_field(
                             state.get(), row_group, field, window, &cursor));
     state->children.push_back(field_array);
-    SAN_RETURN_NOT_OK(enforce_native_array_retained_budget(*state, stream->max_buffer_bytes));
+    SAN_RETURN_NOT_OK(
+        enforce_native_array_retained_budget(*state, stream->max_buffer_bytes));
   }
   sanitize::internal::cdata_stream::clear_array(out);
   out->length = window.row_count;

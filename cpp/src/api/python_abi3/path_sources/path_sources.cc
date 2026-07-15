@@ -60,9 +60,9 @@ csv_header_from_path_source(const PathSourceSpec &source,
 
     std::vector<std::string_view> views;
     SAN_RETURN_NOT_OK(sanitize::internal::parse_csv_cells(
-        record.view, prepared->spec.csv_delimiter.empty()
-                         ? ','
-                         : prepared->spec.csv_delimiter[0],
+        record.view,
+        prepared->spec.csv_delimiter.empty() ? ','
+                                             : prepared->spec.csv_delimiter[0],
         &views, &arena));
     std::vector<std::string> header;
     header.reserve(views.size());
@@ -247,8 +247,8 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
   SAN_ASSIGN_OR_RAISE(
       input.chunk_source,
       sanitize::chunk_source_from_paths_with_source_names_encoding(
-          std::move(paths), std::move(source_names), "\n",
-          input_text_encoding, memory_limit_bytes));
+          std::move(paths), std::move(source_names), "\n", input_text_encoding,
+          memory_limit_bytes));
   return input;
 }
 
@@ -353,7 +353,7 @@ path_source_input(const sanitize::PreparedOptionsPtr &prepared,
     SAN_ASSIGN_OR_RAISE(auto chunk_source,
                         sanitize::chunk_source_from_path_with_encoding(
                             source.path, prepared->spec.input_text_encoding,
-                          prepared->spec.memory_limit_bytes));
+                            prepared->spec.memory_limit_bytes));
     PathSourceInput input;
     input.frontend = source.frontend;
     input.chunk_source = std::move(chunk_source);

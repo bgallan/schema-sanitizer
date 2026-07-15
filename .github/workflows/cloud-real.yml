@@ -2,7 +2,7 @@
 name: Real GCP interoperability
 on:
   schedule:
-    - cron: '47 4 * * 3'
+    - cron: 47 4 * * 3
   workflow_dispatch:
 permissions:
   contents: read

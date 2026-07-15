@@ -24,8 +24,8 @@ sanitize::Status parse_error_at(const Cursor &c, std::string_view message) {
 sanitize::Status skip_value_at_depth(Cursor &c, std::size_t depth);
 
 sanitize::Status nesting_error(const Cursor &c) {
-  return parse_error_at(c,
-                        "JSON parse error: nesting exceeds safety limit at byte ");
+  return parse_error_at(
+      c, "JSON parse error: nesting exceeds safety limit at byte ");
 }
 
 sanitize::Status skip_object_member(Cursor &c, std::size_t depth) {
@@ -143,8 +143,6 @@ sanitize::Status skip_array(Cursor &c) {
   return skip_array_at_depth(c, 1U);
 }
 
-sanitize::Status skip_value(Cursor &c) {
-  return skip_value_at_depth(c, 0U);
-}
+sanitize::Status skip_value(Cursor &c) { return skip_value_at_depth(c, 0U); }
 
 } // namespace sanitize::internal::json_scan

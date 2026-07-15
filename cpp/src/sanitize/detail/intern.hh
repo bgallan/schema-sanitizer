@@ -84,9 +84,8 @@ public:
 
   // Interns a child path and returns its stable identifier.
   PathId child(PathId parent, StrId comp) {
-    const std::uint64_t key =
-        (static_cast<std::uint64_t>(parent) << 32U) |
-        static_cast<std::uint64_t>(comp);
+    const std::uint64_t key = (static_cast<std::uint64_t>(parent) << 32U) |
+                              static_cast<std::uint64_t>(comp);
     if (const auto found = map_.find(key); found != map_.end()) {
       return found->second;
     }

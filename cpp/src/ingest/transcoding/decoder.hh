@@ -21,8 +21,7 @@ public:
   sanitize::Result<std::string> Decode(std::string_view raw, bool final);
 
 private:
-  static sanitize::Result<std::string>
-  transcode_latin1(std::string_view raw);
+  static sanitize::Result<std::string> transcode_latin1(std::string_view raw);
   sanitize::Result<std::string> transcode_utf16(std::string_view raw,
                                                 bool final);
   sanitize::Status append_utf16_pair(unsigned char b0, unsigned char b1,
