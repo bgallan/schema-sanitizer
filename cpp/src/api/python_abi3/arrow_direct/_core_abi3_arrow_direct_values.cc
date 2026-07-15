@@ -1,6 +1,7 @@
 // Implements Arrow C Data value extraction for the direct frontend.
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.hh"
+#include "internal/arrow_c/cdata_stream_callbacks.hh"
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_bits.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_formatters.hh"
@@ -170,9 +171,9 @@ sanitize::Status object_for_each(const void *self, void *ctx,
   }
   for (std::size_t i = 0; i < children.size(); ++i) {
     const ArrowArray *child_array = ref->array->children[i];
-    const ArrowValueRef *child =
-        store_value_ref(ref->storage, &children[i], child_array, ref->row);
-    SAN_RETURN_NOT_OK(fn(ctx, children[i].name, 0, value_from_ref(child)));
+    SAN_RETURN_NOT_OK(fn(ctx, children[i].name, 0,
+                         value_at(ref->storage, &children[i], child_array,
+                                  ref->row)));
   }
   return sanitize::Status::OK();
 }
@@ -197,9 +198,8 @@ sanitize::Status array_for_each_offset(const ArrowValueRef *ref, void *ctx,
   const ArrowArray *child_array = ref->array->children[0];
   for (int64_t i = static_cast<int64_t>(begin); i < static_cast<int64_t>(end);
        ++i) {
-    const ArrowValueRef *child =
-        store_value_ref(ref->storage, &child_node, child_array, i);
-    SAN_RETURN_NOT_OK(fn(ctx, value_from_ref(child)));
+    SAN_RETURN_NOT_OK(
+        fn(ctx, value_at(ref->storage, &child_node, child_array, i)));
   }
   return sanitize::Status::OK();
 }
@@ -219,9 +219,8 @@ array_for_each_fixed_size(const ArrowValueRef *ref, void *ctx,
   const ArrowInputNode &child_node = ref->node->children[0];
   const ArrowArray *child_array = ref->array->children[0];
   for (int64_t i = begin; i < end; ++i) {
-    const ArrowValueRef *child =
-        store_value_ref(ref->storage, &child_node, child_array, i);
-    SAN_RETURN_NOT_OK(fn(ctx, value_from_ref(child)));
+    SAN_RETURN_NOT_OK(
+        fn(ctx, value_at(ref->storage, &child_node, child_array, i)));
   }
   return sanitize::Status::OK();
 }
@@ -251,10 +250,9 @@ const sanitize::ValueView::ArrayVTable kArrayVTable{
 
 } // namespace
 
-ArrowBatchStorage::~ArrowBatchStorage() {
-  if (array.release) {
-    array.release(&array);
-  }
+ArrowArrayStorage::~ArrowArrayStorage() {
+  sanitize::internal::cdata_stream::release_array_nothrow(&array);
+  sanitize::internal::cdata_stream::clear_array(&array);
 }
 
 const ArrowValueRef *store_value_ref(ArrowBatchStorage *storage,
@@ -263,6 +261,40 @@ const ArrowValueRef *store_value_ref(ArrowBatchStorage *storage,
   storage->values.push_back(ArrowValueRef{
       .node = node, .array = array, .row = row, .storage = storage});
   return &storage->values.back();
+}
+
+namespace {
+
+bool value_requires_stable_ref(const ArrowInputNode *node) {
+  if (!node) {
+    return false;
+  }
+  switch (node->kind) {
+  case ArrowNodeKind::kStruct:
+  case ArrowNodeKind::kList:
+  case ArrowNodeKind::kLargeList:
+  case ArrowNodeKind::kFixedSizeList:
+  case ArrowNodeKind::kMap:
+    return true;
+  case ArrowNodeKind::kDictionary:
+    return node->children.size() == 1 &&
+           value_requires_stable_ref(&node->children[0]);
+  default:
+    return false;
+  }
+}
+
+} // namespace
+
+sanitize::ValueView value_at(ArrowBatchStorage *storage,
+                             const ArrowInputNode *node,
+                             const ArrowArray *array, int64_t row) {
+  if (value_requires_stable_ref(node)) {
+    return value_from_ref(store_value_ref(storage, node, array, row));
+  }
+  const ArrowValueRef ref{
+      .node = node, .array = array, .row = row, .storage = storage};
+  return value_from_ref(&ref);
 }
 
 sanitize::ValueView value_from_ref(const ArrowValueRef *ref) {
@@ -358,9 +390,8 @@ sanitize::ValueView value_from_ref(const ArrowValueRef *ref) {
     if (!index || *index < 0 || *index >= ref->array->dictionary->length) {
       return sanitize::ValueView::Null();
     }
-    const ArrowValueRef *dict_ref = store_value_ref(
-        ref->storage, &ref->node->children[0], ref->array->dictionary, *index);
-    return value_from_ref(dict_ref);
+    return value_at(ref->storage, &ref->node->children[0],
+                    ref->array->dictionary, *index);
   }
   }
   return sanitize::ValueView::Null();

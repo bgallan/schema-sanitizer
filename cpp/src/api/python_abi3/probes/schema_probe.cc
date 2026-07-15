@@ -48,17 +48,32 @@ bool dict_set_steal(PyObject *dict, const char *key, PyObject *value) {
   return rc == 0;
 }
 
+std::optional<std::string>
+serialize_schema_or_set_error(const sanitize::LogicalSchema &schema) {
+  auto payload =
+      sanitize::internal::options_io::serialize_logical_schema_bytes(schema);
+  if (payload.ok())
+    return std::move(payload).ValueOrDie();
+  const auto status = payload.status();
+  if (status.code() == sanitize::StatusCode::kOutOfMemory)
+    PyErr_NoMemory();
+  else
+    PyErr_SetString(PyExc_ValueError, status.ToString().c_str());
+  return std::nullopt;
+}
+
 PyObject *pack_schema_probe(const sanitize::LogicalSchema &schema,
                             const sanitize::IngestDiagnostics &diagnostics) {
-  const std::string schema_payload =
-      sanitize::internal::options_io::serialize_logical_schema_bytes(schema);
+  auto schema_payload = serialize_schema_or_set_error(schema);
+  if (!schema_payload)
+    return nullptr;
   PyObject *dict = PyDict_New();
   if (!dict)
     return nullptr;
   if (!dict_set_steal(dict, "schema",
                       PyBytes_FromStringAndSize(
-                          schema_payload.data(),
-                          static_cast<Py_ssize_t>(schema_payload.size())))) {
+                          schema_payload->data(),
+                          static_cast<Py_ssize_t>(schema_payload->size())))) {
     Py_DECREF(dict);
     return nullptr;
   }
@@ -72,16 +87,16 @@ PyObject *pack_schema_probe(const sanitize::LogicalSchema &schema,
 
 PyObject *pack_registry_probe(const sanitize::SchemaRegistryMergeResult &merged,
                               const sanitize::IngestDiagnostics &diagnostics) {
-  const std::string schema_payload =
-      sanitize::internal::options_io::serialize_logical_schema_bytes(
-          merged.schema);
+  auto schema_payload = serialize_schema_or_set_error(merged.schema);
+  if (!schema_payload)
+    return nullptr;
   PyObject *dict = PyDict_New();
   if (!dict)
     return nullptr;
   if (!dict_set_steal(dict, "schema",
                       PyBytes_FromStringAndSize(
-                          schema_payload.data(),
-                          static_cast<Py_ssize_t>(schema_payload.size())))) {
+                          schema_payload->data(),
+                          static_cast<Py_ssize_t>(schema_payload->size())))) {
     Py_DECREF(dict);
     return nullptr;
   }
@@ -387,7 +402,8 @@ chunk_source_from_source_py(const char *source_name, PyObject *payload_obj,
     }
     auto src = sanitize::chunk_source_from_path_with_encoding(
         std::string(path, static_cast<std::size_t>(path_size)),
-        prepared->spec.input_text_encoding);
+        prepared->spec.input_text_encoding,
+        prepared->spec.memory_limit_bytes);
     Py_DECREF(path_bytes);
     return src;
   }

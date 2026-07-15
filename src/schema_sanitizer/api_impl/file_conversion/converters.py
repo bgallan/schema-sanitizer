@@ -117,7 +117,7 @@ def convert_file_with_options(
         xml_row_tag=options.get("xml_row_tag"),
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
-        memory_limit_bytes=options.get("batch_memory_limit_bytes"),
+        memory_limit_bytes=options.get("memory_limit_bytes"),
     )
     all_row_columns = (
         {SOURCE_FILE_COLUMN: prepared_input.source_file}
@@ -139,7 +139,9 @@ def convert_file_with_options(
             FILE_CONVERSION_HELPER_KEYS,
         )
         call_options = normalize_call_options_or_none(**options_for_schema_probe(options))
-        output_target = prepare_output_target(output_path)
+        output_target = prepare_output_target(
+            output_path, memory_limit_bytes=options.get("memory_limit_bytes")
+        )
         try:
             field_name_policy = str(options.get("field_name_policy", "lower_alpha"))
             result = try_convert_source_plan_with_options(
@@ -247,8 +249,7 @@ def to_jsonl(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    batch_memory_limit_bytes: int | None = None,
-    read_chunk_bytes: int = 1 << 20,
+    memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
     """Stream-sanitize an input file to JSON Lines without materializing a table."""
@@ -296,8 +297,7 @@ def to_csv(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    batch_memory_limit_bytes: int | None = None,
-    read_chunk_bytes: int = 1 << 20,
+    memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
     """Stream-sanitize an input file to CSV without materializing a table."""
@@ -345,8 +345,7 @@ def to_parquet(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    batch_memory_limit_bytes: int | None = None,
-    read_chunk_bytes: int = 1 << 20,
+    memory_limit_bytes: int | None = None,
     parquet_compression: str | None = "gzip",
     parquet_gzip_level: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,

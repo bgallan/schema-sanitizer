@@ -63,8 +63,7 @@ def test_example_07_warm_up_logs_progress(caplog, tmp_path: Path) -> None:
         parse_iso_dates=True,
         parse_iso_times=True,
         on_error="emit_null_row",
-        batch_memory_limit_bytes=64 * 1024 * 1024,
-        read_chunk_bytes=256 * 1024,
+        memory_limit_bytes=64 * 1024 * 1024,
         arrow_max_depth=32,
         parquet_max_depth=15,
         input_text_encoding="utf-8",
@@ -114,8 +113,7 @@ def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> Non
         parse_iso_dates=True,
         parse_iso_times=True,
         on_error="emit_null_row",
-        batch_memory_limit_bytes=64 * 1024 * 1024,
-        read_chunk_bytes=256 * 1024,
+        memory_limit_bytes=64 * 1024 * 1024,
         arrow_max_depth=32,
         parquet_max_depth=15,
         input_text_encoding="utf-8",
@@ -160,7 +158,9 @@ def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
         for day in (1, 2, 3)
     ]
 
-    async def fake_remote_file_exists(uri: str) -> bool:
+    async def fake_remote_file_exists(
+        uri: str, *, memory_limit_bytes: int | None = None
+    ) -> bool:
         """Return false for one missing generated object."""
         return not uri.endswith("20260102.json")
 
@@ -348,6 +348,8 @@ def test_example_07_directory_discovery_skips_empty_partitions(monkeypatch) -> N
     async def fake_bulk_directory_check(
         uris: list[str],
         extensions: tuple[str, ...],
+        *,
+        memory_limit_bytes: int | None = None,
     ):
         """Capture directory discovery configuration."""
         from schema_sanitizer.input_impl.directory_inputs import DirectoryDiscovery

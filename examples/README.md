@@ -101,6 +101,13 @@ add a schema warm-up range. The warm-up scan always uses additive registry
 merging, even when the normal write uses `--schema-mode strict`, and it scans
 the selected warm-up files as one logical source:
 
+Additive runs also preflight every selected normal partition automatically.
+This prevents an early all-integer Parquet file from remaining `INT64` when a
+later partition promotes the same field to `DOUBLE`, which BigQuery external
+tables cannot read as one column. An explicit warm-up range adds historical
+sources to that preflight; strict runs only scan the explicitly requested
+warm-up range and continue to enforce their existing contract.
+
 ```bash
 python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --source-jsonl-prefix gs://raw-bucket/events/rt \

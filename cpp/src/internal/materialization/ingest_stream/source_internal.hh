@@ -5,6 +5,7 @@
 #include "internal/arrow_c/cdata_export_internal.hh"
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/materialization/batch_appender.hh"
+#include "internal/materialization/batch_sizing.hh"
 #include "internal/materialization/direct_rows.hh"
 #include "internal/memory/pool_resource.hh"
 #include "sanitize/core/diagnostics.hh"
@@ -29,6 +30,7 @@ struct IngestStreamInit {
   PreparedOptionsPtr opts;
   std::shared_ptr<IngestDiagnostics> diagnostics;
   std::shared_ptr<sanitize::ExecutionContext> owned_ctx;
+  std::shared_ptr<void> operation_memory_pool;
   BatchAppenderPtr app;
   std::shared_ptr<PoolResource> pool;
   std::unique_ptr<DirectMaterializer> direct;
@@ -64,6 +66,7 @@ private:
   PreparedOptionsPtr opts_;
   std::shared_ptr<IngestDiagnostics> diagnostics_;
   std::shared_ptr<sanitize::ExecutionContext> owned_ctx_keepalive_;
+  std::shared_ptr<void> operation_memory_pool_keepalive_;
 
   BatchAppenderPtr app_;
   std::shared_ptr<PoolResource> pool_keepalive_;
@@ -72,6 +75,8 @@ private:
   RowBatch cur_;
   std::size_t cur_i_ = 0;
   int64_t row_index_ = 0;
+  int64_t observed_bytes_per_row_ = kInitialEstimatedRowBytes;
+  bool has_observed_batch_size_ = false;
   bool eof_ = false;
   bool closed_ = false;
 };

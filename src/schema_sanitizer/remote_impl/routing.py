@@ -11,7 +11,12 @@ from .providers import azure, gcs, s3
 from .transport import http_file_exists
 
 
-async def list_remote_directory(uri: str, suffixes: Sequence[str]) -> list[RemoteFile]:
+async def list_remote_directory(
+    uri: str,
+    suffixes: Sequence[str],
+    *,
+    memory_limit_bytes: int | None = None,
+) -> list[RemoteFile]:
     """List one supported remote directory non-recursively."""
     accepted = normalize_extensions(suffixes)
     provider = remote_provider(uri)
@@ -27,7 +32,9 @@ async def list_remote_directory(uri: str, suffixes: Sequence[str]) -> list[Remot
     raise ValueError(f"Unsupported remote directory URI scheme: {scheme!r}")
 
 
-async def remote_file_exists(uri: str) -> bool:
+async def remote_file_exists(
+    uri: str, *, memory_limit_bytes: int | None = None
+) -> bool:
     """Return whether one supported remote object exists."""
     provider = remote_provider(uri)
     if provider == "gcs":
@@ -37,6 +44,6 @@ async def remote_file_exists(uri: str) -> bool:
     if provider == "azure":
         return await azure.file_exists(uri)
     if provider == "http":
-        return await http_file_exists(uri)
+        return await http_file_exists(uri, memory_limit_bytes=memory_limit_bytes)
     scheme = urlparse(uri).scheme.lower()
     raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")

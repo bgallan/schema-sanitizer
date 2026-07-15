@@ -6,17 +6,18 @@ A native C++23 engine performs schema inference, reconciliation, bounded
 streaming, and Arrow C Data materialization; the Python API provides file,
 dataframe, partitioned pipeline, and BigQuery integration helpers.
 
-Version 0.3.6 is still alpha software, with particular focus on Parquet files
+Version 0.3.7 is still alpha software, with particular focus on Parquet files
 used by BigQuery external tables.
 
 ## Documentation
 
 - This README is the installation, Python API, options, and pipeline guide.
-- [heuristics.md](heuristics.md) explains inference, field sanitization,
+- [HEURISTICS.md](HEURISTICS.md) explains inference, field sanitization,
   schema merging and versioning, the registry, drift records, and the BigQuery
   sidecar model.
-- [responsibilities.md](responsibilities.md) maps the Python and C++ source
+- [RESPONSIBILITIES.md](RESPONSIBILITIES.md) maps the Python and C++ source
   layout for contributors.
+- [COMPATIBILITY.md](COMPATIBILITY.md) defines supported runtimes and serialized-state guarantees.
 
 ## Install
 
@@ -209,8 +210,26 @@ prices = ss.to_pyarrow(
 | `input_text_encoding` | `"utf-8"` | `utf-8`, `utf-16`, `utf-16-le`, `utf-16-be`, or `iso8859-1`. Not used for Parquet. |
 | `xml_row_tag` | `None` | Stream each matching direct XML element as a row; `None` treats the document as one row. |
 | `on_error` | `"emit_null_row"` | `stop`, `skip_row`, or `emit_null_row`. |
-| `batch_memory_limit_bytes` | `None` | Best-effort native inference/materialization budget per batch or document. |
-| `read_chunk_bytes` | `1024 * 1024` | Streaming source read-buffer size. |
+| `memory_limit_bytes` | `None` | The only public memory/resource control. `None` selects 512 MiB. The native extension derives all chunk, batch, coalescing, metadata, spool, concurrency, Arrow, and Parquet sub-budgets from this value. |
+
+`memory_limit_bytes` is local to one operation. It is validated before native
+execution, cannot exceed the absolute 64 GiB safety ceiling, and never mutates
+process-global state. There are no environment-variable overrides or secondary
+public memory knobs. Two concurrent calls may therefore use different budgets
+without interfering with each other. Schema-Sanitizer also contains no
+environment-access hooks in its runtime, build files, examples, tests, or
+project workflows; configuration is explicit or declarative. Provider SDKs may
+still use their own standard credential discovery outside the library.
+
+The native extension is the single source of truth for derived limits. Python
+queries that native budget and uses the returned values for input chunks, replay
+spooling, remote scheduling, metadata expansion, Arrow validation, coalescing,
+and Parquet reading/writing. Internal structural ceilings such as maximum schema
+depth, field cardinality, Arrow logical ranges, and row-group count remain
+non-configurable and cannot be raised by callers. Scratch cleanup and hardened
+allocation bookkeeping are always active. Best-effort overwriting cannot
+guarantee physical erasure on copy-on-write filesystems, SSD wear-leveling, or
+after data has been copied by a third-party Arrow consumer.
 
 ### Parquet output
 
@@ -230,6 +249,13 @@ ss.to_parquet(
     parquet_gzip_level=6,
 )
 ```
+
+Release wheels for Windows, Linux, and macOS build GZIP support from the same
+pinned zlib source and expose the same native output matrix: `gzip`, `snappy`,
+and `uncompressed`. Windows source builds default to that bundled static zlib,
+so GZIP does not depend on vcpkg or a machine-wide zlib installation. Set
+`-DSCHEMA_SANITIZER_ZLIB_PROVIDER=system` only when intentionally building against
+a system package.
 
 ## Incremental schemas
 
@@ -253,7 +279,7 @@ second = ss.to_parquet(
 
 Use `schema_mode="strict"` when a non-empty existing registry is mandatory and
 unexpected fields should fail. Detailed compatibility, version-family, and
-generation behavior is documented in [heuristics.md](heuristics.md).
+generation behavior is documented in [HEURISTICS.md](HEURISTICS.md).
 
 ## Partition pipeline
 
@@ -386,11 +412,12 @@ local temporary files. File outputs are uploaded after conversion. Remote
 directory listing is bounded, deterministic, and non-recursive; generic HTTP
 directory listing is not supported.
 
-Useful tuning variables are `SCHEMA_SANITIZER_ASYNC_CONCURRENCY` (default 64),
-`SCHEMA_SANITIZER_ASYNC_PREFETCH_FILES` (default twice the concurrency),
-`SCHEMA_SANITIZER_ASYNC_TIMEOUT` (120 seconds),
-`SCHEMA_SANITIZER_ASYNC_RETRIES` (4), and `SCHEMA_SANITIZER_SPOOL_DIR` (the
-system temporary directory).
+Remote concurrency, file prefetch, retries, chunk lookahead, discovery workers,
+and replay-spool capacity are derived automatically from the operation's
+`memory_limit_bytes`. They are not separate API options and have no
+environment-variable overrides. Absolute internal ceilings remain in place so
+direct internal callers cannot create unbounded worker, queue, connection, or
+staging state.
 
 ## Development
 
@@ -424,7 +451,7 @@ python benchmarks/bench_ingest.py --rows 100 --width 4 --repeats 1
 python benchmarks/bench_ingest.py --case jsonl --rows 100000 --repeats 3
 ```
 
-For architecture and ownership, see [responsibilities.md](responsibilities.md).
+For architecture and ownership, see [RESPONSIBILITIES.md](RESPONSIBILITIES.md).
 For the production-readiness roadmap, see [todo.md](todo.md).
 
 ## License

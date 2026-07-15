@@ -3,6 +3,7 @@
 #pragma once
 
 #include "internal/parsing/streaming/json/scanner.hh"
+#include "internal/parsing/json/ondemand/scan.hh"
 
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,7 @@ private:
   enum class Mode : uint8_t { kString = 0, kComposite = 1, kPrimitive = 2 };
 
   static constexpr std::size_t kMaxValueBytes = std::size_t{128} << 20;
+  static constexpr std::size_t kMaxSegments = 65'536;
 
   // Returns whether a byte terminates a primitive JSON value.
   static bool is_primitive_delim(char ch);

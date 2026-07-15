@@ -125,7 +125,8 @@ PyObject *py_context_schema_probe_from_paths(PyObject *, PyObject *args) {
     return raise_status(paths.status(), "context_schema_probe_from_paths");
   auto src = sanitize::chunk_source_from_paths_with_encoding(
       std::move(paths).ValueOrDie(), separator ? separator : "",
-      prepared->spec.input_text_encoding);
+      prepared->spec.input_text_encoding,
+      prepared->spec.memory_limit_bytes);
   if (!src.ok())
     return raise_status(src.status(), "context_schema_probe_from_paths");
   return schema_probe_or_raise(ctx, frontend_name, std::move(src).ValueOrDie(),
@@ -161,7 +162,8 @@ PyObject *py_context_registry_probe_from_paths(PyObject *, PyObject *args) {
     return raise_status(paths.status(), "context_registry_probe_from_paths");
   auto src = sanitize::chunk_source_from_paths_with_encoding(
       std::move(paths).ValueOrDie(), separator ? separator : "",
-      prepared->spec.input_text_encoding);
+      prepared->spec.input_text_encoding,
+      prepared->spec.memory_limit_bytes);
   if (!src.ok())
     return raise_status(src.status(), "context_registry_probe_from_paths");
   return registry_probe_or_raise(

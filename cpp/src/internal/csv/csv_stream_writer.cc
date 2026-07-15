@@ -4,17 +4,79 @@
 
 #include "internal/json_output/jsonl_value_writer.hh"
 #include "internal/json_output/schema/model.hh"
+#include "internal/memory/memory_pool.hh"
 #include "internal/parsing/json/string_decode.hh"
 #include "sanitize/abi/cdata_types.hh"
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace sanitize::internal::csv_stream_writer {
 namespace {
+
+constexpr std::size_t kFlushThresholdBytes = 1U << 20;
+constexpr std::size_t kMaxRetainedOutputBytes = 4U << 20;
+
+void clear_output_buffer(std::string &buffer) noexcept {
+  if (secure_memory_cleanup_enabled() && !buffer.empty()) {
+    secure_zero_memory(buffer.data(), buffer.size());
+  }
+  if (buffer.capacity() > kMaxRetainedOutputBytes) {
+    std::string empty;
+    buffer.swap(empty);
+  } else {
+    buffer.clear();
+  }
+}
+
+void clear_decode_buffer(std::vector<char> &buffer) noexcept {
+  if (secure_memory_cleanup_enabled() && !buffer.empty()) {
+    secure_zero_memory(buffer.data(), buffer.size());
+  }
+  if (buffer.capacity() > kMaxRetainedOutputBytes) {
+    std::vector<char> empty;
+    buffer.swap(empty);
+  } else {
+    buffer.clear();
+  }
+}
+
+class ScopedStringWipe final {
+public:
+  explicit ScopedStringWipe(std::string *value) noexcept : value_(value) {}
+  ~ScopedStringWipe() {
+    if (value_ && secure_memory_cleanup_enabled() && !value_->empty()) {
+      secure_zero_memory(value_->data(), value_->size());
+    }
+  }
+
+  ScopedStringWipe(const ScopedStringWipe &) = delete;
+  ScopedStringWipe &operator=(const ScopedStringWipe &) = delete;
+
+private:
+  std::string *value_;
+};
+
+class ScopedDecodeBufferClear final {
+public:
+  explicit ScopedDecodeBufferClear(std::vector<char> *value) noexcept
+      : value_(value) {}
+  ~ScopedDecodeBufferClear() {
+    if (value_) {
+      clear_decode_buffer(*value_);
+    }
+  }
+
+  ScopedDecodeBufferClear(const ScopedDecodeBufferClear &) = delete;
+  ScopedDecodeBufferClear &operator=(const ScopedDecodeBufferClear &) = delete;
+
+private:
+  std::vector<char> *value_;
+};
 
 namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
@@ -48,12 +110,11 @@ sanitize::Status flush_buffer(Output &out_file, std::string &buffer) {
     return sanitize::Status::OK();
   }
   auto status = out_file.Write(buffer);
-  buffer.clear();
+  clear_output_buffer(buffer);
   return status;
 }
 
 sanitize::Status flush_buffer_if_large(Output &out_file, std::string &buffer) {
-  constexpr std::size_t kFlushThresholdBytes = 1 << 20;
   if (buffer.size() < kFlushThresholdBytes) {
     return sanitize::Status::OK();
   }
@@ -109,6 +170,7 @@ sanitize::Status append_csv_cell(std::string &out,
                                  const ArrowArray &array, int64_t row,
                                  std::vector<char> *decode_buffer) {
   std::string json_value;
+  ScopedStringWipe json_value_wipe(&json_value);
   SAN_RETURN_NOT_OK(jsonl::append_value(json_value, field, array, row));
   return append_csv_cell_from_json(out, json_value, decode_buffer);
 }
@@ -125,10 +187,10 @@ sanitize::Status write_header(Output &out_file, const jsonl::JsonlField &root,
   return flush_buffer_if_large(out_file, buffer);
 }
 
-sanitize::Status write_batch_csv(Output &out_file,
-                                 const jsonl::JsonlField &root,
-                                 const ArrowArray &array, std::string &buffer) {
-  SAN_RETURN_NOT_OK(jsonl::validate_batch(root, array));
+sanitize::Status write_batch_csv(
+    Output &out_file, const jsonl::JsonlField &root, const ArrowArray &array,
+    std::string &buffer, const jsonl::ArrayValidationLimits &limits) {
+  SAN_RETURN_NOT_OK(jsonl::validate_batch(root, array, limits));
   if (array.length > 0) {
     constexpr int64_t kDefaultRowReserve = 96;
     const auto reserve_size = static_cast<std::size_t>(
@@ -155,7 +217,8 @@ sanitize::Status write_batch_csv(Output &out_file,
 } // namespace
 
 sanitize::Result<WriteStats> write_stream(ArrowArrayStream *stream,
-                                          Output &out_file) {
+                                          Output &out_file,
+                                          std::int64_t memory_limit_bytes) {
   if (!stream) {
     return sanitize::Status::Invalid("CSV writer: Arrow C stream is null");
   }
@@ -166,8 +229,10 @@ sanitize::Result<WriteStats> write_stream(ArrowArrayStream *stream,
         stream_error_message(stream, "CSV writer: get_schema failed"));
   }
   SAN_ASSIGN_OR_RAISE(auto root, jsonl::parse_schema_field(schema.value()));
+  const auto limits = jsonl::array_validation_limits(memory_limit_bytes);
 
   std::string buffer;
+  ScopedStringWipe buffer_wipe(&buffer);
   SAN_RETURN_NOT_OK(write_header(out_file, root, buffer));
 
   WriteStats stats;
@@ -181,9 +246,18 @@ sanitize::Result<WriteStats> write_stream(ArrowArrayStream *stream,
     if (!batch.value().release) {
       break;
     }
+    if (batch.value().length < 0 ||
+        stats.batches == std::numeric_limits<std::int64_t>::max() ||
+        batch.value().length >
+            std::numeric_limits<std::int64_t>::max() -
+                stats.materialized_rows) {
+      return sanitize::Status::Invalid(
+          "CSV writer: write statistics overflow");
+    }
+    SAN_RETURN_NOT_OK(
+        write_batch_csv(out_file, root, batch.value(), buffer, limits));
     ++stats.batches;
     stats.materialized_rows += batch.value().length;
-    SAN_RETURN_NOT_OK(write_batch_csv(out_file, root, batch.value(), buffer));
   }
   SAN_RETURN_NOT_OK(flush_buffer(out_file, buffer));
   SAN_RETURN_NOT_OK(out_file.Flush());

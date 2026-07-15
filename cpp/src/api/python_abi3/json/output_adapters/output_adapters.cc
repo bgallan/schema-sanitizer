@@ -14,7 +14,8 @@ namespace {
 namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
 sanitize::Result<jsonl::WriteStats>
-write_python_jsonl_stream(PyObject *stream_obj, jsonl::Output &output) {
+write_python_jsonl_stream(PyObject *stream_obj, jsonl::Output &output,
+                          std::int64_t memory_limit_bytes) {
   PyObject *capsule = nullptr;
   ArrowArrayStream *stream = nullptr;
   if (!acquire_arrow_stream(stream_obj, &capsule, &stream)) {
@@ -23,7 +24,7 @@ write_python_jsonl_stream(PyObject *stream_obj, jsonl::Output &output) {
   }
   std::unique_ptr<PyObject, decltype(&Py_DECREF)> capsule_owner(capsule,
                                                                 Py_DECREF);
-  return jsonl::write_stream(stream, output);
+  return jsonl::write_stream(stream, output, memory_limit_bytes);
 }
 
 class FileJsonlOutput final : public jsonl::Output {
@@ -154,34 +155,38 @@ private:
 } // namespace
 
 sanitize::Result<jsonl::WriteStats>
-jsonl_write_stream_to_path(PyObject *stream_obj, std::string path) {
+jsonl_write_stream_to_path(PyObject *stream_obj, std::string path,
+                           std::int64_t memory_limit_bytes) {
   FileJsonlOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError("JSONL writer: failed opening output");
   }
-  return write_python_jsonl_stream(stream_obj, output);
+  return write_python_jsonl_stream(stream_obj, output, memory_limit_bytes);
 }
 
 sanitize::Result<jsonl::WriteStats>
-jsonl_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path) {
+jsonl_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
+                                 std::int64_t memory_limit_bytes) {
   FileJsonlOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError("JSONL writer: failed opening output");
   }
-  return jsonl::write_stream(stream, output);
+  return jsonl::write_stream(stream, output, memory_limit_bytes);
 }
 
 sanitize::Result<jsonl::WriteStats>
-jsonl_write_stream_to_python(PyObject *stream_obj, PyObject *output_obj) {
+jsonl_write_stream_to_python(PyObject *stream_obj, PyObject *output_obj,
+                             std::int64_t memory_limit_bytes) {
   PythonJsonlOutput output(output_obj);
-  return write_python_jsonl_stream(stream_obj, output);
+  return write_python_jsonl_stream(stream_obj, output, memory_limit_bytes);
 }
 
 sanitize::Status jsonl_write_batch_to_string(ArrowSchema &schema,
                                              ArrowArray &array,
-                                             std::string *out) {
+                                             std::string *out,
+                                             std::int64_t memory_limit_bytes) {
   StringJsonlOutput output(out);
-  return jsonl::write_batch(output, schema, array);
+  return jsonl::write_batch(output, schema, array, memory_limit_bytes);
 }
 
 } // namespace core_abi3_internal

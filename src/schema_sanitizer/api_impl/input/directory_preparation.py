@@ -417,7 +417,9 @@ def _remote_native_directory_prepared_from_files(
         csv_has_header=csv_has_header,
         xml_row_tag=xml_row_tag,
         memory_limit_bytes=memory_limit_bytes,
-        chunk_size=remote_staging.remote_directory_stage_chunk_size(),
+        chunk_size=remote_staging.remote_directory_stage_chunk_size(
+            memory_limit_bytes
+        ),
     )
     if input_format == "xml" and xml_row_tag is None:
         staged_probe = manifest.stage_chunk(0)

@@ -38,14 +38,44 @@ function(schema_sanitizer_add_sanitizer target)
 
   if(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan-ubsan")
     target_compile_options(${target} PRIVATE -fsanitize=address,undefined
-                                             -fno-omit-frame-pointer)
+                                             -fno-omit-frame-pointer
+                                             -fno-sanitize-recover=all)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined
-                        -fno-omit-frame-pointer)
+                        -fno-omit-frame-pointer -fno-sanitize-recover=all)
   else()
     message(
       FATAL_ERROR
         "Invalid SCHEMA_SANITIZER_SANITIZER value: '${SCHEMA_SANITIZER_SANITIZER}'. Expected: none or asan-ubsan"
     )
+  endif()
+endfunction()
+
+# Adds LLVM source coverage instrumentation to a target.
+function(schema_sanitizer_add_coverage target)
+  if(NOT SCHEMA_SANITIZER_ENABLE_COVERAGE)
+    return()
+  endif()
+
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_COVERAGE requires Clang/AppleClang (got ${CMAKE_CXX_COMPILER_ID})"
+    )
+  endif()
+
+  target_compile_options(
+    ${target}
+    PRIVATE
+      "-fprofile-instr-generate=${SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN}"
+      -fcoverage-mapping)
+  get_target_property(_coverage_target_type ${target} TYPE)
+  if(_coverage_target_type STREQUAL "SHARED_LIBRARY"
+     OR _coverage_target_type STREQUAL "MODULE_LIBRARY"
+     OR _coverage_target_type STREQUAL "EXECUTABLE")
+    target_link_options(
+      ${target}
+      PRIVATE
+        "-fprofile-instr-generate=${SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN}")
   endif()
 endfunction()
 

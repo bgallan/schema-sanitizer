@@ -24,6 +24,10 @@ auto kMethods = std::to_array<PyMethodDef>({
      .ml_doc = "Return live diagnostics JSON for a diagnostics capsule."},
 
     // Options
+    {.ml_name = "memory_budget",
+     .ml_meth = _PyCFunction_CAST(py_memory_budget),
+     .ml_flags = METH_VARARGS,
+     .ml_doc = "Derive every internal resource budget from one memory limit."},
     {.ml_name = "options_catalog",
      .ml_meth = _PyCFunction_CAST(py_options_catalog),
      .ml_flags = METH_NOARGS,
@@ -168,6 +172,10 @@ auto kMethods = std::to_array<PyMethodDef>({
      .ml_meth = _PyCFunction_CAST(py_parquet_footer_info_json),
      .ml_flags = METH_VARARGS,
      .ml_doc = "Return bounded native Parquet footer metadata as JSON."},
+    {.ml_name = "parquet_stream_preflight_json",
+     .ml_meth = _PyCFunction_CAST(py_parquet_stream_preflight_json),
+     .ml_flags = METH_VARARGS,
+     .ml_doc = "Validate native Parquet stream readiness with bounded memory."},
     {.ml_name = "parquet_stream_read",
      .ml_meth = _PyCFunction_CAST(py_parquet_stream_read),
      .ml_flags = METH_VARARGS,

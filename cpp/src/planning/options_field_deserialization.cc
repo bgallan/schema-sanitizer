@@ -22,6 +22,8 @@ namespace sanitize::internal::options_io {
 
 namespace {
 
+constexpr std::uint32_t kMaxStringListElements = 1U << 20;
+
 using internal::options_io::read_string;
 using internal::options_io::read_u32;
 using internal::options_io::read_u8;
@@ -86,17 +88,27 @@ static bool read_value(std::string_view in, std::size_t *pos,
 // Reads a vector of length-prefixed string option values.
 static bool read_value(std::string_view in, std::size_t *pos,
                        std::vector<std::string> *out) {
-  uint32_t n = 0;
-  if (!read_u32(in, pos, &n))
+  std::uint32_t count = 0;
+  if (!pos || !out || !read_u32(in, pos, &count)) {
     return false;
-  out->clear();
-  out->reserve(n);
-  for (uint32_t i = 0; i < n; ++i) {
-    std::string s;
-    if (!read_string(in, pos, &s))
-      return false;
-    out->push_back(std::move(s));
   }
+  // Every encoded string needs at least its four-byte length prefix. Reject
+  // impossible or pathological counts before reserve() can amplify a tiny
+  // hostile payload into a large allocation attempt.
+  if (count > kMaxStringListElements || *pos > in.size() ||
+      static_cast<std::size_t>(count) > (in.size() - *pos) / 4U) {
+    return false;
+  }
+  std::vector<std::string> decoded;
+  decoded.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    std::string value;
+    if (!read_string(in, pos, &value)) {
+      return false;
+    }
+    decoded.push_back(std::move(value));
+  }
+  *out = std::move(decoded);
   return true;
 }
 

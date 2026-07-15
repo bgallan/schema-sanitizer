@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from functools import lru_cache
+from threading import Lock
 from typing import Any
 
 from .logical_schema import LogicalSchemaPayload, encode_arrow_schema_payload
@@ -17,6 +18,12 @@ _I32_MIN = -(1 << 31)
 _I32_MAX = (1 << 31) - 1
 _I64_MIN = -(1 << 63)
 _I64_MAX = (1 << 63) - 1
+_MAX_STRING_LIST_ITEMS = 1 << 20
+_MAX_OPTIONS_WIRE_BYTES = 64 * 1024 * 1024
+_MAX_PREPARED_OPTIONS_CACHE_BYTES = 1 * 1024 * 1024
+_MAX_PREPARED_OPTIONS_CACHE_ENTRIES = 128
+_MAX_STRING_LIST_FINGERPRINT_BYTES = 64 * 1024
+_MAX_STRING_LIST_FINGERPRINT_ITEMS = 4096
 
 
 def optional_memory_limit_arg(memory_limit_bytes: int | None) -> int:
@@ -171,11 +178,18 @@ def _require_int_value(name: str, value: Any) -> int:
     return value
 
 
+def _ensure_wire_growth(out: bytearray, additional: int) -> None:
+    """Reject an options payload before its backing buffer grows too large."""
+    if additional < 0 or len(out) > _MAX_OPTIONS_WIRE_BYTES - additional:
+        raise ValueError("options serialization: payload exceeds safety limit")
+
+
 def _append_u8(out: bytearray, value: int) -> None:
     """Append an unsigned 8-bit integer."""
     value = _require_int_value("u8", value)
     if not (0 <= value <= _U8_MAX):
         raise ValueError("options serialization: u8 out of range")
+    _ensure_wire_growth(out, 1)
     out.append(value)
 
 
@@ -184,6 +198,7 @@ def _append_u32(out: bytearray, value: int) -> None:
     value = _require_int_value("u32", value)
     if not (0 <= value <= _U32_MAX):
         raise ValueError("options serialization: u32 out of range")
+    _ensure_wire_growth(out, 4)
     out.extend(value.to_bytes(4, "little", signed=False))
 
 
@@ -192,6 +207,7 @@ def _append_i32(out: bytearray, value: int) -> None:
     value = _require_int_value("i32", value)
     if not (_I32_MIN <= value <= _I32_MAX):
         raise ValueError("options serialization: i32 out of range")
+    _ensure_wire_growth(out, 4)
     out.extend(value.to_bytes(4, "little", signed=True))
 
 
@@ -200,6 +216,7 @@ def _append_i64(out: bytearray, value: int) -> None:
     value = _require_int_value("i64", value)
     if not (_I64_MIN <= value <= _I64_MAX):
         raise ValueError("options serialization: i64 out of range")
+    _ensure_wire_growth(out, 8)
     out.extend(value.to_bytes(8, "little", signed=True))
 
 
@@ -209,19 +226,23 @@ def _append_string(out: bytearray, value: str) -> None:
     if len(encoded) > _U32_MAX:
         raise ValueError("options serialization: string too large")
     _append_u32(out, len(encoded))
+    _ensure_wire_growth(out, len(encoded))
     out.extend(encoded)
 
 
 def _append_vec_string(out: bytearray, values: Iterable[str]) -> None:
-    """Append a length-prefixed vector of strings."""
-    items = list(values)
-    if len(items) > _U32_MAX:
-        raise ValueError("options serialization: vector<string> too large")
-    _append_u32(out, len(items))
-    for value in items:
+    """Append strings without first retaining an arbitrary iterable in a list."""
+    count_offset = len(out)
+    _append_u32(out, 0)
+    count = 0
+    for value in values:
+        if count >= _MAX_STRING_LIST_ITEMS:
+            raise ValueError("options serialization: vector<string> exceeds safety limit")
         if not isinstance(value, str):
             raise TypeError("options serialization: vector<string> items must be strings")
         _append_string(out, value)
+        count += 1
+    out[count_offset : count_offset + 4] = count.to_bytes(4, "little")
 
 
 def _read_u32(data: memoryview, pos: int) -> tuple[int, int]:
@@ -243,6 +264,7 @@ def _append_schema(out: bytearray, schema: Any) -> None:
     )
     _append_u8(out, 1)
     _append_u32(out, len(payload))
+    _ensure_wire_growth(out, len(payload))
     out.extend(payload)
 
 
@@ -282,20 +304,71 @@ def _encode_options_bytes(options: Options) -> bytes:
     return bytes(out)
 
 
-@lru_cache(maxsize=128)
+_PREPARED_OPTIONS_CACHE: OrderedDict[bytes, Any] = OrderedDict()
+_PREPARED_OPTIONS_CACHE_BYTES = 0
+_PREPARED_OPTIONS_CACHE_LOCK = Lock()
+
+
 def _cached_options_capsule(encoded: bytes) -> Any:
-    """Return shared compiled state for equivalent small option payloads."""
-    return _native.options_prepare_bytes(encoded)
+    """Return compiled option state from a byte- and entry-bounded LRU cache."""
+    global _PREPARED_OPTIONS_CACHE_BYTES
+    if len(encoded) > _MAX_PREPARED_OPTIONS_CACHE_BYTES:
+        return _native.options_prepare_bytes(encoded)
+    with _PREPARED_OPTIONS_CACHE_LOCK:
+        cached = _PREPARED_OPTIONS_CACHE.get(encoded)
+        if cached is not None:
+            _PREPARED_OPTIONS_CACHE.move_to_end(encoded)
+            return cached
+    capsule = _native.options_prepare_bytes(encoded)
+    with _PREPARED_OPTIONS_CACHE_LOCK:
+        cached = _PREPARED_OPTIONS_CACHE.get(encoded)
+        if cached is not None:
+            _PREPARED_OPTIONS_CACHE.move_to_end(encoded)
+            return cached
+        while _PREPARED_OPTIONS_CACHE and (
+            len(_PREPARED_OPTIONS_CACHE) >= _MAX_PREPARED_OPTIONS_CACHE_ENTRIES
+            or _PREPARED_OPTIONS_CACHE_BYTES
+            > _MAX_PREPARED_OPTIONS_CACHE_BYTES - len(encoded)
+        ):
+            evicted_key, _evicted_capsule = _PREPARED_OPTIONS_CACHE.popitem(last=False)
+            _PREPARED_OPTIONS_CACHE_BYTES -= len(evicted_key)
+        _PREPARED_OPTIONS_CACHE[encoded] = capsule
+        _PREPARED_OPTIONS_CACHE_BYTES += len(encoded)
+    return capsule
+
+
+def _bounded_fingerprint_string_bytes(value: str, remaining: int) -> int | None:
+    """Return an exact small UTF-8 size without copying an oversized value."""
+    if remaining < 0 or len(value) > remaining:
+        return None
+    size = len(value.encode("utf-8"))
+    return size if size <= remaining else None
 
 
 def _string_list_fingerprint(options: Options) -> tuple[tuple[Any, ...], ...] | None:
-    """Return immutable list-option state, or disable object caching for exotic values."""
+    """Return compact mutation state only when retaining it is inexpensive."""
     values: list[tuple[Any, ...]] = []
+    used_bytes = 0
+    used_items = 0
     for name in _STRING_LIST_OPTION_NAMES:
         value = getattr(options, name)
         if not isinstance(value, (list, tuple)):
             return None
-        values.append(tuple(value))
+        if len(value) > _MAX_STRING_LIST_FINGERPRINT_ITEMS - used_items:
+            return None
+        retained: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                return None
+            item_bytes = _bounded_fingerprint_string_bytes(
+                item, _MAX_STRING_LIST_FINGERPRINT_BYTES - used_bytes
+            )
+            if item_bytes is None:
+                return None
+            retained.append(item)
+            used_bytes += item_bytes
+            used_items += 1
+        values.append(tuple(retained))
     return tuple(values)
 
 
@@ -314,13 +387,15 @@ def _options_capsule(options: Any) -> Any:
     ):
         return capsule
     encoded = _encode_options_bytes(options)
-    capsule = (
-        _cached_options_capsule(encoded)
-        if len(encoded) <= 262_144
-        else _native.options_prepare_bytes(encoded)
-    )
-    object.__setattr__(options, "_prepared_capsule", capsule)
-    object.__setattr__(options, "_prepared_string_lists", fingerprint)
+    capsule = _cached_options_capsule(encoded)
+    if fingerprint is not None:
+        object.__setattr__(options, "_prepared_capsule", capsule)
+        object.__setattr__(options, "_prepared_string_lists", fingerprint)
+    else:
+        # A very large or exotic mutable sequence cannot be tracked cheaply.
+        # Do not retain a second compiled representation on the Options object.
+        object.__setattr__(options, "_prepared_capsule", None)
+        object.__setattr__(options, "_prepared_string_lists", None)
     return capsule
 
 

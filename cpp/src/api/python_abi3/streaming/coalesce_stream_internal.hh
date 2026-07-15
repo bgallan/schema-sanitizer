@@ -62,12 +62,29 @@ struct CoalesceStreamState {
   PyObject *stream_capsule = nullptr;
   CoalesceNodeSpec root;
   std::int64_t target_rows = 65536;
+  std::size_t target_bytes = 64 * 1024 * 1024;
+  std::size_t max_batch_bytes = 512 * 1024 * 1024;
+  std::int64_t max_logical_slots = 100'000'000;
+  std::int64_t max_logical_buffer_bytes = 1LL << 30;
+  ArrowArray pending_array{};
+  std::int64_t pending_offset = 0;
+  bool inner_eof = false;
   std::string last_error;
   bool closed = false;
 };
 
 [[nodiscard]] bool schema_supported(const ArrowSchema &schema,
                                     CoalesceNodeSpec *root);
+[[nodiscard]] std::size_t retained_bytes(const CoalescedNode &node);
+[[nodiscard]] std::int64_t fitting_slice_rows(
+    const CoalesceNodeSpec &spec, const ArrowArray &array, std::int64_t offset,
+    std::int64_t max_rows, std::size_t max_bytes) noexcept;
+sanitize::Status validate_arrow_node(const CoalesceNodeSpec &spec,
+                                     const ArrowArray &array,
+                                     std::int64_t offset, std::int64_t length,
+                                     std::size_t depth,
+                                     std::int64_t max_logical_slots,
+                                     std::int64_t max_logical_buffer_bytes);
 
 sanitize::Status append_node(const CoalesceNodeSpec &spec, CoalescedNode *out,
                              const ArraySlice &slice);

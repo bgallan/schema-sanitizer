@@ -4,11 +4,13 @@
 #include "frontends/xml/frontend_internal.hh"
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string_view>
 #include <utility>
 
 #include "sanitize/detail/hash.hh"
+#include "internal/memory/memory_budget.hh"
 
 namespace sanitize::internal::xml_frontend_detail {
 
@@ -16,8 +18,9 @@ XmlFrontend::XmlFrontend(ChunkSourcePtr src, const Options &options)
     : src_(std::move(src)), default_key_(options.default_key_name),
       default_key_hash_(sanitize::detail::hash_key64(default_key_)),
       row_tag_(options.xml_row_tag),
-      chunk_bytes_((options.io_chunk_bytes > 0) ? options.io_chunk_bytes
-                                                : (int64_t{1} << 20)),
+      chunk_bytes_(internal::memory_budget_from_limit(
+                       options.memory_limit_bytes)
+                       .io_chunk_bytes),
       memory_limit_bytes_(options.memory_limit_bytes) {
   if (row_tag_.empty()) {
     parse_status_ = parse_once();
@@ -33,6 +36,18 @@ void XmlFrontend::reset() noexcept {
   done_ = false;
   if (scanner_) {
     parse_status_ = scanner_->Reset();
+  }
+}
+
+void XmlFrontend::set_plan(const CompiledPlan *) noexcept {
+  execution_mode_ = true;
+  if (!scanner_) {
+    // XmlNode owns parsed names, text, attributes and scalar projections. Once
+    // inference has finished, execution no longer needs the original document
+    // bytes solely to populate RowRef::raw, so release that duplicate copy.
+    source_owner_.reset();
+    source_text_ = {};
+    std::string().swap(owned_text_);
   }
 }
 
@@ -94,8 +109,18 @@ sanitize::Result<RowBatch> XmlFrontend::next_batch(int64_t capacity) {
 
   auto storage = std::make_shared<BatchStorage>();
   storage->batch.reset(capacity);
-  storage->raw_rows.reserve(static_cast<std::size_t>(capacity));
-  storage->nodes.reserve(static_cast<std::size_t>(capacity));
+  const auto reserve_rows = static_cast<std::size_t>(
+      std::min<int64_t>(capacity, int64_t{4096}));
+  if (!execution_mode_) {
+    storage->raw_rows.reserve(reserve_rows);
+  }
+  storage->nodes.reserve(reserve_rows);
+  const auto batch_byte_limit =
+      memory_limit_bytes_ > 0
+          ? std::max<std::size_t>(1, static_cast<std::size_t>(
+                                        memory_limit_bytes_ / 3))
+          : std::numeric_limits<std::size_t>::max();
+  std::size_t retained_raw_bytes = 0;
 
   if (scanner_) {
     int64_t produced = 0;
@@ -106,27 +131,37 @@ sanitize::Result<RowBatch> XmlFrontend::next_batch(int64_t capacity) {
         break;
       }
 
-      storage->raw_rows.push_back(std::move(slice.text));
-      std::string_view row_text(storage->raw_rows.back());
+      std::string_view row_text(slice.text);
       XmlParser parser(row_text);
       SAN_ASSIGN_OR_RAISE(auto node, parser.parse_document());
       build_xml_node_model(node.get());
       const XmlNode *node_ptr = node.get();
       storage->nodes.push_back(std::move(node));
-      append_row(storage.get(), node_ptr, row_text, slice.base_offset);
+      if (execution_mode_) {
+        // Parsed XML nodes own their values, so retaining the raw fragment for
+        // every execution row would duplicate the source bytes unnecessarily.
+        append_row(storage.get(), node_ptr, {}, slice.base_offset);
+      } else {
+        retained_raw_bytes += slice.text.size();
+        storage->raw_rows.emplace_back(slice.text);
+        append_row(storage.get(), node_ptr, storage->raw_rows.back(),
+                   slice.base_offset);
+      }
       ++produced;
+      if (retained_raw_bytes >= batch_byte_limit) {
+        break;
+      }
     }
   } else {
     int64_t produced = 0;
     while (produced < capacity && row_index_ < rows_.size()) {
       const XmlNode *node = rows_[row_index_++];
       std::string_view raw;
-      std::size_t base_offset = 0;
-      if (node && node->end_offset >= node->start_offset &&
+      std::size_t base_offset = node ? node->start_offset : 0;
+      if (!execution_mode_ && node && node->end_offset >= node->start_offset &&
           node->end_offset <= source_text_.size()) {
         raw = source_text_.substr(node->start_offset,
                                   node->end_offset - node->start_offset);
-        base_offset = node->start_offset;
       }
       append_row(storage.get(), node, raw, base_offset);
       ++produced;
@@ -182,7 +217,9 @@ sanitize::Result<RowBatch> xml_next_batch(void *self, int64_t capacity) {
   return static_cast<XmlFrontend *>(self)->next_batch(capacity);
 }
 
-void xml_set_plan(void *, const CompiledPlan *) noexcept {}
+void xml_set_plan(void *self, const CompiledPlan *plan) noexcept {
+  static_cast<XmlFrontend *>(self)->set_plan(plan);
+}
 
 void xml_destroy(void *self) noexcept {
   delete static_cast<XmlFrontend *>(self);

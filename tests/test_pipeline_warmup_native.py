@@ -311,7 +311,7 @@ def test_pipeline_warm_up_native_manifest_replaces_fallback_routing(
         xml_row_tag="row",
         csv_delimiter=",",
         csv_has_header=True,
-        batch_memory_limit_bytes=None,
+        memory_limit_bytes=None,
     )
     try:
         assert prepared.source == "source_plan"
@@ -345,7 +345,7 @@ def test_pipeline_warm_up_and_normal_directory_share_source_descriptors(
     normal = prepare_public_input(source, memory_limit_bytes=None, **options)
     warm = prepare_schema_warm_up_input(
         [PartitionRunPlan(date(2026, 1, 1), str(source), str(tmp_path / "out.parquet"))],
-        batch_memory_limit_bytes=None,
+        memory_limit_bytes=None,
         **options,
     )
     try:

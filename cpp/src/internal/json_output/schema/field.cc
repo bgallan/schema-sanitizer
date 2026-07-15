@@ -13,6 +13,10 @@
 namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
+constexpr std::int64_t kMaxJsonlSchemaDepth = 64;
+constexpr std::int64_t kMaxJsonlSchemaChildren = 65'536;
+constexpr std::int64_t kMaxJsonlSchemaNodes = 1'000'000;
+
 bool parse_decimal_format(std::string_view format, JsonlField *field) {
   if (!field) {
     return false;
@@ -61,10 +65,20 @@ bool parse_fixed_size_binary_format(std::string_view format,
 
 } // namespace
 
-sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
-  if (!schema.format) {
+sanitize::Result<JsonlField> parse_schema_field_impl(
+    const ArrowSchema &schema, std::int64_t depth, std::int64_t *nodes) {
+  if (!schema.format || !nodes) {
     return sanitize::Status::Invalid("JSONL writer: schema format is null");
   }
+  if (depth > kMaxJsonlSchemaDepth) {
+    return sanitize::Status::OutOfMemory(
+        "JSONL writer: schema nesting exceeds safety limit");
+  }
+  if (*nodes >= kMaxJsonlSchemaNodes) {
+    return sanitize::Status::OutOfMemory(
+        "JSONL writer: schema node count exceeds safety limit");
+  }
+  ++*nodes;
   JsonlField field;
   field.name = schema.name ? schema.name : "";
   field.format = schema.format;
@@ -89,20 +103,29 @@ sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
         std::string(schema.format), "'");
   }
   if (schema.n_children < 0) {
-    return sanitize::Status::Invalid("JSONL writer: negative schema children");
+    return sanitize::Status::Invalid(
+        "JSONL writer: schema child count is negative");
+  }
+  if (schema.n_children > kMaxJsonlSchemaChildren) {
+    return sanitize::Status::OutOfMemory(
+        "JSONL writer: schema child count exceeds safety limit");
   }
   field.children.reserve(static_cast<std::size_t>(schema.n_children));
   for (int64_t i = 0; i < schema.n_children; ++i) {
     if (!schema.children || !schema.children[i]) {
       return sanitize::Status::Invalid("JSONL writer: missing schema child");
     }
-    SAN_ASSIGN_OR_RAISE(auto child, parse_schema_field(*schema.children[i]));
+    SAN_ASSIGN_OR_RAISE(
+        auto child,
+        parse_schema_field_impl(*schema.children[i], depth + 1, nodes));
     field.children.push_back(std::move(child));
   }
   if (schema.dictionary) {
     JsonlField dictionary;
     dictionary.name = "dictionary";
-    SAN_ASSIGN_OR_RAISE(dictionary, parse_schema_field(*schema.dictionary));
+    SAN_ASSIGN_OR_RAISE(
+        dictionary,
+        parse_schema_field_impl(*schema.dictionary, depth + 1, nodes));
     field.dictionary_index_kind = field.kind;
     field.kind = JsonlKind::kDictionary;
     field.children.clear();
@@ -111,20 +134,22 @@ sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
   return field;
 }
 
+sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema) {
+  std::int64_t nodes = 0;
+  return parse_schema_field_impl(schema, 0, &nodes);
+}
+
 sanitize::Status validate_batch(const JsonlField &root,
-                                const ArrowArray &array) {
+                                const ArrowArray &array,
+                                const ArrayValidationLimits &limits) {
   if (root.kind != JsonlKind::kStruct) {
     return sanitize::Status::Invalid("JSONL writer: root schema is not struct");
   }
-  if (array.n_children != static_cast<int64_t>(root.children.size()) ||
-      (!root.children.empty() && !array.children)) {
+  if (array.offset != 0) {
     return sanitize::Status::Invalid(
-        "JSONL writer: root array/schema mismatch");
+        "JSONL writer: record batch root offset must be zero");
   }
-  if (array.length < 0) {
-    return sanitize::Status::Invalid("JSONL writer: negative batch length");
-  }
-  return sanitize::Status::OK();
+  return validate_array_slice(root, array, 0, array.length, limits);
 }
 
 bool schema_is_supported(const ArrowSchema &schema) {

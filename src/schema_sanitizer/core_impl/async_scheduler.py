@@ -1,52 +1,38 @@
-"""Generic bounded async scheduling, retry, and environment helpers."""
+"""Generic bounded async scheduling and retry helpers."""
 
 from __future__ import annotations
 
 import asyncio
-import os
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, TypeVar
 
 T = TypeVar("T")
 
-
-def read_int_env(name: str, default: int) -> int:
-    """Read a positive integer from the environment."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
-
-
-def read_float_env(name: str, default: float) -> float:
-    """Read a positive float from the environment."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+_MAX_ASYNC_WORKERS = 512
+_MAX_ASYNC_RETRIES = 32
 
 
 def retry_delay(attempt: int) -> float:
     """Return jittered exponential backoff delay for remote I/O retries."""
-    return min(8.0, 0.25 * (2**attempt)) + random.uniform(0.0, 0.25)
+    bounded_attempt = min(max(attempt, 0), 16)
+    return min(8.0, 0.25 * (2**bounded_attempt)) + random.uniform(0.0, 0.25)
 
 
-async def retry_async(operation: Callable[[], Awaitable[T]], *, retries: int) -> T:
-    """Run one async operation with retry/backoff for raised exceptions."""
-    for attempt in range(retries + 1):
+async def retry_async(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    retries: int,
+    should_retry: Callable[[Exception], bool] | None = None,
+) -> T:
+    """Run one async operation with bounded retry/backoff."""
+    bounded_retries = min(max(int(retries), 0), _MAX_ASYNC_RETRIES)
+    for attempt in range(bounded_retries + 1):
         try:
             return await operation()
-        except Exception:
-            if attempt >= retries:
+        except Exception as exc:
+            retryable = should_retry(exc) if should_retry is not None else True
+            if attempt >= bounded_retries or not retryable:
                 raise
             await asyncio.sleep(retry_delay(attempt))
     raise RuntimeError("unreachable async retry state")
@@ -78,7 +64,8 @@ def _start_indexed_workers(
 ) -> list[asyncio.Task[None]]:
     """Start a fixed worker pool for indexed asynchronous work."""
     return [
-        asyncio.create_task(_indexed_worker(indices, results, fetch)) for _ in range(worker_count)
+        asyncio.create_task(_indexed_worker(indices, results, fetch))
+        for _ in range(worker_count)
     ]
 
 
@@ -96,15 +83,10 @@ async def ordered_indexed_results(
     *,
     window: int,
 ) -> AsyncIterator[tuple[int, Any]]:
-    """Yield indexed async results in input order with bounded prefetch.
-
-    A fixed worker pool replaces the previous task-per-item scheduler.  New
-    indices enter the pool only after the next ordered result is yielded, so a
-    slow early item cannot cause unbounded completed-result buffering.
-    """
+    """Yield indexed async results in input order with bounded prefetch."""
     if count <= 0:
         return
-    worker_count = min(count, max(1, window))
+    worker_count = min(count, max(1, int(window)), _MAX_ASYNC_WORKERS)
     indices: asyncio.Queue[int] = asyncio.Queue(maxsize=worker_count)
     results: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue(
         maxsize=worker_count
@@ -139,7 +121,7 @@ async def unordered_indexed_results(
     """Yield indexed async results as they complete with a fixed worker pool."""
     if count <= 0:
         return
-    worker_count = min(count, max(1, window))
+    worker_count = min(count, max(1, int(window)), _MAX_ASYNC_WORKERS)
     indices: asyncio.Queue[int] = asyncio.Queue(maxsize=worker_count)
     results: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue(
         maxsize=worker_count

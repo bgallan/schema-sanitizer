@@ -52,10 +52,24 @@ def _schema_supports_native_jsonl(schema: Any, *, pa: Any) -> bool:
     return _JSONL_SCHEMA_SUPPORT_CACHE.set(schema, supported, include_text=True)
 
 
-def _native_jsonl_stream_write(write: Any, stream: Any, out_path: Any, *, feature: str) -> Any:
+def _native_jsonl_stream_write(
+    write: Any,
+    stream: Any,
+    out_path: Any,
+    *,
+    feature: str,
+    memory_limit_bytes: int | None,
+) -> Any:
     """Write JSONL natively to a local path."""
     del feature
-    return write(stream, local_output_path_or_reject_remote(out_path, sink_name="JSONL")) or True
+    return (
+        write(
+            stream,
+            local_output_path_or_reject_remote(out_path, sink_name="JSONL"),
+            -1 if memory_limit_bytes is None else memory_limit_bytes,
+        )
+        or True
+    )
 
 
 def write_jsonl_stream(
@@ -67,6 +81,7 @@ def write_jsonl_stream(
     all_row_columns: AllRowColumns = None,
     row_span_columns: RowSpanColumns = None,
     timestamp_columns: TimestampColumns = None,
+    memory_limit_bytes: int | None = None,
 ) -> Any:
     """Write an Arrow batch stream to JSON Lines."""
     global _LAST_JSONL_STREAM_ROUTE
@@ -92,6 +107,7 @@ def write_jsonl_stream(
             native_write_stream,
             out_path,
             feature=feature,
+            memory_limit_bytes=memory_limit_bytes,
         )
         _LAST_JSONL_STREAM_ROUTE = "native"
         return stats

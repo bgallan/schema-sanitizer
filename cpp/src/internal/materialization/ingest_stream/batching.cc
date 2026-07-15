@@ -13,9 +13,13 @@ namespace sanitize::internal {
 
 IngestStreamSource::BatchLimits IngestStreamSource::batch_limits() const {
   const int64_t memory_limit = opts_ ? opts_->spec.memory_limit_bytes : -1;
-  const int64_t max_rows = rows_per_batch_from_memory_limit(memory_limit);
-  return BatchLimits{
-      .max_rows = max_rows, .max_bytes = memory_limit, .capacity = max_rows};
+  const int64_t max_rows = rows_per_batch_from_memory_limit(
+      memory_limit, observed_bytes_per_row_);
+  const int64_t target_bytes =
+      batch_target_bytes_from_memory_limit(memory_limit);
+  return BatchLimits{.max_rows = max_rows,
+                     .max_bytes = target_bytes,
+                     .capacity = max_rows};
 }
 
 bool IngestStreamSource::appender_is_full(const BatchLimits &limits) const {

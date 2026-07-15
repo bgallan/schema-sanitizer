@@ -27,6 +27,7 @@ public:
   XmlFrontend(ChunkSourcePtr src, const Options &options);
 
   void reset() noexcept;
+  void set_plan(const CompiledPlan *plan) noexcept;
   sanitize::Result<RowBatch> next_batch(int64_t capacity);
 
 private:
@@ -53,6 +54,7 @@ private:
   std::vector<const XmlNode *> rows_;
 
   std::size_t row_index_ = 0;
+  bool execution_mode_ = false;
   bool done_ = false;
 };
 

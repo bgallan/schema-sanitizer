@@ -32,9 +32,9 @@ int schema_sanitizer_context_memory_stats_json(schema_sanitizer_context *ctx,
     return rc;
   try {
     auto *pool = static_cast<sanitize::internal::MemoryPool *>(
-        sanitize::ExecutionContext::memory_pool_handle());
+        ctx->ctx->memory_pool_handle());
     std::string json;
-    json.reserve(128);
+    json.reserve(256);
     json.push_back('{');
     bool first = true;
     sanitize::internal::json_encoding::append_string_field(
@@ -44,6 +44,20 @@ int schema_sanitizer_context_memory_stats_json(schema_sanitizer_context *ctx,
         pool ? pool->bytes_allocated() : int64_t{0});
     sanitize::internal::json_encoding::append_int_field(
         json, first, "max_memory", pool ? pool->max_memory() : int64_t{0});
+    sanitize::internal::json_encoding::append_int_field(
+        json, first, "allocation_count",
+        pool ? pool->allocation_count() : int64_t{0});
+    sanitize::internal::json_encoding::append_int_field(
+        json, first, "invalid_free_count",
+        pool ? pool->invalid_free_count() : int64_t{0});
+    sanitize::internal::json_encoding::append_int_field(
+        json, first, "size_mismatch_count",
+        pool ? pool->size_mismatch_count() : int64_t{0});
+    sanitize::internal::json_encoding::append_int_field(
+        json, first, "corruption_count",
+        pool ? pool->corruption_count() : int64_t{0});
+    sanitize::internal::json_encoding::append_int_field(
+        json, first, "limit_bytes", pool ? pool->limit_bytes() : int64_t{-1});
     json.push_back('}');
 
     *out_json = dup_cstr(json);

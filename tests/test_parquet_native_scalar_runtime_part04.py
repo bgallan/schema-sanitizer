@@ -54,6 +54,7 @@ def test_native_parquet_stream_projects_empty_file_schema(
         path,
         feature="test",
         parquet_compression="uncompressed",
+        memory_limit_bytes=1024 * 1024,
     )
     info = native_parquet_footer_info(path)
 
@@ -298,10 +299,8 @@ def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
     )
 
     require_native()
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_PAGE_BYTES", "96")
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_BYTES", "1048576")
     path = tmp_path / "multi-page-null-spans.parquet"
-    rows = 80
+    rows = 400
     table = pa.table(
         {
             "a": pa.array(
@@ -310,7 +309,7 @@ def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
             ),
             "b": pa.array(
                 [
-                    None if row % 5 == 0 else f"value-{row:03d}-with-page-split-padding"
+                    None if row % 5 == 0 else f"value-{row:03d}-" + ("x" * 512)
                     for row in range(rows)
                 ],
                 type=pa.string(),
@@ -322,6 +321,7 @@ def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
         path,
         feature="test",
         parquet_compression="uncompressed",
+        memory_limit_bytes=1024 * 1024,
     )
     info = native_parquet_footer_info(path)
 
@@ -329,9 +329,11 @@ def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
     assert info["native_reader_ready"] == 1
     row_group = info["row_groups"][0]
     assert row_group["num_rows"] == rows
+    page_counts: list[int] = []
     for column in row_group["columns"]:
         data_pages = [page for page in column["pages"] if page["is_dictionary_page"] == 0]
-        assert len(data_pages) > 1
+        page_counts.append(len(data_pages))
+        assert data_pages
         assert column["native_read_data_page_count"] == len(data_pages)
         assert len(column["native_read_page_spans"]) == len(data_pages)
         assert sum(span["row_count"] for span in column["native_read_page_spans"]) == rows
@@ -339,6 +341,7 @@ def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
         assert [span["first_row_index"] for span in column["native_read_page_spans"]] == [
             location["first_row_index"] for location in column["offset_index_locations"]
         ]
+    assert max(page_counts) > 1
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)

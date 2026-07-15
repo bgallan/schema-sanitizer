@@ -1,11 +1,13 @@
 // Builds nested Arrow C Data arrays for struct and list cells.
 
 #include "internal/materialization/builders/detail.hh"
+#include "internal/memory/size_math.hh"
 
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <utility>
 #include <vector>
 
@@ -21,8 +23,9 @@ using sanitize::Status;
 class StructBuilder final : public BaseBuilder {
 public:
   // Creates a StructBuilder.
-  explicit StructBuilder(std::vector<std::unique_ptr<ColumnBuilder>> children)
-      : children_(std::move(children)) {}
+  StructBuilder(std::vector<std::unique_ptr<ColumnBuilder>> children,
+                std::shared_ptr<PoolResource> pool)
+      : BaseBuilder(std::move(pool)), children_(std::move(children)) {}
 
   // Resets the object state.
   Status reset() override {
@@ -54,7 +57,7 @@ public:
 
   // Finishes the current output.
   Status finish(ArrowArray *out) override {
-    auto payload = make_array_payload();
+    auto payload = make_array_payload(pool_);
     if (!payload)
       return Status::OutOfMemory("StructBuilder::finish: OOM payload");
     payload->validity = std::move(validity_);
@@ -73,9 +76,10 @@ public:
 
   // Returns the current byte usage.
   [[nodiscard]] int64_t bytes() const noexcept override {
-    auto total = static_cast<int64_t>(validity_.size());
-    for (const auto &child : children_)
-      total += child->bytes();
+    auto total = saturating_size_to_i64(validity_.capacity());
+    for (const auto &child : children_) {
+      total = saturating_add_i64(total, child->bytes());
+    }
     return total;
   }
 
@@ -90,8 +94,10 @@ private:
 class ListBuilder final : public BaseBuilder {
 public:
   // Creates a ListBuilder.
-  explicit ListBuilder(std::unique_ptr<ColumnBuilder> child)
-      : child_(std::move(child)) {
+  ListBuilder(std::unique_ptr<ColumnBuilder> child,
+              std::shared_ptr<PoolResource> pool)
+      : BaseBuilder(std::move(pool)), child_(std::move(child)),
+        offsets_(pool_.get()) {
     offsets_.push_back(0);
   }
 
@@ -129,7 +135,7 @@ public:
 
   // Finishes the current output.
   Status finish(ArrowArray *out) override {
-    auto payload = make_array_payload();
+    auto payload = make_array_payload(pool_);
     if (!payload)
       return Status::OutOfMemory("ListBuilder::finish: OOM payload");
     payload->validity = std::move(validity_);
@@ -148,9 +154,10 @@ public:
 
   // Returns the current byte usage.
   [[nodiscard]] int64_t bytes() const noexcept override {
-    return static_cast<int64_t>(validity_.size() +
-                                offsets_.size() * sizeof(int32_t)) +
-           (child_ ? child_->bytes() : 0);
+    auto total = saturating_size_to_i64(validity_.capacity());
+    total = saturating_add_i64(
+        total, saturating_capacity_bytes(offsets_.capacity(), sizeof(int32_t)));
+    return saturating_add_i64(total, child_ ? child_->bytes() : 0);
   }
 
 protected:
@@ -159,22 +166,25 @@ protected:
 
 private:
   std::unique_ptr<ColumnBuilder> child_;
-  std::vector<int32_t> offsets_;
+  std::pmr::vector<int32_t> offsets_;
 };
 
 } // namespace
 
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_struct_builder(std::vector<std::unique_ptr<ColumnBuilder>> children) {
-  auto builder = make_column_builder<StructBuilder>(std::move(children));
+make_struct_builder(std::vector<std::unique_ptr<ColumnBuilder>> children,
+                    const std::shared_ptr<PoolResource> &pool) {
+  auto builder =
+      make_column_builder<StructBuilder>(std::move(children), pool);
   if (!builder)
     return Status::OutOfMemory("make_struct_builder: OOM builder");
   return builder;
 }
 
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_list_builder(std::unique_ptr<ColumnBuilder> child) {
-  auto builder = make_column_builder<ListBuilder>(std::move(child));
+make_list_builder(std::unique_ptr<ColumnBuilder> child,
+                  const std::shared_ptr<PoolResource> &pool) {
+  auto builder = make_column_builder<ListBuilder>(std::move(child), pool);
   if (!builder)
     return Status::OutOfMemory("make_list_builder: OOM builder");
   return builder;

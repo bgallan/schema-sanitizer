@@ -101,7 +101,7 @@ def convert_analytical_with_options(
         xml_row_tag=options.get("xml_row_tag"),
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
-        memory_limit_bytes=options.get("batch_memory_limit_bytes"),
+        memory_limit_bytes=options.get("memory_limit_bytes"),
     )
     try:
         if prepared_input.xml_row_tag is not None:
@@ -171,8 +171,7 @@ def to_duckdb(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    batch_memory_limit_bytes: int | None = None,
-    read_chunk_bytes: int = 1 << 20,
+    memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
     """Sanitize file input into a DuckDB relation."""
@@ -216,8 +215,7 @@ def to_pandas(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    batch_memory_limit_bytes: int | None = None,
-    read_chunk_bytes: int = 1 << 20,
+    memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
     """Sanitize file input into a pandas DataFrame."""
@@ -261,8 +259,7 @@ def to_polars(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    batch_memory_limit_bytes: int | None = None,
-    read_chunk_bytes: int = 1 << 20,
+    memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
     """Sanitize file input into a Polars DataFrame."""
@@ -306,8 +303,7 @@ def to_pyarrow(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    batch_memory_limit_bytes: int | None = None,
-    read_chunk_bytes: int = 1 << 20,
+    memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
     """Sanitize file input into a PyArrow table."""

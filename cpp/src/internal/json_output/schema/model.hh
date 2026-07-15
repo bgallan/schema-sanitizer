@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -51,6 +52,14 @@ enum class JsonlKind {
   kDictionary,
 };
 
+struct ArrayValidationLimits {
+  std::int64_t logical_slots = 0;
+  std::int64_t logical_buffer_bytes = 0;
+};
+
+// Derives Arrow validation limits from the operation memory budget.
+ArrayValidationLimits array_validation_limits(std::int64_t memory_limit_bytes);
+
 struct JsonlField {
   JsonlKind kind = JsonlKind::kNull;
   JsonlKind dictionary_index_kind = JsonlKind::kNull;
@@ -73,7 +82,15 @@ sanitize::Result<JsonlField> parse_schema_field(const ArrowSchema &schema);
 
 // Validates a root struct field against one record batch array.
 sanitize::Status validate_batch(const JsonlField &root,
-                                const ArrowArray &array);
+                                const ArrowArray &array,
+                                const ArrayValidationLimits &limits);
+
+// Validates one logical Arrow array slice against its parsed field schema.
+sanitize::Status validate_array_slice(const JsonlField &field,
+                                      const ArrowArray &array,
+                                      std::int64_t offset,
+                                      std::int64_t length,
+                                      const ArrayValidationLimits &limits);
 
 // Returns whether an Arrow C schema can be serialized by the native writer.
 bool schema_is_supported(const ArrowSchema &schema);

@@ -55,6 +55,8 @@ SUFFIX_EXCLUDES = {
 }
 FILE_EXCLUDES = {
     ".DS_Store",
+    ".coverage",
+    "coverage.xml",
     "CMakeCache.txt",
     "CTestTestfile.cmake",
     "cmake_install.cmake",
@@ -62,6 +64,7 @@ FILE_EXCLUDES = {
     ".ninja_deps",
     ".ninja_log",
 }
+PROFILE_SUFFIX_EXCLUDES = {".gcda", ".gcno", ".profdata", ".profraw"}
 
 entries: list[Path] = []
 for path in root.rglob("*"):
@@ -82,7 +85,7 @@ for path in root.rglob("*"):
         continue
     if path.name in FILE_EXCLUDES:
         continue
-    if path.suffix in SUFFIX_EXCLUDES:
+    if path.suffix in SUFFIX_EXCLUDES or path.suffix in PROFILE_SUFFIX_EXCLUDES:
         continue
     if path.resolve() == out.resolve():
         continue
@@ -93,5 +96,6 @@ with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.write(root / rel, rel.as_posix())
 PY
 
+python "${root}/meta/ci/check_distribution_contents.py" "${out_abs}"
 bash "${root}/meta/ci/check_zip_contains_cmake_sources.sh" "${out_abs}"
 echo "OK: wrote ${out_abs}"

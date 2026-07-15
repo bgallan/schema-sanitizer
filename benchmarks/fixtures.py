@@ -109,3 +109,37 @@ def write_parquet(path: Path, rows: int, width: int) -> None:
     for col in range(width):
         data[f"value_{col}"] = [row_id * (col + 1) for row_id in range(rows)]
     pq.write_table(pa.table(data), path)
+
+
+def write_deeply_nested_jsonl(path: Path, rows: int, depth: int = 12) -> None:
+    """Write JSONL rows with a stable deeply nested object/list shape."""
+    with path.open("w", encoding="utf-8") as f:
+        for row_id in range(rows):
+            value: Any = {"leaf": row_id}
+            for level in range(depth):
+                value = {f"level_{depth - level}": [value]}
+            f.write(json.dumps({"id": row_id, "payload": value}, separators=(",", ":")))
+            f.write("\n")
+
+
+def write_all_null_jsonl(path: Path, rows: int, width: int) -> None:
+    """Write a stable all-null workload."""
+    with path.open("w", encoding="utf-8") as f:
+        for row_id in range(rows):
+            row = {"id": row_id, **{f"value_{col}": None for col in range(width)}}
+            f.write(json.dumps(row, separators=(",", ":")))
+            f.write("\n")
+
+
+def write_empty_container_jsonl(path: Path, rows: int) -> None:
+    """Write rows dominated by empty nested containers."""
+    with path.open("w", encoding="utf-8") as f:
+        for row_id in range(rows):
+            row = {
+                "id": row_id,
+                "empty_object": {},
+                "empty_array": [],
+                "nested": {"objects": [{}, {}], "arrays": [[], []]},
+            }
+            f.write(json.dumps(row, separators=(",", ":")))
+            f.write("\n")

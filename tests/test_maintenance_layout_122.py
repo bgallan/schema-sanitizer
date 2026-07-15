@@ -71,3 +71,41 @@ def test_decompressors_write_into_reusable_outputs() -> None:
     assert not (pages / "footer_reader_compression.cc.inc").exists()
     assert not (pages / "footer_reader_snappy_decode.cc.inc").exists()
     assert len(source.splitlines()) <= 500
+
+
+def test_release_wheels_share_one_bundled_zlib_provider() -> None:
+    """Windows, Linux, and macOS wheels must build GZIP from one pinned source."""
+    cmake = (ROOT / "cmake/SchemaSanitizerCompression.cmake").read_text(encoding="utf-8")
+    project = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    workflows = "\n".join(
+        (ROOT / relative).read_text(encoding="utf-8")
+        for relative in (".github/workflows/ci.yml", ".github/workflows/publish.yml")
+    )
+
+    assert "if(WIN32)" in cmake
+    assert 'set(_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT "bundled")' in cmake
+    assert "zlib132.zip" in cmake
+    assert "SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28" in cmake
+    assert "set(ZLIB_BUILD_SHARED OFF" in cmake
+    assert "set(ZLIB_BUILD_STATIC ON" in cmake
+    assert "ZLIB::ZLIBSTATIC" in cmake
+    assert "SchemaSanitizerCompression.cmake" in project
+    assert 'SCHEMA_SANITIZER_ZLIB_PROVIDER = "bundled"' in pyproject
+    assert 'SCHEMA_SANITIZER_REQUIRE_ZLIB = "ON"' in pyproject
+    assert "check_parquet_compression_matrix.py" in pyproject
+    assert workflows.count("python -m cibuildwheel") == 6
+    assert "CIBW_" + "ENVIRONMENT" not in workflows
+
+
+def test_native_snappy_writer_uses_copy_records() -> None:
+    """The native Snappy path must perform compression, not only framing."""
+    source = (
+        ROOT / "cpp/src/internal/parquet/stream_writer/stream_writer_compression.cc.inc"
+    ).read_text(encoding="utf-8")
+
+    assert "append_snappy_copy" in source
+    assert "snappy_encode_payload" in source
+    assert "snappy_encode_literal_payload" not in source
+    assert "0x02U" in source
+    assert len(source.splitlines()) <= 500

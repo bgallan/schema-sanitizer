@@ -44,7 +44,7 @@ project(
   DESCRIPTION
     "Spec-driven path and URI data sanitization for CSV, JSON, JSON arrays, JSON Lines, XML, and Parquet"
   HOMEPAGE_URL "https://github.com/bgallan/schema-sanitizer"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 option(SCHEMA_SANITIZER_ENABLE_LTO
        "Enable IPO/LTO in Release builds when supported" ON)
@@ -53,15 +53,10 @@ option(SCHEMA_SANITIZER_ENABLE_WARNINGS
 option(SCHEMA_SANITIZER_REPRODUCIBLE
        "Enable reproducible build flags (path mapping where supported)" ON)
 
-# Build hygiene: treat warnings as errors for schema-sanitizer targets. Default
-# is strict in CI, tolerant locally.
-set(_SCHEMA_SANITIZER_WERROR_DEFAULT OFF)
-if(DEFINED ENV{CI} OR DEFINED ENV{GITHUB_ACTIONS})
-  set(_SCHEMA_SANITIZER_WERROR_DEFAULT ON)
-endif()
+# Build hygiene: warnings are errors by default in every build. Callers may
+# still opt out explicitly through the CMake cache option.
 option(SCHEMA_SANITIZER_ENABLE_WERROR
-       "Treat compiler warnings as errors for schema-sanitizer targets"
-       ${_SCHEMA_SANITIZER_WERROR_DEFAULT})
+       "Treat compiler warnings as errors for schema-sanitizer targets" ON)
 
 # Developer sanitizer mode: none|asan-ubsan.
 set(SCHEMA_SANITIZER_SANITIZER
@@ -84,6 +79,13 @@ option(
   OFF)
 option(SCHEMA_SANITIZER_REQUIRE_ZLIB
        "Require zlib for native Parquet GZIP support" OFF)
+option(SCHEMA_SANITIZER_BUILD_FUZZERS
+       "Build libFuzzer entry points for native parsers" OFF)
+option(SCHEMA_SANITIZER_ENABLE_COVERAGE
+       "Build native targets with LLVM source coverage instrumentation" OFF)
+set(SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN
+    "schema-sanitizer-%p.profraw"
+    CACHE STRING "LLVM raw profile path pattern embedded in instrumented targets")
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerTargetOptions.cmake")
 
@@ -106,15 +108,12 @@ endif()
 # on the Arrow C Data / C Stream ABIs through the vendored NanoArrow C header.
 
 # ---- Optional compression ---------------------------------------------------
-# Native Parquet output can use zlib for GZIP page compression when available.
-# Keep this optional so source builds remain portable on minimal systems.
-find_package(ZLIB QUIET)
-if(SCHEMA_SANITIZER_REQUIRE_ZLIB AND NOT ZLIB_FOUND)
-  message(
-    FATAL_ERROR
-      "SCHEMA_SANITIZER_REQUIRE_ZLIB=ON but zlib was not found; published wheels require native Parquet GZIP support"
-  )
-endif()
+# GZIP is available through the same zlib API on every supported platform.
+# Windows defaults to the pinned static provider; release wheels force that
+# provider on every OS for bit-for-bit dependency parity.
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerCompression.cmake")
+schema_sanitizer_resolve_zlib(SCHEMA_SANITIZER_ZLIB_TARGET
+                              SCHEMA_SANITIZER_ZLIB_PROVIDER_RESOLVED)
 
 # ---- Python discovery -------------------------------------------------------
 # Python is required to build the ABI3 extension module.
@@ -164,6 +163,7 @@ foreach(_schema_sanitizer_target sanitize_core
   schema_sanitizer_enable_warnings(${_schema_sanitizer_target})
   schema_sanitizer_enable_repro(${_schema_sanitizer_target})
   schema_sanitizer_add_sanitizer(${_schema_sanitizer_target})
+  schema_sanitizer_add_coverage(${_schema_sanitizer_target})
   schema_sanitizer_enable_clang_tidy(${_schema_sanitizer_target})
   target_include_directories(${_schema_sanitizer_target} PRIVATE cpp/src
                                                                  cpp/thirdparty)
@@ -172,9 +172,38 @@ endforeach()
 # Link
 target_link_libraries(${_schema_sanitizer_pymod_target} PRIVATE sanitize_core)
 
-if(ZLIB_FOUND)
+if(SCHEMA_SANITIZER_ZLIB_TARGET)
   target_compile_definitions(sanitize_core PRIVATE SCHEMA_SANITIZER_HAS_ZLIB=1)
-  target_link_libraries(sanitize_core PUBLIC ZLIB::ZLIB)
+  target_link_libraries(sanitize_core PUBLIC ${SCHEMA_SANITIZER_ZLIB_TARGET})
+endif()
+
+if(SCHEMA_SANITIZER_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "SCHEMA_SANITIZER_BUILD_FUZZERS requires Clang/libFuzzer")
+  endif()
+
+  function(schema_sanitizer_add_fuzzer target source)
+    add_executable(${target} ${source} cpp/fuzz/sanitizer_runtime_defaults.cc)
+    target_compile_features(${target} PRIVATE cxx_std_23)
+    set_target_properties(
+      ${target}
+      PROPERTIES CXX_EXTENSIONS OFF
+                 CXX_SCAN_FOR_MODULES OFF
+                 RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fuzz")
+    target_include_directories(${target} PRIVATE cpp/src cpp/thirdparty)
+    target_link_libraries(${target} PRIVATE sanitize_core)
+    schema_sanitizer_enable_warnings(${target})
+    schema_sanitizer_enable_repro(${target})
+    schema_sanitizer_add_sanitizer(${target})
+    target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
+    target_link_options(${target} PRIVATE -fsanitize=fuzzer)
+  endfunction()
+
+  schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_json cpp/fuzz/fuzz_json.cc)
+  schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_csv cpp/fuzz/fuzz_csv.cc)
+  schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_xml cpp/fuzz/fuzz_xml.cc)
+  schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_parquet
+                               cpp/fuzz/fuzz_parquet.cc)
 endif()
 
 # Install extension into the schema_sanitizer package.

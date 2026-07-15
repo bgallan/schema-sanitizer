@@ -203,6 +203,7 @@ def execution_context_to_sink(
             source=source_name,
             format_name=format_name,
             input_text_encoding=input_text_encoding,
+            memory_limit_bytes=memory_limit_bytes,
         )
         if format_name == "python":
             raw = call_core(context._raw.to_sink_python, sink, native_data, prepared)

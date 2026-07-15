@@ -3,37 +3,41 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 
 #include "sanitize/core/status.hh"
+
+namespace sanitize::internal {
+class MemoryPool;
+}
 
 namespace sanitize {
 
 // A shared execution boundary for ingest operations.
-//
-// This owns runtime state for ingest operations.
 class ExecutionContext {
 public:
   using InterruptCheck = std::function<sanitize::Status()>;
 
-  // Creates an ExecutionContext.
   ExecutionContext();
-  // Destroys the ExecutionContext.
   ~ExecutionContext() = default;
 
-  // Disables copying execution contexts.
   ExecutionContext(const ExecutionContext &) = delete;
-  // Disables copy assignment.
   ExecutionContext &operator=(const ExecutionContext &) = delete;
 
-  // Returns the runtime memory pool handle.
-  static void *memory_pool_handle() noexcept;
+  // Returns the context-scoped aggregate memory pool handle.
+  [[nodiscard]] void *memory_pool_handle() const noexcept;
 
-  // Installs a cooperative interrupt check for long-running work.
+  // Creates an independent operation-scoped pool. A positive limit is a hard
+  // quota for allocations routed through this pool; the context pool still
+  // aggregates current and peak usage across concurrent operations.
+  [[nodiscard]] std::shared_ptr<void>
+  make_operation_memory_pool_handle(int64_t limit_bytes) const;
+
   void set_interrupt_check(InterruptCheck check);
-  // Returns cancellation when the installed interrupt check requests it.
   [[nodiscard]] sanitize::Status CheckInterrupt() const;
 
 private:
+  std::shared_ptr<sanitize::internal::MemoryPool> memory_pool_;
   InterruptCheck interrupt_check_;
 };
 

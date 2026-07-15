@@ -182,7 +182,8 @@ int schema_sanitizer_context_to_registry_sink_path(
     return rc;
 
   auto src_r = sanitize::chunk_source_from_path_with_encoding(
-      std::string(input_path), prep->spec.input_text_encoding);
+      std::string(input_path), prep->spec.input_text_encoding,
+      prep->spec.memory_limit_bytes);
   if (!src_r.ok()) {
     return set_error(out_error, src_r.status().ToString(),
                      code_for_status(src_r.status()));

@@ -20,6 +20,7 @@ class CsvRecordSpanScanner;
 inline constexpr int64_t kDefaultCsvChunkBytes = 1024LL * 1024LL;
 inline constexpr std::size_t kMaxCsvRecordBytes =
     static_cast<std::size_t>(256) * 1024u * 1024u;
+inline constexpr std::size_t kMaxCsvRecordSegments = 65'536;
 
 class CsvStreamingScanner {
 public:
@@ -35,6 +36,7 @@ private:
     std::string_view view;
   };
 
+  void clear_segments() noexcept;
   sanitize::Status ensure_chunk();
   sanitize::Status refill();
   void consume_pending_lf() noexcept;

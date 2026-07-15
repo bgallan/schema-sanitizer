@@ -35,12 +35,17 @@ def test_partition_execution_has_one_bounded_owner() -> None:
 
 
 def test_native_stream_decoders_are_grouped_by_data_model() -> None:
-    """Native decoders stay cohesive without returning to per-codec fragments."""
+    """Native decoders stay cohesive without returning to per-codec fragments.
+
+    Binary list leaves have a separate owner because their offset/value-buffer
+    lifecycle differs from fixed-width list leaves and scalar binary columns.
+    """
     package = ROOT / "cpp/src/internal/parquet/footer_reader/native_stream/decode"
     assert {path.name for path in package.glob("*.cc.inc")} == {
         "native_stream_binary_columns.cc.inc",
         "native_stream_dictionary_binary_columns.cc.inc",
         "native_stream_dictionary_fixed_columns.cc.inc",
+        "native_stream_list_binary_columns.cc.inc",
         "native_stream_list_columns.cc.inc",
         "native_stream_scalar_columns.cc.inc",
     }

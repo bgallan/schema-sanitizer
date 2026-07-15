@@ -1,0 +1,72 @@
+---
+name: Scheduled benchmarks
+on:
+  schedule:
+    - cron: '30 3 * * 1'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install benchmark environment
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U '.[pyarrow]'
+      - name: Run stable synthetic workload set
+        run: |
+          mkdir -p benchmark-results
+          python benchmarks/bench_ingest.py \
+            --rows 25000 \
+            --width 32 \
+            --warmups 2 \
+            --repeats 7 \
+            --case all \
+            --json-output benchmark-results/results.json \
+            | tee benchmark-results/console.txt
+      - name: Download previous successful baseline
+        id: baseline
+        continue-on-error: true
+        shell: bash
+        run: |
+          printf '%s' '${{ github.token }}' | gh auth login --with-token
+          RUN_ID=$(gh run list \
+            --workflow benchmarks.yml \
+            --branch main \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')
+          if [[ -z "${RUN_ID}" ]]; then
+            exit 0
+          fi
+          mkdir -p previous-benchmark
+          gh run download "${RUN_ID}" \
+            --name benchmark-results \
+            --dir previous-benchmark
+      - name: Compare with historical baseline
+        shell: bash
+        run: |
+          BASELINE=$(find previous-benchmark -name results.json -print -quit 2>/dev/null || true)
+          if [[ -z "${BASELINE}" ]]; then
+            echo "No previous benchmark artifact is available yet." \
+              | tee benchmark-results/comparison.md
+            exit 0
+          fi
+          python benchmarks/compare_results.py \
+            benchmark-results/results.json \
+            "${BASELINE}" \
+            --output benchmark-results/comparison.md
+          cat benchmark-results/comparison.md
+      - uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-results
+          path: benchmark-results/
+          retention-days: 90

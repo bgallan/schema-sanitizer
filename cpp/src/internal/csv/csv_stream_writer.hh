@@ -27,7 +27,8 @@ public:
 };
 
 // Writes all batches from an Arrow C stream as CSV.
-Result<WriteStats> write_stream(ArrowArrayStream *stream, Output &out_file);
+Result<WriteStats> write_stream(ArrowArrayStream *stream, Output &out_file,
+                                std::int64_t memory_limit_bytes);
 
 // Returns whether an Arrow C schema can be serialized by the native CSV writer.
 bool schema_is_supported(const ArrowSchema &schema);

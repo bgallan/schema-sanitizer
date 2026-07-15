@@ -4,6 +4,8 @@
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/json_encoding/token_writer.hh"
+#include "internal/memory/memory_budget.hh"
+#include "internal/memory/memory_pool.hh"
 #include "internal/string_lookup.hh"
 
 #include "nanoarrow/nanoarrow.h"
@@ -74,6 +76,7 @@ namespace {
 
 #include "native_stream/decode/native_stream_scalar_columns.cc.inc"
 #include "native_stream/decode/native_stream_list_columns.cc.inc"
+#include "native_stream/decode/native_stream_list_binary_columns.cc.inc"
 #include "native_stream/decode/native_stream_binary_columns.cc.inc"
 #include "native_stream/decode/native_stream_dictionary_binary_columns.cc.inc"
 #include "native_stream/decode/native_stream_dictionary_fixed_columns.cc.inc"
@@ -86,6 +89,7 @@ namespace {
 #include "native_stream/materialization/native_stream_validity.cc.inc"
 #include "native_stream/materialization/native_stream_recursive_containers.cc.inc"
 #include "native_stream/materialization/native_stream_recursive_children.cc.inc"
+#include "native_stream/materialization/row_group/native_stream_retained_budget.cc.inc"
 #include "native_stream/materialization/row_group/native_stream_row_group.cc.inc"
 } // namespace
 

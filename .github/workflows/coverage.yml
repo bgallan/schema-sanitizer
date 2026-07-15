@@ -1,0 +1,136 @@
+---
+name: Coverage reports
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  python-branch-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install package and coverage tools
+        run: |
+          python -m pip install -U pip coverage '.[dev,pyarrow]'
+      - name: Collect contextual Python branch coverage
+        run: |
+          coverage erase
+          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=regular -m pytest -q \
+            tests/test_api.py \
+            tests/test_input_python_and_local.py \
+            tests/test_input_xml_and_public_api.py \
+            tests/test_sinks_csv_jsonl.py
+          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=adversarial -m pytest -q \
+            tests/test_contracts.py \
+            tests/test_runtime_lifecycle_part01.py \
+            tests/test_runtime_lifecycle_part02.py \
+            tests/test_runtime_lifecycle_part03.py \
+            tests/test_streaming_writer_lifecycle.py \
+            tests/test_async_remote_scheduler.py \
+            tests/test_high_risk_coverage_gaps.py \
+            tests/test_parquet_native_recursive_fuzz_runtime.py
+          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=integration -m pytest -q \
+            tests/test_input_remote_staging_part01.py \
+            tests/test_input_remote_staging_part02.py \
+            tests/test_input_remote_staging_part03.py \
+            tests/test_cloud_emulator_configuration.py \
+            tests/test_bigquery_integration.py
+          coverage combine
+          coverage report
+          coverage html --show-contexts -d coverage-python-html
+          coverage xml -o coverage-python.xml
+          coverage json -o coverage-python.json
+          python meta/ci/report_risk_coverage.py coverage-python.json \
+            --output coverage-python-risk-gaps.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-branch-coverage
+          path: |
+            coverage-python-html/
+            coverage-python.xml
+            coverage-python.json
+            coverage-python-risk-gaps.txt
+
+  native-llvm-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install instrumented package
+        run: |
+          python -m pip install -U pip ninja 'cmake>=4.3,<4.4' scikit-build-core==0.11.6
+          python -m pip install -U pytest pyarrow
+          mkdir -p coverage-native/raw
+          python -m pip install --no-build-isolation -v \
+            --config-settings=cmake.define.CMAKE_C_COMPILER=clang \
+            --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++ \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_COVERAGE=ON \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN='${{ github.workspace }}/coverage-native/raw/schema-sanitizer-%p.profraw' \
+            .
+      - name: Run native coverage suites
+        shell: bash
+        run: |
+          mkdir -p coverage-native/raw
+          pytest -q \
+            tests/test_api.py \
+            tests/test_input_xml_and_public_api.py \
+            tests/test_sinks_csv_jsonl.py
+          pytest -q \
+            tests/test_contracts.py \
+            tests/test_runtime_lifecycle_part01.py \
+            tests/test_runtime_lifecycle_part02.py \
+            tests/test_runtime_lifecycle_part03.py \
+            tests/test_streaming_writer_lifecycle.py \
+            tests/test_async_remote_scheduler.py \
+            tests/test_high_risk_coverage_gaps.py \
+            tests/test_parquet_native_recursive_fuzz_runtime.py
+          pytest -q \
+            tests/test_input_remote_staging_part01.py \
+            tests/test_input_remote_staging_part02.py \
+            tests/test_input_remote_staging_part03.py \
+            tests/test_cloud_emulator_configuration.py \
+            tests/test_bigquery_integration.py
+      - name: Render LLVM reports
+        shell: bash
+        run: |
+          EXTENSION=$(python - <<'PY'
+          import schema_sanitizer._core_abi3 as core
+          print(core.__file__)
+          PY
+          )
+          for suite in regular adversarial integration; do
+            llvm-profdata merge -sparse coverage-native/raw/${suite}-*.profraw \
+              -o coverage-native/${suite}.profdata
+            llvm-cov report "${EXTENSION}" \
+              -instr-profile=coverage-native/${suite}.profdata \
+              > coverage-native/${suite}-summary.txt
+          done
+          llvm-profdata merge -sparse coverage-native/raw/*.profraw \
+            -o coverage-native/combined.profdata
+          llvm-cov show "${EXTENSION}" \
+            -instr-profile=coverage-native/combined.profdata \
+            -format=html \
+            -show-branches=count \
+            -output-dir=coverage-native/html
+          llvm-cov report "${EXTENSION}" \
+            -instr-profile=coverage-native/combined.profdata \
+            > coverage-native/combined-summary.txt
+          cat coverage-native/combined-summary.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-llvm-coverage
+          path: coverage-native/

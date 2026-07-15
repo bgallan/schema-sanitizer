@@ -67,7 +67,8 @@ int schema_sanitizer_context_to_sink_path(
   if (rc != SCHEMA_SANITIZER_STATUS_OK)
     return rc;
   auto source = sanitize::chunk_source_from_path_with_encoding(
-      std::string(input_path), prepared->spec.input_text_encoding);
+      std::string(input_path), prepared->spec.input_text_encoding,
+      prepared->spec.memory_limit_bytes);
   if (!source.ok()) {
     return set_error(out_error, source.status().ToString(),
                      code_for_status(source.status()));

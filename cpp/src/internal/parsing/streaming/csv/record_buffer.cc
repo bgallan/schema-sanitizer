@@ -16,6 +16,10 @@ sanitize::Status CsvRecordSpanScanner::push_segment(std::size_t end_pos) {
       total_bytes_ > kMaxCsvRecordBytes - part.size()) {
     return sanitize::Status::Invalid("CSV record exceeds max buffered size");
   }
+  if (scanner_.segments_.size() >= kMaxCsvRecordSegments) {
+    return sanitize::Status::Invalid(
+        "CSV record spans too many input chunks");
+  }
   total_bytes_ += part.size();
   scanner_.segments_.push_back(CsvStreamingScanner::Segment{
       .owner = segment_owner_,
@@ -55,6 +59,9 @@ sanitize::Result<TextSlice> CsvRecordSpanScanner::materialize_segments() {
                 segment.view.size());
     written += segment.view.size();
   }
+  // The arena copy owns the completed record. Drop chunk owners now rather
+  // than retaining every contributing input chunk until the next record.
+  scanner_.clear_segments();
   return make_text_slice(std::string_view(destination, total_bytes_),
                          record_start_abs_, {}, record_source_file_owner_,
                          record_source_file_, record_source_index_,

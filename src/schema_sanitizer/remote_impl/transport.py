@@ -8,7 +8,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from ..core_impl.async_scheduler import read_float_env, read_int_env
+from ..core_impl.memory_budget import memory_budget
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
 
@@ -62,12 +62,16 @@ async def write_response_to_file(response: Any, *, uri: str, local_path: str) ->
             file_handle.write(chunk)
 
 
-async def open_aiohttp_session(headers: dict[str, str] | None = None) -> Any:
-    """Open an aiohttp session with the configured timeout and concurrency."""
+async def open_aiohttp_session(
+    headers: dict[str, str] | None = None,
+    *,
+    memory_limit_bytes: int | None = None,
+) -> Any:
+    """Open an aiohttp session using the per-operation memory budget."""
     aiohttp = import_module("aiohttp")
-
-    timeout = aiohttp.ClientTimeout(total=read_float_env("SCHEMA_SANITIZER_ASYNC_TIMEOUT", 120.0))
-    concurrency = read_int_env("SCHEMA_SANITIZER_ASYNC_CONCURRENCY", 64)
+    budget = memory_budget(memory_limit_bytes)
+    timeout = aiohttp.ClientTimeout(total=budget.async_timeout_seconds)
+    concurrency = budget.async_concurrency
     connector = aiohttp.TCPConnector(
         limit=concurrency,
         limit_per_host=concurrency,
@@ -76,16 +80,18 @@ async def open_aiohttp_session(headers: dict[str, str] | None = None) -> Any:
     return aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers)
 
 
-async def download_http_file(uri: str, local_path: str) -> None:
+async def download_http_file(
+    uri: str, local_path: str, *, memory_limit_bytes: int | None = None
+) -> None:
     """Download one HTTP(S) object to a local file."""
-    async with await open_aiohttp_session() as session:
+    async with await open_aiohttp_session(memory_limit_bytes=memory_limit_bytes) as session:
         async with session.get(uri) as response:
             await write_response_to_file(response, uri=uri, local_path=local_path)
 
 
-async def http_file_exists(uri: str) -> bool:
+async def http_file_exists(uri: str, *, memory_limit_bytes: int | None = None) -> bool:
     """Return whether one HTTP(S) object appears to exist."""
-    async with await open_aiohttp_session() as session:
+    async with await open_aiohttp_session(memory_limit_bytes=memory_limit_bytes) as session:
         async with session.head(uri) as response:
             if response.status in {200, 204}:
                 return True
@@ -101,10 +107,14 @@ async def http_file_exists(uri: str) -> bool:
             )
 
 
-async def upload_http_file(local_path: str, uri: str) -> None:
+async def upload_http_file(
+    local_path: str, uri: str, *, memory_limit_bytes: int | None = None
+) -> None:
     """Upload a local file to an HTTP(S) endpoint with PUT."""
     headers = {"Content-Type": content_type_for_uri(uri)}
-    async with await open_aiohttp_session(headers) as session:
+    async with await open_aiohttp_session(
+        headers, memory_limit_bytes=memory_limit_bytes
+    ) as session:
         with Path(local_path).open("rb") as file_handle:
             async with session.put(uri, data=file_handle) as response:
                 if response.status not in {200, 201, 202, 204}:

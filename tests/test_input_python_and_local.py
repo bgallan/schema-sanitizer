@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from input_contract_shared import *  # noqa: F403
 
 
@@ -29,6 +31,48 @@ def test_python_rows_jsonl_reader_is_replayable_and_chunked() -> None:
     assert first == b'{"a":1}'
     assert second == '\n{"a":"ñ"}\n'.encode()
     assert reader.read(1024) == first + second
+
+
+def test_python_rows_generator_is_spooled_and_replayable() -> None:
+    """Verify one-shot iterables are replayed without retaining all row objects."""
+    require_native()
+    iterations = 0
+
+    def rows() -> Iterator[dict[str, int]]:
+        """Yield rows once while tracking generator traversal."""
+        nonlocal iterations
+        iterations += 1
+        yield from ({"a": index} for index in range(5_000))
+
+    reader = PythonRowsJsonlByteReader(rows())
+    first = reader.read(257)
+    assert iterations == 1
+    while reader.read(4096):
+        pass
+    reader.seek(0)
+
+    assert reader.read(257) == first
+    assert iterations == 1
+
+
+def test_python_rows_generator_spools_incrementally() -> None:
+    """A small first read must not consume an entire one-shot iterable."""
+    require_native()
+    yielded = 0
+
+    def rows() -> Iterator[dict[str, int]]:
+        """Track how much of the generator has been requested."""
+        nonlocal yielded
+        for index in range(10_000):
+            yielded += 1
+            yield {"a": index}
+
+    reader = PythonRowsJsonlByteReader(rows())
+    assert reader.read(32)
+    assert 0 < yielded < 10_000
+    assert len(reader._iterable_chunk) <= reader._ENCODE_ROWS_PER_CHUNK
+    reader.seek(0)
+    assert yielded == 10_000
 
 
 def test_python_rows_jsonl_reader_rejects_unsupported_values_without_fallback() -> None:
@@ -305,6 +349,7 @@ def test_read_json_folder_rejects_missing_or_empty_folder(tmp_path) -> None:
 
 def test_read_json_folder_reports_invalid_json_file(tmp_path) -> None:
     """Verify read json folder reports invalid source file path."""
+    pytest.importorskip("pyarrow")
     folder = tmp_path / "bad"
     folder.mkdir()
     bad = folder / "bad.json"
@@ -324,7 +369,7 @@ def test_read_json_folder_memory_limit_rejects_large_document(tmp_path) -> None:
     )
 
     with pytest.raises(ss.SchemaSanitizerResourceError) as excinfo:
-        read_test_json_folder(folder, batch_memory_limit_bytes=128)
+        read_test_json_folder(folder, memory_limit_bytes=128)
 
     err = excinfo.value
     assert err.detail is not None
@@ -335,6 +380,7 @@ def test_read_json_folder_memory_limit_rejects_large_document(tmp_path) -> None:
 
 def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypatch) -> None:
     """Verify remote folder staging rejects oversized children with unknown size."""
+    pytest.importorskip("pyarrow")
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import routing as remote_routing
     from schema_sanitizer.remote_impl import staging as remote_staging
@@ -349,9 +395,9 @@ def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypa
         del client, file
         Path(local_path).write_bytes(b"x" * 10_000)
 
-    async def fake_client(files):
+    async def fake_client(files, *, memory_limit_bytes):
         """Return a reusable fake provider context."""
-        del files
+        del files, memory_limit_bytes
         return object()
 
     async def fake_close(client):
@@ -364,7 +410,7 @@ def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypa
     monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)
 
     with pytest.raises(ss.SchemaSanitizerResourceError) as excinfo:
-        read_test_json_folder("s3://bucket/events/", batch_memory_limit_bytes=128)
+        read_test_json_folder("s3://bucket/events/", memory_limit_bytes=128)
 
     err = excinfo.value
     assert err.detail is not None
@@ -506,7 +552,7 @@ def test_read_xml_folder_memory_limit_rejects_large_document(tmp_path) -> None:
     )
 
     with pytest.raises(ss.SchemaSanitizerResourceError) as excinfo:
-        read_test_xml_folder(folder, batch_memory_limit_bytes=128)
+        read_test_xml_folder(folder, memory_limit_bytes=128)
 
     err = excinfo.value
     assert err.detail is not None
@@ -540,3 +586,17 @@ def test_discovered_file_rejects_known_oversize_before_opening() -> None:
             stage="directory read",
         )
     assert not opened
+
+
+def test_python_rows_generator_rejects_replay_spool_limit() -> None:
+    """One-shot Python iterables must not grow replay storage without a bound."""
+    require_native()
+    reader = PythonRowsJsonlByteReader(
+        ({"payload": "x" * 256} for _ in range(100)),
+        memory_limit_bytes=256,
+    )
+
+    with pytest.raises(RuntimeError, match="max_replay_spool_bytes limit exceeded"):
+        while reader.read(4096):
+            pass
+    reader.close()

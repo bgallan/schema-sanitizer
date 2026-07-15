@@ -33,6 +33,10 @@ struct PreparedIngest {
   // after preparation.
   ExecutionContext *ctx = nullptr;
 
+  // Operation-scoped pool with an independent quota. It delegates to the
+  // context pool, which aggregates concurrent operation usage.
+  std::shared_ptr<void> operation_memory_pool;
+
   std::shared_ptr<const CompiledPlan> plan;
   PreparedOptionsPtr opts;
   std::shared_ptr<IngestDiagnostics> diagnostics;

@@ -58,19 +58,21 @@ private:
 };
 
 // Writes a raw Arrow C stream pointer to a local Parquet path.
-sanitize::Status parquet_write_arrow_stream_to_path(ArrowArrayStream *stream,
-                                                    std::string path) {
+sanitize::Status parquet_write_arrow_stream_to_path(
+    ArrowArrayStream *stream, std::string path,
+    const parquet::WriterOptions &options) {
   FileParquetOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError(
         "native Parquet writer: failed opening output");
   }
-  return parquet::write_stream(stream, output);
+  return parquet::write_stream(stream, output, options);
 }
 
 // Writes a Python Arrow C stream exporter to a local Parquet path.
-sanitize::Status parquet_write_stream_to_path(PyObject *stream_obj,
-                                              std::string path) {
+sanitize::Status parquet_write_stream_to_path(
+    PyObject *stream_obj, std::string path,
+    const parquet::WriterOptions &options) {
   PyObject *capsule = nullptr;
   ArrowArrayStream *stream = nullptr;
   if (!acquire_arrow_stream(stream_obj, &capsule, &stream)) {
@@ -79,7 +81,7 @@ sanitize::Status parquet_write_stream_to_path(PyObject *stream_obj,
   }
   std::unique_ptr<PyObject, decltype(&Py_DECREF)> capsule_owner(capsule,
                                                                 Py_DECREF);
-  return parquet_write_arrow_stream_to_path(stream, std::move(path));
+  return parquet_write_arrow_stream_to_path(stream, std::move(path), options);
 }
 
 } // namespace
@@ -88,8 +90,12 @@ sanitize::Status parquet_write_stream_to_path(PyObject *stream_obj,
 PyObject *py_parquet_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "OO:parquet_stream_write", &stream_obj,
-                        &path_obj)) {
+  const char *compression = nullptr;
+  int gzip_level = -1;
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "OOsiL:parquet_stream_write", &stream_obj,
+                        &path_obj, &compression, &gzip_level,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -100,8 +106,14 @@ PyObject *py_parquet_stream_write(PyObject *, PyObject *args) {
     return nullptr;
   }
 
+  parquet::WriterOptions options{
+      .memory_limit_bytes = memory_limit_bytes,
+      .compression = compression ? compression : "",
+      .gzip_level = gzip_level,
+  };
   auto st = parquet_write_stream_to_path(
-      stream_obj, std::string(path, static_cast<std::size_t>(path_len)));
+      stream_obj, std::string(path, static_cast<std::size_t>(path_len)),
+      options);
   if (!st.ok()) {
     PyErr_SetString(PyExc_RuntimeError, st.message().c_str());
     return nullptr;
@@ -117,10 +129,15 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *all_row_columns = nullptr;
   PyObject *row_span_columns = nullptr;
   PyObject *timestamp_columns = nullptr;
-  if (!PyArg_ParseTuple(args, "OOOOOO:parquet_stream_write_with_metadata",
+  const char *compression = nullptr;
+  int gzip_level = -1;
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args,
+                        "OOOOOOsiL:parquet_stream_write_with_metadata",
                         &stream_obj, &path_obj, &first_row_columns,
                         &all_row_columns, &row_span_columns,
-                        &timestamp_columns)) {
+                        &timestamp_columns, &compression, &gzip_level,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -133,12 +150,18 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
 
   ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns);
+      timestamp_columns, memory_limit_bytes);
   if (!wrapped) {
     return nullptr;
   }
+  parquet::WriterOptions options{
+      .memory_limit_bytes = memory_limit_bytes,
+      .compression = compression ? compression : "",
+      .gzip_level = gzip_level,
+  };
   auto st = parquet_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)));
+      wrapped, std::string(path, static_cast<std::size_t>(path_len)),
+      options);
   schema_sanitizer_stream_free(wrapped);
   if (!st.ok()) {
     PyErr_SetString(PyExc_RuntimeError, st.message().c_str());

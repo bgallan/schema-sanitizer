@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -22,11 +23,14 @@ public:
 
 private:
   static constexpr std::size_t kVectorCacheLimit = 32;
+  static constexpr std::size_t kMapCacheEntryLimit = 4096;
+  static constexpr std::size_t kCacheKeyByteLimit = 1U << 20;
 
   const CompiledPlan *plan_ = nullptr;
   std::string field_name_policy_;
   mutable std::vector<std::pair<std::string, bool>> cache_;
   mutable StringLookupMap<bool> cache_map_;
+  mutable std::size_t cache_key_bytes_ = 0;
 };
 
 } // namespace sanitize::internal

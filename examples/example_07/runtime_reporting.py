@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from contextlib import contextmanager
 from time import perf_counter
 from typing import Any
@@ -22,34 +21,6 @@ from schema_sanitizer.pipeline.types import PartitionRunPlan as DateRunPlan
 from schema_sanitizer.pipeline.types import PartitionRunResult as DateRunResult
 
 LOGGER = logging.getLogger("gcs_input_to_silver_parquet")
-
-
-def _read_int_env(name: str, default: int) -> int:
-    """Read a positive integer from an environment variable."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-
-    try:
-        value = int(raw)
-    except ValueError:
-        LOGGER.warning("Ignoring invalid %s=%r. Using default %d.", name, raw, default)
-        return default
-
-    if value <= 0:
-        LOGGER.warning("Ignoring non-positive %s=%r. Using default %d.", name, raw, default)
-        return default
-
-    return value
-
-
-def _read_bool_env(name: str, default: bool = False) -> bool:
-    """Read a boolean from an environment variable."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _format_duration(seconds: float) -> str:
@@ -284,7 +255,7 @@ def _print_stats_summary(
         runs_to_print = _sample_items(completed_runs, sample_size)
         print(
             f"Showing {len(runs_to_print)} of {len(completed_runs)} run stat block(s). "
-            "Set PIPELINE_PRINT_RUN_DETAILS=1 to print all."
+            "Use the script option that enables full run details to print all."
         )
 
     for run_result in runs_to_print:

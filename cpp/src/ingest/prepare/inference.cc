@@ -12,6 +12,7 @@
 #include "internal/inference/schema.hh"
 #include "internal/inference/statistics/state.hh"
 #include "internal/materialization/batch_sizing.hh"
+#include "internal/memory/pool_resource.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/row_stream.hh"
 
@@ -69,8 +70,10 @@ sanitize::Result<LogicalSchema>
 infer_schema_from_frontend(FrontendHandle &frontend,
                            const PreparedOptions &opts,
                            IngestDiagnostics *diagnostics, bool *out_consumed,
-                           ExecutionContext *execution_context) {
-  internal::InferenceContext ctx;
+                           ExecutionContext *execution_context,
+                           void *memory_pool_handle) {
+  internal::PoolResource pool_resource(memory_pool_handle);
+  internal::InferenceContext ctx(&pool_resource);
   ctx.set_default_key(opts.spec.default_key_name);
   InferenceProgress progress;
 

@@ -20,27 +20,51 @@ void append_rle_run_u32(std::string &out, std::int64_t run_length,
   }
 }
 
-std::string encode_dictionary_indices(const std::vector<std::uint32_t> &indices,
-                                      std::size_t dictionary_size) {
-  const auto bit_width = dictionary_bit_width(dictionary_size);
-  std::string out;
-  out.push_back(static_cast<char>(bit_width));
-  if (indices.empty()) {
-    return out;
-  }
-  auto current = indices.front();
-  std::int64_t run_length = 1;
-  for (std::size_t i = 1; i < indices.size(); ++i) {
-    if (indices[i] == current) {
-      ++run_length;
-      continue;
+template <class Fn>
+bool for_each_dictionary_item(const LeafColumn &column,
+                              jsonl::JsonlKind kind,
+                              std::string_view values, Fn &&fn) {
+  if (is_byte_array_kind(kind)) {
+    std::size_t offset = 0;
+    while (offset < values.size()) {
+      const auto item_start = offset;
+      if (values.size() - offset < sizeof(std::uint32_t)) {
+        return false;
+      }
+      const auto size = static_cast<std::size_t>(read_u32_le(values, offset));
+      offset += sizeof(std::uint32_t);
+      if (values.size() - offset < size) {
+        return false;
+      }
+      offset += size;
+      if (!fn(values.substr(item_start, offset - item_start))) {
+        return false;
+      }
     }
-    append_rle_run_u32(out, run_length, current, bit_width);
-    current = indices[i];
-    run_length = 1;
+    return true;
   }
-  append_rle_run_u32(out, run_length, current, bit_width);
-  return out;
+
+  const auto width = fixed_dictionary_value_width(*column.node, kind);
+  if (!width || *width == 0 || values.size() % *width != 0) {
+    return false;
+  }
+  for (std::size_t offset = 0; offset < values.size(); offset += *width) {
+    if (!fn(values.substr(offset, *width))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::size_t estimated_dictionary_scratch_bytes(std::size_t entry_count,
+                                               std::size_t value_bytes) {
+  constexpr std::size_t kEstimatedEntryOverhead =
+      sizeof(std::string_view) +
+      sizeof(std::pair<const std::string_view, std::uint32_t>) +
+      4U * sizeof(void *);
+  return saturating_size_add(
+      value_bytes,
+      saturating_size_multiply(entry_count, kEstimatedEntryOverhead));
 }
 
 std::optional<DictionaryEncodingData>
@@ -53,73 +77,53 @@ try_dictionary_encode_column(const LeafColumn &column,
     return std::nullopt;
   }
 
-  std::vector<std::uint32_t> indices;
   std::vector<std::string_view> dictionary;
   internal::BorrowedStringLookupMap<std::uint32_t> index_by_value;
   std::size_t dictionary_bytes = 0;
+  std::size_t value_count = 0;
 
-  auto append_item = [&](std::string_view current) -> bool {
-    const auto found = index_by_value.find(current);
-    if (found != index_by_value.end()) {
-      indices.push_back(found->second);
+  constexpr std::size_t kInitialUniqueReserve = 4096;
+  const auto estimated_count = is_byte_array_kind(kind)
+                                   ? std::max<std::size_t>(
+                                         1U, values.size() /
+                                                 (sizeof(std::uint32_t) + 4U))
+                                   : values.size();
+  const auto initial_unique_capacity =
+      std::min(estimated_count, kInitialUniqueReserve);
+  dictionary.reserve(initial_unique_capacity);
+  index_by_value.reserve(initial_unique_capacity);
+
+  const auto collect_item = [&](std::string_view current) -> bool {
+    value_count = saturating_size_add(value_count, 1U);
+    if (value_count == std::numeric_limits<std::size_t>::max()) {
+      return false;
+    }
+    if (index_by_value.contains(current)) {
       return true;
     }
-    if (dictionary.size() >=
-        static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    if (dictionary.size() >= kMaxDictionaryCandidateEntries ||
+        dictionary.size() >=
+            static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+      return false;
+    }
+    const auto next_dictionary_bytes =
+        saturating_size_add(dictionary_bytes, current.size());
+    const auto next_entry_count = dictionary.size() + 1U;
+    if (next_dictionary_bytes == std::numeric_limits<std::size_t>::max() ||
+        estimated_dictionary_scratch_bytes(next_entry_count,
+                                           next_dictionary_bytes) >
+            kMaxDictionaryCandidateScratchBytes) {
       return false;
     }
     const auto next_index = static_cast<std::uint32_t>(dictionary.size());
     index_by_value.emplace(current, next_index);
     dictionary.push_back(current);
-    dictionary_bytes += current.size();
-    indices.push_back(next_index);
+    dictionary_bytes = next_dictionary_bytes;
     return true;
   };
 
-  constexpr std::size_t kInitialUniqueReserve = 4096;
-  if (is_byte_array_kind(kind)) {
-    const auto estimated_count =
-        std::max<std::size_t>(1U, values.size() / (sizeof(std::uint32_t) + 4U));
-    const auto initial_unique_capacity =
-        std::min(estimated_count, kInitialUniqueReserve);
-    indices.reserve(estimated_count);
-    dictionary.reserve(initial_unique_capacity);
-    index_by_value.reserve(initial_unique_capacity);
-    std::size_t offset = 0;
-    while (offset < values.size()) {
-      const auto item_start = offset;
-      if (values.size() - offset < sizeof(std::uint32_t)) {
-        return std::nullopt;
-      }
-      const auto size = static_cast<std::size_t>(read_u32_le(values, offset));
-      offset += sizeof(std::uint32_t);
-      if (values.size() - offset < size) {
-        return std::nullopt;
-      }
-      offset += size;
-      if (!append_item(values.substr(item_start, offset - item_start))) {
-        return std::nullopt;
-      }
-    }
-  } else {
-    const auto width = fixed_dictionary_value_width(*column.node, kind);
-    if (!width || *width == 0 || values.size() % *width != 0) {
-      return std::nullopt;
-    }
-    const auto value_count = values.size() / *width;
-    const auto initial_unique_capacity =
-        std::min(value_count, kInitialUniqueReserve);
-    indices.reserve(value_count);
-    dictionary.reserve(initial_unique_capacity);
-    index_by_value.reserve(initial_unique_capacity);
-    for (std::size_t offset = 0; offset < values.size(); offset += *width) {
-      if (!append_item(values.substr(offset, *width))) {
-        return std::nullopt;
-      }
-    }
-  }
-
-  if (dictionary.empty() || dictionary.size() >= indices.size()) {
+  if (!for_each_dictionary_item(column, kind, values, collect_item) ||
+      dictionary.empty() || dictionary.size() >= value_count) {
     return std::nullopt;
   }
 
@@ -129,7 +133,38 @@ try_dictionary_encode_column(const LeafColumn &column,
   for (const auto value : dictionary) {
     out.dictionary_values.append(value);
   }
-  out.encoded_indices = encode_dictionary_indices(indices, dictionary.size());
+
+  const auto bit_width = dictionary_bit_width(dictionary.size());
+  out.encoded_indices.push_back(static_cast<char>(bit_width));
+  std::uint32_t current_index = 0;
+  std::int64_t run_length = 0;
+  const auto encode_item = [&](std::string_view current) -> bool {
+    const auto found = index_by_value.find(current);
+    if (found == index_by_value.end()) {
+      return false;
+    }
+    if (run_length == 0) {
+      current_index = found->second;
+      run_length = 1;
+      return true;
+    }
+    if (found->second == current_index) {
+      ++run_length;
+      return true;
+    }
+    append_rle_run_u32(out.encoded_indices, run_length, current_index,
+                       bit_width);
+    current_index = found->second;
+    run_length = 1;
+    return true;
+  };
+  if (!for_each_dictionary_item(column, kind, values, encode_item)) {
+    return std::nullopt;
+  }
+  if (run_length > 0) {
+    append_rle_run_u32(out.encoded_indices, run_length, current_index,
+                       bit_width);
+  }
   return out;
 }
 
@@ -195,39 +230,42 @@ std::uint64_t nonnegative_i64_difference(std::int64_t high, std::int64_t low) {
          static_cast<std::uint64_t>(-(low + 1)) + 1U;
 }
 
+template <class NextValue>
 std::optional<std::string>
-encode_delta_binary_packed_values(const std::vector<std::int64_t> &values) {
+encode_delta_binary_packed_sequence(std::size_t value_count,
+                                    NextValue &&next_value) {
   constexpr std::size_t kBlockSize = 128;
   constexpr std::size_t kMiniBlockCount = 4;
   constexpr std::size_t kMiniBlockSize = kBlockSize / kMiniBlockCount;
   std::string out;
-  if (values.empty()) {
+  if (value_count == 0) {
     return out;
   }
   append_varint(out, kBlockSize);
   append_varint(out, kMiniBlockCount);
-  append_varint(out, static_cast<std::uint64_t>(values.size()));
-  append_zigzag_varint(out, values.front());
-  if (values.size() == 1) {
+  append_varint(out, static_cast<std::uint64_t>(value_count));
+  auto previous_value = next_value();
+  append_zigzag_varint(out, previous_value);
+  if (value_count == 1) {
     return out;
   }
 
   std::array<std::int64_t, kBlockSize> block_deltas{};
   std::array<std::array<std::uint64_t, kMiniBlockSize>, kMiniBlockCount>
       adjusted{};
-  const auto delta_count = values.size() - 1U;
+  const auto delta_count = value_count - 1U;
   for (std::size_t block_start = 0; block_start < delta_count;
        block_start += kBlockSize) {
     const auto block_count =
         std::min<std::size_t>(kBlockSize, delta_count - block_start);
     auto min_delta = std::numeric_limits<std::int64_t>::max();
     for (std::size_t i = 0; i < block_count; ++i) {
-      const auto value_index = block_start + i + 1U;
-      auto delta =
-          checked_i64_subtract(values[value_index], values[value_index - 1U]);
+      const auto current_value = next_value();
+      auto delta = checked_i64_subtract(current_value, previous_value);
       if (!delta) {
         return std::nullopt;
       }
+      previous_value = current_value;
       block_deltas[i] = *delta;
       min_delta = std::min(min_delta, *delta);
     }
@@ -284,50 +322,6 @@ jsonl::JsonlKind leaf_value_kind(const LeafColumn &column) {
              : column.node->arrow_kind;
 }
 
-std::optional<std::vector<std::int64_t>>
-signed_delta_values_for_column(const LeafColumn &column,
-                               std::string_view values) {
-  const auto kind = leaf_value_kind(column);
-  switch (kind) {
-  case jsonl::JsonlKind::kInt8:
-  case jsonl::JsonlKind::kInt16:
-  case jsonl::JsonlKind::kInt32:
-  case jsonl::JsonlKind::kDate32:
-  case jsonl::JsonlKind::kTime32s: {
-    if (values.empty() || values.size() % sizeof(std::int32_t) != 0) {
-      return std::nullopt;
-    }
-    std::vector<std::int64_t> out;
-    out.reserve(values.size() / sizeof(std::int32_t));
-    for (std::size_t offset = 0; offset < values.size();
-         offset += sizeof(std::int32_t)) {
-      std::int32_t value{};
-      std::memcpy(&value, values.data() + offset, sizeof(value));
-      out.push_back(value);
-    }
-    return out;
-  }
-  case jsonl::JsonlKind::kInt64:
-  case jsonl::JsonlKind::kTimestampMillis:
-  case jsonl::JsonlKind::kTimestampMicros:
-  case jsonl::JsonlKind::kTimestampNanos: {
-    if (values.empty() || values.size() % sizeof(std::int64_t) != 0) {
-      return std::nullopt;
-    }
-    std::vector<std::int64_t> out;
-    out.reserve(values.size() / sizeof(std::int64_t));
-    for (std::size_t offset = 0; offset < values.size();
-         offset += sizeof(std::int64_t)) {
-      std::int64_t value{};
-      std::memcpy(&value, values.data() + offset, sizeof(value));
-      out.push_back(value);
-    }
-    return out;
-  }
-  default:
-    return std::nullopt;
-  }
-}
 
 // Encodes float values with Parquet BYTE_STREAM_SPLIT.
 std::optional<std::string> encode_byte_stream_split(std::string_view values,
@@ -349,14 +343,55 @@ std::optional<std::string> encode_byte_stream_split(std::string_view values,
   return out;
 }
 
+template <class T>
+std::int64_t load_signed_delta_value(std::string_view values,
+                                     std::size_t index) {
+  T value{};
+  std::memcpy(&value, values.data() + index * sizeof(T), sizeof(T));
+  return static_cast<std::int64_t>(value);
+}
+
 std::optional<std::string>
 encode_delta_binary_packed_column(const LeafColumn &column,
                                   std::string_view values) {
-  auto extracted = signed_delta_values_for_column(column, values);
-  if (!extracted || extracted->size() < 2) {
+  const auto kind = leaf_value_kind(column);
+  switch (kind) {
+  case jsonl::JsonlKind::kInt8:
+  case jsonl::JsonlKind::kInt16:
+  case jsonl::JsonlKind::kInt32:
+  case jsonl::JsonlKind::kDate32:
+  case jsonl::JsonlKind::kTime32s: {
+    if (values.empty() || values.size() % sizeof(std::int32_t) != 0) {
+      return std::nullopt;
+    }
+    const auto count = values.size() / sizeof(std::int32_t);
+    if (count < 2) {
+      return std::nullopt;
+    }
+    std::size_t index = 0;
+    return encode_delta_binary_packed_sequence(count, [&] {
+      return load_signed_delta_value<std::int32_t>(values, index++);
+    });
+  }
+  case jsonl::JsonlKind::kInt64:
+  case jsonl::JsonlKind::kTimestampMillis:
+  case jsonl::JsonlKind::kTimestampMicros:
+  case jsonl::JsonlKind::kTimestampNanos: {
+    if (values.empty() || values.size() % sizeof(std::int64_t) != 0) {
+      return std::nullopt;
+    }
+    const auto count = values.size() / sizeof(std::int64_t);
+    if (count < 2) {
+      return std::nullopt;
+    }
+    std::size_t index = 0;
+    return encode_delta_binary_packed_sequence(count, [&] {
+      return load_signed_delta_value<std::int64_t>(values, index++);
+    });
+  }
+  default:
     return std::nullopt;
   }
-  return encode_delta_binary_packed_values(*extracted);
 }
 
 std::optional<std::string>
@@ -364,36 +399,81 @@ encode_delta_length_byte_array(std::string_view values) {
   if (values.empty()) {
     return std::nullopt;
   }
-  std::vector<std::int64_t> lengths;
-  lengths.reserve(values.size() / (sizeof(std::uint32_t) + 4U));
+  std::size_t value_count = 0;
   std::size_t offset = 0;
   while (offset < values.size()) {
     if (values.size() - offset < sizeof(std::uint32_t)) {
       return std::nullopt;
     }
-    const auto size = read_u32_le(values, offset);
+    const auto size = static_cast<std::size_t>(read_u32_le(values, offset));
     offset += sizeof(std::uint32_t);
     if (values.size() - offset < size) {
       return std::nullopt;
     }
-    lengths.push_back(static_cast<std::int64_t>(size));
     offset += size;
+    value_count = saturating_size_add(value_count, 1U);
+    if (value_count == std::numeric_limits<std::size_t>::max()) {
+      return std::nullopt;
+    }
   }
-  if (lengths.size() < 2) {
+  if (value_count < 2) {
     return std::nullopt;
   }
-  auto encoded_lengths = encode_delta_binary_packed_values(lengths);
+
+  offset = 0;
+  auto encoded_lengths = encode_delta_binary_packed_sequence(value_count, [&] {
+    const auto size = static_cast<std::int64_t>(read_u32_le(values, offset));
+    offset += sizeof(std::uint32_t) + static_cast<std::size_t>(size);
+    return size;
+  });
   if (!encoded_lengths) {
     return std::nullopt;
   }
   std::string out = std::move(*encoded_lengths);
-  out.reserve(out.size() + values.size() -
-              lengths.size() * sizeof(std::uint32_t));
+  const auto prefix_bytes =
+      saturating_size_multiply(value_count, sizeof(std::uint32_t));
+  const auto raw_value_bytes = values.size() - prefix_bytes;
+  const auto reserve_size = saturating_size_add(out.size(), raw_value_bytes);
+  if (reserve_size == std::numeric_limits<std::size_t>::max()) {
+    return std::nullopt;
+  }
+  out.reserve(reserve_size);
   offset = 0;
-  for (const auto length : lengths) {
+  for (std::size_t index = 0; index < value_count; ++index) {
+    const auto size = static_cast<std::size_t>(read_u32_le(values, offset));
     offset += sizeof(std::uint32_t);
-    out.append(values.substr(offset, static_cast<std::size_t>(length)));
-    offset += static_cast<std::size_t>(length);
+    out.append(values.substr(offset, size));
+    offset += size;
   }
   return out;
+}
+
+bool prefers_dictionary_tie_break(const LeafColumn &column) {
+  if (column.path.empty()) {
+    return false;
+  }
+  const auto &name = column.path.back();
+  return name == "source_file" || name == "schema_registry" ||
+         name == "schema_drifts" || name == "year" || name == "month" ||
+         name == "date" || name == "hour";
+}
+
+std::string encode_page_levels_and_values(const LeafColumn &column,
+                                          const ColumnPageData &page_data,
+                                          std::string_view encoded_values) {
+  std::string payload;
+  if (column.max_repetition_level > 0) {
+    auto levels = encode_levels(page_data.repetition_levels,
+                                column.max_repetition_level);
+    payload.reserve(levels.size() + encoded_values.size());
+    payload.append(levels);
+  }
+  if (column.max_definition_level > 0) {
+    auto levels = encode_levels(page_data.definition_levels,
+                                column.max_definition_level);
+    payload.reserve(payload.size() + levels.size() + encoded_values.size());
+    payload.append(levels);
+  }
+  payload.append(encoded_values);
+  return payload;
 }

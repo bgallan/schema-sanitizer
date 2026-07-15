@@ -63,6 +63,7 @@ struct CsvNestedStreamState {
   PyObject *stream_capsule = nullptr;
   std::vector<CsvNestedColumnPlan> columns;
   std::size_t nested_column_count = 0;
+  jsonl::ArrayValidationLimits validation_limits{};
   std::string last_error;
   bool schema_loaded = false;
   bool closed = false;

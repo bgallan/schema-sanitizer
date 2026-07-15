@@ -2,8 +2,9 @@ sanitize::Result<NativeRecursiveStructValidity>
 materialize_native_recursive_struct_validity_for_node(
     const RowGroupInfo &row_group, const ColumnChunkInfo &layout_column,
     const NativeRecursiveMaterializationTree &tree,
-    std::size_t struct_node_index, std::int16_t defined_level,
-    std::vector<std::uint8_t> *validity) {
+    std::size_t struct_node_index, const NativeFlatRowWindow &window,
+    std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
+  (void)row_group;
   if (!tree.valid || struct_node_index >= tree.nodes.size() ||
       tree.nodes[struct_node_index].kind !=
           NativeRecursiveMaterializationNodeKind::Struct) {
@@ -20,7 +21,7 @@ materialize_native_recursive_struct_validity_for_node(
     }
     return materialize_native_recursive_map_value_struct_validity(
         layout_column,
-        struct_node.struct_validity_repeated_layout_index.value(),
+        struct_node.struct_validity_repeated_layout_index.value(), window,
         defined_level, validity);
   }
   case NativeRecursiveStructValidityDomain::ListElement: {
@@ -31,15 +32,15 @@ materialize_native_recursive_struct_validity_for_node(
     }
     return materialize_native_recursive_list_element_struct_validity(
         layout_column,
-        struct_node.struct_validity_repeated_layout_index.value(),
+        struct_node.struct_validity_repeated_layout_index.value(), window,
         defined_level, validity);
   }
   case NativeRecursiveStructValidityDomain::RowGroup: {
     SAN_ASSIGN_OR_RAISE(
         const auto null_count,
         materialize_struct_validity_at_definition_level(
-            layout_column, row_group.num_rows, defined_level, validity));
-    return NativeRecursiveStructValidity{row_group.num_rows, null_count};
+            layout_column, window, defined_level, validity));
+    return NativeRecursiveStructValidity{window.row_count, null_count};
   }
   case NativeRecursiveStructValidityDomain::None:
     break;
@@ -66,7 +67,7 @@ select_recursive_struct_layout_column_for_node(
 sanitize::Result<ArrowArray *> materialize_native_recursive_list_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree, std::size_t list_node_index,
-    NativeRecursiveArrayCursor *cursor) {
+    const NativeFlatRowWindow &window, NativeRecursiveArrayCursor *cursor) {
   if (!state || !cursor || !tree.valid ||
       list_node_index >= tree.nodes.size() ||
       tree.nodes[list_node_index].kind !=
@@ -88,7 +89,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_node(
                           row_group, tree, list_node_index));
   SAN_ASSIGN_OR_RAISE(
       const auto list_array_layout,
-      native_recursive_list_array_layout(*layout_column, list_layout_index));
+      native_recursive_list_array_layout(*layout_column, list_layout_index,
+                                         window));
   const auto &list_layout = list_array_layout.repeated_layout;
   if (cursor->list_index >= state->lists.size()) {
     return sanitize::Status::Invalid(
@@ -97,7 +99,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_list_node(
   auto &list_array = state->lists[cursor->list_index++];
   SAN_ASSIGN_OR_RAISE(auto *child_array,
                       materialize_native_recursive_child_node(
-                          state, row_group, tree, child_node_index, cursor));
+                          state, row_group, tree, child_node_index, window,
+                          cursor));
   SAN_RETURN_NOT_OK(configure_native_recursive_list_array(
       &list_array, list_layout, child_array));
   return &list_array.array;

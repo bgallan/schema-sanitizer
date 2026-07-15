@@ -2,13 +2,13 @@
 
 // ---- native_stream_decode_dictionary_fixed_width ----
 sanitize::Status materialize_dictionary_fixed_width_column(
-    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
-  if (!out || row_count < 0 ||
-      row_count >
-          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    std::ifstream &file, const ColumnChunkInfo &column,
+    const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
+  SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
+  if (!out) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: invalid fixed-width dictionary row count");
+        "native Parquet reader: fixed-width dictionary output is null");
   }
   const auto arrow_width = column.native_read_value_width_bytes;
   const auto physical_width = fixed_width_for_plain_values(column);
@@ -16,15 +16,12 @@ sanitize::Status materialize_dictionary_fixed_width_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: fixed-width dictionary width is invalid");
   }
-  if (column.decoded_dictionary_fixed_width_values.empty()) {
+  if (column.decoded_dictionary_fixed_width_values.empty() ||
+      column.decoded_dictionary_fixed_width_values.size() %
+              static_cast<std::size_t>(*physical_width) !=
+          0) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: missing fixed-width dictionary values");
-  }
-  if (column.decoded_dictionary_fixed_width_values.size() %
-          static_cast<std::size_t>(*physical_width) !=
-      0) {
-    return sanitize::Status::Invalid(
-        "native Parquet reader: fixed-width dictionary payload is misaligned");
+        "native Parquet reader: invalid fixed-width dictionary payload");
   }
   const auto dictionary_value_count =
       column.decoded_dictionary_fixed_width_values.size() /
@@ -34,37 +31,37 @@ sanitize::Status materialize_dictionary_fixed_width_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: fixed-width dictionary is too large");
   }
-  const auto value_bytes = static_cast<std::uint64_t>(row_count) *
+  const auto value_bytes = static_cast<std::uint64_t>(window.row_count) *
                            static_cast<std::uint64_t>(arrow_width);
   if (value_bytes >
       static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: fixed-width dictionary value buffer is too "
-        "large");
+        "native Parquet reader: fixed-width dictionary buffer is too large");
   }
   out->values.assign(static_cast<std::size_t>(value_bytes), 0);
   if (column.native_read_total_nulls > 0) {
-    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+    out->validity.assign(static_cast<std::size_t>((window.row_count + 7) / 8),
+                         0);
   }
-
   DictionaryPageState dictionary;
   dictionary.decoded = true;
   dictionary.value_count = static_cast<std::int32_t>(dictionary_value_count);
-  dictionary.fixed_width_values = column.decoded_dictionary_fixed_width_values;
-
   for (const auto &span : column.native_read_page_spans) {
     if (span.page_index < 0 ||
-        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+        static_cast<std::size_t>(span.page_index) >= column.pages.size() ||
+        span.first_row_index < 0 || span.row_count < 0 ||
+        span.first_row_index > window.row_group_rows - span.row_count) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid fixed-width dictionary page span "
-          "index");
+          "native Parquet reader: invalid fixed-width dictionary page span");
+    }
+    if (!window.overlaps(span.first_row_index, span.row_count)) {
+      continue;
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
     if (!page.has_value_encoding ||
         page.value_encoding != kEncodingRleDictionary) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: expected RLE fixed-width dictionary data "
-          "page");
+          "native Parquet reader: expected RLE fixed-width dictionary page");
     }
     std::string_view payload;
     SAN_RETURN_NOT_OK(
@@ -72,8 +69,7 @@ sanitize::Status materialize_dictionary_fixed_width_column(
     if (page.value_payload_offset < 0 ||
         static_cast<std::size_t>(page.value_payload_offset) > payload.size()) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid fixed-width dictionary value payload "
-          "offset");
+          "native Parquet reader: invalid dictionary value payload offset");
     }
     const auto values = std::string_view(payload).substr(
         static_cast<std::size_t>(page.value_payload_offset));
@@ -86,42 +82,41 @@ sanitize::Status materialize_dictionary_fixed_width_column(
     if (decoded_indices != span.non_null_count ||
         static_cast<std::size_t>(decoded_indices) != indices.size()) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: fixed-width dictionary index count mismatch");
+          "native Parquet reader: fixed-width dictionary index mismatch");
     }
     std::size_t index_offset = 0;
     for (std::int32_t row = 0; row < span.row_count; ++row) {
       const auto global_row = span.first_row_index + row;
-      if (global_row < 0 || global_row >= row_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: fixed-width dictionary page row span "
-            "exceeds row group");
-      }
       const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
+      std::uint32_t dictionary_index = 0;
       if (valid) {
         if (index_offset >= indices.size()) {
           return sanitize::Status::Invalid(
               "native Parquet reader: missing fixed-width dictionary index");
         }
-        const auto dictionary_index = indices[index_offset++];
+        dictionary_index = indices[index_offset++];
         if (dictionary_index >= dictionary_value_count) {
           return sanitize::Status::Invalid(
-              "native Parquet reader: fixed-width dictionary index out of "
-              "range");
+              "native Parquet reader: fixed-width dictionary index out of range");
         }
-        const auto source_offset = static_cast<std::size_t>(dictionary_index) *
-                                   static_cast<std::size_t>(*physical_width);
-        auto *target =
-            out->values.data() + static_cast<std::size_t>(global_row) *
-                                     static_cast<std::size_t>(arrow_width);
-        SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
-            target,
-            reinterpret_cast<const char *>(
-                column.decoded_dictionary_fixed_width_values.data() +
-                source_offset),
-            column, *physical_width, arrow_width));
-        if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, global_row);
-        }
+      }
+      if (!valid || !window.contains(global_row)) {
+        continue;
+      }
+      const auto output_row = window.local_row(global_row);
+      const auto source_offset = static_cast<std::size_t>(dictionary_index) *
+                                 static_cast<std::size_t>(*physical_width);
+      auto *target = out->values.data() +
+                     static_cast<std::size_t>(output_row) *
+                         static_cast<std::size_t>(arrow_width);
+      SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
+          target,
+          reinterpret_cast<const char *>(
+              column.decoded_dictionary_fixed_width_values.data() +
+              source_offset),
+          column, *physical_width, arrow_width));
+      if (!out->validity.empty()) {
+        set_output_validity_bit(&out->validity, output_row);
       }
     }
     if (index_offset != indices.size()) {
@@ -135,7 +130,8 @@ sanitize::Status materialize_dictionary_fixed_width_column(
 // ---- native_stream_decode_simple_list_dictionary_fixed_width ----
 sanitize::Status materialize_simple_list_dictionary_fixed_width_column(
     std::ifstream &file, const ColumnChunkInfo &column,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
+    const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
   if (!out ||
       column.native_read_value_buffer_kind !=
           NativeValueBufferKind::dictionary_fixed_width ||
@@ -143,7 +139,7 @@ sanitize::Status materialize_simple_list_dictionary_fixed_width_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: invalid list dictionary fixed-width layout");
   }
-  const auto element_count = list_leaf_value_count(column);
+  const auto element_count = window.elements.count;
   const auto arrow_width = column.native_read_value_width_bytes;
   const auto physical_width = fixed_width_for_plain_values(column);
   if (!physical_width || *physical_width <= 0 || arrow_width <= 0) {
@@ -179,7 +175,6 @@ sanitize::Status materialize_simple_list_dictionary_fixed_width_column(
   DictionaryPageState dictionary;
   dictionary.decoded = true;
   dictionary.value_count = static_cast<std::int32_t>(dictionary_value_count);
-  dictionary.fixed_width_values = column.decoded_dictionary_fixed_width_values;
 
   const auto list_defined_level = list_leaf_value_parent_defined_level(column);
   std::int64_t element_index = 0;
@@ -223,7 +218,7 @@ sanitize::Status materialize_simple_list_dictionary_fixed_width_column(
       if (definition <= list_defined_level) {
         continue;
       }
-      if (element_index >= element_count) {
+      if (element_index >= window.total_elements) {
         return sanitize::Status::Invalid(
             "native Parquet reader: list dictionary fixed-width element span "
             "exceeds row group");
@@ -240,19 +235,23 @@ sanitize::Status materialize_simple_list_dictionary_fixed_width_column(
               "native Parquet reader: list dictionary fixed-width index out "
               "of range");
         }
-        const auto source_offset = static_cast<std::size_t>(dictionary_index) *
-                                   static_cast<std::size_t>(*physical_width);
-        auto *target =
-            out->values.data() + static_cast<std::size_t>(element_index) *
-                                     static_cast<std::size_t>(arrow_width);
-        SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
-            target,
-            reinterpret_cast<const char *>(
-                column.decoded_dictionary_fixed_width_values.data() +
-                source_offset),
-            column, *physical_width, arrow_width));
-        if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, element_index);
+        if (window.elements.contains(element_index)) {
+          const auto output_index = window.elements.local(element_index);
+          const auto source_offset =
+              static_cast<std::size_t>(dictionary_index) *
+              static_cast<std::size_t>(*physical_width);
+          auto *target =
+              out->values.data() + static_cast<std::size_t>(output_index) *
+                                       static_cast<std::size_t>(arrow_width);
+          SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
+              target,
+              reinterpret_cast<const char *>(
+                  column.decoded_dictionary_fixed_width_values.data() +
+                  source_offset),
+              column, *physical_width, arrow_width));
+          if (!out->validity.empty()) {
+            set_output_validity_bit(&out->validity, output_index);
+          }
         }
       }
       ++element_index;
@@ -263,7 +262,7 @@ sanitize::Status materialize_simple_list_dictionary_fixed_width_column(
           "indices");
     }
   }
-  if (element_index != element_count) {
+  if (element_index != window.total_elements) {
     return sanitize::Status::Invalid(
         "native Parquet reader: list dictionary fixed-width element count "
         "mismatch");

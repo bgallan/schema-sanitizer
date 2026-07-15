@@ -365,9 +365,10 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         RemoteFile(f"s3://bucket/partition/{index}.jsonl", f"{index}.jsonl") for index in range(5)
     ]
 
-    async def fake_client(files):
+    async def fake_client(files, *, memory_limit_bytes):
         """Return a reusable fake provider client."""
         assert len(files) == 5
+        assert memory_limit_bytes == 32 * 1024 * 1024
         return object()
 
     async def fake_close(client):
@@ -384,15 +385,13 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         Path(local_path).write_text(f'{{"file":"{file.name}"}}\n', encoding="utf-8")
         active_downloads -= 1
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_ASYNC_CONCURRENCY", "2")
-    monkeypatch.setenv("SCHEMA_SANITIZER_ASYNC_PREFETCH_FILES", "5")
     monkeypatch.setattr(remote_staging, "provider_client_for_downloads", fake_client)
     monkeypatch.setattr(remote_staging, "close_provider_client", fake_close)
     monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)
 
     staged = remote_staging.stage_remote_files_to_directory(
         files,
-        memory_limit_bytes=None,
+        memory_limit_bytes=32 * 1024 * 1024,
     )
     try:
         assert max_active_downloads == 2
@@ -420,9 +419,10 @@ def test_remote_directory_staging_does_not_retry_memory_limit_failure(monkeypatc
 
     files = [RemoteFile("s3://bucket/partition/row.jsonl", "row.jsonl", None)]
 
-    async def fake_client(files):
+    async def fake_client(files, *, memory_limit_bytes):
         """Return a reusable fake provider client."""
         assert len(files) == 1
+        assert memory_limit_bytes == 8
         return object()
 
     async def fake_close(client):
@@ -437,7 +437,6 @@ def test_remote_directory_staging_does_not_retry_memory_limit_failure(monkeypatc
         downloads += 1
         Path(local_path).write_bytes(b'{"payload":"too large"}\n')
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_ASYNC_RETRIES", "3")
     monkeypatch.setattr(remote_staging, "provider_client_for_downloads", fake_client)
     monkeypatch.setattr(remote_staging, "close_provider_client", fake_close)
     monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)

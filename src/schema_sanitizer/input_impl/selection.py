@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 
 from ..core_impl.generated_bytes import BufferedGeneratedBytesReader
+from ..core_impl.memory_budget import memory_budget
 from ..core_impl.uris import (
     local_path_from_file_uri,
     looks_like_file_uri,
@@ -61,12 +62,12 @@ class TranscodingPathByteReader(BufferedGeneratedBytesReader):
         path: str | os.PathLike[str],
         *,
         encoding: str,
-        read_chunk_bytes: int = 1 << 20,
+        memory_limit_bytes: int | None = None,
     ):
         """Open a path and initialize strict incremental transcoding."""
         self._path = os.fspath(path)
         self._encoding = codecs.lookup(encoding).name
-        self._read_chunk_bytes = max(1, int(read_chunk_bytes))
+        self._read_chunk_bytes = memory_budget(memory_limit_bytes).io_chunk_bytes
         self._stream: Any = None
         self._decoder: Any = None
         self._source_eof = False
@@ -321,6 +322,7 @@ def prepare_native_text_data(
     source: _Source,
     format_name: _Format,
     input_text_encoding: str,
+    memory_limit_bytes: int | None = None,
 ) -> tuple[Any, _Source]:
     """Prepare encoded text input for native ingestion."""
     if format_name not in {"csv", "json", "json_array", "xml"}:
@@ -329,7 +331,11 @@ def prepare_native_text_data(
     if source == "path" and encoding != "utf-8":
         if native_text_encoding_supported(encoding):
             return data, source
-        return TranscodingPathByteReader(data, encoding=encoding), "stream"
+        return TranscodingPathByteReader(
+            data,
+            encoding=encoding,
+            memory_limit_bytes=memory_limit_bytes,
+        ), "stream"
     if source != "path" and isinstance(data, (bytes, bytearray, memoryview)):
         return decode_text_bytes(data, encoding=encoding), source
     return data, source

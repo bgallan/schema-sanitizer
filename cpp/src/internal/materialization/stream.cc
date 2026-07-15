@@ -24,7 +24,8 @@ make_ingest_c_stream(const std::string &frontend_name, FrontendHandle frontend,
                      std::shared_ptr<const CompiledPlan> plan,
                      PreparedOptionsPtr opts,
                      std::shared_ptr<IngestDiagnostics> diagnostics,
-                     std::shared_ptr<sanitize::ExecutionContext> owned_ctx) {
+                     std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
+                     std::shared_ptr<void> operation_memory_pool) {
   if (!plan) {
     return sanitize::Status::Invalid("make_ingest_c_stream: plan is null");
   }
@@ -36,7 +37,8 @@ make_ingest_c_stream(const std::string &frontend_name, FrontendHandle frontend,
       auto main_source,
       make_ingest_stream_source(frontend_name, std::move(frontend),
                                 std::move(plan), std::move(opts),
-                                std::move(diagnostics), std::move(owned_ctx)));
+                                std::move(diagnostics), std::move(owned_ctx),
+                                std::move(operation_memory_pool)));
 
   return sanitize::export_stream_c(std::move(main_source));
 }

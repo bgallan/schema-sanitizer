@@ -1,10 +1,12 @@
 // Composes scalar Arrow C Data builders by physical representation.
 
 #include "internal/materialization/builders/detail.hh"
+#include "internal/memory/size_math.hh"
 
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory_resource>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -17,6 +19,9 @@ using sanitize::Status;
 
 template <typename T> class FixedWidthBuilder final : public BaseBuilder {
 public:
+  explicit FixedWidthBuilder(std::shared_ptr<PoolResource> pool)
+      : BaseBuilder(std::move(pool)), values_(pool_.get()) {}
+
   // Appends the object state.
   Status append(const Cell &cell) override {
     if (cell.is_null)
@@ -41,7 +46,7 @@ public:
 
   // Finishes the current output.
   Status finish(ArrowArray *out) override {
-    auto payload = make_array_payload();
+    auto payload = make_array_payload(pool_);
     if (!payload)
       return Status::OutOfMemory("FixedWidthBuilder::finish: OOM payload");
     payload->validity = std::move(validity_);
@@ -71,7 +76,9 @@ public:
 
   // Returns the current byte usage.
   [[nodiscard]] int64_t bytes() const noexcept override {
-    return static_cast<int64_t>(validity_.size() + values_.size() * sizeof(T));
+    return saturating_add_i64(
+        saturating_size_to_i64(validity_.capacity()),
+        saturating_capacity_bytes(values_.capacity(), sizeof(T)));
   }
 
 protected:
@@ -82,10 +89,13 @@ protected:
   }
 
 private:
-  std::vector<T> values_;
+  std::pmr::vector<T> values_;
 };
 class NullBuilder final : public BaseBuilder {
 public:
+  explicit NullBuilder(std::shared_ptr<PoolResource> pool)
+      : BaseBuilder(std::move(pool)) {}
+
   // Appends the object state.
   Status append(const Cell &) override { return append_null(); }
 
@@ -98,7 +108,7 @@ public:
 
   // Finishes the current output.
   Status finish(ArrowArray *out) override {
-    auto payload = make_array_payload();
+    auto payload = make_array_payload(pool_);
     if (!payload)
       return Status::OutOfMemory("NullBuilder::finish: OOM payload");
     payload->buffers.assign(1, nullptr);
@@ -123,6 +133,9 @@ protected:
 
 class BoolBuilder final : public BaseBuilder {
 public:
+  explicit BoolBuilder(std::shared_ptr<PoolResource> pool)
+      : BaseBuilder(std::move(pool)), bits_(pool_.get()) {}
+
   // Appends the object state.
   Status append(const Cell &cell) override {
     if (cell.is_null)
@@ -141,7 +154,7 @@ public:
 
   // Finishes the current output.
   Status finish(ArrowArray *out) override {
-    auto payload = make_array_payload();
+    auto payload = make_array_payload(pool_);
     if (!payload)
       return Status::OutOfMemory("BoolBuilder::finish: OOM payload");
     payload->validity = std::move(validity_);
@@ -157,7 +170,9 @@ public:
 
   // Returns the current byte usage.
   [[nodiscard]] int64_t bytes() const noexcept override {
-    return static_cast<int64_t>(validity_.size() + bits_.size());
+    return saturating_add_i64(
+        saturating_size_to_i64(validity_.capacity()),
+        saturating_size_to_i64(bits_.capacity()));
   }
 
 protected:
@@ -177,12 +192,15 @@ private:
           static_cast<uint8_t>(1u << (length_ & 7));
   }
 
-  std::vector<uint8_t> bits_;
+  std::pmr::vector<uint8_t> bits_;
 };
 class Utf8Builder final : public BaseBuilder {
 public:
   // Creates a Utf8Builder.
-  Utf8Builder() { offsets_.push_back(0); }
+  explicit Utf8Builder(std::shared_ptr<PoolResource> pool)
+      : BaseBuilder(std::move(pool)), offsets_(pool_.get()), data_(pool_.get()) {
+    offsets_.push_back(0);
+  }
 
   // Resets the object state.
   Status reset() override {
@@ -216,7 +234,7 @@ public:
 
   // Finishes the current output.
   Status finish(ArrowArray *out) override {
-    auto payload = make_array_payload();
+    auto payload = make_array_payload(pool_);
     if (!payload)
       return Status::OutOfMemory("Utf8Builder::finish: OOM payload");
     payload->validity = std::move(validity_);
@@ -235,8 +253,10 @@ public:
 
   // Returns the current byte usage.
   [[nodiscard]] int64_t bytes() const noexcept override {
-    return static_cast<int64_t>(
-        validity_.size() + offsets_.size() * sizeof(int32_t) + data_.size());
+    auto total = saturating_size_to_i64(validity_.capacity());
+    total = saturating_add_i64(
+        total, saturating_capacity_bytes(offsets_.capacity(), sizeof(int32_t)));
+    return saturating_add_i64(total, saturating_size_to_i64(data_.capacity()));
   }
 
 protected:
@@ -244,29 +264,30 @@ protected:
   Status reset_values() override { return Status::OK(); }
 
 private:
-  std::vector<int32_t> offsets_;
-  std::vector<char> data_;
+  std::pmr::vector<int32_t> offsets_;
+  std::pmr::vector<char> data_;
 };
 
 } // namespace
 
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_scalar_builder(LogicalKind kind) {
+make_scalar_builder(LogicalKind kind,
+                    const std::shared_ptr<PoolResource> &pool) {
   switch (kind) {
   case LogicalKind::kNull:
-    return make_column_builder<NullBuilder>();
+    return make_column_builder<NullBuilder>(pool);
   case LogicalKind::kBool:
-    return make_column_builder<BoolBuilder>();
+    return make_column_builder<BoolBuilder>(pool);
   case LogicalKind::kInt64:
   case LogicalKind::kTimestampNs:
-    return make_column_builder<FixedWidthBuilder<int64_t>>();
+    return make_column_builder<FixedWidthBuilder<int64_t>>(pool);
   case LogicalKind::kFloat64:
-    return make_column_builder<FixedWidthBuilder<double>>();
+    return make_column_builder<FixedWidthBuilder<double>>(pool);
   case LogicalKind::kDate32:
   case LogicalKind::kTime32s:
-    return make_column_builder<FixedWidthBuilder<int32_t>>();
+    return make_column_builder<FixedWidthBuilder<int32_t>>(pool);
   case LogicalKind::kUtf8:
-    return make_column_builder<Utf8Builder>();
+    return make_column_builder<Utf8Builder>(pool);
   case LogicalKind::kStruct:
   case LogicalKind::kList:
     return Status::Invalid("make_scalar_builder: nested logical kind");

@@ -96,7 +96,7 @@ def test_options_bytes_encoder_rejects_non_int_integer_values() -> None:
     """Verify options bytes encoder rejects non int integer values."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
-    for key in ("arrow_max_depth", "parquet_max_depth", "io_chunk_bytes", "memory_limit_bytes"):
+    for key in ("arrow_max_depth", "parquet_max_depth", "memory_limit_bytes"):
         opts = _opts_bytes.Options()
         setattr(opts, key, True)
         with pytest.raises(TypeError, match=key):

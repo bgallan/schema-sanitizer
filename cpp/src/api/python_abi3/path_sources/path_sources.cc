@@ -36,7 +36,8 @@ csv_header_from_path_source(const PathSourceSpec &source,
                             const sanitize::PreparedOptionsPtr &prepared) {
   SAN_ASSIGN_OR_RAISE(auto chunk_source,
                       sanitize::chunk_source_from_path_with_encoding(
-                          source.path, prepared->spec.input_text_encoding));
+                          source.path, prepared->spec.input_text_encoding,
+                          prepared->spec.memory_limit_bytes));
   sanitize::internal::CsvStreamingScanner scanner(
       std::move(chunk_source), sanitize::internal::kDefaultCsvChunkBytes);
   SAN_RETURN_NOT_OK(scanner.Reset());
@@ -58,11 +59,11 @@ csv_header_from_path_source(const PathSourceSpec &source,
     }
 
     std::vector<std::string_view> views;
-    sanitize::internal::parse_csv_cells(record.view,
-                                        prepared->spec.csv_delimiter.empty()
-                                            ? ','
-                                            : prepared->spec.csv_delimiter[0],
-                                        &views, &arena);
+    SAN_RETURN_NOT_OK(sanitize::internal::parse_csv_cells(
+        record.view, prepared->spec.csv_delimiter.empty()
+                         ? ','
+                         : prepared->spec.csv_delimiter[0],
+        &views, &arena));
     std::vector<std::string> header;
     header.reserve(views.size());
     for (std::string_view value : views) {
@@ -212,7 +213,8 @@ json_array_path_source_group_end(const std::vector<PathSourceSpec> &sources,
 sanitize::Result<PathSourceInput>
 make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
                              const PathSourceGroupPlan &group,
-                             std::string_view input_text_encoding) {
+                             std::string_view input_text_encoding,
+                             std::int64_t memory_limit_bytes) {
   const std::size_t start = group.start;
   const std::size_t end = group.end;
   if (start >= end || end > sources.size()) {
@@ -246,7 +248,7 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
       input.chunk_source,
       sanitize::chunk_source_from_paths_with_source_names_encoding(
           std::move(paths), std::move(source_names), "\n",
-          input_text_encoding));
+          input_text_encoding, memory_limit_bytes));
   return input;
 }
 
@@ -350,7 +352,8 @@ path_source_input(const sanitize::PreparedOptionsPtr &prepared,
       kDirectPathSourceFrontends.cend()) {
     SAN_ASSIGN_OR_RAISE(auto chunk_source,
                         sanitize::chunk_source_from_path_with_encoding(
-                            source.path, prepared->spec.input_text_encoding));
+                            source.path, prepared->spec.input_text_encoding,
+                          prepared->spec.memory_limit_bytes));
     PathSourceInput input;
     input.frontend = source.frontend;
     input.chunk_source = std::move(chunk_source);
@@ -426,11 +429,13 @@ next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
 sanitize::Result<PathSourceInput>
 path_source_group_input(const std::vector<PathSourceSpec> &sources,
                         const PathSourceGroupPlan &group,
-                        std::string_view input_text_encoding) {
+                        std::string_view input_text_encoding,
+                        std::int64_t memory_limit_bytes) {
   if (!group.grouped) {
     return sanitize::Status::Invalid("path-source group is not grouped");
   }
-  return make_path_source_group_input(sources, group, input_text_encoding);
+  return make_path_source_group_input(sources, group, input_text_encoding,
+                                      memory_limit_bytes);
 }
 
 } // namespace core_abi3_internal

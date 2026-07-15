@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ...core_impl.async_scheduler import read_int_env
+from ...core_impl.memory_budget import memory_budget
 from ...core_impl.uris import name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
@@ -63,10 +63,9 @@ def parse_uri(uri: str) -> AzureRef:
 
 
 async def open_service(ref: AzureRef) -> Any:
-    """Open an async Azure Blob service client using default credentials."""
-    identity = import_module("azure.identity.aio")
+    """Open an async Azure Blob service client using the SDK credential chain."""
     blob = import_module("azure.storage.blob.aio")
-
+    identity = import_module("azure.identity.aio")
     credential = identity.DefaultAzureCredential()
     return blob.BlobServiceClient(account_url=ref.account_url, credential=credential)
 
@@ -168,6 +167,8 @@ async def list_files(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile]:
 async def directories_containing_files(
     uris: list[str],
     suffixes: tuple[str, ...],
+    *,
+    memory_limit_bytes: int | None = None,
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether Azure directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
@@ -187,7 +188,9 @@ async def directories_containing_files(
     if not groups:
         return discovery.finish()
 
-    concurrency = read_int_env("SCHEMA_SANITIZER_SOURCE_DISCOVERY_AZURE_BULK_CONCURRENCY", 16)
+    concurrency = memory_budget(
+        memory_limit_bytes
+    ).source_discovery_concurrency
     semaphore = asyncio.Semaphore(concurrency)
 
     async def scan_group(

@@ -1,0 +1,78 @@
+---
+name: Cloud emulator interoperability
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  object-storage-emulators:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install package and real cloud SDKs
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U '.[cloud,pyarrow]' pytest
+      - name: Start pinned object-storage emulators
+        shell: bash
+        run: |
+          docker run -d --name schema-sanitizer-minio \
+            -p 9000:9000 \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z \
+            server /data
+          docker run -d --name schema-sanitizer-azurite \
+            -p 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite:3.35.0 \
+            azurite-blob --blobHost 0.0.0.0 --disableTelemetry
+          docker run -d --name schema-sanitizer-gcs \
+            -p 4443:4443 \
+            fsouza/fake-gcs-server:1.53.1 \
+            -scheme http -port 4443 -public-host 127.0.0.1:4443
+      - name: Wait for emulator ports
+        run: |
+          python - <<'PY'
+          import socket
+          import time
+
+          for port in (9000, 10000, 4443):
+              deadline = time.monotonic() + 60
+              while True:
+                  try:
+                      with socket.create_connection(("127.0.0.1", port), timeout=1):
+                          break
+                  except OSError:
+                      if time.monotonic() >= deadline:
+                          raise RuntimeError(f"emulator port {port} did not become ready")
+                      time.sleep(0.5)
+          PY
+      - name: Run real-SDK remote directory pipelines
+        run: >-
+          pytest -q tests/test_cloud_emulator_integration.py
+          --run-cloud-emulators
+          --s3-emulator-endpoint http://127.0.0.1:9000
+          --azure-emulator-connection-string
+          'DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;'
+          --gcs-emulator-endpoint http://127.0.0.1:4443
+      - name: Preserve emulator diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p cloud-emulator-logs
+          for name in minio azurite gcs; do
+            docker logs "schema-sanitizer-${name}" \
+              > "cloud-emulator-logs/${name}.log" 2>&1 || true
+          done
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: cloud-emulator-diagnostics
+          path: cloud-emulator-logs/
+          if-no-files-found: ignore

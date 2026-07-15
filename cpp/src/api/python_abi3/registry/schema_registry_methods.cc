@@ -80,9 +80,19 @@ PyObject *py_schema_registry_contract_payload(PyObject *, PyObject *args) {
   }
   sanitize::schema_registry_internal::normalize_integer_float_schema(
       *maybe_schema);
-  const std::string payload =
+  auto payload_result =
       sanitize::internal::options_io::serialize_logical_schema_bytes(
           *maybe_schema);
+  if (!payload_result.ok()) {
+    const auto status = payload_result.status();
+    if (status.code() == sanitize::StatusCode::kOutOfMemory) {
+      PyErr_NoMemory();
+    } else {
+      PyErr_SetString(PyExc_ValueError, status.ToString().c_str());
+    }
+    return nullptr;
+  }
+  std::string payload = std::move(payload_result).ValueOrDie();
   return PyBytes_FromStringAndSize(payload.data(),
                                    static_cast<Py_ssize_t>(payload.size()));
 }
@@ -115,9 +125,19 @@ PyObject *py_schema_registry_merge(PyObject *, PyObject *args) {
   }
 
   sanitize::SchemaRegistryMergeResult result = std::move(merged).ValueOrDie();
-  const std::string schema_payload =
+  auto schema_payload_result =
       sanitize::internal::options_io::serialize_logical_schema_bytes(
           result.schema);
+  if (!schema_payload_result.ok()) {
+    const auto status = schema_payload_result.status();
+    if (status.code() == sanitize::StatusCode::kOutOfMemory) {
+      PyErr_NoMemory();
+    } else {
+      PyErr_SetString(PyExc_ValueError, status.ToString().c_str());
+    }
+    return nullptr;
+  }
+  std::string schema_payload = std::move(schema_payload_result).ValueOrDie();
 
   PyObject *tuple = PyTuple_New(3);
   if (!tuple) {

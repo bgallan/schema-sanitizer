@@ -43,6 +43,8 @@ def test_parquet_micro_fragments_are_consolidated_by_runtime_phase() -> None:
         FOOTER / "runtime/native_stream_readiness.cc.inc": 500,
         FOOTER / "native_stream/materialization/native_stream_validity.cc.inc": 500,
         FOOTER / "native_stream/materialization/row_group/native_stream_row_group.cc.inc": 500,
+        FOOTER
+        / "native_stream/materialization/row_group/native_stream_retained_budget.cc.inc": 500,
     }
     for owner, line_limit in owners.items():
         assert owner.is_file()
@@ -52,7 +54,10 @@ def test_parquet_micro_fragments_are_consolidated_by_runtime_phase() -> None:
     assert not (FOOTER / "native_stream/materialization/validity").exists()
     assert {
         path.name for path in (FOOTER / "native_stream/materialization/row_group").glob("*.cc.inc")
-    } == {"native_stream_row_group.cc.inc"}
+    } == {
+        "native_stream_retained_budget.cc.inc",
+        "native_stream_row_group.cc.inc",
+    }
 
     translation_unit = (FOOTER / "footer_reader.cc").read_text(encoding="utf-8")
     for owner in owners:

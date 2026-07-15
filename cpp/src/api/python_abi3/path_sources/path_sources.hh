@@ -82,7 +82,8 @@ next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
 sanitize::Result<PathSourceInput>
 path_source_group_input(const std::vector<PathSourceSpec> &sources,
                         const PathSourceGroupPlan &group,
-                        std::string_view input_text_encoding);
+                        std::string_view input_text_encoding,
+                        std::int64_t memory_limit_bytes);
 
 sanitize::Result<sanitize::FrontendHandle>
 path_source_frontend(PathSourceInput input, const sanitize::Options &options);

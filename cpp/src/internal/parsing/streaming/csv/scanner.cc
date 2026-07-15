@@ -14,6 +14,15 @@ CsvStreamingScanner::CsvStreamingScanner(ChunkSourcePtr source,
   segments_.reserve(4);
 }
 
+void CsvStreamingScanner::clear_segments() noexcept {
+  segments_.clear();
+  constexpr std::size_t kMaxRetainedSegments = 1024;
+  if (segments_.capacity() > kMaxRetainedSegments) {
+    std::vector<Segment> empty;
+    segments_.swap(empty);
+  }
+}
+
 sanitize::Status CsvStreamingScanner::Reset() {
   eof_ = false;
   have_chunk_ = false;
@@ -21,6 +30,7 @@ sanitize::Status CsvStreamingScanner::Reset() {
   pending_consume_lf_ = false;
   eof_offset_ = 0;
   chunk_ = Chunk{};
+  clear_segments();
   if (!source_) {
     return sanitize::Status::Invalid("CSV scanner: source is null");
   }
@@ -31,7 +41,7 @@ sanitize::Result<TextSlice> CsvStreamingScanner::next_record(BumpArena *arena) {
   if (!arena) {
     return sanitize::Status::Invalid("CSV scanner: arena is null");
   }
-  segments_.clear();
+  clear_segments();
   SAN_ASSIGN_OR_RAISE(bool has_record, prepare_record_start());
   if (!has_record) {
     return make_text_slice(std::string_view{}, eof_offset_);

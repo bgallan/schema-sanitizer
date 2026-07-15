@@ -2,11 +2,14 @@
 
 #pragma once
 
+#include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/materialization/batch_appender_internal.hh"
+#include "internal/memory/pool_resource.hh"
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <utility>
 #include <vector>
@@ -16,15 +19,23 @@
 namespace sanitize::internal {
 
 struct ArrayPayload {
-  std::vector<const void *> buffers;
-  std::vector<uint8_t> validity;
-  std::vector<uint8_t> bit_data;
-  std::vector<int32_t> i32;
-  std::vector<int64_t> i64;
-  std::vector<double> f64;
-  std::vector<int32_t> offsets;
-  std::vector<char> bytes;
-  std::vector<ArrowArray *> children;
+  explicit ArrayPayload(std::shared_ptr<PoolResource> pool)
+      : pool_keepalive(std::move(pool)), buffers(pool_keepalive.get()),
+        validity(pool_keepalive.get()), bit_data(pool_keepalive.get()),
+        i32(pool_keepalive.get()), i64(pool_keepalive.get()),
+        f64(pool_keepalive.get()), offsets(pool_keepalive.get()),
+        bytes(pool_keepalive.get()), children(pool_keepalive.get()) {}
+
+  std::shared_ptr<PoolResource> pool_keepalive;
+  std::pmr::vector<const void *> buffers;
+  std::pmr::vector<uint8_t> validity;
+  std::pmr::vector<uint8_t> bit_data;
+  std::pmr::vector<int32_t> i32;
+  std::pmr::vector<int64_t> i64;
+  std::pmr::vector<double> f64;
+  std::pmr::vector<int32_t> offsets;
+  std::pmr::vector<char> bytes;
+  std::pmr::vector<ArrowArray *> children;
 };
 
 // Destroys array payload.
@@ -34,8 +45,7 @@ inline void destroy_array_payload(ArrayPayload *payload) noexcept {
   for (ArrowArray *child : payload->children) {
     if (!child)
       continue;
-    if (child->release)
-      child->release(child);
+    cdata_stream::release_array_nothrow(child);
     delete child;
   }
   delete payload;
@@ -51,8 +61,12 @@ struct ArrayPayloadDeleter {
 using ArrayPayloadPtr = std::unique_ptr<ArrayPayload, ArrayPayloadDeleter>;
 
 // Creates array payload.
-inline ArrayPayloadPtr make_array_payload() noexcept {
-  return ArrayPayloadPtr(new (std::nothrow) ArrayPayload());
+inline ArrayPayloadPtr
+make_array_payload(const std::shared_ptr<PoolResource> &pool) noexcept {
+  if (!pool) {
+    return {};
+  }
+  return ArrayPayloadPtr(new (std::nothrow) ArrayPayload(pool));
 }
 
 // Performs the array release operation.
@@ -85,8 +99,7 @@ inline sanitize::Status finish_child_array(ColumnBuilder *builder,
     return sanitize::Status::OutOfMemory(oom_message);
   sanitize::Status st = builder->finish(child.get());
   if (!st.ok()) {
-    if (child->release)
-      child->release(child.get());
+    cdata_stream::release_array_nothrow(child.get());
     return st;
   }
   *slot = child.release();
@@ -95,6 +108,9 @@ inline sanitize::Status finish_child_array(ColumnBuilder *builder,
 
 class BaseBuilder : public ColumnBuilder {
 public:
+  explicit BaseBuilder(std::shared_ptr<PoolResource> pool)
+      : pool_(std::move(pool)), validity_(pool_.get()) {}
+
   // Resets row counts, validity bits, and builder-specific values.
   sanitize::Status reset() override {
     length_ = 0;
@@ -110,15 +126,27 @@ protected:
   // Resets values owned by a concrete builder.
   virtual sanitize::Status reset_values() = 0;
 
-  // Appends one validity bit and advances the row count.
+  // Appends one validity bit and advances the row count. Null-free columns
+  // deliberately keep no bitmap; Arrow treats a null buffer as all-valid.
   void push_validity(bool valid) {
-    if ((length_ & 7) == 0)
+    const auto byte_index = static_cast<std::size_t>(length_ >> 3);
+    const auto bit_mask = static_cast<uint8_t>(1u << (length_ & 7));
+    if (validity_.empty()) {
+      if (valid) {
+        ++length_;
+        return;
+      }
+      const auto byte_count = static_cast<std::size_t>((length_ >> 3) + 1);
+      validity_.assign(byte_count, uint8_t{0xff});
+    } else if ((length_ & 7) == 0) {
       validity_.push_back(0);
-    if (valid)
-      validity_[static_cast<std::size_t>(length_ >> 3)] |=
-          static_cast<uint8_t>(1u << (length_ & 7));
-    else
+    }
+    if (valid) {
+      validity_[byte_index] |= bit_mask;
+    } else {
+      validity_[byte_index] &= static_cast<uint8_t>(~bit_mask);
       ++null_count_;
+    }
     ++length_;
   }
 
@@ -147,9 +175,10 @@ protected:
     out->release = &array_release;
   }
 
+  std::shared_ptr<PoolResource> pool_;
   int64_t length_ = 0;
   int64_t null_count_ = 0;
-  std::vector<uint8_t> validity_;
+  std::pmr::vector<uint8_t> validity_;
 };
 
 template <typename BuilderT, typename... Args>
@@ -161,14 +190,17 @@ std::unique_ptr<ColumnBuilder> make_column_builder(Args &&...args) {
 
 // Creates scalar builder.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_scalar_builder(sanitize::LogicalKind kind);
+make_scalar_builder(sanitize::LogicalKind kind,
+                    const std::shared_ptr<PoolResource> &pool);
 
 // Creates struct builder.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_struct_builder(std::vector<std::unique_ptr<ColumnBuilder>> children);
+make_struct_builder(std::vector<std::unique_ptr<ColumnBuilder>> children,
+                    const std::shared_ptr<PoolResource> &pool);
 
 // Creates list builder.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_list_builder(std::unique_ptr<ColumnBuilder> child);
+make_list_builder(std::unique_ptr<ColumnBuilder> child,
+                  const std::shared_ptr<PoolResource> &pool);
 
 } // namespace sanitize::internal

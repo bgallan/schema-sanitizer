@@ -1,6 +1,7 @@
 // Public entry points for private Arrow C Data batch building.
 
 #include "internal/materialization/batch_appender_internal.hh"
+#include "internal/arrow_c/cdata_stream_callbacks.hh"
 
 #include <cstring>
 #include <memory>
@@ -12,11 +13,12 @@
 
 namespace sanitize::internal {
 
-BatchAppender::BatchAppender(const sanitize::CompiledPlan &plan)
-    : plan_(&plan) {}
+BatchAppender::BatchAppender(const sanitize::CompiledPlan &plan,
+                             std::shared_ptr<PoolResource> pool)
+    : plan_(&plan), pool_(std::move(pool)) {}
 
 sanitize::Status BatchAppender::init() {
-  SAN_ASSIGN_OR_RAISE(root_, make_root_builder(*plan_));
+  SAN_ASSIGN_OR_RAISE(root_, make_root_builder(*plan_, pool_));
   return sanitize::Status::OK();
 }
 
@@ -44,15 +46,35 @@ sanitize::Status BatchAppender::finish(ArrowArray *out) {
   return root_->finish(out);
 }
 
-sanitize::Status BatchAppender::append_cells(std::vector<Cell> cells) {
+std::vector<Cell> &BatchAppender::prepare_row_cells(std::size_t size) {
+  // Reuse the outer vector allocation while destroying nested/string payloads
+  // from the previous row. This removes one heap allocation per input row
+  // without retaining exceptional nested values.
+  row_cells_.clear();
+  row_cells_.resize(size);
+  return row_cells_;
+}
+
+sanitize::Status BatchAppender::append_prepared_cells() {
   if (!root_)
     return sanitize::Status::Invalid(
-        "BatchAppender::append_cells: root is null");
+        "BatchAppender::append_prepared_cells: root is null");
   Cell root;
   root.is_null = false;
   root.kind = sanitize::LogicalKind::kStruct;
-  root.children = std::move(cells);
-  return root_->append(root);
+  root.children = std::move(row_cells_);
+  auto status = root_->append(root);
+  row_cells_ = std::move(root.children);
+  return status;
+}
+
+std::vector<sanitize::FieldRef> &
+BatchAppender::prepare_field_refs(std::size_t reserve) {
+  field_refs_.clear();
+  if (field_refs_.capacity() < reserve) {
+    field_refs_.reserve(reserve);
+  }
+  return field_refs_;
 }
 
 sanitize::Status BatchAppender::append_null_row() {
@@ -67,8 +89,13 @@ void BatchAppenderDeleter::operator()(BatchAppender *app) const noexcept {
 }
 
 sanitize::Result<BatchAppenderPtr>
-make_batch_appender(const sanitize::CompiledPlan &plan) {
-  auto app = BatchAppenderPtr(new (std::nothrow) BatchAppender(plan));
+make_batch_appender(const sanitize::CompiledPlan &plan,
+                    std::shared_ptr<PoolResource> pool) {
+  if (!pool) {
+    return sanitize::Status::Invalid("make_batch_appender: pool is null");
+  }
+  auto app =
+      BatchAppenderPtr(new (std::nothrow) BatchAppender(plan, std::move(pool)));
   if (!app)
     return sanitize::Status::OutOfMemory("make_batch_appender: OOM appender");
   auto st = app->init();
@@ -99,8 +126,7 @@ sanitize::Status batch_appender_finish(BatchAppender *app, ArrowArray *out) {
   std::memset(out, 0, sizeof(*out));
   sanitize::Status st = app->finish(out);
   if (!st.ok()) {
-    if (out->release)
-      out->release(out);
+    sanitize::internal::cdata_stream::release_array_nothrow(out);
     std::memset(out, 0, sizeof(*out));
   }
   return st;

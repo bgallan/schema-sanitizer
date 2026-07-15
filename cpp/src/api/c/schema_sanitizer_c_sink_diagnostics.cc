@@ -7,12 +7,12 @@
 #include <string>
 
 #include "internal/abi/schema_sanitizer_c_bridge.hh"
+#include "internal/arrow_c/cdata_stream_callbacks.hh"
 
 void schema_sanitizer_stream_free(struct ArrowArrayStream *stream) {
   if (!stream)
     return;
-  if (stream->release)
-    stream->release(stream);
+  sanitize::internal::cdata_stream::release_stream_nothrow(stream);
   delete stream;
 }
 

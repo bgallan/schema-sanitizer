@@ -27,10 +27,11 @@ public:
 };
 
 // Writes all batches from an Arrow C stream as JSON Lines.
-Result<WriteStats> write_stream(ArrowArrayStream *stream, Output &out_file);
+Result<WriteStats> write_stream(ArrowArrayStream *stream, Output &out_file,
+                                std::int64_t memory_limit_bytes);
 
 // Writes one Arrow C record batch as JSON Lines.
 Status write_batch(Output &out_file, const ArrowSchema &schema,
-                   const ArrowArray &array);
+                   const ArrowArray &array, std::int64_t memory_limit_bytes);
 
 } // namespace sanitize::internal::jsonl_stream_writer

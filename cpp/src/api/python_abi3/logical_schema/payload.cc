@@ -4,10 +4,12 @@
 
 #include "internal/abi/python_abi3/methods.hh"
 #include "internal/arrow_c/cdata_schema_builder.hh"
+#include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/options_schema_serialization.hh"
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <new>
 #include <string_view>
 #include <utility>
@@ -27,9 +29,7 @@ void arrow_schema_capsule_destructor(PyObject *capsule) {
     PyErr_Clear();
     return;
   }
-  if (schema->release) {
-    schema->release(schema);
-  }
+  sanitize::internal::cdata_stream::release_schema_nothrow(schema);
   delete schema;
 }
 
@@ -59,12 +59,22 @@ sanitize::Result<sanitize::LogicalSchema> read_required(PyObject *obj) {
   if (!readonly_buffer_view(obj, &data, &size, &owner)) {
     return sanitize::Status::Invalid("invalid logical schema payload bytes");
   }
+  std::unique_ptr<PyObject, decltype(&Py_DECREF)> owner_guard(owner, Py_DECREF);
   const std::string_view payload(reinterpret_cast<const char *>(data),
                                  static_cast<std::size_t>(size));
-  auto decoded =
-      sanitize::internal::options_io::deserialize_logical_schema_bytes(payload);
-  Py_DECREF(owner);
-  return decoded;
+  try {
+    return sanitize::internal::options_io::deserialize_logical_schema_bytes(
+        payload);
+  } catch (const std::bad_alloc &) {
+    return sanitize::Status::OutOfMemory(
+        "logical schema payload deserialization ran out of memory");
+  } catch (const std::exception &e) {
+    return sanitize::Status::Invalid(
+        "logical schema payload deserialization failed: ", e.what());
+  } catch (...) {
+    return sanitize::Status::Invalid(
+        "logical schema payload deserialization failed");
+  }
 }
 
 } // namespace logical_schema_payload
@@ -125,25 +135,38 @@ PyObject *py_logical_schema_payload_arrow_c_schema(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  auto *arrow_schema = new (std::nothrow) ArrowSchema();
+  auto arrow_schema =
+      std::unique_ptr<ArrowSchema>(new (std::nothrow) ArrowSchema());
   if (!arrow_schema) {
     return PyErr_NoMemory();
   }
-  auto fields = take_field_layouts(std::move(schema).ValueOrDie());
-  const auto status = sanitize::internal::export_fields_as_struct_schema(
-      fields, arrow_schema, "TIMESTAMP_NANOS");
-  if (!status.ok()) {
-    delete arrow_schema;
-    PyErr_SetString(PyExc_ValueError, status.ToString().c_str());
+  try {
+    auto fields = take_field_layouts(std::move(schema).ValueOrDie());
+    const auto status = sanitize::internal::export_fields_as_struct_schema(
+        fields, arrow_schema.get(), "TIMESTAMP_NANOS");
+    if (!status.ok()) {
+      PyErr_SetString(PyExc_ValueError, status.ToString().c_str());
+      return nullptr;
+    }
+  } catch (const std::bad_alloc &) {
+    return PyErr_NoMemory();
+  } catch (const std::exception &e) {
+    PyErr_SetString(PyExc_RuntimeError, e.what());
+    return nullptr;
+  } catch (...) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "logical schema Arrow export failed");
     return nullptr;
   }
 
-  PyObject *capsule = PyCapsule_New(arrow_schema, kArrowSchemaCapsuleName,
+  PyObject *capsule = PyCapsule_New(arrow_schema.get(), kArrowSchemaCapsuleName,
                                     arrow_schema_capsule_destructor);
   if (!capsule) {
-    arrow_schema->release(arrow_schema);
-    delete arrow_schema;
+    sanitize::internal::cdata_stream::release_schema_nothrow(
+        arrow_schema.get());
+    return nullptr;
   }
+  (void)arrow_schema.release();
   return capsule;
 }
 

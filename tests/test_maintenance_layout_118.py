@@ -19,25 +19,24 @@ def test_file_conversion_orchestration_has_one_bounded_owner() -> None:
     assert len(source.splitlines()) <= 500
 
 
-def test_parquet_readiness_reuses_one_footer_layout_plan() -> None:
-    """Readiness and stream opening share one layout instead of rebuilding per row group."""
+def test_parquet_stream_plans_layout_once_and_loads_row_groups_lazily() -> None:
+    """Stream opening plans metadata once and decodes only the active row group."""
     reader = ROOT / "cpp/src/internal/parquet/footer_reader"
-    readiness = (reader / "runtime/native_stream_readiness.cc.inc").read_text(encoding="utf-8")
-    validation = (
-        reader / "native_stream/materialization/native_stream_page_layout.cc.inc"
-    ).read_text(encoding="utf-8")
     public = (reader / "reporting/footer_reader_public.cc.inc").read_text(encoding="utf-8")
+    row_group = (
+        reader / "native_stream/materialization/row_group/native_stream_row_group.cc.inc"
+    ).read_text(encoding="utf-8")
     schema = (reader / "native_stream/schema/native_stream_arrow_schema_root.cc.inc").read_text(
         encoding="utf-8"
     )
 
-    assert "std::vector<NativeParquetOutputField> *planned_output_layout" in readiness
-    assert readiness.count("build_native_output_layout(") == 1
-    assert "info.row_groups.front().columns" in readiness
-    assert "validate_native_recursive_row_group_output_layout(row_group," in readiness
-    assert "build_native_output_layout(row_group.columns" not in validation
-    assert "native_reader_readiness(info, &planned_output_layout)" in public
-    assert "state->output_layout = std::move(planned_output_layout)" in public
+    assert "read_footer_metadata_impl(path, projected_columns)" in public
+    assert "initialize_native_stream_output_layout(state.get())" in public
+    assert "native_reader_readiness(info, &planned_output_layout)" not in public
+    assert "prepare_native_row_group" in row_group
+    assert "read_page_headers(stream->file, &current)" in row_group
+    assert "release_native_row_group_runtime_state(&row_group)" in row_group
+    assert "validate_native_recursive_row_group_output_layout(" in row_group
     assert "finalize_native_stream_output_layout_plan" in schema
 
 

@@ -276,13 +276,11 @@ def test_native_parquet_stream_materializes_simple_lists_across_pages(
     )
 
     require_native()
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_PAGE_BYTES", "96")
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_ROW_GROUP_BYTES", "1048576")
     path = tmp_path / "native-list-multi-page.parquet"
     table = pa.table(
         {
             "items": pa.array(
-                [[row, row + 1] for row in range(120)],
+                [list(range(row * 128, (row + 1) * 128)) for row in range(120)],
                 type=pa.list_(pa.int64()),
             )
         }
@@ -292,6 +290,7 @@ def test_native_parquet_stream_materializes_simple_lists_across_pages(
         path,
         feature="test",
         parquet_compression="uncompressed",
+        memory_limit_bytes=1024 * 1024,
     )
 
     info = native_parquet_footer_info(path)
@@ -301,8 +300,13 @@ def test_native_parquet_stream_materializes_simple_lists_across_pages(
     column = info["row_groups"][0]["columns"][0]
     data_pages = [page for page in column["pages"] if page["is_dictionary_page"] == 0]
     assert len(data_pages) > 1
-    assert column["repeated_level_layouts"][0]["offsets"][:4] == [0, 2, 4, 6]
-    assert column["repeated_level_layouts"][0]["offsets"][-4:] == [234, 236, 238, 240]
+    assert column["repeated_level_layouts"][0]["offsets"][:4] == [0, 128, 256, 384]
+    assert column["repeated_level_layouts"][0]["offsets"][-4:] == [
+        14_976,
+        15_104,
+        15_232,
+        15_360,
+    ]
 
     factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
     reader = pa.RecordBatchReader.from_stream(factory)

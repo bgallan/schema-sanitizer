@@ -1,6 +1,7 @@
 // Root Arrow C Data builder and recursive builder factory.
 
 #include "internal/materialization/builders/detail.hh"
+#include "internal/memory/size_math.hh"
 
 #include <cstdint>
 #include <cstring>
@@ -17,7 +18,8 @@ using sanitize::Status;
 
 // Creates builder.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_builder(const ColumnPlan &plan) {
+make_builder(const ColumnPlan &plan,
+             const std::shared_ptr<PoolResource> &pool) {
   switch (plan.logical_type.kind) {
   case LogicalKind::kNull:
   case LogicalKind::kBool:
@@ -27,25 +29,25 @@ make_builder(const ColumnPlan &plan) {
   case LogicalKind::kTimestampNs:
   case LogicalKind::kDate32:
   case LogicalKind::kTime32s:
-    return make_scalar_builder(plan.logical_type.kind);
+    return make_scalar_builder(plan.logical_type.kind, pool);
   case LogicalKind::kStruct: {
     std::vector<std::unique_ptr<ColumnBuilder>> children;
     children.reserve(plan.children.size());
     for (const auto &child_plan : plan.children) {
-      SAN_ASSIGN_OR_RAISE(auto child, make_builder(child_plan));
+      SAN_ASSIGN_OR_RAISE(auto child, make_builder(child_plan, pool));
       if (!child)
         return Status::OutOfMemory("make_builder: OOM child builder");
       children.push_back(std::move(child));
     }
-    return make_struct_builder(std::move(children));
+    return make_struct_builder(std::move(children), pool);
   }
   case LogicalKind::kList: {
     if (!plan.value)
       return Status::Invalid("make_builder: list plan has no child");
-    SAN_ASSIGN_OR_RAISE(auto child, make_builder(*plan.value));
+    SAN_ASSIGN_OR_RAISE(auto child, make_builder(*plan.value, pool));
     if (!child)
       return Status::OutOfMemory("make_builder: OOM list child builder");
-    return make_list_builder(std::move(child));
+    return make_list_builder(std::move(child), pool);
   }
   }
   return Status::Invalid("make_builder: unsupported logical kind");
@@ -54,9 +56,9 @@ make_builder(const ColumnPlan &plan) {
 class RootStructBuilder final : public ColumnBuilder {
 public:
   // Creates a RootStructBuilder.
-  explicit RootStructBuilder(
-      std::vector<std::unique_ptr<ColumnBuilder>> children)
-      : children_(std::move(children)) {}
+  RootStructBuilder(std::vector<std::unique_ptr<ColumnBuilder>> children,
+                    std::shared_ptr<PoolResource> pool)
+      : pool_(std::move(pool)), children_(std::move(children)) {}
 
   // Resets the object state.
   Status reset() override {
@@ -86,7 +88,7 @@ public:
 
   // Finishes the current output.
   Status finish(ArrowArray *out) override {
-    auto payload = make_array_payload();
+    auto payload = make_array_payload(pool_);
     if (!payload)
       return Status::OutOfMemory("RootStructBuilder::finish: OOM payload");
     payload->buffers.assign(1, nullptr);
@@ -117,12 +119,14 @@ public:
   // Returns the current byte usage.
   [[nodiscard]] int64_t bytes() const noexcept override {
     int64_t total = 0;
-    for (const auto &child : children_)
-      total += child->bytes();
+    for (const auto &child : children_) {
+      total = saturating_add_i64(total, child->bytes());
+    }
     return total;
   }
 
 private:
+  std::shared_ptr<PoolResource> pool_;
   std::vector<std::unique_ptr<ColumnBuilder>> children_;
   int64_t length_ = 0;
 };
@@ -130,17 +134,18 @@ private:
 } // namespace
 
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_root_builder(const sanitize::CompiledPlan &plan) {
+make_root_builder(const sanitize::CompiledPlan &plan,
+                  const std::shared_ptr<PoolResource> &pool) {
   std::vector<std::unique_ptr<ColumnBuilder>> builders;
   builders.reserve(plan.columns.size());
   for (const auto &column : plan.columns) {
-    SAN_ASSIGN_OR_RAISE(auto builder, make_builder(column));
+    SAN_ASSIGN_OR_RAISE(auto builder, make_builder(column, pool));
     if (!builder)
       return Status::OutOfMemory("make_root_builder: OOM child builder");
     builders.push_back(std::move(builder));
   }
 
-  auto root = make_column_builder<RootStructBuilder>(std::move(builders));
+  auto root = make_column_builder<RootStructBuilder>(std::move(builders), pool);
   if (!root)
     return Status::OutOfMemory("make_root_builder: OOM root builder");
   SAN_RETURN_NOT_OK(root->reset());

@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "internal/memory/pool_resource.hh"
 #include "nanoarrow/nanoarrow.h"
 #include "sanitize/core/value_view.hh"
 #include "sanitize/planning/plan.hh"
@@ -98,12 +99,14 @@ sanitize::Status convert_value(const sanitize::ColumnPlan &plan,
 
 // Creates root builder.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
-make_root_builder(const sanitize::CompiledPlan &plan);
+make_root_builder(const sanitize::CompiledPlan &plan,
+                  const std::shared_ptr<PoolResource> &pool);
 
 class BatchAppender {
 public:
   // Creates a BatchAppender.
-  explicit BatchAppender(const sanitize::CompiledPlan &plan);
+  BatchAppender(const sanitize::CompiledPlan &plan,
+                std::shared_ptr<PoolResource> pool);
 
   // Initializes the object state.
   sanitize::Status init();
@@ -117,14 +120,21 @@ public:
   [[nodiscard]] int64_t bytes() const noexcept;
   // Finishes the current output.
   sanitize::Status finish(ArrowArray *out);
-  // Appends cells.
-  sanitize::Status append_cells(std::vector<Cell> cells);
+  // Returns reusable row conversion scratch sized for the current schema.
+  std::vector<Cell> &prepare_row_cells(std::size_t size);
+  // Appends the reusable row conversion scratch.
+  sanitize::Status append_prepared_cells();
+  // Returns reusable FieldRef scratch for direct text frontends.
+  std::vector<sanitize::FieldRef> &prepare_field_refs(std::size_t reserve);
   // Appends null row.
   sanitize::Status append_null_row();
 
 private:
   const sanitize::CompiledPlan *plan_ = nullptr;
+  std::shared_ptr<PoolResource> pool_;
   std::unique_ptr<ColumnBuilder> root_;
+  std::vector<Cell> row_cells_;
+  std::vector<sanitize::FieldRef> field_refs_;
 };
 
 // Appends materialized row.

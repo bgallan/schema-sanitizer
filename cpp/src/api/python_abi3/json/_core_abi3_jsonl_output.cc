@@ -20,7 +20,8 @@
 namespace core_abi3_internal {
 
 sanitize::Result<sanitize::internal::jsonl_stream_writer::WriteStats>
-jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj) {
+jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj,
+                             std::int64_t memory_limit_bytes) {
   if (PyUnicode_Check(output_obj)) {
     Py_ssize_t path_len = 0;
     const char *path = PyUnicode_AsUTF8AndSize(output_obj, &path_len);
@@ -28,14 +29,17 @@ jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj) {
       return sanitize::Status::Invalid("output path must be a string");
     }
     return jsonl_write_stream_to_path(
-        stream_obj, std::string(path, static_cast<std::size_t>(path_len)));
+        stream_obj, std::string(path, static_cast<std::size_t>(path_len)),
+        memory_limit_bytes);
   }
 
-  return jsonl_write_stream_to_python(stream_obj, output_obj);
+  return jsonl_write_stream_to_python(stream_obj, output_obj,
+                                      memory_limit_bytes);
 }
 
 sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj,
-                                          std::string *out) {
+                                          std::string *out,
+                                          std::int64_t memory_limit_bytes) {
   ArrowSchema *schema = nullptr;
   ArrowArray *array = nullptr;
   PyObject *owner = nullptr;
@@ -46,11 +50,13 @@ sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj,
     return status;
   }
 
-  return jsonl_write_batch_to_string(*schema, *array, out);
+  return jsonl_write_batch_to_string(*schema, *array, out,
+                                    memory_limit_bytes);
 }
 
 sanitize::Status jsonl_append_batches_bytes(PyObject *batches_obj,
-                                            std::string *out) {
+                                            std::string *out,
+                                            std::int64_t memory_limit_bytes) {
   PyObject *batches =
       PySequence_Fast(batches_obj, "jsonl_batches_bytes expects a sequence");
   if (!batches) {
@@ -69,7 +75,7 @@ sanitize::Status jsonl_append_batches_bytes(PyObject *batches_obj,
     }
     std::unique_ptr<PyObject, decltype(&Py_DECREF)> item_guard(
         borrowed ? nullptr : item, Py_DECREF);
-    auto status = jsonl_append_batch_bytes(item, out);
+    auto status = jsonl_append_batch_bytes(item, out, memory_limit_bytes);
     if (!status.ok()) {
       return status;
     }

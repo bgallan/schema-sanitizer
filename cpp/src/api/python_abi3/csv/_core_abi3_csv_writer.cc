@@ -81,8 +81,8 @@ private:
   std::ofstream out_;
 };
 
-sanitize::Result<csv::WriteStats> csv_write_stream_to_path(PyObject *stream_obj,
-                                                           std::string path) {
+sanitize::Result<csv::WriteStats> csv_write_stream_to_path(
+    PyObject *stream_obj, std::string path, std::int64_t memory_limit_bytes) {
   FileCsvOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError("CSV writer: failed opening output");
@@ -95,16 +95,17 @@ sanitize::Result<csv::WriteStats> csv_write_stream_to_path(PyObject *stream_obj,
   }
   std::unique_ptr<PyObject, decltype(&Py_DECREF)> capsule_owner(capsule,
                                                                 Py_DECREF);
-  return csv::write_stream(stream, output);
+  return csv::write_stream(stream, output, memory_limit_bytes);
 }
 
 sanitize::Result<csv::WriteStats>
-csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path) {
+csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
+                               std::int64_t memory_limit_bytes) {
   FileCsvOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError("CSV writer: failed opening output");
   }
-  return csv::write_stream(stream, output);
+  return csv::write_stream(stream, output, memory_limit_bytes);
 }
 
 } // namespace
@@ -112,7 +113,9 @@ csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path) {
 PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "OO:csv_stream_write", &stream_obj, &path_obj)) {
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "OO|L:csv_stream_write", &stream_obj, &path_obj,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -123,7 +126,8 @@ PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
   }
 
   auto result = csv_write_stream_to_path(
-      stream_obj, std::string(path, static_cast<std::size_t>(path_len)));
+      stream_obj, std::string(path, static_cast<std::size_t>(path_len)),
+      memory_limit_bytes);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
@@ -138,10 +142,11 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *all_row_columns = nullptr;
   PyObject *row_span_columns = nullptr;
   PyObject *timestamp_columns = nullptr;
-  if (!PyArg_ParseTuple(args, "OOOOOO:csv_stream_write_with_metadata",
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "OOOOOO|L:csv_stream_write_with_metadata",
                         &stream_obj, &path_obj, &first_row_columns,
                         &all_row_columns, &row_span_columns,
-                        &timestamp_columns)) {
+                        &timestamp_columns, &memory_limit_bytes)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -154,12 +159,13 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
 
   ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns);
+      timestamp_columns, memory_limit_bytes);
   if (!wrapped) {
     return nullptr;
   }
   auto result = csv_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)));
+      wrapped, std::string(path, static_cast<std::size_t>(path_len)),
+      memory_limit_bytes);
   schema_sanitizer_stream_free(wrapped);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());

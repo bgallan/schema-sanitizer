@@ -21,10 +21,12 @@ public:
   sanitize::Result<std::string> Decode(std::string_view raw, bool final);
 
 private:
-  static std::string transcode_latin1(std::string_view raw);
+  static sanitize::Result<std::string>
+  transcode_latin1(std::string_view raw);
   sanitize::Result<std::string> transcode_utf16(std::string_view raw,
                                                 bool final);
-  std::size_t consume_bom(std::string_view bytes);
+  sanitize::Status append_utf16_pair(unsigned char b0, unsigned char b1,
+                                     std::string *out);
   sanitize::Status append_utf16_unit(std::uint16_t unit, std::string *out);
 
   TextEncoding encoding_;

@@ -200,7 +200,9 @@ void append_column_readiness_blockers(const ColumnChunkInfo &column,
 
 NativeReadinessInfo native_reader_readiness(
     const FooterInfo &info,
-    std::vector<NativeParquetOutputField> *planned_output_layout = nullptr) {
+    std::vector<NativeParquetOutputField> *planned_output_layout = nullptr,
+    std::int64_t max_buffer_bytes =
+        configured_native_reader_max_buffer_bytes(-1)) {
   NativeReadinessInfo readiness;
   std::vector<NativeParquetOutputField> local_output_layout;
   auto *output_layout =
@@ -220,7 +222,6 @@ NativeReadinessInfo native_reader_readiness(
       output_layout_ready = true;
     }
   }
-  const auto max_buffer_bytes = configured_native_reader_max_buffer_bytes();
   if (info.created_by != "schema-sanitizer native parquet writer") {
     add_readiness_blocker(&readiness,
                           "file was not written by schema-sanitizer native "
@@ -253,11 +254,22 @@ NativeReadinessInfo native_reader_readiness(
                                 ": native buffer estimate failed: " +
                                 estimated.status().message());
     } else if (*estimated > max_buffer_bytes) {
-      add_readiness_blocker(
-          &readiness,
-          "row group " + std::to_string(row_group_index) +
-              ": native buffer estimate " + std::to_string(*estimated) +
-              " exceeds configured limit " + std::to_string(max_buffer_bytes));
+      bool flat_window_fits = false;
+      if (output_layout_ready &&
+          native_output_layout_supports_flat_windows(*output_layout,
+                                                     row_group) &&
+          row_group.num_rows > 0) {
+        auto one_row = native_reader_flat_window_buffer_bytes(row_group, 0, 1);
+        flat_window_fits = one_row.ok() && *one_row <= max_buffer_bytes;
+      }
+      if (!flat_window_fits) {
+        add_readiness_blocker(
+            &readiness,
+            "row group " + std::to_string(row_group_index) +
+                ": native buffer estimate " + std::to_string(*estimated) +
+                " exceeds configured limit " +
+                std::to_string(max_buffer_bytes));
+      }
     }
     if (output_layout_ready) {
       const auto output_layout_status =

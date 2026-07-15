@@ -43,7 +43,7 @@ def _native_parquet_zlib_available(pa: object, tmp_path: Path) -> bool:
     batch = pa.record_batch({"text": pa.array(["probe"], type=pa.string())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     try:
-        write(stream, str(tmp_path / "native-zlib-probe.parquet"))
+        write(stream, str(tmp_path / "native-zlib-probe.parquet"), "gzip", -1, -1)
     except RuntimeError as exc:
         if "zlib is not available" in str(exc):
             return False
@@ -64,7 +64,6 @@ def test_parquet_native_file_output_writes_integer_width_logical_types(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
         {
@@ -126,7 +125,6 @@ def test_parquet_native_file_output_writes_timestamp_nanos(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
         {
@@ -166,7 +164,6 @@ def test_parquet_native_file_output_writes_schema_sanitizer_logical_surface(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     struct_type = pa.struct([pa.field("x", pa.int64()), pa.field("s", pa.string())])
     batch = pa.record_batch(
@@ -254,7 +251,6 @@ def test_parquet_native_file_output_writes_nested_stream(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     schema = pa.schema(
         [
@@ -347,7 +343,6 @@ def test_parquet_native_file_output_writes_map_stream(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     schema = pa.schema(
         [
@@ -397,7 +392,6 @@ def test_parquet_native_file_output_writes_fixed_size_list_stream(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     schema = pa.schema(
         [
@@ -442,7 +436,6 @@ def test_parquet_native_file_output_writes_generated_metadata(
         """Fail when the PyArrow Parquet sink fallback is called."""
         raise AssertionError("PyArrow sink fallback should not be used")
 
-    monkeypatch.setenv("SCHEMA_SANITIZER_NATIVE_PARQUET_COMPRESSION", "uncompressed")
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch({"id": pa.array([1, 2], type=pa.int64())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])

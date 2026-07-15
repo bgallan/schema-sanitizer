@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
-from ...core_impl.async_scheduler import read_int_env, retry_async
+from ...core_impl.async_scheduler import retry_async
+from ...core_impl.memory_budget import memory_budget
 from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
@@ -22,7 +22,46 @@ from ...input_impl.directory_inputs import (
 from ..transport import open_aiohttp_session, read_response_bytes, write_response_to_file
 
 _GCS_JSON_API_ENDPOINT = "https://storage.googleapis.com"
-_GCS_READ_ONLY_SCOPE = "https://www.googleapis.com/auth/devstorage.read_only"
+_GCS_READ_WRITE_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
+
+
+class _TransientGcsError(RuntimeError):
+    """A GCS response that is safe to retry with backoff."""
+
+
+def _list_page_size() -> int:
+    """Return the fixed maximum JSON API page size."""
+    return 1000
+
+
+def _list_retries(memory_limit_bytes: int | None = None) -> int:
+    """Derive list retries from the operation memory budget."""
+    return memory_budget(memory_limit_bytes).async_retries
+
+
+def _should_retry_gcs(exc: Exception) -> bool:
+    """Return whether a failed GCS JSON API request is transient."""
+    return isinstance(exc, _TransientGcsError)
+
+
+async def _request_list_page(
+    session: Any,
+    url: str,
+    params: dict[str, str],
+    *,
+    context: str,
+) -> dict[str, Any]:
+    """Fetch and decode one GCS list page with precise error classification."""
+    async with session.get(url, params=params) as response:
+        body = await response.text()
+        if response.status == 200:
+            return json.loads(body)
+        message = f"{context}: status={response.status}, body={body[:1000]!r}"
+        if response.status in {401, 403}:
+            raise PermissionError(message)
+        if response.status == 429 or 500 <= response.status <= 599:
+            raise _TransientGcsError(message)
+        raise RuntimeError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +90,7 @@ def access_token() -> str:
     google_auth = import_module("google.auth")
     google_requests = import_module("google.auth.transport.requests")
 
-    credentials, _ = google_auth.default(scopes=[_GCS_READ_ONLY_SCOPE])
+    credentials, _ = google_auth.default(scopes=[_GCS_READ_WRITE_SCOPE])
     if not credentials.valid:
         credentials.refresh(google_requests.Request())
     if not credentials.token:
@@ -60,13 +99,20 @@ def access_token() -> str:
 
 
 def api_base() -> str:
-    """Return the GCS JSON API endpoint."""
-    return os.getenv("GCS_JSON_API_ENDPOINT", _GCS_JSON_API_ENDPOINT).rstrip("/")
+    """Return the canonical GCS JSON API endpoint."""
+    return _GCS_JSON_API_ENDPOINT
 
 
-def requester_pays_project() -> str | None:
-    """Return the optional requester-pays billing project."""
-    return os.getenv("GCS_REQUESTER_PAYS_PROJECT") or None
+def request_headers(
+    *, accept_json: bool = False, content_type: str | None = None
+) -> dict[str, str]:
+    """Return ADC-authorized request headers."""
+    headers: dict[str, str] = {"Authorization": f"Bearer {access_token()}"}
+    if accept_json:
+        headers["Accept"] = "application/json"
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    return headers
 
 
 def media_url(uri: str) -> str:
@@ -76,9 +122,6 @@ def media_url(uri: str) -> str:
         f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o/"
         f"{quote(ref.object_name, safe='')}?alt=media"
     )
-    project = requester_pays_project()
-    if project:
-        url += f"&userProject={quote(project, safe='')}"
     return url
 
 
@@ -96,10 +139,7 @@ async def file_exists(uri: str) -> bool:
         f"{quote(ref.object_name, safe='')}"
     )
     params = {"fields": "name"}
-    project = requester_pays_project()
-    if project:
-        params["userProject"] = project
-    headers = {"Authorization": f"Bearer {access_token()}", "Accept": "application/json"}
+    headers = request_headers(accept_json=True)
     async with await open_aiohttp_session(headers) as session:
         async with session.get(url, params=params) as response:
             if response.status == 200:
@@ -128,7 +168,7 @@ async def download_file_with_session(session: Any, file: RemoteFile, local_path:
 
 async def download_file(uri: str, local_path: str) -> None:
     """Download one GCS object to a local file."""
-    headers = {"Authorization": f"Bearer {access_token()}"}
+    headers = request_headers()
     async with await open_aiohttp_session(headers) as session:
         await download_file_with_session(
             session,
@@ -142,17 +182,37 @@ async def upload_file(local_path: str, uri: str) -> None:
     ref = parse_uri(uri)
     url = f"{api_base()}/upload/storage/v1/b/{quote(ref.bucket, safe='')}/o"
     params = {"uploadType": "media", "name": ref.object_name}
-    project = requester_pays_project()
-    if project:
-        params["userProject"] = project
-    headers = {
-        "Authorization": f"Bearer {access_token()}",
-        "Content-Type": content_type_for_uri(uri),
-    }
+    headers = request_headers(content_type=content_type_for_uri(uri))
     async with await open_aiohttp_session(headers) as session:
         with Path(local_path).open("rb") as file_handle:
             async with session.post(url, params=params, data=file_handle) as response:
                 await read_response_bytes(response, uri=uri)
+
+
+async def delete_file(uri: str) -> None:
+    """Delete one GCS object, treating an already-missing object as success."""
+    ref = parse_uri(uri)
+    url = (
+        f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o/"
+        f"{quote(ref.object_name, safe='')}"
+    )
+    params: dict[str, str] = {}
+    headers = request_headers()
+    async with await open_aiohttp_session(headers) as session:
+        async with session.delete(url, params=params) as response:
+            if response.status in {200, 204, 404}:
+                await response.read()
+                return
+            body = await response.text()
+            if response.status in {401, 403}:
+                raise PermissionError(
+                    "GCS returned a permission error while deleting an object. "
+                    f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
+                )
+            raise RuntimeError(
+                "Unexpected GCS response while deleting an object. "
+                f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
+            )
 
 
 async def list_directory(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile]:
@@ -160,9 +220,9 @@ async def list_directory(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile
     ref = parse_uri(uri)
     url = f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o"
     prefix = ref.object_name.rstrip("/") + "/"
-    headers = {"Authorization": f"Bearer {access_token()}", "Accept": "application/json"}
-    project = requester_pays_project()
+    headers = request_headers(accept_json=True)
     files: list[RemoteFile] = []
+    retries = _list_retries()
     async with await open_aiohttp_session(headers) as session:
         page_token: str | None = None
         while True:
@@ -170,19 +230,25 @@ async def list_directory(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile
                 "prefix": prefix,
                 "delimiter": "/",
                 "fields": "nextPageToken,items(name,size)",
-                "maxResults": "1000",
+                "maxResults": str(_list_page_size()),
             }
             if page_token:
                 params["pageToken"] = page_token
-            if project:
-                params["userProject"] = project
-            async with session.get(url, params=params) as response:
-                body = await response.text()
-                if response.status != 200:
-                    raise RuntimeError(
-                        f"GCS list failed for {uri!r}: {response.status} {body[:1000]!r}"
-                    )
-                payload = json.loads(body)
+
+            async def request_page() -> dict[str, Any]:
+                """Fetch one direct-child listing page."""
+                return await _request_list_page(
+                    session,
+                    url,
+                    params,
+                    context=f"GCS list failed for {uri!r}",
+                )
+
+            payload = await retry_async(
+                request_page,
+                retries=retries,
+                should_retry=_should_retry_gcs,
+            )
             for item in payload.get("items", ()):
                 name = item.get("name")
                 if not isinstance(name, str):
@@ -203,6 +269,8 @@ async def list_directory(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile
 async def directories_containing_files(
     uris: list[str],
     suffixes: tuple[str, ...],
+    *,
+    memory_limit_bytes: int | None = None,
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether GCS directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
@@ -220,16 +288,15 @@ async def directories_containing_files(
     if not groups:
         return discovery.finish()
 
-    headers = {"Authorization": f"Bearer {access_token()}", "Accept": "application/json"}
-    project = requester_pays_project()
-    concurrency = read_int_env("SCHEMA_SANITIZER_SOURCE_DISCOVERY_GCS_BULK_CONCURRENCY", 16)
-    retries = read_int_env(
-        "SCHEMA_SANITIZER_SOURCE_DISCOVERY_GCS_RETRIES",
-        read_int_env("SCHEMA_SANITIZER_ASYNC_RETRIES", 4),
-    )
+    headers = request_headers(accept_json=True)
+    budget = memory_budget(memory_limit_bytes)
+    concurrency = budget.source_discovery_concurrency
+    retries = budget.async_retries
     semaphore = asyncio.Semaphore(concurrency)
 
-    async with await open_aiohttp_session(headers) as session:
+    async with await open_aiohttp_session(
+        headers, memory_limit_bytes=memory_limit_bytes
+    ) as session:
 
         async def scan_group(
             bucket: str,
@@ -244,33 +311,28 @@ async def directories_containing_files(
                 params = {
                     "prefix": prefix,
                     "fields": "nextPageToken,items(name,size)",
-                    "maxResults": "1000",
+                    "maxResults": str(_list_page_size()),
                 }
                 if page_token:
                     params["pageToken"] = page_token
-                if project:
-                    params["userProject"] = project
 
                 async def request_page() -> dict[str, Any]:
                     """Fetch one GCS list page with retryable transient errors."""
                     async with semaphore:
-                        async with session.get(url, params=params) as response:
-                            body = await response.text()
-                            if response.status == 200:
-                                return json.loads(body)
-                            if response.status in {401, 403}:
-                                raise PermissionError(
-                                    "GCS returned a permission error while bulk-listing "
-                                    f"source directories. status={response.status}, "
-                                    f"prefix={prefix!r}, body={body[:1000]!r}"
-                                )
-                            raise RuntimeError(
-                                "GCS bulk source discovery list failed. "
-                                f"status={response.status}, prefix={prefix!r}, "
-                                f"body={body[:1000]!r}"
-                            )
+                        return await _request_list_page(
+                            session,
+                            url,
+                            params,
+                            context=(
+                                f"GCS bulk source discovery list failed for prefix={prefix!r}"
+                            ),
+                        )
 
-                payload = await retry_async(request_page, retries=retries)
+                payload = await retry_async(
+                    request_page,
+                    retries=retries,
+                    should_retry=_should_retry_gcs,
+                )
                 for item in payload.get("items", ()):
                     name = item.get("name")
                     if not isinstance(name, str) or not name.startswith(prefix):

@@ -11,6 +11,10 @@
 
 namespace core_abi3_internal {
 
+inline constexpr std::size_t kMaxMetadataStreamColumns = 65'536;
+inline constexpr std::size_t kMaxMetadataStreamSpans = 1'000'000;
+inline constexpr std::size_t kMaxMetadataInputUtf8Bytes = 256U * 1024U * 1024U;
+
 enum class MetadataColumnPlacement {
   FirstRowUtf8,
   AllRowsUtf8,

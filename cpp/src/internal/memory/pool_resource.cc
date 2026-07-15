@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <utility>
 #include <memory_resource>
 #include <new>
 
@@ -15,6 +17,11 @@ namespace sanitize::internal {
 PoolResource::PoolResource(void *pool_handle)
     : pool_handle_(pool_handle ? pool_handle
                                : static_cast<void *>(default_memory_pool())) {}
+
+PoolResource::PoolResource(std::shared_ptr<void> pool_keepalive)
+    : pool_keepalive_(std::move(pool_keepalive)),
+      pool_handle_(pool_keepalive_ ? pool_keepalive_.get()
+                                   : static_cast<void *>(default_memory_pool())) {}
 
 void *PoolResource::do_allocate(std::size_t bytes, std::size_t alignment) {
   if (bytes == 0) {
@@ -36,7 +43,7 @@ void *PoolResource::do_allocate(std::size_t bytes, std::size_t alignment) {
 }
 
 void PoolResource::do_deallocate(void *p, std::size_t bytes,
-                                 std::size_t alignment) {
+                                 std::size_t alignment) noexcept {
   if (!p) {
     return;
   }

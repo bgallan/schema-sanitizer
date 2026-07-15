@@ -4,19 +4,77 @@
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/memory/memory_budget.hh"
 
-#include <cerrno>
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace core_abi3_internal::coalesce_detail {
+
+namespace {
+
+void move_array(ArrowArray *source, ArrowArray *destination) noexcept {
+  *destination = *source;
+  sanitize::internal::cdata_stream::clear_array(source);
+}
+
+void release_pending_array(CoalesceStreamState *state) noexcept {
+  if (!state) {
+    return;
+  }
+  sanitize::internal::cdata_stream::release_array_nothrow(
+      &state->pending_array);
+  sanitize::internal::cdata_stream::clear_array(&state->pending_array);
+  state->pending_offset = 0;
+}
+
+
+sanitize::Status ensure_pending_batch(CoalesceStreamState *state) {
+  if (!state || !state->inner) {
+    return sanitize::Status::Invalid(
+        "coalescing stream has no inner stream");
+  }
+  while (!state->pending_array.release && !state->inner_eof) {
+    sanitize::CArrayGuard batch;
+    const int rc = state->inner->get_next(state->inner, batch.get());
+    if (rc != 0) {
+      return sanitize::Status::IOError(
+          "coalescing stream inner get_next failed");
+    }
+    if (!batch.value().release) {
+      state->inner_eof = true;
+      break;
+    }
+    if (batch.value().length < 0 || batch.value().offset < 0) {
+      return sanitize::Status::Invalid(
+          "coalescing stream received an Arrow batch with negative length or offset");
+    }
+    if (batch.value().length == 0) {
+      continue;
+    }
+    SAN_RETURN_NOT_OK(validate_arrow_node(
+        state->root, batch.value(), 0, batch.value().length, 0,
+        state->max_logical_slots, state->max_logical_buffer_bytes));
+    move_array(batch.get(), &state->pending_array);
+    state->pending_offset = 0;
+  }
+  return sanitize::Status::OK();
+}
+
+} // namespace
 
 void release_coalesce_stream(CoalesceStreamState *state) noexcept {
   if (!state || state->closed) {
     return;
   }
+  release_pending_array(state);
   close_arrow_stream_keepalive(&state->inner, &state->stream_obj,
                                &state->stream_capsule, &state->closed);
 }
@@ -76,20 +134,56 @@ int coalesce_get_next(ArrowArrayStream *stream, ArrowArray *out) {
         std::int64_t rows = 0;
         bool has_batch = false;
         while (rows < state->target_rows) {
-          sanitize::CArrayGuard batch;
-          const int rc = state->inner->get_next(state->inner, batch.get());
-          if (rc != 0) {
-            return sanitize::Status::IOError(
-                "coalescing stream inner get_next failed");
-          }
-          if (!batch.value().release) {
+          SAN_RETURN_NOT_OK(ensure_pending_batch(state));
+          if (!state->pending_array.release) {
             break;
           }
+
+          const auto retained = retained_bytes(coalesced->root);
+          const auto remaining_bytes =
+              retained >= state->target_bytes ? std::size_t{0}
+                                              : state->target_bytes - retained;
+          const auto remaining_rows = state->target_rows - rows;
+          auto slice_rows = fitting_slice_rows(
+              state->root, state->pending_array, state->pending_offset,
+              remaining_rows, remaining_bytes);
+          if (slice_rows == 0) {
+            if (has_batch) {
+              break;
+            }
+            const auto hard_remaining =
+                retained >= state->max_batch_bytes
+                    ? std::size_t{0}
+                    : state->max_batch_bytes - retained;
+            if (fitting_slice_rows(state->root, state->pending_array,
+                                   state->pending_offset, 1,
+                                   hard_remaining) == 0) {
+              return sanitize::Status::OutOfMemory(
+                  "coalescing stream single row exceeds hard batch byte limit");
+            }
+            // A single Arrow row may exceed the preferred target, but never
+            // the independent hard safety ceiling.
+            slice_rows = 1;
+          }
+
+          SAN_RETURN_NOT_OK(append_node(
+              state->root, &coalesced->root,
+              ArraySlice{&state->pending_array, state->pending_offset,
+                         slice_rows}));
           has_batch = true;
-          rows += batch.value().length;
-          SAN_RETURN_NOT_OK(
-              append_node(state->root, &coalesced->root,
-                          ArraySlice{&batch.value(), 0, batch.value().length}));
+          rows += slice_rows;
+          state->pending_offset += slice_rows;
+          if (state->pending_offset >= state->pending_array.length) {
+            release_pending_array(state);
+          }
+          const auto retained_after = retained_bytes(coalesced->root);
+          if (retained_after > state->max_batch_bytes) {
+            return sanitize::Status::OutOfMemory(
+                "coalescing stream retained bytes exceed hard batch limit");
+          }
+          if (retained_after >= state->target_bytes) {
+            break;
+          }
         }
         if (!has_batch) {
           sanitize::internal::cdata_stream::clear_array(array);
@@ -107,44 +201,79 @@ namespace core_abi3_internal {
 PyObject *py_coalescing_stream_wrap(PyObject *, PyObject *args) {
   using namespace coalesce_detail;
   PyObject *stream_obj = nullptr;
-  long long target_rows_arg = 65536;
+  long long memory_limit_bytes = -1;
   if (!PyArg_ParseTuple(args, "O|L:coalescing_stream_wrap", &stream_obj,
-                        &target_rows_arg)) {
+                        &memory_limit_bytes)) {
     return nullptr;
   }
-  if (target_rows_arg <= 0) {
-    PyErr_SetString(PyExc_ValueError, "target_rows must be positive");
+  if (memory_limit_bytes < -1 ||
+      memory_limit_bytes > sanitize::internal::kHardMaxMemoryLimitBytes) {
+    PyErr_SetString(PyExc_ValueError,
+                    "memory_limit_bytes must be -1 or within the 64 GiB safety ceiling");
     return nullptr;
   }
+  const auto budget =
+      sanitize::internal::memory_budget_from_limit(memory_limit_bytes);
 
   PyObject *capsule = nullptr;
   ArrowArrayStream *inner = nullptr;
   if (!acquire_arrow_stream(stream_obj, &capsule, &inner)) {
     return nullptr;
   }
+  std::unique_ptr<PyObject, decltype(&decref_with_gil)> capsule_owner(
+      capsule, decref_with_gil);
 
   sanitize::CSchemaGuard schema;
-  const int rc = inner->get_schema(inner, schema.get());
+  int rc = 0;
+  try {
+    rc = inner->get_schema(inner, schema.get());
+  } catch (const std::bad_alloc &) {
+    return PyErr_NoMemory();
+  } catch (const std::exception &e) {
+    PyErr_SetString(PyExc_RuntimeError, e.what());
+    return nullptr;
+  } catch (...) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "coalescing stream inner get_schema raised an exception");
+    return nullptr;
+  }
   if (rc != 0) {
-    Py_DECREF(capsule);
     PyErr_SetString(PyExc_RuntimeError,
                     "coalescing stream inner get_schema failed");
     return nullptr;
   }
 
   CoalesceNodeSpec root;
-  if (!schema_supported(schema.value(), &root)) {
-    Py_DECREF(capsule);
-    Py_RETURN_NONE;
+  try {
+    if (!schema_supported(schema.value(), &root)) {
+      Py_RETURN_NONE;
+    }
+  } catch (const std::bad_alloc &) {
+    return PyErr_NoMemory();
+  } catch (const std::exception &e) {
+    PyErr_SetString(PyExc_RuntimeError, e.what());
+    return nullptr;
+  } catch (...) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "coalescing stream schema parsing failed");
+    return nullptr;
   }
 
-  auto state = std::make_unique<CoalesceStreamState>();
+  auto state = std::unique_ptr<CoalesceStreamState>(
+      new (std::nothrow) CoalesceStreamState());
+  if (!state) {
+    return PyErr_NoMemory();
+  }
   state->inner = inner;
-  state->stream_capsule = capsule;
+  state->stream_capsule = capsule_owner.release();
   Py_INCREF(stream_obj);
   state->stream_obj = stream_obj;
   state->root = std::move(root);
-  state->target_rows = static_cast<std::int64_t>(target_rows_arg);
+  state->target_rows = budget.parquet_row_group_rows;
+  state->target_bytes = static_cast<std::size_t>(budget.parquet_row_group_bytes);
+  state->max_batch_bytes = static_cast<std::size_t>(budget.coalesce_max_bytes);
+  state->max_logical_slots = budget.arrow_logical_slots;
+  state->max_logical_buffer_bytes = budget.arrow_logical_buffer_bytes;
 
   auto *wrapped = new (std::nothrow) ArrowArrayStream();
   if (!wrapped) {

@@ -5,6 +5,29 @@ from __future__ import annotations
 from contextlib import suppress
 
 _COMPACT_AFTER_BYTES = 1 << 20
+_ZERO_CHUNK = b"\x00" * (1 << 20)
+
+
+def _secure_cleanup_enabled() -> bool:
+    """Return the always-on transient-byte cleanup policy."""
+    return True
+
+
+def _zero_bytearray_range(buffer: bytearray, start: int, end: int) -> None:
+    """Overwrite one bytearray range without allocating a same-sized zero buffer."""
+    if start < 0 or end <= start:
+        return
+    view = memoryview(buffer)
+    zero_view = memoryview(_ZERO_CHUNK)
+    try:
+        cursor = start
+        while cursor < end:
+            next_cursor = min(cursor + len(_ZERO_CHUNK), end)
+            view[cursor:next_cursor] = zero_view[: next_cursor - cursor]
+            cursor = next_cursor
+    finally:
+        zero_view.release()
+        view.release()
 
 
 class BufferedGeneratedBytesReader:
@@ -30,17 +53,27 @@ class BufferedGeneratedBytesReader:
         """Return unread bytes currently held by the reader."""
         return len(self._buffer) - self._buffer_offset
 
+    def _discard_buffer(self) -> None:
+        """Drop the backing allocation, optionally overwriting its contents first."""
+        old_buffer = self._buffer
+        self._buffer = bytearray()
+        self._buffer_offset = 0
+        if old_buffer and _secure_cleanup_enabled():
+            _zero_bytearray_range(old_buffer, 0, len(old_buffer))
+        old_buffer.clear()
+
     def _compact_buffer(self) -> None:
         """Discard the consumed prefix at an amortized frequency."""
         if self._buffer_offset == 0:
             return
         if self._buffer_offset == len(self._buffer):
-            self._buffer.clear()
-            self._buffer_offset = 0
+            self._discard_buffer()
             return
         if self._buffer_offset >= _COMPACT_AFTER_BYTES and self._buffer_offset * 2 >= len(
             self._buffer
         ):
+            if _secure_cleanup_enabled():
+                _zero_bytearray_range(self._buffer, 0, self._buffer_offset)
             del self._buffer[: self._buffer_offset]
             self._buffer_offset = 0
 
@@ -78,8 +111,7 @@ class BufferedGeneratedBytesReader:
         if offset != 0:
             raise ValueError(f"{self._reader_name} only supports seek(0)")
         self._reset_reader()
-        self._buffer.clear()
-        self._buffer_offset = 0
+        self._discard_buffer()
         self._closed = False
         return 0
 
@@ -88,8 +120,7 @@ class BufferedGeneratedBytesReader:
         if self._closed:
             return
         self._closed = True
-        self._buffer.clear()
-        self._buffer_offset = 0
+        self._discard_buffer()
 
     def __del__(self) -> None:
         """Best-effort release transient buffered bytes."""

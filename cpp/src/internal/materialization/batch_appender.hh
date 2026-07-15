@@ -26,6 +26,8 @@ struct CompiledPlan;
 
 namespace sanitize::internal {
 
+class PoolResource;
+
 class BumpArena;
 struct CsvDirectContext;
 class JsonOnDemandDoc;
@@ -45,7 +47,8 @@ using BatchAppenderPtr = std::unique_ptr<BatchAppender, BatchAppenderDeleter>;
 
 // Creates batch appender.
 sanitize::Result<BatchAppenderPtr>
-make_batch_appender(const sanitize::CompiledPlan &plan);
+make_batch_appender(const sanitize::CompiledPlan &plan,
+                    std::shared_ptr<PoolResource> pool);
 
 // Performs the batch appender reset operation.
 sanitize::Status batch_appender_reset(BatchAppender *app);

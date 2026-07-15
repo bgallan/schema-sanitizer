@@ -27,6 +27,7 @@ JSONL_STREAM_WRITE_WITH_METADATA = _native.jsonl_stream_write_with_metadata
 PARQUET_STREAM_WRITE = _native.parquet_stream_write
 PARQUET_STREAM_WRITE_WITH_METADATA = _native.parquet_stream_write_with_metadata
 PARQUET_FOOTER_INFO_JSON = _native.parquet_footer_info_json
+PARQUET_STREAM_PREFLIGHT_JSON = _native.parquet_stream_preflight_json
 PARQUET_STREAM_READ = _native.parquet_stream_read
 
 # Source preparation and row conversion.

@@ -39,14 +39,13 @@ try:
         _log_run_plan_summary,
         _print_run_outputs_summary,
         _print_stats_summary,
-        _read_bool_env,
-        _read_int_env,
         _timed_step,
     )
     from examples.example_07.runtime_support import (
         _build_to_parquet_kwargs,
         _filter_available_date_plans,
         _infer_warm_up_schema_registry_state,
+        _schema_warm_up_plan_for_run,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from cli import build_parser
@@ -57,14 +56,13 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         _log_run_plan_summary,
         _print_run_outputs_summary,
         _print_stats_summary,
-        _read_bool_env,
-        _read_int_env,
         _timed_step,
     )
     from runtime_support import (
         _build_to_parquet_kwargs,
         _filter_available_date_plans,
         _infer_warm_up_schema_registry_state,
+        _schema_warm_up_plan_for_run,
     )
 
 
@@ -73,13 +71,10 @@ def main() -> int:
     args = build_parser().parse_args()
     _configure_logging(args.log_level)
 
-    log_sample_size = _read_int_env("PIPELINE_LOG_SAMPLE_SIZE", 3)
-    skipped_log_sample_size = _read_int_env("PIPELINE_SKIPPED_LOG_SAMPLE_SIZE", 5)
-    print_run_details = _read_bool_env("PIPELINE_PRINT_RUN_DETAILS", False)
-    enable_parquet_schema_drift_logging = _read_bool_env(
-        "PIPELINE_LOG_PARQUET_SCHEMA_DRIFT",
-        False,
-    )
+    log_sample_size = 3
+    skipped_log_sample_size = 5
+    print_run_details = False
+    enable_parquet_schema_drift_logging = False
 
     external_format = _normalize_external_format(args.external_table_format)
 
@@ -158,11 +153,19 @@ def main() -> int:
     current_schema_registry_state = SchemaRegistryState(
         schema_registry_json=current_schema_registry_json,
     )
-    if warm_up_plan:
-        with _timed_step(f"schema warm-up over {len(warm_up_plan)} selected source partition(s)"):
+    schema_warm_up_plan = _schema_warm_up_plan_for_run(args, run_plan, warm_up_plan)
+    if args.schema_mode == "additive":
+        LOGGER.info(
+            "Additive schema preflight includes all %d current write partition(s)",
+            len(run_plan),
+        )
+    if schema_warm_up_plan:
+        with _timed_step(
+            f"schema warm-up over {len(schema_warm_up_plan)} selected source partition(s)"
+        ):
             current_schema_registry_state = _infer_warm_up_schema_registry_state(
                 args,
-                warm_up_plan,
+                schema_warm_up_plan,
                 current_schema_registry_state,
             )
             current_schema_registry_json = current_schema_registry_state.schema_registry_json

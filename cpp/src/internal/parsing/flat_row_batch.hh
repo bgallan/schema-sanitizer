@@ -10,6 +10,8 @@
 
 namespace sanitize::internal {
 
+inline constexpr std::size_t kMaxMaterializedFieldsPerRow = 65'536;
+
 // Helper for frontends that want to build a batch of RowRef without per-row
 // allocations. All FieldRef for the batch are stored in one contiguous vector.
 //

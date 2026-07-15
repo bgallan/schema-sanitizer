@@ -98,8 +98,6 @@ SCHEMA_SANITIZER_OPTION(
     "TIMESTAMP_MICROS, and TIMESTAMP_NANOS.")
 
 // --- Input I/O
-SCHEMA_SANITIZER_OPTION(int64_t, io_chunk_bytes, (1LL * 1024 * 1024), "io",
-                        "Chunk size for streaming reads (bytes).")
 SCHEMA_SANITIZER_OPTION(
     std::string, input_text_encoding, std::string("utf-8"), "io",
     "Character encoding used to decode text bytes for CSV/JSON ingestion.")
@@ -122,8 +120,9 @@ SCHEMA_SANITIZER_OPTION(sanitize::OnErrorPolicy, on_error,
                         "Row-level error handling policy.")
 
 // --- Performance
-// Single per-batch memory budget in bytes. <= 0 uses default batch sizing. This
-// is used to derive internal inference read sizes and output batch sizes.
+// Single per-operation memory budget in bytes. <= 0 selects the documented
+// default. Every internal buffer, batch, staging, and concurrency budget is
+// derived from this value; no runtime environment configuration is consulted.
 SCHEMA_SANITIZER_OPTION(int64_t, memory_limit_bytes, -1, "performance",
-                        "Per-batch memory budget in bytes for inference reads "
-                        "and produced batches (<=0 uses defaults).")
+                        "Per-operation memory budget used to derive all runtime "
+                        "resource limits (<=0 uses the documented default).")

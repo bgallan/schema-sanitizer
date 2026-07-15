@@ -1,9 +1,4 @@
 // Native Parquet decode owner: scalar columns.
-
-// ---- native_stream_column_validation ----
-// Native stream flat/plain column validation and decoding helpers.
-// Included directly by footer_reader.cc.
-
 sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
   if (!native_plain_path_is_materializable(column.path_in_schema,
                                            column.max_repetition_level,
@@ -121,15 +116,14 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
   return {};
 }
 
-// ---- native_stream_decode_fixed_width ----
 sanitize::Status materialize_fixed_width_column(
-    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
-  if (!out || row_count < 0 ||
-      row_count >
-          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    std::ifstream &file, const ColumnChunkInfo &column,
+    const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
+  SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
+  if (!out) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: invalid fixed-width row count");
+        "native Parquet reader: fixed-width output is null");
   }
   const auto arrow_width = column.native_read_value_width_bytes;
   const auto physical_width = fixed_width_for_plain_values(column);
@@ -137,7 +131,7 @@ sanitize::Status materialize_fixed_width_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: fixed-width value width is invalid");
   }
-  const auto value_bytes = static_cast<std::uint64_t>(row_count) *
+  const auto value_bytes = static_cast<std::uint64_t>(window.row_count) *
                            static_cast<std::uint64_t>(arrow_width);
   if (value_bytes >
       static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
@@ -146,13 +140,19 @@ sanitize::Status materialize_fixed_width_column(
   }
   out->values.assign(static_cast<std::size_t>(value_bytes), 0);
   if (column.native_read_total_nulls > 0) {
-    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+    out->validity.assign(static_cast<std::size_t>((window.row_count + 7) / 8),
+                         0);
   }
   for (const auto &span : column.native_read_page_spans) {
     if (span.page_index < 0 ||
-        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+        static_cast<std::size_t>(span.page_index) >= column.pages.size() ||
+        span.first_row_index < 0 || span.row_count < 0 ||
+        span.first_row_index > window.row_group_rows - span.row_count) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid page span index");
+          "native Parquet reader: invalid fixed-width page span");
+    }
+    if (!window.overlaps(span.first_row_index, span.row_count)) {
+      continue;
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
     std::string_view payload;
@@ -163,33 +163,33 @@ sanitize::Status materialize_fixed_width_column(
       return sanitize::Status::Invalid(
           "native Parquet reader: invalid value payload offset");
     }
-    const std::string_view values = std::string_view(payload).substr(
+    const auto values = std::string_view(payload).substr(
         static_cast<std::size_t>(page.value_payload_offset));
     std::size_t value_offset = 0;
     for (std::int32_t row = 0; row < span.row_count; ++row) {
       const auto global_row = span.first_row_index + row;
-      if (global_row < 0 || global_row >= row_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: page row span exceeds row group");
-      }
       const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
-      if (valid) {
-        if (values.size() - value_offset <
-            static_cast<std::size_t>(*physical_width)) {
-          return sanitize::Status::Invalid(
-              "native Parquet reader: truncated fixed-width payload");
-        }
-        auto *target =
-            out->values.data() + static_cast<std::size_t>(global_row) *
-                                     static_cast<std::size_t>(arrow_width);
+      if (!valid) {
+        continue;
+      }
+      if (values.size() - value_offset <
+          static_cast<std::size_t>(*physical_width)) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: truncated fixed-width payload");
+      }
+      if (window.contains(global_row)) {
+        const auto output_row = window.local_row(global_row);
+        auto *target = out->values.data() +
+                       static_cast<std::size_t>(output_row) *
+                           static_cast<std::size_t>(arrow_width);
         SAN_RETURN_NOT_OK(copy_fixed_width_physical_to_arrow(
             target, values.data() + value_offset, column, *physical_width,
             arrow_width));
-        value_offset += static_cast<std::size_t>(*physical_width);
         if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, global_row);
+          set_output_validity_bit(&out->validity, output_row);
         }
       }
+      value_offset += static_cast<std::size_t>(*physical_width);
     }
     if (value_offset != values.size()) {
       return sanitize::Status::Invalid(
@@ -199,17 +199,14 @@ sanitize::Status materialize_fixed_width_column(
   return {};
 }
 
-// ---- native_stream_decode_boolean ----
-sanitize::Status materialize_boolean_column(std::ifstream &file,
-                                            const ColumnChunkInfo &column,
-                                            std::int64_t row_count,
-                                            NativeParquetPageScratch *scratch,
-                                            NativeParquetChildArray *out) {
-  if (!out || row_count < 0 ||
-      row_count >
-          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+sanitize::Status materialize_boolean_column(
+    std::ifstream &file, const ColumnChunkInfo &column,
+    const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
+  SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
+  if (!out) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: invalid boolean row count");
+        "native Parquet reader: boolean output is null");
   }
   if (column.physical_type != kPhysicalBoolean) {
     return sanitize::Status::Invalid(
@@ -217,16 +214,23 @@ sanitize::Status materialize_boolean_column(std::ifstream &file,
   }
   SAN_ASSIGN_OR_RAISE(
       const auto value_buffer_bytes,
-      arrow_boolean_value_buffer_bytes(static_cast<std::int32_t>(row_count)));
+      arrow_boolean_value_buffer_bytes(
+          static_cast<std::int32_t>(window.row_count)));
   out->values.assign(static_cast<std::size_t>(value_buffer_bytes), 0);
   if (column.native_read_total_nulls > 0) {
-    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+    out->validity.assign(static_cast<std::size_t>((window.row_count + 7) / 8),
+                         0);
   }
   for (const auto &span : column.native_read_page_spans) {
     if (span.page_index < 0 ||
-        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+        static_cast<std::size_t>(span.page_index) >= column.pages.size() ||
+        span.first_row_index < 0 || span.row_count < 0 ||
+        span.first_row_index > window.row_group_rows - span.row_count) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid boolean page span index");
+          "native Parquet reader: invalid boolean page span");
+    }
+    if (!window.overlaps(span.first_row_index, span.row_count)) {
+      continue;
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
     if (!page.has_value_encoding || page.value_encoding != kEncodingPlain) {
@@ -252,24 +256,24 @@ sanitize::Status materialize_boolean_column(std::ifstream &file,
     std::int32_t value_index = 0;
     for (std::int32_t row = 0; row < span.row_count; ++row) {
       const auto global_row = span.first_row_index + row;
-      if (global_row < 0 || global_row >= row_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: boolean row span exceeds row group");
-      }
       const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
-      if (valid) {
-        if (value_index >= span.non_null_count) {
-          return sanitize::Status::Invalid(
-              "native Parquet reader: missing boolean value");
-        }
+      if (!valid) {
+        continue;
+      }
+      if (value_index >= span.non_null_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: missing boolean value");
+      }
+      if (window.contains(global_row)) {
+        const auto output_row = window.local_row(global_row);
         if (bit_stream_value_is_set(values, value_index)) {
-          set_output_validity_bit(&out->values, global_row);
+          set_output_validity_bit(&out->values, output_row);
         }
-        ++value_index;
         if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, global_row);
+          set_output_validity_bit(&out->validity, output_row);
         }
       }
+      ++value_index;
     }
     if (value_index != span.non_null_count) {
       return sanitize::Status::Invalid(
@@ -279,15 +283,14 @@ sanitize::Status materialize_boolean_column(std::ifstream &file,
   return {};
 }
 
-// ---- native_stream_decode_delta_binary_column ----
 sanitize::Status materialize_delta_binary_packed_column(
-    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
-  if (!out || row_count < 0 ||
-      row_count >
-          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    std::ifstream &file, const ColumnChunkInfo &column,
+    const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
+  SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
+  if (!out) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: invalid DELTA_BINARY_PACKED row count");
+        "native Parquet reader: DELTA_BINARY_PACKED output is null");
   }
   const auto width = column.native_read_value_width_bytes;
   const auto physical_width = fixed_width_for_plain_values(column);
@@ -297,8 +300,8 @@ sanitize::Status materialize_delta_binary_packed_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: unsupported DELTA_BINARY_PACKED physical type");
   }
-  const auto value_bytes =
-      static_cast<std::uint64_t>(row_count) * static_cast<std::uint64_t>(width);
+  const auto value_bytes = static_cast<std::uint64_t>(window.row_count) *
+                           static_cast<std::uint64_t>(width);
   if (value_bytes >
       static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::Invalid(
@@ -306,13 +309,19 @@ sanitize::Status materialize_delta_binary_packed_column(
   }
   out->values.assign(static_cast<std::size_t>(value_bytes), 0);
   if (column.native_read_total_nulls > 0) {
-    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+    out->validity.assign(static_cast<std::size_t>((window.row_count + 7) / 8),
+                         0);
   }
   for (const auto &span : column.native_read_page_spans) {
     if (span.page_index < 0 ||
-        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+        static_cast<std::size_t>(span.page_index) >= column.pages.size() ||
+        span.first_row_index < 0 || span.row_count < 0 ||
+        span.first_row_index > window.row_group_rows - span.row_count) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid DELTA_BINARY_PACKED page span index");
+          "native Parquet reader: invalid DELTA_BINARY_PACKED page span");
+    }
+    if (!window.overlaps(span.first_row_index, span.row_count)) {
+      continue;
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
     if (!page.has_value_encoding ||
@@ -357,27 +366,26 @@ sanitize::Status materialize_delta_binary_packed_column(
     std::size_t value_offset = 0;
     for (std::int32_t row = 0; row < span.row_count; ++row) {
       const auto global_row = span.first_row_index + row;
-      if (global_row < 0 || global_row >= row_count) {
-        return sanitize::Status::Invalid(
-            "native Parquet reader: DELTA_BINARY_PACKED row span exceeds row "
-            "group");
-      }
       const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
-      if (valid) {
-        if (value_offset >= decoded_values.size()) {
-          return sanitize::Status::Invalid(
-              "native Parquet reader: missing DELTA_BINARY_PACKED value");
-        }
-        const auto target =
-            out->values.data() + static_cast<std::size_t>(global_row) *
-                                     static_cast<std::size_t>(width);
+      if (!valid) {
+        continue;
+      }
+      if (value_offset >= decoded_values.size()) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: missing DELTA_BINARY_PACKED value");
+      }
+      if (window.contains(global_row)) {
+        const auto output_row = window.local_row(global_row);
+        auto *target = out->values.data() +
+                       static_cast<std::size_t>(output_row) *
+                           static_cast<std::size_t>(width);
         SAN_RETURN_NOT_OK(write_arrow_integer_value(
             target, column, decoded_values[value_offset]));
-        ++value_offset;
         if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, global_row);
+          set_output_validity_bit(&out->validity, output_row);
         }
       }
+      ++value_offset;
     }
     if (value_offset != decoded_values.size()) {
       return sanitize::Status::Invalid(
@@ -387,15 +395,14 @@ sanitize::Status materialize_delta_binary_packed_column(
   return {};
 }
 
-// ---- native_stream_decode_byte_stream_split ----
 sanitize::Status materialize_byte_stream_split_column(
-    std::ifstream &file, const ColumnChunkInfo &column, std::int64_t row_count,
-    NativeParquetPageScratch *scratch, NativeParquetChildArray *out) {
-  if (!out || row_count < 0 ||
-      row_count >
-          static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())) {
+    std::ifstream &file, const ColumnChunkInfo &column,
+    const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
+    NativeParquetChildArray *out) {
+  SAN_RETURN_NOT_OK(validate_native_flat_row_window(window));
+  if (!out) {
     return sanitize::Status::Invalid(
-        "native Parquet reader: invalid BYTE_STREAM_SPLIT row count");
+        "native Parquet reader: BYTE_STREAM_SPLIT output is null");
   }
   const auto width = column.native_read_value_width_bytes;
   if ((column.physical_type != kPhysicalFloat &&
@@ -404,8 +411,8 @@ sanitize::Status materialize_byte_stream_split_column(
     return sanitize::Status::Invalid(
         "native Parquet reader: unsupported BYTE_STREAM_SPLIT physical type");
   }
-  const auto value_bytes =
-      static_cast<std::uint64_t>(row_count) * static_cast<std::uint64_t>(width);
+  const auto value_bytes = static_cast<std::uint64_t>(window.row_count) *
+                           static_cast<std::uint64_t>(width);
   if (value_bytes >
       static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::Invalid(
@@ -413,13 +420,19 @@ sanitize::Status materialize_byte_stream_split_column(
   }
   out->values.assign(static_cast<std::size_t>(value_bytes), 0);
   if (column.native_read_total_nulls > 0) {
-    out->validity.assign(static_cast<std::size_t>((row_count + 7) / 8), 0);
+    out->validity.assign(static_cast<std::size_t>((window.row_count + 7) / 8),
+                         0);
   }
   for (const auto &span : column.native_read_page_spans) {
     if (span.page_index < 0 ||
-        static_cast<std::size_t>(span.page_index) >= column.pages.size()) {
+        static_cast<std::size_t>(span.page_index) >= column.pages.size() ||
+        span.first_row_index < 0 || span.row_count < 0 ||
+        span.first_row_index > window.row_group_rows - span.row_count) {
       return sanitize::Status::Invalid(
-          "native Parquet reader: invalid BYTE_STREAM_SPLIT page span index");
+          "native Parquet reader: invalid BYTE_STREAM_SPLIT page span");
+    }
+    if (!window.overlaps(span.first_row_index, span.row_count)) {
+      continue;
     }
     const auto &page = column.pages[static_cast<std::size_t>(span.page_index)];
     if (!page.has_value_encoding ||
@@ -449,20 +462,19 @@ sanitize::Status materialize_byte_stream_split_column(
     std::int32_t value_index = 0;
     for (std::int32_t row = 0; row < span.row_count; ++row) {
       const auto global_row = span.first_row_index + row;
-      if (global_row < 0 || global_row >= row_count) {
-        return sanitize::Status::Invalid("native Parquet reader: "
-                                         "BYTE_STREAM_SPLIT row span exceeds "
-                                         "row group");
-      }
       const bool valid = validity_bit_is_set(page.decoded_validity_bitmap, row);
-      if (valid) {
-        if (value_index >= span.non_null_count) {
-          return sanitize::Status::Invalid(
-              "native Parquet reader: missing BYTE_STREAM_SPLIT value");
-        }
-        auto *target =
-            out->values.data() + static_cast<std::size_t>(global_row) *
-                                     static_cast<std::size_t>(width);
+      if (!valid) {
+        continue;
+      }
+      if (value_index >= span.non_null_count) {
+        return sanitize::Status::Invalid(
+            "native Parquet reader: missing BYTE_STREAM_SPLIT value");
+      }
+      if (window.contains(global_row)) {
+        const auto output_row = window.local_row(global_row);
+        auto *target = out->values.data() +
+                       static_cast<std::size_t>(output_row) *
+                           static_cast<std::size_t>(width);
         for (std::int32_t byte_index = 0; byte_index < width; ++byte_index) {
           const auto source_offset =
               static_cast<std::size_t>(byte_index) *
@@ -471,11 +483,11 @@ sanitize::Status materialize_byte_stream_split_column(
           target[static_cast<std::size_t>(byte_index)] =
               static_cast<std::uint8_t>(values[source_offset]);
         }
-        ++value_index;
         if (!out->validity.empty()) {
-          set_output_validity_bit(&out->validity, global_row);
+          set_output_validity_bit(&out->validity, output_row);
         }
       }
+      ++value_index;
     }
     if (value_index != span.non_null_count) {
       return sanitize::Status::Invalid(

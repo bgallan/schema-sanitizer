@@ -47,9 +47,41 @@ constexpr std::size_t kMaxValuePreviewBytes = 128;
 constexpr std::size_t kMaxPageHeaderBytes = 1024 * 1024;
 constexpr std::size_t kMaxPayloadVerificationBytes = 256ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxValidityBitmapBytes = 64ULL * 1024ULL * 1024ULL;
-constexpr std::uint64_t kMaxContainerElements = 100000000ULL;
+constexpr std::size_t kMaxFooterBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxMetadataBinaryBytes = 16ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxMaterializedMetadataBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMinMaterializedMetadataBytes = 1024ULL * 1024ULL;
+constexpr std::size_t kMetadataAmplificationFactor = 64ULL;
+constexpr std::uint64_t kMaxContainerElements = 4'000'000ULL;
+constexpr std::uint64_t kMaxColumnEncodingEntries = 256ULL;
+constexpr std::uint64_t kMaxSchemaPathEntries = 65'536ULL;
+constexpr std::uint64_t kMaxSchemaElements = 65'536ULL;
+constexpr std::uint64_t kMaxRowGroups = 1'000'000ULL;
+constexpr std::uint64_t kMaxColumnsPerRowGroup = 65'536ULL;
+constexpr std::uint64_t kMaxPagesPerColumn = 1'000'000ULL;
+constexpr std::int32_t kMaxDictionaryEntries = 16'777'216;
+constexpr std::uint64_t kMaxDecompressedBytesPerRowGroup =
+    1024ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaxDerivedBytesPerRowGroup =
+    1024ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaxDecompressionExpansionRatio = 4096ULL;
 constexpr std::int64_t kDefaultNativeReaderMaxBufferBytes =
     1024LL * 1024LL * 1024LL;
+constexpr std::int64_t kHardMaxNativeReaderBufferBytes =
+    kDefaultNativeReaderMaxBufferBytes;
+constexpr std::int64_t kDefaultNativeReaderMaxBatchRows = 65'536;
+constexpr std::int64_t kHardMaxNativeReaderBatchRows = 1024 * 1024;
+
+
+std::size_t metadata_materialization_limit(std::size_t input_bytes) noexcept {
+  std::size_t scaled = kMaxMaterializedMetadataBytes;
+  if (input_bytes <=
+      std::numeric_limits<std::size_t>::max() / kMetadataAmplificationFactor) {
+    scaled = input_bytes * kMetadataAmplificationFactor;
+  }
+  return std::min(kMaxMaterializedMetadataBytes,
+                  std::max(kMinMaterializedMetadataBytes, scaled));
+}
 
 std::uint32_t read_u32_le(const char *ptr) {
   return static_cast<std::uint32_t>(static_cast<unsigned char>(ptr[0])) |

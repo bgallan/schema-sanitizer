@@ -34,6 +34,8 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             _to_jsonl_once,
             rows,
             repeats,
+            input_bytes=jsonl_path,
+            output_bytes=output_path,
             describe=lambda _result: jsonl_route_detail(),
         )
 
@@ -52,6 +54,8 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             _to_csv_once,
             rows,
             repeats,
+            input_bytes=jsonl_path,
+            output_bytes=output_path,
             describe=lambda _result: f"{metadata_route_detail()} {csv_nested_route_detail()}",
         )
 
@@ -70,6 +74,8 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             _parquet_to_jsonl_once,
             rows,
             repeats,
+            input_bytes=parquet_path,
+            output_bytes=output_path,
             describe=lambda _result: join_route_details(
                 parquet_direct_route_detail(), jsonl_route_detail()
             ),
@@ -90,6 +96,8 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             _wide_parquet_to_jsonl_once,
             rows,
             repeats,
+            input_bytes=parquet_path,
+            output_bytes=output_path,
             describe=lambda _result: join_route_details(
                 parquet_direct_route_detail(), jsonl_route_detail()
             ),
@@ -115,6 +123,8 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             _registry_parquet_to_jsonl_once,
             rows,
             repeats,
+            input_bytes=parquet_path,
+            output_bytes=output_path,
             describe=lambda _result: join_route_details(
                 parquet_direct_route_detail(), jsonl_route_detail()
             ),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -75,8 +76,7 @@ def test_example_07_embedded_registry_preserves_additive_bootstrap_mode(monkeypa
         parse_iso_dates=True,
         parse_iso_times=True,
         on_error="emit_null_row",
-        batch_memory_limit_bytes=64 * 1024 * 1024,
-        read_chunk_bytes=256 * 1024,
+        memory_limit_bytes=64 * 1024 * 1024,
         arrow_max_depth=32,
         parquet_max_depth=15,
         parquet_compression="gzip",
@@ -386,8 +386,7 @@ def test_example_07_warm_up_infers_one_additive_registry(tmp_path: Path) -> None
         parse_iso_dates=True,
         parse_iso_times=True,
         on_error="emit_null_row",
-        batch_memory_limit_bytes=64 * 1024 * 1024,
-        read_chunk_bytes=256 * 1024,
+        memory_limit_bytes=64 * 1024 * 1024,
         arrow_max_depth=32,
         parquet_max_depth=15,
         input_text_encoding="utf-8",
@@ -410,3 +409,87 @@ def test_example_07_warm_up_infers_one_additive_registry(tmp_path: Path) -> None
     assert example.registry_has_canonical_schema(registry)
     fields = registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
+
+
+def test_example_07_additive_preflight_stabilizes_integer_float_parquet(
+    tmp_path: Path,
+) -> None:
+    """All additive partitions must use the final widened numeric schema."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from schema_sanitizer.pipeline import run_partitioned_to_parquet_registry_state
+
+    example = _load_example_07_runtime_support()
+    integer_source = tmp_path / "integer.jsonl"
+    float_source = tmp_path / "float.jsonl"
+    integer_source.write_text(
+        '{"exitscreen":{"timeelapsed":0}}\n', encoding="utf-8"
+    )
+    float_source.write_text(
+        '{"exitscreen":{"timeelapsed":0.0}}\n', encoding="utf-8"
+    )
+    plans = [
+        example.DateRunPlan(
+            logical_date=date(2026, 6, 20),
+            source_uri=str(integer_source),
+            output_uri=str(tmp_path / "integer.parquet"),
+        ),
+        example.DateRunPlan(
+            logical_date=date(2026, 6, 21),
+            source_uri=str(float_source),
+            output_uri=str(tmp_path / "float.parquet"),
+        ),
+    ]
+    args = SimpleNamespace(
+        input_format="jsonl",
+        input_mode="single_file",
+        schema_mode="additive",
+        column_order="alphabetically",
+        field_name_policy="lower_snake",
+        timestamp_precision="TIMESTAMP_MICROS",
+        parse_integers=True,
+        parse_floats=True,
+        parse_float_decimal_separator=".",
+        parse_float_thousands_separator=",",
+        parse_iso_timestamps=True,
+        parse_iso_dates=True,
+        parse_iso_times=True,
+        on_error="emit_null_row",
+        memory_limit_bytes=64 * 1024 * 1024,
+        arrow_max_depth=32,
+        parquet_max_depth=15,
+        input_text_encoding="utf-8",
+        parquet_compression="uncompressed",
+        parquet_gzip_level=None,
+    )
+
+    preflight = example._schema_warm_up_plan_for_run(args, plans, [])
+    state = example._infer_warm_up_schema_registry_state(
+        args,
+        preflight,
+        example.SchemaRegistryState(
+            schema_registry_json=json.dumps(
+                example._new_schema_registry(), separators=(",", ":")
+            )
+        ),
+    )
+    run_partitioned_to_parquet_registry_state(
+        plans,
+        initial_schema_registry_state=state,
+        to_parquet_kwargs=example._build_to_parquet_kwargs(args),
+    )
+
+    for plan in plans:
+        nested = pq.read_schema(plan.output_uri).field("exitscreen").type
+        assert nested.field("timeelapsed").type == pa.float64()
+
+
+def test_example_07_strict_preflight_only_uses_requested_warm_up() -> None:
+    """Strict runs must not silently absorb current-range drift."""
+    example = _load_example_07_runtime_support()
+    current = [example.DateRunPlan(date(2026, 6, 21), "current", "current.parquet")]
+    requested = [example.DateRunPlan(date(2026, 6, 20), "warm", "warm.parquet")]
+
+    assert example._schema_warm_up_plan_for_run(
+        SimpleNamespace(schema_mode="strict"), current, requested
+    ) == requested

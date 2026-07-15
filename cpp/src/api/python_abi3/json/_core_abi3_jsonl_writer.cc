@@ -52,12 +52,14 @@ PyObject *jsonl_stats_to_dict(const jsonl::WriteStats &stats) {
 PyObject *py_jsonl_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *output_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "OO:jsonl_stream_write", &stream_obj,
-                        &output_obj)) {
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "OO|L:jsonl_stream_write", &stream_obj,
+                        &output_obj, &memory_limit_bytes)) {
     return nullptr;
   }
 
-  auto result = jsonl_write_stream_to_output(stream_obj, output_obj);
+  auto result = jsonl_write_stream_to_output(
+      stream_obj, output_obj, memory_limit_bytes);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
@@ -72,10 +74,11 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *all_row_columns = nullptr;
   PyObject *row_span_columns = nullptr;
   PyObject *timestamp_columns = nullptr;
-  if (!PyArg_ParseTuple(args, "OOOOOO:jsonl_stream_write_with_metadata",
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "OOOOOO|L:jsonl_stream_write_with_metadata",
                         &stream_obj, &path_obj, &first_row_columns,
                         &all_row_columns, &row_span_columns,
-                        &timestamp_columns)) {
+                        &timestamp_columns, &memory_limit_bytes)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -88,12 +91,13 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
 
   ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns);
+      timestamp_columns, memory_limit_bytes);
   if (!wrapped) {
     return nullptr;
   }
   auto result = jsonl_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)));
+      wrapped, std::string(path, static_cast<std::size_t>(path_len)),
+      memory_limit_bytes);
   schema_sanitizer_stream_free(wrapped);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
@@ -104,12 +108,15 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
 
 PyObject *py_jsonl_batch_bytes(PyObject *, PyObject *args) {
   PyObject *batch_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "O:jsonl_batch_bytes", &batch_obj)) {
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "O|L:jsonl_batch_bytes", &batch_obj,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
 
   std::string bytes;
-  const auto status = jsonl_append_batch_bytes(batch_obj, &bytes);
+  const auto status =
+      jsonl_append_batch_bytes(batch_obj, &bytes, memory_limit_bytes);
   if (!status.ok()) {
     PyErr_SetString(PyExc_RuntimeError, status.message().c_str());
     return nullptr;
@@ -120,12 +127,15 @@ PyObject *py_jsonl_batch_bytes(PyObject *, PyObject *args) {
 
 PyObject *py_jsonl_batches_bytes(PyObject *, PyObject *args) {
   PyObject *batches_obj = nullptr;
-  if (!PyArg_ParseTuple(args, "O:jsonl_batches_bytes", &batches_obj)) {
+  long long memory_limit_bytes = -1;
+  if (!PyArg_ParseTuple(args, "O|L:jsonl_batches_bytes", &batches_obj,
+                        &memory_limit_bytes)) {
     return nullptr;
   }
 
   std::string bytes;
-  const auto status = jsonl_append_batches_bytes(batches_obj, &bytes);
+  const auto status =
+      jsonl_append_batches_bytes(batches_obj, &bytes, memory_limit_bytes);
   if (!status.ok()) {
     PyErr_SetString(PyExc_RuntimeError, status.message().c_str());
     return nullptr;

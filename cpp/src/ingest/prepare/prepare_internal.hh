@@ -17,7 +17,8 @@ sanitize::Result<LogicalSchema>
 infer_schema_from_frontend(FrontendHandle &frontend,
                            const PreparedOptions &opts,
                            IngestDiagnostics *diagnostics, bool *out_consumed,
-                           ExecutionContext *execution_context);
+                           ExecutionContext *execution_context,
+                           void *memory_pool_handle);
 
 // Resolves the final logical schema from a contract and inferred schema.
 sanitize::Result<LogicalSchema>

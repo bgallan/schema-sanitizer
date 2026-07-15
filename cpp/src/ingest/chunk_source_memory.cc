@@ -24,9 +24,8 @@ public:
   }
 
   sanitize::Result<Chunk> NextChunk(std::int64_t max_bytes) override {
-    if (max_bytes <= 0) {
-      return sanitize::Status::Invalid("NextChunk: max_bytes must be > 0");
-    }
+    SAN_RETURN_NOT_OK(
+        internal::validate_chunk_request(max_bytes, "OwnedChunkSource"));
     const std::string_view data(*data_);
     if (pos_ >= data.size()) {
       Chunk chunk;

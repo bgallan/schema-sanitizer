@@ -116,6 +116,10 @@ sanitize::Status decode_dictionary_page_values(std::string_view payload,
       !page->has_value_encoding) {
     return {};
   }
+  if (page->num_values < 0 || page->num_values > kMaxDictionaryEntries) {
+    return sanitize::Status::Invalid(
+        "Parquet dictionary: entry count exceeds security limit");
+  }
   if (page->value_encoding != kEncodingPlain) {
     page->values_decode_skipped = true;
     return {};

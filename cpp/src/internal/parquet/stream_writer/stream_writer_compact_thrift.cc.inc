@@ -65,30 +65,50 @@ public:
 
   // Writes a list of i64 values.
   void FieldListI64(std::int16_t id, const std::vector<std::int64_t> &values) {
+    FieldListI64(id, values.size(),
+                 [&](std::size_t index) { return values[index]; });
+  }
+
+  // Writes generated i64 values without materializing an auxiliary vector.
+  void FieldListI64(std::int16_t id, std::size_t size, auto value_at) {
     field(id, 9);
-    list_header(values.size(), 6);
-    for (const auto value : values) {
-      append_varint(out_, zigzag(value));
+    list_header(size, 6);
+    for (std::size_t index = 0; index < size; ++index) {
+      append_varint(out_, zigzag(value_at(index)));
     }
   }
 
   // Writes a list of boolean values.
   void FieldListBool(std::int16_t id, const std::vector<bool> &values) {
+    FieldListBool(id, values.size(),
+                  [&](std::size_t index) { return values[index]; });
+  }
+
+  // Writes generated booleans without materializing an auxiliary vector.
+  void FieldListBool(std::int16_t id, std::size_t size, auto value_at) {
     field(id, 9);
-    list_header(values.size(), 2);
-    for (const bool value : values) {
-      out_.push_back(static_cast<char>(value ? 1 : 2));
+    list_header(size, 2);
+    for (std::size_t index = 0; index < size; ++index) {
+      out_.push_back(static_cast<char>(value_at(index) ? 1 : 2));
     }
   }
 
   // Writes a list of strings.
   void FieldListString(std::int16_t id,
                        const std::vector<std::string> &values) {
+    FieldListString(id, values.size(), [&](std::size_t index) -> std::string_view {
+      return values[index];
+    });
+  }
+
+  // Writes generated strings without copying them into an auxiliary vector.
+  void FieldListString(std::int16_t id, std::size_t size, auto value_at) {
     field(id, 9);
-    list_header(values.size(), 8);
-    for (const auto &value : values) {
+    list_header(size, 8);
+    for (std::size_t index = 0; index < size; ++index) {
+      const std::string_view value = value_at(index);
       append_varint(out_, value.size());
-      out_.append(value);
+      out_.append(value.data(), value.size());
     }
   }
 

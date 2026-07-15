@@ -30,7 +30,7 @@ void CsvColumnProjection::set_plan(
   plan_ = plan;
   keep_mask_ready_ = false;
   keep_mask_.clear();
-  root_field_cache_.clear();
+  resolved_fields_.clear();
 
   direct_ready_ = false;
   direct_.col_to_csv.clear();
@@ -46,7 +46,7 @@ void CsvColumnProjection::set_plan(
 void CsvColumnProjection::reset_header() noexcept {
   header_ready_ = false;
   keep_mask_ready_ = false;
-  root_field_cache_.clear();
+  resolved_fields_.clear();
   if (has_header_) {
     column_hashes_.clear();
   }
@@ -85,7 +85,7 @@ sanitize::Status CsvColumnProjection::validate_header_cells(
     return sanitize::Status::OK();
   }
   for (const std::string_view cell : cells) {
-    if (find_root_field(cell) == nullptr) {
+    if (find_root_field_uncached(cell) == nullptr) {
       return sanitize::Status::Invalid(
           "Strict schema evolution: observed extra field '", std::string(cell),
           "'");
@@ -97,13 +97,14 @@ sanitize::Status CsvColumnProjection::validate_header_cells(
 void CsvColumnProjection::set_header_cells(
     const std::vector<std::string_view> &cells) {
   headers_.clear();
+  resolved_fields_.clear();
   headers_.reserve(cells.size());
   for (const std::string_view cell : cells) {
     headers_.emplace_back(cell);
   }
   header_ready_ = true;
-  root_field_cache_.reserve(cells.size());
   ensure_numeric_keys(headers_.size());
+  ensure_resolved_fields(headers_.size());
   column_hashes_.clear();
   ensure_column_hashes(headers_.size());
   ensure_keep_mask(headers_.size());
@@ -125,7 +126,7 @@ void CsvColumnProjection::build_direct_from_headers(
   }
   direct_.col_to_csv.assign(plan_->columns.size(), -1);
   for (std::size_t i = 0; i < cells.size(); ++i) {
-    const auto *field = find_root_field(cells[i]);
+    const auto *field = resolved_fields_[i];
     if (!field) {
       continue;
     }
@@ -135,21 +136,6 @@ void CsvColumnProjection::build_direct_from_headers(
     }
   }
   direct_ready_ = true;
-}
-
-const sanitize::FieldIndex *
-CsvColumnProjection::find_root_field(std::string_view key) const noexcept {
-  if (const auto cached = root_field_cache_.find(key);
-      cached != root_field_cache_.end()) {
-    return cached->second;
-  }
-  const auto *field = find_root_field_uncached(key);
-  try {
-    root_field_cache_.emplace(std::string(key), field);
-  } catch (...) {
-    // Lookup remains correct when cache allocation fails.
-  }
-  return field;
 }
 
 const sanitize::FieldIndex *CsvColumnProjection::find_root_field_uncached(
@@ -220,6 +206,17 @@ void CsvColumnProjection::ensure_column_hashes(std::size_t column_count) {
   }
 }
 
+void CsvColumnProjection::ensure_resolved_fields(std::size_t column_count) {
+  if (resolved_fields_.size() >= column_count) {
+    return;
+  }
+  const std::size_t first_new_column = resolved_fields_.size();
+  resolved_fields_.resize(column_count, nullptr);
+  for (std::size_t i = first_new_column; i < column_count; ++i) {
+    resolved_fields_[i] = find_root_field_uncached(column_key(i));
+  }
+}
+
 void CsvColumnProjection::ensure_keep_mask(std::size_t column_count) {
   if (!plan_ || (keep_mask_ready_ && keep_mask_.size() >= column_count)) {
     return;
@@ -231,11 +228,11 @@ void CsvColumnProjection::ensure_keep_mask(std::size_t column_count) {
     keep_mask_.resize(column_count, 0);
   } else {
     keep_mask_.assign(column_count, 0);
-    root_field_cache_.reserve(column_count);
   }
 
+  ensure_resolved_fields(column_count);
   for (std::size_t i = first_new_column; i < column_count; ++i) {
-    keep_mask_[i] = find_root_field(column_key(i)) != nullptr ? 1 : 0;
+    keep_mask_[i] = resolved_fields_[i] != nullptr ? 1 : 0;
   }
   keep_mask_ready_ = true;
 }

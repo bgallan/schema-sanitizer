@@ -3,7 +3,6 @@
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "sanitize/abi/cdata_types.hh"
-
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -17,7 +16,6 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-
 namespace core_abi3_internal {
 namespace {
 
@@ -26,13 +24,11 @@ struct MetadataSchemaChild {
   std::string name;
   const char *format = nullptr;
 };
-
 struct MetadataSchemaState {
   sanitize::CSchemaGuard base;
   std::vector<MetadataSchemaChild> metadata;
   std::vector<ArrowSchema *> children;
 };
-
 struct Utf8ColumnData {
   std::vector<std::uint8_t> validity;
   std::vector<std::int32_t> offsets;
@@ -41,7 +37,6 @@ struct Utf8ColumnData {
   const void *buffers[3]{nullptr, nullptr, nullptr};
   ArrowArray array{};
 };
-
 struct TimestampMicrosColumnData {
   std::vector<std::int64_t> values;
   const void *buffers[2]{nullptr, nullptr};
@@ -64,19 +59,19 @@ void clear_array(ArrowArray *array) noexcept {
   sanitize::internal::cdata_stream::clear_array(array);
 }
 
-void metadata_schema_child_release(ArrowSchema *schema) {
+void metadata_schema_child_release(ArrowSchema *schema) noexcept {
   if (schema && schema->release) {
     clear_schema(schema);
   }
 }
 
-void metadata_array_child_release(ArrowArray *array) {
+void metadata_array_child_release(ArrowArray *array) noexcept {
   if (array && array->release) {
     clear_array(array);
   }
 }
 
-void metadata_schema_release(ArrowSchema *schema) {
+void metadata_schema_release(ArrowSchema *schema) noexcept {
   if (!schema || !schema->release) {
     return;
   }
@@ -84,7 +79,7 @@ void metadata_schema_release(ArrowSchema *schema) {
   clear_schema(schema);
 }
 
-void metadata_array_release(ArrowArray *array) {
+void metadata_array_release(ArrowArray *array) noexcept {
   if (!array || !array->release) {
     return;
   }
@@ -161,7 +156,9 @@ void append_utf8_run(Utf8ColumnData *out, std::string_view value,
   out->data.resize(old_data_size +
                    value_size * static_cast<std::size_t>(count));
   char *dest = value_size > 0 ? out->data.data() + old_data_size : nullptr;
-  set_validity_range(&out->validity, row_offset, count);
+  if (!out->validity.empty()) {
+    set_validity_range(&out->validity, row_offset, count);
+  }
   for (std::int64_t i = 0; i < count; ++i) {
     if (value_size > 0) {
       std::memcpy(dest + value_size * static_cast<std::size_t>(i), value.data(),
@@ -189,21 +186,26 @@ sanitize::Status build_first_row_value(Utf8ColumnData *out,
   if (length < 0) {
     return sanitize::Status::Invalid("metadata column length is negative");
   }
-  out->validity.assign(static_cast<std::size_t>((length + 7) / 8), 0);
   if (first_row_pending && length > 0) {
     if (value.size() >
         static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
       return sanitize::Status::Invalid(
           "metadata value exceeds Arrow UTF-8 limit");
     }
-    set_validity_bit(&out->validity, 0);
+    out->null_count = length - 1;
+    if (out->null_count > 0) {
+      out->validity.assign(static_cast<std::size_t>((length + 7) / 8), 0);
+      set_validity_bit(&out->validity, 0);
+    } else {
+      out->validity.clear();
+    }
     out->data.assign(value.begin(), value.end());
     const auto end = static_cast<std::int32_t>(value.size());
     out->offsets.assign(static_cast<std::size_t>(length) + 1, end);
     out->offsets[0] = 0;
-    out->null_count = length - 1;
     return sanitize::Status::OK();
   }
+  out->validity.assign(static_cast<std::size_t>((length + 7) / 8), 0);
   out->offsets.assign(static_cast<std::size_t>(length) + 1, 0);
   out->null_count = length;
   return sanitize::Status::OK();
@@ -216,7 +218,7 @@ sanitize::Status build_all_row_value(Utf8ColumnData *out,
     return sanitize::Status::Invalid("metadata column length is negative");
   }
   SAN_RETURN_NOT_OK(ensure_utf8_capacity(value, length));
-  out->validity.assign(static_cast<std::size_t>((length + 7) / 8), 0);
+  out->validity.clear();
   out->offsets.assign(static_cast<std::size_t>(length) + 1, 0);
   out->data.clear();
   out->data.reserve(value.size() * static_cast<std::size_t>(length));
@@ -231,13 +233,13 @@ sanitize::Status build_row_span_value(Utf8ColumnData *out,
   if (length < 0) {
     return sanitize::Status::Invalid("metadata column length is negative");
   }
-  out->validity.assign(static_cast<std::size_t>((length + 7) / 8), 0);
   out->offsets.assign(static_cast<std::size_t>(length) + 1, 0);
   out->data.clear();
 
   std::size_t reserve_span_index = column->span_index;
   std::int64_t reserve_span_offset = column->span_offset;
   std::int64_t reserve_row = 0;
+  std::int64_t reserve_null_count = 0;
   std::uint64_t data_bytes = 0;
   while (reserve_row < length && reserve_span_index < column->spans.size()) {
     const MetadataSpan &span = column->spans[reserve_span_index];
@@ -248,7 +250,9 @@ sanitize::Status build_row_span_value(Utf8ColumnData *out,
       continue;
     }
     const std::int64_t take = std::min(length - reserve_row, span_remaining);
-    if (!span.is_null) {
+    if (span.is_null) {
+      reserve_null_count += take;
+    } else {
       SAN_RETURN_NOT_OK(add_utf8_data_bytes(&data_bytes, span.value, take));
     }
     reserve_row += take;
@@ -257,6 +261,12 @@ sanitize::Status build_row_span_value(Utf8ColumnData *out,
       ++reserve_span_index;
       reserve_span_offset = 0;
     }
+  }
+  reserve_null_count += length - reserve_row;
+  if (reserve_null_count > 0) {
+    out->validity.assign(static_cast<std::size_t>((length + 7) / 8), 0);
+  } else {
+    out->validity.clear();
   }
   out->data.reserve(static_cast<std::size_t>(data_bytes));
 
@@ -327,13 +337,11 @@ sanitize::Status build_timestamp_micros_array(TimestampMicrosColumnData *out,
   if (length < 0) {
     return sanitize::Status::Invalid("metadata column length is negative");
   }
-  out->values.resize(static_cast<std::size_t>(length));
-  for (std::int64_t i = 0; i < length; ++i) {
-    out->values[static_cast<std::size_t>(i)] =
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count();
-  }
+  const auto timestamp =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  out->values.assign(static_cast<std::size_t>(length), timestamp);
   out->buffers[0] = nullptr;
   out->buffers[1] = out->values.empty() ? nullptr : out->values.data();
   clear_array(&out->array);
@@ -437,16 +445,14 @@ sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
     clear_array(out);
     return sanitize::Status::OK();
   }
-  if (base.n_children < 0) {
-    return sanitize::Status::Invalid(
-        "metadata stream base array has invalid children");
-  }
+  SAN_RETURN_NOT_OK(validate_metadata_base_array(*stream_state, base));
 
   const auto timestamp_count = static_cast<std::size_t>(std::ranges::count_if(
       stream_state->columns, [](const MetadataColumn &column) {
         return column.placement ==
                MetadataColumnPlacement::AllRowsTimestampMicros;
       }));
+  SAN_RETURN_NOT_OK(validate_generated_metadata_budget(*stream_state, base, timestamp_count));
   state->timestamp_columns.reserve(timestamp_count);
   state->utf8_columns.reserve(stream_state->columns.size() - timestamp_count);
   state->children.resize(static_cast<std::size_t>(base.n_children) +
