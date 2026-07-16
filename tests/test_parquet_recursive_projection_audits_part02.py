@@ -6,6 +6,8 @@ requiring PyArrow. Runtime materialization lives in focused native modules.
 
 from __future__ import annotations
 
+from parquet_contract_shared import list_projection_field, recursive_projection_field
+
 # Split from test_parquet_recursive_projection_audits.py: test_native_recursive_projection_partition_contract_audit_recomposes_full_layout, test_native_recursive_projection_partition_contract_audit_detects_gaps_duplicates_and_drift, test_native_recursive_projection_coverage_contract_audit_allows_partial_overlaps, ...
 
 
@@ -18,29 +20,7 @@ def test_native_recursive_projection_partition_contract_audit_recomposes_full_la
         _native_recursive_projection_partition_contract_audit_from_summaries,
     )
 
-    def field(name: str, root_kind: str, leaf_suffix: str, rep_depth: int) -> dict[str, object]:
-        """Internal test helper."""
-        components = [name, *leaf_suffix.split(".")]
-        repeated_components = [components[:2]] if rep_depth else []
-        return {
-            "name": name,
-            "root_kind": root_kind,
-            "structural_shape_signature": f"{root_kind}<payload:int64>",
-            "shape_signature": f"{root_kind}<payload:#0:int64>",
-            "leaf_paths": [f"{name}.{leaf_suffix}"],
-            "leaf_path_components": [components],
-            "repeated_node_paths": [".".join(components[:2])] if rep_depth else [],
-            "repeated_node_path_components": repeated_components,
-            "leaf_max_definition_levels": [2 + rep_depth],
-            "leaf_max_repetition_levels": [rep_depth],
-            "leaf_path_definition_levels": [[0, 1, 2 + rep_depth]],
-            "leaf_path_repetition_levels": [[0, *([1] * rep_depth), rep_depth]],
-            "leaf_count": 1,
-            "node_count": 2 + rep_depth,
-            "repetition_depth": rep_depth,
-            "max_node_depth": 2 + rep_depth,
-            "max_child_count": 1,
-        }
+    field = recursive_projection_field
 
     alpha = field("alpha", "list", "list.element.value", 1)
     beta = field("beta", "map", "entries.value", 1)
@@ -124,28 +104,7 @@ def test_native_recursive_projection_partition_contract_audit_detects_gaps_dupli
         _native_recursive_projection_partition_contract_audit_from_summaries,
     )
 
-    def field(name: str, leaf_suffix: str, max_def: int) -> dict[str, object]:
-        """Internal test helper."""
-        components = [name, *leaf_suffix.split(".")]
-        return {
-            "name": name,
-            "root_kind": "list",
-            "structural_shape_signature": f"list<struct<{leaf_suffix}:int64>>",
-            "shape_signature": f"list<struct<{leaf_suffix}:#0:int64>>",
-            "leaf_paths": [f"{name}.{leaf_suffix}"],
-            "leaf_path_components": [components],
-            "repeated_node_paths": [f"{name}.list"],
-            "repeated_node_path_components": [[name, "list"]],
-            "leaf_max_definition_levels": [max_def],
-            "leaf_max_repetition_levels": [1],
-            "leaf_path_definition_levels": [[0, 1, max_def]],
-            "leaf_path_repetition_levels": [[0, 1, 1]],
-            "leaf_count": 1,
-            "node_count": 3,
-            "repetition_depth": 1,
-            "max_node_depth": 2,
-            "max_child_count": 1,
-        }
+    field = list_projection_field
 
     alpha = field("alpha", "list.element.value", 3)
     beta = field("beta", "list.element.value", 3)
@@ -210,29 +169,7 @@ def test_native_recursive_projection_coverage_contract_audit_allows_partial_over
         _native_recursive_projection_coverage_contract_audit_from_summaries,
     )
 
-    def field(name: str, root_kind: str, leaf_suffix: str, rep_depth: int) -> dict[str, object]:
-        """Internal test helper."""
-        components = [name, *leaf_suffix.split(".")]
-        repeated_components = [components[:2]] if rep_depth else []
-        return {
-            "name": name,
-            "root_kind": root_kind,
-            "structural_shape_signature": f"{root_kind}<payload:int64>",
-            "shape_signature": f"{root_kind}<payload:#0:int64>",
-            "leaf_paths": [f"{name}.{leaf_suffix}"],
-            "leaf_path_components": [components],
-            "repeated_node_paths": [".".join(components[:2])] if rep_depth else [],
-            "repeated_node_path_components": repeated_components,
-            "leaf_max_definition_levels": [2 + rep_depth],
-            "leaf_max_repetition_levels": [rep_depth],
-            "leaf_path_definition_levels": [[0, 1, 2 + rep_depth]],
-            "leaf_path_repetition_levels": [[0, *([1] * rep_depth), rep_depth]],
-            "leaf_count": 1,
-            "node_count": 2 + rep_depth,
-            "repetition_depth": rep_depth,
-            "max_node_depth": 2 + rep_depth,
-            "max_child_count": 1,
-        }
+    field = recursive_projection_field
 
     alpha = field("alpha", "list", "list.element.value", 1)
     beta = field("beta", "map", "entries.value", 1)
@@ -307,28 +244,7 @@ def test_native_recursive_projection_coverage_contract_audit_enforces_requested_
         _native_recursive_projection_coverage_contract_audit_from_summaries,
     )
 
-    def field(name: str, leaf_suffix: str, max_def: int) -> dict[str, object]:
-        """Internal test helper."""
-        components = [name, *leaf_suffix.split(".")]
-        return {
-            "name": name,
-            "root_kind": "list",
-            "structural_shape_signature": f"list<struct<{leaf_suffix}:int64>>",
-            "shape_signature": f"list<struct<{leaf_suffix}:#0:int64>>",
-            "leaf_paths": [f"{name}.{leaf_suffix}"],
-            "leaf_path_components": [components],
-            "repeated_node_paths": [f"{name}.list"],
-            "repeated_node_path_components": [[name, "list"]],
-            "leaf_max_definition_levels": [max_def],
-            "leaf_max_repetition_levels": [1],
-            "leaf_path_definition_levels": [[0, 1, max_def]],
-            "leaf_path_repetition_levels": [[0, 1, 1]],
-            "leaf_count": 1,
-            "node_count": 3,
-            "repetition_depth": 1,
-            "max_node_depth": 2,
-            "max_child_count": 1,
-        }
+    field = list_projection_field
 
     alpha = field("alpha", "list.element.value", 3)
     beta = field("beta", "list.element.value", 3)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
+from sinks_shared import fail_pyarrow_sink
 
 
 def test_parquet_native_file_output_dictionary_encodes_repeated_byte_arrays(
@@ -17,10 +18,6 @@ def test_parquet_native_file_output_dictionary_encodes_repeated_byte_arrays(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
@@ -69,10 +66,6 @@ def test_parquet_native_file_output_preserves_null_dictionary_values(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
@@ -172,10 +165,6 @@ def test_parquet_native_file_output_skips_dictionary_when_payload_is_larger(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
-
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
         {
@@ -215,10 +204,6 @@ def test_parquet_native_file_output_dictionary_encodes_repeated_fixed_values(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
@@ -274,10 +259,6 @@ def test_parquet_native_file_output_writes_dictionary_stream(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(

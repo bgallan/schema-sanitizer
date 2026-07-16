@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 from conftest import require_native
 from sinks_shared import (
+    fail_pyarrow_sink,
+)
+from sinks_shared import (
     native_parquet_zlib_available as _native_parquet_zlib_available,
 )
 
@@ -24,10 +27,6 @@ def test_parquet_native_file_output_writes_float_statistics_without_nan_bounds(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
@@ -75,10 +74,6 @@ def test_parquet_native_file_output_skips_column_index_without_page_bounds(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
-
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch({"value": pa.array([float("nan"), float("nan")], type=pa.float64())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
@@ -110,10 +105,6 @@ def test_parquet_native_file_output_splits_large_batches_into_row_groups(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     row_count = 400
@@ -157,10 +148,6 @@ def test_parquet_native_file_output_respects_uncompressed_override(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
-
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch({"text": pa.array(["same"] * 32, type=pa.string())})
     stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
@@ -187,10 +174,6 @@ def test_parquet_native_snappy_reduces_repeated_payload(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     values = [f"shared-prefix-{'abc123' * 32}-{index:08d}" for index in range(1024)]
@@ -221,10 +204,6 @@ def test_parquet_native_file_output_defaults_to_gzip_when_available(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     if not _native_parquet_zlib_available(pa, tmp_path):
         pytest.skip("native Parquet writer was built without zlib")

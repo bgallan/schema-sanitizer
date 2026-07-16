@@ -6,19 +6,10 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
+from parquet_runtime_shared import pa, pq
+from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 import schema_sanitizer as ss
-
-try:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = pq = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
 
 # Split from test_parquet_native_nested_scalars_lists.py: test_native_parquet_footer_info_reads_schema_sanitizer_file, test_native_parquet_stream_materializes_simple_integer_lists, test_native_parquet_stream_materializes_simple_lists_across_pages, ...
 

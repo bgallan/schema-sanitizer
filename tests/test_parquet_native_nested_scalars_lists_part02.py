@@ -8,17 +8,8 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-
-try:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = pq = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
+from parquet_runtime_shared import pa, pq
+from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 # Split from test_parquet_native_nested_scalars_lists.py: test_native_parquet_stream_materializes_plain_byte_array_lists, test_native_parquet_stream_materializes_simple_float_lists, test_native_parquet_stream_materializes_simple_boolean_lists, ...
 

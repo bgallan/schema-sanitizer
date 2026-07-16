@@ -75,3 +75,94 @@ def stable_native_writer_footer_info() -> dict[str, object]:
             {"native_recursive_output_layout": {"decoded": 1, "fields": [field()]}},
         ],
     }
+
+
+def recursive_projection_field(
+    name: str,
+    root_kind: str,
+    leaf_suffix: str,
+    rep_depth: int,
+) -> dict[str, object]:
+    """Build one recursive field diagnostic for projection composition tests."""
+    components = [name, *leaf_suffix.split(".")]
+    repeated_components = [components[:2]] if rep_depth else []
+    return {
+        "name": name,
+        "root_kind": root_kind,
+        "structural_shape_signature": f"{root_kind}<payload:int64>",
+        "shape_signature": f"{root_kind}<payload:#0:int64>",
+        "leaf_paths": [f"{name}.{leaf_suffix}"],
+        "leaf_path_components": [components],
+        "repeated_node_paths": [".".join(components[:2])] if rep_depth else [],
+        "repeated_node_path_components": repeated_components,
+        "leaf_max_definition_levels": [2 + rep_depth],
+        "leaf_max_repetition_levels": [rep_depth],
+        "leaf_path_definition_levels": [[0, 1, 2 + rep_depth]],
+        "leaf_path_repetition_levels": [[0, *([1] * rep_depth), rep_depth]],
+        "leaf_count": 1,
+        "node_count": 2 + rep_depth,
+        "repetition_depth": rep_depth,
+        "max_node_depth": 2 + rep_depth,
+        "max_child_count": 1,
+    }
+
+
+def list_projection_field(
+    name: str,
+    leaf_suffix: str,
+    max_def: int,
+) -> dict[str, object]:
+    """Build one list field diagnostic for projection failure tests."""
+    components = [name, *leaf_suffix.split(".")]
+    return {
+        "name": name,
+        "root_kind": "list",
+        "structural_shape_signature": f"list<struct<{leaf_suffix}:int64>>",
+        "shape_signature": f"list<struct<{leaf_suffix}:#0:int64>>",
+        "leaf_paths": [f"{name}.{leaf_suffix}"],
+        "leaf_path_components": [components],
+        "repeated_node_paths": [f"{name}.list"],
+        "repeated_node_path_components": [[name, "list"]],
+        "leaf_max_definition_levels": [max_def],
+        "leaf_max_repetition_levels": [1],
+        "leaf_path_definition_levels": [[0, 1, max_def]],
+        "leaf_path_repetition_levels": [[0, 1, 1]],
+        "leaf_count": 1,
+        "node_count": 3,
+        "repetition_depth": 1,
+        "max_node_depth": 2,
+        "max_child_count": 1,
+    }
+
+
+def repeated_ancestor_field(path_rep: list[list[int]]) -> dict[str, object]:
+    """Build a nested field diagnostic with configurable repetition levels."""
+    return {
+        "name": "payload",
+        "root_kind": "list",
+        "structural_shape_signature": "list<map<string,list<int64>>>",
+        "shape_signature": "list<map<string,list<#0:int64>>>",
+        "leaf_paths": ["payload.list.element.entries.value.list.element"],
+        "leaf_path_components": [
+            ["payload", "list", "element", "entries", "value", "list", "element"]
+        ],
+        "repeated_node_paths": [
+            "payload.list",
+            "payload.list.element.entries",
+            "payload.list.element.entries.value.list",
+        ],
+        "repeated_node_path_components": [
+            ["payload", "list"],
+            ["payload", "list", "element", "entries"],
+            ["payload", "list", "element", "entries", "value", "list"],
+        ],
+        "leaf_max_definition_levels": [6],
+        "leaf_max_repetition_levels": [3],
+        "leaf_path_definition_levels": [[0, 1, 2, 3, 4, 5, 6]],
+        "leaf_path_repetition_levels": path_rep,
+        "leaf_count": 1,
+        "node_count": 7,
+        "repetition_depth": 3,
+        "max_node_depth": 6,
+        "max_child_count": 1,
+    }

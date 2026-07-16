@@ -7,22 +7,11 @@ import gc
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
 from conftest import read_test_parquet, require_native
+from parquet_runtime_shared import pa, pq
+from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 import schema_sanitizer as ss
-
-try:
-    import pyarrow as pa
-    import pyarrow.feather as feather
-    import pyarrow.parquet as pq
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = feather = pq = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
 
 # Split from test_parquet_direct_io_runtime.py: test_parquet_directory_converter_uses_direct_arrow_path, test_parquet_directory_mismatched_schemas_use_native_child_arrow_path, test_parquet_directory_mismatched_schema_converter_uses_native_child_arrow_path, ...
 

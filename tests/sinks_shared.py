@@ -46,3 +46,8 @@ def native_parquet_zlib_available(pa: object, tmp_path: Path) -> bool:
             return False
         raise
     return True
+
+
+def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
+    """Fail when a native-writer test unexpectedly uses the PyArrow fallback."""
+    raise AssertionError("PyArrow sink fallback should not be used")

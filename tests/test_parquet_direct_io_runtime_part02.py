@@ -7,21 +7,11 @@ from pathlib import Path
 
 import pytest
 from conftest import read_test_parquet, require_native
+from parquet_runtime_shared import pa, pq
+from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 from parquet_runtime_support import sample_table
 
 import schema_sanitizer as ss
-
-try:
-    import pyarrow as pa
-    import pyarrow.feather as feather
-    import pyarrow.parquet as pq
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = feather = pq = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
 
 # Split from test_parquet_direct_io_runtime.py: test_native_parquet_footer_info_decodes_plain_value_counts_with_nulls, test_native_parquet_footer_info_decodes_delta_binary_packed_int_values, test_native_parquet_footer_info_decodes_rle_dictionary_string_pages, ...
 

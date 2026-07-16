@@ -5,139 +5,15 @@ from __future__ import annotations
 import json
 
 import pytest
-from conftest import read_test_json, read_test_jsonl, read_test_python, require_native
+from cleaning_policies_shared import INPUT_CASES as _INPUT_CASES
+from cleaning_policies_shared import field_names as _field_names
+from cleaning_policies_shared import read_result as _read_result
+from cleaning_policies_shared import versioned_scalar_registry as _versioned_scalar_registry
+from conftest import read_test_python, require_native
 
 pa = pytest.importorskip("pyarrow")
 
 import schema_sanitizer as ss
-from schema_sanitizer.api_impl.execution_context import ExecutionContext
-from schema_sanitizer.core_impl.schema_registry import merge_schema_registry
-from schema_sanitizer.options_impl.call_options import normalize_call_options
-
-_INPUT_CASES = [
-    "python_obj",
-    "json_path",
-    "json_path_auto",
-    "jsonl_path",
-    "jsonl_path_auto",
-]
-
-
-def _table_signature(table) -> tuple[str, list[dict[str, object]]]:
-    """Return table signature for the test."""
-    return (
-        table.schema.to_string(show_field_metadata=False, show_schema_metadata=False),
-        table.to_pylist(),
-    )
-
-
-def _nested_depth_rows() -> list[dict[str, object]]:
-    """Return nested depth rows for the test."""
-    return [
-        {"id": 1, "a": {"b": {"c": 3}}},
-        {"id": 2, "a": {"b": {"c": 4}}},
-    ]
-
-
-def _nested_contract_rows() -> list[dict[str, object]]:
-    """Return nested contract rows for the test."""
-    return [
-        {"id": 1, "user": {"id": 10, "name": "a"}},
-        {"id": 2, "user": {"id": "oops", "name": "b"}},
-        {"id": 3, "user": {"id": 30, "name": "c"}},
-    ]
-
-
-def _nested_contract_schema():
-    """Return nested contract schema for the test."""
-    return pa.schema(
-        [
-            ("id", pa.int64()),
-            (
-                "user",
-                pa.struct(
-                    [
-                        ("id", pa.int64()),
-                        ("name", pa.string()),
-                    ]
-                ),
-            ),
-        ]
-    )
-
-
-def _field_names(struct_type) -> list[str]:
-    """Return field names for a PyArrow schema or struct type."""
-    return [field.name for field in struct_type]
-
-
-def _versioned_scalar_registry(field_name: str, types: list[pa.DataType]) -> dict[str, object]:
-    """Return a schema registry with one scalar variant for each type."""
-    registry = None
-    for typ in types:
-        registry = merge_schema_registry(
-            inferred_schema=pa.schema([pa.field(field_name, typ)]),
-            schema_registry=registry,
-            field_name_policy="lower_snake",
-        ).schema_registry
-    assert registry is not None
-    return registry
-
-
-def _prepare_input(
-    rows: list[dict[str, object]],
-    case: str,
-    tmp_path,
-) -> tuple[object, str]:
-    """Prepare input."""
-    json_text = json.dumps(rows)
-    jsonl_text = "\n".join(json.dumps(r) for r in rows) + "\n"
-
-    if case == "python_obj":
-        return rows, "python"
-    if case == "json_path":
-        p = tmp_path / "rows.json"
-        p.write_text(json_text, encoding="utf-8")
-        return p, "json"
-    if case == "json_path_auto":
-        p = tmp_path / "rows.auto.json"
-        p.write_text(json_text, encoding="utf-8")
-        return p, "auto"
-    if case == "jsonl_path":
-        p = tmp_path / "rows.jsonl"
-        p.write_text(jsonl_text, encoding="utf-8")
-        return p, "jsonl"
-    if case == "jsonl_path_auto":
-        p = tmp_path / "rows.auto.jsonl"
-        p.write_text(jsonl_text, encoding="utf-8")
-        return p, "auto"
-    raise ValueError(f"unsupported input case: {case}")
-
-
-def _read_result(
-    rows: list[dict[str, object]],
-    case: str,
-    tmp_path,
-    options: dict[str, object] | None = None,
-    **option_kwargs,
-):
-    """Read result."""
-    data, fmt = _prepare_input(rows, case, tmp_path)
-    options = {**(options or {}), **option_kwargs}
-    schema_contract = options.pop("schema_contract", None)
-    if schema_contract is not None:
-        return ExecutionContext().to_table(
-            data,
-            options=normalize_call_options(schema_contract=schema_contract, **options),
-            format=fmt,
-            source="python" if fmt == "python" else "auto",
-        )
-    if fmt == "python":
-        return read_test_python(data, output_format="pyarrow", **options)
-    if case.startswith("jsonl"):
-        return read_test_jsonl(data, output_format="pyarrow", **options)
-    return read_test_json(data, output_format="pyarrow", **options)
-
 
 # Split from test_cleaning_policies.py: test_column_order_alphabetically_is_recursive_by_default, test_column_order_schema_contract_first_preserves_inferred_order_without_contract, test_column_order_alphabetically_applies_to_strict_schema_contract, ...
 

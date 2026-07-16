@@ -4,25 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from conftest import require_native
-
-try:
-    import pyarrow as pa
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
-
 from parquet_recursive_fuzz_helpers import (
     _RECURSIVE_FUZZ_SCALARS,
     _recursive_fuzz_cartesian_specs,
     _recursive_fuzz_row_group_phase_labels,
     _recursive_fuzz_row_group_phase_matrix_specs,
 )
+from parquet_runtime_shared import pa
+from parquet_runtime_shared import recursive_arrow_type as arrow_type
+from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 # Split from test_parquet_native_recursive_projection_runtime.py: test_native_parquet_stream_projects_recursive_row_group_phase_roots, test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots
 
@@ -42,25 +33,6 @@ def test_native_parquet_stream_projects_recursive_row_group_phase_roots(
     from schema_sanitizer.api_impl.file_conversion.writers import (
         write_parquet_native_first_stream,
     )
-
-    def arrow_type(spec: object) -> pa.DataType:
-        """Internal test helper."""
-        kind = spec[0]
-        if kind == "int64":
-            return pa.int64()
-        if kind == "string":
-            return pa.string()
-        if kind == "bool":
-            return pa.bool_()
-        if kind == "float64":
-            return pa.float64()
-        if kind == "list":
-            return pa.list_(arrow_type(spec[1]))
-        if kind == "map":
-            return pa.map_(pa.string(), arrow_type(spec[1]))
-        if kind == "struct":
-            return pa.struct([pa.field(name, arrow_type(child)) for name, child in spec[1]])
-        raise AssertionError(kind)
 
     def scalar_value(kind: str, seed: int) -> object:
         """Internal test helper."""
@@ -234,25 +206,6 @@ def test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots(
     from schema_sanitizer.api_impl.file_conversion.writers import (
         write_parquet_native_first_stream,
     )
-
-    def arrow_type(spec: object) -> pa.DataType:
-        """Internal test helper."""
-        kind = spec[0]
-        if kind == "int64":
-            return pa.int64()
-        if kind == "string":
-            return pa.string()
-        if kind == "bool":
-            return pa.bool_()
-        if kind == "float64":
-            return pa.float64()
-        if kind == "list":
-            return pa.list_(arrow_type(spec[1]))
-        if kind == "map":
-            return pa.map_(pa.string(), arrow_type(spec[1]))
-        if kind == "struct":
-            return pa.struct([pa.field(name, arrow_type(child)) for name, child in spec[1]])
-        raise AssertionError(kind)
 
     def scalar_value(kind: str, seed: int) -> object:
         """Internal test helper."""

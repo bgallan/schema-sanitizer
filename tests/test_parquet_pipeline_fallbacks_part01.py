@@ -6,18 +6,6 @@ import pytest
 
 from schema_sanitizer.adapters.parquet import telemetry as recording
 
-try:
-    import pyarrow as pa
-    import pyarrow.feather as feather
-    import pyarrow.parquet as pq
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = feather = pq = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
-
 
 def _make_native_try_factory(factory_module: object) -> object:
     """Build a minimal ParquetRecordBatchStreamFactory for _try_native_stream tests."""

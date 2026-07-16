@@ -4,19 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from conftest import require_native
-
-try:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = pq = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
+from parquet_runtime_shared import pa
+from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 # Split from test_parquet_native_nested_list_struct_combinators.py: test_native_parquet_stream_materializes_list_struct_with_map_child, test_native_parquet_stream_materializes_list_struct_with_map_list_child, test_native_parquet_stream_materializes_list_struct_with_map_list_chain_child, ...
 
