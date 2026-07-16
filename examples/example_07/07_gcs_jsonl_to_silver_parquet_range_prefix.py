@@ -38,6 +38,7 @@ try:
         _log_one_parquet_processed,
         _log_run_plan_summary,
         _print_run_outputs_summary,
+        _print_schema_drift_summary,
         _print_stats_summary,
         _timed_step,
     )
@@ -55,6 +56,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         _log_one_parquet_processed,
         _log_run_plan_summary,
         _print_run_outputs_summary,
+        _print_schema_drift_summary,
         _print_stats_summary,
         _timed_step,
     )
@@ -153,12 +155,7 @@ def main() -> int:
     current_schema_registry_state = SchemaRegistryState(
         schema_registry_json=current_schema_registry_json,
     )
-    schema_warm_up_plan = _schema_warm_up_plan_for_run(args, run_plan, warm_up_plan)
-    if args.schema_mode == "additive":
-        LOGGER.info(
-            "Additive schema preflight includes all %d current write partition(s)",
-            len(run_plan),
-        )
+    schema_warm_up_plan = _schema_warm_up_plan_for_run(warm_up_plan)
     if schema_warm_up_plan:
         with _timed_step(
             f"schema warm-up over {len(schema_warm_up_plan)} selected source partition(s)"
@@ -249,6 +246,10 @@ def main() -> int:
         completed_runs,
         sample_size=log_sample_size,
         print_all_details=print_run_details,
+    )
+    _print_schema_drift_summary(
+        completed_runs,
+        schema_mode=args.schema_mode,
     )
 
     return 0

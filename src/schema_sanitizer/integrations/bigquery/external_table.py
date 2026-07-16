@@ -215,6 +215,11 @@ def external_table_options_sql(spec: ExternalTableSpec) -> str:
         and spec.parquet_enable_list_inference
     ):
         options.append("enable_list_inference = TRUE")
+    if normalize_external_format(spec.external_format) == "PARQUET":
+        # This integration always supplies an explicit schema. BigQuery would
+        # otherwise bind it positionally, which corrupts nested values when
+        # compatible Parquet files use different recursive field orders.
+        options.append("source_column_match = 'NAME'")
     return ",\n            ".join(options)
 
 

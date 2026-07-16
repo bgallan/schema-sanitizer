@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import sys
 from datetime import date
@@ -86,6 +87,98 @@ def test_example_07_warm_up_logs_progress(caplog, tmp_path: Path) -> None:
     assert "Warm-up prepare 2/2" in caplog.text
     assert "Warm-up scan finished partitions=2" in caplog.text
     assert "canonical_schema=True" in caplog.text
+
+
+def test_example_07_logs_partition_cpu_and_io_wait_summary(caplog) -> None:
+    """Each materialized partition log must compare CPU with estimated I/O wait."""
+    from examples.example_07 import runtime_reporting
+
+    plan = runtime_reporting.DateRunPlan(date(2026, 7, 16), "source", "output.parquet")
+    run = runtime_reporting.DateRunResult(
+        plan=plan,
+        output_schema=None,
+        stats={},
+        schema_drifts_json="[]",
+        wall_seconds=5.0,
+        cpu_seconds=2.0,
+        io_wait_seconds=3.0,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gcs_input_to_silver_parquet"):
+        runtime_reporting._log_one_parquet_processed(
+            index=1,
+            total=1,
+            plan=plan,
+            run_result=run,
+            run_seconds=5.0,
+            pipeline_start_time=0.0,
+            registry_updated=True,
+        )
+
+    assert "duration=5.0s cpu=2.0s io_wait_est=3.0s" in caplog.text
+    assert "cpu_share=40.0% io_wait_share=60.0%" in caplog.text
+    assert "drifts=0" in caplog.text
+
+
+def test_example_07_prints_all_additive_drifts_with_triggering_partition(capsys) -> None:
+    """The final additive summary must attribute every drift to its partition."""
+    from examples.example_07 import runtime_reporting
+
+    first_plan = runtime_reporting.DateRunPlan(date(2026, 7, 15), "source-a", "a.parquet")
+    second_plan = runtime_reporting.DateRunPlan(date(2026, 7, 16), "source-b", "b.parquet")
+    runs = [
+        runtime_reporting.DateRunResult(
+            plan=first_plan,
+            output_schema=None,
+            stats={},
+            schema_drifts_json=json.dumps(
+                [
+                    {
+                        "source_path": "new_field",
+                        "output_name": "new_field",
+                        "drift_type": "newly_added",
+                        "previous_schema": None,
+                        "new_schema": "int64",
+                    },
+                    {
+                        "source_path": "percentage",
+                        "output_name": "percentage",
+                        "drift_type": "type_promoted",
+                        "previous_schema": "int64",
+                        "new_schema": "double",
+                    },
+                ]
+            ),
+        ),
+        runtime_reporting.DateRunResult(
+            plan=second_plan,
+            output_schema=None,
+            stats={},
+            schema_drifts_json=json.dumps(
+                [
+                    {
+                        "source_path": "value",
+                        "output_name": "value_v2_string",
+                        "drift_type": "new_version_generated",
+                        "previous_schema": "int64",
+                        "new_schema": "string",
+                    }
+                ]
+            ),
+        ),
+    ]
+
+    runtime_reporting._print_schema_drift_summary(runs, schema_mode="additive")
+
+    output = capsys.readouterr().out
+    assert "Total schema drift(s): 3" in output
+    assert "partition=2026-07-15 change=new_column_added" in output
+    assert "partition=2026-07-15 change=column_type_promoted" in output
+    assert "partition=2026-07-16 change=new_column_version" in output
+    assert "output_column=value_v2_string" in output
+
+    runtime_reporting._print_schema_drift_summary(runs, schema_mode="strict")
+    assert capsys.readouterr().out == ""
 
 
 def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> None:

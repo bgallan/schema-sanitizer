@@ -110,6 +110,9 @@ class PartitionRunResult:
     schema_drifts: list[dict[str, Any]] | None = None
     schema_registry_json: str | None = None
     schema_drifts_json: str | None = None
+    wall_seconds: float | None = None
+    cpu_seconds: float | None = None
+    io_wait_seconds: float | None = None
     native_registry_state: Any | None = field(default=None, compare=False, repr=False)
 
 

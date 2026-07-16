@@ -142,6 +142,33 @@ def _schema_drift_count(schema_drifts: Any) -> int | None:
     return schema_drift_count(schema_drifts)
 
 
+def _schema_drifts_for_run(run_result: DateRunResult) -> list[dict[str, Any]]:
+    """Return one run's drift events from its parsed or JSON representation."""
+    payload: Any = run_result.schema_drifts
+    if payload is None and run_result.schema_drifts_json is not None:
+        try:
+            payload = json.loads(run_result.schema_drifts_json or "[]")
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Could not decode schema drift metadata partition=%s",
+                run_result.plan.label,
+            )
+            return []
+
+    if isinstance(payload, dict):
+        for key in ("drifts", "schema_drifts", "items", "changes"):
+            nested = payload.get(key)
+            if isinstance(nested, list):
+                payload = nested
+                break
+        else:
+            payload = [payload]
+
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
 def _warm_up_progress_logger(total: int):
     """Return a compact warm-up source preparation progress logger."""
     start_time = perf_counter()
@@ -202,16 +229,36 @@ def _log_one_parquet_processed(
     stats_text = _compact_stats_for_log(run_result.stats)
     stats_suffix = f" {stats_text}" if stats_text else ""
 
-    drift_count = _schema_drift_count(run_result.schema_drifts)
+    drift_count = _schema_drift_count(_schema_drifts_for_run(run_result))
     drift_suffix = f" drifts={drift_count}" if drift_count is not None else ""
 
+    wall_seconds = run_result.wall_seconds
+    if wall_seconds is None:
+        wall_seconds = run_seconds
+    timing_suffix = (
+        f" cpu={_format_duration(run_result.cpu_seconds)}"
+        if run_result.cpu_seconds is not None
+        else ""
+    )
+    if run_result.io_wait_seconds is not None:
+        timing_suffix += f" io_wait_est={_format_duration(run_result.io_wait_seconds)}"
+    if (
+        wall_seconds > 0
+        and run_result.cpu_seconds is not None
+        and run_result.io_wait_seconds is not None
+    ):
+        cpu_share = min(run_result.cpu_seconds / wall_seconds, 1.0) * 100.0
+        io_wait_share = min(run_result.io_wait_seconds / wall_seconds, 1.0) * 100.0
+        timing_suffix += f" cpu_share={cpu_share:.1f}% io_wait_share={io_wait_share:.1f}%"
+
     LOGGER.info(
-        "Parquet %d/%d %.1f%% label=%s duration=%s avg=%s eta=%s registry_updated=%s%s%s output=%s",
+        "Parquet %d/%d %.1f%% label=%s duration=%s%s avg=%s eta=%s registry_updated=%s%s%s output=%s",
         index,
         total,
         percent,
         plan.label,
-        _format_duration(run_seconds),
+        _format_duration(wall_seconds),
+        timing_suffix,
         _format_duration(avg_seconds),
         _format_duration(eta_seconds),
         registry_updated,
@@ -219,6 +266,45 @@ def _log_one_parquet_processed(
         drift_suffix,
         _compact_uri(run_result.plan.output_uri),
     )
+
+
+def _print_schema_drift_summary(
+    completed_runs: list[DateRunResult],
+    *,
+    schema_mode: str,
+) -> None:
+    """Print every additive schema change with its triggering partition."""
+    if schema_mode != "additive":
+        return
+
+    events = [
+        (run_result, drift)
+        for run_result in completed_runs
+        for drift in _schema_drifts_for_run(run_result)
+    ]
+    print("\nSchema drift summary (additive mode):")
+    print(f"Total schema drift(s): {len(events)}")
+    if not events:
+        print("No schema drifts were triggered by materialized partitions.")
+        return
+
+    labels = {
+        "newly_added": "new_column_added",
+        "new_version_generated": "new_column_version",
+        "type_promoted": "column_type_promoted",
+    }
+    for run_result, drift in events:
+        drift_type = str(drift.get("drift_type", "unknown"))
+        change = labels.get(drift_type, drift_type)
+        source_path = drift.get("source_path")
+        output_name = drift.get("output_name")
+        previous_schema = drift.get("previous_schema")
+        new_schema = drift.get("new_schema")
+        print(
+            f"- partition={run_result.plan.label} change={change} "
+            f"source_path={source_path} output_column={output_name} "
+            f"schema={previous_schema} -> {new_schema}"
+        )
 
 
 def _print_run_outputs_summary(

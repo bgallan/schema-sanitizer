@@ -97,16 +97,18 @@ debugging or compatibility testing. `--parquet-gzip-level 0..9` optionally tunes
 the gzip level; when omitted, the writer/zlib default is used.
 
 To bootstrap or broaden the registry before the first normal output is written,
-add a schema warm-up range. The warm-up scan always uses additive registry
-merging, even when the normal write uses `--schema-mode strict`, and it scans
-the selected warm-up files as one logical source:
+add a schema warm-up range. Warm-up is opt-in in both additive and strict modes;
+normal output partitions are not preflighted automatically. The warm-up scan
+always uses additive registry merging and scans the selected warm-up files as
+one logical source. Consequently, if those files contain both integer and
+floating-point values for one field, the registry resolves that field to one
+`DOUBLE` column before any normal output is materialized.
 
-Additive runs also preflight every selected normal partition automatically.
-This prevents an early all-integer Parquet file from remaining `INT64` when a
-later partition promotes the same field to `DOUBLE`, which BigQuery external
-tables cannot read as one column. An explicit warm-up range adds historical
-sources to that preflight; strict runs only scan the explicitly requested
-warm-up range and continue to enforce their existing contract.
+Without a warm-up range, each additive partition evolves the registry only
+when it is processed. An earlier file may therefore retain an `INT64` physical
+column while a later file writes the same field as `DOUBLE`. This avoids the
+extra preflight read, but BigQuery may reject an external table that spans both
+physical versions.
 
 ```bash
 python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
@@ -143,6 +145,14 @@ schema/DDL/external-table helpers live in `schema_sanitizer.integrations.bigquer
 Cloud discovery stays async Python, and warm-up inference/conversion use the
 native registry-backed engine. Empty registries come from
 `schema_sanitizer.new_schema_registry()`.
+
+Each completed partition log reports wall duration, process CPU time, and an
+`io_wait_est` value calculated as wall time minus CPU time. The estimate includes
+remote/local I/O waits as well as any other time when the process was not using
+the CPU. At the end of an additive run, the example prints every schema drift
+triggered during materialization, including the partition, source path, output
+column, drift kind, and previous/new physical schemas. Strict runs omit this
+additive drift summary.
 
 Process all direct `.jsonl` files in each hourly partition into one Parquet:
 

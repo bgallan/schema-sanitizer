@@ -17,8 +17,8 @@ def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "strict enforces the existing BigQuery schema exactly; additive allows "
             "new observed fields. On the first run, use additive because there is "
-            "no existing BigQuery schema yet. Additive range runs preflight all "
-            "current partitions so every Parquet file uses one stable schema."
+            "no existing BigQuery schema yet. Schema warm-up is only performed "
+            "when a warm-up date range is explicitly requested."
         ),
     )
     parser.add_argument(

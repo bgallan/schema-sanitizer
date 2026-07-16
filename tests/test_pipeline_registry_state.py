@@ -42,6 +42,39 @@ def test_pipeline_runner_carries_registry_forward(monkeypatch, tmp_path) -> None
     assert [run.plan for run in result.completed_runs] == plans
 
 
+def test_pipeline_runner_records_partition_cpu_and_io_wait_times(monkeypatch, tmp_path) -> None:
+    """Partition telemetry must split wall time into CPU and estimated I/O wait."""
+    from schema_sanitizer.pipeline import partition_execution
+
+    wall_clock = iter((10.0, 14.0))
+    cpu_clock = iter((3.0, 4.25))
+
+    monkeypatch.setattr(partition_execution, "perf_counter", lambda: next(wall_clock))
+    monkeypatch.setattr(partition_execution, "process_time", lambda: next(cpu_clock))
+    monkeypatch.setattr(partition_execution, "_compile_native_registry_state", lambda *_: None)
+    monkeypatch.setattr(
+        partition_execution,
+        "to_parquet",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stats={},
+            schema_registry_json='{"schema_generation":2}',
+            schema_drifts_json="[]",
+            native_registry_state=None,
+        ),
+    )
+
+    result = run_partitioned_to_parquet_registry_json(
+        [PartitionRunPlan(date(2026, 1, 1), "raw/a.jsonl", str(tmp_path / "a.parquet"))],
+        initial_schema_registry_json='{"schema_generation":1}',
+        to_parquet_kwargs={"input_format": "jsonl"},
+    )
+
+    run = result.completed_runs[0]
+    assert run.wall_seconds == pytest.approx(4.0)
+    assert run.cpu_seconds == pytest.approx(1.25)
+    assert run.io_wait_seconds == pytest.approx(2.75)
+
+
 def test_pipeline_json_registry_runner_carries_registry_json_forward(monkeypatch, tmp_path) -> None:
     """Verify the JSON-native runner passes registry strings between partitions."""
     from schema_sanitizer.pipeline import partition_execution
