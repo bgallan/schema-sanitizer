@@ -9,10 +9,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  schedule:
+    - cron: 23 3 * * 0
+    - cron: 30 3 * * 1
+    - cron: 47 4 * * 3
 permissions:
+  actions: read
   contents: read
 jobs:
   security:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -104,6 +110,7 @@ jobs:
           PY
   quality:
     name: lint and static typing
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -123,6 +130,7 @@ jobs:
 
   # Core lane: must build and import without pyarrow installed and without Arrow C++ linkage.
   core-only:
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -280,6 +288,7 @@ jobs:
   # Publish parity lane: build and validate the same release artifacts before merge.
   validate-release-version:
     name: validate release version
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -445,17 +454,497 @@ jobs:
           print("core", core.__file__)
           PY
   cloud-emulators:
-    name: cloud emulator interoperability
-    uses: ./.github/workflows/cloud-emulators.yml
-  coverage:
-    name: coverage reports
-    uses: ./.github/workflows/coverage.yml
-  downstream-packaging:
-    name: downstream packaging
+    name: cloud emulator interoperability / object-storage-emulators
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install package and real cloud SDKs
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U '.[cloud,pyarrow]' pytest
+      - name: Start pinned object-storage emulators
+        shell: bash
+        run: |
+          docker run -d --name schema-sanitizer-minio \
+            -p 9000:9000 \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z \
+            server /data
+          docker run -d --name schema-sanitizer-azurite \
+            -p 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite:3.35.0 \
+            azurite-blob --blobHost 0.0.0.0 --disableTelemetry
+          docker run -d --name schema-sanitizer-gcs \
+            -p 4443:4443 \
+            fsouza/fake-gcs-server:1.53.1 \
+            -scheme http -port 4443 -public-host 127.0.0.1:4443
+      - name: Wait for emulator ports
+        run: |
+          python - <<'PY'
+          import socket
+          import time
+          for port in (9000, 10000, 4443):
+              deadline = time.monotonic() + 60
+              while True:
+                  try:
+                      with socket.create_connection(("127.0.0.1", port), timeout=1):
+                          break
+                  except OSError:
+                      if time.monotonic() >= deadline:
+                          raise RuntimeError(f"emulator port {port} did not become ready")
+                      time.sleep(0.5)
+          PY
+      - name: Run real-SDK remote directory pipelines
+        run: >-
+          pytest -q tests/test_cloud_emulator_integration.py
+          --run-cloud-emulators
+          --s3-emulator-endpoint http://127.0.0.1:9000
+          --azure-emulator-connection-string
+          'UseDevelopmentStorage=true'
+          --gcs-emulator-endpoint http://127.0.0.1:4443
+      - name: Preserve emulator diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p cloud-emulator-logs
+          for name in minio azurite gcs; do
+            docker logs "schema-sanitizer-${name}" \
+              > "cloud-emulator-logs/${name}.log" 2>&1 || true
+          done
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: cloud-emulator-diagnostics
+          path: cloud-emulator-logs/
+          if-no-files-found: ignore
+  coverage-python:
+    name: coverage reports / python-branch-coverage
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install package and coverage tools
+        run: |
+          python -m pip install -U pip coverage '.[dev,pyarrow]'
+      - name: Collect contextual Python branch coverage
+        run: |
+          coverage erase
+          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=regular -m pytest -q \
+            tests/test_api.py \
+            tests/test_input_python_and_local.py \
+            tests/test_input_xml_and_public_api.py \
+            tests/test_sinks_csv_jsonl.py
+          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=adversarial -m pytest -q \
+            tests/test_contracts.py \
+            tests/test_runtime_lifecycle_part01.py \
+            tests/test_runtime_lifecycle_part02.py \
+            tests/test_runtime_lifecycle_part03.py \
+            tests/test_streaming_writer_lifecycle.py \
+            tests/test_async_remote_scheduler.py \
+            tests/test_high_risk_coverage_gaps.py \
+            tests/test_parquet_native_recursive_fuzz_runtime.py
+          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=integration -m pytest -q \
+            tests/test_input_remote_staging_part01.py \
+            tests/test_input_remote_staging_part02.py \
+            tests/test_input_remote_staging_part03.py \
+            tests/test_cloud_emulator_configuration.py \
+            tests/test_bigquery_integration.py
+          coverage combine
+          coverage report
+          coverage html --show-contexts -d coverage-python-html
+          coverage xml -o coverage-python.xml
+          coverage json -o coverage-python.json
+          python meta/ci/report_risk_coverage.py coverage-python.json \
+            --output coverage-python-risk-gaps.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-branch-coverage
+          path: |
+            coverage-python-html/
+            coverage-python.xml
+            coverage-python.json
+            coverage-python-risk-gaps.txt
+  coverage-native:
+    name: coverage reports / native-llvm-coverage
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install LLVM 18 coverage toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          clang-18 --version
+          llvm-profdata-18 --version
+          llvm-cov-18 --version
+      - name: Install instrumented package
+        run: |
+          python -m pip install -U pip ninja 'cmake>=4.3,<4.4' scikit-build-core==0.11.6
+          python -m pip install -U pytest pyarrow
+          mkdir -p coverage-native/raw
+          python -m pip install --no-build-isolation -v \
+            --config-settings=install.strip=false \
+            --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18 \
+            --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18 \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_COVERAGE=ON \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON \
+            --config-settings=cmake.define.SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN='${{ github.workspace }}/coverage-native/raw/schema-sanitizer-%p.profraw' \
+            .
+      - name: Run native coverage suites
+        shell: bash
+        run: |
+          mkdir -p coverage-native/raw/regular
+          pytest -q \
+            tests/test_api.py \
+            tests/test_input_xml_and_public_api.py \
+            tests/test_sinks_csv_jsonl.py
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            coverage-native/raw/regular/
+          mkdir -p coverage-native/raw/adversarial
+          pytest -q \
+            tests/test_contracts.py \
+            tests/test_runtime_lifecycle_part01.py \
+            tests/test_runtime_lifecycle_part02.py \
+            tests/test_runtime_lifecycle_part03.py \
+            tests/test_streaming_writer_lifecycle.py \
+            tests/test_async_remote_scheduler.py \
+            tests/test_high_risk_coverage_gaps.py \
+            tests/test_parquet_native_recursive_fuzz_runtime.py
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            coverage-native/raw/adversarial/
+          mkdir -p coverage-native/raw/integration
+          pytest -q \
+            tests/test_input_remote_staging_part01.py \
+            tests/test_input_remote_staging_part02.py \
+            tests/test_input_remote_staging_part03.py \
+            tests/test_cloud_emulator_configuration.py \
+            tests/test_bigquery_integration.py
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            coverage-native/raw/integration/
+      - name: Render LLVM reports
+        shell: bash
+        run: |
+          EXTENSION=$(python - <<'PY'
+          import schema_sanitizer._core_abi3 as core
+          print(core.__file__)
+          PY
+          )
+          for suite in regular adversarial integration; do
+            llvm-profdata-18 merge -sparse coverage-native/raw/${suite}/*.profraw \
+              -o coverage-native/${suite}.profdata
+            llvm-cov-18 report "${EXTENSION}" \
+              -instr-profile=coverage-native/${suite}.profdata \
+              > coverage-native/${suite}-summary.txt
+          done
+          llvm-profdata-18 merge -sparse coverage-native/raw/*/*.profraw \
+            -o coverage-native/combined.profdata
+          llvm-cov-18 show "${EXTENSION}" \
+            -instr-profile=coverage-native/combined.profdata \
+            -format=html \
+            -show-branches=count \
+            -output-dir=coverage-native/html
+          llvm-cov-18 report "${EXTENSION}" \
+            -instr-profile=coverage-native/combined.profdata \
+            > coverage-native/combined-summary.txt
+          cat coverage-native/combined-summary.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-llvm-coverage
+          path: coverage-native/
+  downstream-wheel:
+    name: downstream packaging / downstream-wheel
     needs: [sdist]
-    uses: ./.github/workflows/downstream-packaging.yml
-    with:
-      sdist-artifact: dist-sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist-sdist
+          path: release-dist
+      - name: Build wheel only from the generated sdist
+        run: |
+          python -m pip install -U pip
+          mkdir -p downstream-wheel
+          python -m pip wheel --no-deps --wheel-dir downstream-wheel release-dist/*.tar.gz
+      - name: Validate wheel contents
+        run: python meta/ci/check_distribution_contents.py downstream-wheel/*.whl
+      - name: Install outside the repository
+        shell: bash
+        run: |
+          python -m venv "${{ runner.temp }}/consumer-venv"
+          source "${{ runner.temp }}/consumer-venv/bin/activate"
+          python -m pip install -U pip mypy pyarrow downstream-wheel/*.whl
+          mkdir -p "${{ runner.temp }}/consumer-work"
+          cp meta/ci/downstream_smoke.py meta/ci/downstream_typecheck.py \
+            "${{ runner.temp }}/consumer-work/"
+          cd "${{ runner.temp }}/consumer-work"
+          python -I downstream_smoke.py
+          python -I -m mypy --strict downstream_typecheck.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: downstream-wheel
+          path: downstream-wheel/*.whl
+  downstream-extras:
+    name: downstream packaging / optional-extra (${{ matrix.extra }})
+    needs: downstream-wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [core, pyarrow, pandas, polars, duckdb, cloud]
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v7
+        with:
+          name: downstream-wheel
+          path: downstream-wheel
+      - name: Install one consumer extra in isolation
+        shell: bash
+        run: |-
+          python -m venv "${{ runner.temp }}/extra-venv"
+          source "${{ runner.temp }}/extra-venv/bin/activate"
+          python -m pip install -U pip
+          WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
+          if [[ "${{ matrix.extra }}" == "core" ]]; then
+            python -m pip install "${WHEEL}"
+          else
+            python -m pip install "${WHEEL}[${{ matrix.extra }}]"
+          fi
+          cd "${{ runner.temp }}"
+          python -I -c "import schema_sanitizer as s; print(s.__version__)"
+          case "${{ matrix.extra }}" in
+            pyarrow) python -I -c "import pyarrow" ;;
+            pandas) python -I -c "import pandas" ;;
+            polars) python -I -c "import polars" ;;
+            duckdb) python -I -c "import duckdb" ;;
+            cloud) python -I -c "import aiohttp, aiobotocore, azure.identity, azure.storage.blob, google.auth" ;;
+          esac
   native-sanitizers:
-    name: native sanitizers
-    uses: ./.github/workflows/native-sanitizers.yml
+    name: native sanitizers / Clang ASan + UBSan
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install build and test dependencies
+        run: >-
+          python -m pip install -U pip ninja 'cmake>=4.3,<4.4'
+          scikit-build-core==0.11.6 pytest pyarrow
+      - name: Build and install instrumented package
+        run: >-
+          python -m pip install -v --no-build-isolation
+          --config-settings=cmake.define.CMAKE_C_COMPILER=clang
+          --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF
+          --config-settings=cmake.define.SCHEMA_SANITIZER_SANITIZER=asan-ubsan
+          --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON
+          .
+      - name: Build sanitizer-first CPython launcher
+        run: >-
+          clang++ -std=c++17 -fsanitize=address,undefined
+          -fno-omit-frame-pointer -fno-sanitize-recover=all
+          meta/ci/asan_python_launcher.cc
+          $(python3-config --embed --cflags --ldflags)
+          -o python-asan
+      - name: Malformed native input and lifecycle suite
+        run: >-
+          ./python-asan -m pytest -q
+          tests/test_input_python_and_local.py
+          tests/test_options_bytes.py
+          tests/test_runtime_lifecycle_part01.py
+          tests/test_runtime_lifecycle_part02.py
+          tests/test_runtime_lifecycle_part03.py
+      - name: Nested materialization and adversarial Parquet suite
+        run: >-
+          ./python-asan -m pytest -q
+          tests/test_parquet_direct_io_runtime_part01.py
+          tests/test_parquet_native_nested_list_map_combinators.py
+          tests/test_parquet_native_recursive_shapes_part04.py
+          tests/test_parquet_native_recursive_extreme_runtime.py
+  scheduled-benchmarks:
+    name: scheduled benchmarks
+    if: github.event_name == 'schedule' && github.event.schedule == '30 3 * * 1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install benchmark environment
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U '.[pyarrow]'
+      - name: Run stable synthetic workload set
+        run: |
+          mkdir -p benchmark-results
+          python benchmarks/bench_ingest.py \
+            --rows 25000 \
+            --width 32 \
+            --warmups 2 \
+            --repeats 7 \
+            --case all \
+            --json-output benchmark-results/results.json \
+            | tee benchmark-results/console.txt
+      - name: Download previous successful baseline
+        id: baseline
+        continue-on-error: true
+        shell: bash
+        run: |
+          printf '%s' '${{ github.token }}' | gh auth login --with-token
+          RUN_ID=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=benchmark-results&per_page=1" \
+            --jq '.artifacts[0].workflow_run.id // empty')
+          if [[ -z "${RUN_ID}" ]]; then
+            exit 0
+          fi
+          mkdir -p previous-benchmark
+          gh run download "${RUN_ID}" \
+            --name benchmark-results \
+            --dir previous-benchmark
+      - name: Compare with historical baseline
+        shell: bash
+        run: |
+          BASELINE=$(find previous-benchmark -name results.json -print -quit 2>/dev/null || true)
+          if [[ -z "${BASELINE}" ]]; then
+            echo "No previous benchmark artifact is available yet." \
+              | tee benchmark-results/comparison.md
+            exit 0
+          fi
+          python benchmarks/compare_results.py \
+            benchmark-results/results.json \
+            "${BASELINE}" \
+            --output benchmark-results/comparison.md
+          cat benchmark-results/comparison.md
+      - uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-results
+          path: benchmark-results/
+          retention-days: 90
+  scheduled-native-fuzz:
+    name: native fuzz campaign / Bounded parser fuzzing
+    if: github.event_name == 'schedule' && github.event.schedule == '23 3 * * 0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install native build tools
+        run: python -m pip install -U ninja 'cmake>=4.3,<4.4'
+      - name: Configure fuzz targets
+        run: >-
+          cmake -S . -B build-fuzz -G Ninja
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+          -DSCHEMA_SANITIZER_SANITIZER=asan-ubsan
+          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+      - name: Build fuzz targets
+        run: cmake --build build-fuzz --target schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
+          schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet --parallel 2
+      - name: Run deterministic promoted crash regressions
+        run: python meta/ci/run_fuzz_regressions.py --build-root build-fuzz/fuzz
+      - name: Prepare writable corpora and artifacts
+        shell: bash
+        run: |
+          mkdir -p fuzz-run artifacts
+          for target in json csv xml parquet; do
+            cp -R "fuzz/corpus/${target}" "fuzz-run/${target}"
+            mkdir -p "artifacts/${target}"
+          done
+      - name: Run bounded campaigns
+        shell: bash
+        run: |
+          set -o pipefail
+          for target in json csv xml parquet; do
+            "build-fuzz/fuzz/schema_sanitizer_fuzz_${target}" \
+              "fuzz-run/${target}" \
+              -max_total_time=180 \
+              -timeout=10 \
+              -rss_limit_mb=4096 \
+              -print_final_stats=1 \
+              -artifact_prefix="artifacts/${target}/" \
+              2>&1 | tee "artifacts/${target}/campaign.log"
+          done
+      - name: Upload corpora and crash diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-fuzz-${{ github.run_id }}
+          path: |
+            artifacts/**
+            fuzz-run/**
+          if-no-files-found: error
+  scheduled-real-gcp:
+    name: real GCP interoperability
+    if: >-
+      github.event_name == 'schedule' &&
+      github.event.schedule == '47 4 * * 3' &&
+      vars.SCHEMA_SANITIZER_RUN_REAL_GCP == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    concurrency:
+      group: schema-sanitizer-real-gcp
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Configure Google application-default credentials
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.config/gcloud"
+          cat > "$HOME/.config/gcloud/application_default_credentials.json" <<'SCHEMA_SANITIZER_CREDENTIALS'
+          ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          SCHEMA_SANITIZER_CREDENTIALS
+          chmod 600 "$HOME/.config/gcloud/application_default_credentials.json"
+      - name: Install package and real clients
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U '.[cloud,pyarrow]' pytest 'adbc-driver-bigquery[dbapi]'
+      - name: Run GCS to BigQuery workflow
+        run: >-
+          pytest -q tests/test_cloud_real_services.py
+          --run-real-gcp
+          --real-gcp-project '${{ secrets.SCHEMA_SANITIZER_GCP_PROJECT }}'
+          --real-gcs-bucket '${{ secrets.SCHEMA_SANITIZER_GCS_BUCKET }}'
+          --real-bigquery-dataset '${{ secrets.SCHEMA_SANITIZER_BIGQUERY_DATASET }}'
+          --real-bigquery-location '${{ secrets.SCHEMA_SANITIZER_BIGQUERY_LOCATION }}'
+          --junitxml=real-gcp-results.xml
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: real-gcp-results-${{ github.run_id }}
+          path: real-gcp-results.xml
+          if-no-files-found: ignore

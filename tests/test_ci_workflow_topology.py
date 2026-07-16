@@ -25,6 +25,11 @@ def test_only_general_sanity_and_publish_are_manually_dispatchable() -> None:
     assert dispatched == {"ci.yml", "publish.yml"}
 
 
+def test_actions_sidebar_has_only_general_sanity_and_publish() -> None:
+    """Only the two user-facing workflow files should appear in Actions."""
+    assert {path.name for path in WORKFLOWS.glob("*.yml")} == {"ci.yml", "publish.yml"}
+
+
 def test_pr_main_manual_and_publish_share_general_sanity() -> None:
     """PR, post-merge, manual sanity, and publish must use one validation owner."""
     ci = _workflow("ci.yml")
@@ -39,20 +44,23 @@ def test_pr_main_manual_and_publish_share_general_sanity() -> None:
     assert publish.count("python meta/ci/validate_release_version.py") == 2
 
 
-def test_general_sanity_owns_all_pr_validation_modules() -> None:
-    """PR validation modules run only through the general sanity orchestrator."""
+def test_general_sanity_owns_all_validation_and_scheduled_jobs() -> None:
+    """General sanity owns validation and isolates each scheduled workload."""
     ci = _workflow("ci.yml")
-    modules = (
-        "cloud-emulators.yml",
-        "coverage.yml",
-        "downstream-packaging.yml",
-        "native-sanitizers.yml",
+    validation_jobs = (
+        "cloud-emulators:",
+        "coverage-python:",
+        "coverage-native:",
+        "downstream-wheel:",
+        "downstream-extras:",
+        "native-sanitizers:",
     )
 
-    for module in modules:
-        source = _workflow(module)
-        assert f"uses: ./.github/workflows/{module}" in ci
-        assert "  workflow_call:" in source
-        assert "  workflow_dispatch:" not in source
-        assert "  pull_request:" not in source
-        assert "  push:" not in source
+    for job in validation_jobs:
+        assert f"  {job}" in ci
+    assert "uses: ./.github/workflows/" not in ci
+
+    schedules = ("23 3 * * 0", "30 3 * * 1", "47 4 * * 3")
+    for schedule in schedules:
+        assert ci.count(schedule) == 2
+    assert ci.count("github.event_name != 'schedule'") >= 7
