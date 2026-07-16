@@ -107,6 +107,15 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
     physical_schema = pq.read_schema(second_out)
     variable_names = [field.name for field in physical_schema.field("variables").type]
     assert variable_names == ["birthday", "company", "country", "email", "phone"]
+    assert pq.read_table(second_out, columns=["variables"])["variables"].to_pylist() == [
+        {
+            "birthday": "2026-01-01",
+            "company": "acme",
+            "country": "ES",
+            "email": "b@example.com",
+            "phone": None,
+        }
+    ]
 
     registry_fields = second.schema_registry["canonical_schema"]["fields"]
     variables = next(field for field in registry_fields if field["name"] == "variables")

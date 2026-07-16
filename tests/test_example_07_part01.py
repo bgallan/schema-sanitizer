@@ -411,10 +411,10 @@ def test_example_07_warm_up_infers_one_additive_registry(tmp_path: Path) -> None
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
 
 
-def test_example_07_additive_preflight_stabilizes_integer_float_parquet(
+def test_example_07_manual_preflight_stabilizes_integer_float_parquet(
     tmp_path: Path,
 ) -> None:
-    """All additive partitions must use the final widened numeric schema."""
+    """Manual warm-up must widen integer and float observations before writes."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.pipeline import run_partitioned_to_parquet_registry_state
@@ -459,7 +459,7 @@ def test_example_07_additive_preflight_stabilizes_integer_float_parquet(
         parquet_gzip_level=None,
     )
 
-    preflight = example._schema_warm_up_plan_for_run(args, plans, [])
+    preflight = example._schema_warm_up_plan_for_run(plans)
     state = example._infer_warm_up_schema_registry_state(
         args,
         preflight,
@@ -478,15 +478,83 @@ def test_example_07_additive_preflight_stabilizes_integer_float_parquet(
         assert nested.field("timeelapsed").type == pa.float64()
 
 
-def test_example_07_strict_preflight_only_uses_requested_warm_up() -> None:
-    """Strict runs must not silently absorb current-range drift."""
+def test_example_07_without_preflight_keeps_per_partition_numeric_types(
+    tmp_path: Path,
+) -> None:
+    """No warm-up leaves an earlier integer file unchanged after float promotion."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from schema_sanitizer.pipeline import run_partitioned_to_parquet_registry_state
+
     example = _load_example_07_runtime_support()
-    current = [example.DateRunPlan(date(2026, 6, 21), "current", "current.parquet")]
+    integer_source = tmp_path / "integer.jsonl"
+    float_source = tmp_path / "float.jsonl"
+    integer_source.write_text('{"exitscreen":{"timeelapsed":0}}\n', encoding="utf-8")
+    float_source.write_text('{"exitscreen":{"timeelapsed":0.0}}\n', encoding="utf-8")
+    plans = [
+        example.DateRunPlan(
+            logical_date=date(2026, 6, 20),
+            source_uri=str(integer_source),
+            output_uri=str(tmp_path / "integer.parquet"),
+        ),
+        example.DateRunPlan(
+            logical_date=date(2026, 6, 21),
+            source_uri=str(float_source),
+            output_uri=str(tmp_path / "float.parquet"),
+        ),
+    ]
+    args = SimpleNamespace(
+        input_format="jsonl",
+        input_mode="single_file",
+        schema_mode="additive",
+        column_order="alphabetically",
+        field_name_policy="lower_snake",
+        timestamp_precision="TIMESTAMP_MICROS",
+        parse_integers=True,
+        parse_floats=True,
+        parse_float_decimal_separator=".",
+        parse_float_thousands_separator=",",
+        parse_iso_timestamps=True,
+        parse_iso_dates=True,
+        parse_iso_times=True,
+        on_error="emit_null_row",
+        memory_limit_bytes=64 * 1024 * 1024,
+        arrow_max_depth=32,
+        parquet_max_depth=15,
+        input_text_encoding="utf-8",
+        parquet_compression="uncompressed",
+        parquet_gzip_level=None,
+    )
+
+    assert example._schema_warm_up_plan_for_run([]) == []
+    result = run_partitioned_to_parquet_registry_state(
+        plans,
+        initial_schema_registry_state=example.SchemaRegistryState(
+            schema_registry_json=json.dumps(example._new_schema_registry(), separators=(",", ":"))
+        ),
+        to_parquet_kwargs=example._build_to_parquet_kwargs(args),
+    )
+
+    integer_nested = pq.read_schema(plans[0].output_uri).field("exitscreen").type
+    float_nested = pq.read_schema(plans[1].output_uri).field("exitscreen").type
+    assert integer_nested.field("timeelapsed").type == pa.int64()
+    assert float_nested.field("timeelapsed").type == pa.float64()
+    final_registry = json.loads(result.final_schema_registry_json)
+    exitscreen = next(
+        field
+        for field in final_registry["canonical_schema"]["fields"]
+        if field["name"] == "exitscreen"
+    )
+    timeelapsed = next(
+        field for field in exitscreen["type"]["fields"] if field["name"] == "timeelapsed"
+    )
+    assert timeelapsed["type"] == {"kind": "float64"}
+
+
+def test_example_07_preflight_only_uses_requested_warm_up() -> None:
+    """Normal ranges must not be scanned unless warm-up was requested."""
+    example = _load_example_07_runtime_support()
     requested = [example.DateRunPlan(date(2026, 6, 20), "warm", "warm.parquet")]
 
-    assert (
-        example._schema_warm_up_plan_for_run(
-            SimpleNamespace(schema_mode="strict"), current, requested
-        )
-        == requested
-    )
+    assert example._schema_warm_up_plan_for_run(requested) == requested
+    assert example._schema_warm_up_plan_for_run([]) == []

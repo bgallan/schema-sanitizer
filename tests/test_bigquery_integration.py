@@ -30,6 +30,7 @@ def test_bigquery_integration_builds_external_table_ddl() -> None:
     assert skipped == ["date"]
     assert "CREATE OR REPLACE EXTERNAL TABLE" in ddl
     assert "`id` INT64" in ddl
+    assert "source_column_match = 'NAME'" in ddl
     assert parse_hive_partition_column("hour:INT64") == ("hour", "INT64")
 
 

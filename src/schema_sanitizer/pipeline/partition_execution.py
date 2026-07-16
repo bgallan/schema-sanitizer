@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
-from time import perf_counter
+from time import perf_counter, process_time
 from typing import Any
 
 from ..api_impl.file_conversion.converters import to_parquet
@@ -159,6 +159,7 @@ def run_partitioned_to_parquet_registry_json(
                 kwargs,
             )
         run_start = perf_counter()
+        cpu_start = process_time()
         input_context = discovered_directory_input_context(plan.source_uri, plan.discovered_input)
         registry_context = (
             native_registry_state_context(current_native_registry_state)
@@ -172,7 +173,9 @@ def run_partitioned_to_parquet_registry_json(
                 **kwargs,
                 schema_registry=current_schema_registry_json,
             )
-        run_seconds = perf_counter() - run_start
+        cpu_seconds = max(process_time() - cpu_start, 0.0)
+        run_seconds = max(perf_counter() - run_start, 0.0)
+        io_wait_seconds = max(run_seconds - cpu_seconds, 0.0)
         output_schema = read_output_schema(plan.output_uri) if read_output_schema else None
         schema_registry_json = result.schema_registry_json
         run_result = PartitionRunResult(
@@ -183,6 +186,9 @@ def run_partitioned_to_parquet_registry_json(
             schema_drifts=None,
             schema_registry_json=schema_registry_json,
             schema_drifts_json=result.schema_drifts_json,
+            wall_seconds=run_seconds,
+            cpu_seconds=cpu_seconds,
+            io_wait_seconds=io_wait_seconds,
             native_registry_state=result.native_registry_state,
         )
         registry_updated = schema_registry_json is not None

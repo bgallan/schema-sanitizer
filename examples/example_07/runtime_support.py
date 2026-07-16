@@ -79,22 +79,15 @@ def _build_to_parquet_kwargs(
 
 
 def _schema_warm_up_plan_for_run(
-    args: argparse.Namespace,
-    run_plan: list[DateRunPlan],
     requested_warm_up_plan: list[DateRunPlan],
 ) -> list[DateRunPlan]:
-    """Return sources that must be probed before partition materialization.
+    """Return explicitly requested sources to probe before materialization.
 
-    Additive partition writes can promote a logical type after an earlier
-    Parquet file has already been committed. BigQuery external tables require
-    one compatible physical type across every file, so probe the complete
-    current write range before the first additive output. Strict runs keep
-    their existing contract and only use an explicitly requested warm-up
-    range.
+    Warm-up is opt-in for both additive and strict runs. In particular, an
+    additive run must not scan the current write range unless those sources
+    were also selected through the warm-up date arguments.
     """
     plans = list(requested_warm_up_plan)
-    if args.schema_mode == "additive":
-        plans.extend(run_plan)
 
     unique: list[DateRunPlan] = []
     seen_sources: set[str] = set()
