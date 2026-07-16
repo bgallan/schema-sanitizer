@@ -141,7 +141,6 @@ regex = '^(?P<value>\d+\.\d+(?:\.\d+)?(?:\.post\d+)?)$'
 # local caches/build trees into release artifacts.
 include = [
   "/CMakeLists.txt",
-  "/CHANGELOG.md",
   "/COMPATIBILITY.md",
   "/cmake/SchemaSanitizerCompression.cmake",
   "/meta/ci/check_parquet_compression_matrix.py",

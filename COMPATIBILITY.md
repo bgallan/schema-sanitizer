@@ -17,7 +17,8 @@ commitments until release CI publishes those wheels.
 The core package has no mandatory Python dependency. Supported adapter ranges
 begin at PyArrow 14, pandas 2, Polars 0.20, and DuckDB 1. Cloud operation uses
 the minimum versions declared in `pyproject.toml`; release CI validates each
-extra independently. New minimums require a minor release and changelog entry.
+extra independently. New minimums require a minor release and corresponding
+release documentation.
 
 ## Public API
 
