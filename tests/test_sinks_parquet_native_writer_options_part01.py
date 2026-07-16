@@ -8,48 +8,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-
-_GENERATED_METADATA_COLUMNS = {
-    "schema_registry",
-    "schema_drifts",
-    "source_file",
-    "ingestion_timestamp",
-}
-
-
-def _write_csv(path: Path, text: str = "a,b\n1,2\n3,4\n") -> Path:
-    """Write csv."""
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
-def _without_generated_metadata(row: dict[str, object]) -> dict[str, object]:
-    """Return row data excluding generated file-converter metadata columns."""
-    return {k: v for k, v in row.items() if k not in _GENERATED_METADATA_COLUMNS}
-
-
-def _without_generated_metadata_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Return rows excluding generated file-converter metadata columns."""
-    return [_without_generated_metadata(row) for row in rows]
-
-
-def _native_parquet_zlib_available(pa: object, tmp_path: Path) -> bool:
-    """Return whether the compiled native Parquet writer can emit gzip pages."""
-    from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
-
-    write = native_parquet_output.PARQUET_STREAM_WRITE
-    if write is None:
-        return False
-    batch = pa.record_batch({"text": pa.array(["probe"], type=pa.string())})
-    stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
-    try:
-        write(stream, str(tmp_path / "native-zlib-probe.parquet"), "gzip", -1, -1)
-    except RuntimeError as exc:
-        if "zlib is not available" in str(exc):
-            return False
-        raise
-    return True
-
+from sinks_shared import fail_pyarrow_sink
 
 # Split from test_sinks_parquet_native_writer_options.py: test_parquet_native_file_output_uses_native_writer_when_available, test_parquet_native_file_output_falls_back_when_gzip_lacks_zlib, test_parquet_native_file_output_retries_pyarrow_after_native_failure, ...
 
@@ -75,10 +34,6 @@ def test_parquet_native_file_output_uses_native_writer_when_available(
         assert hasattr(stream, "__arrow_c_stream__")
         assert (compression, gzip_level, memory_limit_bytes) == ("gzip", -1, -1)
         Path(output_path).write_bytes(b"native-parquet")
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_parquet_output, "PARQUET_STREAM_WRITE", fake_native_write)
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
@@ -261,10 +216,6 @@ def test_parquet_native_file_output_writes_metadata_without_pyarrow_sink(
         assert (compression, gzip_level, memory_limit_bytes) == ("gzip", -1, -1)
         Path(output_path).write_bytes(b"native-parquet-metadata")
 
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
-
     monkeypatch.setattr(
         native_parquet_output, "PARQUET_STREAM_WRITE_WITH_METADATA", fake_native_write
     )
@@ -302,10 +253,6 @@ def test_parquet_native_file_output_writes_supported_flat_stream(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(

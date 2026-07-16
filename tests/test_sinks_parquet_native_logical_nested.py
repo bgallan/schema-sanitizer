@@ -8,47 +8,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-
-_GENERATED_METADATA_COLUMNS = {
-    "schema_registry",
-    "schema_drifts",
-    "source_file",
-    "ingestion_timestamp",
-}
-
-
-def _write_csv(path: Path, text: str = "a,b\n1,2\n3,4\n") -> Path:
-    """Write csv."""
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
-def _without_generated_metadata(row: dict[str, object]) -> dict[str, object]:
-    """Return row data excluding generated file-converter metadata columns."""
-    return {k: v for k, v in row.items() if k not in _GENERATED_METADATA_COLUMNS}
-
-
-def _without_generated_metadata_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Return rows excluding generated file-converter metadata columns."""
-    return [_without_generated_metadata(row) for row in rows]
-
-
-def _native_parquet_zlib_available(pa: object, tmp_path: Path) -> bool:
-    """Return whether the compiled native Parquet writer can emit gzip pages."""
-    from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
-
-    write = native_parquet_output.PARQUET_STREAM_WRITE
-    if write is None:
-        return False
-    batch = pa.record_batch({"text": pa.array(["probe"], type=pa.string())})
-    stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
-    try:
-        write(stream, str(tmp_path / "native-zlib-probe.parquet"), "gzip", -1, -1)
-    except RuntimeError as exc:
-        if "zlib is not available" in str(exc):
-            return False
-        raise
-    return True
+from sinks_shared import fail_pyarrow_sink
 
 
 def test_parquet_native_file_output_writes_integer_width_logical_types(
@@ -59,10 +19,6 @@ def test_parquet_native_file_output_writes_integer_width_logical_types(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
@@ -121,10 +77,6 @@ def test_parquet_native_file_output_writes_timestamp_nanos(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
-
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch(
         {
@@ -159,10 +111,6 @@ def test_parquet_native_file_output_writes_schema_sanitizer_logical_surface(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     struct_type = pa.struct([pa.field("x", pa.int64()), pa.field("s", pa.string())])
@@ -246,10 +194,6 @@ def test_parquet_native_file_output_writes_nested_stream(
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     schema = pa.schema(
@@ -339,10 +283,6 @@ def test_parquet_native_file_output_writes_map_stream(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
-
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     schema = pa.schema(
         [
@@ -388,10 +328,6 @@ def test_parquet_native_file_output_writes_fixed_size_list_stream(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
-
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     schema = pa.schema(
         [
@@ -431,10 +367,6 @@ def test_parquet_native_file_output_writes_generated_metadata(
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
-        """Fail when the PyArrow Parquet sink fallback is called."""
-        raise AssertionError("PyArrow sink fallback should not be used")
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
     batch = pa.record_batch({"id": pa.array([1, 2], type=pa.int64())})

@@ -79,10 +79,9 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
     compact_cmake = " ".join(cmake.split()).replace("( ", "(")
     project = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    workflows = "\n".join(
-        (ROOT / relative).read_text(encoding="utf-8")
-        for relative in (".github/workflows/ci.yml", ".github/workflows/publish.yml")
-    )
+    ci_workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    publish_workflow = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+    workflows = f"{ci_workflow}\n{publish_workflow}"
 
     assert "if(WIN32)" in cmake
     assert 'set(_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT "bundled")' in cmake
@@ -95,7 +94,9 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
     assert 'SCHEMA_SANITIZER_ZLIB_PROVIDER = "bundled"' in pyproject
     assert 'SCHEMA_SANITIZER_REQUIRE_ZLIB = "ON"' in pyproject
     assert "check_parquet_compression_matrix.py" in pyproject
-    assert workflows.count("python -m cibuildwheel") == 6
+    assert ci_workflow.count("python -m cibuildwheel") == 3
+    assert "python -m cibuildwheel" not in publish_workflow
+    assert "uses: ./.github/workflows/ci.yml" in publish_workflow
     assert "CIBW_" + "ENVIRONMENT" not in workflows
 
 

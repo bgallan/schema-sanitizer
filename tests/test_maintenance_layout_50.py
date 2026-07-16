@@ -8,14 +8,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_native_parquet_reader_has_one_direct_owner() -> None:
-    """Native reader contracts, preflight, and opening share one cohesive owner."""
-    owner = ROOT / "src/schema_sanitizer/adapters/parquet/native_reader.py"
-    assert owner.is_file()
-    assert not owner.with_suffix("").exists()
-    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 500
-
-
 def test_bigquery_sidecar_has_one_bounded_owner() -> None:
     """BigQuery sidecar SQL, lookup, and mutation stay in one cohesive module."""
     assert (

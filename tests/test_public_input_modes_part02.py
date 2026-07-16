@@ -6,19 +6,10 @@ import json
 from pathlib import Path
 
 import pytest
+from public_input_modes_shared import GENERATED_COLUMNS as GENERATED
+from public_input_modes_shared import data_rows as _data_rows
 
 import schema_sanitizer as ss
-
-GENERATED = {"schema_registry", "schema_drifts", "source_file", "ingestion_timestamp"}
-
-
-def _data_rows(result) -> list[dict]:
-    """Return analytical rows without generated metadata columns."""
-    return [
-        {key: value for key, value in row.items() if key not in GENERATED}
-        for row in result.clean_data.to_pylist()
-    ]
-
 
 # Split from test_public_input_modes.py: test_csv_directory_source_file_spans_count_quoted_newlines, test_native_csv_path_source_probe_coalesces_and_skips_child_headers, test_csv_directory_source_file_does_not_precount_rows, ...
 

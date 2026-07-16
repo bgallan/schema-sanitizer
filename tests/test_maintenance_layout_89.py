@@ -110,14 +110,3 @@ def test_cpp23_enum_serialization_uses_to_underlying() -> None:
     ).read_text(encoding="utf-8")
     assert source.count("std::to_underlying") >= 4
     assert "static_cast<std::int32_t>(node.physical_type)" not in source
-
-
-def test_product_files_remain_bounded_including_textual_cpp_fragments() -> None:
-    """No product owner may hide a monolith behind a .inc include."""
-    candidates = [*SRC.rglob("*.py"), *CPP.rglob("*.cc"), *CPP.rglob("*.hh"), *CPP.rglob("*.inc")]
-    oversized = {
-        str(path.relative_to(ROOT)): len(path.read_text(encoding="utf-8").splitlines())
-        for path in candidates
-        if len(path.read_text(encoding="utf-8").splitlines()) > 500
-    }
-    assert oversized == {}

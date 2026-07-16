@@ -1,34 +1,16 @@
 ---
 name: Downstream packaging
 on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      sdist-artifact:
+        description: Source-distribution artifact produced by the parent CI workflow
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
-  sdist:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - name: Build source distribution
-        run: |
-          python -m pip install -U pip build
-          python -m build --sdist --outdir release-dist
-      - name: Validate source distribution contents
-        run: python meta/ci/check_distribution_contents.py release-dist/*.tar.gz
-      - uses: actions/upload-artifact@v6
-        with:
-          name: downstream-sdist
-          path: release-dist/*.tar.gz
   downstream-wheel:
-    needs: sdist
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -38,7 +20,7 @@ jobs:
           python-version: '3.11'
       - uses: actions/download-artifact@v7
         with:
-          name: downstream-sdist
+          name: ${{ inputs.sdist-artifact }}
           path: release-dist
       - name: Build wheel only from the generated sdist
         run: |

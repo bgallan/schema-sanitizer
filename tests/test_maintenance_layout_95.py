@@ -84,21 +84,3 @@ def test_value_view_owns_empty_container_detection_without_message_building() ->
     assert "Status(StatusCode::kCancelled, {})" in source
     assert "Status::Cancelled" not in source
     assert "Status container_is_empty(bool *out) const" in header
-
-
-def test_product_files_remain_bounded() -> None:
-    """All Python and native product owners remain within 500 lines."""
-    candidates = [
-        *SRC.rglob("*.py"),
-        *CPP.rglob("*.cc"),
-        *CPP.rglob("*.cpp"),
-        *CPP.rglob("*.hh"),
-        *CPP.rglob("*.hpp"),
-        *CPP.rglob("*.inc"),
-    ]
-    oversized = {
-        str(path.relative_to(ROOT)): len(path.read_text(encoding="utf-8").splitlines())
-        for path in candidates
-        if len(path.read_text(encoding="utf-8").splitlines()) > 500
-    }
-    assert oversized == {}

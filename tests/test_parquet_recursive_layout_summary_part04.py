@@ -6,6 +6,8 @@ requiring PyArrow. Runtime materialization lives in focused native modules.
 
 from __future__ import annotations
 
+from parquet_contract_shared import repeated_ancestor_field
+
 # Split from test_parquet_recursive_layout_summary.py: test_native_recursive_layout_summary_detects_root_contract_drift, test_native_recursive_layout_summary_detects_repeated_ancestor_drift
 
 
@@ -90,37 +92,7 @@ def test_native_recursive_layout_summary_detects_repeated_ancestor_drift() -> No
         _native_recursive_layout_summary_from_footer_info,
     )
 
-    def field(path_rep: list[list[int]]) -> dict[str, object]:
-        """Internal test helper."""
-        return {
-            "name": "payload",
-            "root_kind": "list",
-            "structural_shape_signature": "list<map<string,list<int64>>>",
-            "shape_signature": "list<map<string,list<#0:int64>>>",
-            "leaf_paths": ["payload.list.element.entries.value.list.element"],
-            "leaf_path_components": [
-                ["payload", "list", "element", "entries", "value", "list", "element"]
-            ],
-            "repeated_node_paths": [
-                "payload.list",
-                "payload.list.element.entries",
-                "payload.list.element.entries.value.list",
-            ],
-            "repeated_node_path_components": [
-                ["payload", "list"],
-                ["payload", "list", "element", "entries"],
-                ["payload", "list", "element", "entries", "value", "list"],
-            ],
-            "leaf_max_definition_levels": [6],
-            "leaf_max_repetition_levels": [3],
-            "leaf_path_definition_levels": [[0, 1, 2, 3, 4, 5, 6]],
-            "leaf_path_repetition_levels": path_rep,
-            "leaf_count": 1,
-            "node_count": 7,
-            "repetition_depth": 3,
-            "max_node_depth": 6,
-            "max_child_count": 1,
-        }
+    field = repeated_ancestor_field
 
     summary = _native_recursive_layout_summary_from_footer_info(
         {

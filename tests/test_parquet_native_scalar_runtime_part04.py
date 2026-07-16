@@ -6,18 +6,8 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-
-try:
-    import pyarrow as pa
-    import pyarrow.feather as feather
-    import pyarrow.parquet as pq
-
-    _HAVE_PYARROW = True
-except ModuleNotFoundError:  # pragma: no cover
-    pa = feather = pq = None
-    _HAVE_PYARROW = False
-
-_requires_pyarrow = pytest.mark.skipif(not _HAVE_PYARROW, reason="pyarrow not installed")
+from parquet_runtime_shared import pa
+from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 # Split from test_parquet_native_scalar_runtime.py: test_native_parquet_stream_projects_empty_file_schema, test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repeated, test_native_parquet_footer_info_accepts_empty_list_struct_list_chain_readiness, ...
 

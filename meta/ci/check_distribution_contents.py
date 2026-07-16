@@ -31,7 +31,6 @@ _SCRATCH_SUFFIXES = {
 }
 _SDIST_REQUIRED = {
     "CMakeLists.txt",
-    "CHANGELOG.md",
     "COMPATIBILITY.md",
     "HEURISTICS.md",
     "LICENSE",

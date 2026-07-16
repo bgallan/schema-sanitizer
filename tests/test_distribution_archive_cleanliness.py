@@ -49,34 +49,17 @@ def test_source_zip_validator_accepts_clean_source_tree(tmp_path: Path) -> None:
         "profiles/parser.profdata",
         "coverage/native.gcda",
         "coverage/native.gcno",
-    ],
-)
-def test_source_zip_validator_rejects_coverage_and_profile_artifacts(
-    tmp_path: Path,
-    scratch_name: str,
-) -> None:
-    """Coverage databases and profiler output never ship in source archives."""
-    validator = _load_validator()
-    names = [*_minimal_source_names(validator), scratch_name]
-
-    with pytest.raises(AssertionError, match="contains scratch/build files"):
-        validator._validate_source_zip(tmp_path / "source.zip", names)
-
-
-@pytest.mark.parametrize(
-    "scratch_name",
-    [
         "build-memsec/libsanitize_core.a",
         "build-asan/CMakeCache.txt",
         "cmake-build-debug/module.obj",
         ".build-local/generated.o",
     ],
 )
-def test_source_zip_validator_rejects_root_build_variants(
+def test_source_zip_validator_rejects_scratch_artifacts(
     tmp_path: Path,
     scratch_name: str,
 ) -> None:
-    """Root build directories remain scratch even when their names carry suffixes."""
+    """Coverage, profiler, and build scratch files never ship in source archives."""
     validator = _load_validator()
     names = [*_minimal_source_names(validator), scratch_name]
 

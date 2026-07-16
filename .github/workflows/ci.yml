@@ -1,6 +1,7 @@
 ---
-name: CI
+name: General sanity
 on:
+  workflow_call:
   push:
     branches: [main]
   # Keep this as pull_request, not pull_request_target. The latter would run
@@ -267,7 +268,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: parquet-contract-runtime-certificate
+          name: parquet-contract-runtime-certificate-${{ matrix.os }}
           path: artifacts/parquet-contract-runtime-certificate.json
           if-no-files-found: ignore
       - name: Gate tests
@@ -283,15 +284,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Validate package version
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(tr -d '[:space:]' < meta/VERSION)"
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(\.post[0-9]+)?$ ]]; then
-            echo "Invalid meta/VERSION: ${version}" >&2
-            exit 1
-          fi
-          echo "package-version=${version}"
+        run: python meta/ci/validate_release_version.py
   sdist:
     name: sdist
     needs: [validate-release-version]
@@ -306,6 +299,7 @@ jobs:
           python -m pip install -U pip build twine
           python -m build --sdist
           python -m twine check dist/*
+          python meta/ci/check_distribution_contents.py dist/*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: dist-sdist
@@ -450,3 +444,18 @@ jobs:
           print("schema-sanitizer", ss.__version__)
           print("core", core.__file__)
           PY
+  cloud-emulators:
+    name: cloud emulator interoperability
+    uses: ./.github/workflows/cloud-emulators.yml
+  coverage:
+    name: coverage reports
+    uses: ./.github/workflows/coverage.yml
+  downstream-packaging:
+    name: downstream packaging
+    needs: [sdist]
+    uses: ./.github/workflows/downstream-packaging.yml
+    with:
+      sdist-artifact: dist-sdist
+  native-sanitizers:
+    name: native sanitizers
+    uses: ./.github/workflows/native-sanitizers.yml

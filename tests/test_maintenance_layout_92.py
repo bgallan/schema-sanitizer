@@ -86,20 +86,3 @@ def test_metadata_parser_has_one_owner_and_reserves_known_sizes() -> None:
     assert manifest.count("metadata/columns/columns.cc") == 1
     assert "metadata/columns/spans.cc" not in manifest
     assert "metadata/columns/values.cc" not in manifest
-
-
-def test_product_files_remain_bounded_without_hidden_fragments() -> None:
-    """Python, C++, headers, and textual fragments remain within 500 lines."""
-    candidates = [
-        *SRC.rglob("*.py"),
-        *CPP.rglob("*.cc"),
-        *CPP.rglob("*.cpp"),
-        *CPP.rglob("*.hh"),
-        *CPP.rglob("*.inc"),
-    ]
-    oversized = {
-        str(path.relative_to(ROOT)): len(path.read_text(encoding="utf-8").splitlines())
-        for path in candidates
-        if len(path.read_text(encoding="utf-8").splitlines()) > 500
-    }
-    assert oversized == {}

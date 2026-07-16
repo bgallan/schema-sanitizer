@@ -6,7 +6,7 @@ A native C++23 engine performs schema inference, reconciliation, bounded
 streaming, and Arrow C Data materialization; the Python API provides file,
 dataframe, partitioned pipeline, and BigQuery integration helpers.
 
-Version 0.3.7 is still alpha software, with particular focus on Parquet files
+Version 0.3.8 is still alpha software, with particular focus on Parquet files
 used by BigQuery external tables.
 
 ## Index

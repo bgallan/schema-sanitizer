@@ -2,32 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-
-def _load_example_08() -> Any:
-    """Load example 07 despite its numeric filename prefix."""
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "examples"
-        / "example_07"
-        / "07_gcs_jsonl_to_silver_parquet_range_prefix.py"
-    )
-    spec = importlib.util.spec_from_file_location("schema_sanitizer_example_08", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load example module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _load_example_07_runtime_support() -> Any:
@@ -149,6 +130,9 @@ def test_example_07_parser_lives_in_cli_module() -> None:
     assert args.parse_iso_dates is True
     assert args.parse_iso_times is True
     assert args.parquet_enable_list_inference is True
+    assert args.memory_limit_bytes == 64 * 1024 * 1024
+    assert not hasattr(args, "batch_memory_limit_bytes")
+    assert not hasattr(args, "read_chunk_bytes")
     registry_order = registry_order_sql(
         hive_partition_columns(
             args.hive_partition_column,
