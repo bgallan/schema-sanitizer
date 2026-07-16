@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import re
 
 from conftest import require_native
+from schema_registry_shared import without_detected_at as _without_detected_at
 
 import schema_sanitizer.core_impl.schema_registry as registry_native_state
 from schema_sanitizer.core_impl.logical_schema import LogicalSchemaPayload
@@ -15,22 +15,6 @@ from schema_sanitizer.core_impl.schema_registry import (
     schema_contract_from_registry_json,
 )
 from schema_sanitizer.options_impl.call_options import normalize_call_options
-
-_UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
-
-
-def _without_detected_at(drifts: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Validate and remove native conversion timestamps for stable comparisons."""
-    normalized = []
-    for drift in drifts:
-        detected_at = drift.get("detected_at")
-        assert isinstance(detected_at, str)
-        assert _UTC_TIMESTAMP_RE.fullmatch(detected_at)
-        item = dict(drift)
-        item.pop("detected_at")
-        normalized.append(item)
-    return normalized
-
 
 # Split from test_schema_registry.py: test_new_schema_registry_uses_public_native_shape, test_native_schema_registry_generates_versioned_field, test_native_schema_registry_names_scalar_versions_by_semantic_type, ...
 

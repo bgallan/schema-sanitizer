@@ -7,6 +7,25 @@ from types import SimpleNamespace
 
 import pytest
 
+
+class _CloseCounter:
+    """Test double that counts idempotent lifecycle close calls."""
+
+    def __init__(self) -> None:
+        """Initialize the close counter."""
+        self.closed = 0
+
+    def close(self) -> None:
+        """Record one close call."""
+        self.closed += 1
+
+
+class _CloseCountingReader(_CloseCounter):
+    """Close-counting reader double with a minimal Arrow-like schema."""
+
+    schema = None
+
+
 # Split from test_runtime_lifecycle.py: test_abi3_sink_output_close_main_stream_preserves_diagnostics, test_arrow_c_stream_close_prefers_main_stream_only_close, test_arrow_c_stream_close_releases_keepalive_reference, ...
 
 
@@ -134,20 +153,7 @@ def test_stream_close_deduplicates_reader_raw_close(monkeypatch) -> None:
 
     Stream = stream_batches.Stream
 
-    class Reader:
-        """Test helper for Reader."""
-
-        schema = None
-
-        def __init__(self) -> None:
-            """Initialize the test helper."""
-            self.closed = 0
-
-        def close(self) -> None:
-            """Close the test helper."""
-            self.closed += 1
-
-    reader = Reader()
+    reader = _CloseCountingReader()
 
     def fake_is_record_batch_reader(obj, *, feature):
         """Return fake is record batch reader for the test."""
@@ -176,19 +182,6 @@ def test_stream_close_main_stream_preserves_diagnostics(monkeypatch) -> None:
 
     Stream = stream_batches.Stream
 
-    class Reader:
-        """Test helper for Reader."""
-
-        schema = None
-
-        def __init__(self) -> None:
-            """Initialize the test helper."""
-            self.closed = 0
-
-        def close(self) -> None:
-            """Close the test helper."""
-            self.closed += 1
-
     class Raw:
         """Test helper for Raw."""
 
@@ -209,7 +202,7 @@ def test_stream_close_main_stream_preserves_diagnostics(monkeypatch) -> None:
             """Close the test helper."""
             self.closed += 1
 
-    reader = Reader()
+    reader = _CloseCountingReader()
     raw = Raw()
 
     def fake_is_record_batch_reader(obj, *, feature):
@@ -292,19 +285,8 @@ def test_arrow_c_stream_drop_closes_main_stream_and_keepalive() -> None:
             """Close the test helper."""
             self.closed += 1
 
-    class Keepalive:
-        """Test helper for Keepalive."""
-
-        def __init__(self) -> None:
-            """Initialize the test helper."""
-            self.closed = 0
-
-        def close(self) -> None:
-            """Close the test helper."""
-            self.closed += 1
-
     raw = Raw()
-    keepalive = Keepalive()
+    keepalive = _CloseCounter()
     stream = ArrowCStream(raw)
     object.__setattr__(stream, "_keepalive", keepalive)
 
@@ -321,18 +303,7 @@ def test_result_drop_closes_private_keepalive() -> None:
 
     from schema_sanitizer.api_impl.results import Result
 
-    class Keepalive:
-        """Test helper for Keepalive."""
-
-        def __init__(self) -> None:
-            """Initialize the test helper."""
-            self.closed = 0
-
-        def close(self) -> None:
-            """Close the test helper."""
-            self.closed += 1
-
-    keepalive = Keepalive()
+    keepalive = _CloseCounter()
     result = Result(SimpleNamespace(diagnostics=None), clean_data=None)
     object.__setattr__(result, "_keepalive", keepalive)
 

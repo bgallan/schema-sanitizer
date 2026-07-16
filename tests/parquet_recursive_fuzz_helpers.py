@@ -6,9 +6,130 @@ The corpus generators remain separate from the focused assertion modules.
 from __future__ import annotations
 
 import itertools
+from collections.abc import Callable
 
 _RECURSIVE_FUZZ_OPS = ("list", "map", "struct")
 _RECURSIVE_FUZZ_SCALARS = ("int64", "string", "bool", "float64")
+
+_ScalarValue = Callable[[str, int], object]
+_RecursiveValue = Callable[[object, int], object]
+
+
+def _recursive_fuzz_empty_value(spec: object, seed: int) -> object:
+    """Return the canonical empty/null value for a recursive grammar spec."""
+    del seed
+    kind = spec[0]
+    if kind in set(_RECURSIVE_FUZZ_SCALARS):
+        return None
+    if kind == "list":
+        return []
+    if kind == "map":
+        return []
+    if kind == "struct":
+        return {
+            name: _recursive_fuzz_empty_value(child, child_index)
+            for child_index, (name, child) in enumerate(spec[1])
+        }
+    raise AssertionError(kind)
+
+
+def _recursive_fuzz_full_value_factory(
+    scalar_value: _ScalarValue,
+    *,
+    include_null: bool,
+) -> _RecursiveValue:
+    """Build a full-value generator with optional explicit null children."""
+
+    def full_value(spec: object, seed: int) -> object:
+        """Return one full recursive value."""
+        kind = spec[0]
+        if kind in set(_RECURSIVE_FUZZ_SCALARS):
+            return scalar_value(kind, seed)
+        if kind == "list":
+            values = [
+                full_value(spec[1], seed + 1),
+                _recursive_fuzz_empty_value(spec[1], seed + 2),
+            ]
+            return [*values, None] if include_null else values
+        if kind == "map":
+            if include_null:
+                return [
+                    (f"full-{seed}", full_value(spec[1], seed + 1)),
+                    (f"empty-{seed}", _recursive_fuzz_empty_value(spec[1], seed + 2)),
+                    (f"none-{seed}", None),
+                ]
+            return [
+                (f"k{seed}", full_value(spec[1], seed + 1)),
+                (f"empty{seed}", _recursive_fuzz_empty_value(spec[1], seed + 2)),
+            ]
+        if kind == "struct":
+            return {
+                name: full_value(child, seed + child_index + 1)
+                for child_index, (name, child) in enumerate(spec[1])
+            }
+        raise AssertionError(kind)
+
+    return full_value
+
+
+def _recursive_fuzz_sparse_value_factory(
+    scalar_value: _ScalarValue,
+    full_value: _RecursiveValue,
+) -> _RecursiveValue:
+    """Build the common sparse-value generator for null/empty matrix tests."""
+
+    def sparse_value(spec: object, seed: int) -> object:
+        """Return one sparse recursive value."""
+        kind = spec[0]
+        if kind in set(_RECURSIVE_FUZZ_SCALARS):
+            return None if seed % 2 == 0 else scalar_value(kind, seed)
+        if kind == "list":
+            return [
+                _recursive_fuzz_empty_value(spec[1], seed + 1),
+                None,
+                full_value(spec[1], seed + 2),
+            ]
+        if kind == "map":
+            return [
+                (f"empty-{seed}", _recursive_fuzz_empty_value(spec[1], seed + 1)),
+                (f"none-{seed}", None),
+                (f"full-{seed}", full_value(spec[1], seed + 2)),
+            ]
+        if kind == "struct":
+            return {
+                name: (
+                    None
+                    if offset % 3 == 0
+                    else _recursive_fuzz_empty_value(child, seed + offset)
+                    if offset % 3 == 1
+                    else full_value(child, seed + offset)
+                )
+                for offset, (name, child) in enumerate(spec[1])
+            }
+        raise AssertionError(kind)
+
+    return sparse_value
+
+
+def _recursive_fuzz_phase_value_factory(
+    sparse_value: _RecursiveValue,
+    full_value: _RecursiveValue,
+) -> Callable[[object, str, int], object]:
+    """Build the common null/empty/sparse/full phase selector."""
+
+    def phase_value(spec: object, phase: str, seed: int) -> object:
+        """Return a recursive value for one named phase."""
+        if phase == "all-null":
+            return None
+        if phase == "empty-only":
+            return _recursive_fuzz_empty_value(spec, seed)
+        if phase == "sparse":
+            return sparse_value(spec, seed)
+        if phase == "full":
+            return full_value(spec, seed)
+        raise AssertionError(phase)
+
+    return phase_value
 
 
 def _recursive_fuzz_scalar(seed: int) -> tuple[str]:

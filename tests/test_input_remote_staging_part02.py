@@ -6,6 +6,29 @@ import json
 
 from input_contract_shared import *  # noqa: F403
 
+
+class FakeResponse:
+    """Minimal aiohttp-like response for a JSON GCS list page."""
+
+    status = 200
+
+    def __init__(self, payload: dict[str, object]):
+        """Store one JSON response payload."""
+        self._payload = payload
+
+    async def __aenter__(self):
+        """Return this fake response."""
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        """Close this fake response."""
+        return None
+
+    async def text(self) -> str:
+        """Return the JSON response body."""
+        return json.dumps(self._payload)
+
+
 # Split from test_input_remote_staging.py: test_remote_gcs_directory_listing_reads_all_pages, test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes, test_remote_s3_bulk_directory_discovery_groups_parent_prefixes, ...
 
 
@@ -14,27 +37,6 @@ def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl.providers import gcs as gcs_listing
     from schema_sanitizer.remote_impl.transport import run_sync
-
-    class FakeResponse:
-        """Minimal aiohttp-like response for one GCS list page."""
-
-        status = 200
-
-        def __init__(self, payload: dict[str, object]):
-            """Store one JSON response payload."""
-            self._payload = payload
-
-        async def __aenter__(self):
-            """Return this fake response."""
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            """Close this fake response."""
-            return None
-
-        async def text(self) -> str:
-            """Return the JSON response body."""
-            return json.dumps(self._payload)
 
     class FakeSession:
         """Minimal aiohttp-like session with paginated GCS responses."""
@@ -82,27 +84,6 @@ def test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes(monkeypatch)
     """Verify GCS source discovery can check sibling partition directories in one listing."""
     from schema_sanitizer.remote_impl.providers import gcs as gcs_bulk_discovery
     from schema_sanitizer.remote_impl.transport import run_sync
-
-    class FakeResponse:
-        """Minimal aiohttp-like response for one GCS list page."""
-
-        status = 200
-
-        def __init__(self, payload: dict[str, object]):
-            """Store one JSON response payload."""
-            self._payload = payload
-
-        async def __aenter__(self):
-            """Return this fake response."""
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            """Close this fake response."""
-            return None
-
-        async def text(self) -> str:
-            """Return the JSON response body."""
-            return json.dumps(self._payload)
 
     class FakeSession:
         """Minimal aiohttp-like session with one parent-prefix listing."""

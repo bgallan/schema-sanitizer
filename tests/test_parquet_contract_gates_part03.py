@@ -7,7 +7,10 @@ test module harder to navigate.
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
+from parquet_contract_shared import filter_rejecting_writer_status
 
 # Split from test_parquet_contract_gates.py: test_parquet_contract_certification_status_passes_filters_to_writer_gate, test_parquet_contract_runtime_readiness_status_from_capabilities_accepts_full_runtime, test_parquet_contract_runtime_readiness_status_fails_without_pyarrow, ...
 
@@ -20,21 +23,7 @@ def test_parquet_contract_certification_status_passes_filters_to_writer_gate(
 
     captured: dict[str, object] = {}
     sentinel_filter = object()
-
-    def fake_writer_status(*args: object, **kwargs: object) -> dict[str, object]:
-        """Internal test helper."""
-        captured.update(kwargs)
-        return {
-            "applicable": True,
-            "satisfied": False,
-            "issues": ["native reader filter contract: predicate filters require PyArrow"],
-            "created_by": "schema-sanitizer native parquet writer",
-            "native_reader_ready": True,
-            "filters_present": True,
-            "filter_contract_satisfied": False,
-            "nested_contract_applicable": True,
-            "nested_contract_satisfied": True,
-        }
+    fake_writer_status = partial(filter_rejecting_writer_status, captured)
 
     monkeypatch.setattr(
         parquet_runtime, "native_parquet_writer_contract_status", fake_writer_status

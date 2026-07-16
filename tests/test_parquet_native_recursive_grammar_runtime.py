@@ -8,7 +8,11 @@ from conftest import require_native
 from parquet_recursive_fuzz_helpers import (
     _RECURSIVE_FUZZ_SCALARS,
     _recursive_fuzz_cartesian_specs,
+    _recursive_fuzz_full_value_factory,
     _recursive_fuzz_seeded_specs,
+)
+from parquet_recursive_fuzz_helpers import (
+    _recursive_fuzz_empty_value as empty_value,
 )
 from parquet_runtime_shared import pa
 from parquet_runtime_shared import recursive_arrow_type as arrow_type
@@ -54,22 +58,6 @@ def test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus(
             return {
                 name: full_value(child, seed + offset + 1)
                 for offset, (name, child) in enumerate(spec[1])
-            }
-        raise AssertionError(kind)
-
-    def empty_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
-        del seed
-        kind = spec[0]
-        if kind in set(_RECURSIVE_FUZZ_SCALARS):
-            return None
-        if kind == "list":
-            return []
-        if kind == "map":
-            return []
-        if kind == "struct":
-            return {
-                name: empty_value(child, offset) for offset, (name, child) in enumerate(spec[1])
             }
         raise AssertionError(kind)
 
@@ -171,41 +159,7 @@ def test_native_parquet_stream_materializes_seeded_recursive_fuzzer_corpus(
             return seed + 0.875
         raise AssertionError(kind)
 
-    def empty_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
-        del seed
-        kind = spec[0]
-        if kind in set(_RECURSIVE_FUZZ_SCALARS):
-            return None
-        if kind == "list":
-            return []
-        if kind == "map":
-            return []
-        if kind == "struct":
-            return {
-                name: empty_value(child, child_index)
-                for child_index, (name, child) in enumerate(spec[1])
-            }
-        raise AssertionError(kind)
-
-    def full_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
-        kind = spec[0]
-        if kind in set(_RECURSIVE_FUZZ_SCALARS):
-            return scalar_value(kind, seed)
-        if kind == "list":
-            return [full_value(spec[1], seed + 1), empty_value(spec[1], seed + 2)]
-        if kind == "map":
-            return [
-                (f"k{seed}", full_value(spec[1], seed + 1)),
-                (f"empty{seed}", empty_value(spec[1], seed + 2)),
-            ]
-        if kind == "struct":
-            return {
-                name: full_value(child, seed + child_index + 1)
-                for child_index, (name, child) in enumerate(spec[1])
-            }
-        raise AssertionError(kind)
+    full_value = _recursive_fuzz_full_value_factory(scalar_value, include_null=False)
 
     def sparse_value(spec: object, seed: int) -> object:
         """Internal test helper."""

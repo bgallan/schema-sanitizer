@@ -6,6 +6,19 @@ from __future__ import annotations
 
 from input_contract_shared import *  # noqa: F403
 
+
+class _Stage:
+    """Minimal staged-path stand-in that preserves its local file."""
+
+    def __init__(self, path: Path):  # noqa: F405
+        """Store the local staged path."""
+        self.path = str(path)
+
+    def close(self) -> None:
+        """Keep the staged file available for test assertions."""
+        pass
+
+
 # Split from test_input_remote_staging.py: test_uri_input_uses_async_local_staging, test_uri_input_staging_works_with_converters, test_uri_input_allows_non_utf8_after_local_staging, ...
 
 
@@ -15,17 +28,6 @@ def test_uri_input_uses_async_local_staging(monkeypatch, tmp_path) -> None:
     require_native()
 
     staged_paths: list[str] = []
-
-    class _Stage:
-        """Minimal staged-path stand-in."""
-
-        def __init__(self, path: Path):
-            """Store the local staged path."""
-            self.path = str(path)
-
-        def close(self) -> None:
-            """Keep the staged file available for test assertions."""
-            pass
 
     def fake_stage(uri: str, *, memory_limit_bytes: int | None) -> _Stage:
         """Write the remote payload to a local staged file."""
@@ -52,17 +54,6 @@ def test_uri_input_staging_works_with_converters(monkeypatch, tmp_path) -> None:
     require_native()
 
     out = tmp_path / "out.jsonl"
-
-    class _Stage:
-        """Minimal staged-path stand-in."""
-
-        def __init__(self, path: Path):
-            """Store the local staged path."""
-            self.path = str(path)
-
-        def close(self) -> None:
-            """Keep the staged file available for test assertions."""
-            pass
 
     def fake_stage(uri: str, *, memory_limit_bytes: int | None) -> _Stage:
         """Write one remote payload to a local staged file."""
@@ -103,17 +94,6 @@ def test_uri_input_staging_works_with_converters(monkeypatch, tmp_path) -> None:
 def test_uri_input_allows_non_utf8_after_local_staging(monkeypatch, tmp_path) -> None:
     """Verify URI text inputs can be transcoded after local staging."""
     require_native()
-
-    class _Stage:
-        """Minimal staged-path stand-in."""
-
-        def __init__(self, path: Path):
-            """Store the local staged path."""
-            self.path = str(path)
-
-        def close(self) -> None:
-            """Keep the staged file available for test assertions."""
-            pass
 
     def fake_stage(uri: str, *, memory_limit_bytes: int | None) -> _Stage:
         """Write Latin-1 JSONL to a local staged file."""

@@ -3,6 +3,26 @@
 from __future__ import annotations
 
 
+def filter_rejecting_writer_status(
+    captured: dict[str, object],
+    *_args: object,
+    **kwargs: object,
+) -> dict[str, object]:
+    """Capture writer-gate arguments and return a filter-rejection status."""
+    captured.update(kwargs)
+    return {
+        "applicable": True,
+        "satisfied": False,
+        "issues": ["native reader filter contract: predicate filters require PyArrow"],
+        "created_by": "schema-sanitizer native parquet writer",
+        "native_reader_ready": True,
+        "filters_present": True,
+        "filter_contract_satisfied": False,
+        "nested_contract_applicable": True,
+        "nested_contract_satisfied": True,
+    }
+
+
 def stable_native_nested_contract_summary() -> dict[str, object]:
     """Return a compact recursive summary with every contract family stable."""
     return {

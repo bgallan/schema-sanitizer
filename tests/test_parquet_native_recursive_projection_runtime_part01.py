@@ -8,8 +8,13 @@ from conftest import require_native
 from parquet_recursive_fuzz_helpers import (
     _RECURSIVE_FUZZ_SCALARS,
     _recursive_fuzz_cartesian_specs,
+    _recursive_fuzz_full_value_factory,
+    _recursive_fuzz_phase_value_factory,
     _recursive_fuzz_row_group_phase_labels,
     _recursive_fuzz_row_group_phase_matrix_specs,
+)
+from parquet_recursive_fuzz_helpers import (
+    _recursive_fuzz_empty_value as empty_value,
 )
 from parquet_runtime_shared import pa
 from parquet_runtime_shared import recursive_arrow_type as arrow_type
@@ -44,22 +49,6 @@ def test_native_parquet_stream_projects_recursive_row_group_phase_roots(
             return seed % 2 == 0
         if kind == "float64":
             return seed + 0.5
-        raise AssertionError(kind)
-
-    def empty_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
-        del seed
-        kind = spec[0]
-        if kind in set(_RECURSIVE_FUZZ_SCALARS):
-            return None
-        if kind == "list":
-            return []
-        if kind == "map":
-            return []
-        if kind == "struct":
-            return {
-                name: empty_value(child, offset) for offset, (name, child) in enumerate(spec[1])
-            }
         raise AssertionError(kind)
 
     def full_value(spec: object, seed: int) -> object:
@@ -102,17 +91,7 @@ def test_native_parquet_stream_projects_recursive_row_group_phase_roots(
             }
         raise AssertionError(kind)
 
-    def phase_value(spec: object, phase: str, seed: int) -> object:
-        """Internal test helper."""
-        if phase == "all-null":
-            return None
-        if phase == "empty-only":
-            return empty_value(spec, seed)
-        if phase == "sparse":
-            return sparse_value(spec, seed)
-        if phase == "full":
-            return full_value(spec, seed)
-        raise AssertionError(phase)
+    phase_value = _recursive_fuzz_phase_value_factory(sparse_value, full_value)
 
     require_native()
     specs = _recursive_fuzz_row_group_phase_matrix_specs()[:3]
@@ -219,41 +198,7 @@ def test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots(
             return seed + 0.125
         raise AssertionError(kind)
 
-    def empty_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
-        del seed
-        kind = spec[0]
-        if kind in set(_RECURSIVE_FUZZ_SCALARS):
-            return None
-        if kind == "list":
-            return []
-        if kind == "map":
-            return []
-        if kind == "struct":
-            return {
-                name: empty_value(child, offset) for offset, (name, child) in enumerate(spec[1])
-            }
-        raise AssertionError(kind)
-
-    def full_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
-        kind = spec[0]
-        if kind in set(_RECURSIVE_FUZZ_SCALARS):
-            return scalar_value(kind, seed)
-        if kind == "list":
-            return [full_value(spec[1], seed + 1), empty_value(spec[1], seed + 2), None]
-        if kind == "map":
-            return [
-                (f"full-{seed}", full_value(spec[1], seed + 1)),
-                (f"empty-{seed}", empty_value(spec[1], seed + 2)),
-                (f"none-{seed}", None),
-            ]
-        if kind == "struct":
-            return {
-                name: full_value(child, seed + offset + 1)
-                for offset, (name, child) in enumerate(spec[1])
-            }
-        raise AssertionError(kind)
+    full_value = _recursive_fuzz_full_value_factory(scalar_value, include_null=True)
 
     def sparse_value(spec: object, seed: int) -> object:
         """Internal test helper."""
@@ -275,17 +220,7 @@ def test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots(
             }
         raise AssertionError(kind)
 
-    def phase_value(spec: object, phase: str, seed: int) -> object:
-        """Internal test helper."""
-        if phase == "all-null":
-            return None
-        if phase == "empty-only":
-            return empty_value(spec, seed)
-        if phase == "sparse":
-            return sparse_value(spec, seed)
-        if phase == "full":
-            return full_value(spec, seed)
-        raise AssertionError(phase)
+    phase_value = _recursive_fuzz_phase_value_factory(sparse_value, full_value)
 
     require_native()
     target_spec = _recursive_fuzz_row_group_phase_matrix_specs()[0][1]
