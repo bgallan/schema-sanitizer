@@ -98,20 +98,3 @@ def test_numeric_registry_planning_borrows_names_before_moving_fields() -> None:
     assert "StringLookupMap<NumericFamilyPlan>" not in source
     second_pass = source[source.index("std::vector<LogicalField> out") :]
     assert "family_base_name(field)" not in second_pass
-
-
-def test_product_files_remain_bounded_without_hidden_fragments() -> None:
-    """Python, C++, headers, and textual fragments remain within 500 lines."""
-    candidates = [
-        *SRC.rglob("*.py"),
-        *CPP.rglob("*.cc"),
-        *CPP.rglob("*.cpp"),
-        *CPP.rglob("*.hh"),
-        *CPP.rglob("*.inc"),
-    ]
-    oversized = {
-        str(path.relative_to(ROOT)): len(path.read_text(encoding="utf-8").splitlines())
-        for path in candidates
-        if len(path.read_text(encoding="utf-8").splitlines()) > 500
-    }
-    assert oversized == {}

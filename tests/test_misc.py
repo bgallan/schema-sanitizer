@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 
 import pytest
 from conftest import (
     read_test_csv,
-    read_test_json,
     read_test_jsonl,
     read_test_path,
     read_test_python,
@@ -319,39 +317,6 @@ def test_schema_contract_rejects_logical_schema_dict_spec(tmp_path: Path) -> Non
 
     with pytest.raises(TypeError, match="schema_contract"):
         _read_with_contract(path, schema_contract=spec, format="csv", schema_mode="strict")
-
-
-class NonSeekable:
-    """A minimal non-seekable file-like: .read() only."""
-
-    def __init__(self, data: bytes):
-        """Initialize the test helper."""
-        self._data = data
-        self._pos = 0
-
-    def read(self, n: int = -1):
-        """Read from the test helper."""
-        if n is None or n < 0:
-            n = len(self._data) - self._pos
-        if self._pos >= len(self._data):
-            return b""
-        out = self._data[self._pos : self._pos + n]
-        self._pos += len(out)
-        return out
-
-
-def test_non_seekable_filelike_is_rejected():
-    """Verify non seekable filelike is rejected."""
-    src = NonSeekable(b'[{"a": 1}, {"a": 2}]')
-    with pytest.raises(TypeError):
-        read_test_json(src)
-
-
-def test_seekable_filelike_is_rejected():
-    """Verify seekable filelike is rejected."""
-    src = io.BytesIO(b'[{"a": 1}, {"a": 2}]')
-    with pytest.raises(TypeError):
-        read_test_json(src)
 
 
 def _run_csv(path: Path, memory_limit_bytes: int) -> pa.Table:

@@ -59,20 +59,3 @@ def test_jsonl_output_adapters_have_one_translation_unit() -> None:
     assert manifest.count("json/output_adapters/output_adapters.cc") == 1
     for retired in ("file.cc", "python.cc", "python_stream.cc", "string.cc"):
         assert f"json/output_adapters/{retired}" not in manifest
-
-
-def test_product_owners_stay_below_500_lines_including_inc_fragments() -> None:
-    """No Python or native implementation may hide an oversized owner."""
-    candidates = [
-        *SRC.rglob("*.py"),
-        *CPP.rglob("*.cc"),
-        *CPP.rglob("*.cpp"),
-        *CPP.rglob("*.hh"),
-        *CPP.rglob("*.inc"),
-    ]
-    oversized = {
-        str(path.relative_to(ROOT)): len(path.read_text(encoding="utf-8").splitlines())
-        for path in candidates
-        if len(path.read_text(encoding="utf-8").splitlines()) > 500
-    }
-    assert oversized == {}

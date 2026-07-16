@@ -2,33 +2,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
-import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-
-def _load_example_08() -> Any:
-    """Load example 07 despite its numeric filename prefix."""
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "examples"
-        / "example_07"
-        / "07_gcs_jsonl_to_silver_parquet_range_prefix.py"
-    )
-    spec = importlib.util.spec_from_file_location("schema_sanitizer_example_08", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load example module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _load_example_07_runtime_support() -> Any:

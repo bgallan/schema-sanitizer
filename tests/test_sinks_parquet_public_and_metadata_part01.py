@@ -6,51 +6,15 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
+from sinks_shared import (
+    without_generated_metadata_rows as _without_generated_metadata_rows,
+)
+from sinks_shared import (
+    write_csv as _write_csv,
+)
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.schema_registry import merge_schema_registry
-
-_GENERATED_METADATA_COLUMNS = {
-    "schema_registry",
-    "schema_drifts",
-    "source_file",
-    "ingestion_timestamp",
-}
-
-
-def _write_csv(path: Path, text: str = "a,b\n1,2\n3,4\n") -> Path:
-    """Write csv."""
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
-def _without_generated_metadata(row: dict[str, object]) -> dict[str, object]:
-    """Return row data excluding generated file-converter metadata columns."""
-    return {k: v for k, v in row.items() if k not in _GENERATED_METADATA_COLUMNS}
-
-
-def _without_generated_metadata_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Return rows excluding generated file-converter metadata columns."""
-    return [_without_generated_metadata(row) for row in rows]
-
-
-def _native_parquet_zlib_available(pa: object, tmp_path: Path) -> bool:
-    """Return whether the compiled native Parquet writer can emit gzip pages."""
-    from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
-
-    write = native_parquet_output.PARQUET_STREAM_WRITE
-    if write is None:
-        return False
-    batch = pa.record_batch({"text": pa.array(["probe"], type=pa.string())})
-    stream = pa.RecordBatchReader.from_batches(batch.schema, [batch])
-    try:
-        write(stream, str(tmp_path / "native-zlib-probe.parquet"), "gzip", -1, -1)
-    except RuntimeError as exc:
-        if "zlib is not available" in str(exc):
-            return False
-        raise
-    return True
-
 
 # Split from test_sinks_parquet_public_and_metadata.py: test_to_parquet_writes_file, test_parquet_sink_native_coalesces_flat_arrow_batches, test_parquet_sink_native_coalesces_nested_arrow_batches, ...
 

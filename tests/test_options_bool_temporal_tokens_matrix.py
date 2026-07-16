@@ -96,21 +96,10 @@ def _kwargs(case: _CsvCase, combo: _PolicyCombo) -> dict[str, object]:
     return {"on_error": combo.on_error, **kwargs}
 
 
-@pytest.mark.parametrize("case", _BOOL_CASES, ids=lambda c: c.name)
+@pytest.mark.parametrize("case", _BOOL_CASES + _TEMPORAL_CASES, ids=lambda c: c.name)
 @pytest.mark.parametrize("combo", _POLICY_COMBOS, ids=_combo_id)
-def test_bool_token_option_matrix_read(tmp_path: Path, combo: _PolicyCombo, case: _CsvCase) -> None:
-    """Verify bool token option matrix read."""
-    require_native()
-    pytest.importorskip("pyarrow")
-
-    result = read_test_csv(_path(tmp_path, case), **_kwargs(case, combo))
-    assert result.clean_data.num_rows == EXPECTED_ROWS
-
-
-@pytest.mark.parametrize("case", _TEMPORAL_CASES, ids=lambda c: c.name)
-@pytest.mark.parametrize("combo", _POLICY_COMBOS, ids=_combo_id)
-def test_temporal_option_matrix_read(tmp_path: Path, combo: _PolicyCombo, case: _CsvCase) -> None:
-    """Verify temporal option matrix read."""
+def test_token_option_matrix_read(tmp_path: Path, combo: _PolicyCombo, case: _CsvCase) -> None:
+    """Verify Boolean and temporal token options across read policies."""
     require_native()
     pytest.importorskip("pyarrow")
 
