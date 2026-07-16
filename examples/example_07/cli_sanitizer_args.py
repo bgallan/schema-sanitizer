@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-DEFAULT_BATCH_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
-DEFAULT_READ_CHUNK_BYTES = 256 * 1024
+DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
@@ -93,19 +92,14 @@ def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--parse-iso-dates", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--parse-iso-times", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
-        "--batch-memory-limit-bytes",
+        "--memory-limit-bytes",
         type=int,
-        default=DEFAULT_BATCH_MEMORY_LIMIT_BYTES,
+        default=DEFAULT_MEMORY_LIMIT_BYTES,
         help=(
-            "Best-effort native per-batch memory budget. Default: "
-            f"{DEFAULT_BATCH_MEMORY_LIMIT_BYTES} bytes (64 MiB)."
+            "Total memory/resource budget passed to schema_sanitizer. The native "
+            "extension derives its chunk, batch, staging, Arrow, and Parquet budgets "
+            f"from this value. Default: {DEFAULT_MEMORY_LIMIT_BYTES} bytes (64 MiB)."
         ),
-    )
-    parser.add_argument(
-        "--read-chunk-bytes",
-        type=int,
-        default=DEFAULT_READ_CHUNK_BYTES,
-        help=f"Streaming read chunk size. Default: {DEFAULT_READ_CHUNK_BYTES} bytes (256 KiB).",
     )
     parser.add_argument("--arrow-max-depth", type=int, default=32)
     parser.add_argument("--parquet-max-depth", type=int, default=15)

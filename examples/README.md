@@ -81,8 +81,13 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --field-name-policy lower_snake \
   --timestamp-precision TIMESTAMP_MICROS \
   --on-error emit_null_row \
+  --memory-limit-bytes 67108864 \
   --bigquery-registry-sidecar-table project_id.dataset_id.external_events_registry_state
 ```
+
+`--memory-limit-bytes` is the example's only resource-control option. It is
+passed directly to `schema_sanitizer`, which derives its read, batch, staging,
+Arrow, and Parquet sub-budgets from that one operation-wide limit.
 
 `--bigquery-registry-sidecar-table` is optional. When set, the example creates
 or updates a native BigQuery table with two columns, `external_table_name` and
