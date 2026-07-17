@@ -58,6 +58,9 @@ class PartitionRunPlan:
     output_uri: str
     logical_hour: int | None = None
     discovered_input: Any | None = field(default=None, compare=False, repr=False)
+    discovery_seconds: float = field(default=0.0, compare=False, repr=False)
+    source_file_count: int | None = field(default=None, compare=False, repr=False)
+    source_bytes: int | None = field(default=None, compare=False, repr=False)
 
     def __init__(
         self,
@@ -67,6 +70,9 @@ class PartitionRunPlan:
         logical_hour: int | None = None,
         *,
         discovered_input: Any | None = None,
+        discovery_seconds: float = 0.0,
+        source_file_count: int | None = None,
+        source_bytes: int | None = None,
     ):
         """Initialize a partition run plan."""
         if source_uri is None:
@@ -78,6 +84,17 @@ class PartitionRunPlan:
         object.__setattr__(self, "output_uri", output_uri)
         object.__setattr__(self, "logical_hour", logical_hour)
         object.__setattr__(self, "discovered_input", discovered_input)
+        object.__setattr__(self, "discovery_seconds", max(float(discovery_seconds), 0.0))
+        object.__setattr__(
+            self,
+            "source_file_count",
+            None if source_file_count is None else max(int(source_file_count), 0),
+        )
+        object.__setattr__(
+            self,
+            "source_bytes",
+            None if source_bytes is None else max(int(source_bytes), 0),
+        )
 
     def with_discovered_input(self, discovered_input: Any | None) -> PartitionRunPlan:
         """Return the same partition plan with internal discovered source metadata."""
@@ -87,6 +104,29 @@ class PartitionRunPlan:
             self.output_uri,
             self.logical_hour,
             discovered_input=discovered_input,
+            discovery_seconds=self.discovery_seconds,
+            source_file_count=self.source_file_count,
+            source_bytes=self.source_bytes,
+        )
+
+    def with_discovery_timing(
+        self,
+        discovered_input: Any | None,
+        discovery_seconds: float,
+        *,
+        source_file_count: int | None = None,
+        source_bytes: int | None = None,
+    ) -> PartitionRunPlan:
+        """Return a plan carrying reusable discovery data and elapsed latency."""
+        return PartitionRunPlan(
+            self.logical_date,
+            self.source_uri,
+            self.output_uri,
+            self.logical_hour,
+            discovered_input=discovered_input,
+            discovery_seconds=discovery_seconds,
+            source_file_count=source_file_count,
+            source_bytes=source_bytes,
         )
 
     @property
@@ -101,7 +141,14 @@ class PartitionRunPlan:
 
 @dataclass(frozen=True)
 class PartitionRunResult:
-    """Result metadata for one completed logical partition."""
+    """Result metadata for one completed logical partition.
+
+    CPU and I/O values allocate the full critical-path wall duration. CPU is
+    process time from schema inference, sanitization, materialization, and the
+    streaming writer, capped to wall time. I/O is the complementary time,
+    including discovery, source preparation/download, writer waits, and output
+    finalization/upload.
+    """
 
     plan: PartitionRunPlan
     output_schema: Any | None

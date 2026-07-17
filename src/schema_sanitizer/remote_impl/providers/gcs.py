@@ -133,21 +133,28 @@ async def download_bytes(session: Any, file: RemoteFile) -> bytes:
 
 async def file_exists(uri: str) -> bool:
     """Return whether one GCS object exists."""
+    return await file_metadata(uri) is not None
+
+
+async def file_metadata(uri: str) -> RemoteFile | None:
+    """Return GCS object metadata using the existence request."""
     ref = parse_uri(uri)
     url = (
         f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o/"
         f"{quote(ref.object_name, safe='')}"
     )
-    params = {"fields": "name"}
+    params = {"fields": "name,size"}
     headers = request_headers(accept_json=True)
     async with await open_aiohttp_session(headers) as session:
         async with session.get(url, params=params) as response:
             if response.status == 200:
-                await response.read()
-                return True
+                payload = json.loads(await response.text())
+                raw_size = payload.get("size")
+                size = int(raw_size) if raw_size is not None else None
+                return RemoteFile(uri, Path(ref.object_name).name, size)
             if response.status == 404:
                 await response.read()
-                return False
+                return None
             body = await response.text()
             if response.status in {401, 403}:
                 raise PermissionError(

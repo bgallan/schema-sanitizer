@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from ..core_impl.uris import normalize_extensions, remote_provider
 from ..input_impl.directory_inputs import RemoteFile
 from .providers import azure, gcs, s3
-from .transport import http_file_exists
+from .transport import http_file_exists, http_file_metadata
 
 
 async def list_remote_directory(
@@ -43,5 +43,24 @@ async def remote_file_exists(uri: str, *, memory_limit_bytes: int | None = None)
         return await azure.file_exists(uri)
     if provider == "http":
         return await http_file_exists(uri, memory_limit_bytes=memory_limit_bytes)
+    scheme = urlparse(uri).scheme.lower()
+    raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
+
+
+async def remote_file_metadata(
+    uri: str,
+    *,
+    memory_limit_bytes: int | None = None,
+) -> RemoteFile | None:
+    """Return one supported remote object's existence and size metadata."""
+    provider = remote_provider(uri)
+    if provider == "gcs":
+        return await gcs.file_metadata(uri)
+    if provider == "s3":
+        return await s3.file_metadata(uri)
+    if provider == "azure":
+        return await azure.file_metadata(uri)
+    if provider == "http":
+        return await http_file_metadata(uri, memory_limit_bytes=memory_limit_bytes)
     scheme = urlparse(uri).scheme.lower()
     raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")

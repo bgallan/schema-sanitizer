@@ -55,6 +55,31 @@ def test_pipeline_source_discovery_filters_local_single_files(tmp_path) -> None:
 
     assert discovery.existing_plans == [plans[0]]
     assert discovery.skipped_plans == [plans[1]]
+    assert discovery.existing_plans[0].source_file_count == 1
+    assert discovery.existing_plans[0].source_bytes == existing.stat().st_size
+
+
+def test_pipeline_source_discovery_records_per_source_latency(monkeypatch, tmp_path) -> None:
+    """Selected plans must carry discovery latency into partition accounting."""
+    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+
+    existing = tmp_path / "existing.jsonl"
+    existing.write_text('{"ok": true}\n', encoding="utf-8")
+    plan = PartitionRunPlan(
+        date(2026, 1, 1),
+        str(existing),
+        str(tmp_path / "out.parquet"),
+    )
+    clock = iter((10.0, 12.5))
+    monkeypatch.setattr(source_discovery_mod, "perf_counter", lambda: next(clock))
+
+    discovery = discover_existing_source_plans(
+        [plan],
+        input_mode="single_file",
+        input_format="jsonl",
+    )
+
+    assert discovery.existing_plans[0].discovery_seconds == pytest.approx(2.5)
 
 
 def test_pipeline_source_discovery_filters_local_directories(tmp_path) -> None:
@@ -78,6 +103,8 @@ def test_pipeline_source_discovery_filters_local_directories(tmp_path) -> None:
 
     assert discovery.existing_plans == [plans[0]]
     assert discovery.skipped_plans == [plans[1]]
+    assert discovery.existing_plans[0].source_file_count == 1
+    assert discovery.existing_plans[0].source_bytes == (populated / "row.jsonl").stat().st_size
 
 
 def test_pipeline_runner_reuses_discovered_local_directory_files(

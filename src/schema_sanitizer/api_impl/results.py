@@ -72,6 +72,8 @@ class Result(DiagnosticsAccessMixin):
         schema_drifts: list[dict[str, Any]] | None = None,
         schema_drifts_json: str | None = None,
         native_registry_state: Any = None,
+        conversion_cpu_seconds: float | None = None,
+        file_io_seconds: float | None = None,
     ):
         """Wrap raw reader output and optional materialized clean data."""
         self._raw = raw
@@ -84,6 +86,8 @@ class Result(DiagnosticsAccessMixin):
         self._schema_drifts_cache: Any = schema_drifts if schema_drifts is not None else self._UNSET
         self.schema_drifts_json = schema_drifts_json
         self.native_registry_state = native_registry_state
+        self.conversion_cpu_seconds = conversion_cpu_seconds
+        self.file_io_seconds = file_io_seconds
 
     @property
     def schema_registry(self) -> dict[str, Any] | None:

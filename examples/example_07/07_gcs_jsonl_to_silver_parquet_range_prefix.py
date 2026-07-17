@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-from time import perf_counter
 from typing import Any
 
 from schema_sanitizer.integrations.bigquery import (
@@ -36,9 +35,10 @@ try:
         LOGGER,
         _configure_logging,
         _log_one_parquet_processed,
+        _log_run_filesystem_prefixes,
         _log_run_plan_summary,
+        _log_schema_drift_summary,
         _print_run_outputs_summary,
-        _print_schema_drift_summary,
         _print_stats_summary,
         _timed_step,
     )
@@ -47,6 +47,7 @@ try:
         _filter_available_date_plans,
         _infer_warm_up_schema_registry_state,
         _schema_warm_up_plan_for_run,
+        _schema_warm_up_requested,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from cli import build_parser
@@ -54,9 +55,10 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         LOGGER,
         _configure_logging,
         _log_one_parquet_processed,
+        _log_run_filesystem_prefixes,
         _log_run_plan_summary,
+        _log_schema_drift_summary,
         _print_run_outputs_summary,
-        _print_schema_drift_summary,
         _print_stats_summary,
         _timed_step,
     )
@@ -65,6 +67,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         _filter_available_date_plans,
         _infer_warm_up_schema_registry_state,
         _schema_warm_up_plan_for_run,
+        _schema_warm_up_requested,
     )
 
 
@@ -72,6 +75,7 @@ def main() -> int:
     """Run the partitioned GCS input to silver Parquet pipeline."""
     args = build_parser().parse_args()
     _configure_logging(args.log_level)
+    _log_run_filesystem_prefixes(args)
 
     log_sample_size = 3
     skipped_log_sample_size = 5
@@ -111,10 +115,10 @@ def main() -> int:
         sample_size=log_sample_size,
     )
 
-    with _timed_step("building schema warm-up run plan"):
-        warm_up_plan = build_warm_up_hive_range_plan_from_namespace(args)
-
-    if warm_up_plan:
+    warm_up_plan = []
+    if _schema_warm_up_requested(args):
+        with _timed_step("building schema warm-up run plan"):
+            warm_up_plan = build_warm_up_hive_range_plan_from_namespace(args)
         _log_run_plan_summary(
             "Planned schema warm-up",
             warm_up_plan,
@@ -156,6 +160,7 @@ def main() -> int:
         schema_registry_json=current_schema_registry_json,
     )
     schema_warm_up_plan = _schema_warm_up_plan_for_run(warm_up_plan)
+    warm_up_drift_runs: list[DateRunResult] | None = [] if schema_warm_up_plan else None
     if schema_warm_up_plan:
         with _timed_step(
             f"schema warm-up over {len(schema_warm_up_plan)} selected source partition(s)"
@@ -164,6 +169,7 @@ def main() -> int:
                 args,
                 schema_warm_up_plan,
                 current_schema_registry_state,
+                warm_up_drift_runs=warm_up_drift_runs,
             )
             current_schema_registry_json = current_schema_registry_state.schema_registry_json
         if registry_has_canonical_schema(json.loads(current_schema_registry_json or "{}")):
@@ -172,7 +178,6 @@ def main() -> int:
             LOGGER.warning("Schema warm-up finished without an embedded canonical schema")
 
     total_runs = len(run_plan)
-    parquet_start_time = perf_counter()
 
     def after_partition(
         index: int,
@@ -198,8 +203,6 @@ def main() -> int:
             plan=run_result.plan,
             run_result=run_result,
             run_seconds=run_seconds,
-            pipeline_start_time=parquet_start_time,
-            registry_updated=registry_updated,
         )
 
     with _timed_step(f"writing {total_runs} selected Parquet file(s)"):
@@ -220,6 +223,7 @@ def main() -> int:
             args,
             table_ref,
             final_schema,
+            reference_file_schema_uri=completed_runs[-1].plan.output_uri,
         )
 
     if args.bigquery_registry_sidecar_table:
@@ -247,9 +251,10 @@ def main() -> int:
         sample_size=log_sample_size,
         print_all_details=print_run_details,
     )
-    _print_schema_drift_summary(
+    _log_schema_drift_summary(
         completed_runs,
-        schema_mode=args.schema_mode,
+        schema_mode="additive",
+        warm_up_runs=warm_up_drift_runs,
     )
 
     return 0

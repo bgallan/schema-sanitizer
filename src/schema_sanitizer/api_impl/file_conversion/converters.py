@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping, Sequence
+from time import perf_counter, process_time
 from typing import Any
 
 from ...adapters.parquet.compression import (
@@ -109,6 +110,8 @@ def convert_file_with_options(
     if schema_registry_native_state is None:
         schema_registry_native_state = current_native_registry_state()
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
+    file_io_seconds = 0.0
+    input_started_at = perf_counter()
     prepared_input = prepare_public_input(
         input_path,
         input_format=input_format,
@@ -119,6 +122,8 @@ def convert_file_with_options(
         csv_has_header=bool(options.get("csv_has_header", True)),
         memory_limit_bytes=options.get("memory_limit_bytes"),
     )
+    file_io_seconds += max(perf_counter() - input_started_at, 0.0)
+    result: Result | None = None
     all_row_columns = (
         {SOURCE_FILE_COLUMN: prepared_input.source_file}
         if prepared_input.source_file is not None
@@ -134,15 +139,18 @@ def convert_file_with_options(
             options = dict(options)
             options["xml_row_tag"] = prepared_input.xml_row_tag
             options["input_text_encoding"] = "utf-8"
-        options = call_options_from_locals(
-            dict(options),
-            FILE_CONVERSION_HELPER_KEYS,
-        )
-        call_options = normalize_call_options_or_none(**options_for_schema_probe(options))
+        output_started_at = perf_counter()
         output_target = prepare_output_target(
             output_path, memory_limit_bytes=options.get("memory_limit_bytes")
         )
+        file_io_seconds += max(perf_counter() - output_started_at, 0.0)
         try:
+            conversion_cpu_started_at = process_time()
+            options = call_options_from_locals(
+                dict(options),
+                FILE_CONVERSION_HELPER_KEYS,
+            )
+            call_options = normalize_call_options_or_none(**options_for_schema_probe(options))
             field_name_policy = str(options.get("field_name_policy", "lower_alpha"))
             result = try_convert_source_plan_with_options(
                 prepared_input,
@@ -173,13 +181,23 @@ def convert_file_with_options(
                     field_name_policy=field_name_policy,
                     **resolved_writer_options,
                 )
+            result.conversion_cpu_seconds = max(
+                process_time() - conversion_cpu_started_at,
+                0.0,
+            )
+            upload_started_at = perf_counter()
             finalize_output_target(output_target)
+            file_io_seconds += max(perf_counter() - upload_started_at, 0.0)
             return result
         except Exception:
             cleanup_output_target(output_target)
             raise
     finally:
+        cleanup_started_at = perf_counter()
         prepared_input.close()
+        file_io_seconds += max(perf_counter() - cleanup_started_at, 0.0)
+        if result is not None:
+            result.file_io_seconds = file_io_seconds
 
 
 def _convert_public_file(

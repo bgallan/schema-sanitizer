@@ -30,7 +30,7 @@ def test_bigquery_integration_builds_external_table_ddl() -> None:
     assert skipped == ["date"]
     assert "CREATE OR REPLACE EXTERNAL TABLE" in ddl
     assert "`id` INT64" in ddl
-    assert "source_column_match = 'NAME'" in ddl
+    assert "source_column_match" not in ddl
     assert parse_hive_partition_column("hour:INT64") == ("hour", "INT64")
 
 
@@ -74,6 +74,116 @@ def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> 
     assert (
         "`variables` STRUCT<`birthday` STRING, `company` STRING, `email` STRING, `phone` STRING>"
     ) in ddl
+
+
+def test_bigquery_external_table_uses_canonical_parquet_reference_schema() -> None:
+    """Reference-file mode must avoid explicit positional schema matching."""
+    pa = __import__("pyarrow")
+    from schema_sanitizer.integrations.bigquery import (
+        BigQueryTableRef,
+        ExternalTableSpec,
+        external_table_ddl,
+    )
+
+    ddl, skipped = external_table_ddl(
+        BigQueryTableRef("project", "dataset", "events"),
+        pa.schema(
+            [
+                pa.field(
+                    "variables",
+                    pa.struct(
+                        [
+                            pa.field("birthday", pa.string()),
+                            pa.field("email", pa.string()),
+                        ]
+                    ),
+                )
+            ]
+        ),
+        ExternalTableSpec(
+            source_uris=["gs://silver/events/*"],
+            hive_uri_prefix="gs://silver/events",
+            partition_columns=(("date", "DATE"),),
+            reference_file_schema_uri="gs://silver/events/date=2026-07-17/final.parquet",
+        ),
+    )
+
+    assert skipped == []
+    assert "reference_file_schema_uri = " in ddl
+    assert "gs://silver/events/date=2026-07-17/final.parquet" in ddl
+    assert "source_column_match" not in ddl
+    assert "`variables` STRUCT" not in ddl
+    assert "WITH PARTITION COLUMNS" in ddl
+
+
+def test_bigquery_reference_schema_rejects_hive_column_collisions() -> None:
+    """A reference file cannot hide fields that duplicate Hive partition keys."""
+    pa = __import__("pyarrow")
+    from schema_sanitizer.integrations.bigquery import (
+        BigQueryTableRef,
+        ExternalTableSpec,
+        external_table_ddl,
+    )
+
+    with pytest.raises(RuntimeError, match="collide with Hive partition columns"):
+        external_table_ddl(
+            BigQueryTableRef("project", "dataset", "events"),
+            pa.schema([pa.field("id", pa.int64()), pa.field("date", pa.date32())]),
+            ExternalTableSpec(
+                source_uris=["gs://silver/events/*"],
+                hive_uri_prefix="gs://silver/events",
+                partition_columns=(("date", "DATE"),),
+                reference_file_schema_uri="gs://silver/events/date=2026-07-17/final.parquet",
+            ),
+        )
+
+
+def test_bigquery_namespace_uses_requested_parquet_reference_file(monkeypatch) -> None:
+    """The Example 07 namespace path must forward its final Parquet reference."""
+    from schema_sanitizer.integrations.bigquery import namespace_ops
+    from schema_sanitizer.integrations.bigquery.external_table import (
+        ExternalTableSpec,
+    )
+    from schema_sanitizer.integrations.bigquery.table_ref import BigQueryTableRef
+
+    reference_uri = "gs://silver/events/date=2026-07-17/final.parquet"
+    base_spec = ExternalTableSpec(
+        source_uris=["gs://silver/events/*"],
+        hive_uri_prefix="gs://silver/events",
+        partition_columns=(("date", "DATE"),),
+    )
+    seen_specs = []
+
+    monkeypatch.setattr(namespace_ops, "import_bigquery_adbc", lambda: (object(), object()))
+    monkeypatch.setattr(namespace_ops, "bigquery_db_kwargs_from_namespace", lambda *_: {})
+    monkeypatch.setattr(namespace_ops, "external_table_spec_from_namespace", lambda *_: base_spec)
+
+    def fake_ddl(_table_ref, _schema, spec, **_kwargs):
+        """Capture the validation DDL spec."""
+        seen_specs.append(spec)
+        return "DDL", []
+
+    def fake_create(**kwargs):
+        """Capture the execution DDL spec."""
+        seen_specs.append(kwargs["spec"])
+        return []
+
+    monkeypatch.setattr(namespace_ops, "external_table_ddl", fake_ddl)
+    monkeypatch.setattr(
+        namespace_ops,
+        "create_or_replace_external_table_from_schema",
+        fake_create,
+    )
+
+    namespace_ops.create_or_replace_external_bigquery_table_from_namespace(
+        SimpleNamespace(column_order="alphabetically"),
+        BigQueryTableRef("project", "dataset", "events"),
+        object(),
+        reference_file_schema_uri=reference_uri,
+    )
+
+    assert len(seen_specs) == 2
+    assert all(spec.reference_file_schema_uri == reference_uri for spec in seen_specs)
 
 
 @pytest.mark.parametrize("sort_fields_alphabetically", [False, True])

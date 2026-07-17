@@ -7,10 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from ..core_impl.memory_budget import memory_budget
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
+from ..input_impl.directory_inputs import RemoteFile
 
 TRANSFER_CHUNK_BYTES = 1024 * 1024
 
@@ -91,12 +93,23 @@ async def download_http_file(
 
 async def http_file_exists(uri: str, *, memory_limit_bytes: int | None = None) -> bool:
     """Return whether one HTTP(S) object appears to exist."""
+    return await http_file_metadata(uri, memory_limit_bytes=memory_limit_bytes) is not None
+
+
+async def http_file_metadata(
+    uri: str,
+    *,
+    memory_limit_bytes: int | None = None,
+) -> RemoteFile | None:
+    """Return HTTP object metadata from the existence HEAD request."""
     async with await open_aiohttp_session(memory_limit_bytes=memory_limit_bytes) as session:
         async with session.head(uri) as response:
             if response.status in {200, 204}:
-                return True
+                raw_size = response.headers.get("Content-Length")
+                size = int(raw_size) if raw_size is not None else None
+                return RemoteFile(uri, Path(urlparse(uri).path).name, size)
             if response.status == 404:
-                return False
+                return None
             if response.status in {401, 403}:
                 raise PermissionError(
                     f"HTTP returned a permission error while checking source object: {uri!r}"

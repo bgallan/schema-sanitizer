@@ -42,12 +42,22 @@ def test_pipeline_runner_carries_registry_forward(monkeypatch, tmp_path) -> None
     assert [run.plan for run in result.completed_runs] == plans
 
 
-def test_pipeline_runner_records_partition_cpu_and_io_wait_times(monkeypatch, tmp_path) -> None:
-    """Partition telemetry must split wall time into CPU and estimated I/O wait."""
+@pytest.mark.parametrize(
+    ("cpu_end", "expected_cpu", "expected_io"),
+    ((4.25, 1.25, 2.75), (9.0, 4.0, 0.0)),
+)
+def test_pipeline_runner_records_partition_cpu_and_io_wait_times(
+    monkeypatch,
+    tmp_path,
+    cpu_end: float,
+    expected_cpu: float,
+    expected_io: float,
+) -> None:
+    """Partition telemetry must produce an additive wall-time split."""
     from schema_sanitizer.pipeline import partition_execution
 
     wall_clock = iter((10.0, 14.0))
-    cpu_clock = iter((3.0, 4.25))
+    cpu_clock = iter((3.0, cpu_end))
 
     monkeypatch.setattr(partition_execution, "perf_counter", lambda: next(wall_clock))
     monkeypatch.setattr(partition_execution, "process_time", lambda: next(cpu_clock))
@@ -66,13 +76,63 @@ def test_pipeline_runner_records_partition_cpu_and_io_wait_times(monkeypatch, tm
     result = run_partitioned_to_parquet_registry_json(
         [PartitionRunPlan(date(2026, 1, 1), "raw/a.jsonl", str(tmp_path / "a.parquet"))],
         initial_schema_registry_json='{"schema_generation":1}',
+        initial_schema_registry_state=SchemaRegistryState(
+            schema_registry_json='{"schema_generation":1}',
+            native_registry_state=object(),
+        ),
         to_parquet_kwargs={"input_format": "jsonl"},
     )
 
     run = result.completed_runs[0]
     assert run.wall_seconds == pytest.approx(4.0)
-    assert run.cpu_seconds == pytest.approx(1.25)
-    assert run.io_wait_seconds == pytest.approx(2.75)
+    assert run.cpu_seconds == pytest.approx(expected_cpu)
+    assert run.io_wait_seconds == pytest.approx(expected_io)
+    assert run.cpu_seconds + run.io_wait_seconds == pytest.approx(run.wall_seconds)
+
+
+def test_pipeline_runner_attributes_discovery_and_transfer_time_to_io(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Only conversion and registry CPU may enter the CPU partition share."""
+    from schema_sanitizer.pipeline import partition_execution
+
+    wall_clock = iter((10.0, 14.0))
+    cpu_clock = iter((100.0, 101.0, 102.0, 110.0))
+    monkeypatch.setattr(partition_execution, "perf_counter", lambda: next(wall_clock))
+    monkeypatch.setattr(partition_execution, "process_time", lambda: next(cpu_clock))
+    monkeypatch.setattr(partition_execution, "_compile_native_registry_state", lambda *_: None)
+    monkeypatch.setattr(
+        partition_execution,
+        "to_parquet",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stats={},
+            schema_registry_json='{"schema_generation":2}',
+            schema_drifts_json="[]",
+            native_registry_state=None,
+            conversion_cpu_seconds=20.0,
+            file_io_seconds=1.0,
+        ),
+    )
+
+    result = run_partitioned_to_parquet_registry_json(
+        [
+            PartitionRunPlan(
+                date(2026, 1, 1),
+                "raw/a.jsonl",
+                str(tmp_path / "a.parquet"),
+                discovery_seconds=2.0,
+            )
+        ],
+        initial_schema_registry_json='{"schema_generation":1}',
+        to_parquet_kwargs={"input_format": "jsonl"},
+    )
+
+    run = result.completed_runs[0]
+    assert run.wall_seconds == pytest.approx(6.0)
+    assert run.cpu_seconds == pytest.approx(3.0)
+    assert run.io_wait_seconds == pytest.approx(3.0)
+    assert run.cpu_seconds + run.io_wait_seconds == pytest.approx(run.wall_seconds)
 
 
 def test_pipeline_json_registry_runner_carries_registry_json_forward(monkeypatch, tmp_path) -> None:
@@ -225,6 +285,49 @@ def test_pipeline_runner_compiles_initial_registry_json_state(monkeypatch, tmp_p
     )
 
     assert compile_calls == [('{"schema_generation":1}', "lower_snake")]
+    assert seen_states == [compiled_state]
+
+
+def test_pipeline_runner_compiles_strict_sidecar_registry_with_probe_options(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A later strict run must compile durable registry JSON before its first write."""
+    from schema_sanitizer.pipeline import partition_execution
+
+    compiled_state = object()
+    seen_states = []
+
+    def fake_compile(_registry_json, **kwargs):
+        """Require additive inference options while compiling strict registry state."""
+        assert kwargs["options"].schema_evolution.name == "ADDITIVE"
+        return compiled_state
+
+    def fake_to_parquet(_input_path, _output_path, **_kwargs):
+        """Record that the compiled sidecar state reached the strict write."""
+        from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
+
+        seen_states.append(current_native_registry_state())
+        return SimpleNamespace(
+            stats={},
+            schema_registry_json='{"schema_generation":2}',
+            schema_drifts_json="[]",
+            native_registry_state=compiled_state,
+        )
+
+    monkeypatch.setattr(partition_execution, "native_registry_state_from_json", fake_compile)
+    monkeypatch.setattr(partition_execution, "to_parquet", fake_to_parquet)
+
+    run_partitioned_to_parquet_registry_json(
+        [PartitionRunPlan(date(2026, 1, 2), "raw/a.jsonl", str(tmp_path / "a.parquet"))],
+        initial_schema_registry_json='{"schema_generation":1}',
+        to_parquet_kwargs={
+            "input_format": "jsonl",
+            "schema_mode": "strict",
+            "field_name_policy": "lower_snake",
+        },
+    )
+
     assert seen_states == [compiled_state]
 
 

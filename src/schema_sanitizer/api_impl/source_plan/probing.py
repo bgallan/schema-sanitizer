@@ -177,6 +177,7 @@ def _probe_path_plan_via_auto_registry_stream(
     registry_json: str,
     field_name_policy: str,
     schema_mode: str,
+    native_registry_state: Any = None,
 ) -> Any:
     """Probe a path plan through the same native stream used by normal runs."""
     raw = _open_path_sources_auto_registry_stream(
@@ -189,6 +190,7 @@ def _probe_path_plan_via_auto_registry_stream(
         first_row_columns={},
         timestamp_columns=(),
         skip_invalid_json_sources=True,
+        native_registry_state=native_registry_state,
     )
     try:
         return SimpleNamespace(
@@ -210,6 +212,7 @@ def probe_prepared_source_plan_registry(
     registry_json: str,
     field_name_policy: str,
     schema_mode: str,
+    native_registry_state: Any = None,
 ) -> SourcePlanRegistryProbeResult:
     """Infer and merge registry state from a prepared source-plan input."""
     if prepared.source != "source_plan":
@@ -225,6 +228,7 @@ def probe_prepared_source_plan_registry(
             registry_json=registry_json,
             field_name_policy=field_name_policy,
             schema_mode=schema_mode,
+            native_registry_state=native_registry_state,
         )
     else:
         raw = probe_source_plan_registry(
@@ -234,5 +238,6 @@ def probe_prepared_source_plan_registry(
             registry_json=registry_json,
             field_name_policy=field_name_policy,
             schema_mode=schema_mode,
+            native_registry_state=native_registry_state,
         )
     return SourcePlanRegistryProbeResult(raw=raw, route_name=plan.route_name)

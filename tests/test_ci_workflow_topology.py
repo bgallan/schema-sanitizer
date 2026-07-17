@@ -44,8 +44,8 @@ def test_pr_main_manual_and_publish_share_general_sanity() -> None:
     assert publish.count("python meta/ci/validate_release_version.py") == 2
 
 
-def test_general_sanity_owns_all_validation_and_scheduled_jobs() -> None:
-    """General sanity owns validation and isolates each scheduled workload."""
+def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
+    """General sanity owns validation without exposing scheduled workloads."""
     ci = _workflow("ci.yml")
     validation_jobs = (
         "cloud-emulators:",
@@ -60,7 +60,9 @@ def test_general_sanity_owns_all_validation_and_scheduled_jobs() -> None:
         assert f"  {job}" in ci
     assert "uses: ./.github/workflows/" not in ci
 
-    schedules = ("23 3 * * 0", "30 3 * * 1", "47 4 * * 3")
-    for schedule in schedules:
-        assert ci.count(schedule) == 2
-    assert ci.count("github.event_name != 'schedule'") >= 7
+    assert "  schedule:" not in ci
+    assert "github.event.schedule" not in ci
+    assert "github.event_name != 'schedule'" not in ci
+    assert "scheduled-benchmarks:" not in ci
+    assert "scheduled-native-fuzz:" not in ci
+    assert "scheduled-real-gcp:" not in ci

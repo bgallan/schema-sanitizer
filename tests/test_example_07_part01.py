@@ -21,8 +21,8 @@ def _load_example_07_runtime_support() -> Any:
 # Split from test_example_07.py: test_example_07_embedded_registry_preserves_additive_bootstrap_mode, test_example_07_parser_lives_in_cli_module, test_example_07_warm_up_prefix_plan_uses_warm_up_range, ...
 
 
-def test_example_07_embedded_registry_preserves_additive_bootstrap_mode(monkeypatch) -> None:
-    """Verify first registry-backed range runs can bootstrap with additive mode."""
+def test_example_07_always_forces_additive_normal_runs(monkeypatch) -> None:
+    """Normal conversion must remain additive even for a conflicting namespace."""
     pa = pytest.importorskip("pyarrow")
     example = _load_example_07_runtime_support()
     captured: dict[str, Any] = {}
@@ -45,7 +45,7 @@ def test_example_07_embedded_registry_preserves_additive_bootstrap_mode(monkeypa
     args = SimpleNamespace(
         input_format="json_array",
         input_mode="single_file",
-        schema_mode="additive",
+        schema_mode="strict",
         column_order="alphabetically",
         field_name_policy="lower_snake",
         timestamp_precision="TIMESTAMP_MICROS",
@@ -94,7 +94,8 @@ def test_example_07_parser_lives_in_cli_module() -> None:
     from examples.example_07.cli import build_parser
     from schema_sanitizer.integrations.bigquery import hive_partition_columns, registry_order_sql
 
-    args = build_parser().parse_args(
+    parser = build_parser()
+    args = parser.parse_args(
         [
             "--source-jsonl-prefix",
             "gs://raw/events/rt",
@@ -111,13 +112,16 @@ def test_example_07_parser_lives_in_cli_module() -> None:
         ]
     )
 
-    assert args.schema_mode == "strict"
+    assert args.schema_mode == "additive"
+    schema_mode_action = next(action for action in parser._actions if action.dest == "schema_mode")
+    assert schema_mode_action.choices == ("additive",)
     assert args.field_name_policy == "lower_snake"
     assert args.input_format == "json_array"
     assert args.input_mode == "single_file"
     assert args.partition_granularity == "daily"
     assert args.start_date_warm_up is None
     assert args.end_date_warm_up is None
+    assert not _load_example_07_runtime_support()._schema_warm_up_requested(args)
     assert args.start_hour is None
     assert args.end_hour is None
     assert args.start_hour_warm_up is None
@@ -171,6 +175,7 @@ def test_example_07_warm_up_prefix_plan_uses_warm_up_range() -> None:
 
     plans = build_warm_up_hive_range_plan_from_namespace(args)
 
+    assert _load_example_07_runtime_support()._schema_warm_up_requested(args)
     assert [plan.label for plan in plans] == ["2026-06-20", "2026-06-21"]
     assert plans[0].source_uri == (
         "gs://raw/events/rt/year=2026/month=06/date=2026-06-20/events_20260620.jsonl"
@@ -358,7 +363,7 @@ def test_example_07_warm_up_infers_one_additive_registry(tmp_path: Path) -> None
     args = SimpleNamespace(
         input_format="jsonl",
         input_mode="single_file",
-        schema_mode="strict",
+        schema_mode="additive",
         column_order="alphabetically",
         field_name_policy="lower_snake",
         timestamp_precision="TIMESTAMP_MICROS",

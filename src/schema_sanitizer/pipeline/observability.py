@@ -5,6 +5,47 @@ from __future__ import annotations
 from typing import Any
 
 
+def estimate_cpu_io_wall_time(
+    wall_seconds: float,
+    aggregate_cpu_seconds: float,
+) -> tuple[float, float]:
+    """Split wall time into bounded CPU and non-CPU estimates.
+
+    Process CPU time is accumulated across threads and can exceed elapsed wall
+    time. Cap it to the operation's wall interval before calculating the
+    remainder so the two reported estimates are non-negative and additive.
+    Concurrent I/O can overlap CPU work, so a zero remainder does not prove
+    that no I/O occurred.
+    """
+    wall_seconds = max(float(wall_seconds), 0.0)
+    aggregate_cpu_seconds = max(float(aggregate_cpu_seconds), 0.0)
+    cpu_seconds = min(aggregate_cpu_seconds, wall_seconds)
+    return cpu_seconds, wall_seconds - cpu_seconds
+
+
+def cpu_io_wall_percentages(
+    wall_seconds: float,
+    aggregate_cpu_seconds: float,
+) -> tuple[float, float]:
+    """Return complementary CPU and estimated I/O percentages.
+
+    CPU is rounded first and I/O is its complement so the displayed one-decimal
+    percentages always add up to exactly 100.0%. A zero-duration interval is
+    reported as 0% CPU and 100% I/O because no CPU time was observed.
+    """
+    wall_seconds = max(float(wall_seconds), 0.0)
+    cpu_seconds, _ = estimate_cpu_io_wall_time(
+        wall_seconds,
+        aggregate_cpu_seconds,
+    )
+    if wall_seconds == 0.0:
+        return 0.0, 100.0
+
+    cpu_percent = round(cpu_seconds / wall_seconds * 100.0, 1)
+    io_percent = round(100.0 - cpu_percent, 1)
+    return cpu_percent, io_percent
+
+
 def format_duration(seconds: float) -> str:
     """Format elapsed seconds compactly."""
     seconds = max(seconds, 0.0)

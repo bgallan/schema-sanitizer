@@ -208,6 +208,13 @@ def test_pipeline_observability_helpers_are_reusable() -> None:
     """Verify compact logging helpers are exported from the pipeline package."""
     assert format_duration(65.2) == "1m 5s"
     assert compact_stats_for_log({"input_rows": 3, "bytes_written": 42}) == "in=3 bytes_written=42"
+    assert estimate_cpu_io_wall_time(4.0, 1.25) == pytest.approx((1.25, 2.75))
+    assert estimate_cpu_io_wall_time(4.0, 6.0) == pytest.approx((4.0, 0.0))
+    cpu_percent, io_percent = cpu_io_wall_percentages(3.0, 1.0)
+    assert (cpu_percent, io_percent) == (33.3, 66.7)
+    assert cpu_percent + io_percent == 100.0
+    assert cpu_io_wall_percentages(4.0, 6.0) == (100.0, 0.0)
+    assert cpu_io_wall_percentages(0.0, 0.0) == (0.0, 100.0)
 
 
 def test_pipeline_read_parquet_schema_handles_local_paths(tmp_path) -> None:

@@ -34,7 +34,7 @@ The major boundary is intentional:
 | `README.md` | User introduction, API/options, pipeline, and BigQuery guide. |
 | `heuristics.md` | Normative explanation of sanitization and registry behavior. |
 | `responsibilities.md` | Architecture and ownership map. |
-| `todo.md` | Prioritized production-readiness and release-maturity roadmap. |
+| `THREADING_TODO.md` | Deterministic single-thread/multi-thread architecture and implementation roadmap. |
 | `pyproject.toml` | Python metadata, extras, lint/type/test settings, scikit-build packaging. |
 | `CMakeLists.txt` | Native targets, compiler policy, ABI3 extension installation, zlib integration. |
 | `cmake/SchemaSanitizerSources.cmake` | Authoritative C++ translation-unit manifest. |

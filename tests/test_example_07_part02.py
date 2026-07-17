@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ def _load_example_07_runtime_support() -> Any:
 
 
 def test_example_07_warm_up_logs_progress(caplog, tmp_path: Path) -> None:
-    """Verify example warm-up emits concise source preparation and scan progress."""
+    """Warm-up progress must match normal-run timing fields and cadence."""
     example = _load_example_07_runtime_support()
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"
@@ -33,7 +34,7 @@ def test_example_07_warm_up_logs_progress(caplog, tmp_path: Path) -> None:
     args = SimpleNamespace(
         input_format="jsonl",
         input_mode="single_file",
-        schema_mode="strict",
+        schema_mode="additive",
         column_order="alphabetically",
         field_name_policy="lower_snake",
         timestamp_precision="TIMESTAMP_MICROS",
@@ -54,24 +55,61 @@ def test_example_07_warm_up_logs_progress(caplog, tmp_path: Path) -> None:
         example.DateRunPlan(date(2026, 1, 1), str(first), str(tmp_path / "first.parquet")),
         example.DateRunPlan(date(2026, 1, 2), str(second), str(tmp_path / "second.parquet")),
     ]
+    warm_up_drift_runs: list[example.DateRunResult] = []
 
     with caplog.at_level(logging.INFO, logger="gcs_input_to_silver_parquet"):
         registry = example._infer_warm_up_schema_registry(
             args,
             plans,
             example._new_schema_registry(),
+            warm_up_drift_runs=warm_up_drift_runs,
         )
 
     assert example.registry_has_canonical_schema(registry)
-    assert "Warm-up scan starting partitions=2 mode=additive" in caplog.text
-    assert "Warm-up prepare 1/2" in caplog.text
-    assert "Warm-up prepare 2/2" in caplog.text
-    assert "Warm-up scan finished partitions=2" in caplog.text
-    assert "canonical_schema=True" in caplog.text
+    assert "run=warmup progress=1/2 label=2026-01-01" in caplog.text
+    assert "run=warmup progress=2/2 label=2026-01-02" in caplog.text
+    progress_records = [
+        record.message for record in caplog.records if record.message.startswith("run=warmup ")
+    ]
+    assert len(progress_records) == 2
+    for message in progress_records:
+        assert " duration=" in message
+        percentages = re.search(r" cpu=(\d+\.\d)% io=(\d+\.\d)%", message)
+        assert percentages is not None
+        assert float(percentages.group(1)) + float(percentages.group(2)) == 100.0
+        assert " io_wait_est=" not in message
+        assert " cpu_share=" not in message
+        assert " io_wait_share=" not in message
+        assert " avg=" not in message
+        assert " eta=" not in message
+        assert " source=" not in message
+        assert " output=" not in message
+        assert " registry_updated=" not in message
+        assert " drifts=" not in message
+        assert " source_files=1" in message
+        assert " source_size_mb=0.000" in message
+
+    caplog.clear()
+    from examples.example_07 import runtime_reporting
+
+    with caplog.at_level(logging.INFO, logger="gcs_input_to_silver_parquet"):
+        runtime_reporting._log_schema_drift_summary(
+            [],
+            schema_mode="additive",
+            warm_up_runs=warm_up_drift_runs,
+        )
+
+    assert "Schema drift summary mode=additive total=2 warmup=2 parquet=0" in caplog.text
+    assert (
+        "Schema drift run=warmup partition=2026-01-01 change=new_column_added source_path=alpha"
+    ) in caplog.text
+    assert (
+        "Schema drift run=warmup partition=2026-01-02 change=new_column_added source_path=beta"
+    ) in caplog.text
 
 
-def test_example_07_logs_partition_cpu_and_io_wait_summary(caplog) -> None:
-    """Each materialized partition log must compare CPU with estimated I/O wait."""
+def test_example_07_logs_partition_cpu_and_io_percentages(caplog, monkeypatch) -> None:
+    """Each materialized partition log must show complementary CPU/I/O shares."""
     from examples.example_07 import runtime_reporting
 
     plan = runtime_reporting.DateRunPlan(date(2026, 7, 16), "source", "output.parquet")
@@ -92,17 +130,69 @@ def test_example_07_logs_partition_cpu_and_io_wait_summary(caplog) -> None:
             plan=plan,
             run_result=run,
             run_seconds=5.0,
-            pipeline_start_time=0.0,
-            registry_updated=True,
         )
 
-    assert "duration=5.0s cpu=2.0s io_wait_est=3.0s" in caplog.text
-    assert "cpu_share=40.0% io_wait_share=60.0%" in caplog.text
-    assert "drifts=0" in caplog.text
+    assert (
+        "run=parquet progress=1/1 label=2026-07-16 duration=5.0s cpu=40.0% io=60.0% "
+        "source_files=unknown source_size_mb=unknown"
+    ) in caplog.text
+    assert "io_wait_est=" not in caplog.text
+    assert "cpu_share=" not in caplog.text
+    assert "io_wait_share=" not in caplog.text
+    assert "avg=" not in caplog.text
+    assert "eta=" not in caplog.text
+    assert "registry_updated=" not in caplog.text
+    assert "drifts=" not in caplog.text
+    assert "output=" not in caplog.text
+
+    caplog.clear()
+    parallel_run = runtime_reporting.DateRunResult(
+        plan=plan,
+        output_schema=None,
+        stats={},
+        schema_drifts_json="[]",
+        wall_seconds=5.0,
+        cpu_seconds=8.0,
+        io_wait_seconds=0.0,
+    )
+    with caplog.at_level(logging.INFO, logger="gcs_input_to_silver_parquet"):
+        runtime_reporting._log_one_parquet_processed(
+            index=1,
+            total=1,
+            plan=plan,
+            run_result=parallel_run,
+            run_seconds=5.0,
+        )
+
+    assert "duration=5.0s cpu=100.0% io=0.0%" in caplog.text
+    assert "cpu=8.0s" not in caplog.text
+
+    class ExistingWindowsPath:
+        """Stand in for an existing Windows source while running on any host."""
+
+        def __init__(self, value: str):
+            """Validate the canonical Windows path reaches pathlib unchanged."""
+            assert value == r"C:\source\events.jsonl"
+
+        def is_file(self) -> bool:
+            """Report that the synthetic source exists."""
+            return True
+
+        def stat(self) -> SimpleNamespace:
+            """Return deterministic source size metadata."""
+            return SimpleNamespace(st_size=2_500_000)
+
+    monkeypatch.setattr(runtime_reporting, "Path", ExistingWindowsPath)
+    windows_plan = runtime_reporting.DateRunPlan(
+        date(2026, 7, 17),
+        r"C:\source\events.jsonl",
+        r"C:\target\events.parquet",
+    )
+    assert runtime_reporting._source_metrics(windows_plan) == (1, 2_500_000)
 
 
-def test_example_07_prints_all_additive_drifts_with_triggering_partition(capsys) -> None:
-    """The final additive summary must attribute every drift to its partition."""
+def test_example_07_logs_all_drifts_with_triggering_partition(caplog) -> None:
+    """The final summary must attribute every drift to its partition."""
     from examples.example_07 import runtime_reporting
 
     first_plan = runtime_reporting.DateRunPlan(date(2026, 7, 15), "source-a", "a.parquet")
@@ -149,17 +239,35 @@ def test_example_07_prints_all_additive_drifts_with_triggering_partition(capsys)
         ),
     ]
 
-    runtime_reporting._print_schema_drift_summary(runs, schema_mode="additive")
+    with caplog.at_level(logging.INFO, logger="gcs_input_to_silver_parquet"):
+        runtime_reporting._log_schema_drift_summary(runs, schema_mode="additive")
 
-    output = capsys.readouterr().out
-    assert "Total schema drift(s): 3" in output
-    assert "partition=2026-07-15 change=new_column_added" in output
-    assert "partition=2026-07-15 change=column_type_promoted" in output
-    assert "partition=2026-07-16 change=new_column_version" in output
-    assert "output_column=value_v2_string" in output
+    assert "Schema drift summary mode=additive total=3" in caplog.text
+    assert "warmup=" not in caplog.text
+    assert "run=parquet partition=2026-07-15 change=new_column_added" in caplog.text
+    assert "run=parquet partition=2026-07-15 change=column_type_promoted" in caplog.text
+    assert "run=parquet partition=2026-07-16 change=new_column_version" in caplog.text
+    assert "output_column=value_v2_string" in caplog.text
 
-    runtime_reporting._print_schema_drift_summary(runs, schema_mode="strict")
-    assert capsys.readouterr().out == ""
+
+def test_example_07_logs_full_filesystem_prefixes_once(caplog) -> None:
+    """Run startup must expose unabridged source and target prefixes."""
+    from examples.example_07 import runtime_reporting
+
+    args = SimpleNamespace(
+        source_jsonl_prefix="gs://raw-bucket/a/very/long/source/prefix",
+        source_jsonl_uri=None,
+        silver_parquet_prefix="gs://silver-bucket/a/very/long/target/prefix",
+        silver_parquet_uri=None,
+    )
+    with caplog.at_level(logging.INFO, logger="gcs_input_to_silver_parquet"):
+        runtime_reporting._log_run_filesystem_prefixes(args)
+
+    assert caplog.messages == [
+        "Run filesystems "
+        "source_prefix=gs://raw-bucket/a/very/long/source/prefix "
+        "target_prefix=gs://silver-bucket/a/very/long/target/prefix"
+    ]
 
 
 def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> None:
@@ -175,7 +283,7 @@ def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> Non
     args = SimpleNamespace(
         input_format="json",
         input_mode="directory",
-        schema_mode="strict",
+        schema_mode="additive",
         column_order="alphabetically",
         field_name_policy="lower_snake",
         timestamp_precision="TIMESTAMP_MICROS",
@@ -232,16 +340,30 @@ def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
         for day in (1, 2, 3)
     ]
 
-    async def fake_remote_file_exists(uri: str, *, memory_limit_bytes: int | None = None) -> bool:
+    async def fake_remote_file_metadata(
+        uri: str,
+        *,
+        memory_limit_bytes: int | None = None,
+    ) -> object | None:
         """Return false for one missing generated object."""
-        return not uri.endswith("20260102.json")
+        if uri.endswith("20260102.json"):
+            return None
+        return RemoteFile(uri, uri.rsplit("/", 1)[-1], 42)
 
-    monkeypatch.setattr(source_discovery_mod.routing, "remote_file_exists", fake_remote_file_exists)
+    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
+
+    monkeypatch.setattr(
+        source_discovery_mod.routing,
+        "remote_file_metadata",
+        fake_remote_file_metadata,
+    )
 
     discovery = discover_existing_source_plans(plans)
 
     assert [plan.label for plan in discovery.existing_plans] == ["2026-01-01", "2026-01-03"]
     assert [plan.label for plan in discovery.skipped_plans] == ["2026-01-02"]
+    assert [plan.source_file_count for plan in discovery.existing_plans] == [1, 1]
+    assert [plan.source_bytes for plan in discovery.existing_plans] == [42, 42]
 
 
 def test_example_07_daily_single_file_prefix_plan() -> None:

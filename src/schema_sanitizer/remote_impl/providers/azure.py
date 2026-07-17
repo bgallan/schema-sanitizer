@@ -105,10 +105,30 @@ async def download_file(uri: str, local_path: str) -> None:
 
 async def file_exists(uri: str) -> bool:
     """Return whether one Azure Blob object exists."""
+    return await file_metadata(uri) is not None
+
+
+async def file_metadata(uri: str) -> RemoteFile | None:
+    """Return Azure Blob metadata using the existence request."""
     ref = parse_uri(uri)
     service = await open_service(ref)
     try:
-        return bool(await service.get_blob_client(ref.container, ref.blob).exists())
+        blob = service.get_blob_client(ref.container, ref.blob)
+        try:
+            properties = await blob.get_blob_properties()
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            code = getattr(exc, "error_code", None)
+            if status == 404 or code in {"BlobNotFound", "ContainerNotFound"}:
+                return None
+            if status in {401, 403}:
+                raise PermissionError(
+                    f"Azure returned a permission error while checking source object: {uri!r}"
+                ) from exc
+            raise
+        raw_size = getattr(properties, "size", None)
+        size = int(raw_size) if raw_size is not None else None
+        return RemoteFile(uri, Path(ref.blob).name, size)
     finally:
         await service.close()
 
