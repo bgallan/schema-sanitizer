@@ -108,7 +108,7 @@ def test_example_07_warm_up_logs_progress(caplog, tmp_path: Path) -> None:
     ) in caplog.text
 
 
-def test_example_07_logs_partition_cpu_and_io_percentages(caplog) -> None:
+def test_example_07_logs_partition_cpu_and_io_percentages(caplog, monkeypatch) -> None:
     """Each materialized partition log must show complementary CPU/I/O shares."""
     from examples.example_07 import runtime_reporting
 
@@ -166,6 +166,29 @@ def test_example_07_logs_partition_cpu_and_io_percentages(caplog) -> None:
 
     assert "duration=5.0s cpu=100.0% io=0.0%" in caplog.text
     assert "cpu=8.0s" not in caplog.text
+
+    class ExistingWindowsPath:
+        """Stand in for an existing Windows source while running on any host."""
+
+        def __init__(self, value: str):
+            """Validate the canonical Windows path reaches pathlib unchanged."""
+            assert value == r"C:\source\events.jsonl"
+
+        def is_file(self) -> bool:
+            """Report that the synthetic source exists."""
+            return True
+
+        def stat(self) -> SimpleNamespace:
+            """Return deterministic source size metadata."""
+            return SimpleNamespace(st_size=2_500_000)
+
+    monkeypatch.setattr(runtime_reporting, "Path", ExistingWindowsPath)
+    windows_plan = runtime_reporting.DateRunPlan(
+        date(2026, 7, 17),
+        r"C:\source\events.jsonl",
+        r"C:\target\events.parquet",
+    )
+    assert runtime_reporting._source_metrics(windows_plan) == (1, 2_500_000)
 
 
 def test_example_07_logs_all_drifts_with_triggering_partition(caplog) -> None:
