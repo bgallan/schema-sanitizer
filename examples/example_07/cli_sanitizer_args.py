@@ -11,13 +11,12 @@ def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
     """Add schema-sanitizer conversion arguments."""
     parser.add_argument(
         "--schema-mode",
-        choices=("strict", "additive"),
-        default="strict",
+        choices=("additive",),
+        default="additive",
         help=(
-            "strict enforces the existing BigQuery schema exactly; additive allows "
-            "new observed fields. On the first run, use additive because there is "
-            "no existing BigQuery schema yet. Schema warm-up is only performed "
-            "when a warm-up date range is explicitly requested."
+            "Schema mode for every warm-up and normal partition. Example 07 always "
+            "uses additive so new observations can evolve the registry. Schema "
+            "warm-up remains opt-in through an explicit warm-up date range."
         ),
     )
     parser.add_argument(

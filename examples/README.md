@@ -77,7 +77,6 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --target-table project_id.dataset_id.external_events \
   --start-date 2026-06-15 \
   --end-date 2026-06-15 \
-  --schema-mode strict \
   --field-name-policy lower_snake \
   --timestamp-precision TIMESTAMP_MICROS \
   --on-error emit_null_row \
@@ -101,13 +100,22 @@ Parquet output defaults to `--parquet-compression gzip`. Pass
 debugging or compatibility testing. `--parquet-gzip-level 0..9` optionally tunes
 the gzip level; when omitted, the writer/zlib default is used.
 
-To bootstrap or broaden the registry before the first normal output is written,
-add a schema warm-up range. Warm-up is opt-in in both additive and strict modes;
-normal output partitions are not preflighted automatically. The warm-up scan
-always uses additive registry merging and scans the selected warm-up files as
-one logical source. Consequently, if those files contain both integer and
-floating-point values for one field, the registry resolves that field to one
-`DOUBLE` column before any normal output is materialized.
+When replacing the BigQuery external table, the example uses the final output
+Parquet as `reference_file_schema_uri`. BigQuery therefore derives the table
+schema from a self-describing canonical Parquet file instead of combining an
+explicit SQL schema with `source_column_match`. This preserves nested field-name
+mapping without the invalid explicit-schema/`NAME` option combination.
+
+Example 07 always uses additive schema mode for both warm-up probes and normal
+Parquet writes. The CLI accepts no strict-mode override. To bootstrap or broaden
+the registry before the first normal output is written, add a schema warm-up
+range. Warm-up is opt-in; normal output partitions are not preflighted
+automatically. Without explicit warm-up dates, the runner skips warm-up planning
+entirely and emits no warm-up logs. The warm-up scan merges the selected files
+while carrying registry state from partition to partition. Consequently, if
+those files contain both integer and floating-point values for one field, the
+registry resolves that field to one `DOUBLE` column before any normal output is
+materialized.
 
 Without a warm-up range, each additive partition evolves the registry only
 when it is processed. An earlier file may therefore retain an `INT64` physical
@@ -126,8 +134,7 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --start-date 2026-06-15 \
   --end-date 2026-06-15 \
   --start-date-warm-up 2026-06-01 \
-  --end-date-warm-up 2026-06-07 \
-  --schema-mode strict
+  --end-date-warm-up 2026-06-07
 ```
 
 For hourly pipelines, pass `--partition-granularity hourly` explicitly. Normal
@@ -151,13 +158,38 @@ Cloud discovery stays async Python, and warm-up inference/conversion use the
 native registry-backed engine. Empty registries come from
 `schema_sanitizer.new_schema_registry()`.
 
-Each completed partition log reports wall duration, process CPU time, and an
-`io_wait_est` value calculated as wall time minus CPU time. The estimate includes
-remote/local I/O waits as well as any other time when the process was not using
-the CPU. At the end of an additive run, the example prints every schema drift
-triggered during materialization, including the partition, source path, output
-column, drift kind, and previous/new physical schemas. Strict runs omit this
-additive drift summary.
+At startup, the example logs the complete source and target filesystem prefixes
+without URI abbreviation. Each completed normal or warm-up partition then emits
+one progress record containing `run`, `progress`, `label`, wall `duration`,
+`cpu`, estimated `io`, `source_files`, and aggregate decimal `source_size_mb`.
+The percentages are rounded as a pair and always add up to 100.0%, making the
+dominant partition bottleneck directly visible. Warm-up
+progress is emitted after each source partition has been prepared or staged and
+its additive schema probe has completed, rather than as a plan sample. This lets
+the CPU percentage include measured schema-inference work instead of reporting
+every warm-up partition as 0% CPU by construction.
+
+The partition `duration` includes source discovery, source preparation and
+download, schema processing, materialization, local output writing, output
+upload, and the final output-schema read. The CPU share uses process time only
+from registry compilation and the conversion stage, where inference,
+sanitization, materialization, compression, and streaming execute. Discovery,
+download/upload, filesystem waits, and every remaining part of the critical
+path form the complementary I/O share.
+
+Process CPU accumulates work across threads and can therefore exceed wall time.
+CPU is capped to the complete partition duration, then the displayed I/O
+percentage is derived as its rounded complement. The pair therefore always
+adds up to 100.0%. An `io=0.0%` result means aggregate conversion CPU covered
+the full critical path; concurrent I/O may still have occurred.
+
+At the end of the run, the example logs the total schema drift count and every
+drift triggered during materialization, including the triggering partition,
+source path, output column, drift kind, and previous/new physical schemas.
+Warm-up probe drifts are included too. On a fresh run, the initial canonical
+schema is therefore reported as `new_column_added` events attributed to the
+warm-up partitions that first introduced those columns, even when subsequent
+Parquet writes have no additional drift.
 
 Process all direct `.jsonl` files in each hourly partition into one Parquet:
 
@@ -176,7 +208,7 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
 ```
 
 Run an hourly JSONL pipeline with a separate additive warm-up window before the
-strict normal writes:
+additive normal writes:
 
 ```bash
 python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
@@ -193,7 +225,6 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --end-date-warm-up 2026-06-24 \
   --start-hour-warm-up 0 \
   --end-hour-warm-up 23 \
-  --schema-mode strict \
   --parquet-compression gzip \
   --target-table project_id.dataset_id.external_events
 ```
@@ -216,7 +247,6 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --end-date-warm-up 2026-06-24 \
   --start-hour-warm-up 0 \
   --end-hour-warm-up 23 \
-  --schema-mode strict \
   --field-name-policy lower_snake \
   --timestamp-precision TIMESTAMP_MICROS \
   --parquet-compression gzip \

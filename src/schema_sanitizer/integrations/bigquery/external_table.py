@@ -37,6 +37,7 @@ class ExternalTableSpec:
     external_format: str = "PARQUET"
     require_partition_filter: bool = False
     parquet_enable_list_inference: bool = True
+    reference_file_schema_uri: str | None = None
 
 
 def parse_hive_partition_column(raw: str) -> tuple[str, str]:
@@ -202,6 +203,15 @@ def external_table_spec_from_namespace(args: Any) -> ExternalTableSpec:
 
 def external_table_options_sql(spec: ExternalTableSpec) -> str:
     """Build BigQuery external table OPTIONS SQL."""
+    normalized_format = normalize_external_format(spec.external_format)
+    if spec.reference_file_schema_uri is not None and normalized_format not in {
+        "AVRO",
+        "ORC",
+        "PARQUET",
+    }:
+        raise ValueError(
+            "reference_file_schema_uri requires a self-describing AVRO, ORC, or PARQUET source"
+        )
     uris_sql = ", ".join(quote_bq_string(uri) for uri in spec.source_uris)
     require_partition_filter_sql = "TRUE" if spec.require_partition_filter else "FALSE"
     options = [
@@ -210,16 +220,15 @@ def external_table_options_sql(spec: ExternalTableSpec) -> str:
         f"hive_partition_uri_prefix = {quote_bq_string(spec.hive_uri_prefix)}",
         f"require_hive_partition_filter = {require_partition_filter_sql}",
     ]
-    if (
-        normalize_external_format(spec.external_format) == "PARQUET"
-        and spec.parquet_enable_list_inference
-    ):
+    if normalized_format == "PARQUET" and spec.parquet_enable_list_inference:
         options.append("enable_list_inference = TRUE")
-    if normalize_external_format(spec.external_format) == "PARQUET":
-        # This integration always supplies an explicit schema. BigQuery would
-        # otherwise bind it positionally, which corrupts nested values when
-        # compatible Parquet files use different recursive field orders.
-        options.append("source_column_match = 'NAME'")
+    if spec.reference_file_schema_uri is not None:
+        options.append(
+            f"reference_file_schema_uri = {quote_bq_string(spec.reference_file_schema_uri)}"
+        )
+    # BigQuery rejects source_column_match='NAME' with an explicit schema.
+    # Reference-file mode avoids that combination and lets self-describing
+    # Parquet field names define the external schema.
     return ",\n            ".join(options)
 
 
@@ -241,10 +250,16 @@ def external_table_ddl(
             "The final Parquet schema has no non-partition columns. "
             "Refusing to create an external table with only Hive partition columns."
         )
-    ddl = f"""
-        CREATE OR REPLACE EXTERNAL TABLE {table_ref.sql_identifier} (
-{column_ddl}
+    if spec.reference_file_schema_uri is not None and skipped_partition_fields:
+        raise RuntimeError(
+            "The reference Parquet schema contains fields that collide with Hive "
+            f"partition columns: {skipped_partition_fields}."
         )
+    schema_clause = (
+        "" if spec.reference_file_schema_uri is not None else f" (\n{column_ddl}\n        )"
+    )
+    ddl = f"""
+        CREATE OR REPLACE EXTERNAL TABLE {table_ref.sql_identifier}{schema_clause}
         WITH PARTITION COLUMNS (
 {format_partition_columns(spec.partition_columns)}
         )

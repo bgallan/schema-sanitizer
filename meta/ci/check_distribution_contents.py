@@ -36,6 +36,7 @@ _SDIST_REQUIRED = {
     "LICENSE",
     "README.md",
     "RESPONSIBILITIES.md",
+    "THREADING_TODO.md",
     "cmake/SchemaSanitizerCompression.cmake",
     "cmake/SchemaSanitizerSources.cmake",
     "cmake/SchemaSanitizerTargetOptions.cmake",

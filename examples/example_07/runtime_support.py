@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
-from time import perf_counter
+from collections.abc import Callable
 from typing import Any
 
 import schema_sanitizer as ss
@@ -29,14 +28,12 @@ try:
     from examples.example_07.runtime_reporting import (
         LOGGER,
         _log_skipped_plan_summary,
-        _log_warm_up_scan_finished,
         _warm_up_progress_logger,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from runtime_reporting import (
         LOGGER,
         _log_skipped_plan_summary,
-        _log_warm_up_scan_finished,
         _warm_up_progress_logger,
     )
 
@@ -55,7 +52,7 @@ def _build_to_parquet_kwargs(
     kwargs = {
         "input_format": args.input_format,
         "input_mode": args.input_mode,
-        "schema_mode": args.schema_mode,
+        "schema_mode": "additive",
         "column_order": args.column_order,
         "field_name_policy": args.field_name_policy,
         "timestamp_precision": args.timestamp_precision,
@@ -83,9 +80,8 @@ def _schema_warm_up_plan_for_run(
 ) -> list[DateRunPlan]:
     """Return explicitly requested sources to probe before materialization.
 
-    Warm-up is opt-in for both additive and strict runs. In particular, an
-    additive run must not scan the current write range unless those sources
-    were also selected through the warm-up date arguments.
+    Warm-up is opt-in. An additive run must not scan the current write range
+    unless those sources were also selected through the warm-up date arguments.
     """
     plans = list(requested_warm_up_plan)
 
@@ -99,79 +95,99 @@ def _schema_warm_up_plan_for_run(
     return unique
 
 
+def _schema_warm_up_requested(args: argparse.Namespace) -> bool:
+    """Return whether the caller explicitly requested a warm-up date range."""
+    return (
+        getattr(args, "start_date_warm_up", None) is not None
+        or getattr(args, "end_date_warm_up", None) is not None
+    )
+
+
+def _warm_up_schema_drift_collector(
+    target: list[DateRunResult] | None,
+) -> Callable[[int, int, DateRunPlan, str], None] | None:
+    """Return a callback that retains partition-attributed warm-up drifts."""
+    if target is None:
+        return None
+
+    def _collect(
+        _index: int,
+        _total: int,
+        plan: DateRunPlan,
+        schema_drifts_json: str,
+    ) -> None:
+        if not schema_drifts_json or schema_drifts_json.strip() == "[]":
+            return
+        target.append(
+            DateRunResult(
+                plan=plan,
+                output_schema=None,
+                stats={},
+                schema_drifts_json=schema_drifts_json,
+            )
+        )
+
+    return _collect
+
+
 def _infer_warm_up_schema_registry(
     args: argparse.Namespace,
     warm_up_plan: list[DateRunPlan],
     initial_schema_registry: dict[str, Any],
+    *,
+    warm_up_drift_runs: list[DateRunResult] | None = None,
 ) -> dict[str, Any]:
     """Run additive schema warm-up and return the updated registry."""
-    start = perf_counter()
-    LOGGER.info("Warm-up scan starting partitions=%d mode=additive", len(warm_up_plan))
-    registry = infer_warm_up_schema_registry(
+    return infer_warm_up_schema_registry(
         warm_up_plan,
         input_format=args.input_format,
         input_mode=args.input_mode,
         options=_build_to_parquet_kwargs(args, include_output_options=False),
         schema_registry=initial_schema_registry,
         field_name_policy=args.field_name_policy,
-        after_source_prepared=_warm_up_progress_logger(len(warm_up_plan)),
+        after_partition_warmed=_warm_up_progress_logger(len(warm_up_plan)),
+        after_schema_drifts=_warm_up_schema_drift_collector(warm_up_drift_runs),
     )
-    _log_warm_up_scan_finished(
-        warm_up_plan=warm_up_plan,
-        started_at=start,
-        schema_registry_json=json.dumps(registry, ensure_ascii=False, separators=(",", ":")),
-    )
-    return registry
 
 
 def _infer_warm_up_schema_registry_json(
     args: argparse.Namespace,
     warm_up_plan: list[DateRunPlan],
     initial_schema_registry_json: str,
+    *,
+    warm_up_drift_runs: list[DateRunResult] | None = None,
 ) -> str:
     """Run additive schema warm-up and return the updated registry JSON."""
-    start = perf_counter()
-    LOGGER.info("Warm-up scan starting partitions=%d mode=additive", len(warm_up_plan))
-    registry_json = infer_warm_up_schema_registry_json(
+    return infer_warm_up_schema_registry_json(
         warm_up_plan,
         input_format=args.input_format,
         input_mode=args.input_mode,
         options=_build_to_parquet_kwargs(args, include_output_options=False),
         schema_registry=initial_schema_registry_json,
         field_name_policy=args.field_name_policy,
-        after_source_prepared=_warm_up_progress_logger(len(warm_up_plan)),
+        after_partition_warmed=_warm_up_progress_logger(len(warm_up_plan)),
+        after_schema_drifts=_warm_up_schema_drift_collector(warm_up_drift_runs),
     )
-    _log_warm_up_scan_finished(
-        warm_up_plan=warm_up_plan,
-        started_at=start,
-        schema_registry_json=registry_json,
-    )
-    return registry_json
 
 
 def _infer_warm_up_schema_registry_state(
     args: argparse.Namespace,
     warm_up_plan: list[DateRunPlan],
     initial_schema_registry_state: SchemaRegistryState,
+    *,
+    warm_up_drift_runs: list[DateRunResult] | None = None,
 ) -> SchemaRegistryState:
     """Run additive schema warm-up and return JSON plus native state."""
-    start = perf_counter()
-    LOGGER.info("Warm-up scan starting partitions=%d mode=additive", len(warm_up_plan))
-    state = infer_warm_up_schema_registry_state(
+    return infer_warm_up_schema_registry_state(
         warm_up_plan,
         input_format=args.input_format,
         input_mode=args.input_mode,
         options=_build_to_parquet_kwargs(args, include_output_options=False),
         schema_registry=initial_schema_registry_state.schema_registry_json,
         field_name_policy=args.field_name_policy,
-        after_source_prepared=_warm_up_progress_logger(len(warm_up_plan)),
+        after_partition_warmed=_warm_up_progress_logger(len(warm_up_plan)),
+        after_schema_drifts=_warm_up_schema_drift_collector(warm_up_drift_runs),
     )
-    _log_warm_up_scan_finished(
-        warm_up_plan=warm_up_plan,
-        started_at=start,
-        schema_registry_json=state.schema_registry_json,
-    )
-    return state
 
 
 def _run_one_date(

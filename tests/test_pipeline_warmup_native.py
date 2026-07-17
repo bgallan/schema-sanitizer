@@ -163,6 +163,46 @@ def test_pipeline_warm_up_can_return_registry_state(tmp_path: Path) -> None:
     assert state.schema_registry["canonical_schema"]["fields"][0]["name"] == "alpha"
 
 
+def test_pipeline_warm_up_completed_progress_measures_probe_cpu(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Completed warm-up progress must include measured schema-probe CPU time."""
+    source = tmp_path / "a.jsonl"
+    source.write_text('{"alpha": 1}\n', encoding="utf-8")
+    progress: list[tuple[object, ...]] = []
+
+    from schema_sanitizer.pipeline import registry_warmup
+
+    cpu_samples = iter((10.0, 10.25))
+    monkeypatch.setattr(registry_warmup, "process_time", lambda: next(cpu_samples))
+
+    infer_warm_up_schema_registry_state(
+        [
+            PartitionRunPlan(
+                date(2026, 1, 1),
+                str(source),
+                str(tmp_path / "a.parquet"),
+                discovery_seconds=1.0,
+            )
+        ],
+        input_format="jsonl",
+        input_mode="single_file",
+        options={},
+        schema_registry={},
+        field_name_policy="lower_snake",
+        after_partition_warmed=lambda *values: progress.append(values),
+    )
+
+    assert len(progress) == 1
+    index, total, plan, wall_seconds, cpu_seconds, io_wait_seconds = progress[0]
+    assert (index, total, plan.source_uri) == (1, 1, str(source))
+    assert wall_seconds >= 1.0
+    assert cpu_seconds == pytest.approx(0.25)
+    assert io_wait_seconds == pytest.approx(wall_seconds - cpu_seconds)
+    assert cpu_seconds + io_wait_seconds == pytest.approx(wall_seconds)
+
+
 def test_pipeline_warm_up_keeps_parquet_writer_options_out_of_schema_options(
     tmp_path: Path,
 ) -> None:
@@ -302,6 +342,7 @@ def test_pipeline_warm_up_native_manifest_replaces_fallback_routing(
     from schema_sanitizer.pipeline import registry_warmup as warm_up_input
 
     assert not hasattr(warm_up_input, "_route_prepared_inputs_for_warm_up")
+    progress = []
 
     prepared = warm_up_input.prepare_schema_warm_up_input(
         [PartitionRunPlan(date(2026, 1, 1), str(source), str(tmp_path / "out.parquet"))],
@@ -312,10 +353,17 @@ def test_pipeline_warm_up_native_manifest_replaces_fallback_routing(
         csv_delimiter=",",
         csv_has_header=True,
         memory_limit_bytes=None,
+        after_source_prepared=lambda *values: progress.append(values),
     )
     try:
         assert prepared.source == "source_plan"
         assert prepared.data.source_batch.input_format == input_format
+        assert len(progress) == 1
+        index, total, plan, wall_seconds, cpu_seconds, io_wait_seconds = progress[0]
+        assert (index, total, plan.source_uri) == (1, 1, str(source))
+        assert wall_seconds >= 0
+        assert cpu_seconds >= 0
+        assert io_wait_seconds == pytest.approx(max(wall_seconds - cpu_seconds, 0.0))
     finally:
         prepared.close()
 

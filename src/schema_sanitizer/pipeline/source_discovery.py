@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol
 from urllib.parse import urlparse
 
@@ -142,9 +143,12 @@ async def _discover_directories(
     input_format: str,
     exists_by_uri: dict[str, bool],
     discovered_by_uri: dict[str, DiscoveredDirectoryInput],
+    discovery_seconds_by_uri: dict[str, float] | None = None,
     memory_limit_bytes: int | None = None,
 ) -> set[str]:
     """Discover provider-grouped directories and preserve their listings."""
+    if discovery_seconds_by_uri is None:
+        discovery_seconds_by_uri = {}
     grouped: dict[LocationKind, list[str]] = defaultdict(list)
     for uri, kind in source_locations.items():
         grouped[kind].append(uri)
@@ -154,9 +158,12 @@ async def _discover_directories(
         uris = grouped.get(provider)
         if not uris:
             continue
+        started_at = perf_counter()
         remote_result = await discovery.directories_containing_files(
             uris, extensions, memory_limit_bytes=memory_limit_bytes
         )
+        elapsed = max(perf_counter() - started_at, 0.0)
+        discovery_seconds_by_uri.update(dict.fromkeys(uris, elapsed))
         exists_by_uri.update(remote_result.exists_by_uri)
         _record_discovered_inputs(
             discovered_by_uri,
@@ -169,7 +176,10 @@ async def _discover_directories(
         uri: kind for kind in _LOCAL_LOCATION_KINDS for uri in grouped.get(kind, ())
     }
     if local_locations:
+        started_at = perf_counter()
         local_result = _local_directories_containing_files(local_locations, extensions)
+        elapsed = max(perf_counter() - started_at, 0.0)
+        discovery_seconds_by_uri.update(dict.fromkeys(local_locations, elapsed))
         exists_by_uri.update(local_result.exists_by_uri)
         _record_discovered_inputs(
             discovered_by_uri,
@@ -188,8 +198,8 @@ async def _discover_source(
     input_format: str,
     extensions: tuple[str, ...],
     memory_limit_bytes: int | None,
-) -> tuple[bool, DiscoveredDirectoryInput | None]:
-    """Return whether one source exists plus reusable discovered metadata."""
+) -> tuple[bool, DiscoveredDirectoryInput | None, int | None, int | None]:
+    """Return source existence, reusable input metadata, file count, and bytes."""
     if kind not in {"path", "file"}:
         if input_mode == "directory":
             remote_files = await routing.list_remote_directory(
@@ -202,8 +212,14 @@ async def _discover_source(
                 if remote_files
                 else None
             )
-            return bool(remote_files), discovered
-        return await routing.remote_file_exists(uri, memory_limit_bytes=memory_limit_bytes), None
+            return bool(remote_files), discovered, *_source_summary(discovered)
+        remote_file = await routing.remote_file_metadata(
+            uri,
+            memory_limit_bytes=memory_limit_bytes,
+        )
+        if remote_file is None:
+            return False, None, None, None
+        return True, None, 1, remote_file.size
 
     if input_mode == "directory":
         local_files = _local_directory_matching_files(
@@ -214,8 +230,31 @@ async def _discover_source(
             if local_files
             else None
         )
-        return bool(local_files), discovered
-    return _local_path(uri, kind).is_file(), None
+        return bool(local_files), discovered, *_source_summary(discovered)
+    path = _local_path(uri, kind)
+    if not path.is_file():
+        return False, None, None, None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = None
+    return True, None, 1, size
+
+
+def _source_summary(
+    discovered: DiscoveredDirectoryInput | None,
+) -> tuple[int | None, int | None]:
+    """Return the complete file count and byte total for discovered input."""
+    if discovered is None:
+        return None, None
+    sizes = [file.size for file in discovered.local_files]
+    sizes.extend(file.size for file in discovered.remote_files)
+    total_bytes = (
+        sum(size for size in sizes if size is not None)
+        if all(size is not None for size in sizes)
+        else None
+    )
+    return len(sizes), total_bytes
 
 
 def _unique_source_locations(plans: list[PartitionRunPlan]) -> dict[str, LocationKind]:
@@ -240,6 +279,9 @@ def _partition_plans(
     *,
     exists_by_uri: dict[str, bool],
     discovered_by_uri: dict[str, DiscoveredDirectoryInput],
+    discovery_seconds_by_uri: dict[str, float],
+    source_file_count_by_uri: dict[str, int | None],
+    source_bytes_by_uri: dict[str, int | None],
 ) -> SourcePlanDiscovery:
     """Split plans into existing and skipped groups with reusable metadata."""
     existing: list[PartitionRunPlan] = []
@@ -249,7 +291,21 @@ def _partition_plans(
             skipped.append(plan)
             continue
         discovered = discovered_by_uri.get(plan.source_uri)
-        existing.append(plan.with_discovered_input(discovered) if discovered is not None else plan)
+        discovered_count, discovered_bytes = _source_summary(discovered)
+        existing.append(
+            plan.with_discovery_timing(
+                discovered,
+                discovery_seconds_by_uri.get(plan.source_uri, 0.0),
+                source_file_count=source_file_count_by_uri.get(
+                    plan.source_uri,
+                    discovered_count,
+                ),
+                source_bytes=source_bytes_by_uri.get(
+                    plan.source_uri,
+                    discovered_bytes,
+                ),
+            )
+        )
     return SourcePlanDiscovery(existing_plans=existing, skipped_plans=skipped)
 
 
@@ -272,6 +328,9 @@ async def discover_existing_source_plans_async(
     window = memory_budget(memory_limit_bytes).source_discovery_concurrency
     exists_by_uri: dict[str, bool] = {}
     discovered_by_uri: dict[str, DiscoveredDirectoryInput] = {}
+    discovery_seconds_by_uri: dict[str, float] = {}
+    source_file_count_by_uri: dict[str, int | None] = {}
+    source_bytes_by_uri: dict[str, int | None] = {}
     bulk_checked_uris: set[str] = set()
     if input_mode == "directory":
         bulk_checked_uris = await _discover_directories(
@@ -280,6 +339,7 @@ async def discover_existing_source_plans_async(
             input_format=input_format,
             exists_by_uri=exists_by_uri,
             discovered_by_uri=discovered_by_uri,
+            discovery_seconds_by_uri=discovery_seconds_by_uri,
             memory_limit_bytes=memory_limit_bytes,
         )
 
@@ -287,26 +347,49 @@ async def discover_existing_source_plans_async(
         (uri, kind) for uri, kind in source_locations.items() if uri not in bulk_checked_uris
     ]
 
-    async def check_index(index: int) -> tuple[bool, DiscoveredDirectoryInput | None]:
+    async def check_index(
+        index: int,
+    ) -> tuple[bool, DiscoveredDirectoryInput | None, int | None, int | None, float]:
         """Discover one source URI selected by the scheduler."""
         uri, kind = remaining[index]
-        return await _discover_source(
-            uri,
-            kind=kind,
-            input_mode=input_mode,
-            input_format=input_format,
-            extensions=extensions,
-            memory_limit_bytes=memory_limit_bytes,
-        )
+        started_at = perf_counter()
+        try:
+            exists, discovered_input, source_file_count, source_bytes = await _discover_source(
+                uri,
+                kind=kind,
+                input_mode=input_mode,
+                input_format=input_format,
+                extensions=extensions,
+                memory_limit_bytes=memory_limit_bytes,
+            )
+            return (
+                exists,
+                discovered_input,
+                source_file_count,
+                source_bytes,
+                max(perf_counter() - started_at, 0.0),
+            )
+        except Exception:
+            discovery_seconds_by_uri[uri] = max(perf_counter() - started_at, 0.0)
+            raise
 
     async for index, discovered in unordered_indexed_results(
         len(remaining),
         check_index,
         window=window,
     ):
-        exists, discovered_input = discovered
+        (
+            exists,
+            discovered_input,
+            source_file_count,
+            source_bytes,
+            discovery_seconds,
+        ) = discovered
         source_uri, _kind = remaining[index]
         exists_by_uri[source_uri] = exists
+        discovery_seconds_by_uri[source_uri] = discovery_seconds
+        source_file_count_by_uri[source_uri] = source_file_count
+        source_bytes_by_uri[source_uri] = source_bytes
         if discovered_input is not None:
             discovered_by_uri[source_uri] = discovered_input
 
@@ -314,6 +397,9 @@ async def discover_existing_source_plans_async(
         plans,
         exists_by_uri=exists_by_uri,
         discovered_by_uri=discovered_by_uri,
+        discovery_seconds_by_uri=discovery_seconds_by_uri,
+        source_file_count_by_uri=source_file_count_by_uri,
+        source_bytes_by_uri=source_bytes_by_uri,
     )
 
 

@@ -39,8 +39,10 @@ def test_file_conversion_core_filters_helper_and_writer_options_before_schema_op
         return Result(SimpleNamespace(diagnostics=None), schema_registry_json="{}")
 
     monkeypatch.setattr(file_convert_core, "normalize_call_options_or_none", fake_normalize)
+    process_clock = iter((5.0, 7.0))
+    monkeypatch.setattr(file_convert_core, "process_time", lambda: next(process_clock))
 
-    file_convert_core.convert_file_with_options(
+    result = file_convert_core.convert_file_with_options(
         source,
         tmp_path / "out.parquet",
         input_format="jsonl",
@@ -68,6 +70,9 @@ def test_file_conversion_core_filters_helper_and_writer_options_before_schema_op
             "schema_mode": "additive",
         }
     ]
+    assert result.conversion_cpu_seconds == pytest.approx(2.0)
+    assert result.file_io_seconds is not None
+    assert result.file_io_seconds >= 0.0
 
 
 def test_analytical_core_filters_helper_options_before_schema_options(

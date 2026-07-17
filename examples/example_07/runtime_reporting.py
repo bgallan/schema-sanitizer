@@ -5,18 +5,17 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import contextmanager
+from pathlib import Path
 from time import perf_counter
 from typing import Any
+from urllib.parse import unquote, urlparse
 
-from schema_sanitizer.integrations.bigquery import registry_has_canonical_schema
 from schema_sanitizer.pipeline import (
-    compact_stats_for_log,
     compact_uri,
+    cpu_io_wall_percentages,
     format_duration,
     sample_items,
-    schema_drift_count,
 )
-from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
 from schema_sanitizer.pipeline.types import PartitionRunPlan as DateRunPlan
 from schema_sanitizer.pipeline.types import PartitionRunResult as DateRunResult
 
@@ -50,6 +49,17 @@ def _configure_logging(log_level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+
+
+def _log_run_filesystem_prefixes(args: Any) -> None:
+    """Log the unabridged source and target filesystem roots once per run."""
+    source_prefix = args.source_jsonl_prefix or args.source_jsonl_uri
+    target_prefix = args.silver_parquet_prefix or args.silver_parquet_uri
+    LOGGER.info(
+        "Run filesystems source_prefix=%s target_prefix=%s",
+        source_prefix,
+        target_prefix,
     )
 
 
@@ -132,16 +142,6 @@ def _log_skipped_plan_summary(
             )
 
 
-def _compact_stats_for_log(stats: Any) -> str:
-    """Extract useful scalar stats for compact one-line logging."""
-    return compact_stats_for_log(stats)
-
-
-def _schema_drift_count(schema_drifts: Any) -> int | None:
-    """Return a compact drift count if the shape is known."""
-    return schema_drift_count(schema_drifts)
-
-
 def _schema_drifts_for_run(run_result: DateRunResult) -> list[dict[str, Any]]:
     """Return one run's drift events from its parsed or JSON representation."""
     payload: Any = run_result.schema_drifts
@@ -169,45 +169,64 @@ def _schema_drifts_for_run(run_result: DateRunResult) -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)]
 
 
-def _warm_up_progress_logger(total: int):
-    """Return a compact warm-up source preparation progress logger."""
-    start_time = perf_counter()
+def _timing_suffix(
+    wall_seconds: float,
+    cpu_seconds: float | None,
+) -> str:
+    """Return complementary CPU and estimated I/O percentages."""
+    if cpu_seconds is None:
+        return ""
+    cpu_percent, io_percent = cpu_io_wall_percentages(wall_seconds, cpu_seconds)
+    return f" cpu={cpu_percent:.1f}% io={io_percent:.1f}%"
 
-    def _log(index: int, _total: int, plan: DateRunPlan, source_seconds: float) -> None:
-        elapsed = perf_counter() - start_time
-        avg_seconds = elapsed / index if index else 0.0
-        eta_seconds = max(total - index, 0) * avg_seconds
-        percent = index * 100.0 / total if total else 100.0
+
+def _source_metrics(plan: DateRunPlan) -> tuple[int | None, int | None]:
+    """Return discovered source count and bytes, with a local-file fallback."""
+    if plan.source_file_count is not None or plan.source_bytes is not None:
+        return plan.source_file_count, plan.source_bytes
+    parsed = urlparse(plan.source_uri)
+    if parsed.scheme not in {"", "file"}:
+        return None, None
+    path = Path(unquote(parsed.path) if parsed.scheme == "file" else plan.source_uri)
+    try:
+        if path.is_file():
+            return 1, path.stat().st_size
+    except OSError:
+        pass
+    return None, None
+
+
+def _source_metrics_suffix(plan: DateRunPlan) -> str:
+    """Format source file count and aggregate decimal megabytes."""
+    source_file_count, source_bytes = _source_metrics(plan)
+    files = "unknown" if source_file_count is None else str(source_file_count)
+    size_mb = "unknown" if source_bytes is None else f"{source_bytes / 1_000_000:.3f}"
+    return f" source_files={files} source_size_mb={size_mb}"
+
+
+def _warm_up_progress_logger(total: int):
+    """Return the completed warm-up partition progress logger."""
+
+    def _log(
+        index: int,
+        callback_total: int,
+        plan: DateRunPlan,
+        wall_seconds: float,
+        cpu_seconds: float,
+        _io_wait_seconds: float,
+    ) -> None:
+        progress_total = callback_total or total
         LOGGER.info(
-            "Warm-up prepare %d/%d %.1f%% label=%s duration=%s avg=%s eta=%s source=%s",
+            "run=warmup progress=%d/%d label=%s duration=%s%s%s",
             index,
-            total,
-            percent,
+            progress_total,
             plan.label,
-            _format_duration(source_seconds),
-            _format_duration(avg_seconds),
-            _format_duration(eta_seconds),
-            _compact_uri(plan.source_uri),
+            _format_duration(wall_seconds),
+            _timing_suffix(wall_seconds, cpu_seconds),
+            _source_metrics_suffix(plan),
         )
 
     return _log
-
-
-def _log_warm_up_scan_finished(
-    *,
-    warm_up_plan: list[DateRunPlan],
-    started_at: float,
-    schema_registry_json: str,
-) -> None:
-    """Log one concise warm-up scan completion line."""
-    registry = json.loads(schema_registry_json or "{}")
-    LOGGER.info(
-        "Warm-up scan finished partitions=%d duration=%s route=%s canonical_schema=%s",
-        len(warm_up_plan),
-        _format_duration(perf_counter() - started_at),
-        last_warm_up_route(),
-        registry_has_canonical_schema(registry),
-    )
 
 
 def _log_one_parquet_processed(
@@ -217,75 +236,61 @@ def _log_one_parquet_processed(
     plan: DateRunPlan,
     run_result: DateRunResult,
     run_seconds: float,
-    pipeline_start_time: float,
-    registry_updated: bool,
 ) -> None:
-    """Emit one optimized INFO log line for one completed Parquet."""
-    elapsed = perf_counter() - pipeline_start_time
-    avg_seconds = elapsed / index if index else 0.0
-    eta_seconds = max(total - index, 0) * avg_seconds
-    percent = index * 100.0 / total if total else 100.0
-
-    stats_text = _compact_stats_for_log(run_result.stats)
-    stats_suffix = f" {stats_text}" if stats_text else ""
-
-    drift_count = _schema_drift_count(_schema_drifts_for_run(run_result))
-    drift_suffix = f" drifts={drift_count}" if drift_count is not None else ""
-
+    """Emit the progress log for one completed Parquet partition."""
     wall_seconds = run_result.wall_seconds
     if wall_seconds is None:
         wall_seconds = run_seconds
-    timing_suffix = (
-        f" cpu={_format_duration(run_result.cpu_seconds)}"
-        if run_result.cpu_seconds is not None
-        else ""
+    timing_suffix = _timing_suffix(
+        wall_seconds,
+        run_result.cpu_seconds,
     )
-    if run_result.io_wait_seconds is not None:
-        timing_suffix += f" io_wait_est={_format_duration(run_result.io_wait_seconds)}"
-    if (
-        wall_seconds > 0
-        and run_result.cpu_seconds is not None
-        and run_result.io_wait_seconds is not None
-    ):
-        cpu_share = min(run_result.cpu_seconds / wall_seconds, 1.0) * 100.0
-        io_wait_share = min(run_result.io_wait_seconds / wall_seconds, 1.0) * 100.0
-        timing_suffix += f" cpu_share={cpu_share:.1f}% io_wait_share={io_wait_share:.1f}%"
 
     LOGGER.info(
-        "Parquet %d/%d %.1f%% label=%s duration=%s%s avg=%s eta=%s registry_updated=%s%s%s output=%s",
+        "run=parquet progress=%d/%d label=%s duration=%s%s%s",
         index,
         total,
-        percent,
         plan.label,
         _format_duration(wall_seconds),
         timing_suffix,
-        _format_duration(avg_seconds),
-        _format_duration(eta_seconds),
-        registry_updated,
-        stats_suffix,
-        drift_suffix,
-        _compact_uri(run_result.plan.output_uri),
+        _source_metrics_suffix(plan),
     )
 
 
-def _print_schema_drift_summary(
+def _log_schema_drift_summary(
     completed_runs: list[DateRunResult],
     *,
     schema_mode: str,
+    warm_up_runs: list[DateRunResult] | None = None,
 ) -> None:
-    """Print every additive schema change with its triggering partition."""
-    if schema_mode != "additive":
-        return
-
-    events = [
-        (run_result, drift)
+    """Log every schema change with the partition that triggered it."""
+    warm_up_events = [
+        ("warmup", run_result, drift)
+        for run_result in warm_up_runs or []
+        for drift in _schema_drifts_for_run(run_result)
+    ]
+    parquet_events = [
+        ("parquet", run_result, drift)
         for run_result in completed_runs
         for drift in _schema_drifts_for_run(run_result)
     ]
-    print("\nSchema drift summary (additive mode):")
-    print(f"Total schema drift(s): {len(events)}")
+    events = [*warm_up_events, *parquet_events]
+    if warm_up_runs is None:
+        LOGGER.info(
+            "Schema drift summary mode=%s total=%d parquet=%d",
+            schema_mode,
+            len(events),
+            len(parquet_events),
+        )
+    else:
+        LOGGER.info(
+            "Schema drift summary mode=%s total=%d warmup=%d parquet=%d",
+            schema_mode,
+            len(events),
+            len(warm_up_events),
+            len(parquet_events),
+        )
     if not events:
-        print("No schema drifts were triggered by materialized partitions.")
         return
 
     labels = {
@@ -293,17 +298,23 @@ def _print_schema_drift_summary(
         "new_version_generated": "new_column_version",
         "type_promoted": "column_type_promoted",
     }
-    for run_result, drift in events:
+    for run_type, run_result, drift in events:
         drift_type = str(drift.get("drift_type", "unknown"))
         change = labels.get(drift_type, drift_type)
         source_path = drift.get("source_path")
         output_name = drift.get("output_name")
         previous_schema = drift.get("previous_schema")
         new_schema = drift.get("new_schema")
-        print(
-            f"- partition={run_result.plan.label} change={change} "
-            f"source_path={source_path} output_column={output_name} "
-            f"schema={previous_schema} -> {new_schema}"
+        LOGGER.info(
+            "Schema drift run=%s partition=%s change=%s source_path=%s "
+            "output_column=%s schema=%s -> %s",
+            run_type,
+            run_result.plan.label,
+            change,
+            source_path,
+            output_name,
+            previous_schema,
+            new_schema,
         )
 
 

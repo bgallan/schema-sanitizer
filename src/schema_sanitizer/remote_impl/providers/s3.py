@@ -63,11 +63,18 @@ async def download_bytes(client: Any, file: RemoteFile) -> bytes:
 
 async def file_exists(uri: str) -> bool:
     """Return whether one S3 object exists."""
+    return await file_metadata(uri) is not None
+
+
+async def file_metadata(uri: str) -> RemoteFile | None:
+    """Return S3 object metadata using the existence HEAD request."""
     ref = parse_uri(uri)
     async with await open_client() as client:
         try:
-            await client.head_object(Bucket=ref.bucket, Key=ref.key)
-            return True
+            response = await client.head_object(Bucket=ref.bucket, Key=ref.key)
+            raw_size = response.get("ContentLength")
+            size = int(raw_size) if raw_size is not None else None
+            return RemoteFile(uri, Path(ref.key).name, size)
         except Exception as exc:
             response = getattr(exc, "response", None)
             code = None
@@ -80,7 +87,7 @@ async def file_exists(uri: str) -> bool:
                 if isinstance(metadata, dict):
                     status = metadata.get("HTTPStatusCode")
             if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
-                return False
+                return None
             if status in {401, 403} or code in {"403", "AccessDenied"}:
                 raise PermissionError(
                     f"S3 returned a permission error while checking source object: {uri!r}"

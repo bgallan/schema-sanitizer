@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from importlib import import_module
 from typing import Any
 
@@ -149,11 +150,18 @@ def create_or_replace_external_bigquery_table_from_namespace(
     args: Any,
     table_ref: BigQueryTableRef,
     schema: Any,
+    *,
+    reference_file_schema_uri: str | None = None,
 ) -> None:
     """Create or replace a BigQuery external table using namespace settings."""
     dbapi, _database_options = import_bigquery_adbc()
     db_kwargs = bigquery_db_kwargs_from_namespace(args, table_ref)
     spec = external_table_spec_from_namespace(args)
+    if normalize_external_format(spec.external_format) == "PARQUET":
+        spec = replace(
+            spec,
+            reference_file_schema_uri=reference_file_schema_uri,
+        )
     column_order = str(getattr(args, "column_order", "alphabetically")).strip().lower()
     sort_fields_alphabetically = column_order == "alphabetically"
     _ddl, skipped_partition_fields = external_table_ddl(
@@ -180,6 +188,11 @@ def create_or_replace_external_bigquery_table_from_namespace(
         spec.partition_columns,
         bool(spec.parquet_enable_list_inference),
     )
+    if spec.reference_file_schema_uri is not None:
+        LOGGER.info(
+            "BigQuery external table reference schema file=%s",
+            spec.reference_file_schema_uri,
+        )
     if sort_fields_alphabetically:
         LOGGER.debug("BigQuery external table schema field ordering=alphabetically")
     LOGGER.debug("BigQuery external table source URIs: %s", spec.source_uris)

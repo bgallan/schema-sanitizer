@@ -6,7 +6,7 @@ A native C++23 engine performs schema inference, reconciliation, bounded
 streaming, and Arrow C Data materialization; the Python API provides file,
 dataframe, partitioned pipeline, and BigQuery integration helpers.
 
-Version 0.3.8 is still alpha software, with particular focus on Parquet files
+Version 0.3.9 is still alpha software, with particular focus on Parquet files
 used by BigQuery external tables.
 
 ## Index
@@ -38,6 +38,8 @@ used by BigQuery external tables.
   sidecar model.
 - [RESPONSIBILITIES.md](RESPONSIBILITIES.md) maps the Python and C++ source
   layout for contributors.
+- [THREADING_TODO.md](THREADING_TODO.md) defines the deterministic single-thread
+  and multi-thread architecture and its implementation checklist.
 - [COMPATIBILITY.md](COMPATIBILITY.md) defines supported runtimes and serialized-state guarantees.
 
 ## [Install](#index)
@@ -473,7 +475,7 @@ python benchmarks/bench_ingest.py --case jsonl --rows 100000 --repeats 3
 ```
 
 For architecture and ownership, see [RESPONSIBILITIES.md](RESPONSIBILITIES.md).
-For the production-readiness roadmap, see [todo.md](todo.md).
+For the deterministic threading roadmap, see [THREADING_TODO.md](THREADING_TODO.md).
 
 ## [License](#index)
 
