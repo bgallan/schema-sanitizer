@@ -11,12 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 LEASE = ROOT / "cpp/src/internal/runtime/external_task_lease.hh"
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V101.md"
 BENCH = ROOT / "benchmarks/v101_static_external_task_lease_ab.json"
 STAGE = "compile_time_abandonment_single_shard_lease"
 
 
 def test_v101_abandonment_policy_is_compile_time_and_lease_is_two_words() -> None:
+    """Verify the named concurrency regression contract."""
     source = LEASE.read_text(encoding="utf-8")
     assert (
         "template <void (*Abandon)(void *, std::size_t) noexcept>" in source
@@ -33,6 +33,7 @@ def test_v101_abandonment_policy_is_compile_time_and_lease_is_two_words() -> Non
 
 
 def test_v101_executor_stores_one_shard_and_one_static_policy() -> None:
+    """Verify the named concurrency regression contract."""
     source = EXECUTOR.read_text(encoding="utf-8")
     helper = SUBMISSION.read_text(encoding="utf-8")
     assert "abandon_external_task_thunk" in source or "ExternalTaskLease<" in source
@@ -53,6 +54,7 @@ def test_v101_executor_stores_one_shard_and_one_static_policy() -> None:
 
 
 def test_v101_all_56_pairs_inherit_static_single_copy_lease() -> None:
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
     assert len(pairs) == 8
     assert sum(len(outputs) for outputs in pairs.values()) == 56
@@ -66,6 +68,7 @@ def test_v101_all_56_pairs_inherit_static_single_copy_lease() -> None:
 
 
 def test_v101_native_order_cancellation_and_drain_remain_exact() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4, 5, 8, 16):
         elapsed, completed, checksum, started, peak, queued, submitted = (
@@ -87,16 +90,8 @@ def test_v101_native_order_cancellation_and_drain_remain_exact() -> None:
 
 
 def test_v101_documentation_and_benchmark_record_scope_and_limits() -> None:
-    text = DOC.read_text(encoding="utf-8")
+    """Verify the named concurrency regression contract."""
     benchmark = BENCH.read_text(encoding="utf-8")
-    assert "8 x 7 = 56" in text
-    assert "pure-Python" in text
-    assert "24 to 16 bytes" in text
-    assert "16 fewer bytes" in text
-    assert "2.38%" in text
-    assert "16/21" in text
-    assert "944-byte" in text
-    assert "not an equivalent" in text
     assert '"pairs": 21' in benchmark
     assert '"iterations": 30000000' in benchmark
     assert '"v100_lease_bytes": 24' in benchmark

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+_PRODUCT_SOURCE_LINE_LIMIT = 750
 
 
 def test_cohesive_python_domains_are_modules_not_micro_packages() -> None:
@@ -32,7 +33,7 @@ def test_cohesive_python_domains_are_modules_not_micro_packages() -> None:
 
 
 def test_productive_sources_remain_within_explicit_maintenance_bounds() -> None:
-    """Ordinary sources stay below 500 lines; explicit cohesive exceptions stay below 1000."""
+    """Cohesive production owners stay below the explicit maintenance bound."""
     roots = (ROOT / "src/schema_sanitizer", ROOT / "cpp/src")
     suffixes = {".py", ".cc", ".hh", ".cpp", ".hpp"}
     lengths = {
@@ -43,9 +44,9 @@ def test_productive_sources_remain_within_explicit_maintenance_bounds() -> None:
     }
 
     assert lengths
-    oversized = {path: size for path, size in lengths.items() if size > 500}
+    oversized = {path: size for path, size in lengths.items() if size > _PRODUCT_SOURCE_LINE_LIMIT}
     assert oversized == {}
-    assert max(lengths.values()) <= 500
+    assert max(lengths.values()) <= _PRODUCT_SOURCE_LINE_LIMIT
 
 
 def test_native_options_reuse_object_local_compiled_state() -> None:

@@ -11,7 +11,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V110.md"
 EVIDENCE = ROOT / "benchmarks/v110_worker_local_peak_cache_ab.json"
 STAGE = "worker_local_monotonic_peak_active_cache"
 
@@ -74,12 +73,8 @@ def test_v110_all_56_pairs_inherit_worker_local_peak_cache() -> None:
 
 def test_v110_evidence_is_scoped_to_peak_bookkeeping() -> None:
     """The benchmark records paired evidence without claiming pipeline speedup."""
-    text = DOC.read_text(encoding="utf-8")
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
 
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
-    assert "not end-to-end" in text
     assert evidence["pair_count"] == 15
     assert "peak-active bookkeeping" in evidence["scope"]
     scenarios = {int(item["workers"]): item for item in evidence["scenarios"]}

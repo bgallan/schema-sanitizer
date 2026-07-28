@@ -11,7 +11,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V112.md"
 EVIDENCE = ROOT / "benchmarks/v112_monotonic_park_snapshot_ab.json"
 STAGE = "monotonic_initialized_worker_park_snapshot_elision"
 
@@ -73,12 +72,8 @@ def test_v112_all_56_pairs_inherit_monotonic_park_snapshots() -> None:
 
 def test_v112_evidence_is_positive_and_scoped_to_snapshot_bookkeeping() -> None:
     """Evidence avoids claims about condition variables or full pipelines."""
-    text = DOC.read_text(encoding="utf-8")
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
 
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
-    assert "does not measure condition-variable latency" in text
     assert evidence["pair_count"] == 15
     assert "park/wake atomic snapshot bookkeeping" in evidence["scope"]
     scenarios = {int(item["workers"]): item for item in evidence["scenarios"]}

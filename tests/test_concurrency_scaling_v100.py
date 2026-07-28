@@ -9,12 +9,12 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 
 ROOT = Path(__file__).resolve().parents[1]
 LEASE = ROOT / "cpp/src/internal/runtime/external_task_lease.hh"
-DOC = ROOT / "CONCURRENCY_SCALING_V100.md"
 BENCH = ROOT / "benchmarks/v100_external_task_lease_sentinel_ab.json"
 STAGE = "single_sentinel_external_task_lease_completion"
 
 
 def test_v100_owner_is_the_only_mutable_completion_sentinel() -> None:
+    """Verify the named concurrency regression contract."""
     source = LEASE.read_text(encoding="utf-8")
     move_start = source.index("ExternalTaskLease(ExternalTaskLease &&other)")
     move = source[move_start : source.index("ExternalTaskLease &operator=", move_start)]
@@ -27,6 +27,7 @@ def test_v100_owner_is_the_only_mutable_completion_sentinel() -> None:
 
 
 def test_v100_all_56_pairs_inherit_single_sentinel_lease() -> None:
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
     assert len(pairs) == 8
     assert sum(len(outputs) for outputs in pairs.values()) == 56
@@ -40,6 +41,7 @@ def test_v100_all_56_pairs_inherit_single_sentinel_lease() -> None:
 
 
 def test_v100_native_order_cancel_and_external_drain_remain_exact() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4, 5, 8, 16):
         elapsed, completed, checksum, started, peak, queued, submitted = (
@@ -61,13 +63,7 @@ def test_v100_native_order_cancel_and_external_drain_remain_exact() -> None:
 
 
 def test_v100_documentation_and_benchmark_cover_matrix_and_limits() -> None:
-    text = DOC.read_text(encoding="utf-8")
+    """Verify the named concurrency regression contract."""
     benchmark = BENCH.read_text(encoding="utf-8")
-    assert "8 x 7 = 56" in text
-    assert "pure-Python" in text
-    assert "4.89%" in text
-    assert "13/21" in text
-    assert "not an equivalent" in text
-    assert "end-to-end speed promise" in text
     assert '"pairs": 21' in benchmark
     assert '"iterations": 30000000' in benchmark

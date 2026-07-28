@@ -12,7 +12,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 ROOT = Path(__file__).resolve().parents[1]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V117.md"
 EVIDENCE = ROOT / "benchmarks/v117_wake_epoch_cacheline_ab.json"
 PROBE = ROOT / "benchmarks/v117_wake_epoch_cacheline_tsan.cc"
 STAGE = "cacheline_isolated_worker_wake_epoch_publication"
@@ -76,7 +75,6 @@ def test_v117_all_56_pairs_inherit_wake_epoch_isolation() -> None:
 def test_v117_evidence_is_positive_and_narrowly_scoped() -> None:
     """The benchmark shows cache ownership gains without throughput claims."""
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    text = DOC.read_text(encoding="utf-8")
 
     assert evidence["pair_count"] == 15
     assert evidence["iterations_per_thread"] == 5_000_000
@@ -86,8 +84,6 @@ def test_v117_evidence_is_positive_and_narrowly_scoped() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] == 15
         assert item["paired_median_reduction_percent"] > 60.0
-    assert "8 x 7 = 56" in text
-    assert "pure-Python" in text
 
 
 def test_v117_version_is_at_least_0370() -> None:

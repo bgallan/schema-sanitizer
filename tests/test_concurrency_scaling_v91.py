@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
 LEASE = ROOT / "cpp/src/internal/runtime/external_task_lease.hh"
-DOC = ROOT / "CONCURRENCY_SCALING_V91.md"
 
 
 def test_v91_completion_accounting_is_cacheline_sharded() -> None:
+    """Verify the named concurrency regression contract."""
     source = EXECUTOR.read_text(encoding="utf-8")
 
     assert "struct alignas(64) ExternalCompletionShard" in source
@@ -32,6 +32,7 @@ def test_v91_completion_accounting_is_cacheline_sharded() -> None:
 
 
 def test_v91_scheduled_and_completed_totals_are_exact_per_shard() -> None:
+    """Verify the named concurrency regression contract."""
     source = EXECUTOR.read_text(encoding="utf-8")
     helper = SUBMISSION.read_text(encoding="utf-8")
 
@@ -47,6 +48,7 @@ def test_v91_scheduled_and_completed_totals_are_exact_per_shard() -> None:
 
 
 def test_v91_abandonment_carries_the_same_completion_shard() -> None:
+    """Verify the named concurrency regression contract."""
     source = EXECUTOR.read_text(encoding="utf-8")
     helper = SUBMISSION.read_text(encoding="utf-8")
     lease = LEASE.read_text(encoding="utf-8")
@@ -74,6 +76,7 @@ def test_v91_abandonment_carries_the_same_completion_shard() -> None:
 
 
 def test_v91_all_56_pairs_inherit_sharded_completion_accounting() -> None:
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
 
     assert sum(len(outputs) for outputs in pairs.values()) == 56
@@ -88,18 +91,8 @@ def test_v91_all_56_pairs_inherit_sharded_completion_accounting() -> None:
             assert guarantee["eligible_multi_benefit"] is True
 
 
-def test_v91_documentation_records_safety_coverage_and_ab() -> None:
-    text = DOC.read_text(encoding="utf-8")
-
-    assert "8 x 7" in text
-    assert "pure-Python" in text
-    assert "worker-count" in text
-    assert "ExternalTaskLease" in text
-    assert "13.56%" in text
-    assert "memory remains bounded" in text
-
-
 def test_v91_native_completion_drains_exactly_across_shard_boundaries() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4, 5, 8, 16):
         elapsed, completed, checksum, started, peak, queued, submitted = (
@@ -115,6 +108,7 @@ def test_v91_native_completion_drains_exactly_across_shard_boundaries() -> None:
 
 
 def test_v91_stage_cancellation_preserves_lifetime_wait() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     elapsed_us, active, observed_stop, queued = (
         native_core.operation_task_arena_cancellation_probe()

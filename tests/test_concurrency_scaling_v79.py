@@ -41,15 +41,16 @@ class _FakeReader:
         self.closed = True
 
 
-def test_v79_csv_high_core_policy_is_adaptive_not_globally_wider() -> None:
-    """Only wide fixed-cost CSV grows beyond the proven four-worker path."""
+def test_v79_csv_high_core_policy_scales_without_a_fixed_worker_ceiling() -> None:
+    """CSV output scales proportionally beyond the historical 32-worker path."""
     source = CSV_WRITER.read_text(encoding="utf-8")
 
-    assert "kCsvOutputWorkerCeiling = 4" in source
-    assert "kMaximumWideFixedCsvWorkers = 16" in source
-    assert "wide_fixed_csv_worker_ceiling_for(8) == 4" in source
-    assert "wide_fixed_csv_worker_ceiling_for(16) == 8" in source
-    assert "wide_fixed_csv_worker_ceiling_for(32) == 16" in source
+    assert "csv_worker_ceiling_for(8, true) == 4" in source
+    assert "csv_worker_ceiling_for(16, true) == 8" in source
+    assert "csv_worker_ceiling_for(32, true) == 16" in source
+    assert "csv_worker_ceiling_for(64, true) == 32" in source
+    assert "csv_worker_ceiling_for(64, false) == 8" in source
+    assert "kMaximumWideFixedCsvWorkers" not in source
     assert "high_core_eligible" in source
     assert "output_worker_ceiling" in source
     assert "scale_wide_fixed" in source

@@ -86,8 +86,7 @@ def test_python_row_shape_validation_has_one_native_owner() -> None:
     native = (CPP / "api/python_abi3/json/_core_abi3_python_rows.cc").read_text(encoding="utf-8")
     assert "all(isinstance(row, dict)" not in selection
     assert "PyDict_Check(item)" in native
-    assert "row %zd " in native
-    assert "is not a dict" in native
+    assert '"%zd is not a dict"' in native
 
 
 def test_prepared_options_resolution_has_one_abi3_owner() -> None:

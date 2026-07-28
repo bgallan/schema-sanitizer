@@ -87,7 +87,8 @@ def test_v73_small_parquet_row_groups_use_the_common_output_arena() -> None:
     """Four-worker operations overlap row groups without creating another pool."""
     source = WRITER_API.read_text(encoding="utf-8")
     assert "arena_workers >= 4U" in source
-    assert "std::max<std::size_t>(2U, arena_workers / 2U)" in source
+    assert "std::max<std::size_t>(2U, arena_workers / 8U)" in source
+    assert "fraction continues growing on hosts wider than 32 workers" in source
     assert "RowGroupExecutor::Make" in source
     assert "TaskArenaLane::kOutput" in source
     assert "TaskTelemetryKind::kOutput" in source

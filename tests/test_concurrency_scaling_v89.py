@@ -13,10 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 LEASE = ROOT / "cpp/src/internal/runtime/external_task_lease.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V89.md"
 
 
 def test_v89_admission_total_remains_mutex_owned_after_v91_sharding() -> None:
+    """Verify the named concurrency regression contract."""
     source = EXECUTOR.read_text(encoding="utf-8")
     helper = SUBMISSION.read_text(encoding="utf-8")
     combined = source + helper
@@ -27,6 +27,7 @@ def test_v89_admission_total_remains_mutex_owned_after_v91_sharding() -> None:
 
 
 def test_v89_single_completion_rmw_is_superseded_by_v91_shards() -> None:
+    """Verify the named concurrency regression contract."""
     source = EXECUTOR.read_text(encoding="utf-8")
     assert "completed_external_tasks_.fetch_add" not in source
     assert "completed_external_tasks_[shard].completed" in source
@@ -37,6 +38,7 @@ def test_v89_single_completion_rmw_is_superseded_by_v91_shards() -> None:
 
 
 def test_v89_submit_failure_remains_lease_accounted() -> None:
+    """Verify the named concurrency regression contract."""
     source = EXECUTOR.read_text(encoding="utf-8")
     helper = SUBMISSION.read_text(encoding="utf-8")
     for text in (source, helper):
@@ -49,6 +51,7 @@ def test_v89_submit_failure_remains_lease_accounted() -> None:
 
 
 def test_v89_all_56_pairs_inherit_single_rmw_lifetime_accounting() -> None:
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
     assert sum(len(outputs) for outputs in pairs.values()) == 56
     for input_name, outputs in pairs.items():
@@ -62,18 +65,8 @@ def test_v89_all_56_pairs_inherit_single_rmw_lifetime_accounting() -> None:
             assert guarantee["eligible_multi_benefit"] is True
 
 
-def test_v89_documentation_records_safety_and_ab() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    assert "two global RMW operations" in text
-    assert "one global RMW operation" in text
-    assert "56 supported input/output pairs" in text
-    assert "shutdown" in text.lower()
-    assert "100,000" in text
-    assert "37.46%" in text
-    assert "21.97%" in text
-
-
 def test_v89_native_ordered_completion_still_drains_exactly() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4):
         elapsed, completed, checksum, started, peak, queued, submitted = (

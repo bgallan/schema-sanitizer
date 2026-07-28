@@ -11,7 +11,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V119.md"
 EVIDENCE = ROOT / "benchmarks/v119_fixed_visibility_snapshot_ab.json"
 PROBE = ROOT / "benchmarks/v119_fixed_visibility_snapshot_tsan.cc"
 STAGE = "fixed_physical_queue_visibility_snapshot"
@@ -78,7 +77,6 @@ def test_v119_all_56_pairs_inherit_fixed_visibility_snapshots() -> None:
 def test_v119_evidence_is_positive_and_correctly_scoped() -> None:
     """Paired evidence covers all 2/3/4-shard boundaries without broad claims."""
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    text = DOC.read_text(encoding="utf-8")
 
     assert evidence["pair_count"] == 15
     assert evidence["iterations_per_process"] == 20_000_000
@@ -88,8 +86,6 @@ def test_v119_evidence_is_positive_and_correctly_scoped() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] == 15
         assert item["paired_median_reduction_percent"] > 40.0
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
 
 
 def test_v119_version_is_at_least_0372() -> None:

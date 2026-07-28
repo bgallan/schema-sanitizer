@@ -20,7 +20,6 @@ HEADER = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 TELEMETRY = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
 TELEMETRY_JSON = ROOT / "cpp/src/internal/runtime/performance_telemetry_json.cc.inc"
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
-DOC = ROOT / "CONCURRENCY_SCALING_V108.md"
 EVIDENCE = ROOT / "benchmarks/v108_worker_submission_telemetry_ab.json"
 STAGE = "single_store_worker_sharded_submission_telemetry"
 
@@ -148,14 +147,8 @@ def test_v108_public_multiworker_stats_remain_exact(tmp_path: Path) -> None:
 
 def test_v108_documentation_and_evidence_record_scope() -> None:
     """Release evidence records coverage, cache isolation, and both producer cases."""
-    text = DOC.read_text(encoding="utf-8")
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
 
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
-    assert "false sharing" in text
-    assert "33.25% reduction" in text
-    assert "94.13% reduction" in text
     for key in ("single_producer", "four_producers"):
         result = evidence[key]
         assert result["candidate_wins"] == result["pair_count"] == 15

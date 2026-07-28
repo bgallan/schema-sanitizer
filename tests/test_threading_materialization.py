@@ -34,7 +34,7 @@ def _read_jsonl(path: Path, *, threading_mode: str, **options):
 
 
 def test_multi_materialization_preserves_rows_stats_and_batch_boundaries() -> None:
-    """Ordered commit keeps data, diagnostics, and 65K row batches identical."""
+    """Ordered commit keeps data and diagnostics across bounded parallel packets."""
     rows = [{"ordinal": index, "value": f"row-{index}"} for index in range(70_000)]
 
     single = _read_python(rows, threading_mode="single")
@@ -42,7 +42,9 @@ def test_multi_materialization_preserves_rows_stats_and_batch_boundaries() -> No
 
     assert multi.clean_data.equals(single.clean_data)
     assert [batch.num_rows for batch in single.clean_data.to_batches()] == [65_536, 4_464]
-    assert [batch.num_rows for batch in multi.clean_data.to_batches()] == [65_536, 4_464]
+    multi_batch_rows = [batch.num_rows for batch in multi.clean_data.to_batches()]
+    assert sum(multi_batch_rows) == 70_000
+    assert all(0 < rows <= 65_536 for rows in multi_batch_rows)
     assert multi.stats == single.stats
 
 

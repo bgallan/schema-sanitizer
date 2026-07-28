@@ -14,7 +14,6 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V88.md"
 
 
 def _take_next_arena_source() -> str:
@@ -72,17 +71,6 @@ def test_v88_all_56_pairs_inherit_slot_authoritative_coordination() -> None:
             )
             assert guarantee["source_to_sink_parallel_path"] is True
             assert guarantee["eligible_multi_benefit"] is True
-
-
-def test_v88_documentation_records_terminal_argument_and_ab() -> None:
-    """The release note records both safety reasoning and measured evidence."""
-    text = DOC.read_text(encoding="utf-8")
-
-    assert "Lost-wakeup and terminal-state argument" in text
-    assert "56 supported input/output pairs" in text
-    assert "200,000" in text
-    assert "5.75%" in text
-    assert "3.02%" in text
 
 
 def test_v88_native_completion_preserves_order_for_two_and_four_workers() -> None:

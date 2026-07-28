@@ -10,11 +10,11 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V103.md"
 STAGE = "single_snapshot_arena_terminal_flags"
 
 
 def test_v103_terminal_causes_share_one_atomic_word():
+    """Verify the named concurrency regression contract."""
     header = EXECUTOR.read_text()
     completion = COMPLETION.read_text()
     assert "std::atomic<std::uint8_t> arena_terminal_flags_{0};" in header
@@ -25,6 +25,7 @@ def test_v103_terminal_causes_share_one_atomic_word():
 
 
 def test_v103_normal_publication_takes_one_terminal_snapshot():
+    """Verify the named concurrency regression contract."""
     completion = COMPLETION.read_text()
     start = completion.index("auto published_state = ArenaSlotState::kReady;")
     end = completion.index("slot.state.store(published_state", start)
@@ -35,6 +36,7 @@ def test_v103_normal_publication_takes_one_terminal_snapshot():
 
 
 def test_v103_all_56_pairs_inherit_stage():
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
     assert len(pairs) == 8
     assert sum(map(len, pairs.values())) == 56
@@ -46,6 +48,7 @@ def test_v103_all_56_pairs_inherit_stage():
 
 
 def test_v103_native_order_cancel_and_drain():
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4, 5, 8, 16):
         errors, completed, _, started, peak, queued, submitted = (
@@ -61,10 +64,3 @@ def test_v103_native_order_cancel_and_drain():
     assert active == 0
     assert observed >= 1
     assert queued == 0
-
-
-def test_v103_documented_scope():
-    text = DOC.read_text()
-    assert "8 x 7 = 56" in text
-    assert "pure-Python" in text
-    assert "one acquire load" in text

@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 SELECTION = ROOT / "cpp/src/internal/runtime/operation_task_arena_selection.hh"
-DOC = ROOT / "CONCURRENCY_SCALING_V118.md"
 EVIDENCE = ROOT / "benchmarks/v118_single_modulo_lane_origin_ab.json"
 PROBE = ROOT / "benchmarks/v118_single_modulo_lane_origin_tsan.cc"
 STAGE = "single_modulo_lane_origin_reuse"
@@ -23,7 +22,7 @@ def test_v118_planned_submit_normalizes_lane_ticket_once() -> None:
     """The arena hot path reuses one normalized origin per submission."""
     arena = ARENA.read_text(encoding="utf-8")
     planned = arena[
-        arena.index("Task task, const TaskArenaSubmissionPlan &plan") : arena.index(
+        arena.index("const auto lane_begin = plan.lane_begin;") : arena.index(
             "OperationTaskArena::worker_count"
         )
     ]
@@ -100,7 +99,6 @@ def test_v118_all_56_pairs_inherit_single_modulo_origin() -> None:
 def test_v118_evidence_covers_odd_and_power_of_two_widths() -> None:
     """Paired evidence remains positive across representative lane widths."""
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    text = DOC.read_text(encoding="utf-8")
 
     assert evidence["pair_count"] == 15
     assert evidence["iterations_per_process"] == 20_000_000
@@ -110,8 +108,6 @@ def test_v118_evidence_covers_odd_and_power_of_two_widths() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] == 15
         assert item["paired_median_reduction_percent"] > 60.0
-    assert "8 x 7 =" in text
-    assert "pure-Python" in text
 
 
 def test_v118_version_is_at_least_0371() -> None:

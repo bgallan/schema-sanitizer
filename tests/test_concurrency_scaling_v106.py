@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
 COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V106.md"
 EVIDENCE = ROOT / "benchmarks/v106_high_core_in_flight_consume_ab.json"
 STAGE = "high_core_single_writer_in_flight_consumption"
 
@@ -95,8 +94,3 @@ def test_v106_evidence_and_scope_are_recorded():
     assert evidence["pair_count"] == 15
     assert evidence["candidate_wins"] == 15
     assert evidence["paired_median_reduction_percent"] > 80.0
-    text = DOC.read_text()
-    assert "8 x 7 = 56" in text
-    assert "pure-Python" in text
-    assert "1-8 workers" in text
-    assert "not an end-to-end" in text

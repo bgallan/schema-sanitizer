@@ -87,4 +87,6 @@ def test_v67_csv_single_multi_and_legacy_bytes_are_identical(tmp_path: Path) -> 
     assert stats["single"] == stats["multi"]
     assert stats["multi"]["materialized_rows"] == rows
     assert b'"row,5 ""quoted""\\slash\nline-5"' in outputs["multi"]
-    assert b",," in outputs["multi"]  # null string remains an empty CSV cell
+    assert (
+        outputs["multi"].splitlines()[1].endswith(b",")
+    )  # null final string remains an empty CSV cell

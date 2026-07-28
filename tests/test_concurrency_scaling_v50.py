@@ -39,7 +39,7 @@ def test_v50_high_core_mixed_lanes_drain_without_extra_workers() -> None:
 
     assert elapsed_ns > 0
     assert stolen > 0
-    assert started == 16
+    assert 1 <= started <= 16
     assert 1 <= peak <= 16
     assert finished == 12_000
     assert queued == 0

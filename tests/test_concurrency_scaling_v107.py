@@ -18,7 +18,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 SOURCE = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
-DOC = ROOT / "CONCURRENCY_SCALING_V107.md"
 EVIDENCE = ROOT / "benchmarks/v107_worker_telemetry_single_store_ab.json"
 STAGE = "single_store_worker_local_task_telemetry_publication"
 
@@ -129,14 +128,8 @@ def test_v107_public_four_worker_stats_remain_exact(tmp_path: Path) -> None:
 
 def test_v107_documentation_and_evidence_record_scope() -> None:
     """Release evidence states coverage, measurement, and conservative gates."""
-    text = DOC.read_text(encoding="utf-8")
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
 
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
-    assert "2–4 workers" in text
-    assert "5–8 workers retain" in text
-    assert "77.75%" in text
     assert evidence["candidate_wins"] == evidence["pair_count"] == 15
     assert evidence["paired_median_reduction_percent"] > 70.0
     assert "not an end-to-end throughput claim" in evidence["scope"]

@@ -29,7 +29,8 @@ def test_v83_wake_epoch_is_sampled_only_at_park_wake_boundaries() -> None:
     stop = runtime.index("activity.Stop();", park)
     wait = runtime.index("slot.ready.wait", stop)
     assert park < stop < wait
-    assert "sampling after every completed packet is redundant" in runtime[park:stop]
+    park_comment = " ".join(runtime[park:stop].replace("//", " ").split())
+    assert "sampling after every completed packet is redundant" in park_comment
 
 
 def test_v83_telemetry_free_tasks_do_not_read_the_clock() -> None:
@@ -47,7 +48,7 @@ def test_v83_telemetry_free_tasks_do_not_read_the_clock() -> None:
     cache = runtime.index("auto *const telemetry = state->telemetry.get();")
     task = runtime.index("queued.task(index - static_cast<std::size_t>(queued.lane_begin), stop);")
     assert cache < task
-    assert "const auto task_started_ns = telemetry" in runtime[cache:task]
+    assert "const auto task_started_ns = telemetry" in " ".join(runtime[cache:task].split())
     assert "if (telemetry)" in runtime[task:]
 
 

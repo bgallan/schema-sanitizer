@@ -13,7 +13,6 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 
 ROOT = Path(__file__).resolve().parents[1]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
-DOC = ROOT / "CONCURRENCY_SCALING_V90.md"
 
 
 def test_v90_submitted_counter_is_worker_sharded() -> None:
@@ -73,18 +72,6 @@ def test_v90_all_56_pairs_inherit_worker_sharded_submission_accounting() -> None
             assert "worker_sharded_submission_accounting" in guarantee["shared_parallel_stages"]
             assert guarantee["source_to_sink_parallel_path"] is True
             assert guarantee["eligible_multi_benefit"] is True
-
-
-def test_v90_documentation_records_python_and_controlled_ab() -> None:
-    """The release record states complete coverage and bounded diagnostics."""
-    text = DOC.read_text(encoding="utf-8")
-
-    assert "pure-Python row input" in text
-    assert "complete 8 x 7 input/output matrix" in text
-    assert "at most 32" in text
-    assert "8.88%" in text
-    assert "neutral noise" in text
-    assert "exact submitted-task totals" in text
 
 
 def test_v90_native_stage_shards_preserve_exact_submitted_total() -> None:

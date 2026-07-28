@@ -117,6 +117,7 @@ def test_provider_pool_initializes_distinct_keys_concurrently() -> None:
     )
 
     async def exercise() -> tuple[int, list[_FakeClient]]:
+        """Exercise pooled provider-session behavior."""
         active = 0
         peak = 0
         both_started = asyncio.Event()
@@ -124,6 +125,7 @@ def test_provider_pool_initializes_distinct_keys_concurrently() -> None:
         clients: list[_FakeClient] = []
 
         async def create() -> _FakeClient:
+            """Create one tracked provider session."""
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
@@ -158,10 +160,12 @@ def test_provider_pool_keeps_single_flight_for_one_key() -> None:
     )
 
     async def exercise() -> tuple[int, _FakeClient]:
+        """Exercise pooled provider-session behavior."""
         calls = 0
         client = _FakeClient()
 
         async def create() -> _FakeClient:
+            """Create one tracked provider session."""
             nonlocal calls
             calls += 1
             await asyncio.sleep(0)

@@ -12,7 +12,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 SELECTION = ROOT / "cpp/src/internal/runtime/operation_task_arena_selection.hh"
-DOC = ROOT / "CONCURRENCY_SCALING_V115.md"
 EVIDENCE = ROOT / "benchmarks/v115_sparse_round_robin_selection_ab.json"
 STAGE = "sparse_bitset_round_robin_worker_selection"
 
@@ -30,13 +29,13 @@ def test_v115_selection_visits_only_ordered_set_bits() -> None:
     assert "relative == width_mask" in helper
     assert runtime.count("task_arena_detail::ordered_lane_candidates(") == 2
     assert "first_ordered_lane_index(" in runtime
-    assert (
-        "for (std::size_t offset = 0; offset < width; ++offset)"
-        not in (
-            runtime.split("reserve_unstarted_worker(", 1)[1].split("queue_visibility_snapshot(", 1)[
-                0
-            ]
-        )
+    reservation = runtime.split("reserve_unstarted_worker(", 1)[1].split(
+        "queue_visibility_snapshot(", 1
+    )[0]
+    assert "if (state->scalable_scan)" in reservation
+    assert "for (std::size_t offset = 0; offset < width; ++offset)" in reservation
+    assert reservation.index("if (state->scalable_scan)") < reservation.index(
+        "task_arena_detail::ordered_lane_candidates("
     )
 
 
@@ -90,7 +89,6 @@ def test_v115_all_56_pairs_inherit_sparse_selection() -> None:
 def test_v115_evidence_is_positive_and_narrowly_scoped() -> None:
     """The paired evidence covers three widths without throughput claims."""
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    text = DOC.read_text(encoding="utf-8")
 
     assert evidence["pair_count"] == 15
     assert "round-robin worker selection" in evidence["scope"]
@@ -100,5 +98,3 @@ def test_v115_evidence_is_positive_and_narrowly_scoped() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] == 15
         assert item["paired_median_reduction_percent"] > 70.0
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text

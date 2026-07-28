@@ -12,7 +12,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 ROOT = Path(__file__).resolve().parents[1]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V113.md"
 EVIDENCE = ROOT / "benchmarks/v113_sharded_queue_visibility_ab.json"
 STAGE = "high_core_sharded_queue_visibility"
 
@@ -75,12 +74,8 @@ def test_v113_all_56_pairs_inherit_sharded_visibility() -> None:
 
 def test_v113_evidence_is_positive_and_scoped_to_visibility_bookkeeping() -> None:
     """Evidence is paired, positive, and avoids end-to-end throughput claims."""
-    text = DOC.read_text(encoding="utf-8")
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
 
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
-    assert "does not measure parsing" in " ".join(text.split())
     assert evidence["pair_count"] == 15
     assert "queue-visibility publication" in evidence["scope"]
     scenarios = {int(item["workers"]): item for item in evidence["scenarios"]}

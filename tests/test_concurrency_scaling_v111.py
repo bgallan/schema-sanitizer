@@ -14,7 +14,6 @@ RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 TELEMETRY_HEADER = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 TELEMETRY_SOURCE = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
 TELEMETRY_JSON = ROOT / "cpp/src/internal/runtime/performance_telemetry_json.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V111.md"
 EVIDENCE = ROOT / "benchmarks/v111_worker_active_streak_shard_ab.json"
 STAGE = "single_store_worker_active_streak_telemetry"
 
@@ -89,12 +88,8 @@ def test_v111_all_56_pairs_inherit_streak_sharding() -> None:
 
 def test_v111_evidence_is_scoped_and_consistently_positive() -> None:
     """The benchmark reports only isolated telemetry publication evidence."""
-    text = DOC.read_text(encoding="utf-8")
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
 
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
-    assert "not end-to-end" in text.lower()
     assert evidence["pair_count"] == 15
     assert "active-streak telemetry publication" in evidence["scope"]
     scenarios = {int(item["workers"]): item for item in evidence["scenarios"]}

@@ -51,7 +51,7 @@ def test_v86_planned_submit_reuses_mask_cursor_and_alternative_offset() -> None:
     arena = ARENA.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
     planned = arena[
-        arena.index("Task task, const TaskArenaSubmissionPlan &plan") : arena.index(
+        arena.index("const auto lane_begin = plan.lane_begin;") : arena.index(
             "OperationTaskArena::worker_count"
         )
     ]

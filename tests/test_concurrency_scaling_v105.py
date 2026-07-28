@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
 COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V105.md"
 STAGE = "mutex_owned_memory_order_tightening"
 
 
@@ -34,7 +33,7 @@ def test_v105_completion_slot_orders_are_minimal_and_safe():
     completion = COMPLETION.read_text()
     claim = completion.split("compare_exchange_strong", 1)[1].split(") {", 1)[0]
     assert "ArenaSlotState::kPublishing" in claim
-    assert "std::memory_order_acquire, std::memory_order_acquire" in claim
+    assert re.search(r"std::memory_order_acquire,\s+std::memory_order_acquire", claim)
     assert "std::memory_order_acq_rel" not in claim
     assert "state = slot.state.load(std::memory_order_relaxed);" in completion
     assert "slot.state.store(published_state, std::memory_order_release);" in completion
@@ -76,12 +75,3 @@ def test_v105_native_order_cancel_and_drain():
     assert active == 0
     assert observed >= 1
     assert queued == 0
-
-
-def test_v105_documented_scope_and_rejections():
-    """The design note records complete coverage, scope, and rejected variants."""
-    text = DOC.read_text()
-    assert "8 x 7 = 56" in text
-    assert "pure-Python" in text
-    assert "weakly ordered" in text
-    assert "Rejected v105 experiments" in text

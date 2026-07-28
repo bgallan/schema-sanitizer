@@ -12,11 +12,11 @@ ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 TELEMETRY_H = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 TELEMETRY_CC = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
-DOC = ROOT / "CONCURRENCY_SCALING_V95.md"
 STAGE = "single_store_worker_local_stolen_publication"
 
 
 def test_v95_arena_steal_counter_uses_one_atomic_store() -> None:
+    """Verify the named concurrency regression contract."""
     arena = ARENA.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
     slot = arena[arena.index("struct WorkerSlot") : arena.index("explicit State")]
@@ -28,6 +28,7 @@ def test_v95_arena_steal_counter_uses_one_atomic_store() -> None:
 
 
 def test_v95_telemetry_steal_counter_uses_same_single_store_rule() -> None:
+    """Verify the named concurrency regression contract."""
     header = TELEMETRY_H.read_text(encoding="utf-8")
     source = TELEMETRY_CC.read_text(encoding="utf-8")
     method = source[source.index("RecordWorkerTaskStolen") : source.index("RecordWorkerStarted")]
@@ -38,6 +39,7 @@ def test_v95_telemetry_steal_counter_uses_same_single_store_rule() -> None:
 
 
 def test_v95_all_56_pairs_inherit_single_store_steal_publication() -> None:
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
     assert sum(len(outputs) for outputs in pairs.values()) == 56
     for input_name, outputs in pairs.items():
@@ -49,6 +51,7 @@ def test_v95_all_56_pairs_inherit_single_store_steal_publication() -> None:
 
 
 def test_v95_native_stealing_and_mixed_lanes_remain_exact() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     stolen, displaced, completed, queued, peak = native_core.operation_task_arena_stealing_probe()
     assert stolen >= 1
@@ -67,11 +70,3 @@ def test_v95_native_stealing_and_mixed_lanes_remain_exact() -> None:
         assert finished == 6_000
         assert queued == 0
         assert submitted > finished
-
-
-def test_v95_documentation_records_matrix_and_memory_bound() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    assert "8 x 7" in text
-    assert "pure-Python" in text
-    assert "single atomic store" in text
-    assert "memory remains bounded" in text

@@ -12,33 +12,33 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 ROOT = Path(__file__).resolve().parents[1]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V120.md"
 EVIDENCE = ROOT / "benchmarks/v120_compact_queued_task_ab.json"
 PROBE = ROOT / "benchmarks/v120_compact_queued_task_tsan.cc"
 STAGE = "compact_queued_task_lane_metadata"
 
 
-def test_v120_queue_packet_uses_lossless_byte_lane_bounds() -> None:
-    """Only validated internal packet bounds narrow under the 32-worker cap."""
+def test_v120_queue_packet_uses_unbounded_lane_bounds() -> None:
+    """Queued lane metadata remains lossless beyond the historical 32-worker path."""
     arena = ARENA.read_text(encoding="utf-8")
     packet = arena.split("struct QueuedTask final", 1)[1].split("};", 1)[0]
 
-    assert "std::uint8_t lane_begin = 0;" in packet
-    assert "std::uint8_t lane_end = 1;" in packet
-    assert "std::size_t lane_begin" not in packet
-    assert "std::size_t lane_end" not in packet
-    assert ".lane_begin = static_cast<std::uint8_t>(lane_begin)" in arena
-    assert ".lane_end = static_cast<std::uint8_t>(lane_end)" in arena
-    assert "worker count exceeds 32" in arena
+    assert "std::size_t lane_begin = 0;" in packet
+    assert "std::size_t lane_end = 1;" in packet
+    assert "std::uint8_t lane_begin" not in packet
+    assert "std::uint8_t lane_end" not in packet
+    assert ".lane_begin = lane_begin" in arena
+    assert ".lane_end = lane_end" in arena
+    assert "scalable_scan(count > 32U)" in arena
+    assert "worker count exceeds 32" not in arena
 
 
-def test_v120_workers_widen_compact_bounds_before_arithmetic() -> None:
+def test_v120_workers_use_native_size_bounds_for_arithmetic() -> None:
     """Compatibility and relative worker arithmetic remain size_t exact."""
     source = RUNTIME.read_text(encoding="utf-8")
 
-    assert "static_cast<std::size_t>(queued.lane_begin)" in source
-    assert "static_cast<std::size_t>(queued.lane_end)" in source
+    assert "index >= queued.lane_begin && index < queued.lane_end" in source
     assert "index - static_cast<std::size_t>(queued.lane_begin)" in source
+    assert "static_cast<std::size_t>(queued.lane_end)" not in source
     assert "dedicated_high_output" in source
     assert "compatible(" in source
 
@@ -78,7 +78,6 @@ def test_v120_all_56_pairs_inherit_compact_queue_packets() -> None:
 def test_v120_evidence_is_positive_and_narrowly_scoped() -> None:
     """Fixed-affinity evidence records density wins without throughput claims."""
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    text = DOC.read_text(encoding="utf-8")
 
     assert evidence["pair_count"] == 15
     assert evidence["baseline_packet_bytes"] == 72
@@ -89,8 +88,6 @@ def test_v120_evidence_is_positive_and_narrowly_scoped() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] >= 13
         assert item["paired_median_reduction_percent"] > 5.0
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
 
 
 def test_v120_version_is_0373() -> None:

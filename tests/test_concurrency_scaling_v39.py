@@ -112,7 +112,8 @@ def test_v39_sources_define_bounded_hybrid_row_mode() -> None:
     assert "kEstimatedWideJsonRowBytes" in partition
     assert "desired_packets" in packets
     assert "workers * 2" in packets
-    assert "std::min<std::int64_t>(16" in packets
+    assert "scaled_worker_baseline" in packets
+    assert "sustained_wide_flat_worker_ceiling(64, 64) == 32" in packets
     assert "FrontendMaterializationMode::kDeferredValidationRaw" in source
     assert "submit_validated_jsonl_packets" in dispatch
     assert "balanced_rows" in validation

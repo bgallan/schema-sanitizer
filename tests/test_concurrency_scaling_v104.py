@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
 COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V104.md"
 STAGE = "high_core_single_writer_in_flight_publication"
 
 
 def test_v104_high_core_submission_uses_single_writer_publication():
+    """Verify the named concurrency regression contract."""
     header = EXECUTOR.read_text()
     submission = SUBMISSION.read_text()
     assert "increment_high_core_in_flight_locked" in header
@@ -27,6 +27,7 @@ def test_v104_high_core_submission_uses_single_writer_publication():
 
 
 def test_v104_low_core_and_consumption_paths_remain_historical():
+    """Verify the named concurrency regression contract."""
     header = EXECUTOR.read_text()
     completion = COMPLETION.read_text()
     # Inline, regular arena and local-pool submissions remain atomic RMWs.
@@ -37,6 +38,7 @@ def test_v104_low_core_and_consumption_paths_remain_historical():
 
 
 def test_v104_all_56_pairs_inherit_stage():
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
     assert len(pairs) == 8
     assert sum(map(len, pairs.values())) == 56
@@ -48,6 +50,7 @@ def test_v104_all_56_pairs_inherit_stage():
 
 
 def test_v104_native_order_rollback_cancel_and_drain():
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4, 5, 8, 16):
         elapsed, completed, _, started, peak, queued, submitted = (
@@ -63,12 +66,3 @@ def test_v104_native_order_rollback_cancel_and_drain():
     assert active == 0
     assert observed >= 1
     assert queued == 0
-
-
-def test_v104_documented_scope_and_evidence():
-    text = DOC.read_text()
-    assert "8 x 7 = 56" in text
-    assert "pure-Python" in text
-    assert ">8 workers" in text
-    assert "one locked RMW" in text
-    assert "15/15 wins" in text

@@ -11,7 +11,6 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 
 ROOT = Path(__file__).resolve().parents[1]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
-DOC = ROOT / "CONCURRENCY_SCALING_V114.md"
 EVIDENCE = ROOT / "benchmarks/v114_running_publication_cacheline_ab.json"
 STAGE = "cacheline_isolated_worker_running_publication"
 
@@ -25,7 +24,9 @@ def test_v114_running_publication_has_a_dedicated_cacheline() -> None:
 
     assert "std::atomic<std::size_t> stolen" in fragment
     assert "alignas(64) std::atomic<bool> running" in fragment
-    assert "queue/submission/steal snapshot line" in fragment
+    assert "independently contended publication off the queue snapshot" in " ".join(
+        fragment.split()
+    )
 
 
 def test_v114_does_not_change_running_memory_orders_or_wake_logic() -> None:
@@ -60,7 +61,6 @@ def test_v114_all_56_pairs_inherit_running_publication_isolation() -> None:
 def test_v114_evidence_is_positive_and_scoped() -> None:
     """The paired benchmark is positive and avoids throughput claims."""
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    text = DOC.read_text(encoding="utf-8")
 
     assert evidence["pair_count"] == 15
     assert "cache-line ownership" in evidence["scope"]
@@ -70,8 +70,6 @@ def test_v114_evidence_is_positive_and_scoped() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] >= 14
         assert item["paired_median_reduction_percent"] > 20.0
-    assert "8 x 7 = 56" in text
-    assert "pure-Python rows" in text
 
 
 def test_v114_real_arena_probe_covers_multiple_worker_counts() -> None:

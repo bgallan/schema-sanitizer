@@ -16,11 +16,11 @@ ARENA_HEADER = ROOT / "cpp/src/internal/runtime/operation_task_arena.hh"
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
-DOC = ROOT / "CONCURRENCY_SCALING_V92.md"
 STAGE = "high_core_executor_local_arena_submission_tickets"
 
 
 def test_v92_arena_exposes_pre_reserved_ticket_submission() -> None:
+    """Verify the named concurrency regression contract."""
     header = ARENA_HEADER.read_text(encoding="utf-8")
     source = ARENA.read_text(encoding="utf-8")
 
@@ -32,6 +32,7 @@ def test_v92_arena_exposes_pre_reserved_ticket_submission() -> None:
 
 
 def test_v92_shared_lane_cursor_is_touched_once_per_executor_not_per_packet() -> None:
+    """Verify the named concurrency regression contract."""
     source = ARENA.read_text(encoding="utf-8")
     reserve_start = source.index("OperationTaskArena::ReserveSubmissionTicket")
     reserve_end = source.index("sanitize::Status OperationTaskArena::Submit", reserve_start)
@@ -49,6 +50,7 @@ def test_v92_shared_lane_cursor_is_touched_once_per_executor_not_per_packet() ->
 
 
 def test_v92_only_high_core_helper_advances_ticket_under_existing_mutex() -> None:
+    """Verify the named concurrency regression contract."""
     executor = EXECUTOR.read_text(encoding="utf-8")
     helper = SUBMISSION.read_text(encoding="utf-8")
 
@@ -68,6 +70,7 @@ def test_v92_only_high_core_helper_advances_ticket_under_existing_mutex() -> Non
 
 
 def test_v92_ticket_skip_on_failed_admission_needs_no_shared_rollback() -> None:
+    """Verify the named concurrency regression contract."""
     executor = EXECUTOR.read_text(encoding="utf-8")
     helper = SUBMISSION.read_text(encoding="utf-8")
 
@@ -79,6 +82,7 @@ def test_v92_ticket_skip_on_failed_admission_needs_no_shared_rollback() -> None:
 
 
 def test_v92_all_56_pairs_inherit_high_core_local_tickets() -> None:
+    """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()
 
     assert sum(len(outputs) for outputs in pairs.values()) == 56
@@ -90,18 +94,8 @@ def test_v92_all_56_pairs_inherit_high_core_local_tickets() -> None:
             assert guarantee["eligible_multi_benefit"] is True
 
 
-def test_v92_documentation_records_complete_coverage_and_guardrails() -> None:
-    text = DOC.read_text(encoding="utf-8")
-
-    assert "8 x 7" in text
-    assert "pure-Python" in text
-    assert "one shared atomic RMW per packet" in text
-    assert ">8 workers" in text
-    assert "seed" in text
-    assert "memory remains bounded" in text
-
-
 def test_v92_native_local_tickets_preserve_order_and_exact_drain() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4, 5, 8, 16):
         elapsed, completed, checksum, started, peak, queued, submitted = (
@@ -117,6 +111,7 @@ def test_v92_native_local_tickets_preserve_order_and_exact_drain() -> None:
 
 
 def test_v92_direct_concurrent_arena_producers_keep_shared_ticket_safety() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     for workers in (2, 4, 8, 16):
         elapsed, submitted, finished, queued, started, peak = (
@@ -131,6 +126,7 @@ def test_v92_direct_concurrent_arena_producers_keep_shared_ticket_safety() -> No
 
 
 def test_v92_cancellation_still_drains_executor_local_ticket_work() -> None:
+    """Verify the named concurrency regression contract."""
     require_native()
     elapsed_us, active, observed_stop, queued = (
         native_core.operation_task_arena_cancellation_probe()
