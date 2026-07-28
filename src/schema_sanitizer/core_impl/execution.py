@@ -6,7 +6,7 @@ from typing import Any
 
 from .generated_metadata import TimestampColumns
 from .json_payloads import json_object_loads
-from .native_options import _options_capsule
+from .native_options import _options_capsule, memory_limit_from_options
 from .native_results import SinkOutput, _registry_sink_output
 from .native_runtime import native_core as _native
 from .probes import (
@@ -280,7 +280,7 @@ class ExecutionContext(
 
     def to_sink_python(self, sink: str, data: Any, options: Any = None) -> SinkOutput:
         """Serialize Python rows and send them to a native JSON sink."""
-        memory_limit = getattr(options, "memory_limit_bytes", None) if options is not None else None
+        memory_limit = memory_limit_from_options(options)
         reader = PythonRowsJsonlByteReader(data, memory_limit_bytes=memory_limit)
         return self.to_sink_reader(sink, "jsonl", reader, options)
 

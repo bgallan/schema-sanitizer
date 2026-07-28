@@ -91,7 +91,8 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
 
     def fake_stage_remote_files_to_directory(files, **kwargs):
         """Stage only requested fake remote files."""
-        assert kwargs["memory_limit_bytes"] is None
+        assert isinstance(kwargs["memory_limit_bytes"], int)
+        assert kwargs["memory_limit_bytes"] > 0
         staged_dir = tmp_path / f"stage-{len(list(tmp_path.glob('stage-*'))) + 1}"
         staged_dir.mkdir()
         for file in files:

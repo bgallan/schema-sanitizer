@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 namespace sanitize::internal {
 
@@ -12,6 +13,41 @@ inline constexpr std::int64_t kDefaultMemoryLimitBytes =
     512LL * 1024LL * 1024LL;
 inline constexpr std::int64_t kHardMaxMemoryLimitBytes =
     64LL * 1024LL * 1024LL * 1024LL;
+inline constexpr std::int64_t kAutomaticMemoryReserveBytes =
+    256LL * 1024LL * 1024LL;
+
+// Returns a safe operation budget derived from currently available host and
+// container memory. Platform discovery lives out of line so every native
+// consumer shares one implementation.
+[[nodiscard]] std::int64_t automatic_memory_limit_bytes() noexcept;
+
+[[nodiscard]] constexpr std::int64_t
+automatic_memory_limit_from_available(std::int64_t available_bytes) noexcept {
+  if (available_bytes <= 0) {
+    return kDefaultMemoryLimitBytes;
+  }
+  // Preserve at least one eighth of a roomy host and one quarter of a
+  // constrained host. The absolute reserve stops small transient allocations
+  // outside the tracked operation budget from turning normal pressure into OOM.
+  const auto proportional_reserve = available_bytes / 8;
+  const auto constrained_reserve =
+      std::min(kAutomaticMemoryReserveBytes, available_bytes / 4);
+  const auto reserve = std::max(proportional_reserve, constrained_reserve);
+  return std::max<std::int64_t>(
+      1, std::min(kHardMaxMemoryLimitBytes, available_bytes - reserve));
+}
+
+static_assert(automatic_memory_limit_from_available(128LL * 1024LL * 1024LL) ==
+              96LL * 1024LL * 1024LL);
+static_assert(automatic_memory_limit_from_available(1LL * 1024LL * 1024LL *
+                                                    1024LL) ==
+              768LL * 1024LL * 1024LL);
+static_assert(automatic_memory_limit_from_available(16LL * 1024LL * 1024LL *
+                                                    1024LL) ==
+              14LL * 1024LL * 1024LL * 1024LL);
+static_assert(automatic_memory_limit_from_available(100LL * 1024LL * 1024LL *
+                                                    1024LL) ==
+              kHardMaxMemoryLimitBytes);
 
 struct MemoryBudget {
   std::int64_t total_bytes = kDefaultMemoryLimitBytes;
@@ -40,7 +76,10 @@ struct MemoryBudget {
 [[nodiscard]] constexpr std::int64_t
 normalize_memory_limit_bytes(std::int64_t requested) noexcept {
   if (requested <= 0) {
-    return kDefaultMemoryLimitBytes;
+    if (std::is_constant_evaluated()) {
+      return kDefaultMemoryLimitBytes;
+    }
+    return automatic_memory_limit_bytes();
   }
   return std::min(requested, kHardMaxMemoryLimitBytes);
 }

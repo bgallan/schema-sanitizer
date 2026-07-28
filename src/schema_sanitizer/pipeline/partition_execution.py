@@ -11,6 +11,7 @@ from typing import Any
 
 from ..api_impl.file_conversion.converters import to_parquet
 from ..api_impl.partition_resources import borrowed_partition_resources
+from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.probes import options_for_schema_probe
 from ..core_impl.schema_registry import (
     _normalize_registry_json,
@@ -34,6 +35,21 @@ AfterPartitionCallback = Callable[
     [int, int, PartitionRunResult, float, Any | None, bool],
     None,
 ]
+
+
+def _resolved_converter_kwargs(
+    values: Mapping[str, Any],
+    *,
+    fixed_memory_limit_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Resolve one operation memory budget once before related pipeline work."""
+    resolved = dict(values)
+    resolved["memory_limit_bytes"] = (
+        normalize_memory_limit(resolved.get("memory_limit_bytes"))
+        if fixed_memory_limit_bytes is None
+        else fixed_memory_limit_bytes
+    )
+    return resolved
 
 
 @dataclass(frozen=True, init=False)
@@ -144,17 +160,25 @@ def run_partitioned_to_parquet_registry_json(
 
     kwargs_factory: ToParquetKwargsFactory | None
     static_kwargs: Mapping[str, Any] | None
+    static_memory_limit_bytes: int | None
     if callable(to_parquet_kwargs):
         kwargs_factory = to_parquet_kwargs
         static_kwargs = None
+        static_memory_limit_bytes = None
     else:
         kwargs_factory = None
         static_kwargs = to_parquet_kwargs
+        static_memory_limit_bytes = normalize_memory_limit(
+            to_parquet_kwargs.get("memory_limit_bytes")
+        )
     completed_runs: list[PartitionRunResult] = []
     previous_output_schema: Any | None = None
     total = len(plans)
     lookahead = (
-        PartitionSourceLookahead(static_kwargs)
+        PartitionSourceLookahead(
+            static_kwargs,
+            memory_limit_bytes=static_memory_limit_bytes,
+        )
         if static_kwargs is not None and len(plans) > 1
         else None
     )
@@ -168,8 +192,14 @@ def run_partitioned_to_parquet_registry_json(
         for index, plan in enumerate(plans, start=1):
             run_start = perf_counter()
             aggregate_cpu_start = process_time()
-            kwargs = dict(kwargs_factory(plan)) if kwargs_factory is not None else static_kwargs
-            assert kwargs is not None
+            if kwargs_factory is not None:
+                kwargs = _resolved_converter_kwargs(kwargs_factory(plan))
+            else:
+                assert static_kwargs is not None
+                kwargs = _resolved_converter_kwargs(
+                    static_kwargs,
+                    fixed_memory_limit_bytes=static_memory_limit_bytes,
+                )
             registry_compile_cpu_seconds = 0.0
             if current_native_registry_state is None:
                 registry_compile_cpu_start = process_time()

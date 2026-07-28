@@ -242,13 +242,13 @@ def rows():
     for ordinal in range(2_000):
         yield {"ordinal": ordinal, "value": ordinal * 3, "text": f"row-{ordinal}"}
 
-ss.to_csv(rows(), root / "rows.csv", input_format="python", threading_mode="multi")
-ss.to_jsonl(rows(), root / "rows.jsonl", input_format="python", threading_mode="multi")
+ss.to_csv(rows(), root / "rows.csv", input_format="python", multi_threading=True)
+ss.to_jsonl(rows(), root / "rows.jsonl", input_format="python", multi_threading=True)
 ss.to_parquet(
     rows(),
     root / "rows.parquet",
     input_format="python",
-    threading_mode="multi",
+    multi_threading=True,
     parquet_compression="snappy",
 )
 assert all(path.stat().st_size > 0 for path in root.iterdir())

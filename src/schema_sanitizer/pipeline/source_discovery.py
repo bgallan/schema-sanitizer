@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from ..core_impl.async_scheduler import ordered_indexed_results
 from ..core_impl.execution_policy import execution_policy, normalize_threading_mode
+from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.uris import (
     LocationKind,
     RemoteProvider,
@@ -328,6 +329,7 @@ async def discover_existing_source_plans_async(
     threading_mode: str = "single",
 ) -> SourcePlanDiscovery:
     """Return plans whose source object or non-recursive directory has input."""
+    memory_limit_bytes = normalize_memory_limit(memory_limit_bytes)
     if normalize_threading_mode(threading_mode) == "single":
         from .source_discovery_sync import discover_existing_source_plans_sync
 
@@ -435,6 +437,7 @@ def discover_existing_source_plans(
     threading_mode: str = "single",
 ) -> SourcePlanDiscovery:
     """Synchronously discover existing source plans."""
+    memory_limit_bytes = normalize_memory_limit(memory_limit_bytes)
     mode = normalize_threading_mode(threading_mode)
     if mode == "single":
         from .source_discovery_sync import discover_existing_source_plans_sync

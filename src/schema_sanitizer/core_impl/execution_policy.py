@@ -72,9 +72,7 @@ def execution_policy(
         threading_mode,
         label="option 'threading_mode'",
     )
-    requested_memory = (
-        -1 if memory_limit_bytes is None else normalize_memory_limit(memory_limit_bytes)
-    )
+    requested_memory = normalize_memory_limit(memory_limit_bytes)
     args: tuple[int, ...] = (int(mode.value), requested_memory)
     if available_cpus is not None:
         if isinstance(available_cpus, bool) or not isinstance(available_cpus, int):

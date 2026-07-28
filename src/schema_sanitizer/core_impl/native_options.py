@@ -31,6 +31,14 @@ def optional_memory_limit_arg(memory_limit_bytes: int | None) -> int:
     return -1 if memory_limit_bytes is None else memory_limit_bytes
 
 
+def memory_limit_from_options(options: Any) -> int | None:
+    """Return a native option limit, translating the automatic sentinel."""
+    if options is None:
+        return None
+    value = getattr(options, "memory_limit_bytes", None)
+    return None if value == -1 else value
+
+
 class SchemaEvolutionMode(Enum):
     """Schema evolution policies exposed to option normalization."""
 

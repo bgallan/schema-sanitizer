@@ -107,6 +107,7 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         discovered_directory_inputs,
     )
     from schema_sanitizer.remote_impl import sync_backend
+    from schema_sanitizer.remote_impl.packetization import remote_staging_packet_policy
 
     files = (
         RemoteFile("s3://bucket/partition/a.json", "a.json", 8),
@@ -148,6 +149,6 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         assert plan.route_name == "remote_native_manifest_chunks"
         assert manifest is not None
         assert manifest.files == list(files)
-        assert manifest.chunk_size == 256
+        assert manifest.chunk_size == remote_staging_packet_policy(None).max_files
     finally:
         prepared.close()

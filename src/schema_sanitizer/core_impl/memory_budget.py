@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-DEFAULT_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 MAX_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024 * 1024
 
 
 def normalize_memory_limit(memory_limit_bytes: int | None) -> int:
     """Return the effective positive per-operation memory limit.
 
-    ``None`` selects the documented default. Values above the absolute native
-    ceiling are rejected rather than silently weakening the safety contract.
+    ``None`` asks the extension for a safe share of currently available host
+    and container memory. Values above the absolute native ceiling are rejected
+    rather than silently weakening the safety contract.
     """
     if memory_limit_bytes is None:
-        return DEFAULT_MEMORY_LIMIT_BYTES
+        from .native_runtime import native_core
+
+        values = native_core.memory_budget(-1)
+        if not isinstance(values, tuple) or not values:
+            raise RuntimeError("native memory budget returned an invalid contract")
+        return int(values[0])
     if isinstance(memory_limit_bytes, bool) or not isinstance(memory_limit_bytes, int):
         raise TypeError("Option 'memory_limit_bytes' must be an integer or None")
     if memory_limit_bytes <= 0:
@@ -52,11 +57,7 @@ class MemoryBudget:
     @classmethod
     def from_limit(cls, memory_limit_bytes: int | None) -> "MemoryBudget":
         """Ask the native extension to derive all internal sub-budgets."""
-        requested = (
-            -1
-            if memory_limit_bytes is None or memory_limit_bytes <= 0
-            else normalize_memory_limit(memory_limit_bytes)
-        )
+        requested = normalize_memory_limit(memory_limit_bytes)
         from .native_runtime import native_core
 
         values = native_core.memory_budget(requested)
@@ -71,7 +72,6 @@ def memory_budget(memory_limit_bytes: int | None) -> MemoryBudget:
 
 
 __all__ = [
-    "DEFAULT_MEMORY_LIMIT_BYTES",
     "MAX_MEMORY_LIMIT_BYTES",
     "MemoryBudget",
     "memory_budget",

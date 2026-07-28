@@ -155,6 +155,8 @@ def test_memory_limit_helper_translates_only_native_unset_sentinel() -> None:
     assert options.performance.memory_limit_bytes == -1
     assert memory_limit_bytes_or_none(options) is None
 
+    options.performance.memory_limit_bytes = -1
+    assert memory_limit_bytes_or_none(options) is None
     options.performance.memory_limit_bytes = 1024 * 1024
     assert memory_limit_bytes_or_none(options) == 1024 * 1024
     assert memory_limit_bytes_or_none(None) is None

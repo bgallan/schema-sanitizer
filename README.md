@@ -110,6 +110,19 @@ below.
 | `to_jsonl(input_path, output_path, ...)` | Writes JSON Lines; `clean_data` is `None`. |
 | `to_parquet(input_path, output_path, ...)` | Writes Parquet; `clean_data` is `None`. |
 
+For file outputs, `memory_limit_bytes` is an operation-wide resident-memory
+budget, independent of input or output file size. Input parsing, bounded
+queues, transformation, writer buffers, and local or remote staging all share
+the same resolved budget. Files larger than the budget are streamed; if the
+operation cannot make progress within the budget, it fails without publishing
+a partial replacement.
+
+For analytical outputs (`to_pyarrow`, `to_pandas`, `to_polars`, and
+`to_duckdb`), source processing still respects the operation budget, but the
+final table, DataFrame, or relation returned in `Result.clean_data` is
+deliberately outside it. That result may exhaust process memory when it is too
+large. Use a file-output converter when bounded-memory completion is required.
+
 `new_schema_registry()` creates an empty registry for a pipeline without
 depending on the registry JSON structure:
 
@@ -264,7 +277,7 @@ prices = ss.to_pyarrow(
 | `xml_row_tag` | `None` | Stream each matching direct XML element as a row; `None` treats the document as one row. |
 | `on_error` | `"emit_null_row"` | `stop`, `skip_row`, or `emit_null_row`. |
 | `multi_threading` | `False` | `False` is the deterministic inline reference executor; `True` enables bounded concurrency derived from memory and CPUs. |
-| `memory_limit_bytes` | `None` | The only public memory/resource control. `None` selects 512 MiB. The native extension derives all chunk, batch, coalescing, metadata, spool, concurrency, Arrow, and Parquet sub-budgets from this value. |
+| `memory_limit_bytes` | `None` | The only public memory/resource control. `None` selects a safe share of currently available system/container memory. A positive integer sets a strict operation-wide budget. The native extension derives all chunk, batch, coalescing, metadata, spool, concurrency, Arrow, and Parquet sub-budgets from the resolved value. |
 
 `multi_threading=False` forces every Schema-Sanitizer-owned worker count,
 queue, reorder window, remote download/discovery window, and source prefetch
@@ -341,14 +354,29 @@ source packets and final remote-output spools additionally reserve bytes from
 one operation-owned temporary-storage permit pool, so concurrent staging cannot
 multiply disk usage beyond the derived spool ceiling.
 
-`memory_limit_bytes` is local to one operation. It is validated before native
-execution, cannot exceed the absolute 64 GiB safety ceiling, and never mutates
-process-global state. There are no environment-variable overrides or secondary
-public memory knobs. Two concurrent calls may therefore use different budgets
-without interfering with each other. Schema-Sanitizer also contains no
-environment-access hooks in its runtime, build files, examples, tests, or
-project workflows; configuration is explicit or declarative. Provider SDKs may
-still use their own standard credential discovery outside the library.
+`memory_limit_bytes` is local to one operation and defaults to `None`. In that
+mode the native extension inspects currently available physical memory and, on
+Linux, the remaining cgroup allowance. It reserves 12.5–25% for the system and
+untracked allocations, then applies the absolute 64 GiB safety ceiling. The
+resolved value is fixed once and propagated through the complete operation, so
+multi-threaded workers can use the additional headroom without racing later
+memory-pressure samples. A positive value is likewise global to the operation,
+regardless of input-file size: Schema-Sanitizer-owned input chunks, queues,
+reorder windows, materialization, writers, and staging cannot each spend the
+full limit independently. File-output paths stream data and atomically publish
+the completed staging file, so an oversized file does not require oversized
+resident memory and a resource failure does not replace an existing output.
+
+The budget covers memory owned and tracked by Schema-Sanitizer during the
+operation. It intentionally excludes the final analytical object returned by
+`to_pyarrow`, `to_pandas`, `to_polars`, or `to_duckdb`; materializing that
+object can therefore exhaust process memory. File-output converters do not
+retain such an analytical result and provide the bounded-memory path.
+
+There are no environment-variable overrides or secondary public memory knobs.
+Two concurrent calls may use different budgets without mutating process-global
+state. Provider SDKs may still use their own standard credential discovery
+outside the library.
 
 The native extension is the single source of truth for derived limits. Python
 queries that native budget and uses the returned values for input chunks, replay

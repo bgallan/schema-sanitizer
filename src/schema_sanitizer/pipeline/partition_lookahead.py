@@ -15,6 +15,7 @@ from ..core_impl.execution_policy import (
     execution_policy,
     threading_mode_from_multi_threading,
 )
+from ..core_impl.memory_budget import normalize_memory_limit
 from ..errors import SchemaSanitizerResourceError
 from ..input_impl.directory_inputs import discovered_directory_input_context
 from ..input_impl.prepared import PreparedPublicInput
@@ -35,7 +36,12 @@ class _PreparationOptions:
     threading_mode: str
 
     @classmethod
-    def from_kwargs(cls, kwargs: Mapping[str, Any]) -> _PreparationOptions:
+    def from_kwargs(
+        cls,
+        kwargs: Mapping[str, Any],
+        *,
+        memory_limit_bytes: int,
+    ) -> _PreparationOptions:
         """Extract canonical public input settings from converter keyword arguments."""
         return cls(
             input_format=kwargs.get("input_format"),
@@ -44,7 +50,7 @@ class _PreparationOptions:
             xml_row_tag=kwargs.get("xml_row_tag"),
             csv_delimiter=str(kwargs.get("csv_delimiter", ",")),
             csv_has_header=bool(kwargs.get("csv_has_header", True)),
-            memory_limit_bytes=kwargs.get("memory_limit_bytes"),
+            memory_limit_bytes=memory_limit_bytes,
             threading_mode=threading_mode_from_multi_threading(
                 kwargs.get("multi_threading", False)
             ),
@@ -96,9 +102,19 @@ PreparedOrDeferred = _PreparedPartition | _DeferredPartition
 class PartitionSourceLookahead:
     """Prepare at most partition ``N + 1`` while ``N`` converts or publishes."""
 
-    def __init__(self, kwargs: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        kwargs: Mapping[str, Any],
+        *,
+        memory_limit_bytes: int | None = None,
+    ) -> None:
         """Create a lazy one-slot worker when the static pipeline policy allows it."""
         self._kwargs = kwargs
+        self._memory_limit_bytes = (
+            normalize_memory_limit(kwargs.get("memory_limit_bytes"))
+            if memory_limit_bytes is None
+            else memory_limit_bytes
+        )
         initial_options = self._current_options()
         policy = execution_policy(
             initial_options.threading_mode,
@@ -179,7 +195,10 @@ class PartitionSourceLookahead:
 
     def _current_options(self) -> _PreparationOptions:
         """Capture the live static mapping at one preparation boundary."""
-        return _PreparationOptions.from_kwargs(self._kwargs)
+        return _PreparationOptions.from_kwargs(
+            self._kwargs,
+            memory_limit_bytes=self._memory_limit_bytes,
+        )
 
     def _prepare_with_new_context(
         self,

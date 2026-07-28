@@ -87,7 +87,8 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
 
     def fake_stage_remote_files_to_directory(files, **kwargs):
         """Stage only the requested chunk into local child files."""
-        assert kwargs["memory_limit_bytes"] is None
+        assert isinstance(kwargs["memory_limit_bytes"], int)
+        assert kwargs["memory_limit_bytes"] > 0
         staged_calls.append([file.name for file in files])
         staged_dir = tmp_path / f"remote-stage-{len(staged_calls)}"
         staged_dir.mkdir()
@@ -156,7 +157,8 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
 
     def fake_stage_remote_files_to_directory(files, **kwargs):
         """Stage each requested chunk into local child files."""
-        assert kwargs["memory_limit_bytes"] is None
+        assert isinstance(kwargs["memory_limit_bytes"], int)
+        assert kwargs["memory_limit_bytes"] > 0
         staged_calls.append([file.name for file in files])
         staged_dir = tmp_path / f"remote-arrow-stage-{len(staged_calls)}"
         staged_dir.mkdir()
@@ -227,7 +229,8 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
 
     def fake_stage_remote_files_to_directory(files, **kwargs):
         """Stage each requested remote chunk into local child files."""
-        assert kwargs["memory_limit_bytes"] is None
+        assert isinstance(kwargs["memory_limit_bytes"], int)
+        assert kwargs["memory_limit_bytes"] > 0
         staged_calls.append([file.name for file in files])
         staged_dir = tmp_path / f"remote-single-pass-stage-{len(staged_calls)}"
         staged_dir.mkdir()

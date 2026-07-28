@@ -191,10 +191,9 @@ class _CallOptions:
     def to_options(self) -> Options:
         """Convert flat call options to grouped internal options."""
         performance: dict[str, Any] = {
-            "threading_mode": threading_mode_from_multi_threading(self.multi_threading)
+            "threading_mode": threading_mode_from_multi_threading(self.multi_threading),
+            "memory_limit_bytes": normalize_memory_limit(self.memory_limit_bytes),
         }
-        if self.memory_limit_bytes is not None:
-            performance["memory_limit_bytes"] = self.memory_limit_bytes
 
         return Options(
             schema={

@@ -13,6 +13,7 @@ from ...adapters.parquet.compression import (
 )
 from ...core_impl.execution_policy import threading_mode_from_multi_threading
 from ...core_impl.generated_metadata import INGESTION_TIMESTAMP_COLUMN, SOURCE_FILE_COLUMN
+from ...core_impl.memory_budget import normalize_memory_limit
 from ...core_impl.probes import options_for_registry_operation
 from ...core_impl.schema_registry import current_native_registry_state
 from ...options_impl.call_options import (
@@ -117,7 +118,9 @@ def convert_file_with_options(
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
     file_io_seconds = 0.0
     threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
-    memory_limit_bytes = options.get("memory_limit_bytes")
+    memory_limit_bytes = normalize_memory_limit(options.get("memory_limit_bytes"))
+    options = dict(options)
+    options["memory_limit_bytes"] = memory_limit_bytes
     borrowed = (
         take_borrowed_partition_resources(
             input_path,

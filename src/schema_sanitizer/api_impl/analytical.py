@@ -14,6 +14,7 @@ from schema_sanitizer.core_impl.generated_metadata import (
     INGESTION_TIMESTAMP_COLUMN,
     SOURCE_FILE_COLUMN,
 )
+from schema_sanitizer.core_impl.memory_budget import normalize_memory_limit
 from schema_sanitizer.input_impl.selection import _Source
 from schema_sanitizer.input_impl.source_plan import PARQUET_ARROW_SOURCES
 
@@ -176,7 +177,9 @@ def convert_analytical_with_options(
     registry_json = _normalize_registry_json(schema_registry)
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
     threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
-    memory_limit_bytes = options.get("memory_limit_bytes")
+    memory_limit_bytes = normalize_memory_limit(options.get("memory_limit_bytes"))
+    options = dict(options)
+    options["memory_limit_bytes"] = memory_limit_bytes
     operation_context = OperationExecutionContext(
         threading_mode=threading_mode,
         memory_limit_bytes=memory_limit_bytes,
@@ -291,7 +294,7 @@ def to_duckdb(
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
-    """Sanitize a supported file or Python row iterable into a DuckDB relation."""
+    """Sanitize input into DuckDB; the returned relation is outside the memory budget."""
     options = locals()
     return convert_analytical_with_options(
         input_path,
@@ -336,7 +339,7 @@ def to_pandas(
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
-    """Sanitize a supported file or Python row iterable into a pandas DataFrame."""
+    """Sanitize input into pandas; the returned DataFrame is outside the memory budget."""
     options = locals()
     return convert_analytical_with_options(
         input_path,
@@ -381,7 +384,7 @@ def to_polars(
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
-    """Sanitize a supported file or Python row iterable into a Polars DataFrame."""
+    """Sanitize input into Polars; the returned DataFrame is outside the memory budget."""
     options = locals()
     return convert_analytical_with_options(
         input_path,
@@ -426,7 +429,7 @@ def to_pyarrow(
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
-    """Sanitize a supported file or Python row iterable into a PyArrow table."""
+    """Sanitize input into PyArrow; the returned table is outside the memory budget."""
     options = locals()
     return convert_analytical_with_options(
         input_path,

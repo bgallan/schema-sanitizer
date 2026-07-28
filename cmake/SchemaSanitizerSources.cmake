@@ -109,6 +109,7 @@ target_sources(
     cpp/src/schema_registry/schema_registry_document_json.cc
     cpp/src/schema_registry/schema_registry_drift_json.cc
     cpp/src/schema_registry/schema_registry_types.cc
+    cpp/src/internal/memory/memory_budget.cc
     cpp/src/internal/memory/memory_pool.cc
     cpp/src/internal/arrow_c/cdata_stream_runtime.cc
     cpp/src/internal/runtime/operation_task_arena.cc

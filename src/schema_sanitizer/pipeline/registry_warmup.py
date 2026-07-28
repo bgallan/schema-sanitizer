@@ -16,6 +16,7 @@ from ..api_impl.source_plan.preparation import source_plan_from_prepared_inputs
 from ..api_impl.source_plan.probing import probe_prepared_source_plan_registry
 from ..core_impl.execution import default_execution_context
 from ..core_impl.execution_policy import threading_mode_from_multi_threading
+from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.probes import options_for_schema_probe
 from ..core_impl.schema_registry import _normalize_registry_json
 from ..input_impl.directory_inputs import discovered_directory_input_context
@@ -329,6 +330,8 @@ def infer_warm_up_schema_registry_state(
     _LAST_WARM_UP_ROUTE = "none"
     if not plans:
         raise ValueError("Schema warm-up requires at least one source partition")
+    options = dict(options)
+    options["memory_limit_bytes"] = normalize_memory_limit(options.get("memory_limit_bytes"))
     detected_at = capture_operation_timestamps().detected_at
     call_options_input, call_options = _warm_up_call_options(
         options,

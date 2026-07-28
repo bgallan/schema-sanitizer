@@ -184,7 +184,7 @@ def test_remote_parquet_directory_public_reader_uses_staged_arrow_path(
         """Return a local staged Parquet directory for a remote URI."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".parquet", ".pq")
-        assert memory_limit_bytes is None
+        assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
         staged_dir = tmp_path / "staged-parquet"
         staged_dir.mkdir()
         pq.write_table(pa.table({"id": [1, 2]}), staged_dir / "a.parquet")
@@ -240,7 +240,7 @@ def test_remote_parquet_single_file_public_reader_uses_staged_arrow_path(
     ):
         """Return a local staged Parquet file for a remote URI."""
         assert uri == "s3://bucket/events.parquet"
-        assert memory_limit_bytes is None
+        assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
         staged_file = tmp_path / "events.parquet"
         pq.write_table(pa.table({"id": [1, 2]}), staged_file)
         return StagedPath(str(staged_file))
@@ -284,7 +284,7 @@ def test_remote_parquet_single_file_writer_uses_staged_arrow_path(
     ):
         """Return a local staged Parquet file for a remote URI."""
         assert uri == "s3://bucket/events.parquet"
-        assert memory_limit_bytes is None
+        assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
         return StagedPath(str(staged_file))
 
     monkeypatch.setattr(
