@@ -3,10 +3,12 @@
 #include "internal/materialization/builders/detail.hh"
 #include "internal/memory/size_math.hh"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory_resource>
+#include <new>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -21,6 +23,18 @@ template <typename T> class FixedWidthBuilder final : public BaseBuilder {
 public:
   explicit FixedWidthBuilder(std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)), values_(pool_.get()) {}
+
+  Status reserve(int64_t rows, int64_t) override {
+    if (rows < 0)
+      return Status::Invalid("negative fixed-width reserve");
+    try {
+      values_.reserve(static_cast<std::size_t>(rows));
+    } catch (const std::bad_alloc &) {
+      return Status::OutOfMemory(
+          "FixedWidthBuilder::reserve: allocation failed");
+    }
+    return Status::OK();
+  }
 
   // Appends the object state.
   Status append(const Cell &cell) override {
@@ -37,11 +51,47 @@ public:
     return Status::OK();
   }
 
+  Status append_direct(const DirectScalarValue &value) override {
+    if (value.is_null)
+      return append_null();
+    if constexpr (std::is_same_v<T, double>) {
+      values_.push_back(value.f64);
+    } else if constexpr (std::is_same_v<T, int64_t>) {
+      values_.push_back(value.i64);
+    } else {
+      values_.push_back(static_cast<T>(value.i64));
+    }
+    push_validity(true);
+    return Status::OK();
+  }
+
   // Appends null.
   Status append_null() override {
     values_.push_back(T{});
     push_validity(false);
     return Status::OK();
+  }
+
+  Status append_array(const ArrowArray &array) override {
+    if (array.length < 0 || array.offset < 0 || array.n_buffers < 2 ||
+        !array.buffers) {
+      return Status::Invalid("invalid fixed-width Arrow array");
+    }
+    if (array.length > 0 && !array.buffers[1]) {
+      return Status::Invalid("fixed-width Arrow array has no values buffer");
+    }
+    const auto *values = static_cast<const T *>(array.buffers[1]);
+    const auto begin = static_cast<std::size_t>(array.offset);
+    const auto count = static_cast<std::size_t>(array.length);
+    try {
+      if (count > 0) {
+        values_.insert(values_.end(), values + begin, values + begin + count);
+      }
+    } catch (const std::bad_alloc &) {
+      return Status::OutOfMemory(
+          "FixedWidthBuilder::append_array: allocation failed");
+    }
+    return append_array_validity(array);
   }
 
   // Finishes the current output.
@@ -99,10 +149,23 @@ public:
   // Appends the object state.
   Status append(const Cell &) override { return append_null(); }
 
+  Status append_direct(const DirectScalarValue &) override {
+    return append_null();
+  }
+
   // Appends null.
   Status append_null() override {
     ++length_;
     ++null_count_;
+    return Status::OK();
+  }
+
+  Status append_array(const ArrowArray &array) override {
+    if (array.length < 0) {
+      return Status::Invalid("invalid null Arrow array length");
+    }
+    length_ += array.length;
+    null_count_ += array.length;
     return Status::OK();
   }
 
@@ -136,6 +199,18 @@ public:
   explicit BoolBuilder(std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)), bits_(pool_.get()) {}
 
+  Status reserve(int64_t rows, int64_t) override {
+    if (rows < 0)
+      return Status::Invalid("negative boolean reserve");
+    try {
+      const auto byte_count = static_cast<std::size_t>((rows + 7) / 8);
+      bits_.reserve(byte_count);
+    } catch (const std::bad_alloc &) {
+      return Status::OutOfMemory("BoolBuilder::reserve: allocation failed");
+    }
+    return Status::OK();
+  }
+
   // Appends the object state.
   Status append(const Cell &cell) override {
     if (cell.is_null)
@@ -145,10 +220,50 @@ public:
     return Status::OK();
   }
 
+  Status append_direct(const DirectScalarValue &value) override {
+    if (value.is_null)
+      return append_null();
+    push_bit(value.b);
+    push_validity(true);
+    return Status::OK();
+  }
+
   // Appends null.
   Status append_null() override {
     push_bit(false);
     push_validity(false);
+    return Status::OK();
+  }
+
+  Status append_array(const ArrowArray &array) override {
+    if (array.length < 0 || array.offset < 0 || array.n_buffers < 2 ||
+        !array.buffers) {
+      return Status::Invalid("invalid boolean Arrow array");
+    }
+    const auto *source_bits = static_cast<const uint8_t *>(array.buffers[1]);
+    if (array.length > 0 && !source_bits) {
+      return Status::Invalid("boolean Arrow array has no values buffer");
+    }
+    const auto *validity = static_cast<const uint8_t *>(array.buffers[0]);
+    try {
+      for (int64_t index = 0; index < array.length; ++index) {
+        const int64_t source_index = array.offset + index;
+        const bool value =
+            ((source_bits[static_cast<std::size_t>(source_index >> 3)] >>
+              (source_index & 7)) &
+             1u) != 0;
+        const bool valid =
+            !validity ||
+            ((validity[static_cast<std::size_t>(source_index >> 3)] >>
+              (source_index & 7)) &
+             1u) != 0;
+        push_bit(value);
+        push_validity(valid);
+      }
+    } catch (const std::bad_alloc &) {
+      return Status::OutOfMemory(
+          "BoolBuilder::append_array: allocation failed");
+    }
     return Status::OK();
   }
 
@@ -202,6 +317,25 @@ public:
     offsets_.push_back(0);
   }
 
+  Status reserve(int64_t rows, int64_t variable_bytes) override {
+    if (rows < 0 || variable_bytes < 0)
+      return Status::Invalid("negative UTF-8 reserve");
+    try {
+      const auto row_capacity = static_cast<std::size_t>(rows);
+      if (row_capacity < std::numeric_limits<std::size_t>::max()) {
+        offsets_.reserve(row_capacity + 1);
+      }
+      const auto byte_capacity = static_cast<std::uint64_t>(variable_bytes);
+      const auto max_utf8 =
+          static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max());
+      data_.reserve(
+          static_cast<std::size_t>(std::min(byte_capacity, max_utf8)));
+    } catch (const std::bad_alloc &) {
+      return Status::OutOfMemory("Utf8Builder::reserve: allocation failed");
+    }
+    return Status::OK();
+  }
+
   // Resets the object state.
   Status reset() override {
     SAN_RETURN_NOT_OK(BaseBuilder::reset());
@@ -225,11 +359,73 @@ public:
     return Status::OK();
   }
 
+  Status append_direct(const DirectScalarValue &value) override {
+    if (value.is_null)
+      return append_null();
+    const std::string_view bytes = value.utf8();
+    if (data_.size() + bytes.size() >
+        static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+      return Status::Invalid("utf8 array payload exceeds 2GB");
+    }
+    data_.insert(data_.end(), bytes.begin(), bytes.end());
+    offsets_.push_back(static_cast<int32_t>(data_.size()));
+    push_validity(true);
+    return Status::OK();
+  }
+
   // Appends null.
   Status append_null() override {
     offsets_.push_back(offsets_.empty() ? 0 : offsets_.back());
     push_validity(false);
     return Status::OK();
+  }
+
+  Status append_array(const ArrowArray &array) override {
+    if (array.length < 0 || array.offset < 0 || array.n_buffers < 3 ||
+        !array.buffers || !array.buffers[1]) {
+      return Status::Invalid("invalid UTF-8 Arrow array");
+    }
+    const auto *source_offsets = static_cast<const int32_t *>(array.buffers[1]);
+    const auto source_begin_index = static_cast<std::size_t>(array.offset);
+    const auto source_end_index =
+        source_begin_index + static_cast<std::size_t>(array.length);
+    const int32_t source_begin = source_offsets[source_begin_index];
+    const int32_t source_end = source_offsets[source_end_index];
+    if (source_begin < 0 || source_end < source_begin) {
+      return Status::Invalid("invalid UTF-8 Arrow offsets");
+    }
+    const auto source_bytes =
+        static_cast<std::size_t>(source_end - source_begin);
+    if (source_bytes > 0 && !array.buffers[2]) {
+      return Status::Invalid("UTF-8 Arrow array has no data buffer");
+    }
+    if (data_.size() + source_bytes >
+        static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+      return Status::Invalid("utf8 array payload exceeds 2GB");
+    }
+
+    const auto destination_base = static_cast<int32_t>(data_.size());
+    const auto *source_data = static_cast<const char *>(array.buffers[2]);
+    try {
+      if (source_bytes > 0) {
+        data_.insert(data_.end(), source_data + source_begin,
+                     source_data + source_end);
+      }
+      offsets_.reserve(offsets_.size() +
+                       static_cast<std::size_t>(array.length));
+      for (std::size_t index = source_begin_index + 1;
+           index <= source_end_index; ++index) {
+        const int32_t relative = source_offsets[index] - source_begin;
+        if (relative < 0) {
+          return Status::Invalid("invalid UTF-8 Arrow offsets");
+        }
+        offsets_.push_back(destination_base + relative);
+      }
+    } catch (const std::bad_alloc &) {
+      return Status::OutOfMemory(
+          "Utf8Builder::append_array: allocation failed");
+    }
+    return append_array_validity(array);
   }
 
   // Finishes the current output.

@@ -12,6 +12,11 @@
 #include "sanitize/options/options.hh"
 #include "sanitize/planning/plan.hh"
 
+namespace sanitize::internal {
+class OperationTaskArena;
+class PerformanceTelemetry;
+} // namespace sanitize::internal
+
 namespace sanitize {
 class ExecutionContext;
 }
@@ -25,6 +30,9 @@ make_ingest_c_stream(const std::string &frontend_name, FrontendHandle frontend,
                      PreparedOptionsPtr opts,
                      std::shared_ptr<IngestDiagnostics> diagnostics,
                      std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
-                     std::shared_ptr<void> operation_memory_pool);
+                     std::shared_ptr<void> operation_memory_pool,
+                     std::shared_ptr<OperationTaskArena> task_arena,
+                     std::shared_ptr<PerformanceTelemetry> telemetry,
+                     std::int64_t input_size_hint_bytes);
 
 } // namespace sanitize::internal

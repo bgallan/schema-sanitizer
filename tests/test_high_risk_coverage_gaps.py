@@ -113,14 +113,11 @@ def test_finalize_remote_output_cleans_temp_when_upload_fails(
         temp=staged,
     )
 
-    def fail_run_sync(operation: object) -> None:
-        """Close the pending coroutine and simulate upload failure."""
-        close = getattr(operation, "close", None)
-        if callable(close):
-            close()
+    def fail_upload(*_args: object, **_kwargs: object) -> None:
+        """Simulate a strict blocking publication failure."""
         raise RuntimeError("upload failed")
 
-    monkeypatch.setattr(staging, "run_sync", fail_run_sync)
+    monkeypatch.setattr(staging.sync_backend, "upload_file", fail_upload)
     with pytest.raises(RuntimeError, match="upload failed"):
         staging.finalize_output_target(target)
     assert target.temp is None

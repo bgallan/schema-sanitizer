@@ -8,6 +8,10 @@ from time import perf_counter, process_time
 from typing import Any
 
 from ..api_impl.input.preparation import prepare_public_input
+from ..api_impl.operation_context import (
+    OperationExecutionContext,
+    capture_operation_timestamps,
+)
 from ..api_impl.source_plan.preparation import source_plan_from_prepared_inputs
 from ..api_impl.source_plan.probing import probe_prepared_source_plan_registry
 from ..core_impl.execution import default_execution_context
@@ -17,6 +21,7 @@ from ..input_impl.directory_inputs import discovered_directory_input_context
 from ..input_impl.prepared import PreparedPublicInput
 from ..options_impl.call_options import (
     FILE_CONVERSION_HELPER_KEYS,
+    attach_operation_detected_at,
     call_options_from_locals,
     normalize_call_options_or_none,
     unwrap_options,
@@ -54,6 +59,7 @@ def prepare_schema_warm_up_input(
     csv_delimiter: str = ",",
     csv_has_header: bool = True,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
     _enable_parquet_native: bool = True,
     after_source_prepared: WarmUpProgressCallback | None = None,
 ) -> PreparedPublicInput:
@@ -68,6 +74,10 @@ def prepare_schema_warm_up_input(
         raise ValueError("Schema warm-up requires at least one source partition")
 
     prepared_inputs: list[PreparedPublicInput] = []
+    operation_context = OperationExecutionContext(
+        threading_mode=threading_mode,
+        memory_limit_bytes=memory_limit_bytes,
+    )
     try:
         total = len(plans)
         for index, plan in enumerate(plans, start=1):
@@ -82,6 +92,8 @@ def prepare_schema_warm_up_input(
                     csv_delimiter=csv_delimiter,
                     csv_has_header=csv_has_header,
                     memory_limit_bytes=memory_limit_bytes,
+                    threading_mode=threading_mode,
+                    operation_context=operation_context,
                 )
             prepared_inputs.append(prepared)
             if after_source_prepared is not None:
@@ -99,6 +111,7 @@ def prepare_schema_warm_up_input(
                 )
     except Exception:
         _close_prepared_inputs(prepared_inputs)
+        operation_context.close()
         raise
 
     source_plan = None
@@ -115,6 +128,7 @@ def prepare_schema_warm_up_input(
     if source_plan is None:
         prepared_formats = sorted({prepared.format for prepared in prepared_inputs})
         _close_prepared_inputs(prepared_inputs)
+        operation_context.close()
         if input_format == "parquet":
             raise ValueError(
                 "Parquet schema warm-up requires native Arrow-source probing; "
@@ -125,6 +139,7 @@ def prepare_schema_warm_up_input(
             "use UTF-8 text input and native-supported formats "
             f"(got prepared formats {prepared_formats})."
         )
+    source_plan.close_items.append(operation_context)
     source_plan.close_items.extend(prepared_inputs)
     return PreparedPublicInput(
         source_plan,
@@ -135,7 +150,11 @@ def prepare_schema_warm_up_input(
     )
 
 
-def _warm_up_call_options(options: Mapping[str, Any]) -> tuple[dict[str, Any], Any]:
+def _warm_up_call_options(
+    options: Mapping[str, Any],
+    *,
+    detected_at: str,
+) -> tuple[dict[str, Any], Any]:
     """Build additive probe options once for the warm-up workflow."""
     call_options_input = dict(options)
     call_options_input["schema_mode"] = "additive"
@@ -145,7 +164,10 @@ def _warm_up_call_options(options: Mapping[str, Any]) -> tuple[dict[str, Any], A
     )
     return (
         call_options_input,
-        normalize_call_options_or_none(**options_for_schema_probe(call_options_input)),
+        attach_operation_detected_at(
+            normalize_call_options_or_none(**options_for_schema_probe(call_options_input)),
+            detected_at,
+        ),
     )
 
 
@@ -157,6 +179,7 @@ def _probe_prepared_warm_up_input(
     registry_json: str,
     native_registry_state: Any = None,
     field_name_policy: str,
+    detected_at: str,
 ) -> Any:
     """Probe one prepared warm-up input while carrying registry state forward."""
     effective_call_options = call_options
@@ -166,6 +189,10 @@ def _probe_prepared_warm_up_input(
         effective_input["input_text_encoding"] = "utf-8"
         effective_call_options = normalize_call_options_or_none(
             **options_for_schema_probe(effective_input)
+        )
+        effective_call_options = attach_operation_detected_at(
+            effective_call_options,
+            detected_at,
         )
     if prepared_input.source != "source_plan":
         raise ValueError(f"Unsupported prepared schema warm-up source: {prepared_input.source!r}")
@@ -196,6 +223,7 @@ def _infer_partitioned_warm_up_state(
     after_source_prepared: WarmUpProgressCallback | None,
     after_partition_warmed: WarmUpProgressCallback | None,
     after_schema_drifts: WarmUpSchemaDriftCallback | None,
+    detected_at: str,
 ) -> SchemaRegistryState:
     """Probe partitions sequentially so each progress event has real CPU/I/O timing."""
     global _LAST_WARM_UP_ROUTE
@@ -215,6 +243,7 @@ def _infer_partitioned_warm_up_state(
             csv_delimiter=str(options.get("csv_delimiter", ",")),
             csv_has_header=bool(options.get("csv_has_header", True)),
             memory_limit_bytes=options.get("memory_limit_bytes"),
+            threading_mode=str(options.get("threading_mode", "single")),
         )
         preparation_seconds = plan.discovery_seconds + max(
             perf_counter() - preparation_started_at,
@@ -239,6 +268,7 @@ def _infer_partitioned_warm_up_state(
                 registry_json=current_registry_json,
                 native_registry_state=current_native_registry_state,
                 field_name_policy=field_name_policy,
+                detected_at=detected_at,
             )
             raw = probe.raw
             current_registry_json = raw.schema_registry_json or current_registry_json
@@ -296,7 +326,11 @@ def infer_warm_up_schema_registry_state(
     _LAST_WARM_UP_ROUTE = "none"
     if not plans:
         raise ValueError("Schema warm-up requires at least one source partition")
-    call_options_input, call_options = _warm_up_call_options(options)
+    detected_at = capture_operation_timestamps().detected_at
+    call_options_input, call_options = _warm_up_call_options(
+        options,
+        detected_at=detected_at,
+    )
     registry_json = _normalize_registry_json(schema_registry)
     if after_partition_warmed is not None or after_schema_drifts is not None:
         return _infer_partitioned_warm_up_state(
@@ -311,6 +345,7 @@ def infer_warm_up_schema_registry_state(
             after_source_prepared=after_source_prepared,
             after_partition_warmed=after_partition_warmed,
             after_schema_drifts=after_schema_drifts,
+            detected_at=detected_at,
         )
     prepared_input = prepare_schema_warm_up_input(
         plans,
@@ -321,6 +356,7 @@ def infer_warm_up_schema_registry_state(
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
         memory_limit_bytes=options.get("memory_limit_bytes"),
+        threading_mode=str(options.get("threading_mode", "single")),
         after_source_prepared=after_source_prepared,
     )
     try:
@@ -330,6 +366,7 @@ def infer_warm_up_schema_registry_state(
             call_options=call_options,
             registry_json=registry_json,
             field_name_policy=field_name_policy,
+            detected_at=detected_at,
         )
         raw = probe.raw
         _LAST_WARM_UP_ROUTE = probe.route_name

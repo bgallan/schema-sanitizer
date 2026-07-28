@@ -10,6 +10,10 @@
 struct ArrowArray;
 struct ArrowSchema;
 
+namespace sanitize::internal {
+class OperationTaskArena;
+}
+
 namespace sanitize {
 
 // Internal source interface for streaming Arrow C Data batches.
@@ -20,6 +24,10 @@ public:
   virtual sanitize::Status GetSchema(struct ArrowSchema *out) = 0;
   virtual sanitize::Status GetNext(struct ArrowArray *out) = 0;
   virtual sanitize::Status Close() = 0;
+  [[nodiscard]] virtual std::shared_ptr<internal::OperationTaskArena>
+  TaskArena() const noexcept {
+    return {};
+  }
 };
 
 // Internal-only helper for exporting batch sources to Arrow C streams.

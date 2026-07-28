@@ -23,6 +23,10 @@
 
 struct ArrowArrayStream;
 
+namespace sanitize::internal {
+class OperationTaskArena;
+}
+
 namespace core_abi3_internal::path_registry_detail {
 
 struct PyRegistrySinkOutputs {
@@ -37,6 +41,7 @@ struct PyRegistrySinkOutputs {
 struct NativePathSourcesStreamState {
   schema_sanitizer_context *ctx = nullptr;
   sanitize::PreparedOptionsPtr prepared;
+  std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena;
   std::string sink_name;
   bool registry_enabled = true;
   bool source_file_column = true;
@@ -56,11 +61,15 @@ struct NativePathSourcesStreamState {
   bool chunk_provider_exhausted = false;
   ArrowArrayStream *inner = nullptr;
   schema_sanitizer_diagnostics *diagnostics = nullptr;
+  std::shared_ptr<sanitize::IngestDiagnostics> aggregate_diagnostics;
   std::unique_ptr<MetadataStreamState> metadata;
   std::string last_error;
 };
 
 void release_registry_outputs(PyRegistrySinkOutputs *outputs);
+bool bind_path_source_diagnostics(
+    NativePathSourcesStreamState *state,
+    schema_sanitizer_diagnostics *diagnostics) noexcept;
 void close_chunk_provider(NativePathSourcesStreamState *state) noexcept;
 [[nodiscard]] bool
 path_source_input_empty(const PathSourceInput &input) noexcept;

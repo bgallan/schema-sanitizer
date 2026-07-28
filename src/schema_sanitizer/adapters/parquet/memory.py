@@ -6,7 +6,6 @@ from typing import Any
 
 DEFAULT_PARQUET_BATCH_ROWS = 65536
 ESTIMATED_ROW_BYTES = 4096
-THREADED_PARQUET_MIN_MEMORY_BYTES = 256 * 1024 * 1024
 
 
 def parquet_batch_size_from_memory_limit(memory_limit_bytes: int | None) -> int:
@@ -25,13 +24,11 @@ def parquet_memory_limit_allows_direct_ingest(memory_limit_bytes: int | None) ->
     )
 
 
-def parquet_use_threads_from_memory_limit(memory_limit_bytes: int | None) -> bool:
-    """Return whether Parquet decoding can safely use PyArrow worker threads."""
-    return (
-        memory_limit_bytes is None
-        or memory_limit_bytes <= 0
-        or memory_limit_bytes >= THREADED_PARQUET_MIN_MEMORY_BYTES
-    )
+def parquet_use_threads(threading_mode: str, memory_limit_bytes: int | None) -> bool:
+    """Return whether the shared policy permits PyArrow worker threads."""
+    from ...core_impl.execution_policy import execution_policy
+
+    return execution_policy(threading_mode, memory_limit_bytes).pyarrow_use_threads
 
 
 def _native_parquet_max_row_group_rows(info: dict[str, Any] | None) -> int:

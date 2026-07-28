@@ -121,11 +121,12 @@ def _patch_native_record_file_diagnostics(
         return False
     diagnostics = _diagnostics_target(result)
     skipped_rows = int(getattr(diagnostics, "skipped_rows", 0) or 0)
+    logical_batches = int(getattr(diagnostics, "batches", 0) or 0)
     patch_diagnostics_values(
         diagnostics,
         {
             "materialized_rows": materialized_rows,
-            "batches": batches or (1 if materialized_rows > 0 else 0),
+            "batches": logical_batches or batches or (1 if materialized_rows > 0 else 0),
             "inferred_rows": int(getattr(diagnostics, "inferred_rows", 0) or 0)
             or (materialized_rows + skipped_rows),
             "inferred_bytes": int(getattr(diagnostics, "inferred_bytes", 0) or 0)

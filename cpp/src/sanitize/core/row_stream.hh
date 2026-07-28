@@ -16,6 +16,10 @@
 
 namespace sanitize {
 
+namespace internal {
+class OperationTaskArena;
+}
+
 struct CompiledPlan;
 
 struct FieldRef {
@@ -24,11 +28,34 @@ struct FieldRef {
   ValueView value;
 };
 
+enum class FrontendMaterializationMode : uint8_t {
+  kDefault = 0,
+  // Parse syntax in the frontend, then defer full row materialization.
+  kValidatedRaw = 1,
+  // Parse and arrange scalar fields in frozen plan order for column fan-out.
+  kPlanOrdered = 2,
+  // Emit raw rows without frontend validation. A bounded ordered worker stage
+  // validates the complete frontend batch before materialization can commit.
+  kDeferredValidationRaw = 3,
+  // Emit framed raw rows whose only authoritative parse is worker-local.
+  // Used by JSON document arrays after schema planning.
+  kWorkerAuthoritativeRaw = 4,
+};
+
 enum class RowFlags : uint8_t {
   kNone = 0,
   // Row is provided as raw text only; field parsing is deferred to the
   // materializer.
   kRawOnly = 1,
+  // Row fields occupy frozen plan order, followed by any retained extras.
+  kPlanOrdered = 2,
+  // Raw JSON row has an immutable validated top-level field-token index.
+  kJsonValidatedTokens = 4,
+  // Validated JSON field tokens match the frozen root plan exactly by name and
+  // order. Materialization may consume values positionally without key lookup.
+  kJsonPlanOrderedTokens = 8,
+  // Deferred JSON row must be a top-level object (json_array semantics).
+  kJsonObjectRequired = 16,
 };
 
 struct RowRef {
@@ -63,6 +90,11 @@ struct FrontendVTable {
   sanitize::Result<RowBatch> (*next_batch)(void *, int64_t capacity);
   void (*set_plan)(void *, const CompiledPlan *) noexcept;
   void (*destroy)(void *) noexcept;
+  void (*set_memory_pool)(void *, std::shared_ptr<void>) noexcept = nullptr;
+  void (*set_materialization_mode)(
+      void *, FrontendMaterializationMode) noexcept = nullptr;
+  void (*set_task_arena)(
+      void *, std::shared_ptr<internal::OperationTaskArena>) noexcept = nullptr;
 };
 
 class FrontendHandle {
@@ -113,6 +145,28 @@ public:
     if (!self_ || !vt_)
       return;
     vt_->set_plan(self_, plan);
+  }
+
+  // Selects the internal row representation used by capable frontends.
+  void set_materialization_mode(FrontendMaterializationMode mode) noexcept {
+    if (self_ && vt_ && vt_->set_materialization_mode) {
+      vt_->set_materialization_mode(self_, mode);
+    }
+  }
+
+  // Installs the operation-scoped tracked allocation pool when supported.
+  void set_memory_pool(std::shared_ptr<void> pool) noexcept {
+    if (self_ && vt_ && vt_->set_memory_pool) {
+      vt_->set_memory_pool(self_, std::move(pool));
+    }
+  }
+
+  // Installs the operation-scoped shared worker arena when supported.
+  void set_task_arena(
+      std::shared_ptr<internal::OperationTaskArena> task_arena) noexcept {
+    if (self_ && vt_ && vt_->set_task_arena) {
+      vt_->set_task_arena(self_, std::move(task_arena));
+    }
   }
 
   // Returns the next batch.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core_impl.generated_metadata import TimestampColumnValues
 from ...core_impl.native_symbols import METADATA_STREAM_WRAP
 
 
@@ -45,7 +46,7 @@ def native_metadata_reader(
     first_row_columns: dict[str, Any],
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumnValues = (),
     *,
     pa: Any,
 ) -> Any | None:

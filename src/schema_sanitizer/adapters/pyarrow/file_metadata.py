@@ -6,6 +6,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from ...core_impl.generated_metadata import TimestampColumns, TimestampColumnValues
 from .metadata_native import (
     metadata_values_are_native_supported,
     native_metadata_reader,
@@ -15,7 +16,6 @@ from .metadata_specs import (
     AllRowColumns,
     FirstRowColumns,
     RowSpanColumns,
-    TimestampColumns,
     reject_existing_metadata_columns,
     validate_all_row_columns,
     validate_first_row_columns,
@@ -58,7 +58,7 @@ def native_metadata_args_or_none(
         dict[str, Any],
         dict[str, Any],
         dict[str, list[tuple[int, str | None]]],
-        tuple[str, ...],
+        TimestampColumnValues,
     ]
     | None
 ):

@@ -67,7 +67,18 @@ class ChainedKeepalive:
 
 
 class NativeDirectoryManifestCarrier:
-    """Minimal object used only to carry native directory manifest metadata."""
+    """Own attached local, remote, or Parquet source manifests."""
 
     def close(self) -> None:
-        """Satisfy prepared-input keepalive cleanup."""
+        """Close any attached manifest that owns staged resources."""
+        for attribute in (
+            "remote_native_multisource_manifest",
+            "native_multisource_manifest",
+            "native_parquet_multisource_manifest",
+        ):
+            manifest = getattr(self, attribute, None)
+            close = getattr(manifest, "close", None)
+            if callable(close):
+                close()
+            if manifest is not None:
+                delattr(self, attribute)

@@ -120,6 +120,12 @@ SCHEMA_SANITIZER_OPTION(sanitize::OnErrorPolicy, on_error,
                         "Row-level error handling policy.")
 
 // --- Performance
+SCHEMA_SANITIZER_OPTION(
+    sanitize::ThreadingMode, threading_mode, sanitize::ThreadingMode::kSingle,
+    "performance",
+    "Execution model. single keeps every project-owned stage inline; multi "
+    "enables bounded deterministic parallelism derived from the memory budget "
+    "and available CPUs.")
 // Single per-operation memory budget in bytes. <= 0 selects the documented
 // default. Every internal buffer, batch, staging, and concurrency budget is
 // derived from this value; no runtime environment configuration is consulted.

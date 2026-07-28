@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "sanitize/core/status.hh"
+#include "sanitize/options/options.hh"
 
 namespace sanitize::internal::csv_stream_writer {
 
@@ -27,8 +28,9 @@ public:
 };
 
 // Writes all batches from an Arrow C stream as CSV.
-Result<WriteStats> write_stream(ArrowArrayStream *stream, Output &out_file,
-                                std::int64_t memory_limit_bytes);
+Result<WriteStats> write_stream(
+    ArrowArrayStream *stream, Output &out_file, std::int64_t memory_limit_bytes,
+    sanitize::ThreadingMode threading_mode = sanitize::ThreadingMode::kSingle);
 
 // Returns whether an Arrow C schema can be serialized by the native CSV writer.
 bool schema_is_supported(const ArrowSchema &schema);

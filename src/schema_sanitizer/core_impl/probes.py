@@ -17,6 +17,20 @@ def options_for_schema_probe(options: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def options_for_registry_operation(
+    options: dict[str, Any],
+    *,
+    registry_json: str,
+    schema_mode: str,
+) -> dict[str, Any]:
+    """Infer incoming shape before applying registry-backed evolution rules."""
+    del registry_json, schema_mode
+    # Registry-backed ``strict`` means that a canonical registry must already
+    # exist. The registry still owns compatible promotions and version-family
+    # creation, so probing the incoming source itself must remain additive.
+    return options_for_schema_probe(options)
+
+
 class _ExecutionCapsuleOwner:
     """Type contract shared by execution-context mixins."""
 

@@ -6,9 +6,11 @@ from collections.abc import Callable
 from typing import Any
 
 from schema_sanitizer.core_impl.error_translation import call_core
+from schema_sanitizer.core_impl.execution_policy import normalize_threading_mode
 from schema_sanitizer.core_impl.generated_metadata import (
     SCHEMA_DRIFTS_COLUMN,
     SCHEMA_REGISTRY_COLUMN,
+    TimestampColumns,
 )
 from schema_sanitizer.input_impl.source_plan import PARQUET_ARROW_SOURCES
 
@@ -19,7 +21,7 @@ from ..input_impl.selection import (
     unsupported_native_directory_ingestion,
 )
 from ..options_impl.call_options import unwrap_options
-from ..options_impl.options import Options
+from ..options_impl.options import Options, memory_limit_bytes_or_none
 from .execution_context import default_pool
 from .file_conversion.writers import (
     write_csv_native_first_stream,
@@ -27,6 +29,7 @@ from .file_conversion.writers import (
     write_parquet_native_first_stream,
 )
 from .ingest import native_ingest_plan, normalize_options
+from .input.memory_limits import enforce_materialized_input_limit
 from .parquet.direct_routes import (
     last_parquet_direct_route,
     parquet_direct_registry_sink_raw_or_none,
@@ -48,12 +51,14 @@ def write_registry_raw_stream_to_file(
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     metadata_already_in_stream: bool = False,
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
     schema_registry_json: str | None = None,
     schema_drifts_json: str | None = None,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> Result:
     """Write a registry-backed sink from an already-open native raw stream."""
     registry_json = (
@@ -84,6 +89,8 @@ def write_registry_raw_stream_to_file(
         timestamp_columns=timestamp_columns,
         parquet_compression=parquet_compression,
         parquet_gzip_level=parquet_gzip_level,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
     result.schema_registry_json = registry_json
     result.schema_drifts_json = drifts_json
@@ -102,7 +109,7 @@ def _try_write_direct_parquet_registry_to_file(
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     schema_registry_json: str,
     schema_mode: str,
     field_name_policy: str,
@@ -110,6 +117,12 @@ def _try_write_direct_parquet_registry_to_file(
     parquet_gzip_level: int | None,
 ) -> Result | None:
     """Write direct Parquet registry output when the native Arrow path applies."""
+    memory_limit_bytes = memory_limit_bytes_or_none(call_options)
+    threading_mode = (
+        normalize_threading_mode(call_options.performance.threading_mode)
+        if call_options is not None
+        else "single"
+    )
     raw = parquet_direct_registry_sink_raw_or_none(
         default_pool().get()._raw,
         data,
@@ -148,6 +161,8 @@ def _try_write_direct_parquet_registry_to_file(
         parquet_gzip_level=parquet_gzip_level,
         schema_registry_json=fallback_registry_json,
         schema_drifts_json=fallback_drifts_json,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
 
 
@@ -163,7 +178,7 @@ def _write_registry_file(
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     schema_registry_json: str,
     schema_mode: str,
     field_name_policy: str,
@@ -173,6 +188,12 @@ def _write_registry_file(
 ) -> Result:
     """Ingest and write using native registry-backed schema preparation."""
     call_options = normalize_options(options)
+    memory_limit_bytes = memory_limit_bytes_or_none(call_options)
+    threading_mode = (
+        normalize_threading_mode(call_options.performance.threading_mode)
+        if call_options is not None
+        else "single"
+    )
     source_plan = source_plan_from_data(data)
     if source_plan is not None:
         plan_result = write_source_plan_registry_to_file(
@@ -219,6 +240,42 @@ def _write_registry_file(
         if direct_result is not None:
             return direct_result
 
+    if format == "python":
+        enforce_materialized_input_limit(
+            data,
+            "python",
+            memory_limit_bytes=memory_limit_bytes,
+            source="python",
+        )
+        raw = call_core(
+            default_pool().get()._raw.to_registry_sink_python,
+            "stream",
+            data,
+            unwrap_options(call_options),
+            registry_json=schema_registry_json,
+            field_name_policy=field_name_policy,
+            schema_mode=schema_mode,
+            first_row_columns=first_row_columns or {},
+            all_row_columns=all_row_columns or {},
+            row_span_columns=row_span_columns or {},
+            timestamp_columns=timestamp_columns,
+        )
+        return write_registry_raw_stream_to_file(
+            raw,
+            out_path,
+            first_row_columns=first_row_columns,
+            all_row_columns=all_row_columns,
+            row_span_columns=row_span_columns,
+            timestamp_columns=timestamp_columns,
+            writer=writer,
+            feature=feature,
+            metadata_already_in_stream=True,
+            parquet_compression=parquet_compression,
+            parquet_gzip_level=parquet_gzip_level,
+            memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
+        )
+
     plan = native_ingest_plan(data, format=format, source=source, options=call_options)
     try:
         raw = call_core(
@@ -248,6 +305,8 @@ def _write_registry_file(
             metadata_already_in_stream=True,
             parquet_compression=parquet_compression,
             parquet_gzip_level=parquet_gzip_level,
+            memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
     finally:
         plan.close_keepalive()
@@ -263,7 +322,7 @@ def write_parquet_registry_file(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     schema_registry_json: str,
     schema_mode: str,
     field_name_policy: str,
@@ -303,7 +362,7 @@ def write_jsonl_registry_file(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     schema_registry_json: str,
     schema_mode: str,
     field_name_policy: str,
@@ -341,7 +400,7 @@ def write_csv_registry_file(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     schema_registry_json: str,
     schema_mode: str,
     field_name_policy: str,

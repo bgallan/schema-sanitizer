@@ -9,16 +9,23 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ...core_impl.async_scheduler import retry_async
+from ...core_impl.async_scheduler import (
+    drain_ordered_indexed_results,
+    ordered_indexed_results,
+    retry_async,
+)
+from ...core_impl.execution_policy import execution_policy
 from ...core_impl.memory_budget import memory_budget
-from ...core_impl.uris import name_matches, normalize_extensions
+from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     RemoteFile,
     split_parent_child,
 )
+from ..provider_session_pool import current_provider_session_pool
 from ..transport import TRANSFER_CHUNK_BYTES
+from ..upload_policy import read_upload_part, remote_upload_policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,10 +53,18 @@ def client_options() -> dict[str, Any]:
     return {}
 
 
-async def open_client() -> Any:
-    """Open an aiobotocore S3 client."""
+async def _open_client_unpooled() -> Any:
+    """Create one directly owned aiobotocore S3 client manager."""
     aiobotocore = import_module("aiobotocore.session")
     return aiobotocore.get_session().create_client("s3", **client_options())
+
+
+async def open_client() -> Any:
+    """Open or borrow an aiobotocore S3 client for the current operation."""
+    pool = current_provider_session_pool()
+    if pool is None:
+        return await _open_client_unpooled()
+    return await pool.borrow_manager(("s3",), _open_client_unpooled)
 
 
 async def download_bytes(client: Any, file: RemoteFile) -> bytes:
@@ -61,12 +76,21 @@ async def download_bytes(client: Any, file: RemoteFile) -> bytes:
         return await body.read()
 
 
-async def file_exists(uri: str) -> bool:
+async def file_exists(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> bool:
     """Return whether one S3 object exists."""
-    return await file_metadata(uri) is not None
+    return (
+        await file_metadata(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
+        is not None
+    )
 
 
-async def file_metadata(uri: str) -> RemoteFile | None:
+async def file_metadata(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> RemoteFile | None:
     """Return S3 object metadata using the existence HEAD request."""
     ref = parse_uri(uri)
     async with await open_client() as client:
@@ -95,7 +119,13 @@ async def file_metadata(uri: str) -> RemoteFile | None:
             raise
 
 
-async def download_file(uri: str, local_path: str) -> None:
+async def download_file(
+    uri: str,
+    local_path: str,
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> None:
     """Download one S3 object to a local file."""
     async with await open_client() as client:
         await download_file_with_client(
@@ -116,15 +146,154 @@ async def download_file_with_client(client: Any, file: RemoteFile, local_path: s
                 file_handle.write(chunk)
 
 
-async def upload_file(local_path: str, uri: str) -> None:
-    """Upload a local file to S3."""
+def _should_retry_s3_part(exc: Exception) -> bool:
+    """Return whether one idempotent UploadPart request may be retried."""
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    if exc.__class__.__module__.split(".", 1)[0] in {"aiohttp", "aiobotocore"}:
+        return True
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    metadata = response.get("ResponseMetadata")
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+    error = response.get("Error")
+    code = error.get("Code") if isinstance(error, dict) else None
+    return (
+        status == 429
+        or (isinstance(status, int) and status >= 500)
+        or code
+        in {
+            "InternalError",
+            "RequestTimeout",
+            "ServiceUnavailable",
+            "SlowDown",
+        }
+    )
+
+
+async def _upload_file_multipart(
+    client: Any,
+    local_path: str,
+    uri: str,
+    *,
+    memory_limit_bytes: int | None,
+    threading_mode: str,
+) -> None:
+    """Publish one file through bounded S3 multipart upload and ordered commit."""
     ref = parse_uri(uri)
+    tuning = remote_upload_policy(
+        "s3",
+        local_path,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
+    )
+    source = Path(local_path)
+    initial_stat = source.stat()
+    created = await client.create_multipart_upload(
+        Bucket=ref.bucket,
+        Key=ref.key,
+        ContentType=content_type_for_uri(uri),
+    )
+    upload_id = created.get("UploadId") if isinstance(created, dict) else None
+    if not isinstance(upload_id, str) or not upload_id:
+        raise RuntimeError("S3 multipart upload did not return an upload id")
+
+    retries = memory_budget(memory_limit_bytes).async_retries
+    parts: list[dict[str, Any]] = []
+
+    async def upload_part(index: int) -> dict[str, Any]:
+        """Read and upload one immutable local-file part."""
+        payload = read_upload_part(local_path, index, tuning.part_bytes, tuning.file_size)
+        part_number = index + 1
+
+        async def operation() -> Any:
+            """Send one idempotent part request with bounded retry."""
+            return await client.upload_part(
+                Bucket=ref.bucket,
+                Key=ref.key,
+                UploadId=upload_id,
+                PartNumber=part_number,
+                Body=payload,
+            )
+
+        response = await retry_async(
+            operation,
+            retries=retries,
+            should_retry=_should_retry_s3_part,
+        )
+        etag = response.get("ETag") if isinstance(response, dict) else None
+        if not isinstance(etag, str) or not etag:
+            raise RuntimeError(f"S3 multipart part {part_number} did not return an ETag")
+        return {"ETag": etag, "PartNumber": part_number}
+
+    try:
+        async for _index, completed in ordered_indexed_results(
+            tuning.part_count,
+            upload_part,
+            window=tuning.concurrency,
+        ):
+            parts.append(completed)
+        final_stat = source.stat()
+        if (final_stat.st_size, final_stat.st_mtime_ns) != (
+            initial_stat.st_size,
+            initial_stat.st_mtime_ns,
+        ):
+            raise OSError("remote upload spool changed before S3 multipart commit")
+        await client.complete_multipart_upload(
+            Bucket=ref.bucket,
+            Key=ref.key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+    except BaseException as exc:
+        try:
+            await client.abort_multipart_upload(
+                Bucket=ref.bucket,
+                Key=ref.key,
+                UploadId=upload_id,
+            )
+        except BaseException as abort_exc:
+            exc.add_note(f"S3 multipart abort also failed: {abort_exc!r}")
+        raise
+
+
+async def upload_file(
+    local_path: str,
+    uri: str,
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> None:
+    """Upload a local file to S3 with a bounded multipart fast path."""
+    ref = parse_uri(uri)
+    tuning = remote_upload_policy(
+        "s3",
+        local_path,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
+    )
     async with await open_client() as client:
+        if tuning.multipart:
+            await _upload_file_multipart(
+                client,
+                local_path,
+                uri,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+            )
+            return
         with Path(local_path).open("rb") as file_handle:
             await client.put_object(Bucket=ref.bucket, Key=ref.key, Body=file_handle)
 
 
-async def list_files(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile]:
+async def list_files(
+    uri: str,
+    suffixes: tuple[str, ...],
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> list[RemoteFile]:
     """List direct S3 child files under a URI prefix."""
     ref = parse_uri(uri)
     prefix = ref.key.rstrip("/") + "/"
@@ -166,6 +335,7 @@ async def directories_containing_files(
     suffixes: tuple[str, ...],
     *,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether S3 directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
@@ -184,7 +354,7 @@ async def directories_containing_files(
         return discovery.finish()
 
     budget = memory_budget(memory_limit_bytes)
-    concurrency = budget.source_discovery_concurrency
+    concurrency = execution_policy(threading_mode, memory_limit_bytes).source_discovery_concurrency
     retries = budget.async_retries
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -229,7 +399,16 @@ async def directories_containing_files(
                         "without a continuation token"
                     )
 
-    await asyncio.gather(
-        *(scan_group(bucket, parent, children) for (bucket, parent), children in groups.items())
+    grouped = list(groups.items())
+
+    async def scan_index(index: int) -> None:
+        """Scan one canonically ordered S3 parent group."""
+        (bucket, parent), children = grouped[index]
+        await scan_group(bucket, parent, children)
+
+    await drain_ordered_indexed_results(
+        len(grouped),
+        scan_index,
+        window=concurrency,
     )
     return discovery.finish()

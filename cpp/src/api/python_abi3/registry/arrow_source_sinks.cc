@@ -3,6 +3,7 @@
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -24,13 +25,35 @@
 #include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/planning/options_schema_serialization.hh"
+#include "internal/runtime/execution_policy.hh"
+#include "internal/runtime/operation_task_arena.hh"
 #include "sanitize/registry/registry.hh"
 #include "sanitize/runtime/execution_context.hh"
 
 #include "api/python_abi3/registry/arrow_source_sinks_internal.hh"
 
 namespace core_abi3_internal::arrow_registry_detail {
+
+sanitize::Status
+ensure_operation_task_arena(NativeArrowSourcesStreamState *state) {
+  if (!state || !state->prepared) {
+    return sanitize::Status::Invalid(
+        "native Arrow sources stream has no prepared options");
+  }
+  if (state->task_arena) {
+    return sanitize::Status::OK();
+  }
+  const auto policy = sanitize::internal::execution_policy_from(
+      state->prepared->spec.threading_mode,
+      state->prepared->spec.memory_limit_bytes);
+  SAN_ASSIGN_OR_RAISE(
+      state->task_arena,
+      sanitize::internal::OperationTaskArena::Make(static_cast<std::size_t>(
+          std::max<std::int64_t>(1, policy.effective_workers))));
+  return sanitize::Status::OK();
+}
 
 std::vector<MetadataColumn>
 metadata_columns_for_child(const NativeArrowSourcesStreamState *state,
@@ -61,6 +84,8 @@ finish_opened_source_metadata(NativeArrowSourcesStreamState *state,
   configure_metadata_stream_budget(state->metadata.get(),
                                    state->prepared->spec.memory_limit_bytes);
   state->metadata->inner = state->inner;
+  SAN_RETURN_NOT_OK(ensure_operation_task_arena(state));
+  sanitize::internal::attach_task_arena(state->inner, state->task_arena);
   state->metadata->columns = metadata_columns_for_child(state, source);
   state->metadata->first_row_pending = state->first_row_pending;
   return sanitize::Status::OK();
@@ -145,6 +170,7 @@ ingest_arrow_source_with_registry_plan(NativeArrowSourcesStreamState *state,
     return sanitize::Status::Invalid(
         "prepared ingest has no execution context");
   }
+  SAN_RETURN_NOT_OK(ensure_operation_task_arena(state));
   prepared.operation_memory_pool =
       prepared.ctx->make_operation_memory_pool_handle(
           state->prepared->spec.memory_limit_bytes);
@@ -152,6 +178,7 @@ ingest_arrow_source_with_registry_plan(NativeArrowSourcesStreamState *state,
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");
   }
+  prepared.task_arena = state->task_arena;
   prepared.plan = state->registry_plan->plan;
   prepared.opts = state->prepared;
   prepared.diagnostics = std::move(diagnostics);
@@ -201,7 +228,8 @@ sanitize::Status open_next_source(NativeArrowSourcesStreamState *state) {
         std::move(input_schema), state->registry_json.c_str(),
         state->field_name_policy.c_str(),
         state->prepared->spec.default_key_name,
-        state->prepared->spec.field_order));
+        state->prepared->spec.field_order,
+        state->prepared->operation_detected_at));
     if (!merged_r.ok()) {
       return merged_r.status();
     }

@@ -70,13 +70,13 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
     require_native()
     pytest.importorskip("pyarrow")
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
-    from schema_sanitizer.remote_impl import routing as remote_routing
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
 
     staged_calls = []
 
-    async def fake_list_remote_directory_files(uri, suffixes):
+    def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
         """Return two remote JSON children."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".json",)
@@ -104,7 +104,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
         )
 
     monkeypatch.setattr(
-        remote_routing,
+        sync_backend,
         "list_remote_directory",
         fake_list_remote_directory_files,
     )
@@ -128,7 +128,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
         "s3://bucket/partition/a.json",
         "s3://bucket/partition/b.json",
     ]
-    assert staged_calls == [["a.json", "b.json"], ["a.json", "b.json"]]
+    assert staged_calls == [["a.json", "b.json"]]
 
 
 def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
@@ -139,13 +139,13 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
     require_native()
     pytest.importorskip("pyarrow")
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
-    from schema_sanitizer.remote_impl import routing as remote_routing
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
 
     staged_calls = []
 
-    async def fake_list_remote_directory_files(uri, suffixes):
+    def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
         """Return two remote JSON children."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".json",)
@@ -173,7 +173,7 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
         )
 
     monkeypatch.setattr(
-        remote_routing,
+        sync_backend,
         "list_remote_directory",
         fake_list_remote_directory_files,
     )
@@ -195,7 +195,7 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
         "s3://bucket/partition/a.json",
         "s3://bucket/partition/b.json",
     ]
-    assert staged_calls == [["a.json", "b.json"], ["a.json", "b.json"]]
+    assert staged_calls == [["a.json", "b.json"]]
 
 
 def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
@@ -207,8 +207,8 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
     pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.source_plan import registry as source_plan_registry_stream
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
-    from schema_sanitizer.remote_impl import routing as remote_routing
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
 
     registry_seed = tmp_path / "registry-seed.json"
@@ -216,7 +216,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
     registry_json = ss.to_pyarrow(registry_seed, input_format="json").schema_registry_json
     staged_calls = []
 
-    async def fake_list_remote_directory_files(uri, suffixes):
+    def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
         """Return two remote JSON children."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".json",)
@@ -253,7 +253,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
         return real_registry_stream(*args, **kwargs)
 
     monkeypatch.setattr(
-        remote_routing,
+        sync_backend,
         "list_remote_directory",
         fake_list_remote_directory_files,
     )
@@ -280,4 +280,4 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
     rows = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()]
     assert registry_stream_calls == 1
     assert [row["id"] for row in rows] == ["a", "b"]
-    assert staged_calls == [["a.json", "b.json"], ["a.json", "b.json"]]
+    assert staged_calls == [["a.json", "b.json"]]

@@ -28,7 +28,7 @@ def test_async_scheduler_has_a_neutral_core_owner() -> None:
         "api_impl/parquet/arrow_sources.py",
     ):
         consumer = (SRC / relative).read_text(encoding="utf-8")
-        assert "core_impl.memory_budget" in consumer
+        assert "core_impl.execution_policy" in consumer
         assert "core_impl.async_scheduler" not in consumer
         assert "remote_impl.scheduler" not in consumer
 

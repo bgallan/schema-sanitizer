@@ -62,6 +62,7 @@ def read_test_path(
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
         memory_limit_bytes=options.get("memory_limit_bytes"),
+        threading_mode=str(options.get("threading_mode", "single")),
     )
     try:
         if prepared.xml_row_tag is not None:

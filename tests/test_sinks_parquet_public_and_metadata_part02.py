@@ -171,11 +171,13 @@ def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
     first = pa.record_batch({"a": pa.array(["1", "2"])})
     second = pa.record_batch({"a": pa.array(["3"])})
     stream = pa.RecordBatchReader.from_batches(first.schema, [first, second])
+    fixed_timestamp_micros = 1_700_000_000_123_456
+    fixed_timestamp = dt.datetime(2023, 11, 14, 22, 13, 20, 123456)
     metadata = prepare_file_output_metadata_stream(
         stream,
         {"schema_registry": "{}"},
         {"source_file": "/tmp/source.jsonl"},
-        timestamp_columns=("ingestion_timestamp",),
+        timestamp_columns={"ingestion_timestamp": fixed_timestamp_micros},
         pa=pa,
     )
 
@@ -183,13 +185,15 @@ def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
         assert last_metadata_route() == "native"
         assert metadata.schema.field("source_file").type == pa.string()
         assert metadata.schema.field("ingestion_timestamp").type == pa.timestamp("us")
-        rows = metadata.reader.read_all().to_pylist()
+        batches = list(metadata.reader)
+        rows = pa.Table.from_batches(batches).to_pylist()
     finally:
         metadata.close()
 
+    assert len(batches) == 2
     assert [row["source_file"] for row in rows] == ["/tmp/source.jsonl"] * 3
     assert [row["schema_registry"] for row in rows] == ["{}", None, None]
-    assert all(isinstance(row["ingestion_timestamp"], dt.datetime) for row in rows)
+    assert [row["ingestion_timestamp"] for row in rows] == [fixed_timestamp] * 3
 
 
 def test_metadata_native_stream_handles_row_span_columns_across_batches() -> None:

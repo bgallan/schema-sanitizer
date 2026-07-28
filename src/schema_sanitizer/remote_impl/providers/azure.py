@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ...core_impl.memory_budget import memory_budget
+from ...core_impl.async_scheduler import drain_ordered_indexed_results
+from ...core_impl.execution_policy import execution_policy
 from ...core_impl.uris import name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
@@ -17,6 +19,42 @@ from ...input_impl.directory_inputs import (
     RemoteFile,
     split_parent_child,
 )
+from ..provider_session_pool import current_provider_session_pool
+from ..upload_policy import remote_upload_policy
+
+
+class _AzureServiceOwner:
+    """Own one Blob service and the credential created specifically for it."""
+
+    def __init__(self, service: Any, credential: Any) -> None:
+        """Store both SDK resources for one idempotent combined close."""
+        self._service = service
+        self._credential = credential
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        """Forward Azure service methods and properties."""
+        return getattr(self._service, name)
+
+    async def close(self) -> None:
+        """Close service transport and credential exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        first_error: BaseException | None = None
+        for resource in (self._service, self._credential):
+            close = getattr(resource, "close", None)
+            if close is None:
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,12 +100,37 @@ def parse_uri(uri: str) -> AzureRef:
     raise ValueError(f"not an Azure Blob URI: {uri!r}")
 
 
-async def open_service(ref: AzureRef) -> Any:
-    """Open an async Azure Blob service client using the SDK credential chain."""
+async def _open_service_unpooled(ref: AzureRef) -> Any:
+    """Create one directly owned async Azure Blob service client."""
     blob = import_module("azure.storage.blob.aio")
     identity = import_module("azure.identity.aio")
     credential = identity.DefaultAzureCredential()
-    return blob.BlobServiceClient(account_url=ref.account_url, credential=credential)
+    try:
+        service = blob.BlobServiceClient(
+            account_url=ref.account_url,
+            credential=credential,
+        )
+    except BaseException:
+        close = getattr(credential, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        raise
+    return _AzureServiceOwner(service, credential)
+
+
+async def open_service(ref: AzureRef) -> Any:
+    """Open or borrow one Azure service client for the current operation."""
+    pool = current_provider_session_pool()
+    if pool is None:
+        return await _open_service_unpooled(ref)
+
+    async def create() -> Any:
+        """Create the operation-owned Azure service client."""
+        return await _open_service_unpooled(ref)
+
+    return await pool.borrow_client(("azure", ref.account_url), create)
 
 
 def render_uri(ref: AzureRef, blob: str) -> str:
@@ -89,26 +152,42 @@ async def download_file_with_service(
             file_handle.write(chunk)
 
 
-async def download_file(uri: str, local_path: str) -> None:
+async def download_file(
+    uri: str,
+    local_path: str,
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> None:
     """Download one Azure Blob to a local file."""
     ref = parse_uri(uri)
     service = await open_service(ref)
     try:
-        await download_file_with_service(
-            service,
-            RemoteFile(uri, Path(ref.blob).name),
-            local_path,
-        )
+        policy = execution_policy(threading_mode, memory_limit_bytes)
+        blob = service.get_blob_client(ref.container, ref.blob)
+        stream = await blob.download_blob(max_concurrency=policy.async_concurrency)
+        with Path(local_path).open("wb") as file_handle:
+            async for chunk in stream.chunks():
+                file_handle.write(chunk)
     finally:
         await service.close()
 
 
-async def file_exists(uri: str) -> bool:
+async def file_exists(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> bool:
     """Return whether one Azure Blob object exists."""
-    return await file_metadata(uri) is not None
+    return (
+        await file_metadata(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
+        is not None
+    )
 
 
-async def file_metadata(uri: str) -> RemoteFile | None:
+async def file_metadata(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> RemoteFile | None:
     """Return Azure Blob metadata using the existence request."""
     ref = parse_uri(uri)
     service = await open_service(ref)
@@ -147,19 +226,42 @@ async def download_bytes(uri: str) -> bytes:
         await service.close()
 
 
-async def upload_file(local_path: str, uri: str) -> None:
+async def upload_file(
+    local_path: str,
+    uri: str,
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> None:
     """Upload a local file to Azure Blob storage."""
     ref = parse_uri(uri)
+    tuning = remote_upload_policy(
+        "azure",
+        local_path,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
+    )
     service = await open_service(ref)
     try:
         blob = service.get_blob_client(ref.container, ref.blob)
         with Path(local_path).open("rb") as file_handle:
-            await blob.upload_blob(file_handle, overwrite=True)
+            await blob.upload_blob(
+                file_handle,
+                overwrite=True,
+                length=tuning.file_size,
+                max_concurrency=tuning.concurrency,
+            )
     finally:
         await service.close()
 
 
-async def list_files(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile]:
+async def list_files(
+    uri: str,
+    suffixes: tuple[str, ...],
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> list[RemoteFile]:
     """List direct Azure Blob child files under a URI prefix."""
     ref = parse_uri(uri)
     prefix = ref.blob.rstrip("/") + "/"
@@ -189,6 +291,7 @@ async def directories_containing_files(
     suffixes: tuple[str, ...],
     *,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether Azure directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
@@ -208,7 +311,7 @@ async def directories_containing_files(
     if not groups:
         return discovery.finish()
 
-    concurrency = memory_budget(memory_limit_bytes).source_discovery_concurrency
+    concurrency = execution_policy(threading_mode, memory_limit_bytes).source_discovery_concurrency
     semaphore = asyncio.Semaphore(concurrency)
 
     async def scan_group(
@@ -243,10 +346,16 @@ async def directories_containing_files(
         finally:
             await service.close()
 
-    await asyncio.gather(
-        *(
-            scan_group(account_url, container, parent, children)
-            for (account_url, container, parent), children in groups.items()
-        )
+    grouped = list(groups.items())
+
+    async def scan_index(index: int) -> None:
+        """Scan one canonically ordered Azure parent group."""
+        (account_url, container, parent), children = grouped[index]
+        await scan_group(account_url, container, parent, children)
+
+    await drain_ordered_indexed_results(
+        len(grouped),
+        scan_index,
+        window=concurrency,
     )
     return discovery.finish()

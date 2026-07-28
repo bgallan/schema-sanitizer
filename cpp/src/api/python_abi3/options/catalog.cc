@@ -3,6 +3,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include "internal/memory/memory_budget.hh"
+#include "internal/runtime/execution_policy.hh"
 #include "sanitize/options/options.hh"
 
 #include <concepts>
@@ -39,6 +40,8 @@ template <class T> constexpr std::string_view option_kind() {
     return "field_order";
   } else if constexpr (std::same_as<T, sanitize::OnErrorPolicy>) {
     return "on_error";
+  } else if constexpr (std::same_as<T, sanitize::ThreadingMode>) {
+    return "threading_mode";
   } else {
     static_assert(!sizeof(T), "unsupported option catalog type");
   }
@@ -142,6 +145,54 @@ PyObject *py_memory_budget(PyObject *, PyObject *args) {
                             PyFloat_FromDouble(budget.async_timeout_seconds)) ||
       !set_i64(17, budget.remote_chunk_prefetch) ||
       !set_i64(18, budget.source_discovery_concurrency)) {
+    Py_DECREF(out);
+    return nullptr;
+  }
+  return out;
+}
+
+PyObject *py_execution_policy(PyObject *, PyObject *args) {
+  int mode_value = 0;
+  long long requested = -1;
+  long long available_cpus = -1;
+  if (!PyArg_ParseTuple(args, "iL|L", &mode_value, &requested,
+                        &available_cpus)) {
+    return nullptr;
+  }
+  if (mode_value < 0 || mode_value > 1) {
+    PyErr_SetString(PyExc_ValueError,
+                    "threading mode must be 0 (single) or 1 (multi)");
+    return nullptr;
+  }
+  const auto mode = static_cast<sanitize::ThreadingMode>(mode_value);
+  const auto policy = available_cpus > 0
+                          ? sanitize::internal::execution_policy_from(
+                                mode, static_cast<std::int64_t>(requested),
+                                static_cast<std::int64_t>(available_cpus))
+                          : sanitize::internal::execution_policy_from(
+                                mode, static_cast<std::int64_t>(requested));
+  PyObject *out = PyTuple_New(14);
+  if (!out) {
+    return nullptr;
+  }
+  const auto set_i64 = [out](Py_ssize_t index, std::int64_t value) {
+    return tuple_set_item_steal(out, index, PyLong_FromLongLong(value)) != 0;
+  };
+  if (!set_i64(0, std::to_underlying(policy.requested_mode)) ||
+      !set_i64(1, policy.available_cpus) ||
+      !set_i64(2, policy.effective_workers) ||
+      !set_i64(3, policy.task_queue_capacity) ||
+      !set_i64(4, policy.reorder_capacity) ||
+      !set_i64(5, policy.worker_arena_bytes) ||
+      !set_i64(6, policy.materialization_packet_target_bytes) ||
+      !set_i64(7, policy.materialization_packet_max_rows) ||
+      !set_i64(8, policy.async_concurrency) ||
+      !set_i64(9, policy.async_prefetch_files) ||
+      !set_i64(10, policy.remote_chunk_prefetch) ||
+      !set_i64(11, policy.source_discovery_concurrency) ||
+      !tuple_set_item_steal(
+          out, 12, PyBool_FromLong(policy.pyarrow_use_threads ? 1 : 0)) ||
+      !set_i64(13, std::to_underlying(policy.fallback_reason))) {
     Py_DECREF(out);
     return nullptr;
   }

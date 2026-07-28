@@ -8,6 +8,7 @@ from typing import Any
 from ...adapters.parquet.sink import write_parquet_stream as _write_parquet_stream
 from ...adapters.pyarrow.csv_sink import write_csv_stream as _write_csv_stream
 from ...adapters.pyarrow.jsonl_sink import write_jsonl_stream as _write_jsonl_stream
+from ...core_impl.generated_metadata import TimestampColumns
 from ..parquet.replay_stream import make_replayable_parquet_stream
 from . import direct_writers as _native_output
 
@@ -23,8 +24,9 @@ def write_jsonl_native_first_stream(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> Any:
     """Write JSONL using direct native output or the PyArrow sink path."""
     stats = _native_output.try_write_jsonl_direct_native(
@@ -36,6 +38,7 @@ def write_jsonl_native_first_stream(
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
         memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
     if stats:
         return stats
@@ -48,6 +51,7 @@ def write_jsonl_native_first_stream(
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
         memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
 
 
@@ -59,8 +63,9 @@ def write_csv_native_first_stream(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> Any:
     """Write CSV using direct native output or the PyArrow sink path."""
     stats = _native_output.try_write_csv_direct_native(
@@ -71,6 +76,7 @@ def write_csv_native_first_stream(
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
         memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
     if stats:
         return stats
@@ -83,6 +89,7 @@ def write_csv_native_first_stream(
         row_span_columns=row_span_columns,
         timestamp_columns=timestamp_columns,
         memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
 
 
@@ -123,10 +130,11 @@ def write_parquet_native_first_stream(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> None:
     """Write Parquet using direct native output or the PyArrow sink path."""
     set_last_parquet_stream_route("none")
@@ -143,6 +151,7 @@ def write_parquet_native_first_stream(
                 parquet_compression=parquet_compression,
                 parquet_gzip_level=parquet_gzip_level,
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
             )
         except RuntimeError as exc:
             if not should_retry_native_parquet_failure(exc):
@@ -164,6 +173,7 @@ def write_parquet_native_first_stream(
             parquet_compression=parquet_compression,
             parquet_gzip_level=parquet_gzip_level,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
     finally:
         replay.close()
@@ -177,10 +187,12 @@ def try_write_raw_native_file_output(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+    parquet_retry_is_safe: bool = True,
 ) -> Any:
     """Write a raw native stream without PyArrow when supported."""
     if writer is write_jsonl_native_first_stream:
@@ -192,6 +204,7 @@ def try_write_raw_native_file_output(
             row_span_columns=row_span_columns,
             timestamp_columns=timestamp_columns,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
     if writer is write_csv_native_first_stream:
         return _native_output.try_write_csv_raw_direct_native(
@@ -202,6 +215,7 @@ def try_write_raw_native_file_output(
             row_span_columns=row_span_columns,
             timestamp_columns=timestamp_columns,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
     if writer is not write_parquet_native_first_stream:
         return False
@@ -216,8 +230,11 @@ def try_write_raw_native_file_output(
             parquet_compression=parquet_compression,
             parquet_gzip_level=parquet_gzip_level,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
     except RuntimeError as exc:
+        if not parquet_retry_is_safe:
+            raise
         if not should_retry_native_parquet_failure(exc):
             raise
         _log_native_parquet_fallback(exc)

@@ -111,7 +111,7 @@ void append_iso_time(std::string &out, int64_t seconds_since_midnight,
 
 sanitize::Status append_timestamp_value(std::string &out,
                                         const ArrowArray &array, int64_t row,
-                                        int64_t units_per_second) {
+                                        int64_t units_per_second, bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing timestamp buffer");
@@ -123,52 +123,69 @@ sanitize::Status append_timestamp_value(std::string &out,
   const int64_t days = floor_div(seconds, 86400);
   const int64_t seconds_of_day = floor_mod(seconds, 86400);
 
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_iso_date(out, days);
   out.push_back('T');
   append_iso_time(out, seconds_of_day, nanos);
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 
 sanitize::Status append_date32_value(std::string &out, const ArrowArray &array,
-                                     int64_t row) {
+                                     int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing date32 buffer");
   }
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_iso_date(out, values[array.offset + row]);
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 
 sanitize::Status append_date64_value(std::string &out, const ArrowArray &array,
-                                     int64_t row) {
+                                     int64_t row, bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing date64 buffer");
   }
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_iso_date(out, floor_div(values[array.offset + row], 86400000));
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 
 sanitize::Status append_time32s_value(std::string &out, const ArrowArray &array,
-                                      int64_t row) {
+                                      int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing time32 buffer");
   }
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_iso_time(out, values[array.offset + row], 0);
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 
 sanitize::Status append_time32ms_value(std::string &out,
-                                       const ArrowArray &array, int64_t row) {
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing time32 buffer");
@@ -176,14 +193,19 @@ sanitize::Status append_time32ms_value(std::string &out,
   const int64_t value = values[array.offset + row];
   const int64_t seconds = floor_div(value, 1000);
   const int64_t millis_remainder = floor_mod(value, 1000);
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_iso_time(out, seconds, millis_remainder * 1000000);
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 
 sanitize::Status append_time64_value(std::string &out, const ArrowArray &array,
-                                     int64_t row, int64_t units_per_second) {
+                                     int64_t row, int64_t units_per_second,
+                                     bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing time64 buffer");
@@ -192,9 +214,13 @@ sanitize::Status append_time64_value(std::string &out, const ArrowArray &array,
   const int64_t seconds = floor_div(value, units_per_second);
   const int64_t unit_remainder = floor_mod(value, units_per_second);
   const int64_t nanos = unit_remainder * (1000000000 / units_per_second);
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_iso_time(out, seconds, nanos);
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 

@@ -3,9 +3,10 @@
 class TrackingMemoryPool final : public MemoryPool {
 public:
   TrackingMemoryPool(std::shared_ptr<MemoryPool> parent, int64_t limit,
-                     std::string backend_name)
+                     std::string backend_name, bool thread_safe_registry)
       : parent_(std::move(parent)), limit_(limit),
-        backend_name_(std::move(backend_name)) {}
+        backend_name_(std::move(backend_name)),
+        live_allocations_(thread_safe_registry) {}
 
   sanitize::Status Allocate(int64_t size, int64_t alignment,
                             uint8_t **out) override {

@@ -22,8 +22,8 @@ class _CapsuleStream:
         return self._capsule
 
 
-def test_generator_replay_retains_at_most_one_source_row() -> None:
-    """One-shot generators must not retain a batch of potentially huge objects."""
+def test_generator_replay_retains_no_python_row_batch() -> None:
+    """Native iterator batching must not retain a Python-side row container."""
     from schema_sanitizer.core_impl.execution import PythonRowsJsonlByteReader
 
     yielded = 0
@@ -37,10 +37,11 @@ def test_generator_replay_retains_at_most_one_source_row() -> None:
 
     reader = PythonRowsJsonlByteReader(rows())
     try:
-        payload = reader._spool_next_iterable_chunk(1)
+        payload = reader._produce_and_record(1)
         assert payload
         assert yielded == 1
-        assert len(reader._iterable_chunk) <= 1
+        assert not hasattr(reader, "_iterable_chunk")
+        assert reader._iterable_index == 1
     finally:
         reader.close()
 

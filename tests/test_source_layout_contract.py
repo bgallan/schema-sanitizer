@@ -126,6 +126,7 @@ def test_json_ondemand_parser_is_a_cohesive_subsystem() -> None:
         "array_iteration.cc",
         "document.cc",
         "document.hh",
+        "flat_object_iteration.cc",
         "lex.cc",
         "object_iteration.cc",
         "scalar.cc",
@@ -152,6 +153,24 @@ def test_ingest_stream_is_split_by_runtime_responsibility() -> None:
     stream = ROOT / "cpp/src/internal/materialization/ingest_stream"
     assert {path.name for path in stream.iterdir() if path.is_file()} == {
         "batching.cc",
+        "column_partition.cc",
+        "column_partition.hh",
+        "parallel_diagnostics.cc",
+        "parallel_diagnostics.hh",
+        "parallel_json_validation.cc",
+        "parallel_json_validation.hh",
+        "parallel_packets.cc",
+        "parallel_packets.hh",
+        "parallel_preparer.cc",
+        "parallel_preparer.hh",
+        "parallel_preparer_columns.cc",
+        "parallel_preparer_internal.hh",
+        "parallel_source.cc",
+        "parallel_source.hh",
+        "parallel_source_columns.cc",
+        "parallel_source_dispatch.cc",
+        "parallel_source_impl.hh",
+        "parallel_source_json_validation.cc",
         "source.cc",
         "source.hh",
         "source_internal.hh",
@@ -170,17 +189,42 @@ def test_remote_io_is_owned_by_a_neutral_subsystem() -> None:
     assert {path.name for path in providers.glob("*.py")} == {
         "__init__.py",
         "azure.py",
+        "azure_sync.py",
         "gcs.py",
+        "gcs_sync.py",
         "s3.py",
+        "s3_sync.py",
     }
     assert not [
         path for path in providers.iterdir() if path.is_dir() and path.name != "__pycache__"
     ]
     staging = remote / "staging.py"
+    downloads = remote / "directory_downloads.py"
+    coordinator = remote / "io_coordinator.py"
+    sync_backend = remote / "sync_backend.py"
+    sync_http = remote / "sync_http.py"
+    transfer_dispatch = remote / "transfer_dispatch.py"
+    operation = ROOT / "src/schema_sanitizer/api_impl/operation_context.py"
+    packetization = remote / "packetization.py"
     assert staging.is_file()
+    assert downloads.is_file()
+    assert coordinator.is_file()
+    assert sync_backend.is_file()
+    assert sync_http.is_file()
+    assert transfer_dispatch.is_file()
+    assert operation.is_file()
+    assert packetization.is_file()
     assert len(staging.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(downloads.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(coordinator.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(sync_backend.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(sync_http.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(transfer_dispatch.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(operation.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(packetization.read_text(encoding="utf-8").splitlines()) <= 500
     assert not (remote / "staging").exists()
     assert not (ROOT / "src/schema_sanitizer/api_impl/remote").exists()
+    assert not (remote / "operation_context.py").exists()
     for retired in ("gcs", "s3", "azure", "http.py", "local_staging.py", "output.py"):
         assert not (remote / retired).exists()
 
@@ -402,6 +446,7 @@ def test_native_row_group_materialization_has_bounded_cohesive_owners() -> None:
     assert {owner.name for owner in owners} == {
         "native_stream_retained_budget.cc.inc",
         "native_stream_row_group.cc.inc",
+        "native_stream_parallel_columns.cc.inc",
     }
     assert all(len(owner.read_text(encoding="utf-8").splitlines()) <= 500 for owner in owners)
     assert not (materialization / "native_stream_row_group.cc.inc").exists()
@@ -477,6 +522,7 @@ def test_json_streaming_parser_is_grouped_by_phase() -> None:
     assert {path.name for path in json_streaming.iterdir() if path.is_file()} == {
         "scanner.hh",
         "scanner_flow.cc",
+        "scanner_line.cc",
         "scanner_state.cc",
         "scanner_value.cc",
         "value_span_buffer.cc",

@@ -3,9 +3,11 @@
 #include "internal/parquet/footer_reader/api.hh"
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/json_encoding/token_writer.hh"
 #include "internal/memory/memory_budget.hh"
 #include "internal/memory/memory_pool.hh"
+#include "internal/runtime/ordered_executor.hh"
 #include "internal/string_lookup.hh"
 
 #include "nanoarrow/nanoarrow.h"
@@ -91,6 +93,7 @@ namespace {
 #include "native_stream/materialization/native_stream_recursive_children.cc.inc"
 #include "native_stream/materialization/row_group/native_stream_retained_budget.cc.inc"
 #include "native_stream/materialization/row_group/native_stream_row_group.cc.inc"
+#include "native_stream/materialization/row_group/native_stream_parallel_columns.cc.inc"
 } // namespace
 
 #include "reporting/footer_reader_json.cc.inc"

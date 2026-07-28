@@ -272,14 +272,18 @@ bool append_row_span_columns_from_dict(PyObject *dict,
   return true;
 }
 
-bool append_timestamp_columns_from_sequence(PyObject *sequence,
-                                            std::vector<MetadataColumn> *out) {
-  if (!PySequence_Check(sequence) || PyUnicode_Check(sequence)) {
-    PyErr_SetString(PyExc_TypeError,
-                    "timestamp metadata columns must be a sequence of names");
+bool append_timestamp_columns(PyObject *columns,
+                              std::vector<MetadataColumn> *out) {
+  const bool fixed = PyDict_Check(columns);
+  if (!fixed && (!PySequence_Check(columns) || PyUnicode_Check(columns))) {
+    PyErr_SetString(
+        PyExc_TypeError,
+        "timestamp metadata columns must be a sequence of names or a "
+        "mapping of names to epoch microseconds");
     return false;
   }
-  const Py_ssize_t size = PySequence_Size(sequence);
+  const Py_ssize_t size =
+      fixed ? PyDict_Size(columns) : PySequence_Size(columns);
   if (size < 0) {
     return false;
   }
@@ -296,8 +300,35 @@ bool append_timestamp_columns_from_sequence(PyObject *sequence,
     return false;
   }
   out->reserve(out->size() + incoming);
+  if (fixed) {
+    PyObject *key = nullptr;
+    PyObject *value = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(columns, &pos, &key, &value)) {
+      MetadataColumn column;
+      column.placement = MetadataColumnPlacement::AllRowsTimestampMicros;
+      column.has_fixed_timestamp = true;
+      if (!py_unicode_to_string(key, "timestamp metadata columns", &column.name,
+                                &retained)) {
+        return false;
+      }
+      if (PyBool_Check(value) || !PyLong_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "fixed timestamp metadata values must be integer epoch "
+                        "microseconds");
+        return false;
+      }
+      const long long timestamp = PyLong_AsLongLong(value);
+      if (timestamp == -1 && PyErr_Occurred()) {
+        return false;
+      }
+      column.timestamp_micros = static_cast<std::int64_t>(timestamp);
+      out->push_back(std::move(column));
+    }
+    return true;
+  }
   for (Py_ssize_t i = 0; i < size; ++i) {
-    PyObject *item = PySequence_GetItem(sequence, i);
+    PyObject *item = PySequence_GetItem(columns, i);
     if (!item) {
       return false;
     }
@@ -319,8 +350,7 @@ bool append_registry_metadata_columns(
     std::vector<MetadataColumn> *first_row_out,
     std::vector<MetadataColumn> *timestamp_out) {
   return append_first_row_columns_from_dict(first_row_columns, first_row_out) &&
-         append_timestamp_columns_from_sequence(timestamp_columns,
-                                                timestamp_out);
+         append_timestamp_columns(timestamp_columns, timestamp_out);
 }
 
 } // namespace core_abi3_internal

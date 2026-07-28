@@ -61,7 +61,7 @@ def test_frontends_deduplicate_chunk_and_source_owners_independently() -> None:
     """A stable chunk/source pair must not append two shared_ptrs for every row."""
     for relative in (
         "cpp/src/frontends/csv/frontend.cc",
-        "cpp/src/frontends/json/text_frontend.cc",
+        "cpp/src/frontends/json/text_batch_storage.hh",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "last_data_owner_ptr" in text

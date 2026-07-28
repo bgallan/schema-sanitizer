@@ -2,7 +2,38 @@
 
 #include "internal/parsing/streaming/csv/record_span_internal.hh"
 
+#include <algorithm>
+#include <cstring>
+#include <string_view>
+
 namespace sanitize::internal {
+
+namespace {
+
+constexpr std::size_t kCsvVectorScanMinimum = 1024;
+constexpr std::size_t kCsvDenseQuoteGap = 16;
+constexpr unsigned kCsvDenseQuoteRun = 4;
+
+[[nodiscard]] std::size_t find_byte(std::string_view input, std::size_t begin,
+                                    char needle) noexcept {
+  if (begin >= input.size()) {
+    return std::string_view::npos;
+  }
+  const auto *found = static_cast<const char *>(
+      std::memchr(input.data() + begin, static_cast<unsigned char>(needle),
+                  input.size() - begin));
+  return found ? static_cast<std::size_t>(found - input.data())
+               : std::string_view::npos;
+}
+
+[[nodiscard]] std::size_t find_line_break(std::string_view input,
+                                          std::size_t begin) noexcept {
+  const auto lf = find_byte(input, begin, '\n');
+  const auto cr = find_byte(input, begin, '\r');
+  return std::min(lf, cr);
+}
+
+} // namespace
 
 CsvRecordSpanScanner::CsvRecordSpanScanner(CsvStreamingScanner &scanner,
                                            BumpArena *arena)
@@ -18,6 +49,10 @@ CsvRecordSpanScanner::CsvRecordSpanScanner(CsvStreamingScanner &scanner,
 }
 
 sanitize::Result<TextSlice> CsvRecordSpanScanner::scan() {
+  const char *line_break_data = nullptr;
+  std::size_t next_line_break = std::string_view::npos;
+  bool vector_scan = scanner_.prefer_vector_scan_;
+  unsigned short_quote_run = 0;
   for (;;) {
     TextSlice eof_record;
     bool finished = false;
@@ -25,16 +60,57 @@ sanitize::Result<TextSlice> CsvRecordSpanScanner::scan() {
     if (finished) {
       return eof_record;
     }
-
-    const char current = scanner_.chunk_.data[scanner_.pos_];
-    if (current == '"') {
-      SAN_RETURN_NOT_OK(handle_quote());
+    if (scanner_.pos_ >= scanner_.chunk_.data.size()) {
       continue;
     }
-    if (!in_quotes_ && (current == '\n' || current == '\r')) {
-      return finish_newline_record(current);
+
+    if (!vector_scan) {
+      const char *const data_ptr = scanner_.chunk_.data.data();
+      while (scanner_.pos_ < scanner_.chunk_.data.size()) {
+        const char current = scanner_.chunk_.data[scanner_.pos_];
+        if (current == '"') {
+          SAN_RETURN_NOT_OK(handle_quote());
+          if (scanner_.chunk_.data.data() != data_ptr) {
+            break;
+          }
+          continue;
+        }
+        if (!in_quotes_ && (current == '\n' || current == '\r')) {
+          return finish_newline_record(current);
+        }
+        ++scanner_.pos_;
+      }
+      continue;
     }
-    ++scanner_.pos_;
+
+    const auto data = scanner_.chunk_.data;
+    if (line_break_data != data.data()) {
+      line_break_data = data.data();
+      next_line_break = find_line_break(data, scanner_.pos_);
+    } else if (!in_quotes_ && next_line_break < scanner_.pos_) {
+      next_line_break = find_line_break(data, scanner_.pos_);
+    }
+
+    const auto begin = scanner_.pos_;
+    const auto special =
+        in_quotes_ ? find_byte(data, begin, '"')
+                   : std::min(find_byte(data, begin, '"'), next_line_break);
+    if (special == std::string_view::npos) {
+      scanner_.pos_ = data.size();
+      continue;
+    }
+    scanner_.pos_ = special;
+    const char current = data[special];
+    if (current == '"') {
+      const auto gap = special - begin;
+      short_quote_run = gap <= kCsvDenseQuoteGap ? short_quote_run + 1U : 0U;
+      SAN_RETURN_NOT_OK(handle_quote());
+      if (short_quote_run >= kCsvDenseQuoteRun) {
+        vector_scan = false;
+      }
+      continue;
+    }
+    return finish_newline_record(current);
   }
 }
 
@@ -61,6 +137,7 @@ CsvRecordSpanScanner::finish_newline_record(char current) {
     if (!record.empty() && record.back() == '\r') {
       record.remove_suffix(1);
     }
+    scanner_.prefer_vector_scan_ = record.size() >= kCsvVectorScanMinimum;
     consume_newline(current);
     return make_text_slice(record, record_start_abs_, record_owner_,
                            record_source_file_owner_, record_source_file_,
@@ -70,6 +147,7 @@ CsvRecordSpanScanner::finish_newline_record(char current) {
   SAN_RETURN_NOT_OK(push_segment(end_pos));
   trim_trailing_cr();
   SAN_ASSIGN_OR_RAISE(TextSlice out, materialize_segments());
+  scanner_.prefer_vector_scan_ = out.view.size() >= kCsvVectorScanMinimum;
   consume_newline(current);
   return out;
 }
@@ -80,6 +158,7 @@ sanitize::Result<TextSlice> CsvRecordSpanScanner::finish_eof_record() {
     if (!record.empty() && record.back() == '\r') {
       record.remove_suffix(1);
     }
+    scanner_.prefer_vector_scan_ = record.size() >= kCsvVectorScanMinimum;
     scanner_.pos_ = scanner_.chunk_.data.size();
     return make_text_slice(record, record_start_abs_, record_owner_,
                            record_source_file_owner_, record_source_file_,
@@ -89,6 +168,7 @@ sanitize::Result<TextSlice> CsvRecordSpanScanner::finish_eof_record() {
   SAN_RETURN_NOT_OK(push_segment(scanner_.chunk_.data.size()));
   trim_trailing_cr();
   SAN_ASSIGN_OR_RAISE(TextSlice out, materialize_segments());
+  scanner_.prefer_vector_scan_ = out.view.size() >= kCsvVectorScanMinimum;
   scanner_.pos_ = scanner_.chunk_.data.size();
   return out;
 }

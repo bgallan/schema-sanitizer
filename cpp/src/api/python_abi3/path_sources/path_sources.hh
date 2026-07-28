@@ -7,6 +7,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +18,10 @@
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/ingest/ingest.hh"
 #include "sanitize/schema_registry/schema_registry.hh"
+
+namespace sanitize::internal {
+class OperationTaskArena;
+}
 
 namespace core_abi3_internal {
 
@@ -31,6 +36,7 @@ struct PathSourceInput {
   sanitize::ChunkSourcePtr chunk_source;
   std::vector<std::string> paths;
   std::vector<std::string> source_names;
+  std::int64_t input_size_hint_bytes = 0;
 };
 
 enum class PathSourceGroupPurpose {
@@ -85,8 +91,10 @@ path_source_group_input(const std::vector<PathSourceSpec> &sources,
                         std::string_view input_text_encoding,
                         std::int64_t memory_limit_bytes);
 
-sanitize::Result<sanitize::FrontendHandle>
-path_source_frontend(PathSourceInput input, const sanitize::Options &options);
+sanitize::Result<sanitize::FrontendHandle> path_source_frontend(
+    PathSourceInput input, const sanitize::Options &options,
+    std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena =
+        nullptr);
 
 std::string_view path_source_materializer_frontend(std::string_view frontend);
 

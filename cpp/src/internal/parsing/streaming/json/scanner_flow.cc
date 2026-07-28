@@ -72,6 +72,10 @@ sanitize::Status JsonStreamingScanner::enter_initial_mode() {
   if (state_ != State::kInit) {
     return sanitize::Status::OK();
   }
+  if (line_delimited_) {
+    state_ = State::kStream;
+    return sanitize::Status::OK();
+  }
   if (peek() == '[') {
     consume();
     state_ = State::kArray;
@@ -86,7 +90,8 @@ sanitize::Status JsonStreamingScanner::enter_initial_mode() {
 
 sanitize::Result<TextSlice>
 JsonStreamingScanner::next_stream_value(BumpArena *arena) {
-  SAN_ASSIGN_OR_RAISE(TextSlice value, scan_value(arena));
+  SAN_ASSIGN_OR_RAISE(TextSlice value, line_delimited_ ? scan_line_value(arena)
+                                                       : scan_value(arena));
   if (value.view.empty() && eof_) {
     state_ = State::kDone;
   }

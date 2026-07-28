@@ -3,6 +3,7 @@
 #include "internal/memory/memory_pool.hh"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -305,12 +306,12 @@ std::shared_ptr<MemoryPool> shared_default_memory_pool() {
 
 std::shared_ptr<MemoryPool>
 make_tracking_memory_pool(std::shared_ptr<MemoryPool> parent, int64_t limit,
-                          std::string backend_name) {
+                          std::string backend_name, bool thread_safe_registry) {
   if (!parent) {
     parent = shared_default_memory_pool();
   }
-  return std::make_shared<TrackingMemoryPool>(std::move(parent), limit,
-                                              std::move(backend_name));
+  return std::make_shared<TrackingMemoryPool>(
+      std::move(parent), limit, std::move(backend_name), thread_safe_registry);
 }
 
 } // namespace sanitize::internal

@@ -14,6 +14,7 @@ _FIXED_OPTION_PAYLOAD_WIDTHS = {
     "schema_evolution": 4,
     "field_order": 4,
     "on_error": 4,
+    "threading_mode": 4,
 }
 
 

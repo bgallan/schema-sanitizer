@@ -4,6 +4,8 @@
 
 #include "sanitize/runtime/execution_context.hh"
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -12,6 +14,9 @@
 #include "ingest/prepare/prepare_internal.hh"
 #include "internal/materialization/stream.hh"
 #include "internal/planning/plan_compile.hh"
+#include "internal/runtime/execution_policy.hh"
+#include "internal/runtime/operation_task_arena.hh"
+#include "internal/runtime/performance_telemetry.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/ingest/ingest_types.hh"
@@ -45,6 +50,22 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
     return sanitize::Status::OutOfMemory(
         "prepare_ingest: operation memory pool allocation failed");
   }
+  frontend.set_memory_pool(operation_memory_pool);
+  const auto execution_policy = internal::execution_policy_from(
+      opts->spec.threading_mode, opts->spec.memory_limit_bytes);
+  auto telemetry = ctx->begin_performance_telemetry(
+      operation_memory_pool, opts->spec.memory_limit_bytes,
+      execution_policy.effective_workers,
+      opts->spec.threading_mode == sanitize::ThreadingMode::kMulti);
+  internal::PerformancePhaseScope prepare_scope(
+      telemetry, internal::PerformancePhase::kPrepare);
+  internal::PerformanceCompletionScope finish_on_prepare_error(telemetry);
+  SAN_ASSIGN_OR_RAISE(auto task_arena,
+                      internal::OperationTaskArena::Make(
+                          static_cast<std::size_t>(std::max<std::int64_t>(
+                              1, execution_policy.effective_workers)),
+                          telemetry));
+  frontend.set_task_arena(task_arena);
 
   const bool has_contract = static_cast<bool>(opts->spec.arrow_schema_contract);
   if (opts->spec.schema_evolution == SchemaEvolutionMode::kStrict &&
@@ -61,18 +82,25 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   LogicalSchema inferred_schema;
   bool inference_consumed = false;
   if (need_inference) {
+    internal::PerformancePhaseScope inference_scope(
+        telemetry, internal::PerformancePhase::kInference);
     SAN_ASSIGN_OR_RAISE(inferred_schema,
                         ingest_internal::infer_schema_from_frontend(
-                            frontend, *opts, diagnostics.get(),
-                            &inference_consumed, ctx,
-                            operation_memory_pool.get()));
+                            frontend_name, frontend, *opts, diagnostics.get(),
+                            &inference_consumed, ctx, operation_memory_pool,
+                            task_arena));
   }
 
   LogicalSchema final_schema;
   SAN_ASSIGN_OR_RAISE(
       final_schema,
       ingest_internal::resolve_ingest_logical_schema(*opts, inferred_schema));
-  SAN_ASSIGN_OR_RAISE(CompiledPlan compiled, compile_plan(final_schema));
+  CompiledPlan compiled;
+  {
+    internal::PerformancePhaseScope plan_scope(
+        telemetry, internal::PerformancePhase::kPlanCompile);
+    SAN_ASSIGN_OR_RAISE(compiled, compile_plan(final_schema));
+  }
   auto plan = std::make_shared<CompiledPlan>(std::move(compiled));
 
   frontend.set_plan(plan.get());
@@ -86,11 +114,14 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   out.owned_ctx = std::move(owned_ctx);
   out.ctx = ctx;
   out.operation_memory_pool = std::move(operation_memory_pool);
+  out.task_arena = std::move(task_arena);
+  out.telemetry = std::move(telemetry);
   out.plan = std::move(plan);
   out.opts = std::move(opts);
   out.diagnostics = std::move(diagnostics);
   out.logical_schema = std::move(final_schema);
   out.inference_consumed = inference_consumed;
+  finish_on_prepare_error.Dismiss();
   return out;
 }
 

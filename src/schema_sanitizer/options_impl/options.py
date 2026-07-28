@@ -202,4 +202,12 @@ class Options:
         return cls(**d)
 
 
-__all__ = ["Options"]
+def memory_limit_bytes_or_none(options: Options | None) -> int | None:
+    """Return the configured memory limit, translating the native unset sentinel."""
+    if options is None:
+        return None
+    value = options.performance.memory_limit_bytes
+    return None if value == -1 else value
+
+
+__all__ = ["Options", "memory_limit_bytes_or_none"]

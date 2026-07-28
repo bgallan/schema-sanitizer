@@ -101,8 +101,9 @@ PyObject *py_schema_registry_merge(PyObject *, PyObject *args) {
   PyObject *inferred_obj = nullptr;
   const char *registry_json = nullptr;
   const char *field_name_policy = nullptr;
-  if (!PyArg_ParseTuple(args, "Oss:schema_registry_merge", &inferred_obj,
-                        &registry_json, &field_name_policy)) {
+  const char *detected_at = "";
+  if (!PyArg_ParseTuple(args, "Oss|s:schema_registry_merge", &inferred_obj,
+                        &registry_json, &field_name_policy, &detected_at)) {
     return nullptr;
   }
 
@@ -117,6 +118,7 @@ PyObject *py_schema_registry_merge(PyObject *, PyObject *args) {
   input.registry_json = registry_json ? registry_json : "";
   input.field_name_policy =
       field_name_policy ? field_name_policy : "lower_snake";
+  input.detected_at = detected_at ? detected_at : "";
 
   auto merged = sanitize::merge_schema_registry(input);
   if (!merged.ok()) {

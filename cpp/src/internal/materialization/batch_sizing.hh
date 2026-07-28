@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "internal/memory/memory_budget.hh"
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -9,18 +11,18 @@
 namespace sanitize::internal {
 
 constexpr int64_t kDefaultBatchRows = 65536;
-constexpr int64_t kInitialEstimatedRowBytes = 4096;
+constexpr int64_t kInitialEstimatedRowBytes = 1024;
 
-// Keep headroom for parser state, row scratch, and ArrowArray ownership while
-// avoiding overflow for very large user-provided limits.
+// Use the operation-wide budget partition instead of allowing one Arrow batch
+// to consume nearly the whole limit. This leaves deterministic headroom for
+// parser state, ordered packets, worker arenas, and the output stage while all
+// stages share the same single public memory budget.
 inline int64_t
 batch_target_bytes_from_memory_limit(int64_t memory_limit_bytes) {
   if (memory_limit_bytes <= 0) {
     return memory_limit_bytes;
   }
-  const auto quotient = memory_limit_bytes / 100;
-  const auto remainder = memory_limit_bytes % 100;
-  return std::max<int64_t>(1, quotient * 85 + (remainder * 85) / 100);
+  return memory_budget_from_limit(memory_limit_bytes).batch_target_bytes;
 }
 
 // Derives a conservative row batch size from an optional memory limit and an

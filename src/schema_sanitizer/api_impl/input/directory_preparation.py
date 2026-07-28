@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from threading import Lock
+from typing import TYPE_CHECKING, Any
 
 from ...core_impl.native_options import optional_memory_limit_arg
 from ...core_impl.native_symbols import XML_FOLDER_EFFECTIVE_ROW_TAG
@@ -29,7 +30,15 @@ from ...input_impl.source_plan import (
     SourceDescriptor,
     source_kind_for_format,
 )
+from ...remote_impl import directory_downloads as remote_downloads
 from ...remote_impl import staging as remote_staging
+from ...remote_impl.packetization import (
+    remote_file_packet,
+    remote_file_packet_estimated_bytes,
+)
+
+if TYPE_CHECKING:
+    from ..operation_context import OperationExecutionContext
 from ..parquet.multisource import (
     ParquetDirectorySourceFile,
     ParquetDirectorySourceManifest,
@@ -334,17 +343,129 @@ class RemoteNativeDirectorySourceManifest:
     csv_has_header: bool = True
     xml_row_tag: str | None = None
     memory_limit_bytes: int | None = None
+    threading_mode: str = "single"
     chunk_size: int = 64
+    chunk_target_bytes: int = 16 * 1024 * 1024
+    operation_context: OperationExecutionContext | None = None
+    _temporary_storage_pool: Any = field(default=None, init=False, repr=False)
+    _prefetched_chunks: list[StagedNativeDirectoryManifest] = field(
+        default_factory=list, init=False, repr=False
+    )
+    _prefetched_file_count: int = field(default=0, init=False, repr=False)
+    _prefetch_lock: Any = field(default_factory=Lock, init=False, repr=False)
+
+    def prefetch_first_chunk(self) -> bool:
+        """Stage and retain one immutable prefix for later ordered consumption."""
+        with self._prefetch_lock:
+            if self._prefetched_chunks:
+                return False
+            staged = self.stage_chunk(0)
+            if staged is None:
+                return False
+            self._prefetched_chunks.append(staged)
+            self._prefetched_file_count = len(staged.manifest.source_batch.sources)
+            return True
+
+    def take_prefetched_chunks(self) -> tuple[list[StagedNativeDirectoryManifest], int]:
+        """Transfer ownership of a retained lookahead prefix to one provider."""
+        with self._prefetch_lock:
+            chunks, file_count = self._prefetched_chunks, self._prefetched_file_count
+            self._prefetched_chunks = []
+            self._prefetched_file_count = 0
+        return chunks, file_count
 
     def stage_chunk(self, start: int) -> StagedNativeDirectoryManifest | None:
-        """Stage one bounded remote chunk and return its local native manifest."""
-        chunk = self.files[start : start + max(1, self.chunk_size)]
+        """Synchronously stage one bounded remote chunk."""
+        chunk = self._chunk_at(start)
         if not chunk:
             return None
-        staged = remote_staging.stage_remote_files_to_directory(
-            chunk,
-            memory_limit_bytes=self.memory_limit_bytes,
+        lease = self._storage_pool().acquire(
+            self.estimated_chunk_bytes(start), label=f"remote source packet at file ordinal {start}"
         )
+        try:
+            staged = remote_staging.stage_remote_files_to_directory(
+                chunk,
+                memory_limit_bytes=self.memory_limit_bytes,
+                threading_mode=self.threading_mode,
+                operation_context=self.operation_context,
+                storage_lease=lease,
+            )
+        except BaseException:
+            lease.release()
+            raise
+        return self._prepared_staged_chunk(staged, start=start)
+
+    async def stage_chunk_async(
+        self,
+        start: int,
+        download_session: remote_downloads.RemoteDirectoryDownloadSession,
+        storage_lease: Any | None = None,
+    ) -> StagedNativeDirectoryManifest | None:
+        """Stage one chunk on the operation-owned remote event loop."""
+        chunk = self._chunk_at(start)
+        if not chunk:
+            return None
+        lease = storage_lease or self._storage_pool().acquire(
+            self.estimated_chunk_bytes(start),
+            label=f"remote source packet at file ordinal {start}",
+        )
+        try:
+            staged = await remote_staging.stage_remote_files_to_directory_async(
+                chunk,
+                memory_limit_bytes=self.memory_limit_bytes,
+                threading_mode=self.threading_mode,
+                download_session=download_session,
+                storage_lease=lease,
+            )
+        except BaseException:
+            lease.release()
+            raise
+        return self._prepared_staged_chunk(staged, start=start)
+
+    def open_staging_session(self) -> remote_downloads.RemoteDirectoryDownloadSession:
+        """Return the shared provider session for this manifest operation."""
+        return remote_downloads.RemoteDirectoryDownloadSession(
+            self.files,
+            memory_limit_bytes=self.memory_limit_bytes,
+            threading_mode=self.threading_mode,
+        )
+
+    def _chunk_at(self, start: int) -> list[RemoteFile]:
+        """Return one stable packet bounded by file count and known bytes."""
+        return remote_file_packet(
+            self.files, start, max_files=self.chunk_size, target_bytes=self.chunk_target_bytes
+        )
+
+    def next_chunk_start(self, start: int) -> int:
+        """Return the first file ordinal after the packet beginning at ``start``."""
+        return start + len(self._chunk_at(start))
+
+    def estimated_chunk_bytes(self, start: int) -> int:
+        """Return the deterministic reservation for one remote packet."""
+        return remote_file_packet_estimated_bytes(
+            self.files, start, max_files=self.chunk_size, target_bytes=self.chunk_target_bytes
+        )
+
+    def _storage_pool(self) -> Any:
+        """Return the operation-owned temporary storage pool."""
+        if self.operation_context is not None:
+            return self.operation_context.temporary_storage
+        if self._temporary_storage_pool is None:
+            from ...core_impl.temporary_storage import TemporaryStoragePermitPool
+
+            self._temporary_storage_pool = TemporaryStoragePermitPool(self.memory_limit_bytes)
+        return self._temporary_storage_pool
+
+    def try_acquire_storage_lease(self, start: int) -> Any | None:
+        """Reserve one packet without blocking the source consumer."""
+        return self._storage_pool().try_acquire(
+            self.estimated_chunk_bytes(start), label=f"remote source packet at file ordinal {start}"
+        )
+
+    def _prepared_staged_chunk(
+        self, staged: remote_staging.StagedPath, *, start: int
+    ) -> StagedNativeDirectoryManifest:
+        """Build the native manifest for one fully downloaded local chunk."""
         try:
             local_files = _directory_files_for_format(staged.path, self.input_format)
             effective_xml_row_tag = _effective_native_xml_row_tag(
@@ -354,7 +475,7 @@ class RemoteNativeDirectorySourceManifest:
                 xml_row_tag=self.xml_row_tag,
                 memory_limit_bytes=self.memory_limit_bytes,
             )
-            if self.xml_row_tag is None:
+            if self.xml_row_tag is None and start == 0:
                 self.xml_row_tag = effective_xml_row_tag
             manifest = _native_directory_manifest(
                 local_files,
@@ -368,67 +489,16 @@ class RemoteNativeDirectorySourceManifest:
             if manifest is None:
                 raise unsupported_native_directory_ingestion()
             return StagedNativeDirectoryManifest(manifest, staged)
-        except Exception:
+        except BaseException:
             staged.close()
             raise
 
     def close(self) -> None:
-        """Satisfy PreparedPublicInput keepalive cleanup."""
-
-
-def _validate_remote_native_directory_supported(
-    input_format: str,
-    *,
-    input_text_encoding: str,
-    csv_delimiter: str,
-) -> None:
-    """Reject remote settings that cannot use native chunked staging."""
-    if input_format == "parquet":
-        raise ValueError("Parquet remote directories use the Parquet Arrow-source path")
-    if not _native_directory_supported(
-        input_format,
-        input_text_encoding=input_text_encoding,
-        csv_delimiter=csv_delimiter,
-    ):
-        raise unsupported_native_directory_ingestion()
-
-
-def _remote_native_directory_prepared_from_files(
-    files: list[RemoteFile],
-    input_format: str,
-    *,
-    input_text_encoding: str,
-    xml_row_tag: str | None,
-    csv_delimiter: str,
-    csv_has_header: bool,
-    memory_limit_bytes: int | None,
-) -> PreparedPublicInput:
-    """Prepare a remote directory as a lazy bounded source-plan manifest."""
-    _validate_remote_native_directory_supported(
-        input_format,
-        input_text_encoding=input_text_encoding,
-        csv_delimiter=csv_delimiter,
-    )
-    manifest = RemoteNativeDirectorySourceManifest(
-        files,
-        input_format=input_format,
-        input_text_encoding=input_text_encoding,
-        csv_delimiter=csv_delimiter,
-        csv_has_header=csv_has_header,
-        xml_row_tag=xml_row_tag,
-        memory_limit_bytes=memory_limit_bytes,
-        chunk_size=remote_staging.remote_directory_stage_chunk_size(memory_limit_bytes),
-    )
-    if input_format == "xml" and xml_row_tag is None:
-        staged_probe = manifest.stage_chunk(0)
-        if staged_probe is not None:
-            staged_probe.close()
-    carrier = NativeDirectoryManifestCarrier()
-    setattr(carrier, "remote_native_multisource_manifest", manifest)
-    return PreparedPublicInput(
-        carrier,
-        native_input_format(input_format),
-        "stream",
-        carrier,
-        xml_row_tag=manifest.xml_row_tag,
-    )
+        """Close retained lookahead chunks and any manifest-local permit pool."""
+        chunks, _file_count = self.take_prefetched_chunks()
+        while chunks:
+            chunks.pop().close()
+        pool = self._temporary_storage_pool
+        self._temporary_storage_pool = None
+        if pool is not None:
+            pool.close()

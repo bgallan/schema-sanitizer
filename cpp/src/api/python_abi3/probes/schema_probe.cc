@@ -487,7 +487,8 @@ PyObject *registry_probe_or_raise(schema_sanitizer_context *ctx,
   sanitize::PreparedIngest ingest = std::move(prepared).ValueOrDie();
   auto merged = sanitize::merge_schema_registry(make_registry_merge_input(
       std::move(ingest.logical_schema), registry_json, field_name_policy,
-      ingest.opts->spec.default_key_name, ingest.opts->spec.field_order));
+      ingest.opts->spec.default_key_name, ingest.opts->spec.field_order,
+      ingest.opts->operation_detected_at));
   if (!merged.ok())
     return raise_status(merged.status(), where);
   return pack_registry_probe(std::move(merged).ValueOrDie(),

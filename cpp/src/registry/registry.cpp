@@ -16,6 +16,8 @@ FrontendHandle make_builtin_frontend(std::string_view name, ChunkSourcePtr src,
                                      const Options &opts) {
   if (name == "json")
     return internal::make_json_frontend(std::move(src), opts);
+  if (name == "jsonl")
+    return internal::make_jsonl_frontend(std::move(src), opts);
   if (name == "json_array")
     return internal::make_json_array_frontend(std::move(src), opts);
   if (name == "xml")

@@ -41,6 +41,14 @@ enum class FieldOrderPolicy : std::uint8_t {
   kSchemaContractFirst = 2,
 };
 
+// Execution model for project-owned work.
+enum class ThreadingMode : std::uint8_t {
+  // Execute every project-owned stage inline on the calling thread.
+  kSingle = 0,
+  // Allow bounded parallel execution according to the derived policy.
+  kMulti = 1,
+};
+
 // Row-level error handling.
 enum class OnErrorPolicy : std::uint8_t {
   // Stop materialization and return an error.
@@ -62,6 +70,10 @@ struct Options {
 
 struct PreparedOptions {
   Options spec;
+
+  // Internal run metadata captured by the Python operation owner. This is not
+  // part of the public option catalog or serialized SZOPT contract.
+  std::string operation_detected_at;
 
   // Case-folded token hashes.
   std::unordered_set<uint64_t> true_hashes;

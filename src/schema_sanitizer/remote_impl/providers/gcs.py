@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
-from ...core_impl.async_scheduler import retry_async
+from ...core_impl.async_scheduler import drain_ordered_indexed_results, retry_async
+from ...core_impl.execution_policy import execution_policy
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
@@ -19,7 +20,9 @@ from ...input_impl.directory_inputs import (
     RemoteFile,
     split_parent_child,
 )
+from ..gcs_resumable import upload_gcs_resumable_file
 from ..transport import open_aiohttp_session, read_response_bytes, write_response_to_file
+from ..upload_policy import remote_upload_policy
 
 _GCS_JSON_API_ENDPOINT = "https://storage.googleapis.com"
 _GCS_READ_WRITE_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
@@ -131,12 +134,21 @@ async def download_bytes(session: Any, file: RemoteFile) -> bytes:
         return await read_response_bytes(response, uri=file.uri)
 
 
-async def file_exists(uri: str) -> bool:
+async def file_exists(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> bool:
     """Return whether one GCS object exists."""
-    return await file_metadata(uri) is not None
+    return (
+        await file_metadata(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
+        is not None
+    )
 
 
-async def file_metadata(uri: str) -> RemoteFile | None:
+async def file_metadata(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> RemoteFile | None:
     """Return GCS object metadata using the existence request."""
     ref = parse_uri(uri)
     url = (
@@ -145,7 +157,9 @@ async def file_metadata(uri: str) -> RemoteFile | None:
     )
     params = {"fields": "name,size"}
     headers = request_headers(accept_json=True)
-    async with await open_aiohttp_session(headers) as session:
+    async with await open_aiohttp_session(
+        headers, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+    ) as session:
         async with session.get(url, params=params) as response:
             if response.status == 200:
                 payload = json.loads(await response.text())
@@ -173,10 +187,18 @@ async def download_file_with_session(session: Any, file: RemoteFile, local_path:
         await write_response_to_file(response, uri=file.uri, local_path=local_path)
 
 
-async def download_file(uri: str, local_path: str) -> None:
+async def download_file(
+    uri: str,
+    local_path: str,
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> None:
     """Download one GCS object to a local file."""
     headers = request_headers()
-    async with await open_aiohttp_session(headers) as session:
+    async with await open_aiohttp_session(
+        headers, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+    ) as session:
         await download_file_with_session(
             session,
             RemoteFile(uri, Path(urlparse(uri).path).name),
@@ -184,19 +206,52 @@ async def download_file(uri: str, local_path: str) -> None:
         )
 
 
-async def upload_file(local_path: str, uri: str) -> None:
-    """Upload a local file to GCS."""
+async def upload_file(
+    local_path: str,
+    uri: str,
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> None:
+    """Upload a local file through media or resumable GCS publication."""
     ref = parse_uri(uri)
     url = f"{api_base()}/upload/storage/v1/b/{quote(ref.bucket, safe='')}/o"
-    params = {"uploadType": "media", "name": ref.object_name}
-    headers = request_headers(content_type=content_type_for_uri(uri))
-    async with await open_aiohttp_session(headers) as session:
+    tuning = remote_upload_policy(
+        "gcs",
+        local_path,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
+    )
+    headers = request_headers()
+    async with await open_aiohttp_session(
+        headers, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+    ) as session:
+        if tuning.multipart:
+            await upload_gcs_resumable_file(
+                session,
+                local_path,
+                uri,
+                initiation_url=url,
+                object_name=ref.object_name,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+            )
+            return
+        params = {"uploadType": "media", "name": ref.object_name}
+        request_headers_for_media = {"Content-Type": content_type_for_uri(uri)}
         with Path(local_path).open("rb") as file_handle:
-            async with session.post(url, params=params, data=file_handle) as response:
+            async with session.post(
+                url,
+                params=params,
+                headers=request_headers_for_media,
+                data=file_handle,
+            ) as response:
                 await read_response_bytes(response, uri=uri)
 
 
-async def delete_file(uri: str) -> None:
+async def delete_file(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> None:
     """Delete one GCS object, treating an already-missing object as success."""
     ref = parse_uri(uri)
     url = (
@@ -205,7 +260,9 @@ async def delete_file(uri: str) -> None:
     )
     params: dict[str, str] = {}
     headers = request_headers()
-    async with await open_aiohttp_session(headers) as session:
+    async with await open_aiohttp_session(
+        headers, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+    ) as session:
         async with session.delete(url, params=params) as response:
             if response.status in {200, 204, 404}:
                 await response.read()
@@ -222,15 +279,23 @@ async def delete_file(uri: str) -> None:
             )
 
 
-async def list_directory(uri: str, suffixes: tuple[str, ...]) -> list[RemoteFile]:
+async def list_directory(
+    uri: str,
+    suffixes: tuple[str, ...],
+    *,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> list[RemoteFile]:
     """List direct GCS child files under a URI prefix."""
     ref = parse_uri(uri)
     url = f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o"
     prefix = ref.object_name.rstrip("/") + "/"
     headers = request_headers(accept_json=True)
     files: list[RemoteFile] = []
-    retries = _list_retries()
-    async with await open_aiohttp_session(headers) as session:
+    retries = _list_retries(memory_limit_bytes)
+    async with await open_aiohttp_session(
+        headers, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+    ) as session:
         page_token: str | None = None
         while True:
             params = {
@@ -278,6 +343,7 @@ async def directories_containing_files(
     suffixes: tuple[str, ...],
     *,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether GCS directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
@@ -297,12 +363,14 @@ async def directories_containing_files(
 
     headers = request_headers(accept_json=True)
     budget = memory_budget(memory_limit_bytes)
-    concurrency = budget.source_discovery_concurrency
+    concurrency = execution_policy(threading_mode, memory_limit_bytes).source_discovery_concurrency
     retries = budget.async_retries
     semaphore = asyncio.Semaphore(concurrency)
 
     async with await open_aiohttp_session(
-        headers, memory_limit_bytes=memory_limit_bytes
+        headers,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     ) as session:
 
         async def scan_group(
@@ -360,8 +428,17 @@ async def directories_containing_files(
                 if not isinstance(page_token, str) or not page_token:
                     break
 
-        await asyncio.gather(
-            *(scan_group(bucket, parent, children) for (bucket, parent), children in groups.items())
+        grouped = list(groups.items())
+
+        async def scan_index(index: int) -> None:
+            """Scan one canonically ordered GCS parent group."""
+            (bucket, parent), children = grouped[index]
+            await scan_group(bucket, parent, children)
+
+        await drain_ordered_indexed_results(
+            len(grouped),
+            scan_index,
+            window=concurrency,
         )
 
     return discovery.finish()

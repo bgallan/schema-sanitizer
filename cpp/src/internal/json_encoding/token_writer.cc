@@ -11,43 +11,62 @@
 
 namespace sanitize::internal::json_encoding {
 
-void append_string(std::string &out, std::string_view value) {
-  static constexpr std::string_view kHex = "0123456789abcdef";
+namespace {
 
+[[nodiscard]] constexpr bool requires_json_escape(unsigned char byte) noexcept {
+  return byte < 0x20 || byte == '"' || byte == '\\';
+}
+
+void append_escaped_byte(std::string &out, unsigned char byte) {
+  static constexpr std::string_view kHex = "0123456789abcdef";
+  switch (byte) {
+  case '"':
+    out += "\\\"";
+    break;
+  case '\\':
+    out += "\\\\";
+    break;
+  case '\b':
+    out += "\\b";
+    break;
+  case '\f':
+    out += "\\f";
+    break;
+  case '\n':
+    out += "\\n";
+    break;
+  case '\r':
+    out += "\\r";
+    break;
+  case '\t':
+    out += "\\t";
+    break;
+  default:
+    out += "\\u00";
+    out.push_back(kHex[(byte >> 4) & 0xF]);
+    out.push_back(kHex[byte & 0xF]);
+    break;
+  }
+}
+
+} // namespace
+
+void append_string(std::string &out, std::string_view value) {
   out.push_back('"');
-  for (unsigned char byte : value) {
-    switch (byte) {
-    case '"':
-      out += "\\\"";
-      break;
-    case '\\':
-      out += "\\\\";
-      break;
-    case '\b':
-      out += "\\b";
-      break;
-    case '\f':
-      out += "\\f";
-      break;
-    case '\n':
-      out += "\\n";
-      break;
-    case '\r':
-      out += "\\r";
-      break;
-    case '\t':
-      out += "\\t";
-      break;
-    default:
-      if (byte < 0x20) {
-        out += "\\u00";
-        out.push_back(kHex[(byte >> 4) & 0xF]);
-        out.push_back(kHex[byte & 0xF]);
-      } else {
-        out.push_back(static_cast<char>(byte));
-      }
-      break;
+  std::size_t run_start = 0;
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const auto byte = static_cast<unsigned char>(value[index]);
+    if (!requires_json_escape(byte)) {
+      continue;
     }
+    if (index > run_start) {
+      out.append(value.data() + run_start, index - run_start);
+    }
+    append_escaped_byte(out, byte);
+    run_start = index + 1;
+  }
+  if (run_start < value.size()) {
+    out.append(value.data() + run_start, value.size() - run_start);
   }
   out.push_back('"');
 }

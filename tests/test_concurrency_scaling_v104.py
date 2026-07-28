@@ -1,0 +1,74 @@
+"""Regression coverage for v104 high-core in-flight publication."""
+
+from pathlib import Path
+
+from conftest import require_native
+
+from schema_sanitizer.core_impl.concurrency_coverage import concurrency_pair_guarantees
+from schema_sanitizer.core_impl.native_runtime import native_core
+
+ROOT = Path(__file__).resolve().parents[1]
+EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
+SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
+COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
+DOC = ROOT / "CONCURRENCY_SCALING_V104.md"
+STAGE = "high_core_single_writer_in_flight_publication"
+
+
+def test_v104_high_core_submission_uses_single_writer_publication():
+    header = EXECUTOR.read_text()
+    submission = SUBMISSION.read_text()
+    assert "increment_high_core_in_flight_locked" in header
+    helper = header.split("void increment_high_core_in_flight_locked", 1)[1].split("}\n", 1)[0]
+    assert "in_flight_.load(std::memory_order_relaxed)" in helper
+    assert "in_flight_.store(current + 1U, std::memory_order_release)" in helper
+    assert "increment_high_core_in_flight_locked();" in submission
+    assert "in_flight_.fetch_add" not in submission
+
+
+def test_v104_low_core_and_consumption_paths_remain_historical():
+    header = EXECUTOR.read_text()
+    completion = COMPLETION.read_text()
+    # Inline, regular arena and local-pool submissions remain atomic RMWs.
+    assert header.count("in_flight_.fetch_add(1, std::memory_order_release);") == 3
+    assert "in_flight_.fetch_sub(1, std::memory_order_release);" in header
+    assert "in_flight_.fetch_sub(1, std::memory_order_release);" in completion
+    assert "decrement_arena_in_flight_locked" not in header + completion
+
+
+def test_v104_all_56_pairs_inherit_stage():
+    pairs = concurrency_pair_guarantees()
+    assert len(pairs) == 8
+    assert sum(map(len, pairs.values())) == 56
+    assert "python" in pairs
+    for outputs in pairs.values():
+        assert len(outputs) == 7
+        for guarantee in outputs.values():
+            assert STAGE in guarantee["shared_parallel_stages"]
+
+
+def test_v104_native_order_rollback_cancel_and_drain():
+    require_native()
+    for workers in (2, 4, 5, 8, 16):
+        elapsed, completed, _, started, peak, queued, submitted = (
+            native_core.ordered_executor_arena_completion_probe(workers, 5000, 0)
+        )
+        assert elapsed > 0
+        assert completed == 5000
+        assert 1 <= started <= workers
+        assert 1 <= peak <= workers
+        assert queued == 0
+        assert submitted == 5000
+    _, active, observed, queued = native_core.operation_task_arena_cancellation_probe()
+    assert active == 0
+    assert observed >= 1
+    assert queued == 0
+
+
+def test_v104_documented_scope_and_evidence():
+    text = DOC.read_text()
+    assert "8 x 7 = 56" in text
+    assert "pure-Python" in text
+    assert ">8 workers" in text
+    assert "one locked RMW" in text
+    assert "15/15 wins" in text

@@ -128,6 +128,9 @@ template <class Enum> static bool valid_enum_value(int32_t value) {
   } else if constexpr (std::is_same_v<Enum, OnErrorPolicy>) {
     return enum_wire_value<OnErrorPolicy::kStop, OnErrorPolicy::kSkipRow,
                            OnErrorPolicy::kEmitNullRow>(value);
+  } else if constexpr (std::is_same_v<Enum, ThreadingMode>) {
+    return enum_wire_value<ThreadingMode::kSingle, ThreadingMode::kMulti>(
+        value);
   } else {
     return true;
   }

@@ -66,7 +66,7 @@ def test_json_object_field_vectors_are_bounded_in_both_materializers() -> None:
     assert "kMaxMaterializedFieldsPerRow = 65'536" in limits
     assert "ctx->emitted_fields >= kMaxMaterializedFieldsPerRow" in frontend
     assert "JSON object field count exceeds safety limit" in frontend
-    assert "fields.size() >= kMaxMaterializedFieldsPerRow" in row_appender
+    assert "fields->size() >= kMaxMaterializedFieldsPerRow" in row_appender
 
 
 def test_native_json_rejects_excessive_object_field_count(tmp_path: Path) -> None:

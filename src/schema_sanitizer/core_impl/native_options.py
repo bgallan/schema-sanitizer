@@ -45,6 +45,13 @@ class FieldOrderPolicy(Enum):
     SCHEMA_CONTRACT_FIRST = 2
 
 
+class ThreadingMode(Enum):
+    """Execution modes exposed to option normalization."""
+
+    SINGLE = 0
+    MULTI = 1
+
+
 class OnErrorPolicy(Enum):
     """Row error handling policies exposed to option normalization."""
 
@@ -57,6 +64,7 @@ ENUM_BY_KIND: dict[str, Any] = {
     "schema_evolution": SchemaEvolutionMode,
     "field_order": FieldOrderPolicy,
     "on_error": OnErrorPolicy,
+    "threading_mode": ThreadingMode,
 }
 _ENUM_VALUES_BY_TYPE: dict[Any, frozenset[int]] = {
     enum_type: frozenset(int(member.value) for member in enum_type)
@@ -153,12 +161,20 @@ class Options:
 
     _prepared_capsule: Any
     _prepared_string_lists: tuple[tuple[Any, ...], ...] | None
+    _operation_detected_at: str | None
+    _operation_capsule: Any
+    _operation_capsule_base: Any
+    _operation_capsule_detected_at: str | None
     __slots__ = ("__dict__",)
 
     def __init__(self) -> None:
         """Populate all options from native catalog defaults."""
         object.__setattr__(self, "_prepared_capsule", None)
         object.__setattr__(self, "_prepared_string_lists", None)
+        object.__setattr__(self, "_operation_detected_at", None)
+        object.__setattr__(self, "_operation_capsule", None)
+        object.__setattr__(self, "_operation_capsule_base", None)
+        object.__setattr__(self, "_operation_capsule_detected_at", None)
         for spec in OPTIONS:
             object.__setattr__(self, spec.name, _clone_default_value(spec.default))
 
@@ -169,6 +185,9 @@ class Options:
         object.__setattr__(self, name, value)
         object.__setattr__(self, "_prepared_capsule", None)
         object.__setattr__(self, "_prepared_string_lists", None)
+        object.__setattr__(self, "_operation_capsule", None)
+        object.__setattr__(self, "_operation_capsule_base", None)
+        object.__setattr__(self, "_operation_capsule_detected_at", None)
 
 
 def _require_int_value(name: str, value: Any) -> int:
@@ -297,8 +316,8 @@ def _append_option_value(out: bytearray, spec: OptionSpec, value: Any) -> None:
 
 def _encode_options_bytes(options: Options) -> bytes:
     """Encode options in stable native wire order."""
-    out = bytearray(b"SZOPT16")
-    _append_u32(out, 16)
+    out = bytearray(b"SZOPT17")
+    _append_u32(out, 17)
     for spec in OPTIONS:
         _append_option_value(out, spec, getattr(options, spec.name))
     return bytes(out)
@@ -384,18 +403,46 @@ def _options_capsule(options: Any) -> Any:
         and fingerprint is not None
         and fingerprint == options._prepared_string_lists
     ):
-        return capsule
-    encoded = _encode_options_bytes(options)
-    capsule = _cached_options_capsule(encoded)
-    if fingerprint is not None:
-        object.__setattr__(options, "_prepared_capsule", capsule)
-        object.__setattr__(options, "_prepared_string_lists", fingerprint)
+        base_capsule = capsule
     else:
-        # A very large or exotic mutable sequence cannot be tracked cheaply.
-        # Do not retain a second compiled representation on the Options object.
-        object.__setattr__(options, "_prepared_capsule", None)
-        object.__setattr__(options, "_prepared_string_lists", None)
-    return capsule
+        encoded = _encode_options_bytes(options)
+        capsule = _cached_options_capsule(encoded)
+        base_capsule = capsule
+        if fingerprint is not None:
+            object.__setattr__(options, "_prepared_capsule", capsule)
+            object.__setattr__(options, "_prepared_string_lists", fingerprint)
+        else:
+            # A very large or exotic mutable sequence cannot be tracked cheaply.
+            # Do not retain a second compiled representation on the Options object.
+            object.__setattr__(options, "_prepared_capsule", None)
+            object.__setattr__(options, "_prepared_string_lists", None)
+
+    detected_at = options._operation_detected_at
+    if not detected_at:
+        return base_capsule
+    if (
+        options._operation_capsule is not None
+        and options._operation_capsule_base is base_capsule
+        and options._operation_capsule_detected_at == detected_at
+    ):
+        return options._operation_capsule
+    operation_capsule = _native.options_with_detected_at(base_capsule, detected_at)
+    object.__setattr__(options, "_operation_capsule", operation_capsule)
+    object.__setattr__(options, "_operation_capsule_base", base_capsule)
+    object.__setattr__(options, "_operation_capsule_detected_at", detected_at)
+    return operation_capsule
+
+
+def set_operation_detected_at(options: Options, detected_at: str) -> None:
+    """Attach one internal operation timestamp without changing public options."""
+    if not isinstance(options, Options):
+        raise TypeError("operation metadata requires native Options")
+    if not isinstance(detected_at, str) or not detected_at:
+        raise ValueError("operation detected_at must be a non-empty string")
+    object.__setattr__(options, "_operation_detected_at", detected_at)
+    object.__setattr__(options, "_operation_capsule", None)
+    object.__setattr__(options, "_operation_capsule_base", None)
+    object.__setattr__(options, "_operation_capsule_detected_at", None)
 
 
 def validate_options(options: Any) -> None:

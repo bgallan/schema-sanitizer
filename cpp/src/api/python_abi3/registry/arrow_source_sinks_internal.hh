@@ -24,6 +24,10 @@
 
 struct ArrowArray;
 struct ArrowArrayStream;
+
+namespace sanitize::internal {
+class OperationTaskArena;
+}
 struct ArrowSchema;
 
 namespace core_abi3_internal::arrow_registry_detail {
@@ -56,6 +60,7 @@ struct ArrowSourceSpec {
 struct NativeArrowSourcesStreamState {
   schema_sanitizer_context *ctx = nullptr;
   sanitize::PreparedOptionsPtr prepared;
+  std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena;
   std::string registry_json;
   std::string field_name_policy;
   std::string schema_mode;

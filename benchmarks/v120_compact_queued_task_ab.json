@@ -1,0 +1,33 @@
+{
+  "pair_count": 15,
+  "affinity": "single logical CPU via taskset -c 0",
+  "baseline_packet_bytes": 72,
+  "candidate_packet_bytes": 56,
+  "scope": "Isolates queued packet density, deque movement, and compatibility scanning; does not measure parsing, validation, task execution, sink I/O, end-to-end throughput, or physical scaling.",
+  "scenarios": [
+    {
+      "queue_packets": 64,
+      "iterations_per_process": 2000000,
+      "baseline_median_ns": 124090720,
+      "candidate_median_ns": 113462394,
+      "paired_median_reduction_percent": 7.373605160268702,
+      "candidate_wins": 14
+    },
+    {
+      "queue_packets": 256,
+      "iterations_per_process": 1000000,
+      "baseline_median_ns": 168905271,
+      "candidate_median_ns": 160508878,
+      "paired_median_reduction_percent": 5.424972748179194,
+      "candidate_wins": 15
+    },
+    {
+      "queue_packets": 1024,
+      "iterations_per_process": 400000,
+      "baseline_median_ns": 235633431,
+      "candidate_median_ns": 221298309,
+      "paired_median_reduction_percent": 7.668901197091708,
+      "candidate_wins": 13
+    }
+  ]
+}

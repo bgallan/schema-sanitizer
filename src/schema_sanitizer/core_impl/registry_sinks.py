@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .generated_metadata import TimestampColumns
 from .native_options import _options_capsule
 from .native_results import SinkOutput, _registry_sink_output
 from .native_runtime import native_core as _native
@@ -50,7 +51,7 @@ class _RegistryArrowSinkMethods:
         field_name_policy: str,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
         native_registry_state: Any = None,
     ) -> SinkOutput:
         """Send multiple Arrow stream sources to a native registry-backed sink."""
@@ -90,7 +91,7 @@ class _RegistryArrowSinkMethods:
         field_name_policy: str,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
         native_registry_state: Any = None,
     ) -> SinkOutput:
         """Infer and stream multiple Arrow sources in one native call."""
@@ -130,7 +131,7 @@ class _RegistryArrowSinkMethods:
         native_registry_state: Any,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
     ) -> SinkOutput:
         """Send lazily provided Arrow-source chunks to a native registry sink."""
         return _registry_sink_output(
@@ -158,7 +159,7 @@ class _RegistryArrowSinkMethods:
         field_name_policy: str,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
         native_registry_state: Any = None,
     ) -> SinkOutput:
         """Infer and stream lazily provided Arrow-source chunks in one native call."""
@@ -204,7 +205,7 @@ class _RegistryPathProviderSinkMethods:
         native_registry_state: Any,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
     ) -> SinkOutput:
         """Send lazily provided path-source chunks to a native registry sink."""
         return _registry_sink_output(
@@ -232,7 +233,7 @@ class _RegistryPathProviderSinkMethods:
         field_name_policy: str,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
         native_registry_state: Any = None,
         skip_invalid_json_sources: bool = False,
     ) -> SinkOutput:
@@ -290,7 +291,7 @@ class _RegistryPathSourceSinkMethods:
         field_name_policy: str,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
         native_registry_state: Any = None,
     ) -> SinkOutput:
         """Send multiple local path sources to a native registry-backed sink."""
@@ -332,7 +333,7 @@ class _RegistryPathSourceSinkMethods:
         field_name_policy: str,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
         skip_invalid_json_sources: bool = False,
     ) -> SinkOutput:
         """Infer and stream multiple local path sources in one native call."""
@@ -364,7 +365,7 @@ class _RegistryPathSourceSinkMethods:
         field_name_policy: str,
         schema_mode: str,
         first_row_columns: dict[str, Any],
-        timestamp_columns: tuple[str, ...],
+        timestamp_columns: TimestampColumns,
         skip_invalid_json_sources: bool = False,
     ) -> SinkOutput:
         """Infer and stream path sources using an existing registry-state capsule."""

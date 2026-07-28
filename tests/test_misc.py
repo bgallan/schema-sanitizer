@@ -87,7 +87,7 @@ def test_file_uri_auto_format_uses_platform_path_normalization() -> None:
 
     assert data == "file:///tmp/events.jsonl"
     assert source == "uri"
-    assert format_name == "json"
+    assert format_name == "jsonl"
 
 
 def test_csv_contract_matches_pyarrow(tmp_path: Path) -> None:

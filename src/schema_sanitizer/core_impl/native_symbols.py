@@ -35,4 +35,5 @@ JSON_ARRAY_TO_JSONL_BYTES = _native.json_array_to_jsonl_bytes
 JSON_ARRAY_FILES_TO_JSONL_BYTES = _native.json_array_files_to_jsonl_bytes
 PATH_SOURCE_PLAN_CREATE = _native.path_source_plan_create
 PYTHON_ROWS_JSONL_BYTES = _native.python_rows_jsonl_bytes
+PYTHON_ITER_ROWS_JSONL_BYTES = _native.python_iter_rows_jsonl_bytes
 XML_FOLDER_EFFECTIVE_ROW_TAG = _native.xml_folder_effective_row_tag

@@ -60,7 +60,8 @@ std::shared_ptr<MemoryPool> shared_default_memory_pool();
 // headers, so deallocation accounting does not trust caller-supplied sizes.
 std::shared_ptr<MemoryPool>
 make_tracking_memory_pool(std::shared_ptr<MemoryPool> parent, int64_t limit,
-                          std::string backend_name);
+                          std::string backend_name,
+                          bool thread_safe_registry = true);
 
 inline MemoryPool *memory_pool_from_handle(void *handle) noexcept {
   return handle ? static_cast<MemoryPool *>(handle) : default_memory_pool();

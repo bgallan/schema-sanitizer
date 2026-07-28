@@ -5,6 +5,7 @@
 #include "nanoarrow/nanoarrow.h"
 
 #include "sanitize/core/status.hh"
+#include "sanitize/options/options.hh"
 
 #include <cstdint>
 #include <string>
@@ -26,6 +27,7 @@ struct WriterOptions {
   std::int64_t memory_limit_bytes = -1;
   std::string compression;
   int gzip_level = -1;
+  sanitize::ThreadingMode threading_mode = sanitize::ThreadingMode::kSingle;
 };
 
 // Writes supported Arrow C streams as native Parquet.

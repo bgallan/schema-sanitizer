@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -28,8 +29,27 @@
 
 namespace core_abi3_internal {
 namespace {
-constexpr std::array<std::string_view, 4> kDirectPathSourceFrontends = {
-    "json", "json_array", "csv", "xml"};
+constexpr std::array<std::string_view, 5> kDirectPathSourceFrontends = {
+    "json", "jsonl", "json_array", "csv", "xml"};
+
+std::int64_t
+input_size_hint_from_paths(const std::vector<std::string> &paths) noexcept {
+  std::uintmax_t total = 0;
+  constexpr auto maximum =
+      static_cast<std::uintmax_t>(std::numeric_limits<std::int64_t>::max());
+  for (const auto &path : paths) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error) {
+      return 0;
+    }
+    if (size > maximum - total) {
+      return std::numeric_limits<std::int64_t>::max();
+    }
+    total += size;
+  }
+  return static_cast<std::int64_t>(total);
+}
 
 sanitize::Result<std::optional<std::vector<std::string>>>
 csv_header_from_path_source(const PathSourceSpec &source,
@@ -74,7 +94,7 @@ csv_header_from_path_source(const PathSourceSpec &source,
 }
 
 bool is_json_path_source(const PathSourceSpec &source) {
-  return source.frontend == "json";
+  return source.frontend == "json" || source.frontend == "jsonl";
 }
 
 bool is_json_array_path_source(const PathSourceSpec &source) {
@@ -89,6 +109,13 @@ bool path_has_extension(const std::string &path, std::string_view extension) {
   return path.size() >= extension.size() &&
          path.compare(path.size() - extension.size(), extension.size(),
                       extension) == 0;
+}
+
+bool is_json_lines_path_source(const PathSourceSpec &source) {
+  return source.frontend == "jsonl" ||
+         (source.frontend == "json" &&
+          (path_has_extension(source.path, ".jsonl") ||
+           path_has_extension(source.path, ".ndjson")));
 }
 
 sanitize::Result<std::optional<char>>
@@ -238,6 +265,12 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
 
   PathSourceInput input;
   input.frontend = frontend_name;
+  input.input_size_hint_bytes = input_size_hint_from_paths(paths);
+  if (frontend_name == "jsonl") {
+    input.paths = std::move(paths);
+    input.source_names = std::move(source_names);
+    return input;
+  }
   if (frontend_name == "json_array" || frontend_name == "json_array_document") {
     input.paths = std::move(paths);
     input.source_names = std::move(source_names);
@@ -254,8 +287,14 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
 
 } // namespace
 
-sanitize::Result<sanitize::FrontendHandle>
-path_source_frontend(PathSourceInput input, const sanitize::Options &options) {
+sanitize::Result<sanitize::FrontendHandle> path_source_frontend(
+    PathSourceInput input, const sanitize::Options &options,
+    std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena) {
+  if (input.frontend == "jsonl" && !input.paths.empty()) {
+    return sanitize::internal::make_jsonl_path_group_frontend(
+        std::move(input.paths), std::move(input.source_names), options,
+        std::move(task_arena));
+  }
   if (input.frontend == "json_array" && !input.paths.empty()) {
     auto frontend = sanitize::internal::make_json_array_group_frontend(
         std::move(input.paths), std::move(input.source_names), options);
@@ -321,7 +360,8 @@ validate_csv_path_source_headers(const std::vector<PathSourceSpec> &sources,
 
 bool path_source_failure_is_skippable_json(const PathSourceSpec &source,
                                            const sanitize::Status &status) {
-  if (source.frontend != "json" && source.frontend != "json_array") {
+  if (source.frontend != "json" && source.frontend != "jsonl" &&
+      source.frontend != "json_array") {
     return false;
   }
   const std::string &message = status.message();
@@ -355,7 +395,10 @@ path_source_input(const sanitize::PreparedOptionsPtr &prepared,
                             source.path, prepared->spec.input_text_encoding,
                             prepared->spec.memory_limit_bytes));
     PathSourceInput input;
-    input.frontend = source.frontend;
+    input.frontend =
+        is_json_lines_path_source(source) ? "jsonl" : source.frontend;
+    input.input_size_hint_bytes =
+        input_size_hint_from_paths(std::vector<std::string>{source.path});
     input.chunk_source = std::move(chunk_source);
     return input;
   }
@@ -382,9 +425,13 @@ next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
     SAN_ASSIGN_OR_RAISE(const std::size_t end,
                         json_path_source_group_end(sources, start));
     if (end > start + 1) {
+      const bool all_json_lines =
+          std::all_of(sources.begin() + static_cast<std::ptrdiff_t>(start),
+                      sources.begin() + static_cast<std::ptrdiff_t>(end),
+                      is_json_lines_path_source);
       return PathSourceGroupPlan{.start = start,
                                  .end = end,
-                                 .frontend = "json",
+                                 .frontend = all_json_lines ? "jsonl" : "json",
                                  .grouped = true,
                                  .source_file_in_inner = true};
     }

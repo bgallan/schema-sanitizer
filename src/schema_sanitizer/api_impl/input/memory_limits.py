@@ -2,33 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from ...errors import SchemaSanitizerResourceError
-
-
-class _Utf8ByteCounter:
-    """Count UTF-8 bytes emitted by the JSON encoder."""
-
-    def __init__(self) -> None:
-        """Initialize an empty byte count."""
-        self.size = 0
-
-    def write(self, text: str) -> int:
-        """Count one text fragment and report its character length."""
-        self.size += len(text.encode("utf-8", "replace"))
-        return len(text)
-
-
-def estimate_python_payload_bytes(data: Any) -> int | None:
-    """Return a best-effort byte estimate for Python-object ingestion."""
-    counter = _Utf8ByteCounter()
-    try:
-        json.dump(data, counter, ensure_ascii=False)
-    except Exception:
-        return None
-    return counter.size
 
 
 def enforce_materialized_input_limit(
@@ -44,8 +20,10 @@ def enforce_materialized_input_limit(
 
     actual: int | None = None
     if fmt == "python":
-        actual = estimate_python_payload_bytes(data)
-    elif fmt == "xml" and source == "text":
+        # Python row streams enforce the same limit during their first native
+        # JSONL pass, avoiding a complete duplicate json.dump traversal here.
+        return
+    if fmt == "xml" and source == "text":
         if isinstance(data, str):
             actual = len(data.encode("utf-8", "replace"))
         elif isinstance(data, (bytes, bytearray, memoryview)):

@@ -222,3 +222,25 @@ def test_retry_async_exhausts_selected_transient_failures(
         assert len(sleeps) == 2
 
     asyncio.run(run())
+
+
+def test_ordered_indexed_results_reports_earliest_ordinal_failure() -> None:
+    """A fast later failure must wait for the earlier failing ordinal."""
+
+    async def run() -> None:
+        """Force failures to complete in reverse source order."""
+        later_failed = asyncio.Event()
+
+        async def fetch(index: int) -> int:
+            """Fail index one first, then release index zero."""
+            if index == 1:
+                later_failed.set()
+                raise RuntimeError("later")
+            await later_failed.wait()
+            raise ValueError("earlier")
+
+        with pytest.raises(ValueError, match="earlier"):
+            async for _index, _value in ordered_indexed_results(2, fetch, window=2):
+                raise AssertionError("failing work must not yield")
+
+    asyncio.run(run())

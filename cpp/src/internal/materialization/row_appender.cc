@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -68,14 +69,13 @@ bool should_snapshot_root_fields(const sanitize::CompiledPlan &plan) noexcept {
                              &sanitize::ColumnPlan::has_variant_sibling);
 }
 
-AppendRowResult result_for_policy(BatchAppender *app,
-                                  const PreparedOptions &opts,
-                                  sanitize::IngestDiagnostics *diag,
-                                  const CoerceError &err) {
-  AppendRowResult result;
-  result.code = err.code;
-  result.path_id = err.path_id;
-  result.detail = err.detail;
+PreparedRow result_for_policy(const PreparedOptions &opts,
+                              sanitize::IngestDiagnostics *diag,
+                              const CoerceError &err) {
+  PreparedRow prepared;
+  prepared.result.code = err.code;
+  prepared.result.path_id = err.path_id;
+  prepared.result.detail = err.detail;
   switch (opts.spec.on_error) {
   case sanitize::OnErrorPolicy::kStop:
     break;
@@ -83,30 +83,32 @@ AppendRowResult result_for_policy(BatchAppender *app,
     if (diag) {
       diag->skipped_rows += 1;
     }
-    result.code = DiagnosticCode::kRowSkipped;
-    return result;
+    prepared.action = PreparedRowAction::kSkip;
+    prepared.result.code = DiagnosticCode::kRowSkipped;
+    return prepared;
   case sanitize::OnErrorPolicy::kEmitNullRow:
-    if (app) {
-      (void)app->append_null_row();
-    }
-    return AppendRowResult{};
+    prepared.action = PreparedRowAction::kAppendNull;
+    prepared.result = AppendRowResult{};
+    return prepared;
   }
-  return result;
+  return prepared;
 }
 
 } // namespace
 
-sanitize::Result<AppendRowResult>
-append_materialized_row(BatchAppender *app, const sanitize::RowRef &row,
-                        const PreparedOptions &opts,
-                        sanitize::IngestDiagnostics *diagnostics) {
-  if (!app) {
-    return Status::Invalid("append_row: app is null");
-  }
+namespace {
 
-  const auto &plan = app->plan();
+sanitize::Result<std::optional<CoerceError>> convert_materialized_cells(
+    const sanitize::CompiledPlan &plan, const sanitize::RowRef &row,
+    const PreparedOptions &opts, sanitize::IngestDiagnostics *diagnostics,
+    std::vector<Cell> *cells, RowFieldSnapshot *reusable_snapshot = nullptr) {
+  if (!cells) {
+    return Status::Invalid("convert_materialized_cells: cells is null");
+  }
   FieldLookup lookup{&row};
-  RowFieldSnapshot snapshot;
+  RowFieldSnapshot local_snapshot;
+  RowFieldSnapshot &snapshot =
+      reusable_snapshot ? *reusable_snapshot : local_snapshot;
   const bool use_snapshot = should_snapshot_root_fields(plan);
 
   if (opts.spec.arrow_schema_contract &&
@@ -124,7 +126,8 @@ append_materialized_row(BatchAppender *app, const sanitize::RowRef &row,
     SAN_RETURN_NOT_OK(snapshot.build(row, plan, opts));
   }
 
-  auto &cells = app->prepare_row_cells(plan.columns.size());
+  cells->clear();
+  cells->resize(plan.columns.size());
   CoerceError err;
   ConvertCtx ctx{
       .opts = opts,
@@ -170,11 +173,11 @@ append_materialized_row(BatchAppender *app, const sanitize::RowRef &row,
       if (ctx.error) {
         *ctx.error = CoerceError{};
       }
-      status = convert_null(column, &cells[i]);
+      status = convert_null(column, &(*cells)[i]);
     } else {
       status = (!found || value.is_null())
-                   ? convert_null(column, &cells[i])
-                   : convert_value(column, value, ctx, &cells[i]);
+                   ? convert_null(column, &(*cells)[i])
+                   : convert_value(column, value, ctx, &(*cells)[i]);
     }
     if (status.ok()) {
       continue;
@@ -183,7 +186,7 @@ append_materialized_row(BatchAppender *app, const sanitize::RowRef &row,
       if (ctx.error) {
         *ctx.error = CoerceError{};
       }
-      SAN_RETURN_NOT_OK(convert_null(column, &cells[i]));
+      SAN_RETURN_NOT_OK(convert_null(column, &(*cells)[i]));
       continue;
     }
     if (err.detail.empty()) {
@@ -191,14 +194,120 @@ append_materialized_row(BatchAppender *app, const sanitize::RowRef &row,
       err.path_id = static_cast<uint32_t>(column.path_id);
       err.detail = status.message();
     }
-    if (opts.spec.on_error == sanitize::OnErrorPolicy::kStop) {
-      return Status::Invalid(err.detail);
-    }
-    return result_for_policy(app, opts, diagnostics, err);
+    return std::optional<CoerceError>(std::move(err));
   }
 
-  SAN_RETURN_NOT_OK(app->append_prepared_cells());
-  return AppendRowResult{};
+  return std::optional<CoerceError>{};
+}
+
+sanitize::Result<PreparedRow>
+prepared_error_for_policy(const PreparedOptions &opts,
+                          sanitize::IngestDiagnostics *diagnostics,
+                          const CoerceError &error) {
+  if (opts.spec.on_error == sanitize::OnErrorPolicy::kStop) {
+    return Status::Invalid(error.detail);
+  }
+  return result_for_policy(opts, diagnostics, error);
+}
+
+} // namespace
+
+sanitize::Result<PreparedRow> prepare_materialized_row(
+    const sanitize::CompiledPlan &plan, const sanitize::RowRef &row,
+    const PreparedOptions &opts, sanitize::IngestDiagnostics *diagnostics) {
+  PreparedRow prepared;
+  SAN_ASSIGN_OR_RAISE(auto error,
+                      convert_materialized_cells(plan, row, opts, diagnostics,
+                                                 &prepared.cells));
+  if (error) {
+    return prepared_error_for_policy(opts, diagnostics, *error);
+  }
+  return prepared;
+}
+
+sanitize::Result<AppendRowResult>
+append_materialized_row_reuse(BatchAppender *app, const sanitize::RowRef &row,
+                              const PreparedOptions &opts,
+                              sanitize::IngestDiagnostics *diagnostics) {
+  if (!app) {
+    return Status::Invalid("append_materialized_row_reuse: app is null");
+  }
+  SAN_ASSIGN_OR_RAISE(
+      auto direct, try_append_direct_scalar_row(app, row, opts, diagnostics));
+  if (direct) {
+    return std::move(*direct);
+  }
+  auto &cells = app->prepare_row_cells(app->plan().columns.size());
+  SAN_ASSIGN_OR_RAISE(auto error, convert_materialized_cells(
+                                      app->plan(), row, opts, diagnostics,
+                                      &cells, &app->prepare_row_snapshot()));
+  if (!error) {
+    SAN_RETURN_NOT_OK(app->append_prepared_cells());
+    return AppendRowResult{};
+  }
+
+  SAN_ASSIGN_OR_RAISE(auto prepared,
+                      prepared_error_for_policy(opts, diagnostics, *error));
+  const auto result = prepared.result;
+  switch (prepared.action) {
+  case PreparedRowAction::kAppendCells:
+    return Status::Invalid(
+        "append_materialized_row_reuse: invalid error action");
+  case PreparedRowAction::kAppendNull:
+    SAN_RETURN_NOT_OK(app->append_null_row());
+    break;
+  case PreparedRowAction::kSkip:
+    break;
+  }
+  return result;
+}
+
+sanitize::Result<PreparedRow> prepare_row_csv_text(
+    const sanitize::CompiledPlan &plan, const CsvDirectContext &ctx,
+    BumpArena *arena, std::vector<std::string_view> *cells,
+    std::vector<sanitize::FieldRef> *fields, std::string_view raw,
+    std::size_t base_offset, std::string_view source_file,
+    const PreparedOptions &opts, sanitize::IngestDiagnostics *diagnostics) {
+  if (!cells) {
+    return Status::Invalid("prepare_row_csv_text: cells is null");
+  }
+  if (!fields) {
+    return Status::Invalid("prepare_row_csv_text: fields is null");
+  }
+  if (arena) {
+    arena->reset();
+  }
+  CsvDirectScratchReset scratch_reset(arena, cells);
+  SAN_RETURN_NOT_OK(parse_csv_cells(raw, ctx.delimiter, cells, arena));
+
+  fields->clear();
+  if (fields->capacity() < plan.columns.size()) {
+    fields->reserve(plan.columns.size());
+  }
+  for (std::size_t i = 0; i < plan.columns.size(); ++i) {
+    int32_t csv_index = -1;
+    if (i < ctx.col_to_csv.size()) {
+      csv_index = ctx.col_to_csv[i];
+    }
+    if (csv_index < 0 || static_cast<std::size_t>(csv_index) >= cells->size()) {
+      continue;
+    }
+    const std::string_view cell = (*cells)[static_cast<std::size_t>(csv_index)];
+    fields->push_back(sanitize::FieldRef{
+        .key = plan.columns[i].name,
+        .key_hash = plan.columns[i].name_hash,
+        .value = cell.empty() ? ValueView::Null() : ValueView::String(cell),
+    });
+  }
+
+  const sanitize::RowRef row{
+      .fields = fields->empty() ? nullptr : fields->data(),
+      .size = fields->size(),
+      .raw = raw,
+      .base_offset = base_offset,
+      .source_file = source_file,
+  };
+  return prepare_materialized_row(plan, row, opts, diagnostics);
 }
 
 sanitize::Result<AppendRowResult>
@@ -210,41 +319,68 @@ append_row_csv_text(BatchAppender *app, const CsvDirectContext &ctx,
   if (!app) {
     return Status::Invalid("append_row_csv_text: app is null");
   }
-  if (!cells) {
-    return Status::Invalid("append_row_csv_text: cells is null");
-  }
-  if (arena) {
-    arena->reset();
-  }
-  CsvDirectScratchReset scratch_reset(arena, cells);
-  SAN_RETURN_NOT_OK(parse_csv_cells(raw, ctx.delimiter, cells, arena));
+  auto &fields = app->prepare_field_refs(app->plan().columns.size());
+  SAN_ASSIGN_OR_RAISE(auto prepared,
+                      prepare_row_csv_text(app->plan(), ctx, arena, cells,
+                                           &fields, raw, base_offset,
+                                           source_file, opts, diagnostics));
+  const auto result = prepared.result;
+  SAN_RETURN_NOT_OK(append_prepared_row(app, std::move(prepared)));
+  return result;
+}
 
-  const auto &plan = app->plan();
-  auto &fields = app->prepare_field_refs(plan.columns.size());
-  for (std::size_t i = 0; i < plan.columns.size(); ++i) {
-    int32_t csv_index = -1;
-    if (i < ctx.col_to_csv.size()) {
-      csv_index = ctx.col_to_csv[i];
-    }
-    if (csv_index < 0 || static_cast<std::size_t>(csv_index) >= cells->size()) {
-      continue;
-    }
-    const std::string_view cell = (*cells)[static_cast<std::size_t>(csv_index)];
-    fields.push_back(sanitize::FieldRef{
-        .key = plan.columns[i].name,
-        .key_hash = plan.columns[i].name_hash,
-        .value = cell.empty() ? ValueView::Null() : ValueView::String(cell),
+sanitize::Result<PreparedRow>
+prepare_row_json_text(const sanitize::CompiledPlan &plan, JsonOnDemandDoc *doc,
+                      std::vector<sanitize::FieldRef> *fields,
+                      std::string_view raw, std::size_t base_offset,
+                      std::string_view source_file, const PreparedOptions &opts,
+                      sanitize::IngestDiagnostics *diagnostics) {
+  if (!doc) {
+    return Status::Invalid("prepare_row_json_text: doc is null");
+  }
+  if (!fields) {
+    return Status::Invalid("prepare_row_json_text: fields is null");
+  }
+  doc->Reset();
+  JsonDirectScratchReset scratch_reset(doc);
+  SAN_ASSIGN_OR_RAISE(ValueView root, doc->ParseValue(raw, base_offset));
+
+  fields->clear();
+  if (fields->capacity() < 16) {
+    fields->reserve(16);
+  }
+  if (root.is_object()) {
+    SAN_RETURN_NOT_OK(
+        root.for_each_object_field([&](std::string_view key, uint64_t key_hash,
+                                       ValueView value) -> Status {
+          if (fields->size() >= kMaxMaterializedFieldsPerRow) {
+            return Status::Invalid(
+                "JSON object field count exceeds safety limit: ",
+                fields->size() + 1U, " > ", kMaxMaterializedFieldsPerRow);
+          }
+          fields->push_back(sanitize::FieldRef{
+              .key = key,
+              .key_hash = key_hash,
+              .value = value,
+          });
+          return Status::OK();
+        }));
+  } else {
+    fields->push_back(sanitize::FieldRef{
+        .key = opts.spec.default_key_name,
+        .key_hash = 0,
+        .value = root,
     });
   }
 
   const sanitize::RowRef row{
-      .fields = fields.empty() ? nullptr : fields.data(),
-      .size = fields.size(),
+      .fields = fields->empty() ? nullptr : fields->data(),
+      .size = fields->size(),
       .raw = raw,
       .base_offset = base_offset,
       .source_file = source_file,
   };
-  return append_materialized_row(app, row, opts, diagnostics);
+  return prepare_materialized_row(plan, row, opts, diagnostics);
 }
 
 sanitize::Result<AppendRowResult>
@@ -252,14 +388,20 @@ append_row_json_text(BatchAppender *app, JsonOnDemandDoc *doc,
                      std::string_view raw, std::size_t base_offset,
                      std::string_view source_file, const PreparedOptions &opts,
                      sanitize::IngestDiagnostics *diagnostics) {
+  if (!app) {
+    return Status::Invalid("append_row_json_text: app is null");
+  }
+  auto &fields = app->prepare_field_refs(16);
   if (!doc) {
     return Status::Invalid("append_row_json_text: doc is null");
   }
   doc->Reset();
   JsonDirectScratchReset scratch_reset(doc);
   SAN_ASSIGN_OR_RAISE(ValueView root, doc->ParseValue(raw, base_offset));
-
-  auto &fields = app->prepare_field_refs(16);
+  fields.clear();
+  if (fields.capacity() < 16) {
+    fields.reserve(16);
+  }
   if (root.is_object()) {
     SAN_RETURN_NOT_OK(
         root.for_each_object_field([&](std::string_view key, uint64_t key_hash,
@@ -270,20 +412,13 @@ append_row_json_text(BatchAppender *app, JsonOnDemandDoc *doc,
                 fields.size() + 1U, " > ", kMaxMaterializedFieldsPerRow);
           }
           fields.push_back(sanitize::FieldRef{
-              .key = key,
-              .key_hash = key_hash,
-              .value = value,
-          });
+              .key = key, .key_hash = key_hash, .value = value});
           return Status::OK();
         }));
   } else {
     fields.push_back(sanitize::FieldRef{
-        .key = opts.spec.default_key_name,
-        .key_hash = 0,
-        .value = root,
-    });
+        .key = opts.spec.default_key_name, .key_hash = 0, .value = root});
   }
-
   const sanitize::RowRef row{
       .fields = fields.empty() ? nullptr : fields.data(),
       .size = fields.size(),
@@ -291,7 +426,7 @@ append_row_json_text(BatchAppender *app, JsonOnDemandDoc *doc,
       .base_offset = base_offset,
       .source_file = source_file,
   };
-  return append_materialized_row(app, row, opts, diagnostics);
+  return append_materialized_row_reuse(app, row, opts, diagnostics);
 }
 
 } // namespace sanitize::internal

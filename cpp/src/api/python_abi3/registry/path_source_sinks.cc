@@ -3,8 +3,10 @@
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -22,6 +24,9 @@
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
 #include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/arrow_c/cdata_stream_runtime.hh"
+#include "internal/runtime/execution_policy.hh"
+#include "internal/runtime/operation_task_arena.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/ingest/ingest.hh"
@@ -31,11 +36,73 @@
 
 namespace core_abi3_internal::path_registry_detail {
 
+sanitize::Status
+ensure_operation_task_arena(NativePathSourcesStreamState *state) {
+  if (!state || !state->prepared) {
+    return sanitize::Status::Invalid(
+        "native path sources stream has no prepared options");
+  }
+  if (state->task_arena) {
+    return sanitize::Status::OK();
+  }
+  const auto policy = sanitize::internal::execution_policy_from(
+      state->prepared->spec.threading_mode,
+      state->prepared->spec.memory_limit_bytes);
+  SAN_ASSIGN_OR_RAISE(
+      state->task_arena,
+      sanitize::internal::OperationTaskArena::Make(static_cast<std::size_t>(
+          std::max<std::int64_t>(1, policy.effective_workers))));
+  return sanitize::Status::OK();
+}
+
+void merge_materialization_diagnostics(
+    sanitize::IngestDiagnostics *target,
+    const sanitize::IngestDiagnostics &child) noexcept {
+  if (!target) {
+    return;
+  }
+  target->inferred_rows += child.inferred_rows;
+  target->inferred_bytes += child.inferred_bytes;
+  target->arrow_schema_depth =
+      std::max(target->arrow_schema_depth, child.arrow_schema_depth);
+  target->parquet_schema_depth =
+      std::max(target->parquet_schema_depth, child.parquet_schema_depth);
+  target->materialized_rows += child.materialized_rows;
+  target->batches += child.batches;
+  target->flattened_fields += child.flattened_fields;
+  target->scalar_wrappings += child.scalar_wrappings;
+  target->direct_arrow_input += child.direct_arrow_input;
+  target->skipped_rows += child.skipped_rows;
+}
+
+bool bind_path_source_diagnostics(
+    NativePathSourcesStreamState *state,
+    schema_sanitizer_diagnostics *diagnostics) noexcept {
+  if (!state || !diagnostics) {
+    return false;
+  }
+  try {
+    if (!state->aggregate_diagnostics) {
+      state->aggregate_diagnostics =
+          std::make_shared<sanitize::IngestDiagnostics>();
+    }
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
+  diagnostics->diagnostics = state->aggregate_diagnostics;
+  return true;
+}
+
 void close_current_source(NativePathSourcesStreamState *state) noexcept {
   if (!state) {
     return;
   }
   state->metadata.reset();
+  if (state->diagnostics && state->diagnostics->diagnostics &&
+      state->diagnostics->diagnostics != state->aggregate_diagnostics) {
+    merge_materialization_diagnostics(state->aggregate_diagnostics.get(),
+                                      *state->diagnostics->diagnostics);
+  }
   release_sink_outputs(state->inner, state->diagnostics);
   state->inner = nullptr;
   state->diagnostics = nullptr;
@@ -50,9 +117,11 @@ sanitize::Result<sanitize::IngestStream> ingest_path_source_with_registry_plan(
   }
   const std::string frontend_name(
       path_source_materializer_frontend(input.frontend));
-  SAN_ASSIGN_OR_RAISE(
-      auto frontend,
-      path_source_frontend(std::move(input), state->prepared->spec));
+  const std::int64_t input_size_hint_bytes = input.input_size_hint_bytes;
+  SAN_RETURN_NOT_OK(ensure_operation_task_arena(state));
+  SAN_ASSIGN_OR_RAISE(auto frontend, path_source_frontend(std::move(input),
+                                                          state->prepared->spec,
+                                                          state->task_arena));
 
   frontend.set_plan(registry_plan->plan.get());
   auto diagnostics = std::make_shared<sanitize::IngestDiagnostics>();
@@ -77,10 +146,12 @@ sanitize::Result<sanitize::IngestStream> ingest_path_source_with_registry_plan(
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");
   }
+  prepared.task_arena = state->task_arena;
   prepared.plan = registry_plan->plan;
   prepared.opts = state->prepared;
   prepared.diagnostics = std::move(diagnostics);
   prepared.logical_schema = registry_plan->schema;
+  prepared.input_size_hint_bytes = input_size_hint_bytes;
   prepared.inference_consumed = false;
   (void)source;
   return sanitize::ingest_to_stream(std::move(prepared));
@@ -106,8 +177,14 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
       state->registry_plan;
   PathSourceInput input;
 
-  if (state->registry_enabled && state->registry_plan &&
-      state->source_file_column) {
+  // Compatible local path sources can share one native frontend and one
+  // operation arena. This removes per-file stream teardown and lets packet
+  // preparation remain continuously populated across source boundaries. Keep
+  // per-source metadata wrappers ungrouped because their first-row semantics
+  // must be applied independently.
+  const bool can_group_materialization =
+      state->registry_enabled && state->registry_plan;
+  if (can_group_materialization) {
     SAN_ASSIGN_OR_RAISE(
         auto group,
         next_path_source_group_plan(state->sources, source_index,
@@ -118,15 +195,17 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
                                      state->sources, group,
                                      state->prepared->spec.input_text_encoding,
                                      state->prepared->spec.memory_limit_bytes));
-      if (!state->source_file_registry_plan) {
-        SAN_ASSIGN_OR_RAISE(
-            auto augmented_plan,
-            make_native_registry_plan_with_generated_source_file(
-                *state->registry_plan));
-        state->source_file_registry_plan = std::move(augmented_plan);
+      if (state->source_file_column) {
+        if (!state->source_file_registry_plan) {
+          SAN_ASSIGN_OR_RAISE(
+              auto augmented_plan,
+              make_native_registry_plan_with_generated_source_file(
+                  *state->registry_plan));
+          state->source_file_registry_plan = std::move(augmented_plan);
+        }
+        active_registry_plan = state->source_file_registry_plan;
+        source_file_in_inner = group.source_file_in_inner;
       }
-      active_registry_plan = state->source_file_registry_plan;
-      source_file_in_inner = group.source_file_in_inner;
       state->index = group.end;
     }
   }
@@ -203,6 +282,12 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
   configure_metadata_stream_budget(state->metadata.get(),
                                    state->prepared->spec.memory_limit_bytes);
   state->metadata->inner = state->inner;
+  if (!state->task_arena) {
+    state->task_arena = sanitize::internal::task_arena_for_stream(state->inner);
+  }
+  if (state->task_arena) {
+    sanitize::internal::attach_task_arena(state->inner, state->task_arena);
+  }
   state->metadata->columns =
       metadata_columns_for_child(state, source, source_file_in_inner);
   state->metadata->first_row_pending = state->first_row_pending;
@@ -306,6 +391,11 @@ PyObject *pack_chunk_provider_registry_stream(
   outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
   if (!outputs.diagnostics) {
     schema_sanitizer_stream_free(stream);
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
+    release_registry_outputs(&outputs);
     PyErr_NoMemory();
     return nullptr;
   }

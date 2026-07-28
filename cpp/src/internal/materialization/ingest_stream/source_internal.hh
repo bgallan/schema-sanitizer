@@ -8,6 +8,7 @@
 #include "internal/materialization/batch_sizing.hh"
 #include "internal/materialization/direct_rows.hh"
 #include "internal/memory/pool_resource.hh"
+#include "internal/runtime/operation_task_arena.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/row_stream.hh"
 #include "sanitize/options/options.hh"
@@ -31,6 +32,8 @@ struct IngestStreamInit {
   std::shared_ptr<IngestDiagnostics> diagnostics;
   std::shared_ptr<sanitize::ExecutionContext> owned_ctx;
   std::shared_ptr<void> operation_memory_pool;
+  std::shared_ptr<OperationTaskArena> task_arena;
+  std::shared_ptr<PerformanceTelemetry> telemetry;
   BatchAppenderPtr app;
   std::shared_ptr<PoolResource> pool;
   std::unique_ptr<DirectMaterializer> direct;
@@ -39,10 +42,15 @@ struct IngestStreamInit {
 class IngestStreamSource final : public sanitize::ExportBatchSource {
 public:
   explicit IngestStreamSource(IngestStreamInit init);
+  ~IngestStreamSource() override;
 
   sanitize::Status GetSchema(struct ArrowSchema *out) override;
   sanitize::Status GetNext(struct ArrowArray *out) override;
   sanitize::Status Close() override;
+  [[nodiscard]] std::shared_ptr<OperationTaskArena>
+  TaskArena() const noexcept override {
+    return task_arena_keepalive_;
+  }
 
 private:
   struct BatchLimits {
@@ -67,6 +75,8 @@ private:
   std::shared_ptr<IngestDiagnostics> diagnostics_;
   std::shared_ptr<sanitize::ExecutionContext> owned_ctx_keepalive_;
   std::shared_ptr<void> operation_memory_pool_keepalive_;
+  std::shared_ptr<OperationTaskArena> task_arena_keepalive_;
+  std::shared_ptr<PerformanceTelemetry> telemetry_keepalive_;
 
   BatchAppenderPtr app_;
   std::shared_ptr<PoolResource> pool_keepalive_;

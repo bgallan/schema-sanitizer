@@ -132,7 +132,13 @@ def test_arrow_json_validation_is_recursive_and_precedes_serialization() -> None
     assert "validate_array_slice_impl" in validator
     assert "validate_dictionary_indices" in validator
     assert "fixed-size list child offset overflow" in validator
-    assert writer.index("validate_batch(root, array, limits)") < writer.index("append_value(")
+    ordered_output = (ROOT / "cpp/src/internal/output/ordered_text_output.hh").read_text(
+        encoding="utf-8"
+    )
+    assert ordered_output.index("validate_batch(batch->value())") < ordered_output.index(
+        "executor->Submit"
+    )
+    assert "append_value(" in writer
     get_next = nested_csv.split("int get_next", maxsplit=1)[1]
     assert get_next.index("jsonl::validate_array_slice") < get_next.index("build_nested_utf8_array")
 

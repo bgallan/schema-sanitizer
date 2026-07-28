@@ -18,7 +18,8 @@ namespace core_abi3_internal {
 // Writes an Arrow C stream object to a Python path or output object.
 sanitize::Result<sanitize::internal::jsonl_stream_writer::WriteStats>
 jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj,
-                             std::int64_t memory_limit_bytes);
+                             std::int64_t memory_limit_bytes,
+                             sanitize::ThreadingMode threading_mode);
 
 // Appends one record batch's JSONL bytes to out.
 sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj, std::string *out,

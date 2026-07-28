@@ -21,9 +21,9 @@ def test_metadata_collection_limits_precede_large_reservations() -> None:
         "bool py_value_to_metadata_span", 1
     )[0]
     span_parser = source.split("bool append_row_span_columns_from_dict", 1)[1].split(
-        "bool append_timestamp_columns_from_sequence", 1
+        "bool append_timestamp_columns", 1
     )[0]
-    timestamp_parser = source.split("bool append_timestamp_columns_from_sequence", 1)[1].split(
+    timestamp_parser = source.split("bool append_timestamp_columns", 1)[1].split(
         "bool append_registry_metadata_columns", 1
     )[0]
 
@@ -68,24 +68,19 @@ def test_metadata_root_offset_is_rejected_before_child_generation() -> None:
 
 
 def test_serializers_wipe_and_release_large_transient_buffers() -> None:
-    """Flushed output and CSV decode buffers must not retain giant high-water marks."""
+    """Serial and parallel output buffers are wiped without retaining giant peaks."""
     jsonl = (ROOT / "cpp/src/internal/json_output/jsonl_stream_writer.cc").read_text(
         encoding="utf-8"
     )
     csv = (ROOT / "cpp/src/internal/csv/csv_stream_writer.cc").read_text(encoding="utf-8")
+    ordered = (ROOT / "cpp/src/internal/output/ordered_text_output.hh").read_text(encoding="utf-8")
 
-    for source in (jsonl, csv):
-        flush = source.split("sanitize::Status flush_buffer", 1)[1].split(
-            "sanitize::Status flush_buffer_if_large", 1
-        )[0]
-        assert "secure_zero_memory" in source
-        assert "kMaxRetainedOutputBytes" in source
-        assert "buffer.swap(empty)" in source
-        assert "clear_output_buffer(buffer)" in flush
-
+    assert "secure_zero_memory(buffer.data(), buffer.size())" in jsonl
+    assert "secure_zero_memory(bytes.data(), bytes.size())" in ordered
+    assert "fragment.wipe()" in ordered
     assert "clear_decode_buffer" in csv
-    assert "ScopedDecodeBufferClear" in csv
-    assert "CSV writer: write statistics overflow" in csv
+    assert "secure_zero_memory(buffer.data(), buffer.size())" in csv
+    assert "write statistics overflow" in ordered
 
 
 def test_native_row_span_count_is_rejected_before_iteration() -> None:

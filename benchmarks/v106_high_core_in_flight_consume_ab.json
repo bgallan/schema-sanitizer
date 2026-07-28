@@ -1,0 +1,74 @@
+{
+  "version": "0.3.59",
+  "benchmark": "mutex-authorized high-core ordered-consumption in-flight decrement",
+  "host_logical_cpus": 5,
+  "iterations_per_run": 30000000,
+  "alternating_pairs": [
+    {
+      "baseline": 61271334,
+      "candidate": 8274472
+    },
+    {
+      "candidate": 8363123,
+      "baseline": 61367136
+    },
+    {
+      "baseline": 60988830,
+      "candidate": 9193706
+    },
+    {
+      "candidate": 8293771,
+      "baseline": 61978553
+    },
+    {
+      "baseline": 60530996,
+      "candidate": 8197609
+    },
+    {
+      "candidate": 8180112,
+      "baseline": 64006481
+    },
+    {
+      "baseline": 61048514,
+      "candidate": 8288933
+    },
+    {
+      "candidate": 8257407,
+      "baseline": 61341889
+    },
+    {
+      "baseline": 61749033,
+      "candidate": 8341922
+    },
+    {
+      "candidate": 9141028,
+      "baseline": 63706866
+    },
+    {
+      "baseline": 61526743,
+      "candidate": 8270406
+    },
+    {
+      "candidate": 8213271,
+      "baseline": 61002576
+    },
+    {
+      "baseline": 62924761,
+      "candidate": 8465365
+    },
+    {
+      "candidate": 8918593,
+      "baseline": 60786386
+    },
+    {
+      "baseline": 63791322,
+      "candidate": 8230517
+    }
+  ],
+  "baseline_median_ns": 61367136,
+  "candidate_median_ns": 8288933,
+  "paired_median_reduction_percent": 86.49536176248424,
+  "candidate_wins": 15,
+  "pair_count": 15,
+  "scope": "isolates removal of one locked atomic fetch_sub; not an end-to-end throughput claim"
+}

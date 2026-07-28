@@ -251,12 +251,24 @@ struct NativeParquetPageScratch {
   std::vector<std::int32_t> delta_i32_lengths;
 };
 
+struct NativeParquetColumnWorkerState {
+  std::ifstream file;
+  NativeParquetPageScratch page_scratch;
+};
+
 struct NativeParquetStreamState {
   std::string path;
   std::ifstream file;
   std::int64_t max_buffer_bytes = 0;
   std::int64_t max_batch_rows = 0;
   NativeParquetPageScratch page_scratch;
+  // Keep one private input handle and decode scratch per arena worker for the
+  // lifetime of this stream. Reusing them across bounded row windows avoids
+  // reopening the same Parquet file and rebuilding scratch on every get_next.
+  // Scratch is released at each row-group boundary, so retained capacity never
+  // accumulates across groups and the existing per-group scratch budget remains
+  // authoritative.
+  std::vector<NativeParquetColumnWorkerState> parallel_column_workers;
   FooterInfo footer;
   std::vector<LeafLevelInfo> empty_file_leaves;
   std::vector<NativeParquetOutputField> output_layout;

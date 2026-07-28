@@ -44,6 +44,8 @@ def test_parquet_micro_fragments_are_consolidated_by_runtime_phase() -> None:
         FOOTER / "native_stream/materialization/native_stream_validity.cc.inc": 500,
         FOOTER / "native_stream/materialization/row_group/native_stream_row_group.cc.inc": 500,
         FOOTER
+        / "native_stream/materialization/row_group/native_stream_parallel_columns.cc.inc": 500,
+        FOOTER
         / "native_stream/materialization/row_group/native_stream_retained_budget.cc.inc": 500,
     }
     for owner, line_limit in owners.items():
@@ -57,6 +59,7 @@ def test_parquet_micro_fragments_are_consolidated_by_runtime_phase() -> None:
     } == {
         "native_stream_retained_budget.cc.inc",
         "native_stream_row_group.cc.inc",
+        "native_stream_parallel_columns.cc.inc",
     }
 
     translation_unit = (FOOTER / "footer_reader.cc").read_text(encoding="utf-8")

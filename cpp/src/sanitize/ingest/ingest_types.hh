@@ -13,6 +13,11 @@
 #include <memory>
 #include <string>
 
+namespace sanitize::internal {
+class OperationTaskArena;
+class PerformanceTelemetry;
+} // namespace sanitize::internal
+
 namespace sanitize {
 
 class ExecutionContext;
@@ -37,10 +42,19 @@ struct PreparedIngest {
   // context pool, which aggregates concurrent operation usage.
   std::shared_ptr<void> operation_memory_pool;
 
+  // Operation-wide native workers reused by inference, materialization, and
+  // compatible sinks. Single mode owns an inline arena with no helper thread.
+  std::shared_ptr<internal::OperationTaskArena> task_arena;
+
+  // Operation-local timing, queue, worker, and memory telemetry.
+  std::shared_ptr<internal::PerformanceTelemetry> telemetry;
+
   std::shared_ptr<const CompiledPlan> plan;
   PreparedOptionsPtr opts;
   std::shared_ptr<IngestDiagnostics> diagnostics;
   LogicalSchema logical_schema;
+  // Best-effort local source size used only for internal stage-width policy.
+  std::int64_t input_size_hint_bytes = 0;
   bool inference_consumed = false;
 };
 

@@ -1,4 +1,4 @@
-"""Execute promoted native fuzz crash inputs as deterministic regressions."""
+"""Execute native fuzz regressions and bounded deterministic campaigns."""
 
 from __future__ import annotations
 
@@ -45,19 +45,74 @@ def run_regressions(build_root: Path, regression_root: Path) -> int:
     return executed
 
 
+def run_campaigns(
+    build_root: Path,
+    regression_root: Path,
+    *,
+    runs: int,
+    seed: int,
+    max_length: int,
+) -> int:
+    """Run one deterministic mutation campaign for every parser target."""
+    if runs <= 0:
+        return 0
+    executed = 0
+    for ordinal, target in enumerate(TARGETS):
+        binary = fuzzer_binary(build_root, target)
+        corpus = regression_root / target
+        if not binary.is_file():
+            raise FileNotFoundError(f"missing fuzzer binary: {binary}")
+        if not corpus.is_dir():
+            raise FileNotFoundError(f"missing fuzz corpus directory: {corpus}")
+        target_seed = seed + ordinal
+        print(
+            f"[fuzz-campaign] {target}: runs={runs} seed={target_seed} max_len={max_length}",
+            flush=True,
+        )
+        subprocess.run(
+            [
+                os.fspath(binary),
+                f"-runs={runs}",
+                f"-seed={target_seed}",
+                f"-max_len={max_length}",
+                os.fspath(corpus),
+            ],
+            check=True,
+        )
+        executed += runs
+    return executed
+
+
 def parse_args() -> argparse.Namespace:
-    """Parse command-line locations."""
+    """Parse command-line locations and bounded campaign settings."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-root", type=Path, default=Path("build-fuzz/fuzz"))
     parser.add_argument("--regression-root", type=Path, default=Path("fuzz/regressions"))
-    return parser.parse_args()
+    parser.add_argument("--campaign-runs", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=15_172_026)
+    parser.add_argument("--max-len", type=int, default=1 << 20)
+    args = parser.parse_args()
+    if args.campaign_runs < 0:
+        parser.error("campaign-runs must be non-negative")
+    if args.seed < 0:
+        parser.error("seed must be non-negative")
+    if args.max_len <= 0:
+        parser.error("max-len must be positive")
+    return args
 
 
 def main() -> None:
-    """Run promoted fuzz regressions."""
+    """Run promoted regressions followed by optional mutation campaigns."""
     args = parse_args()
-    count = run_regressions(args.build_root, args.regression_root)
-    print(f"Executed {count} deterministic fuzz regression inputs.")
+    regressions = run_regressions(args.build_root, args.regression_root)
+    mutations = run_campaigns(
+        args.build_root,
+        args.regression_root,
+        runs=args.campaign_runs,
+        seed=args.seed,
+        max_length=args.max_len,
+    )
+    print(f"Executed {regressions} deterministic regression inputs and {mutations} mutation runs.")
 
 
 if __name__ == "__main__":

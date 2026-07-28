@@ -21,7 +21,8 @@ namespace core_abi3_internal {
 
 sanitize::Result<sanitize::internal::jsonl_stream_writer::WriteStats>
 jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj,
-                             std::int64_t memory_limit_bytes) {
+                             std::int64_t memory_limit_bytes,
+                             sanitize::ThreadingMode threading_mode) {
   if (PyUnicode_Check(output_obj)) {
     Py_ssize_t path_len = 0;
     const char *path = PyUnicode_AsUTF8AndSize(output_obj, &path_len);
@@ -30,11 +31,11 @@ jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj,
     }
     return jsonl_write_stream_to_path(
         stream_obj, std::string(path, static_cast<std::size_t>(path_len)),
-        memory_limit_bytes);
+        memory_limit_bytes, threading_mode);
   }
 
   return jsonl_write_stream_to_python(stream_obj, output_obj,
-                                      memory_limit_bytes);
+                                      memory_limit_bytes, threading_mode);
 }
 
 sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj, std::string *out,

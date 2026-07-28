@@ -42,35 +42,42 @@ sanitize::Status append_string32_value(std::string &out,
 sanitize::Status append_string64_value(std::string &out,
                                        const ArrowArray &array, int64_t row);
 sanitize::Status append_binary32_value(std::string &out,
-                                       const ArrowArray &array, int64_t row);
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote = true);
 sanitize::Status append_binary64_value(std::string &out,
-                                       const ArrowArray &array, int64_t row);
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote = true);
 sanitize::Status append_fixed_size_binary_value(std::string &out,
                                                 const JsonlField &field,
                                                 const ArrowArray &array,
-                                                int64_t row);
+                                                int64_t row, bool quote = true);
 
 // Appends date, time, and timestamp Arrow values.
 sanitize::Status append_timestamp_value(std::string &out,
                                         const ArrowArray &array, int64_t row,
-                                        int64_t units_per_second);
+                                        int64_t units_per_second,
+                                        bool quote = true);
 sanitize::Status append_date32_value(std::string &out, const ArrowArray &array,
-                                     int64_t row);
+                                     int64_t row, bool quote = true);
 sanitize::Status append_date64_value(std::string &out, const ArrowArray &array,
-                                     int64_t row);
+                                     int64_t row, bool quote = true);
 sanitize::Status append_time32s_value(std::string &out, const ArrowArray &array,
-                                      int64_t row);
+                                      int64_t row, bool quote = true);
 sanitize::Status append_time32ms_value(std::string &out,
-                                       const ArrowArray &array, int64_t row);
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote = true);
 sanitize::Status append_time64_value(std::string &out, const ArrowArray &array,
-                                     int64_t row, int64_t units_per_second);
+                                     int64_t row, int64_t units_per_second,
+                                     bool quote = true);
 
 // Appends Arrow logical values that are rendered as JSON strings.
 sanitize::Status append_decimal_value(std::string &out, const JsonlField &field,
-                                      const ArrowArray &array, int64_t row);
+                                      const ArrowArray &array, int64_t row,
+                                      bool quote = true);
 sanitize::Status append_duration_value(std::string &out,
                                        const JsonlField &field,
-                                       const ArrowArray &array, int64_t row);
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote = true);
 sanitize::Status append_interval_value(std::string &out,
                                        const JsonlField &field,
                                        const ArrowArray &array, int64_t row);

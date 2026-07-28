@@ -20,7 +20,8 @@ CsvColumnProjection::CsvColumnProjection(const sanitize::Options &opts,
   has_header_ = opts.csv_has_header;
   strict_schema_ = opts.schema_evolution == SchemaEvolutionMode::kStrict &&
                    opts.arrow_schema_contract.has_value();
-  raw_only_ = static_cast<bool>(opts.arrow_schema_contract);
+  raw_only_ = static_cast<bool>(opts.arrow_schema_contract) ||
+              opts.threading_mode == ThreadingMode::kMulti;
   field_name_policy_ = opts.field_name_policy;
   direct_.delimiter = delimiter;
 }

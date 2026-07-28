@@ -1,0 +1,148 @@
+{
+  "version": "0.3.61",
+  "benchmark": "worker-sharded single-store task submission telemetry",
+  "host_logical_cpus": 5,
+  "single_producer": {
+    "producers": 1,
+    "iterations_per_producer": 5000000,
+    "alternating_pairs": [
+      {
+        "baseline": 11061696,
+        "candidate": 7694893
+      },
+      {
+        "candidate": 7716304,
+        "baseline": 11094354
+      },
+      {
+        "baseline": 11246480,
+        "candidate": 7644048
+      },
+      {
+        "candidate": 7921318,
+        "baseline": 11933950
+      },
+      {
+        "baseline": 13945313,
+        "candidate": 7686209
+      },
+      {
+        "candidate": 7645790,
+        "baseline": 11182846
+      },
+      {
+        "baseline": 11399747,
+        "candidate": 7842311
+      },
+      {
+        "candidate": 8056279,
+        "baseline": 11563575
+      },
+      {
+        "baseline": 11613765,
+        "candidate": 8038453
+      },
+      {
+        "candidate": 7751747,
+        "baseline": 12128929
+      },
+      {
+        "baseline": 12625315,
+        "candidate": 9640698
+      },
+      {
+        "candidate": 10272015,
+        "baseline": 11068897
+      },
+      {
+        "baseline": 12934364,
+        "candidate": 7829923
+      },
+      {
+        "candidate": 7723014,
+        "baseline": 12082420
+      },
+      {
+        "baseline": 11901952,
+        "candidate": 7728011
+      }
+    ],
+    "baseline_median_ns": 11613765,
+    "candidate_median_ns": 7751747,
+    "paired_median_reduction_percent": 33.253798402154686,
+    "candidate_wins": 15,
+    "pair_count": 15
+  },
+  "four_producers": {
+    "producers": 4,
+    "iterations_per_producer": 2000000,
+    "alternating_pairs": [
+      {
+        "baseline": 105785535,
+        "candidate": 6042988
+      },
+      {
+        "candidate": 6980668,
+        "baseline": 96405068
+      },
+      {
+        "baseline": 109320558,
+        "candidate": 6095080
+      },
+      {
+        "candidate": 6251953,
+        "baseline": 126621669
+      },
+      {
+        "baseline": 101287158,
+        "candidate": 3687088
+      },
+      {
+        "candidate": 6197432,
+        "baseline": 87506380
+      },
+      {
+        "baseline": 113506747,
+        "candidate": 3945868
+      },
+      {
+        "candidate": 6236800,
+        "baseline": 88792462
+      },
+      {
+        "baseline": 103836144,
+        "candidate": 6069242
+      },
+      {
+        "candidate": 6279022,
+        "baseline": 93649426
+      },
+      {
+        "baseline": 91083380,
+        "candidate": 3391891
+      },
+      {
+        "candidate": 6074304,
+        "baseline": 99496278
+      },
+      {
+        "baseline": 120022506,
+        "candidate": 6013063
+      },
+      {
+        "candidate": 9429601,
+        "baseline": 124442676
+      },
+      {
+        "baseline": 110768696,
+        "candidate": 6103332
+      }
+    ],
+    "baseline_median_ns": 103836144,
+    "candidate_median_ns": 6095080,
+    "paired_median_reduction_percent": 94.13009789731791,
+    "candidate_wins": 15,
+    "pair_count": 15
+  },
+  "scope": "isolates replacement of global task-submitted fetch_add and peak-depth CAS publication with queue-mutex-authorized per-worker local accumulation plus atomic snapshots; not an end-to-end throughput claim"
+}

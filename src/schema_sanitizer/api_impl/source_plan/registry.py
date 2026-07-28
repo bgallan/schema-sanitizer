@@ -19,15 +19,21 @@ from schema_sanitizer.input_impl.source_plan import (
 )
 
 from ...adapters.pyarrow import streams as _pyarrow_streams
+from ...core_impl.execution_policy import execution_policy, normalize_threading_mode
+from ...core_impl.generated_metadata import TimestampColumns
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from ...options_impl.call_options import unwrap_options
-from ...options_impl.options import Options
+from ...options_impl.options import Options, memory_limit_bytes_or_none
 from ..output_diagnostics import patch_file_output_diagnostics, patch_table_diagnostics
 from ..parquet.multisource import parquet_multisource_registry_sink_raw_or_none
-from ..results import Result, convert_arrow_table_output
+from ..results import (
+    AnalyticalOutputConversion,
+    Result,
+    convert_arrow_stream_output,
+)
 from ..stream_output import write_raw_stream_to_file
 from ..streams import Stream
-from .remote import RemotePathSourceChunkProvider
+from .remote import RemotePathSourceChunkProvider, prefetched_remote_chunks
 
 
 @dataclass(slots=True)
@@ -110,15 +116,25 @@ def _open_remote_registry_stream(
     field_name_policy: str,
     schema_mode: str,
     first_row_columns: dict[str, Any],
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     native_registry_state: Any,
 ) -> OpenedSourcePlanRegistryStream:
     """Open a remote stream through the native paired-provider registry route."""
+    policy = execution_policy(
+        plan.payload.threading_mode,
+        plan.payload.memory_limit_bytes,
+    )
+    retained_chunks, remaining_start = prefetched_remote_chunks(plan.payload)
     probe_provider = RemotePathSourceChunkProvider(
-        retained_chunks=[], remaining_manifest=plan.payload
+        retained_chunks=retained_chunks,
+        remaining_manifest=plan.payload,
+        retain_consumed_chunks=max(1, policy.remote_chunk_prefetch),
+        remaining_start=remaining_start,
     )
     stream_provider = RemotePathSourceChunkProvider(
-        retained_chunks=[], remaining_manifest=plan.payload
+        retained_chunks=[],
+        remaining_manifest=plan.payload,
+        retained_chunk_donor=probe_provider,
     )
     try:
         raw = raw_context.to_registry_sink_path_source_chunk_provider_auto_registry(
@@ -151,7 +167,7 @@ def open_source_plan_registry_stream(
     field_name_policy: str,
     schema_mode: str,
     first_row_columns: dict[str, Any],
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     native_registry_state: Any = None,
 ) -> OpenedSourcePlanRegistryStream | None:
     """Open a registry-backed stream from the canonical native source plan."""
@@ -204,22 +220,42 @@ def materialize_opened_registry_stream(
     opened: OpenedSourcePlanRegistryStream,
     *,
     target: str,
+    threading_mode: str = "single",
 ) -> Result:
     """Materialize an opened registry stream into an analytical target."""
     try:
-        table = _pyarrow_streams.table_from_stream_like(
-            opened.materialization_stream(),
-            feature=f"to_{target}",
-        )
+        if target == "pyarrow":
+            table = _pyarrow_streams.table_from_stream_like(
+                opened.materialization_stream(),
+                feature="to_pyarrow",
+            )
+            conversion = AnalyticalOutputConversion(
+                clean_data=table,
+                diagnostics_shape=table,
+                route="arrow_c_stream_to_pyarrow_table",
+            )
+        else:
+            conversion = convert_arrow_stream_output(
+                opened.materialization_stream(),
+                target,
+                feature=f"to_{target}",
+                threading_mode=threading_mode,
+            )
         owner = SimpleNamespace(diagnostics=opened.diagnostics)
         result = Result(
             owner,
-            clean_data=convert_arrow_table_output(table, target, feature=f"to_{target}"),
+            clean_data=conversion.clean_data,
             schema_registry_json=opened.schema_registry_json,
             schema_drifts_json=opened.schema_drifts_json,
             native_registry_state=opened.native_registry_state,
+            conversion_route=conversion.route,
         )
-        patch_table_diagnostics(owner, result, table, fill_inferred_rows_when_missing=True)
+        patch_table_diagnostics(
+            owner,
+            result,
+            conversion.diagnostics_shape,
+            fill_inferred_rows_when_missing=True,
+        )
         return result
     finally:
         opened.close()
@@ -234,6 +270,7 @@ def write_opened_registry_stream_to_file(
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> Result:
     """Write an opened registry stream whose generated metadata is already present."""
     try:
@@ -251,6 +288,7 @@ def write_opened_registry_stream_to_file(
                 parquet_compression=parquet_compression,
                 parquet_gzip_level=parquet_gzip_level,
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
             )
             result.schema_registry_json = opened.schema_registry_json
             result.schema_drifts_json = opened.schema_drifts_json
@@ -272,6 +310,7 @@ def write_opened_registry_stream_to_file(
             row_span_columns=None,
             timestamp_columns=(),
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
             **parquet_kwargs,
         )
         owner = SimpleNamespace(diagnostics=opened.diagnostics)
@@ -291,7 +330,7 @@ def write_source_plan_registry_to_file(
     feature: str,
     call_options: Options | None,
     first_row_columns: dict[str, Any],
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     schema_registry_json: str,
     schema_mode: str,
     field_name_policy: str,
@@ -320,7 +359,10 @@ def write_source_plan_registry_to_file(
         feature=feature,
         parquet_compression=parquet_compression,
         parquet_gzip_level=parquet_gzip_level,
-        memory_limit_bytes=(
-            call_options.performance.memory_limit_bytes if call_options is not None else None
+        memory_limit_bytes=(memory_limit_bytes_or_none(call_options)),
+        threading_mode=(
+            normalize_threading_mode(call_options.performance.threading_mode)
+            if call_options is not None
+            else "single"
         ),
     )

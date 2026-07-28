@@ -8,10 +8,11 @@ from functools import lru_cache
 from typing import Any
 
 from ..core_impl.dependencies import ensure_pyarrow
+from ..core_impl.execution_policy import normalize_threading_mode
 from ..core_impl.logical_schema import LogicalSchemaPayload
 from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.native_options import Options as NativeOptions
-from ..core_impl.native_options import normalize_field_name_policy_option
+from ..core_impl.native_options import normalize_field_name_policy_option, set_operation_detected_at
 from .options import Options
 
 FILE_CONVERSION_HELPER_KEYS = frozenset(
@@ -180,6 +181,7 @@ class _CallOptions:
     xml_row_tag: str | None = None
 
     on_error: str = "emit_null_row"
+    threading_mode: str = "single"
     memory_limit_bytes: int | None = None
 
     def __post_init__(self) -> None:
@@ -188,7 +190,7 @@ class _CallOptions:
 
     def to_options(self) -> Options:
         """Convert flat call options to grouped internal options."""
-        performance: dict[str, Any] = {}
+        performance: dict[str, Any] = {"threading_mode": self.threading_mode}
         if self.memory_limit_bytes is not None:
             performance["memory_limit_bytes"] = self.memory_limit_bytes
 
@@ -292,6 +294,11 @@ def _normalize_call_option_values(options: _CallOptions) -> None:
         options,
         "on_error",
         _normalize_choice("on_error", options.on_error, _ERROR_MODES),
+    )
+    object.__setattr__(
+        options,
+        "threading_mode",
+        normalize_threading_mode(options.threading_mode),
     )
     object.__setattr__(
         options,
@@ -458,6 +465,13 @@ def normalize_call_options_or_none(**kwargs: Any) -> Options | None:
     if _kwargs_are_default_call_options(kwargs):
         return None
     return normalize_call_options(**kwargs)
+
+
+def attach_operation_detected_at(options: Options | None, detected_at: str) -> Options:
+    """Attach internal fixed-clock metadata to prepared per-call options."""
+    resolved = normalize_call_options() if options is None else options
+    set_operation_detected_at(resolved.raw, detected_at)
+    return resolved
 
 
 def unwrap_options(options: Any) -> Any:

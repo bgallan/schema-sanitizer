@@ -323,7 +323,7 @@ def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> Non
 
 def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
     """Verify date-range source discovery removes missing files before conversion."""
-    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+    import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
     from schema_sanitizer.pipeline import discover_existing_source_plans
     from schema_sanitizer.pipeline.types import PartitionRunPlan
 
@@ -340,7 +340,7 @@ def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
         for day in (1, 2, 3)
     ]
 
-    async def fake_remote_file_metadata(
+    def fake_remote_file_metadata(
         uri: str,
         *,
         memory_limit_bytes: int | None = None,
@@ -353,7 +353,7 @@ def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
 
     monkeypatch.setattr(
-        source_discovery_mod.routing,
+        source_discovery_mod.sync_backend,
         "remote_file_metadata",
         fake_remote_file_metadata,
     )
@@ -521,7 +521,7 @@ def test_example_07_hourly_uri_templates_render_hour_and_filename() -> None:
 
 def test_example_07_directory_discovery_skips_empty_partitions(monkeypatch) -> None:
     """Verify directory mode lists partitions and skips those without matching files."""
-    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+    import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
     from schema_sanitizer.pipeline import discover_existing_source_plans
     from schema_sanitizer.pipeline.types import PartitionRunPlan
 
@@ -539,7 +539,8 @@ def test_example_07_directory_discovery_skips_empty_partitions(monkeypatch) -> N
     ]
     captured: dict[str, object] = {}
 
-    async def fake_bulk_directory_check(
+    def fake_bulk_directory_check(
+        provider: str,
         uris: list[str],
         extensions: tuple[str, ...],
         *,
@@ -548,6 +549,7 @@ def test_example_07_directory_discovery_skips_empty_partitions(monkeypatch) -> N
         """Capture directory discovery configuration."""
         from schema_sanitizer.input_impl.directory_inputs import DirectoryDiscovery
 
+        assert provider == "gcs"
         captured["extensions"] = extensions
         exists_by_uri = {uri: uri.endswith("hour=08") for uri in uris}
         return DirectoryDiscovery(
@@ -556,7 +558,7 @@ def test_example_07_directory_discovery_skips_empty_partitions(monkeypatch) -> N
         )
 
     monkeypatch.setattr(
-        source_discovery_mod.gcs,
+        source_discovery_mod.sync_backend,
         "directories_containing_files",
         fake_bulk_directory_check,
     )

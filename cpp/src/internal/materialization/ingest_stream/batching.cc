@@ -42,12 +42,24 @@ IngestStreamSource::ensure_current_row(const BatchLimits &limits) {
   }
 
   SAN_RETURN_NOT_OK(check_interrupt());
-  auto next = frontend_.next_batch(limits.capacity);
+  sanitize::Result<RowBatch> next = sanitize::Status::Invalid(
+      "IngestStreamSource: frontend read was not attempted");
+  {
+    PerformancePhaseScope frontend_scope(telemetry_keepalive_,
+                                         PerformancePhase::kFrontendRead);
+    next = frontend_.next_batch(limits.capacity);
+  }
   if (!next.ok()) {
     return next.status();
   }
   cur_ = std::move(next).ValueOrDie();
   cur_i_ = 0;
+  if (telemetry_keepalive_) {
+    telemetry_keepalive_->AddCounter(PerformanceCounter::kFrontendBatches);
+    telemetry_keepalive_->AddCounter(
+        PerformanceCounter::kSourceRows,
+        static_cast<std::int64_t>(cur_.rows.size()));
+  }
   if (cur_.rows.empty()) {
     eof_ = true;
     return false;
@@ -77,6 +89,8 @@ sanitize::Status IngestStreamSource::check_interrupt() const {
 }
 
 sanitize::Status IngestStreamSource::fill_appender(const BatchLimits &limits) {
+  PerformancePhaseScope coordinator_scope(telemetry_keepalive_,
+                                          PerformancePhase::kCoordinatorWork);
   std::size_t interrupt_countdown = 0;
   while (!appender_is_full(limits)) {
     if ((interrupt_countdown++ & std::size_t{1023}) == 0) {
@@ -113,6 +127,9 @@ sanitize::Status IngestStreamSource::fill_appender(const BatchLimits &limits) {
 }
 
 void IngestStreamSource::record_finished_batch(const ArrowArray *out) {
+  if (telemetry_keepalive_) {
+    telemetry_keepalive_->AddCounter(PerformanceCounter::kOutputBatches);
+  }
   if (diagnostics_) {
     diagnostics_->batches += 1;
     diagnostics_->materialized_rows += out->length;

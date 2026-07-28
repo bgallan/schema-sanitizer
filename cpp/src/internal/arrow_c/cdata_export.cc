@@ -2,6 +2,7 @@
 
 #include "internal/arrow_c/cdata_export_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/arrow_c/cdata_stream_runtime.hh"
 
 #include "nanoarrow/nanoarrow.h"
 
@@ -89,6 +90,7 @@ static void stream_release(ArrowArrayStream *stream) {
   }
   auto *state = static_cast<ExportBatchStreamState *>(stream->private_data);
   close_source(state);
+  sanitize::internal::detach_task_arena(stream);
   delete state;
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
@@ -139,6 +141,7 @@ export_stream_c(std::shared_ptr<ExportBatchSource> source) {
   stream->get_last_error = &stream_get_last_error;
   stream->release = &stream_release;
   stream->private_data = state;
+  sanitize::internal::attach_task_arena(stream, state->source->TaskArena());
   return UniqueCStream(stream);
 }
 

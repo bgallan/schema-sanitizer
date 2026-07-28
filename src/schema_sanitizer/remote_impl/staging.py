@@ -2,41 +2,34 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, Any
 
-from ..core_impl.async_scheduler import (
-    drain_ordered_indexed_results,
-    retry_async,
+from ..core_impl.execution_policy import normalize_threading_mode
+from ..core_impl.temporary_storage import (
+    TemporaryStorageLease,
+    TemporaryStoragePermitPool,
 )
-from ..core_impl.memory_budget import memory_budget
 from ..core_impl.uris import (
-    RemoteProvider,
     local_path_from_file_uri,
     looks_like_file_uri,
     looks_like_remote_uri,
     normalize_extensions,
-    remote_provider,
     suffix_from_uri,
 )
 from ..input_impl.directory_inputs import RemoteFile
-from . import routing
-from .providers import azure, gcs, s3
-from .transport import (
-    check_download_size,
-    download_http_file,
-    open_aiohttp_session,
-    run_sync,
-    upload_http_file,
-    write_response_to_file,
-)
+from . import routing, sync_backend
+from .directory_downloads import RemoteDirectoryDownloadSession, download_files_to_directory
+from .transfer_dispatch import download_single_file, upload_file
+from .transport import check_download_size, run_sync
+
+if TYPE_CHECKING:
+    from ..api_impl.operation_context import OperationExecutionContext
 
 
 class StagedPath:
@@ -48,12 +41,33 @@ class StagedPath:
         *,
         is_dir: bool = False,
         source_file_by_name: dict[str, str] | None = None,
+        storage_lease: TemporaryStorageLease | None = None,
     ) -> None:
         """Store the temporary path and deletion mode."""
         self.path = path
         self.is_dir = is_dir
         self.source_file_by_name = source_file_by_name
+        self.storage_lease = storage_lease
         self._closed = False
+
+    def reserve_actual_size(self, pool: TemporaryStoragePermitPool, *, label: str) -> None:
+        """Acquire or resize the permit to the exact staged filesystem size."""
+        size = self._actual_size()
+        if self.storage_lease is None:
+            self.storage_lease = pool.acquire(size, label=label, path=self.path)
+            return
+        self.storage_lease.resize(size, path=self.path)
+
+    def _actual_size(self) -> int:
+        """Return the current file or recursive directory byte size."""
+        path = Path(self.path)
+        if not self.is_dir:
+            return path.stat().st_size
+        total = 0
+        for child in path.rglob("*"):
+            if child.is_file():
+                total += child.stat().st_size
+        return total
 
     def close(self) -> None:
         """Delete the temporary path."""
@@ -62,11 +76,14 @@ class StagedPath:
         self._closed = True
         if self.is_dir:
             shutil.rmtree(self.path, ignore_errors=True)
-            return
-        try:
-            Path(self.path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        else:
+            try:
+                Path(self.path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        if self.storage_lease is not None:
+            self.storage_lease.release()
+            self.storage_lease = None
 
 
 @dataclass(slots=True)
@@ -77,6 +94,8 @@ class RemoteOutputTarget:
     remote_uri: str | None = None
     temp: StagedPath | None = None
     memory_limit_bytes: int | None = None
+    threading_mode: str = "single"
+    operation_context: OperationExecutionContext | None = None
 
     def close(self) -> None:
         """Release the temporary output path."""
@@ -85,238 +104,242 @@ class RemoteOutputTarget:
             self.temp = None
 
 
-@dataclass(frozen=True, slots=True)
-class _DirectoryDownloadTuning:
-    """Runtime controls for concurrent remote directory downloads."""
-
-    concurrency: int
-    window: int
-    retries: int
-
-
-def _directory_download_tuning(
-    memory_limit_bytes: int | None,
-) -> _DirectoryDownloadTuning:
-    """Derive remote download controls from the operation memory budget."""
-    budget = memory_budget(memory_limit_bytes)
-    return _DirectoryDownloadTuning(
-        concurrency=budget.async_concurrency,
-        window=budget.async_prefetch_files,
-        retries=budget.async_retries,
-    )
-
-
-@dataclass(slots=True)
-class _DownloadContext:
-    """Provider identity plus reusable handles for one staged directory."""
-
-    provider: RemoteProvider
-    client: Any = None
-    manager: Any = None
-
-
-def create_temp_file_path(*, suffix: str) -> StagedPath:
+def create_temp_file_path(
+    *, suffix: str, storage_lease: TemporaryStorageLease | None = None
+) -> StagedPath:
     """Create an owned temporary file path."""
     fd, path = tempfile.mkstemp(
         prefix="schema-sanitizer-",
         suffix=suffix,
     )
     os.close(fd)
-    return StagedPath(path)
+    return StagedPath(path, storage_lease=storage_lease)
 
 
-def create_temp_directory_path() -> StagedPath:
+def create_temp_directory_path(*, storage_lease: TemporaryStorageLease | None = None) -> StagedPath:
     """Create an owned temporary directory path."""
     path = tempfile.mkdtemp(prefix="schema-sanitizer-")
-    return StagedPath(path, is_dir=True)
+    return StagedPath(path, is_dir=True, storage_lease=storage_lease)
 
 
-async def provider_client_for_downloads(
-    files: Sequence[RemoteFile],
-    *,
-    memory_limit_bytes: int | None = None,
-) -> _DownloadContext | None:
-    """Open one reusable provider client or session for a staged directory."""
-    if not files:
-        return None
-    provider = remote_provider(files[0].uri)
-    if provider is None:
-        scheme = urlparse(files[0].uri).scheme.lower()
-        raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
-    if provider == "gcs":
-        client = await open_aiohttp_session(
-            gcs.request_headers(), memory_limit_bytes=memory_limit_bytes
-        )
-        return _DownloadContext(provider, client)
-    if provider == "s3":
-        manager = await s3.open_client()
-        return _DownloadContext(provider, await manager.__aenter__(), manager)
-    if provider == "http":
-        return _DownloadContext(
-            provider, await open_aiohttp_session(memory_limit_bytes=memory_limit_bytes)
-        )
-    if provider == "azure":
-        return _DownloadContext(provider, await azure.open_service(azure.parse_uri(files[0].uri)))
-    raise ValueError(f"Unsupported remote provider: {provider!r}")
-
-
-async def close_provider_client(context: _DownloadContext | None) -> None:
-    """Close a reusable provider client or session."""
-    if context is None:
-        return
-    if context.manager is not None:
-        await context.manager.__aexit__(None, None, None)
-        return
-    close = getattr(context.client, "close", None)
-    if close is not None:
-        result = close()
-        if asyncio.iscoroutine(result):
-            await result
-        return
-    exit_fn = getattr(context.client, "__aexit__", None)
-    if exit_fn is not None:
-        await exit_fn(None, None, None)
-
-
-async def download_file_to_path(
-    context: _DownloadContext,
-    file: RemoteFile,
-    local_path: str,
-) -> None:
-    """Download one remote file using an already classified provider context."""
-    if context.provider == "gcs":
-        await gcs.download_file_with_session(context.client, file, local_path)
-        return
-    if context.provider == "s3":
-        await s3.download_file_with_client(context.client, file, local_path)
-        return
-    if context.provider == "azure":
-        await azure.download_file_with_service(context.client, file, local_path)
-        return
-    async with context.client.get(file.uri) as response:
-        await write_response_to_file(response, uri=file.uri, local_path=local_path)
-
-
-async def download_single_file(
-    uri: str, local_path: str, *, memory_limit_bytes: int | None
-) -> None:
-    """Download one supported remote URI to a local path."""
-    provider = remote_provider(uri)
-    if provider == "gcs":
-        await gcs.download_file(uri, local_path)
-        return
-    if provider == "s3":
-        await s3.download_file(uri, local_path)
-        return
-    if provider == "azure":
-        await azure.download_file(uri, local_path)
-        return
-    if provider == "http":
-        await download_http_file(uri, local_path, memory_limit_bytes=memory_limit_bytes)
-        return
-    scheme = urlparse(uri).scheme.lower()
-    raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
-
-
-async def upload_file(local_path: str, uri: str, *, memory_limit_bytes: int | None) -> None:
-    """Upload a local file to a supported remote URI."""
-    provider = remote_provider(uri)
-    if provider == "gcs":
-        await gcs.upload_file(local_path, uri)
-        return
-    if provider == "s3":
-        await s3.upload_file(local_path, uri)
-        return
-    if provider == "azure":
-        await azure.upload_file(local_path, uri)
-        return
-    if provider == "http":
-        await upload_http_file(local_path, uri, memory_limit_bytes=memory_limit_bytes)
-        return
-    scheme = urlparse(uri).scheme.lower()
-    raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
-
-
-def remote_directory_stage_chunk_size(memory_limit_bytes: int | None) -> int:
-    """Derive the maximum staged children from the memory budget."""
-    return min(4096, memory_budget(memory_limit_bytes).async_prefetch_files * 4)
-
-
-async def download_files_to_directory(
-    files: list[RemoteFile],
-    directory: str,
+def stage_remote_single_file(
+    uri: str,
     *,
     memory_limit_bytes: int | None,
-) -> None:
-    """Download files concurrently into a local directory."""
-    if not files:
-        raise ValueError("remote directory input found no matching files")
-    tuning = _directory_download_tuning(memory_limit_bytes)
-    semaphore = asyncio.Semaphore(tuning.concurrency)
-    context = await provider_client_for_downloads(files, memory_limit_bytes=memory_limit_bytes)
-    if context is None:  # pragma: no cover - guarded by the non-empty check
-        raise RuntimeError("remote download context was not created")
-    target_root = Path(directory)
-
-    async def fetch(index: int) -> None:
-        """Download and validate one indexed remote file."""
-        file = files[index]
-        target = target_root / file.name
-        check_download_size(file.uri, file.size, memory_limit_bytes)
-
-        async def operation() -> None:
-            """Download one file while holding the concurrency slot."""
-            async with semaphore:
-                await download_file_to_path(context, file, str(target))
-
-        try:
-            await retry_async(operation, retries=tuning.retries)
-        except Exception:
-            target.unlink(missing_ok=True)
-            raise
-        check_download_size(file.uri, target.stat().st_size, memory_limit_bytes)
-
-    try:
-        await drain_ordered_indexed_results(len(files), fetch, window=tuning.window)
-    finally:
-        await close_provider_client(context)
-
-
-def stage_remote_single_file(uri: str, *, memory_limit_bytes: int | None) -> StagedPath:
+    threading_mode: str = "single",
+    operation_context: OperationExecutionContext | None = None,
+) -> StagedPath:
     """Download one remote file to a local temporary path."""
-    temp = create_temp_file_path(suffix=suffix_from_uri(uri))
+    pool = (
+        operation_context.temporary_storage
+        if operation_context is not None
+        else TemporaryStoragePermitPool(memory_limit_bytes)
+    )
+    from ..core_impl.memory_budget import memory_budget
+
+    single = normalize_threading_mode(threading_mode) == "single"
+    if single:
+
+        def metadata_operation_sync():
+            """Read object size through the strict blocking provider backend."""
+            return sync_backend.remote_file_metadata(
+                uri,
+                memory_limit_bytes=memory_limit_bytes,
+            )
+
+        metadata = (
+            metadata_operation_sync()
+            if operation_context is None
+            else operation_context.run_remote_sync(metadata_operation_sync)
+        )
+    else:
+
+        def metadata_operation():
+            """Read object size on the operation-owned event loop."""
+            return routing.remote_file_metadata(
+                uri,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+            )
+
+        metadata = (
+            run_sync(metadata_operation(), threading_mode=threading_mode)
+            if operation_context is None
+            else operation_context.run_remote(metadata_operation)
+        )
+    known_size = getattr(metadata, "size", None)
+    estimate = (
+        known_size
+        if isinstance(known_size, int) and known_size >= 0
+        else memory_budget(memory_limit_bytes).io_chunk_bytes
+    )
+    check_download_size(uri, known_size, memory_limit_bytes)
+    lease = pool.acquire(estimate, label=f"remote input {uri!r}")
+    temp = create_temp_file_path(suffix=suffix_from_uri(uri), storage_lease=lease)
     try:
-        run_sync(download_single_file(uri, temp.path, memory_limit_bytes=memory_limit_bytes))
+        if single:
+
+            def operation_sync() -> None:
+                """Download the file through the strict blocking provider backend."""
+                sync_backend.download_single_file(
+                    uri,
+                    temp.path,
+                    memory_limit_bytes=memory_limit_bytes,
+                )
+
+            if operation_context is None:
+                operation_sync()
+            else:
+                operation_context.run_remote_sync(operation_sync)
+        else:
+
+            def operation():
+                """Download the file on the operation-owned event loop."""
+                return download_single_file(
+                    uri,
+                    temp.path,
+                    memory_limit_bytes=memory_limit_bytes,
+                    threading_mode=threading_mode,
+                )
+
+            if operation_context is None:
+                run_sync(operation(), threading_mode=threading_mode)
+            else:
+                operation_context.run_remote(operation)
         check_download_size(uri, Path(temp.path).stat().st_size, memory_limit_bytes)
-    except Exception:
+        temp.reserve_actual_size(pool, label=f"remote input {uri!r}")
+    except BaseException:
         temp.close()
         raise
     return temp
+
+
+def stage_remote_files_to_directory_sync(
+    files: Sequence[RemoteFile],
+    *,
+    memory_limit_bytes: int | None,
+    storage_lease: TemporaryStorageLease | None = None,
+) -> StagedPath:
+    """Stage selected files through the strict blocking provider backend."""
+    selected = list(files)
+    if not selected:
+        raise ValueError("remote directory input found no matching files")
+    temp_dir = (
+        create_temp_directory_path()
+        if storage_lease is None
+        else create_temp_directory_path(storage_lease=storage_lease)
+    )
+    try:
+        sync_backend.download_files_to_directory(
+            selected,
+            temp_dir.path,
+            memory_limit_bytes=memory_limit_bytes,
+        )
+        if storage_lease is not None:
+            storage_lease.resize(temp_dir._actual_size(), path=temp_dir.path)
+    except BaseException:
+        temp_dir.close()
+        raise
+    temp_dir.source_file_by_name = {file.name: file.uri for file in selected}
+    return temp_dir
+
+
+async def stage_remote_files_to_directory_async(
+    files: Sequence[RemoteFile],
+    *,
+    memory_limit_bytes: int | None,
+    threading_mode: str = "single",
+    download_session: RemoteDirectoryDownloadSession | None = None,
+    storage_lease: TemporaryStorageLease | None = None,
+) -> StagedPath:
+    """Download selected remote files into one owned temporary directory."""
+    selected = list(files)
+    if not selected:
+        raise ValueError("remote directory input found no matching files")
+    temp_dir = (
+        create_temp_directory_path()
+        if storage_lease is None
+        else create_temp_directory_path(storage_lease=storage_lease)
+    )
+    try:
+        if download_session is None:
+            await download_files_to_directory(
+                selected,
+                temp_dir.path,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+            )
+        else:
+            await download_session.download_files(selected, temp_dir.path)
+        if storage_lease is not None:
+            storage_lease.resize(temp_dir._actual_size(), path=temp_dir.path)
+    except BaseException:
+        temp_dir.close()
+        raise
+    temp_dir.source_file_by_name = {file.name: file.uri for file in selected}
+    return temp_dir
 
 
 def stage_remote_files_to_directory(
     files: Sequence[RemoteFile],
     *,
     memory_limit_bytes: int | None,
+    threading_mode: str = "single",
+    operation_context: OperationExecutionContext | None = None,
+    storage_lease: TemporaryStorageLease | None = None,
 ) -> StagedPath:
-    """Download selected remote files into one temporary directory."""
+    """Synchronously stage selected remote files into one temporary directory."""
     selected = list(files)
-    if not selected:
-        raise ValueError("remote directory input found no matching files")
-    temp_dir = create_temp_directory_path()
-    try:
-        run_sync(
-            download_files_to_directory(
-                selected,
-                temp_dir.path,
-                memory_limit_bytes=memory_limit_bytes,
-            )
+    lease = storage_lease
+    if lease is None:
+        from ..core_impl.memory_budget import memory_budget
+
+        budget = memory_budget(memory_limit_bytes)
+        estimated_bytes = sum(
+            file.size if isinstance(file.size, int) and file.size >= 0 else budget.io_chunk_bytes
+            for file in selected
         )
-    except Exception:
-        temp_dir.close()
+        pool = (
+            operation_context.temporary_storage
+            if operation_context is not None
+            else TemporaryStoragePermitPool(memory_limit_bytes)
+        )
+        lease = pool.acquire(
+            estimated_bytes,
+            label="remote source directory packet",
+        )
+
+    single = normalize_threading_mode(threading_mode) == "single"
+    try:
+        if single:
+
+            def operation_sync() -> StagedPath:
+                """Stage files through the strict blocking provider backend."""
+                return stage_remote_files_to_directory_sync(
+                    selected,
+                    memory_limit_bytes=memory_limit_bytes,
+                    storage_lease=lease,
+                )
+
+            if operation_context is None:
+                return operation_sync()
+            return operation_context.run_remote_sync(operation_sync)
+
+        def operation():
+            """Stage selected files on the operation-owned event loop."""
+            return stage_remote_files_to_directory_async(
+                selected,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                storage_lease=lease,
+            )
+
+        if operation_context is None:
+            return run_sync(operation(), threading_mode=threading_mode)
+        return operation_context.run_remote(operation)
+    except BaseException:
+        lease.release()
         raise
-    temp_dir.source_file_by_name = {file.name: file.uri for file in selected}
-    return temp_dir
 
 
 def stage_remote_parquet_directory(
@@ -324,45 +347,140 @@ def stage_remote_parquet_directory(
     *,
     suffixes: Sequence[str],
     memory_limit_bytes: int | None,
+    threading_mode: str = "single",
+    operation_context: OperationExecutionContext | None = None,
 ) -> StagedPath:
     """Download a remote Parquet directory to a local temporary directory."""
-    files = run_sync(routing.list_remote_directory(uri, suffixes))
+
+    single = normalize_threading_mode(threading_mode) == "single"
+    if single:
+
+        def list_operation_sync() -> list[RemoteFile]:
+            """List Parquet files through the strict blocking provider backend."""
+            return sync_backend.list_remote_directory(
+                uri,
+                suffixes,
+                memory_limit_bytes=memory_limit_bytes,
+            )
+
+        files = (
+            list_operation_sync()
+            if operation_context is None
+            else operation_context.run_remote_sync(list_operation_sync)
+        )
+    else:
+
+        def list_operation():
+            """List Parquet files on the operation-owned event loop."""
+            return routing.list_remote_directory(
+                uri,
+                suffixes,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+            )
+
+        files = (
+            run_sync(list_operation(), threading_mode=threading_mode)
+            if operation_context is None
+            else operation_context.run_remote(list_operation)
+        )
     if not files:
         expected = " or ".join(normalize_extensions(suffixes))
         raise ValueError(f"parquet remote directory input found no {expected} files in: {uri}")
-    return stage_remote_files_to_directory(files, memory_limit_bytes=memory_limit_bytes)
+    return stage_remote_files_to_directory(
+        files,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
+        operation_context=operation_context,
+    )
 
 
-def prepare_output_target(path: Any, *, memory_limit_bytes: int | None) -> RemoteOutputTarget:
+def prepare_output_target(
+    path: Any,
+    *,
+    memory_limit_bytes: int | None,
+    threading_mode: str = "single",
+    operation_context: OperationExecutionContext | None = None,
+) -> RemoteOutputTarget:
     """Return a local target, staging remote destinations when needed."""
     raw = os.fspath(path)
     if looks_like_file_uri(raw):
         return RemoteOutputTarget(
             local_path=local_path_from_file_uri(raw),
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
+            operation_context=operation_context,
         )
     if not looks_like_remote_uri(raw):
-        return RemoteOutputTarget(local_path=raw, memory_limit_bytes=memory_limit_bytes)
+        return RemoteOutputTarget(
+            local_path=raw,
+            memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
+            operation_context=operation_context,
+        )
     temp = create_temp_file_path(suffix=suffix_from_uri(raw, default=".tmp"))
     return RemoteOutputTarget(
         local_path=temp.path,
         remote_uri=raw,
         temp=temp,
         memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
+        operation_context=operation_context,
     )
 
 
-def finalize_output_target(target: RemoteOutputTarget) -> None:
-    """Upload a staged output target if it points to a remote URI."""
+def finalize_output_target(
+    target: RemoteOutputTarget,
+    *,
+    before_remote_upload: Callable[[], None] | None = None,
+) -> None:
+    """Upload a staged output target after an optional safe overlap trigger."""
     try:
-        if target.remote_uri is not None:
-            run_sync(
-                upload_file(
-                    target.local_path,
-                    target.remote_uri,
-                    memory_limit_bytes=target.memory_limit_bytes,
+        remote_uri = target.remote_uri
+        if remote_uri is not None:
+            if target.temp is not None:
+                pool = (
+                    target.operation_context.temporary_storage
+                    if target.operation_context is not None
+                    else TemporaryStoragePermitPool(target.memory_limit_bytes)
                 )
-            )
+                target.temp.reserve_actual_size(
+                    pool,
+                    label=f"remote output {remote_uri!r}",
+                )
+            if before_remote_upload is not None:
+                before_remote_upload()
+
+            single = normalize_threading_mode(target.threading_mode) == "single"
+            if single:
+
+                def operation_sync() -> None:
+                    """Upload through the strict blocking provider backend."""
+                    sync_backend.upload_file(
+                        target.local_path,
+                        remote_uri,
+                        memory_limit_bytes=target.memory_limit_bytes,
+                    )
+
+                if target.operation_context is None:
+                    operation_sync()
+                else:
+                    target.operation_context.run_remote_sync(operation_sync)
+            else:
+
+                def operation():
+                    """Upload the completed output on the operation-owned event loop."""
+                    return upload_file(
+                        target.local_path,
+                        remote_uri,
+                        memory_limit_bytes=target.memory_limit_bytes,
+                        threading_mode=target.threading_mode,
+                    )
+
+                if target.operation_context is None:
+                    run_sync(operation(), threading_mode=target.threading_mode)
+                else:
+                    target.operation_context.run_remote(operation)
     finally:
         target.close()
 

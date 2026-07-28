@@ -184,6 +184,88 @@ jobs:
         with:
           name: abi3-wheel-${{ matrix.artifact }}
           path: dist/*.whl
+  remote-http-fault-injection:
+    name: remote HTTP faults (${{ matrix.artifact }})
+    needs: [core-only]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux
+          - os: windows-latest
+            artifact: windows
+          - os: macos-15-intel
+            artifact: macos-x86_64
+          - os: macos-14
+            artifact: macos-arm64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v7
+        with:
+          name: abi3-wheel-${{ matrix.artifact }}
+          path: dist
+      - name: Install wheel and HTTP emulator dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip pytest aiohttp
+          python -m pip install dist/*.whl
+      - name: Exercise disconnect, truncation, cancellation, and shutdown
+        run: >-
+          python -m pytest -q
+          tests/test_remote_http_fault_injection.py
+          tests/test_remote_process_lifecycle.py
+  benchmark-matrix-smoke:
+    name: threading benchmark matrix (${{ matrix.artifact }})
+    needs: [core-only]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux
+          - os: windows-latest
+            artifact: windows
+          - os: macos-15-intel
+            artifact: macos-x86_64
+          - os: macos-14
+            artifact: macos-arm64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v7
+        with:
+          name: abi3-wheel-${{ matrix.artifact }}
+          path: dist
+      - name: Install wheel and benchmark adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip pyarrow
+          python -m pip install dist/*.whl
+      - name: Run cross-platform benchmark equivalence smoke
+        run: >-
+          python benchmarks/bench_threading_matrix.py
+          --profile ci
+          --rows 256
+          --warmups 0
+          --repeats 1
+          --only parquet
+          --output artifacts/threading-matrix-${{ matrix.artifact }}.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: threading-benchmark-matrix-${{ matrix.artifact }}
+          path: artifacts/threading-matrix-${{ matrix.artifact }}.json
 
   # ABI smoke lane: install the CPython 3.11-built abi3 wheel per OS.
   abi3-runtime-compat:
@@ -496,6 +578,22 @@ jobs:
           --azure-emulator-connection-string
           'UseDevelopmentStorage=true'
           --gcs-emulator-endpoint http://127.0.0.1:4443
+      - name: Benchmark remote provider equivalence
+        run: >-
+          python benchmarks/bench_remote_providers.py
+          --s3-endpoint http://127.0.0.1:9000
+          --azure-connection-string 'UseDevelopmentStorage=true'
+          --gcs-endpoint http://127.0.0.1:4443
+          --rows 256
+          --source-count 4
+          --memory-mib 96
+          --warmups 0
+          --repeats 1
+          --output artifacts/remote-provider-benchmark.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: remote-provider-benchmark
+          path: artifacts/remote-provider-benchmark.json
       - name: Preserve emulator diagnostics
         if: failure()
         shell: bash
@@ -731,7 +829,7 @@ jobs:
   native-sanitizers:
     name: native sanitizers / Clang ASan + UBSan
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -773,3 +871,191 @@ jobs:
           tests/test_parquet_native_nested_list_map_combinators.py
           tests/test_parquet_native_recursive_shapes_part04.py
           tests/test_parquet_native_recursive_extreme_runtime.py
+      - name: Configure ASan/UBSan libFuzzer targets
+        run: >-
+          cmake -S . -B build/asan-fuzz -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+          -DSCHEMA_SANITIZER_SANITIZER=asan-ubsan
+          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+          -DSCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer
+          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
+          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+      - name: Build ASan/UBSan libFuzzer targets
+        run: >-
+          cmake --build build/asan-fuzz
+          --target schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
+          schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
+          --parallel 4
+      - name: Run ASan/UBSan fuzz regressions and mutation campaigns
+        run: >-
+          python meta/ci/run_fuzz_regressions.py
+          --build-root build/asan-fuzz/fuzz
+          --campaign-runs 1000
+          --seed 15172026
+          --max-len 262144
+  native-platform-sanitizers:
+    name: native sanitizer concurrency (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64-asan
+            os: windows-latest
+            sanitizer: asan
+          - name: macos-x86_64-asan-ubsan
+            os: macos-15-intel
+            sanitizer: asan-ubsan
+          - name: macos-arm64-asan-ubsan
+            os: macos-14
+            sanitizer: asan-ubsan
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install build dependencies
+        run: python -m pip install -U pip ninja 'cmake>=4.3,<4.4'
+      - name: Configure Windows ASan native gates
+        if: runner.os == 'Windows'
+        run: >-
+          cmake -S . -B build/platform-sanitizer
+          -A x64
+          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+          -DSCHEMA_SANITIZER_SANITIZER=${{ matrix.sanitizer }}
+          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+          -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
+          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
+          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+      - name: Configure macOS ASan/UBSan native gates
+        if: runner.os == 'macOS'
+        run: >-
+          cmake -S . -B build/platform-sanitizer -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+          -DSCHEMA_SANITIZER_SANITIZER=${{ matrix.sanitizer }}
+          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+          -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
+          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
+          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+      - name: Build native concurrency and fuzz targets
+        run: >-
+          cmake --build build/platform-sanitizer
+          --config RelWithDebInfo
+          --target schema_sanitizer_sanitized_ordered_executor
+          schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
+          schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
+          --parallel 4
+      - name: Run repeated sanitized concurrency probe
+        run: >-
+          ctest --test-dir build/platform-sanitizer
+          -C RelWithDebInfo
+          -R schema_sanitizer_sanitized_ordered_executor
+          --repeat until-fail:2
+          --output-on-failure
+      - name: Run native fuzz regressions and bounded mutation campaigns
+        run: >-
+          python meta/ci/run_fuzz_regressions.py
+          --build-root build/platform-sanitizer/fuzz
+          --campaign-runs 500
+          --seed 15172026
+          --max-len 262144
+  native-thread-sanitizer:
+    name: native threading / GCC ThreadSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install GCC 14 and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14
+          python -m pip install -U pip ninja 'cmake>=4.3,<4.4' pytest pyarrow
+      - name: Configure fully instrumented extension
+        run: >-
+          cmake -S . -B build/tsan -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=gcc-14
+          -DCMAKE_CXX_COMPILER=g++-14
+          -DPython3_EXECUTABLE=$(which python)
+          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+          -DSCHEMA_SANITIZER_SANITIZER=tsan
+          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+          -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
+          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
+          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+      - name: Build extension, fuzzers, and bundled Parquet compression
+        run: cmake --build build/tsan --parallel 4
+      - name: TSan native fuzz regressions and bounded mutation campaigns
+        run: >-
+          python meta/ci/run_fuzz_regressions.py
+          --build-root build/tsan/fuzz
+          --campaign-runs 1000
+          --seed 15172026
+          --max-len 262144
+      - name: Build sanitizer-first CPython launcher
+        run: >-
+          g++-14 -std=c++17 -fsanitize=thread
+          -fno-omit-frame-pointer
+          meta/ci/tsan_python_launcher.cc
+          $(python3-config --embed --cflags --ldflags)
+          -o python-tsan
+      - name: Verify TSan extension and executor
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 1
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          --verify-only
+      - name: TSan native executor domain
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 2
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          tests/test_threading_native_executor.py
+      - name: TSan inference domain
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 2
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          tests/test_threading_inference.py
+      - name: TSan materialization domain
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 2
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          tests/test_threading_materialization.py
+      - name: TSan text output domain
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 2
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          tests/test_threading_output.py
+      - name: TSan Parquet output domain
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 2
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          tests/test_threading_parquet_output.py
+      - name: TSan fixed-clock golden domain
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 2
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          tests/test_threading_golden_matrix.py
+      - name: TSan partition lookahead domain
+        run: >-
+          meta/ci/run_tsan_extension_suite.sh
+          build/tsan ./python-tsan 2
+          "$(python -c 'import site; print(site.getsitepackages()[0])')"
+          tests/test_partition_lookahead.py

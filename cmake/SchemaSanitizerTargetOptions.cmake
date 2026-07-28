@@ -29,23 +29,55 @@ function(schema_sanitizer_add_sanitizer target)
     return()
   endif()
 
-  if(NOT (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU|AppleClang"))
-    message(
-      FATAL_ERROR
-        "SCHEMA_SANITIZER_SANITIZER is only supported for Clang/GCC/AppleClang (got ${CMAKE_CXX_COMPILER_ID})"
-    )
-  endif()
-
-  if(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan-ubsan")
+  if(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan")
+    if(MSVC)
+      target_compile_options(${target} PRIVATE /fsanitize=address)
+      get_target_property(_sanitizer_target_type ${target} TYPE)
+      if(_sanitizer_target_type STREQUAL "SHARED_LIBRARY"
+         OR _sanitizer_target_type STREQUAL "MODULE_LIBRARY"
+         OR _sanitizer_target_type STREQUAL "EXECUTABLE")
+        target_link_options(${target} PRIVATE /INCREMENTAL:NO)
+      endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU|AppleClang")
+      target_compile_options(${target} PRIVATE -fsanitize=address
+                                               -fno-omit-frame-pointer)
+      target_link_options(${target} PRIVATE -fsanitize=address
+                          -fno-omit-frame-pointer)
+    else()
+      message(
+        FATAL_ERROR
+          "SCHEMA_SANITIZER_SANITIZER=asan is unsupported for ${CMAKE_CXX_COMPILER_ID}"
+      )
+    endif()
+  elseif(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan-ubsan")
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU|AppleClang")
+      message(
+        FATAL_ERROR
+          "SCHEMA_SANITIZER_SANITIZER=asan-ubsan requires Clang/GCC/AppleClang (got ${CMAKE_CXX_COMPILER_ID})"
+      )
+    endif()
     target_compile_options(
       ${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer
                         -fno-sanitize-recover=all)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined
                         -fno-omit-frame-pointer -fno-sanitize-recover=all)
+  elseif(SCHEMA_SANITIZER_SANITIZER STREQUAL "tsan")
+    if(APPLE
+       OR MSVC
+       OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+      message(
+        FATAL_ERROR
+          "SCHEMA_SANITIZER_SANITIZER=tsan is currently supported only on Linux with Clang or GCC"
+      )
+    endif()
+    target_compile_options(${target} PRIVATE -fsanitize=thread
+                                             -fno-omit-frame-pointer)
+    target_link_options(${target} PRIVATE -fsanitize=thread
+                        -fno-omit-frame-pointer)
   else()
     message(
       FATAL_ERROR
-        "Invalid SCHEMA_SANITIZER_SANITIZER value: '${SCHEMA_SANITIZER_SANITIZER}'. Expected: none or asan-ubsan"
+        "Invalid SCHEMA_SANITIZER_SANITIZER value: '${SCHEMA_SANITIZER_SANITIZER}'. Expected: none, asan, asan-ubsan, or tsan"
     )
   endif()
 endfunction()

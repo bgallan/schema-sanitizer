@@ -141,6 +141,7 @@ sanitize::Status scan_string(Cursor &c, const char *&out_begin,
     }
     if (ch == '\\') {
       has_esc = true;
+      c.saw_escape = true;
       if (q >= c.end) {
         return sanitize::Status::Invalid(
             "JSON parse error: unterminated escape at byte ",

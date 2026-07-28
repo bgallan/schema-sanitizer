@@ -105,19 +105,13 @@ sanitize::Status append_list_value(std::string &out, const JsonlField &field,
 sanitize::Status append_struct_value(std::string &out, const JsonlField &field,
                                      const ArrowArray &array, int64_t row) {
   if (array.n_children != static_cast<int64_t>(field.children.size()) ||
-      (!field.children.empty() && !array.children)) {
+      (!field.children.empty() && !array.children) ||
+      field.member_prefixes.size() != field.children.size()) {
     return sanitize::Status::Invalid("JSONL writer: struct/schema mismatch");
   }
   out.push_back('{');
-  bool first = true;
   for (std::size_t i = 0; i < field.children.size(); ++i) {
-    if (!first) {
-      out.push_back(',');
-    }
-    first = false;
-    sanitize::internal::json_encoding::append_string(out,
-                                                     field.children[i].name);
-    out.push_back(':');
+    out.append(field.member_prefixes[i]);
     if (array.offset > std::numeric_limits<int64_t>::max() - row) {
       return sanitize::Status::Invalid(
           "JSONL writer: struct child row offset overflow");

@@ -91,6 +91,11 @@ PyObject *py_context_to_registry_sink_from_path_sources(PyObject *,
     PyErr_NoMemory();
     return nullptr;
   }
+  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
+    release_registry_outputs(&outputs);
+    PyErr_NoMemory();
+    return nullptr;
+  }
   outputs.registry_json = dup_cstr(registry_json ? registry_json : "{}");
   outputs.drifts_json = dup_cstr(drifts_json ? drifts_json : "[]");
   outputs.conversion_timestamp =
@@ -177,6 +182,11 @@ py_context_to_registry_sink_from_path_sources_registry_state(PyObject *,
   outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
   if (!outputs.diagnostics) {
     schema_sanitizer_stream_free(stream);
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
+    release_registry_outputs(&outputs);
     PyErr_NoMemory();
     return nullptr;
   }
@@ -267,6 +277,11 @@ py_context_to_registry_sink_from_path_source_chunk_provider_registry_state(
   outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
   if (!outputs.diagnostics) {
     schema_sanitizer_stream_free(stream);
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
+    release_registry_outputs(&outputs);
     PyErr_NoMemory();
     return nullptr;
   }

@@ -29,7 +29,9 @@ sanitize::Result<IngestStream> ingest_to_stream(PreparedIngest prepared) {
                       internal::make_ingest_c_stream(
                           prepared.frontend_name, std::move(prepared.frontend),
                           prepared.plan, prepared.opts, prepared.diagnostics,
-                          prepared.owned_ctx, prepared.operation_memory_pool));
+                          prepared.owned_ctx, prepared.operation_memory_pool,
+                          prepared.task_arena, prepared.telemetry,
+                          prepared.input_size_hint_bytes));
   out.diagnostics = std::move(prepared.diagnostics);
   return out;
 }

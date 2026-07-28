@@ -9,13 +9,16 @@ SRC = ROOT / "src/schema_sanitizer"
 CPP = ROOT / "cpp/src/internal/parquet/footer_reader"
 
 
-def test_python_rows_are_owned_by_core_execution() -> None:
-    """Python-row byte streaming has no one-consumer satellite module."""
-    owner = SRC / "core_impl/execution.py"
+def test_python_rows_have_one_bounded_core_owner() -> None:
+    """Python-row streaming remains centralized after native iterator batching."""
+    execution = (SRC / "core_impl/execution.py").read_text(encoding="utf-8")
+    owner = SRC / "core_impl/python_rows.py"
     source = owner.read_text(encoding="utf-8")
+    assert "from .python_rows import" in execution
     assert "class PythonRowsJsonlByteReader" in source
     assert "def last_python_rows_route" in source
-    assert not (SRC / "core_impl/python_rows.py").exists()
+    assert "PYTHON_ITER_ROWS_JSONL_BYTES" in source
+    assert len(execution.splitlines()) <= 500
     assert len(source.splitlines()) <= 500
 
 

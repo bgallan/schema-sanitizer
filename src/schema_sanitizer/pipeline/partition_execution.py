@@ -10,6 +10,7 @@ from time import perf_counter, process_time
 from typing import Any
 
 from ..api_impl.file_conversion.converters import to_parquet
+from ..api_impl.partition_resources import borrowed_partition_resources
 from ..core_impl.probes import options_for_schema_probe
 from ..core_impl.schema_registry import (
     _normalize_registry_json,
@@ -24,6 +25,7 @@ from ..options_impl.call_options import (
     unwrap_options,
 )
 from .observability import estimate_cpu_io_wall_time
+from .partition_lookahead import PartitionSourceLookahead
 from .types import PartitionRunPlan, PartitionRunResult, SchemaRegistryState
 
 ToParquetKwargsFactory = Callable[[PartitionRunPlan], Mapping[str, Any]]
@@ -151,100 +153,137 @@ def run_partitioned_to_parquet_registry_json(
     completed_runs: list[PartitionRunResult] = []
     previous_output_schema: Any | None = None
     total = len(plans)
+    lookahead = (
+        PartitionSourceLookahead(static_kwargs)
+        if static_kwargs is not None and len(plans) > 1
+        else None
+    )
+    lookahead_current = (
+        lookahead.prepare_first(plans[0])
+        if lookahead is not None and lookahead.enabled and plans
+        else None
+    )
 
-    for index, plan in enumerate(plans, start=1):
-        run_start = perf_counter()
-        aggregate_cpu_start = process_time()
-        kwargs = dict(kwargs_factory(plan)) if kwargs_factory is not None else static_kwargs
-        assert kwargs is not None
-        registry_compile_cpu_seconds = 0.0
-        if current_native_registry_state is None:
-            registry_compile_cpu_start = process_time()
-            current_native_registry_state = _compile_native_registry_state(
-                current_schema_registry_json,
-                kwargs,
-            )
-            registry_compile_cpu_seconds = max(
-                process_time() - registry_compile_cpu_start,
-                0.0,
-            )
-        input_context = discovered_directory_input_context(plan.source_uri, plan.discovered_input)
-        registry_context = (
-            native_registry_state_context(current_native_registry_state)
-            if current_native_registry_state is not None
-            else nullcontext()
-        )
-        with input_context, registry_context:
-            result = to_parquet(
+    try:
+        for index, plan in enumerate(plans, start=1):
+            run_start = perf_counter()
+            aggregate_cpu_start = process_time()
+            kwargs = dict(kwargs_factory(plan)) if kwargs_factory is not None else static_kwargs
+            assert kwargs is not None
+            registry_compile_cpu_seconds = 0.0
+            if current_native_registry_state is None:
+                registry_compile_cpu_start = process_time()
+                current_native_registry_state = _compile_native_registry_state(
+                    current_schema_registry_json,
+                    kwargs,
+                )
+                registry_compile_cpu_seconds = max(
+                    process_time() - registry_compile_cpu_start,
+                    0.0,
+                )
+            input_context = discovered_directory_input_context(
                 plan.source_uri,
-                plan.output_uri,
-                **kwargs,
-                schema_registry=current_schema_registry_json,
+                plan.discovered_input,
             )
-        output_schema_io_seconds = 0.0
-        if read_output_schema is None:
-            output_schema = None
-        else:
-            output_schema_started_at = perf_counter()
-            output_schema = read_output_schema(plan.output_uri)
-            output_schema_io_seconds = max(
-                perf_counter() - output_schema_started_at,
-                0.0,
+            registry_context = (
+                native_registry_state_context(current_native_registry_state)
+                if current_native_registry_state is not None
+                else nullcontext()
             )
-        aggregate_cpu_seconds = max(process_time() - aggregate_cpu_start, 0.0)
-        partition_seconds = max(perf_counter() - run_start, 0.0)
-        run_seconds = plan.discovery_seconds + partition_seconds
-        conversion_cpu_seconds = getattr(result, "conversion_cpu_seconds", None)
-        explicit_file_io_seconds = getattr(result, "file_io_seconds", None)
-        attributed_cpu_seconds = (
-            aggregate_cpu_seconds
-            if conversion_cpu_seconds is None
-            else registry_compile_cpu_seconds + max(float(conversion_cpu_seconds), 0.0)
-        )
-        if explicit_file_io_seconds is not None:
-            explicit_io_seconds = min(
-                plan.discovery_seconds
-                + max(float(explicit_file_io_seconds), 0.0)
-                + output_schema_io_seconds,
+            resources = None
+            if lookahead is not None and lookahead.enabled:
+                if lookahead_current is None:
+                    lookahead_current = lookahead.take_next(plan)
+                next_plan = plans[index] if index < total else None
+                lookahead.arm(next_plan, lookahead_current.operation_context)
+                resources = lookahead_current.resources(lookahead.trigger)
+                lookahead_current = None
+            try:
+                resource_context = (
+                    borrowed_partition_resources(resources)
+                    if resources is not None
+                    else nullcontext()
+                )
+                with input_context, registry_context, resource_context:
+                    result = to_parquet(
+                        plan.source_uri,
+                        plan.output_uri,
+                        **kwargs,
+                        schema_registry=current_schema_registry_json,
+                    )
+            finally:
+                if resources is not None:
+                    resources.close_if_unconsumed()
+
+            output_schema_io_seconds = 0.0
+            if read_output_schema is None:
+                output_schema = None
+            else:
+                output_schema_started_at = perf_counter()
+                output_schema = read_output_schema(plan.output_uri)
+                output_schema_io_seconds = max(
+                    perf_counter() - output_schema_started_at,
+                    0.0,
+                )
+            aggregate_cpu_seconds = max(process_time() - aggregate_cpu_start, 0.0)
+            partition_seconds = max(perf_counter() - run_start, 0.0)
+            run_seconds = plan.discovery_seconds + partition_seconds
+            conversion_cpu_seconds = getattr(result, "conversion_cpu_seconds", None)
+            explicit_file_io_seconds = getattr(result, "file_io_seconds", None)
+            attributed_cpu_seconds = (
+                aggregate_cpu_seconds
+                if conversion_cpu_seconds is None
+                else registry_compile_cpu_seconds + max(float(conversion_cpu_seconds), 0.0)
+            )
+            if explicit_file_io_seconds is not None:
+                explicit_io_seconds = min(
+                    plan.discovery_seconds
+                    + max(float(explicit_file_io_seconds), 0.0)
+                    + output_schema_io_seconds,
+                    run_seconds,
+                )
+                attributed_cpu_seconds = min(
+                    attributed_cpu_seconds,
+                    run_seconds - explicit_io_seconds,
+                )
+            cpu_seconds, io_wait_seconds = estimate_cpu_io_wall_time(
                 run_seconds,
-            )
-            attributed_cpu_seconds = min(
                 attributed_cpu_seconds,
-                run_seconds - explicit_io_seconds,
             )
-        cpu_seconds, io_wait_seconds = estimate_cpu_io_wall_time(
-            run_seconds,
-            attributed_cpu_seconds,
-        )
-        schema_registry_json = result.schema_registry_json
-        run_result = PartitionRunResult(
-            plan=plan,
-            output_schema=output_schema,
-            stats=result.stats,
-            schema_registry=None,
-            schema_drifts=None,
-            schema_registry_json=schema_registry_json,
-            schema_drifts_json=result.schema_drifts_json,
-            wall_seconds=run_seconds,
-            cpu_seconds=cpu_seconds,
-            io_wait_seconds=io_wait_seconds,
-            native_registry_state=result.native_registry_state,
-        )
-        registry_updated = schema_registry_json is not None
-        if registry_updated:
-            current_schema_registry_json = schema_registry_json or current_schema_registry_json
-            current_native_registry_state = result.native_registry_state
-        completed_runs.append(run_result)
-        if after_partition is not None:
-            after_partition(
-                index,
-                total,
-                run_result,
-                run_seconds,
-                previous_output_schema,
-                registry_updated,
+            schema_registry_json = result.schema_registry_json
+            run_result = PartitionRunResult(
+                plan=plan,
+                output_schema=output_schema,
+                stats=result.stats,
+                schema_registry=None,
+                schema_drifts=None,
+                schema_registry_json=schema_registry_json,
+                schema_drifts_json=result.schema_drifts_json,
+                wall_seconds=run_seconds,
+                cpu_seconds=cpu_seconds,
+                io_wait_seconds=io_wait_seconds,
+                native_registry_state=result.native_registry_state,
             )
-        previous_output_schema = output_schema
+            registry_updated = schema_registry_json is not None
+            if registry_updated:
+                current_schema_registry_json = schema_registry_json or current_schema_registry_json
+                current_native_registry_state = result.native_registry_state
+            completed_runs.append(run_result)
+            if after_partition is not None:
+                after_partition(
+                    index,
+                    total,
+                    run_result,
+                    run_seconds,
+                    previous_output_schema,
+                    registry_updated,
+                )
+            previous_output_schema = output_schema
+    finally:
+        if lookahead_current is not None:
+            lookahead_current.close()
+        if lookahead is not None:
+            lookahead.close()
 
     return PartitionPipelineResult(
         completed_runs=completed_runs,

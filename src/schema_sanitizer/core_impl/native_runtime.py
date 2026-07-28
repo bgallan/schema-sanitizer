@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import importlib.machinery
 import importlib.util
 import os
@@ -36,14 +37,48 @@ def _package_candidate_dirs(site_dirs: list[pathlib.Path]) -> list[pathlib.Path]
     return candidate_dirs
 
 
+def _configured_sanitizer(build_dir: pathlib.Path) -> str:
+    """Return the sanitizer configured for one CMake build directory."""
+    cache_path = build_dir / "CMakeCache.txt"
+    with suppress(OSError, UnicodeError):
+        for line in cache_path.read_text(encoding="utf-8").splitlines():
+            prefix = "SCHEMA_SANITIZER_SANITIZER:STRING="
+            if line.startswith(prefix):
+                return line.removeprefix(prefix).strip().lower()
+    return "none"
+
+
+def _process_exports(symbol: str) -> bool:
+    """Return whether the current process already exports one runtime symbol."""
+    with suppress(OSError, AttributeError):
+        getattr(ctypes.CDLL(None), symbol)
+        return True
+    return False
+
+
+def _build_runtime_is_compatible(build_dir: pathlib.Path) -> bool:
+    """Reject sanitizer builds when their runtime was not linked first."""
+    sanitizer = _configured_sanitizer(build_dir)
+    required_symbol = {
+        "tsan": "__tsan_init",
+        "asan": "__asan_init",
+        "asan-ubsan": "__asan_init",
+    }.get(sanitizer)
+    return required_symbol is None or _process_exports(required_symbol)
+
+
 def _build_candidate_dirs() -> list[pathlib.Path]:
-    """Return extension candidate directories from this checkout."""
+    """Return compatible extension candidate directories from this checkout."""
     candidate_dirs: list[pathlib.Path] = []
     with suppress(Exception):
         repo_root = pathlib.Path(__file__).resolve().parents[3]
         build_root = repo_root / "build"
         if build_root.is_dir():
-            build_dirs = [path for path in build_root.iterdir() if path.is_dir()]
+            build_dirs = [
+                path
+                for path in build_root.iterdir()
+                if path.is_dir() and _build_runtime_is_compatible(path)
+            ]
             build_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
             for build_dir in build_dirs:
                 candidate_dirs.extend((build_dir, build_dir / "schema_sanitizer"))

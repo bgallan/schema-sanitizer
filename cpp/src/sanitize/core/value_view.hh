@@ -53,6 +53,8 @@ public:
     return {Tag::kArray, self, vt};
   }
 
+  // Returns the compact value category without exposing backing storage.
+  [[nodiscard]] Tag tag() const noexcept { return tag_; }
   // Returns whether the value is null.
   [[nodiscard]] bool is_null() const { return tag_ == Tag::kNull; }
   // Returns whether the value is boolean.

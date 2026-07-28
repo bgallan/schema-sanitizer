@@ -94,16 +94,17 @@ async def ordered_indexed_results(
         indices.put_nowait(index)
     next_to_schedule = worker_count
     workers = _start_indexed_workers(worker_count, indices, results, fetch)
-    pending: dict[int, Any] = {}
+    pending: dict[int, tuple[Any, BaseException | None]] = {}
 
     try:
         for expected in range(count):
             while expected not in pending:
                 index, value, error = await results.get()
-                if error is not None:
-                    raise error
-                pending[index] = value
-            yield expected, pending.pop(expected)
+                pending[index] = (value, error)
+            value, error = pending.pop(expected)
+            if error is not None:
+                raise error
+            yield expected, value
             if next_to_schedule < count:
                 indices.put_nowait(next_to_schedule)
                 next_to_schedule += 1

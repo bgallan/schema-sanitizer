@@ -63,7 +63,7 @@ void append_base64(std::string &out, std::string_view value) {
 
 template <typename OffsetT>
 sanitize::Status append_binary_value(std::string &out, const ArrowArray &array,
-                                     int64_t row) {
+                                     int64_t row, bool quote) {
   if (!array.buffers || !array.buffers[1] || !array.buffers[2]) {
     return sanitize::Status::Invalid("JSONL writer: missing binary buffer");
   }
@@ -75,10 +75,14 @@ sanitize::Status append_binary_value(std::string &out, const ArrowArray &array,
   if (begin < 0 || end < begin) {
     return sanitize::Status::Invalid("JSONL writer: invalid binary offsets");
   }
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_base64(out, std::string_view(data + begin,
                                       static_cast<std::size_t>(end - begin)));
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 
@@ -95,19 +99,21 @@ sanitize::Status append_string64_value(std::string &out,
 }
 
 sanitize::Status append_binary32_value(std::string &out,
-                                       const ArrowArray &array, int64_t row) {
-  return append_binary_value<int32_t>(out, array, row);
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote) {
+  return append_binary_value<int32_t>(out, array, row, quote);
 }
 
 sanitize::Status append_binary64_value(std::string &out,
-                                       const ArrowArray &array, int64_t row) {
-  return append_binary_value<int64_t>(out, array, row);
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote) {
+  return append_binary_value<int64_t>(out, array, row, quote);
 }
 
 sanitize::Status append_fixed_size_binary_value(std::string &out,
                                                 const JsonlField &field,
                                                 const ArrowArray &array,
-                                                int64_t row) {
+                                                int64_t row, bool quote) {
   if (field.fixed_size_binary_size <= 0) {
     return sanitize::Status::Invalid(
         "JSONL writer: invalid fixed-size binary width");
@@ -120,9 +126,13 @@ sanitize::Status append_fixed_size_binary_value(std::string &out,
   const auto byte_width =
       static_cast<std::size_t>(field.fixed_size_binary_size);
   const auto offset = static_cast<std::size_t>(array.offset + row) * byte_width;
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   append_base64(out, std::string_view(data + offset, byte_width));
-  out.push_back('"');
+  if (quote) {
+    out.push_back('"');
+  }
   return sanitize::Status::OK();
 }
 

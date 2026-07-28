@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from ...core_impl.execution_policy import normalize_threading_mode
 from ...core_impl.uris import local_path_from_file_uri, looks_like_file_uri, looks_like_remote_uri
 from ...input_impl.directory_inputs import discovered_directory_input_for
 from ...input_impl.prepared import ChainedKeepalive, PreparedPublicInput
 from ...input_impl.selection import (
     FORMAT_SUFFIXES,
     display_source_file,
+    is_python_row_iterable,
     native_input_format,
     normalize_public_input_format,
     normalize_public_input_mode,
@@ -19,15 +21,21 @@ from ...input_impl.selection import (
     validate_local_path_mode,
     validate_suffix,
 )
-from ...remote_impl import routing
+from ...remote_impl import routing, sync_backend
 from ...remote_impl import staging as remote_staging
 from ...remote_impl.transport import run_sync
+
+if TYPE_CHECKING:
+    from ..operation_context import OperationExecutionContext
 from .directory_preparation import (
-    _remote_native_directory_prepared_from_files,
-    _validate_remote_native_directory_supported,
     prepare_directory,
     prepare_directory_from_files,
     prepare_single_parquet_file,
+)
+from .memory_limits import enforce_materialized_input_limit
+from .remote_directory_preparation import (
+    remote_native_directory_prepared_from_files,
+    validate_remote_native_directory_supported,
 )
 
 
@@ -40,7 +48,9 @@ def _prepare_discovered_directory(
     csv_delimiter: str,
     csv_has_header: bool,
     memory_limit_bytes: int | None,
+    threading_mode: str,
     original_source_file: str,
+    operation_context: OperationExecutionContext | None,
 ) -> PreparedPublicInput | None:
     """Prepare an already-listed local or remote directory input."""
     if discovered is None:
@@ -48,7 +58,7 @@ def _prepare_discovered_directory(
     if discovered.remote_files:
         files = list(discovered.remote_files)
         if input_format != "parquet":
-            return _remote_native_directory_prepared_from_files(
+            return remote_native_directory_prepared_from_files(
                 files,
                 input_format,
                 input_text_encoding=input_text_encoding,
@@ -56,10 +66,14 @@ def _prepare_discovered_directory(
                 csv_delimiter=csv_delimiter,
                 csv_has_header=csv_has_header,
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                operation_context=operation_context,
             )
         staged = remote_staging.stage_remote_files_to_directory(
             files,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
+            operation_context=operation_context,
         )
         try:
             prepared = prepare_directory(
@@ -105,7 +119,9 @@ def _prepare_input_target(
     csv_delimiter: str,
     csv_has_header: bool,
     memory_limit_bytes: int | None,
+    threading_mode: str,
     original_source_file: str,
+    operation_context: OperationExecutionContext | None,
 ) -> PreparedPublicInput:
     """Prepare a target that was not supplied through discovery context."""
     keepalive: Any = None
@@ -120,6 +136,8 @@ def _prepare_input_target(
             staged = remote_staging.stage_remote_single_file(
                 path,
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                operation_context=operation_context,
             )
             keepalive = staged
             path = staged.path
@@ -128,23 +146,54 @@ def _prepare_input_target(
                 path,
                 suffixes=FORMAT_SUFFIXES["parquet"],
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                operation_context=operation_context,
             )
             keepalive = staged
             source_file_by_name = staged.source_file_by_name
             path = staged.path
         else:
-            _validate_remote_native_directory_supported(
+            validate_remote_native_directory_supported(
                 input_format,
                 input_text_encoding=input_text_encoding,
                 csv_delimiter=csv_delimiter,
             )
-            files = list(
-                run_sync(routing.list_remote_directory(path, FORMAT_SUFFIXES[input_format]))
-            )
+
+            if normalize_threading_mode(threading_mode) == "single":
+
+                def list_operation_sync():
+                    """List through the strict blocking provider backend."""
+                    return sync_backend.list_remote_directory(
+                        path,
+                        FORMAT_SUFFIXES[input_format],
+                        memory_limit_bytes=memory_limit_bytes,
+                    )
+
+                files = list(
+                    list_operation_sync()
+                    if operation_context is None
+                    else operation_context.run_remote_sync(list_operation_sync)
+                )
+            else:
+
+                def list_operation():
+                    """List the remote directory on the operation-owned event loop."""
+                    return routing.list_remote_directory(
+                        path,
+                        FORMAT_SUFFIXES[input_format],
+                        memory_limit_bytes=memory_limit_bytes,
+                        threading_mode=threading_mode,
+                    )
+
+                files = list(
+                    run_sync(list_operation(), threading_mode=threading_mode)
+                    if operation_context is None
+                    else operation_context.run_remote(list_operation)
+                )
             if not files:
                 expected = " or ".join(FORMAT_SUFFIXES[input_format])
                 raise ValueError(f"remote directory input found no {expected} files in: {path}")
-            return _remote_native_directory_prepared_from_files(
+            return remote_native_directory_prepared_from_files(
                 files,
                 input_format,
                 input_text_encoding=input_text_encoding,
@@ -152,6 +201,8 @@ def _prepare_input_target(
                 csv_delimiter=csv_delimiter,
                 csv_has_header=csv_has_header,
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                operation_context=operation_context,
             )
 
     validate_local_path_mode(path, input_mode)
@@ -218,7 +269,7 @@ def _prepare_input_target(
 
 
 def prepare_public_input(
-    path: str | os.PathLike[str],
+    path: Any,
     *,
     input_format: str | None,
     input_mode: str,
@@ -227,12 +278,31 @@ def prepare_public_input(
     csv_delimiter: str,
     csv_has_header: bool,
     memory_limit_bytes: int | None,
+    threading_mode: str = "single",
+    operation_context: OperationExecutionContext | None = None,
 ) -> PreparedPublicInput:
     """Validate a public input target and prepare its native payload."""
-    if not isinstance(path, (str, os.PathLike)):
-        raise TypeError("input_path must be a local path or supported remote URI")
     mode = normalize_public_input_mode(input_mode)
+    if is_python_row_iterable(path):
+        fmt = "python" if input_format is None else normalize_public_input_format(input_format)
+        if fmt != "python":
+            raise ValueError("Python row iterables require input_format='python'.")
+        if mode != "single_file":
+            raise ValueError("Python row iterables require input_mode='single_file'.")
+        enforce_materialized_input_limit(
+            path,
+            "python",
+            memory_limit_bytes=memory_limit_bytes,
+            source="python",
+        )
+        return PreparedPublicInput(path, "python", "python")
+    if not isinstance(path, (str, os.PathLike)):
+        raise TypeError(
+            "input_path must be a local path, supported remote URI, or iterable of dict rows"
+        )
     fmt = normalize_public_input_format(input_format)
+    if fmt == "python":
+        raise TypeError("input_format='python' requires an iterable of dict rows")
     original_source_file = display_source_file(path)
     discovered = (
         discovered_directory_input_for(
@@ -251,7 +321,9 @@ def prepare_public_input(
         csv_delimiter=csv_delimiter,
         csv_has_header=csv_has_header,
         memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
         original_source_file=original_source_file,
+        operation_context=operation_context,
     )
     if prepared is not None:
         return prepared
@@ -264,5 +336,7 @@ def prepare_public_input(
         csv_delimiter=csv_delimiter,
         csv_has_header=csv_has_header,
         memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
         original_source_file=original_source_file,
+        operation_context=operation_context,
     )

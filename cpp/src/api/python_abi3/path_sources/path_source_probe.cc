@@ -107,7 +107,7 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
     auto merged = sanitize::merge_schema_registry(make_registry_merge_input(
         std::move(ingest.logical_schema), combined_registry.c_str(),
         field_name_policy, ingest.opts->spec.default_key_name,
-        ingest.opts->spec.field_order));
+        ingest.opts->spec.field_order, ingest.opts->operation_detected_at));
     if (!merged.ok()) {
       return merged.status();
     }
@@ -137,7 +137,7 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
       [&](const PathSourceGroupPlan &group,
           sanitize::Status group_status) -> sanitize::Status {
     const std::string &frontend = sources[group.start].frontend;
-    if (frontend == "json") {
+    if (frontend == "json" || frontend == "jsonl") {
       if (!skip_invalid_json_sources &&
           !json_group_failure_should_retry_per_source(group_status)) {
         return group_status;
@@ -197,7 +197,8 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
 
   auto merge_input = make_registry_merge_input(
       std::move(combined_schema), registry_json, field_name_policy,
-      prepared->spec.default_key_name, prepared->spec.field_order);
+      prepared->spec.default_key_name, prepared->spec.field_order,
+      prepared->operation_detected_at);
   sanitize::Result<sanitize::SchemaRegistryMergeResult> final_merged_r =
       previous_schema ? sanitize::merge_schema_registry_with_previous_schema(
                             merge_input, *previous_schema)

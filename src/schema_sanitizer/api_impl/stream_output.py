@@ -6,6 +6,9 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+from ..core_impl.execution_policy import normalize_threading_mode
+from ..core_impl.generated_metadata import TimestampColumns
+from ..core_impl.native_results import SinkOutput as NativeSinkOutput
 from ..core_impl.resource_lifecycle import _close_suppressing_errors
 from ..input_impl.selection import _Format, _Source, resolve_source_and_format
 from ..options_impl.call_options import unwrap_options
@@ -70,6 +73,26 @@ def _parquet_writer_kwargs(
     }
 
 
+def _operation_limits(call_options: Options | None) -> tuple[int | None, str]:
+    """Return the canonical memory limit and threading mode for file output."""
+    if call_options is None:
+        return None, "single"
+    return (
+        call_options.memory_limit_bytes,
+        normalize_threading_mode(call_options.threading_mode),
+    )
+
+
+def _is_internal_native_stream(raw: Any) -> bool:
+    """Return whether a stream is owned by the current native operation."""
+    return isinstance(raw, NativeSinkOutput)
+
+
+def _make_parquet_replay(raw: Any, *, feature: str) -> Any:
+    """Create a replay only when fallback may need a fresh stream."""
+    return make_replayable_parquet_stream(raw, feature=feature)
+
+
 def write_raw_stream_to_file(
     raw: Any,
     out_path: Any,
@@ -79,18 +102,22 @@ def write_raw_stream_to_file(
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> Result:
     """Write an already-open native stream using the best available writer."""
     stream = None
     replay = None
+    internal_parquet = writer is write_parquet_native_first_stream and _is_internal_native_stream(
+        raw
+    )
     try:
         raw_for_native = raw
-        if writer is write_parquet_native_first_stream:
-            replay = make_replayable_parquet_stream(raw, feature=feature)
+        if writer is write_parquet_native_first_stream and not internal_parquet:
+            replay = _make_parquet_replay(raw, feature=feature)
             raw_for_native = replay.reader()
         native_stats = try_write_raw_native_file_output(
             raw_for_native,
@@ -103,12 +130,16 @@ def write_raw_stream_to_file(
             parquet_compression=parquet_compression,
             parquet_gzip_level=parquet_gzip_level,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
+            parquet_retry_is_safe=not internal_parquet,
         )
         if native_stats:
             result = diagnostics_only_result(raw)
             patch_file_output_diagnostics(result, out_path, feature, native_stats=native_stats)
             return result
 
+        if internal_parquet:
+            replay = _make_parquet_replay(raw, feature=feature)
         stream = replay.reader() if replay is not None else Stream(raw)
         native_stats = writer(
             stream,
@@ -120,6 +151,7 @@ def write_raw_stream_to_file(
             timestamp_columns=timestamp_columns,
             **_parquet_writer_kwargs(parquet_compression, parquet_gzip_level),
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
         close_consumed_stream(stream)
         result = diagnostics_only_result(raw)
@@ -146,7 +178,7 @@ def write_table_or_stream(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
     feature: str | None = None,
@@ -165,23 +197,11 @@ def write_table_or_stream(
             source=source,
         )
     )
-    memory_limit_bytes = (
-        getattr(call_options, "memory_limit_bytes", None) if call_options is not None else None
-    )
+    memory_limit_bytes, threading_mode = _operation_limits(call_options)
     replay = None
     try:
         raw_for_native = sink_out.raw
-        if raw_writer is write_parquet_native_first_stream:
-            try:
-                replay = make_replayable_parquet_stream(
-                    sink_out.raw,
-                    feature=feature or "Parquet file output",
-                )
-            except Exception:
-                close_sink_output_or_stream(sink_out)
-                raise
-            raw_for_native = replay.reader()
-
+        internal_parquet = raw_writer is write_parquet_native_first_stream
         native_stats = (
             try_write_raw_native_file_output(
                 raw_for_native,
@@ -194,6 +214,8 @@ def write_table_or_stream(
                 parquet_compression=parquet_compression,
                 parquet_gzip_level=parquet_gzip_level,
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                parquet_retry_is_safe=not internal_parquet,
             )
             if raw_writer is not None
             else False
@@ -210,6 +232,8 @@ def write_table_or_stream(
             sink_out.close()
             return result
 
+        if internal_parquet:
+            replay = _make_parquet_replay(sink_out.raw, feature=feature or "Parquet file output")
         stream = replay.reader() if replay is not None else _stream_from_sink_or_close(sink_out)
         try:
             native_stats = write_stream(stream, out_path)
@@ -245,13 +269,14 @@ def _try_write_direct_parquet_to_file(
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     parquet_compression: str | None,
     parquet_gzip_level: int | None,
 ) -> Result | None:
     """Use the direct Parquet route when the input supports it."""
     from .execution_context import default_pool
 
+    memory_limit_bytes, threading_mode = _operation_limits(call_options)
     direct_raw = parquet_direct_sink_raw_or_none(
         default_pool().get()._raw,
         data,
@@ -274,6 +299,8 @@ def _try_write_direct_parquet_to_file(
         timestamp_columns=timestamp_columns,
         parquet_compression=parquet_compression,
         parquet_gzip_level=parquet_gzip_level,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
 
 
@@ -289,12 +316,13 @@ def write_with_file_output(
     first_row_columns: dict[str, Any] | None = None,
     all_row_columns: dict[str, Any] | None = None,
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None = None,
-    timestamp_columns: tuple[str, ...] = (),
+    timestamp_columns: TimestampColumns = (),
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
 ) -> Result:
     """Write an ingest stream to a file using native-first output."""
     call_options = normalize_options(options)
+    memory_limit_bytes, threading_mode = _operation_limits(call_options)
     data, source, format = resolve_source_and_format(data, format=format, source=source)
     if format == "parquet":
         direct_result = _try_write_direct_parquet_to_file(
@@ -330,6 +358,8 @@ def write_with_file_output(
             row_span_columns=row_span_columns,
             timestamp_columns=timestamp_columns,
             **writer_kwargs,
+            memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         ),
         raw_writer=writer,
         first_row_columns=first_row_columns,

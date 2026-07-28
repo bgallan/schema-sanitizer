@@ -1,0 +1,33 @@
+{
+  "scope": "independent arena submission cursor and worker-activity atomic writer domains; does not measure parsing, validation, materialization, sink throughput, queue locks, task execution, or wake latency",
+  "pair_count": 15,
+  "scenarios": [
+    {
+      "scenario": "cursor_activity",
+      "writer_threads": 2,
+      "pair_count": 15,
+      "baseline_median_ns": 67338378,
+      "candidate_median_ns": 22011479,
+      "paired_median_reduction_percent": 67.27,
+      "candidate_wins": 15
+    },
+    {
+      "scenario": "two_cursors_activity",
+      "writer_threads": 3,
+      "pair_count": 15,
+      "baseline_median_ns": 99688321,
+      "candidate_median_ns": 37612595,
+      "paired_median_reduction_percent": 62.65,
+      "candidate_wins": 15
+    },
+    {
+      "scenario": "three_cursors_two_activity",
+      "writer_threads": 5,
+      "pair_count": 15,
+      "baseline_median_ns": 227931417,
+      "candidate_median_ns": 110161795,
+      "paired_median_reduction_percent": 50.38,
+      "candidate_wins": 15
+    }
+  ]
+}

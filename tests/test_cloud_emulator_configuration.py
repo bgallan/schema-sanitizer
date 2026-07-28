@@ -75,30 +75,36 @@ def test_s3_delegates_sdk_configuration() -> None:
 
 
 def test_azure_uses_default_sdk_credential_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Azure clients are built from the URI plus the SDK credential chain."""
+    """Azure owns and closes both its service transport and SDK credential."""
     from schema_sanitizer.remote_impl.providers import azure
 
-    credential = object()
-    service = object()
     captured: dict[str, object] = {}
 
     class FakeCredential:
-        """Provide a lightweight test double."""
+        """Record explicit credential cleanup."""
 
-        def __new__(cls) -> object:
-            """Implement the test-double protocol method."""
-            return credential
+        def __init__(self) -> None:
+            """Initialize close accounting."""
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            """Record one credential close."""
+            self.close_calls += 1
 
     class FakeService:
-        """Provide a lightweight test double."""
+        """Record service construction and transport cleanup."""
 
-        def __new__(cls, *, account_url: str, credential: object) -> object:
-            """Implement the test-double protocol method."""
+        def __init__(self, *, account_url: str, credential: object) -> None:
+            """Capture the SDK constructor arguments."""
             captured.update(account_url=account_url, credential=credential)
-            return service
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            """Record one service close."""
+            self.close_calls += 1
 
     def fake_import(name: str) -> object:
-        """Provide a test helper implementation."""
+        """Provide Azure SDK test doubles."""
         if name == "azure.identity.aio":
             return SimpleNamespace(DefaultAzureCredential=FakeCredential)
         if name == "azure.storage.blob.aio":
@@ -107,12 +113,18 @@ def test_azure_uses_default_sdk_credential_chain(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(azure, "import_module", fake_import)
     ref = azure.parse_uri("az://account/container/input/a.json")
+    owner = asyncio.run(azure.open_service(ref))
+    service = owner._service
+    credential = owner._credential
 
-    assert asyncio.run(azure.open_service(ref)) is service
     assert captured == {
         "account_url": "https://account.blob.core.windows.net",
         "credential": credential,
     }
+    asyncio.run(owner.close())
+    asyncio.run(owner.close())
+    assert service.close_calls == 1
+    assert credential.close_calls == 1
 
 
 def test_gcs_uses_canonical_endpoint_and_adc_token(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -10,17 +10,22 @@ namespace sanitize::internal {
 
 uint32_t infer_scalar_mask(const ValueView &value,
                            const PreparedOptions &opts) {
-  if (value.is_null())
+  switch (value.tag()) {
+  case ValueView::Tag::kNull:
     return 0;
-  if (value.is_bool())
+  case ValueView::Tag::kBool:
     return K_BOOL;
-  if (value.is_int())
+  case ValueView::Tag::kInt:
     return K_INT;
-  if (value.is_float())
+  case ValueView::Tag::kFloat:
     return K_FLOAT;
-  if (value.is_string())
+  case ValueView::Tag::kString:
     return infer_scalar_mask_from_string(value.as_string_view(), opts);
-  // Objects/arrays are stringified.
+  case ValueView::Tag::kObject:
+  case ValueView::Tag::kArray:
+    // Objects/arrays are stringified.
+    return K_STR;
+  }
   return K_STR;
 }
 

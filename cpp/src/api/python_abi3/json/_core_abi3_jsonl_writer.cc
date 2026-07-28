@@ -13,6 +13,7 @@
 #include "api/python_abi3/json/output_adapters/api.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "internal/json_output/schema/model.hh"
+#include "internal/output/ordered_text_output.hh"
 
 #include <memory>
 #include <string>
@@ -53,13 +54,22 @@ PyObject *py_jsonl_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *output_obj = nullptr;
   long long memory_limit_bytes = -1;
-  if (!PyArg_ParseTuple(args, "OO|L:jsonl_stream_write", &stream_obj,
-                        &output_obj, &memory_limit_bytes)) {
+  long long threading_mode_value = 0;
+  if (!PyArg_ParseTuple(args, "OO|LL:jsonl_stream_write", &stream_obj,
+                        &output_obj, &memory_limit_bytes,
+                        &threading_mode_value)) {
     return nullptr;
   }
 
-  auto result =
-      jsonl_write_stream_to_output(stream_obj, output_obj, memory_limit_bytes);
+  auto mode_result =
+      sanitize::internal::ordered_text_output::threading_mode_from_int(
+          threading_mode_value);
+  if (!mode_result.ok()) {
+    PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
+    return nullptr;
+  }
+  auto result = jsonl_write_stream_to_output(
+      stream_obj, output_obj, memory_limit_bytes, mode_result.ValueOrDie());
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
@@ -75,10 +85,11 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *row_span_columns = nullptr;
   PyObject *timestamp_columns = nullptr;
   long long memory_limit_bytes = -1;
-  if (!PyArg_ParseTuple(args, "OOOOOO|L:jsonl_stream_write_with_metadata",
+  long long threading_mode_value = 0;
+  if (!PyArg_ParseTuple(args, "OOOOOO|LL:jsonl_stream_write_with_metadata",
                         &stream_obj, &path_obj, &first_row_columns,
                         &all_row_columns, &row_span_columns, &timestamp_columns,
-                        &memory_limit_bytes)) {
+                        &memory_limit_bytes, &threading_mode_value)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -95,9 +106,17 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
   if (!wrapped) {
     return nullptr;
   }
+  auto mode_result =
+      sanitize::internal::ordered_text_output::threading_mode_from_int(
+          threading_mode_value);
+  if (!mode_result.ok()) {
+    schema_sanitizer_stream_free(wrapped);
+    PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
+    return nullptr;
+  }
   auto result = jsonl_write_arrow_stream_to_path(
       wrapped, std::string(path, static_cast<std::size_t>(path_len)),
-      memory_limit_bytes);
+      memory_limit_bytes, mode_result.ValueOrDie());
   schema_sanitizer_stream_free(wrapped);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());

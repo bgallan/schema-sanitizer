@@ -72,6 +72,9 @@ struct JsonlField {
   int32_t fixed_size_binary_size = 0;
   int32_t fixed_size_list_size = 0;
   std::vector<JsonlField> children;
+  // Pre-escaped JSON object member literals. Struct fields store one entry per
+  // child, including the leading comma for every member after the first.
+  std::vector<std::string> member_prefixes;
 };
 
 // Maps Arrow C Data format strings to JSONL writer field kinds.
