@@ -103,7 +103,7 @@ def test_v68_public_temporal_csv_single_multi_are_identical(
     outputs: dict[str, bytes] = {}
     for mode in ("single", "multi"):
         destination = tmp_path / f"{mode}.csv"
-        ss.to_csv(source, destination, threading_mode=mode, **common)
+        ss.to_csv(source, destination, multi_threading=mode == "multi", **common)
         outputs[mode] = destination.read_bytes()
 
     assert outputs["single"] == outputs["multi"]

@@ -107,13 +107,13 @@ def test_fixed_clock_analytical_frontend_matrix(
 
     single = ss.to_pyarrow(
         source,
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
         **options,
     )
     multi = ss.to_pyarrow(
         source,
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
         **options,
     )
@@ -147,7 +147,7 @@ def test_fixed_clock_file_output_matrix(
         mode: converter(
             source,
             outputs[mode],
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=_MEMORY_LIMIT,
             **options,
             **extra,
@@ -178,14 +178,14 @@ def test_fixed_clock_directory_source_plan_equivalence(tmp_path: Path) -> None:
         folder,
         input_format="jsonl",
         input_mode="directory",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     multi = ss.to_pyarrow(
         folder,
         input_format="jsonl",
         input_mode="directory",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
@@ -217,7 +217,7 @@ def test_fixed_clock_parquet_input_fallback_equivalence(tmp_path: Path) -> None:
         results[mode] = ss.to_pyarrow(
             source,
             input_format="parquet",
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=_MEMORY_LIMIT,
         )
         routes[mode] = last_parquet_stream_factory_route()
@@ -262,7 +262,7 @@ def test_fixed_clock_parquet_output_fallback_equivalence(
         results[mode] = ss.to_parquet(
             source,
             outputs[mode],
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=_MEMORY_LIMIT,
             parquet_compression="snappy",
             **options,
@@ -287,7 +287,7 @@ def _strict_materialization(rows: list[dict[str, Any]], mode: str, on_error: str
         schema_mode="strict",
         on_error=on_error,
         parse_integers=False,
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     return ExecutionContext().to_table(rows, options=options, format="python", source="python")
@@ -325,7 +325,7 @@ def test_fixed_clock_additive_registry_generation_equivalence(tmp_path: Path) ->
     baseline = ss.to_pyarrow(
         seed,
         input_format="jsonl",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
@@ -337,7 +337,7 @@ def test_fixed_clock_additive_registry_generation_equivalence(tmp_path: Path) ->
             input_format="jsonl",
             schema_mode="additive",
             schema_registry=baseline.schema_registry,
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=_MEMORY_LIMIT,
         )
         for mode in ("single", "multi")
@@ -368,7 +368,7 @@ def test_fixed_clock_strict_registry_precondition_equivalence(tmp_path: Path) ->
             input_format="jsonl",
             schema_mode="strict",
             schema_registry=incomplete_registry,
-            threading_mode="single",
+            multi_threading=False,
             memory_limit_bytes=_MEMORY_LIMIT,
         ),
         lambda: ss.to_pyarrow(
@@ -376,7 +376,7 @@ def test_fixed_clock_strict_registry_precondition_equivalence(tmp_path: Path) ->
             input_format="jsonl",
             schema_mode="strict",
             schema_registry=incomplete_registry,
-            threading_mode="multi",
+            multi_threading=True,
             memory_limit_bytes=_MEMORY_LIMIT,
         ),
     )
@@ -398,7 +398,7 @@ def test_fixed_clock_strict_registry_file_precondition_equivalence(
             input_format="jsonl",
             schema_mode="strict",
             schema_registry=incomplete_registry,
-            threading_mode="single",
+            multi_threading=False,
             memory_limit_bytes=_MEMORY_LIMIT,
         ),
         lambda: ss.to_parquet(
@@ -407,7 +407,7 @@ def test_fixed_clock_strict_registry_file_precondition_equivalence(
             input_format="jsonl",
             schema_mode="strict",
             schema_registry=incomplete_registry,
-            threading_mode="multi",
+            multi_threading=True,
             memory_limit_bytes=_MEMORY_LIMIT,
         ),
     )
@@ -431,7 +431,7 @@ def test_reused_native_registry_state_uses_current_operation_clock(
         tmp_path / "state-seed.parquet",
         input_format="jsonl",
         input_mode="directory",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     assert baseline.native_registry_state is not None
@@ -454,7 +454,7 @@ def test_reused_native_registry_state_uses_current_operation_clock(
                 input_mode="directory",
                 schema_mode="additive",
                 schema_registry=baseline.schema_registry_json,
-                threading_mode=mode,
+                multi_threading=mode == "multi",
                 memory_limit_bytes=_MEMORY_LIMIT,
             )
 
@@ -472,7 +472,7 @@ def test_fixed_clock_nested_registry_version_equivalence(tmp_path: Path) -> None
     baseline = ss.to_pyarrow(
         seed,
         input_format="jsonl",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
@@ -484,7 +484,7 @@ def test_fixed_clock_nested_registry_version_equivalence(tmp_path: Path) -> None
             input_format="jsonl",
             schema_mode="additive",
             schema_registry=baseline.schema_registry,
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=_MEMORY_LIMIT,
         )
         for mode in ("single", "multi")
@@ -529,7 +529,7 @@ def test_fixed_clock_partition_warm_up_registry_equivalence(tmp_path: Path) -> N
             input_format="jsonl",
             input_mode="single_file",
             options={
-                "threading_mode": mode,
+                "multi_threading": mode == "multi",
                 "memory_limit_bytes": _MEMORY_LIMIT,
             },
             schema_registry={},

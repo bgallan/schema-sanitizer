@@ -108,7 +108,7 @@ def test_v80_public_four_worker_path_publishes_exact_sharded_stats(
             source,
             output,
             input_format="jsonl",
-            threading_mode="multi",
+            multi_threading=True,
             memory_limit_bytes=64 << 20,
             parse_integers=True,
             field_name_policy="preserve",

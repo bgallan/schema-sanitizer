@@ -17,7 +17,7 @@ def _read_python(rows, *, threading_mode: str, **options):
     """Materialize Python rows with one explicit execution model."""
     return ExecutionContext().to_table(
         rows,
-        options=normalize_call_options(threading_mode=threading_mode, **options),
+        options=normalize_call_options(multi_threading=threading_mode == "multi", **options),
         format="python",
         source="python",
     )
@@ -27,7 +27,7 @@ def _read_jsonl(path: Path, *, threading_mode: str, **options):
     """Materialize one JSONL path with one explicit execution model."""
     return ExecutionContext().to_table(
         path,
-        options=normalize_call_options(threading_mode=threading_mode, **options),
+        options=normalize_call_options(multi_threading=threading_mode == "multi", **options),
         format="jsonl",
         source="path",
     )
@@ -139,8 +139,8 @@ def test_multi_raw_jsonl_materializer_preserves_source_order(tmp_path: Path) -> 
 
     from schema_sanitizer import to_pyarrow
 
-    single = to_pyarrow(path, input_format="jsonl", threading_mode="single")
-    multi = to_pyarrow(path, input_format="jsonl", threading_mode="multi")
+    single = to_pyarrow(path, input_format="jsonl", multi_threading=False)
+    multi = to_pyarrow(path, input_format="jsonl", multi_threading=True)
 
     stable_columns = ["ordinal", "label", "nested", "source_file"]
     assert multi.clean_data.select(stable_columns).equals(single.clean_data.select(stable_columns))
@@ -188,13 +188,13 @@ def test_multi_packet_accounting_isolates_large_raw_json_row(tmp_path: Path) -> 
     single = to_pyarrow(
         path,
         input_format="jsonl",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=256 * 1024 * 1024,
     )
     multi = to_pyarrow(
         path,
         input_format="jsonl",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=256 * 1024 * 1024,
     )
 

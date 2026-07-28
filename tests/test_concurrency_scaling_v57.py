@@ -26,7 +26,7 @@ def fixed_operation_clock(monkeypatch: pytest.MonkeyPatch) -> None:
 def _probe(payload: str, mode: str):
     """Run one raw JSONL schema probe with explicit options."""
     options = normalize_call_options(
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=_MEMORY_LIMIT,
         field_name_policy="preserve",
         parse_integers=True,
@@ -117,8 +117,8 @@ def test_v57_wide_output_is_byte_identical(tmp_path: Path) -> None:
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
-    single = ss.to_jsonl(source, single_path, threading_mode="single", **common)
-    multi = ss.to_jsonl(source, multi_path, threading_mode="multi", **common)
+    single = ss.to_jsonl(source, single_path, multi_threading=False, **common)
+    multi = ss.to_jsonl(source, multi_path, multi_threading=True, **common)
 
     assert multi_path.read_bytes() == single_path.read_bytes()
     assert single.stats["materialized_rows"] == len(rows)

@@ -69,8 +69,8 @@ def test_grouped_jsonl_prefetch_preserves_global_order_and_source_file(
         "input_mode": "directory",
         "memory_limit_bytes": _MEMORY_LIMIT,
     }
-    single = ss.to_pyarrow(folder, threading_mode="single", **common)
-    multi = ss.to_pyarrow(folder, threading_mode="multi", **common)
+    single = ss.to_pyarrow(folder, multi_threading=False, **common)
+    multi = ss.to_pyarrow(folder, multi_threading=True, **common)
 
     assert_results_equivalent(single, multi)
     rows = multi.clean_data.to_pylist()
@@ -111,9 +111,9 @@ def test_recycled_worker_buffers_preserve_wide_null_heavy_packets(
         "input_format": "jsonl",
         "memory_limit_bytes": _MEMORY_LIMIT,
     }
-    single = ss.to_pyarrow(source, threading_mode="single", **common)
-    multi_first = ss.to_pyarrow(source, threading_mode="multi", **common)
-    multi_second = ss.to_pyarrow(source, threading_mode="multi", **common)
+    single = ss.to_pyarrow(source, multi_threading=False, **common)
+    multi_first = ss.to_pyarrow(source, multi_threading=True, **common)
+    multi_second = ss.to_pyarrow(source, multi_threading=True, **common)
 
     assert_results_equivalent(single, multi_first)
     assert_results_equivalent(multi_first, multi_second)

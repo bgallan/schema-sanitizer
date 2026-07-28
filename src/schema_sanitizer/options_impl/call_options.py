@@ -8,7 +8,7 @@ from functools import lru_cache
 from typing import Any
 
 from ..core_impl.dependencies import ensure_pyarrow
-from ..core_impl.execution_policy import normalize_threading_mode
+from ..core_impl.execution_policy import threading_mode_from_multi_threading
 from ..core_impl.logical_schema import LogicalSchemaPayload
 from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.native_options import Options as NativeOptions
@@ -181,7 +181,7 @@ class _CallOptions:
     xml_row_tag: str | None = None
 
     on_error: str = "emit_null_row"
-    threading_mode: str = "single"
+    multi_threading: bool = False
     memory_limit_bytes: int | None = None
 
     def __post_init__(self) -> None:
@@ -190,7 +190,9 @@ class _CallOptions:
 
     def to_options(self) -> Options:
         """Convert flat call options to grouped internal options."""
-        performance: dict[str, Any] = {"threading_mode": self.threading_mode}
+        performance: dict[str, Any] = {
+            "threading_mode": threading_mode_from_multi_threading(self.multi_threading)
+        }
         if self.memory_limit_bytes is not None:
             performance["memory_limit_bytes"] = self.memory_limit_bytes
 
@@ -294,11 +296,6 @@ def _normalize_call_option_values(options: _CallOptions) -> None:
         options,
         "on_error",
         _normalize_choice("on_error", options.on_error, _ERROR_MODES),
-    )
-    object.__setattr__(
-        options,
-        "threading_mode",
-        normalize_threading_mode(options.threading_mode),
     )
     object.__setattr__(
         options,

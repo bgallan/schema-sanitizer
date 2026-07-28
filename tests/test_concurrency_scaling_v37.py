@@ -81,7 +81,7 @@ def _critical_path_contract(tmp_path: Path):
         parse_integers=True,
         parse_iso_timestamps=True,
         field_name_policy="preserve",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     contract = schema_contract_from_registry_json(result.schema_registry_json)
@@ -98,7 +98,7 @@ def _consume_critical_path_strict(source: Path, output: Path, *, mode: str, cont
         parse_integers=True,
         parse_iso_timestamps=True,
         field_name_policy="preserve",
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     context = ExecutionContext()
@@ -187,13 +187,13 @@ def test_clustered_mixed_wide_rows_preserve_exact_output(tmp_path: Path) -> None
     single_result = ss.to_jsonl(
         source,
         single,
-        threading_mode="single",
+        multi_threading=False,
         **common,
     )
     multi_result = ss.to_jsonl(
         source,
         multi,
-        threading_mode="multi",
+        multi_threading=True,
         **common,
     )
 
@@ -229,7 +229,7 @@ def test_mixed_fixture_activates_parallel_materialization_telemetry(
         parse_integers=True,
         parse_iso_timestamps=True,
         field_name_policy="preserve",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     context = ExecutionContext()

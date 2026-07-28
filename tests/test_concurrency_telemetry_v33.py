@@ -27,7 +27,7 @@ def _write_wide_jsonl(path: Path, rows: int) -> None:
 def _run_native_jsonl(context: ExecutionContext, source: Path, output: Path) -> dict:
     """Consume one native stream and return telemetry after ownership closes."""
     options = normalize_call_options(
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
         on_error="stop",
     )
@@ -116,7 +116,7 @@ def test_prepare_failure_finishes_the_latest_report(tmp_path: Path) -> None:
     context = ExecutionContext()
     options = normalize_call_options(
         on_error="stop",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 

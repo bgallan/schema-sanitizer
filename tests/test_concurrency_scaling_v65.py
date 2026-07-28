@@ -85,7 +85,7 @@ def test_v65_parquet_single_and_multi_remain_byte_identical(tmp_path: Path) -> N
     for mode in ("single", "multi"):
         context = ExecutionContext()
         options = normalize_call_options(
-            threading_mode=mode, memory_limit_bytes=32 << 20, on_error="stop"
+            multi_threading=mode == "multi", memory_limit_bytes=32 << 20, on_error="stop"
         ).raw
         capsule = native_core.parquet_stream_read(str(source), [], 32 << 20)
         sink = context.to_sink_arrow_stream("stream", "arrow", _CapsuleStream(capsule), options)

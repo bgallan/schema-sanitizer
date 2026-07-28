@@ -11,6 +11,7 @@ from ...adapters.parquet.compression import (
     normalize_parquet_compression,
     normalize_parquet_gzip_level,
 )
+from ...core_impl.execution_policy import threading_mode_from_multi_threading
 from ...core_impl.generated_metadata import INGESTION_TIMESTAMP_COLUMN, SOURCE_FILE_COLUMN
 from ...core_impl.probes import options_for_registry_operation
 from ...core_impl.schema_registry import current_native_registry_state
@@ -115,7 +116,7 @@ def convert_file_with_options(
         schema_registry_native_state = current_native_registry_state()
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
     file_io_seconds = 0.0
-    threading_mode = str(options.get("threading_mode", "single"))
+    threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
     memory_limit_bytes = options.get("memory_limit_bytes")
     borrowed = (
         take_borrowed_partition_resources(
@@ -335,7 +336,7 @@ def to_jsonl(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    threading_mode: str = "single",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
@@ -384,7 +385,7 @@ def to_csv(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    threading_mode: str = "single",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
@@ -433,7 +434,7 @@ def to_parquet(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    threading_mode: str = "single",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     parquet_compression: str | None = "gzip",
     parquet_gzip_level: int | None = None,

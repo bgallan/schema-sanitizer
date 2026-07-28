@@ -194,7 +194,7 @@ def test_public_call_options_map_to_native_options() -> None:
         schema_contract=pa.schema([("a", pa.int64())]),
         schema_mode="strict",
         on_error="stop",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=1024 * 1024,
         xml_row_tag="row",
     )

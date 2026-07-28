@@ -97,7 +97,7 @@ def test_wide_rows_repeat_under_low_budget_without_output_drift(tmp_path: Path) 
         input_format="jsonl",
         parse_integers=True,
         on_error="stop",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
@@ -109,7 +109,7 @@ def test_wide_rows_repeat_under_low_budget_without_output_drift(tmp_path: Path) 
             input_format="jsonl",
             parse_integers=True,
             on_error="stop",
-            threading_mode="multi",
+            multi_threading=True,
             memory_limit_bytes=_MEMORY_LIMIT,
         )
         gc.collect()

@@ -33,7 +33,7 @@ ORDERED_TEXT_OUTPUT = ROOT / "cpp/src/internal/output/ordered_text_output.hh"
 def _options(*, threading_mode: str, xml_row_tag: str | None = None):
     """Build the native options used by format-concurrency probes."""
     kwargs = {
-        "threading_mode": threading_mode,
+        "multi_threading": threading_mode == "multi",
         "memory_limit_bytes": 128 * 1024 * 1024,
     }
     if xml_row_tag is not None:
@@ -90,7 +90,9 @@ def test_v71_coverage_matrix_matches_every_public_format() -> None:
     assert all(stages for stages in OUTPUT_CONCURRENCY_COVERAGE.values())
     for output_name in OUTPUT_CONCURRENCY_COVERAGE:
         public_converter = getattr(ss, f"to_{output_name}")
-        assert "threading_mode" in inspect.signature(public_converter).parameters
+        parameters = inspect.signature(public_converter).parameters
+        assert parameters["multi_threading"].default is False
+        assert "threading_mode" not in parameters
     assert concurrency_coverage() == {
         "inputs": dict(INPUT_CONCURRENCY_COVERAGE),
         "outputs": dict(OUTPUT_CONCURRENCY_COVERAGE),

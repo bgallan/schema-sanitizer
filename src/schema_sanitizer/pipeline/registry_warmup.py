@@ -15,6 +15,7 @@ from ..api_impl.operation_context import (
 from ..api_impl.source_plan.preparation import source_plan_from_prepared_inputs
 from ..api_impl.source_plan.probing import probe_prepared_source_plan_registry
 from ..core_impl.execution import default_execution_context
+from ..core_impl.execution_policy import threading_mode_from_multi_threading
 from ..core_impl.probes import options_for_schema_probe
 from ..core_impl.schema_registry import _normalize_registry_json
 from ..input_impl.directory_inputs import discovered_directory_input_context
@@ -243,7 +244,9 @@ def _infer_partitioned_warm_up_state(
             csv_delimiter=str(options.get("csv_delimiter", ",")),
             csv_has_header=bool(options.get("csv_has_header", True)),
             memory_limit_bytes=options.get("memory_limit_bytes"),
-            threading_mode=str(options.get("threading_mode", "single")),
+            threading_mode=threading_mode_from_multi_threading(
+                options.get("multi_threading", False)
+            ),
         )
         preparation_seconds = plan.discovery_seconds + max(
             perf_counter() - preparation_started_at,
@@ -356,7 +359,7 @@ def infer_warm_up_schema_registry_state(
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
         memory_limit_bytes=options.get("memory_limit_bytes"),
-        threading_mode=str(options.get("threading_mode", "single")),
+        threading_mode=threading_mode_from_multi_threading(options.get("multi_threading", False)),
         after_source_prepared=after_source_prepared,
     )
     try:

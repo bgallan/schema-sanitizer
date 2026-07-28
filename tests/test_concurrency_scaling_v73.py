@@ -128,7 +128,7 @@ def test_v73_parquet_output_parallelizes_and_remains_logically_exact(
             source,
             output,
             input_format="jsonl",
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=128 << 20,
             parse_integers=True,
             on_error="stop",
@@ -166,7 +166,7 @@ def test_v73_parquet_output_parallelizes_and_remains_logically_exact(
         capsule = native_core.parquet_stream_read(str(outputs[mode]), projected, 128 << 20)
         context = ExecutionContext()
         options = normalize_call_options(
-            threading_mode="single",
+            multi_threading=False,
             memory_limit_bytes=128 << 20,
             on_error="stop",
         ).raw

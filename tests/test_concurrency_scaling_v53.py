@@ -47,7 +47,7 @@ def _convert(source: Path, output: Path, mode: str):
         input_format="jsonl",
         parse_integers=True,
         field_name_policy="preserve",
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 

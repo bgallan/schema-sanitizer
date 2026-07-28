@@ -42,7 +42,7 @@ def run_operation(
     from schema_sanitizer.options_impl.call_options import normalize_call_options
 
     options = normalize_call_options(
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=memory_limit_bytes,
         on_error="stop",
     )

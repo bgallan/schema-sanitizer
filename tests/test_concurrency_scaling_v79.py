@@ -226,7 +226,7 @@ def test_v79_public_wide_csv_uses_hybrid_plan_and_parallel_output(
         source,
         output,
         input_format="jsonl",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=64 << 20,
         parse_integers=True,
         field_name_policy="preserve",

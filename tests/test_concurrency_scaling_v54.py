@@ -115,8 +115,8 @@ def test_v54_single_and_multi_jsonl_outputs_remain_byte_identical(
         field_name_policy="preserve",
         memory_limit_bytes=_MEMORY_LIMIT,
     )
-    single_result = ss.to_jsonl(source, single, threading_mode="single", **common)
-    multi_result = ss.to_jsonl(source, multi, threading_mode="multi", **common)
+    single_result = ss.to_jsonl(source, single, multi_threading=False, **common)
+    multi_result = ss.to_jsonl(source, multi, multi_threading=True, **common)
 
     assert single.read_bytes() == multi.read_bytes()
     assert single_result.stats["materialized_rows"] == len(rows)

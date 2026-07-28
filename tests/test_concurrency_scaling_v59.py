@@ -35,7 +35,7 @@ def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
 def _telemetry(source: Path, **extra: object) -> dict[str, object]:
     """Consume the native stream and return completed operation telemetry."""
     options = normalize_call_options(
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
         on_error="stop",
         field_name_policy="preserve",
@@ -82,8 +82,8 @@ def test_v59_lexical_scalars_preserve_single_multi_output(tmp_path: Path) -> Non
     )
     single = tmp_path / "single.jsonl"
     multi = tmp_path / "multi.jsonl"
-    ss.to_jsonl(source, single, threading_mode="single", **common)
-    ss.to_jsonl(source, multi, threading_mode="multi", **common)
+    ss.to_jsonl(source, single, multi_threading=False, **common)
+    ss.to_jsonl(source, multi, multi_threading=True, **common)
 
     report = _telemetry(source, parse_integers=True)
     assert multi.read_bytes() == single.read_bytes()
@@ -119,8 +119,8 @@ def test_v59_string_coercions_and_escapes_use_canonical_fallback(
     )
     single = tmp_path / "coercions-single.jsonl"
     multi = tmp_path / "coercions-multi.jsonl"
-    ss.to_jsonl(source, single, threading_mode="single", **common)
-    ss.to_jsonl(source, multi, threading_mode="multi", **common)
+    ss.to_jsonl(source, single, multi_threading=False, **common)
+    ss.to_jsonl(source, multi, multi_threading=True, **common)
 
     report = _telemetry(
         source,

@@ -82,7 +82,7 @@ def test_v52_zero_copy_packets_preserve_single_oracle(tmp_path: Path) -> None:
         input_format="jsonl",
         parse_integers=True,
         field_name_policy="preserve",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     multi_output = tmp_path / "multi.jsonl"
@@ -92,7 +92,7 @@ def test_v52_zero_copy_packets_preserve_single_oracle(tmp_path: Path) -> None:
         input_format="jsonl",
         parse_integers=True,
         field_name_policy="preserve",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 

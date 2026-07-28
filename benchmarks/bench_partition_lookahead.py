@@ -172,9 +172,9 @@ def main() -> None:
     }
     plans = [PartitionRunPlan(None, f"{server.base_url}{path}", "unused") for path in payloads]
     cases: dict[str, Mapping[str, Any] | Callable[[PartitionRunPlan], Mapping[str, Any]]] = {
-        "single": {**common, "threading_mode": "single"},
-        "multi_sequential": lambda _plan: {**common, "threading_mode": "multi"},
-        "multi_lookahead": {**common, "threading_mode": "multi"},
+        "single": {**common, "multi_threading": False},
+        "multi_sequential": lambda _plan: {**common, "multi_threading": True},
+        "multi_lookahead": {**common, "multi_threading": True},
     }
     samples = {name: [] for name in cases}
     digests: dict[str, str] = {}

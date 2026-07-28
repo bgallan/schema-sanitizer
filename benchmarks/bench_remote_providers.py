@@ -225,7 +225,7 @@ def _measure_provider(
                 input_format="json",
                 input_mode="directory",
                 memory_limit_bytes=memory_limit,
-                threading_mode=mode,
+                multi_threading=mode == "multi",
                 parquet_compression="snappy",
             )
             close = getattr(result, "close", None)

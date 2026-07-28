@@ -51,6 +51,9 @@ def read_test_path(
     from schema_sanitizer.api_impl.execution_context import to_table
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
     from schema_sanitizer.api_impl.results import convert_arrow_table_output
+    from schema_sanitizer.core_impl.execution_policy import (
+        threading_mode_from_multi_threading,
+    )
     from schema_sanitizer.options_impl.call_options import normalize_call_options_or_none
 
     prepared = prepare_public_input(
@@ -62,7 +65,7 @@ def read_test_path(
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
         memory_limit_bytes=options.get("memory_limit_bytes"),
-        threading_mode=str(options.get("threading_mode", "single")),
+        threading_mode=threading_mode_from_multi_threading(options.get("multi_threading", False)),
     )
     try:
         if prepared.xml_row_tag is not None:

@@ -7,6 +7,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from schema_sanitizer.core_impl.error_translation import call_core
+from schema_sanitizer.core_impl.execution_policy import (
+    threading_mode_from_multi_threading,
+)
 from schema_sanitizer.core_impl.generated_metadata import (
     INGESTION_TIMESTAMP_COLUMN,
     SOURCE_FILE_COLUMN,
@@ -172,7 +175,7 @@ def convert_analytical_with_options(
     """Sanitize one public input into an in-memory analytical object."""
     registry_json = _normalize_registry_json(schema_registry)
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
-    threading_mode = str(options.get("threading_mode", "single"))
+    threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
     memory_limit_bytes = options.get("memory_limit_bytes")
     operation_context = OperationExecutionContext(
         threading_mode=threading_mode,
@@ -284,7 +287,7 @@ def to_duckdb(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    threading_mode: str = "single",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
@@ -329,7 +332,7 @@ def to_pandas(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    threading_mode: str = "single",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
@@ -374,7 +377,7 @@ def to_polars(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    threading_mode: str = "single",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
@@ -419,7 +422,7 @@ def to_pyarrow(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
-    threading_mode: str = "single",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:

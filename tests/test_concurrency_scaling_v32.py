@@ -51,7 +51,7 @@ def _strict_contract(tmp_path: Path):
         source,
         tmp_path / "contract-output.jsonl",
         input_format="jsonl",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=_MEMORY_LIMIT,
     )
     contract = schema_contract_from_registry_json(result.schema_registry_json)
@@ -68,7 +68,7 @@ def _consume_strict_jsonl(
         schema_mode="strict",
         on_error="stop",
         parse_integers=False,
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=memory_limit,
     )
     context = ExecutionContext()
@@ -106,7 +106,7 @@ def test_wide_fixed_jsonl_matches_single_oracle(tmp_path: Path) -> None:
             input_format="jsonl",
             parse_integers=True,
             on_error="stop",
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=_MEMORY_LIMIT,
         )
 
@@ -349,7 +349,7 @@ def test_low_budget_repeated_consumption_preserves_arrow_ownership(tmp_path: Pat
         input_format="jsonl",
         parse_integers=True,
         on_error="stop",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=64 * 1024 * 1024,
     )
 
@@ -361,7 +361,7 @@ def test_low_budget_repeated_consumption_preserves_arrow_ownership(tmp_path: Pat
             input_format="jsonl",
             parse_integers=True,
             on_error="stop",
-            threading_mode="multi",
+            multi_threading=True,
             memory_limit_bytes=64 * 1024 * 1024,
         )
         gc.collect()

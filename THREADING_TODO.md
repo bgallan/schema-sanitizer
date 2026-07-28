@@ -4,7 +4,7 @@ Status: complete; retained as the deterministic concurrency design record.
 
 The first implementation slice is now present:
 
-- all seven public converters accept `threading_mode`, defaulting to `single`;
+- all seven public converters accept `multi_threading`, defaulting to `False`;
 - one native-derived immutable execution policy reports effective workers,
   queues, reorder capacity, worker arenas, remote windows, PyArrow threading,
   and any fallback-to-one-worker reason;
@@ -122,7 +122,8 @@ The first implementation slice is now present:
 - local CSV, JSONL, native Parquet, and PyArrow Parquet path outputs publish
   through unique sibling files and `os.replace`. Existing destinations remain
   untouched until writer close succeeds; failures remove only partial staging
-  files. Invalid threading modes are rejected before staging is created; and
+  files. Invalid `multi_threading` values are rejected before staging is
+  created; and
 - adaptive native inference now reparses nested JSON rows in worker-private
   documents and emits compact preorder evidence packets. One coordinator
   validates and reduces those packets through the existing shape-then-statistics
@@ -185,8 +186,8 @@ to differ.
 
 ## One algorithm, two executors
 
-The public control should be `threading_mode="single" | "multi"`. The first
-certified release should default to `single`; changing the default to `multi`
+The public control is `multi_threading: bool = False`. Changing the default to
+`True`
 requires all equivalence gates below to pass on every supported platform. There
 should be no public worker-count knob: the effective worker count and every
 queue/reorder limit are derived from `memory_limit_bytes`, available CPUs, and
@@ -409,13 +410,14 @@ diagnostic deltas are merged in ordinal order.
   native warm-up state. One operation clock is captured before scheduling and is
   reused for ingestion metadata and every native drift event.
 
-- [x] Add `threading_mode` to the native option catalog, public signatures,
-  Python normalization, serialized option contract, README, examples, and API
-  option matrices.
+- [x] Add `threading_mode` to the native option catalog and expose it through
+  `multi_threading: bool = False` in public signatures, Python normalization,
+  README, examples, and API option matrices.
 
-- [x] Introduce one immutable execution policy derived from `threading_mode`,
-  `memory_limit_bytes`, CPU availability, and hard ceilings; report requested
-  mode, effective workers, queue bounds, and fallback-to-one-worker reason.
+- [x] Introduce one immutable execution policy derived from `multi_threading`,
+  `memory_limit_bytes`, CPU availability, and hard ceilings; report its internal
+  requested mode, effective workers, queue bounds, and fallback-to-one-worker
+  reason.
 
 - [x] Make remote discovery, remote staging, source-plan prefetch, and PyArrow
   fallback threading consume that shared policy. Prove single mode creates no

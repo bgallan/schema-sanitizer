@@ -46,7 +46,7 @@ def _contract(source: Path, output: Path, memory_limit: int):
         input_format="jsonl",
         parse_integers=True,
         field_name_policy="preserve",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=memory_limit,
     )
     contract = schema_contract_from_registry_json(result.schema_registry_json)
@@ -69,7 +69,7 @@ def _consume(
         on_error="stop",
         parse_integers=True,
         field_name_policy="preserve",
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=memory_limit,
     )
     context = ExecutionContext()

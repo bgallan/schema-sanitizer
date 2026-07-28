@@ -15,7 +15,7 @@ def _probe(rows: list[dict[str, Any]], *, threading_mode: str, **options: Any):
     payload = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows)
     memory_limit_bytes = options.pop("memory_limit_bytes", 256 * 1024 * 1024)
     native_options = normalize_call_options(
-        threading_mode=threading_mode,
+        multi_threading=threading_mode == "multi",
         memory_limit_bytes=memory_limit_bytes,
         **options,
     ).raw

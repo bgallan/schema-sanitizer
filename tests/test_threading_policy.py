@@ -19,6 +19,7 @@ import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution_policy import (
     execution_policy,
     normalize_threading_mode,
+    threading_mode_from_multi_threading,
 )
 
 
@@ -87,14 +88,23 @@ def test_multi_policy_is_bounded_and_can_fall_back_to_one_worker() -> None:
     assert constrained.fallback_to_one_worker_reason == "memory_limited"
 
 
-def test_threading_mode_normalization_is_strict() -> None:
-    """Only the two canonical public values are accepted."""
+def test_internal_threading_mode_normalization_is_strict() -> None:
+    """Only the two canonical internal values are accepted."""
     assert normalize_threading_mode(" single ") == "single"
     assert normalize_threading_mode("MULTI") == "multi"
     with pytest.raises(ValueError, match="threading_mode"):
         normalize_threading_mode("auto")
     with pytest.raises(ValueError, match="threading_mode"):
         normalize_threading_mode(True)
+
+
+def test_public_multi_threading_translation_is_strict() -> None:
+    """The public concurrency switch accepts actual booleans only."""
+    assert threading_mode_from_multi_threading(False) == "single"
+    assert threading_mode_from_multi_threading(True) == "multi"
+    for value in ("multi", 1, None):
+        with pytest.raises(TypeError, match="multi_threading"):
+            threading_mode_from_multi_threading(value)
 
 
 def test_public_entry_points_default_to_single() -> None:
@@ -109,7 +119,23 @@ def test_public_entry_points_default_to_single() -> None:
         ss.to_parquet,
     )
     for function in functions:
-        assert inspect.signature(function).parameters["threading_mode"].default == "single"
+        parameters = inspect.signature(function).parameters
+        assert "threading_mode" not in parameters
+        assert parameters["multi_threading"].default is False
+        assert parameters["multi_threading"].annotation in {bool, "bool"}
+
+
+def test_public_entry_point_rejects_non_boolean_multi_threading(tmp_path: Path) -> None:
+    """Public converters validate the switch before creating an output."""
+    output = tmp_path / "invalid.jsonl"
+    with pytest.raises(TypeError, match="multi_threading"):
+        ss.to_jsonl(
+            [],
+            output,
+            input_format="python",
+            multi_threading="multi",  # type: ignore[arg-type]
+        )
+    assert not output.exists()
 
 
 def test_run_sync_single_refuses_to_create_async_helper_thread(
@@ -192,7 +218,7 @@ def test_single_and_multi_produce_same_logical_jsonl_output(tmp_path: Path) -> N
             source,
             output,
             input_format="jsonl",
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=256 * 1024 * 1024,
         )
 
@@ -237,7 +263,7 @@ for index in range(2):
         source,
         root / f"single-{index}.jsonl",
         input_format="jsonl",
-        threading_mode="single",
+        multi_threading=False,
         memory_limit_bytes=64 * 1024 * 1024,
     )
 """
@@ -319,10 +345,12 @@ def test_low_memory_multi_request_matches_single_output(tmp_path: Path) -> None:
     )
     single = tmp_path / "single.jsonl"
     multi = tmp_path / "multi.jsonl"
+    ss.to_jsonl(source, single, input_format="jsonl", memory_limit_bytes=1 << 20)
     ss.to_jsonl(
-        source, single, input_format="jsonl", memory_limit_bytes=1 << 20, threading_mode="single"
-    )
-    ss.to_jsonl(
-        source, multi, input_format="jsonl", memory_limit_bytes=1 << 20, threading_mode="multi"
+        source,
+        multi,
+        input_format="jsonl",
+        memory_limit_bytes=1 << 20,
+        multi_threading=True,
     )
     assert _logical_jsonl_rows(multi) == _logical_jsonl_rows(single)

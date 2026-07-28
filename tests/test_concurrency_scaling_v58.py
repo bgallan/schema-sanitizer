@@ -48,7 +48,7 @@ def _write_rows(path: Path, rows: list[dict[str, int]]) -> None:
 def _consume_with_telemetry(source: Path) -> dict[str, object]:
     """Consume one native Arrow stream and return completed telemetry."""
     options = normalize_call_options(
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=_MEMORY_LIMIT,
         on_error="stop",
         field_name_policy="preserve",
@@ -85,8 +85,8 @@ def test_v58_ordered_tokens_activate_and_preserve_output(tmp_path: Path) -> None
     )
     single_path = tmp_path / "single.jsonl"
     multi_path = tmp_path / "multi.jsonl"
-    ss.to_jsonl(source, single_path, threading_mode="single", **common)
-    ss.to_jsonl(source, multi_path, threading_mode="multi", **common)
+    ss.to_jsonl(source, single_path, multi_threading=False, **common)
+    ss.to_jsonl(source, multi_path, multi_threading=True, **common)
 
     report = _consume_with_telemetry(source)
     counters = report["counters"]
@@ -122,8 +122,8 @@ def test_v58_reordered_missing_and_escaped_keys_use_fallback(tmp_path: Path) -> 
     )
     single_path = tmp_path / "fallback-single.jsonl"
     multi_path = tmp_path / "fallback-multi.jsonl"
-    ss.to_jsonl(source, single_path, threading_mode="single", **common)
-    ss.to_jsonl(source, multi_path, threading_mode="multi", **common)
+    ss.to_jsonl(source, single_path, multi_threading=False, **common)
+    ss.to_jsonl(source, multi_path, multi_threading=True, **common)
 
     report = _consume_with_telemetry(source)
     ordered = report["counters"]["jsonl_plan_ordered_rows"]

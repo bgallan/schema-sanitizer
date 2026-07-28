@@ -43,7 +43,7 @@ def _probe(path: Path, mode: str):
     """Run a CSV schema probe and return result plus native telemetry."""
     context = ExecutionContext()
     options = normalize_call_options(
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=64 << 20,
         on_error="stop",
     ).raw
@@ -122,7 +122,7 @@ def test_v74_csv_chunk_boundaries_preserve_exact_single_multi_values(
             source,
             output,
             input_format="csv",
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=16 << 20,
             on_error="stop",
         )

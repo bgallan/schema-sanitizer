@@ -160,7 +160,9 @@ def _time_probe_case(
     measurements: dict[str, list[float]] = {"single": [], "multi": []}
     digests: dict[str, str] = {}
     for mode in ("single", "multi"):
-        options = normalize_call_options(threading_mode=mode, memory_limit_bytes=memory_limit).raw
+        options = normalize_call_options(
+            multi_threading=mode == "multi", memory_limit_bytes=memory_limit
+        ).raw
         for iteration in range(warmups + repeats):
             start = time.perf_counter()
             result = ExecutionContext().schema_probe_from_source("json", "text", payload, options)
@@ -407,7 +409,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                         input_format="jsonl",
                         input_mode=input_mode,
                         memory_limit_bytes=memory_limit,
-                        threading_mode=mode,
+                        multi_threading=mode == "multi",
                     )
                     close = getattr(result, "close", None)
                     if callable(close):

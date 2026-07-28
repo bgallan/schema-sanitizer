@@ -142,7 +142,7 @@ def test_v77_single_encode_route_reaches_every_native_output(
         rows,
         output,
         input_format="python",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=128 << 20,
         **extra,
     )

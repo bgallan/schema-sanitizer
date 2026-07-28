@@ -49,8 +49,8 @@ def test_v61_string_runs_preserve_exact_single_multi_json_escaping(
     )
     single = tmp_path / "single.jsonl"
     multi = tmp_path / "multi.jsonl"
-    ss.to_jsonl(source, single, threading_mode="single", **common)
-    ss.to_jsonl(source, multi, threading_mode="multi", **common)
+    ss.to_jsonl(source, single, multi_threading=False, **common)
+    ss.to_jsonl(source, multi, multi_threading=True, **common)
 
     payload = multi.read_bytes()
     assert payload == single.read_bytes()

@@ -161,7 +161,7 @@ def test_v76_public_csv_accepts_generator_and_auto_detects_python(
     result = ss.to_csv(
         _rows(8_000),
         output,
-        threading_mode=mode,
+        multi_threading=mode == "multi",
         memory_limit_bytes=64 << 20,
     )
     assert result.stats["materialized_rows"] == 8_000
@@ -183,7 +183,7 @@ def test_v76_python_generator_has_exact_single_multi_values(tmp_path: Path) -> N
             _rows(4_000),
             output,
             input_format="python",
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=64 << 20,
         )
     assert _jsonl_user_rows(outputs["single"]) == _jsonl_user_rows(outputs["multi"])
@@ -196,13 +196,13 @@ def test_v76_python_input_reaches_every_native_file_output(tmp_path: Path) -> No
     jsonl_path = tmp_path / "rows.jsonl"
     parquet_path = tmp_path / "rows.parquet"
 
-    ss.to_csv(_rows(2_000), csv_path, input_format="python", threading_mode="multi")
-    ss.to_jsonl(_rows(2_000), jsonl_path, input_format="python", threading_mode="multi")
+    ss.to_csv(_rows(2_000), csv_path, input_format="python", multi_threading=True)
+    ss.to_jsonl(_rows(2_000), jsonl_path, input_format="python", multi_threading=True)
     parquet_result = ss.to_parquet(
         _rows(2_000),
         parquet_path,
         input_format="python",
-        threading_mode="multi",
+        multi_threading=True,
         parquet_compression="snappy",
     )
     assert parquet_result.stats["materialized_rows"] == 2_000
@@ -300,7 +300,7 @@ def test_v76_python_input_reaches_every_analytical_output_without_adapter_import
     result = converter(
         _rows(2_000),
         input_format="python",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=64 << 20,
     )
     assert result.clean_data == target
@@ -314,7 +314,7 @@ def test_v76_public_analytical_python_input_when_pyarrow_is_available() -> None:
     result = ss.to_pyarrow(
         ({"a": index} for index in range(2_000)),
         input_format="python",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=64 << 20,
     )
     assert result.clean_data.num_rows == 2_000

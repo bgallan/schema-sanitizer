@@ -132,7 +132,7 @@ def test_v72_large_flat_arrays_parallelize_with_exact_user_data(
             source,
             output,
             input_format=input_format,
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=256 * 1024 * 1024,
             parse_integers=True,
             on_error="stop",
@@ -160,7 +160,7 @@ def test_v72_small_json_document_avoids_artificial_column_parallelism(
         source,
         output,
         input_format="json",
-        threading_mode="multi",
+        multi_threading=True,
         memory_limit_bytes=128 * 1024 * 1024,
         parse_integers=True,
     )
@@ -183,7 +183,7 @@ def test_v72_json_array_object_contract_has_exact_single_multi_error(
             source,
             tmp_path / f"invalid-{mode}.csv",
             input_format="json_array",
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=128 * 1024 * 1024,
             on_error="stop",
         )
@@ -225,8 +225,10 @@ def test_v72_pandas_adapter_obeys_single_multi_threading_policy(
     assert table.calls == [{"use_threads": False}, {"use_threads": True}]
 
 
-def test_v72_all_public_outputs_keep_threading_mode() -> None:
+def test_v72_all_public_outputs_keep_multi_threading() -> None:
     """Every output remains addressable through the common public policy switch."""
     for output_name in OUTPUT_CONCURRENCY_COVERAGE:
         converter = getattr(ss, f"to_{output_name}")
-        assert "threading_mode" in inspect.signature(converter).parameters
+        parameters = inspect.signature(converter).parameters
+        assert parameters["multi_threading"].default is False
+        assert "threading_mode" not in parameters

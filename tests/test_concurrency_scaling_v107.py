@@ -106,7 +106,7 @@ def test_v107_public_four_worker_stats_remain_exact(tmp_path: Path) -> None:
             source,
             output,
             input_format="jsonl",
-            threading_mode="multi",
+            multi_threading=True,
             memory_limit_bytes=64 << 20,
             parse_integers=True,
             field_name_policy="preserve",

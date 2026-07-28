@@ -11,7 +11,10 @@ from ..api_impl.input.preparation import prepare_public_input
 from ..api_impl.operation_context import OperationExecutionContext
 from ..api_impl.partition_resources import BorrowedPartitionResources
 from ..api_impl.source_plan.attached import remote_native_multisource_manifest_from_data
-from ..core_impl.execution_policy import execution_policy, normalize_threading_mode
+from ..core_impl.execution_policy import (
+    execution_policy,
+    threading_mode_from_multi_threading,
+)
 from ..errors import SchemaSanitizerResourceError
 from ..input_impl.directory_inputs import discovered_directory_input_context
 from ..input_impl.prepared import PreparedPublicInput
@@ -42,7 +45,9 @@ class _PreparationOptions:
             csv_delimiter=str(kwargs.get("csv_delimiter", ",")),
             csv_has_header=bool(kwargs.get("csv_has_header", True)),
             memory_limit_bytes=kwargs.get("memory_limit_bytes"),
-            threading_mode=normalize_threading_mode(kwargs.get("threading_mode", "single")),
+            threading_mode=threading_mode_from_multi_threading(
+                kwargs.get("multi_threading", False)
+            ),
         )
 
 

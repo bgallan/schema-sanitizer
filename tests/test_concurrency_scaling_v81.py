@@ -104,7 +104,7 @@ def test_v81_public_pipeline_reports_fewer_streaks_than_tasks(
             source,
             output,
             input_format="jsonl",
-            threading_mode="multi",
+            multi_threading=True,
             memory_limit_bytes=96 << 20,
             parse_integers=True,
             field_name_policy="preserve",

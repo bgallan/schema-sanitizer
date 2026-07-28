@@ -34,7 +34,7 @@ def _multi_kwargs() -> dict[str, Any]:
     return {
         "input_format": "jsonl",
         "input_mode": "single_file",
-        "threading_mode": "multi",
+        "multi_threading": True,
         "memory_limit_bytes": 64 << 20,
     }
 
@@ -179,7 +179,7 @@ def test_single_pipeline_never_constructs_partition_lookahead_worker(
         to_parquet_kwargs={
             "input_format": "jsonl",
             "input_mode": "single_file",
-            "threading_mode": "single",
+            "multi_threading": False,
             "memory_limit_bytes": 64 << 20,
         },
     )
@@ -395,7 +395,10 @@ def test_fixed_partition_timestamps_are_identical_across_modes(
         result = run_partitioned_to_parquet(
             mode_plans,
             initial_schema_registry={},
-            to_parquet_kwargs={**_multi_kwargs(), "threading_mode": mode},
+            to_parquet_kwargs={
+                **_multi_kwargs(),
+                "multi_threading": mode == "multi",
+            },
         )
         rows = [pq.read_table(plan.output_uri).to_pylist() for plan in mode_plans]
         drifts = [run.schema_drifts_json for run in result.completed_runs]

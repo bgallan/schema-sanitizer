@@ -91,7 +91,7 @@ def test_v64_parquet_single_and_multi_are_byte_identical(tmp_path: Path) -> None
     for mode in ("single", "multi"):
         context = ExecutionContext()
         options = normalize_call_options(
-            threading_mode=mode,
+            multi_threading=mode == "multi",
             memory_limit_bytes=128 << 20,
             on_error="stop",
         ).raw

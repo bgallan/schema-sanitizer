@@ -19,7 +19,7 @@ def _probe(rows: list[dict[str, Any]], *, threading_mode: str):
     """Run one native JSONL schema probe with a fixed memory contract."""
     payload = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows)
     options = normalize_call_options(
-        threading_mode=threading_mode,
+        multi_threading=threading_mode == "multi",
         memory_limit_bytes=128 * 1024 * 1024,
     ).raw
     return ExecutionContext().schema_probe_from_source("json", "text", payload, options)

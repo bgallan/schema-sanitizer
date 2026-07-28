@@ -56,7 +56,7 @@ def test_file_conversion_shares_one_context_from_input_through_output(
         input_format="jsonl",
         input_mode="single_file",
         options={
-            "threading_mode": "multi",
+            "multi_threading": True,
             "memory_limit_bytes": 64 * 1024 * 1024,
         },
         writer=write,

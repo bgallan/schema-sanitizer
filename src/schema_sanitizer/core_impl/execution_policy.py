@@ -18,9 +18,16 @@ _FALLBACK_REASONS = {
 
 
 def normalize_threading_mode(value: Any) -> str:
-    """Return the canonical public threading mode name."""
+    """Return the canonical internal threading mode name."""
     member = coerce_enum_member(ThreadingMode, value, label="option 'threading_mode'")
     return member.name.lower()
+
+
+def threading_mode_from_multi_threading(value: Any) -> str:
+    """Translate the public boolean concurrency switch to the internal mode."""
+    if not isinstance(value, bool):
+        raise TypeError("Option 'multi_threading' must be a bool")
+    return "multi" if value else "single"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,4 +120,9 @@ def execution_policy(
     )
 
 
-__all__ = ["ExecutionPolicy", "execution_policy", "normalize_threading_mode"]
+__all__ = [
+    "ExecutionPolicy",
+    "execution_policy",
+    "normalize_threading_mode",
+    "threading_mode_from_multi_threading",
+]
