@@ -14,6 +14,23 @@ namespace {
 constexpr std::size_t kRowAccountingOverhead = 64;
 constexpr std::size_t kValueAccountingOverhead = 96;
 constexpr std::size_t kMaxValueAccountingDepth = 64;
+constexpr std::int64_t kHighCoreWideFlatScoreLimit = 96;
+
+[[nodiscard]] constexpr std::int64_t
+sustained_wide_flat_worker_ceiling(std::int64_t effective_workers,
+                                   std::int64_t score) noexcept {
+  const auto workers = std::max<std::int64_t>(1, effective_workers);
+  if (score > kHighCoreWideFlatScoreLimit) {
+    return std::min<std::int64_t>(4, workers);
+  }
+  return std::min<std::int64_t>(workers,
+                                std::clamp<std::int64_t>(workers / 2, 4, 16));
+}
+
+static_assert(sustained_wide_flat_worker_ceiling(8, 64) == 4);
+static_assert(sustained_wide_flat_worker_ceiling(16, 64) == 8);
+static_assert(sustained_wide_flat_worker_ceiling(32, 64) == 16);
+static_assert(sustained_wide_flat_worker_ceiling(32, 128) == 4);
 
 [[nodiscard]] std::int64_t saturating_add_score(std::int64_t left,
                                                 std::int64_t right) noexcept {
@@ -251,9 +268,12 @@ ExecutionPolicy materialization_execution_policy(
   std::int64_t useful_workers = policy.effective_workers;
   if (wide_flat) {
     if (!wide_short_operation) {
-      useful_workers = std::min<std::int64_t>(4, policy.effective_workers);
+      useful_workers =
+          sustained_wide_flat_worker_ceiling(policy.effective_workers, score);
     } else if (variable_width_heavy) {
       useful_workers = std::min<std::int64_t>(8, policy.effective_workers);
+    } else if (score <= kHighCoreWideFlatScoreLimit) {
+      useful_workers = std::min<std::int64_t>(32, policy.effective_workers);
     } else {
       useful_workers = std::min<std::int64_t>(16, policy.effective_workers);
     }

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from benchmarks.bench_concurrency_telemetry import _dram_high_width_coverage
 from benchmarks.concurrency_telemetry_analysis import (
@@ -285,6 +288,44 @@ def test_devnull_mode_bypasses_atomic_publication(tmp_path: Path) -> None:
         "batches": 1,
         "rows": 20,
     }
+
+
+def test_high_core_wide_fixture_activates_all_32_workers(tmp_path: Path) -> None:
+    """Eligible fixed-wide materialization reaches the complete 32-worker arena."""
+    if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < 32:
+        pytest.skip("requires 32 visible CPUs")
+    root = Path(__file__).parents[1]
+    report_path = tmp_path / "high-core.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(root / "benchmarks" / "bench_concurrency_telemetry.py"),
+            "--workers",
+            "16,32",
+            "--workloads",
+            "arrow_stream",
+            "--rows",
+            "8192",
+            "--columns",
+            "64",
+            "--memory-mib",
+            "512",
+            "--warmups",
+            "0",
+            "--repeats",
+            "1",
+            "--output",
+            str(report_path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    run = report_path.read_text(encoding="utf-8")
+    payload = json.loads(run)["workloads"]["arrow_stream"]["runs"]["32"]
+    native = payload["representative_native"]
+    assert native["effective_workers"] == 32
+    assert native["counters"]["started_workers"] == 32
+    assert native["counters"]["peak_active_tasks"] == 32
 
 
 def test_v35_benchmark_owners_remain_cohesive_and_below_500_lines() -> None:

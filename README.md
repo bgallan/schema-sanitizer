@@ -1016,8 +1016,8 @@ regions at each affinity with the operation-local telemetry harness:
 
 ```bash
 PYTHONPATH=src python benchmarks/bench_concurrency_telemetry.py \
-  --workers 1,2,4,8,16 --rows 20000 --columns 128 \
-  --memory-mib 256 --warmups 1 --repeats 5 \
+  --workers 1,2,4,8,16,32 --rows 20000 --columns 64 \
+  --memory-mib 512 --warmups 1 --repeats 7 \
   --output concurrency-telemetry.json
 ```
 
@@ -1028,13 +1028,13 @@ and sustainable GiB/s values from PCM, uProf, or platform uncore counters before
 the harness may report `dram_bandwidth_saturation`. See
 `CONCURRENCY_SCALING_V33.md` for the report contract and sidecar format.
 
-For the final 8/16 decision, run the resumable paired short+sustained suite. It
+For the final 16/32 decision, run the resumable paired short+sustained suite. It
 locks one CPU/NUMA plan, rejects unstable paired samples, and fingerprints the
 host, command, and complete source revision before reusing results:
 
 ```bash
 PYTHONPATH=src python benchmarks/bench_high_core_evidence.py \
-  --workers 1,2,4,8,16 --columns 128 --memory-mib 256 \
+  --workers 1,2,4,8,16,32 --columns 64 --memory-mib 512 \
   --short-rows 20000 --sustained-rows 500000 \
   --warmups 1 --repeats 7 --numa-node 0 --resume \
   --short-dram-json short-dram.json \
@@ -1308,3 +1308,13 @@ v118 replaces repeated lane-origin division inside one arena submission with a s
 v119 removes repeated `countr_zero`-driven visibility-domain discovery from high-core stealing. The arena now loads its immutable 2-4 physical queue-visibility shards directly and applies the same initialized-worker mask afterwards, preserving exact eligibility across all 56 input/output contracts.
 
 v120 compacts each queued task's validated lane bounds from two machine words to two bytes under the existing 32-worker ceiling. On the validated libstdc++ ABI the packet shrinks from 72 to 56 bytes, improving deque density for enqueue, local dequeue, and compatible stealing while all 56 input/output routes retain identical lane semantics.
+
+The post-v120 high-core policy makes the 32-worker frontier reachable for
+eligible fixed-width flat JSONL. Short moderate-cost schemas may use the
+complete operation arena; sustained stages grow geometrically from half of a
+16-worker arena to half of a 32-worker arena. JSONL output uses the matching
+high half. Variable-width and ultra-wide schemas retain their conservative
+ceilings. On the fixed-affinity 20,000-row, 64-column matrix, 16→32 improved
+Arrow-stream throughput by 23.0% and complete JSONL-to-JSONL throughput by
+20.8%; the 50,000-row sustained matrix improved by 36.3% and 33.2%,
+respectively.

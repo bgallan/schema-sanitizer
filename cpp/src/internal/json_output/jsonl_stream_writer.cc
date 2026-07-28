@@ -24,8 +24,10 @@ constexpr std::size_t kFlushThresholdBytes = 1U << 20;
 constexpr std::size_t kMaxRetainedOutputBytes = 4U << 20;
 
 constexpr std::int64_t kMinimumWideFlatJsonlWorkers = 4;
-constexpr std::int64_t kMaximumWideFlatJsonlWorkers = 8;
+constexpr std::int64_t kMaximumWideFlatJsonlWorkers = 16;
+constexpr std::int64_t kConservativeWideFlatJsonlWorkers = 8;
 constexpr std::size_t kWideFlatJsonlFieldThreshold = 24;
+constexpr std::size_t kHighCoreWideFlatJsonlFieldLimit = 96;
 constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
 
 [[nodiscard]] bool is_nested_output_kind(JsonlKind kind) noexcept {
@@ -80,6 +82,20 @@ wide_flat_worker_ceiling_for(std::int64_t operation_workers) noexcept {
 static_assert(wide_flat_worker_ceiling_for(4) == 4);
 static_assert(wide_flat_worker_ceiling_for(8) == 4);
 static_assert(wide_flat_worker_ceiling_for(16) == 8);
+static_assert(wide_flat_worker_ceiling_for(32) == 16);
+
+[[nodiscard]] constexpr std::int64_t
+wide_fixed_worker_ceiling_for(std::int64_t operation_workers,
+                              std::size_t field_count) noexcept {
+  const auto ceiling = wide_flat_worker_ceiling_for(operation_workers);
+  return field_count <= kHighCoreWideFlatJsonlFieldLimit
+             ? ceiling
+             : std::min(ceiling, kConservativeWideFlatJsonlWorkers);
+}
+
+static_assert(wide_fixed_worker_ceiling_for(16, 64) == 8);
+static_assert(wide_fixed_worker_ceiling_for(32, 64) == 16);
+static_assert(wide_fixed_worker_ceiling_for(32, 128) == 8);
 
 [[nodiscard]] constexpr bool
 should_scale_wide_fixed_output(bool wide_fixed_flat,
@@ -257,8 +273,9 @@ write_stream(ArrowArrayStream *stream, Output &out_file,
   const auto scale_wide_fixed_output =
       should_scale_wide_fixed_output(wide_fixed_flat, operation_workers);
   const auto output_worker_ceiling =
-      scale_wide_fixed_output ? wide_flat_worker_ceiling_for(operation_workers)
-      : wide_flat             ? kMinimumWideFlatJsonlWorkers
+      scale_wide_fixed_output ? wide_fixed_worker_ceiling_for(
+                                    operation_workers, root.children.size())
+      : wide_flat ? kMinimumWideFlatJsonlWorkers
                   : ordered_text_output::kDefaultOutputWorkerCeiling;
   const auto reclaim_wide_variable_packet_window =
       wide_flat && !wide_fixed_flat;

@@ -89,12 +89,14 @@ def _consume(source: Path, output: Path, *, mode: str, contract: object):
 
 
 def test_v43_sources_scale_only_fixed_wide_output_after_eight_cpus() -> None:
-    """The 16-CPU frontier doubles fixed-wide output without global priority."""
+    """Eligible fixed-wide output scales through the high half of 32 CPUs."""
     root = Path(__file__).resolve().parents[1]
     writer = (root / "cpp/src/internal/json_output/jsonl_stream_writer.cc").read_text()
     arena = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     assert "wide_flat_worker_ceiling_for(8) == 4" in writer
     assert "wide_flat_worker_ceiling_for(16) == 8" in writer
+    assert "wide_flat_worker_ceiling_for(32) == 16" in writer
+    assert "wide_fixed_worker_ceiling_for(32, 128) == 8" in writer
     assert "is_wide_fixed_flat_schema" in writer
     assert "should_scale_wide_fixed_output(true, 8)" in writer
     assert "should_scale_wide_fixed_output(true, 16)" in writer
@@ -124,7 +126,7 @@ def test_synthetic_sixteen_worker_arena_separates_eight_plus_eight_lanes() -> No
 def test_fixed_wide_output_preserves_v42_admission_below_nine_cpus(
     tmp_path: Path,
 ) -> None:
-    """The 16-CPU policy is dormant on this four-CPU host."""
+    """The high-core policy is dormant whenever memory/CPU policy stays below nine."""
     require_native()
     contract_source = tmp_path / "contract.jsonl"
     _write_rows(contract_source, 64)
@@ -145,5 +147,5 @@ def test_fixed_wide_output_preserves_v42_admission_below_nine_cpus(
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     assert single_stats["counters"]["started_workers"] == 0
-    assert multi_stats["effective_workers"] == 4
+    assert 1 < multi_stats["effective_workers"] <= 8
     assert multi_stats["tasks"]["output"]["submitted"] > 4

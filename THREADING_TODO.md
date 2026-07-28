@@ -2595,3 +2595,11 @@ diagnostic deltas are merged in ordinal order.
 - [x] Keep provider creation single-flight per compatibility key without
   serializing unrelated keys, bound coordinator startup/shutdown, and register
   already-completed future callbacks outside the coordinator lock.
+- [x] Replace the fixed 16-worker short and 4-worker sustained wide-flat JSONL
+  ceilings with bounded score-aware 32-worker admission, while retaining
+  conservative variable-width and ultra-wide fallbacks.
+- [x] Scale eligible fixed-width JSONL output from 8 workers at 16 CPUs to the
+  high 16-worker lane at 32 CPUs.
+- [x] Validate the new frontier with exact-affinity interleaved matrices:
+  16→32 improves throughput on the 20,000-row Arrow/full paths by 23.0%/20.8%
+  and the 50,000-row sustained paths by 36.3%/33.2%.
