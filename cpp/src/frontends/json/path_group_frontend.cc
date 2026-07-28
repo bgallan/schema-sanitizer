@@ -256,8 +256,7 @@ private:
     const std::size_t budget_workers = static_cast<std::size_t>(
         std::max<std::int64_t>(1, budget.async_concurrency));
     const std::size_t cohort_size = std::min<std::size_t>(
-        children_.size() - index_,
-        std::min({std::size_t{16}, arena_workers, budget_workers}));
+        children_.size() - index_, std::min(arena_workers, budget_workers));
     const std::int64_t total_prefetch_rows =
         capacity > (std::numeric_limits<std::int64_t>::max() / 2)
             ? capacity

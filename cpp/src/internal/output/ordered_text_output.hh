@@ -23,7 +23,7 @@ namespace sanitize::internal::ordered_text_output {
 
 inline constexpr std::int64_t kMaximumOutputPacketRows = 2048;
 inline constexpr std::int64_t kDefaultOutputWorkerCeiling =
-    kMaxExecutionWorkers;
+    std::numeric_limits<std::int64_t>::max();
 inline constexpr std::int64_t kCompactLanePromotionWaves = 16;
 
 [[nodiscard]] inline sanitize::Result<sanitize::ThreadingMode>

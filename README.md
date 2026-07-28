@@ -162,15 +162,20 @@ result = ss.to_parquet(
 )
 ```
 
-The Python object iteration and dictionary inspection remain GIL-bound. Multi
-mode amortizes that boundary by consuming up to 4,096 rows per ABI3 call and
-feeds the same bounded C++ inference, materialization, and output workers used
-by file inputs. Native probes, source-to-sink execution, and CSV, JSONL, and
-Parquet writers release the caller's GIL while waiting on the operation arena;
-reader and Python-output callbacks acquire it only for the callback duration.
-Generators are not converted to lists; their replay spool is bounded by the
-single public memory budget. Single mode creates no helper thread and remains
-the deterministic inline reference.
+Python iteration and dictionary inspection remain GIL-bound. The surrounding
+work is handled as follows:
+
+- Multi mode consumes up to 4,096 rows per ABI3 call, amortizing the Python
+  boundary.
+- Native inference, materialization, and output use the same bounded workers as
+  file inputs.
+- Native probes and writers release the caller's GIL while waiting on the
+  operation arena.
+- Reader and Python-output callbacks acquire the GIL only while running.
+- Generators are not converted to lists; their replay spool stays within the
+  operation memory budget.
+- Single mode creates no helper thread and remains the deterministic reference
+  path.
 
 `input_mode="single_file"` processes exactly one file. `input_mode="directory"`
 processes matching direct children in deterministic filename order; it does not
@@ -279,114 +284,104 @@ prices = ss.to_pyarrow(
 | `multi_threading` | `False` | `False` is the deterministic inline reference executor; `True` enables bounded concurrency derived from memory and CPUs. |
 | `memory_limit_bytes` | `None` | The only public memory/resource control. `None` selects a safe share of currently available system/container memory. A positive integer sets a strict operation-wide budget. The native extension derives all chunk, batch, coalescing, metadata, spool, concurrency, Arrow, and Parquet sub-budgets from the resolved value. |
 
-`multi_threading=False` forces every Schema-Sanitizer-owned worker count,
-queue, reorder window, remote download/discovery window, and source prefetch
-window to one. It does not create a project-owned thread pool, event-loop host,
-or child process, and PyArrow fallback calls receive `use_threads=False`.
-Remote discovery, DNS, metadata, download, and publication use blocking APIs on
-the caller thread: stdlib HTTP, direct Botocore calls without a transfer
-manager, the GCS JSON API with synchronous ADC, and the synchronous Azure Blob
-SDK with `max_concurrency=1`. A remote call made from an active `asyncio` loop
-therefore blocks that same caller thread instead of creating a helper thread.
+#### Execution modes
 
-`multi_threading=True` has no public worker-count setting. The immutable
-execution policy derives an effective worker count, bounded queues, per-worker
-arenas, and remote/PyArrow concurrency from `memory_limit_bytes`, available host
-CPUs, and hard internal ceilings. A constrained multi run may safely fall back
-to one effective worker; inspect `result.execution_policy` for the effective
-values and fallback reason. The current implementation parallelizes bounded
-remote discovery, transfer/staging, source prefetch, supported PyArrow
-fallbacks, adaptive native inference, native materialization, native
-CSV/JSONL fragment preparation, and native Parquet column preparation and
-compression. One operation-wide native task arena owns the effective N-worker
-budget for inference, materialization, and native sinks. Stages reuse those
-physical workers instead of creating independent pools; narrow upstream and
-output stages receive complementary stable lanes so they can overlap without
-exceeding N active Schema-Sanitizer workers. Workers start lazily on first use,
-so a cheap stage does not pay to construct idle helpers. Within a lane, idle
-workers can steal compatible backlog from a busy physical queue; the thief uses
-its own lane-relative parser/builder/compression slot, while ordinal commit keeps
-rows, diagnostics, bytes, and failures deterministic. Each ordered stage owns a
-local cancellation token layered over the shared arena token, so a sink or
-materialization failure stops already-running work for that stage without
-tearing down unrelated arena users. Arena packets are C++23
-`std::move_only_function` tasks carrying a move-only completion lease: normal
-execution disarms the lease after the executor's final locked access, while
-queue destruction publishes abandonment. This prevents shutdown hangs and
-executor use-after-free without one shared allocation per packet. The bounded
-dispatch window is also the
-result-retention bound, eliminating a redundant result-space wait and reducing
-coordinator wakeups. Hardened allocation ownership remains enabled, but its
-process and operation registries are address-sharded so concurrent workers do
-not serialize every allocation/free pair on one mutex. Nested inference rows are converted in
-worker-private parser state into compact preorder evidence packets. One ordered
-reducer remains the sole owner of key interning, shape promotion, scalar
-statistics, and diagnostics. Flat/scalar batches, small batches, and operations
-whose worker pool is below the safe inference reserve stay on the serial
-reference scanner, avoiding a pool-startup regression. Inference uses up to the operation's effective workers when plan complexity
-and packet volume justify them, bounds evidence packets against worker arenas, and drains earlier
-ordinals before scanning an oversized row inline. One lazy operation execution
-context spans the complete public conversion:
-initial listing, single-file or directory staging, probe/stream prefetch, and
-final remote output upload share one event-loop host in `multi`. Compatible HTTP, S3, and Azure provider sessions are pooled for the complete
-operation and close exactly once after submitted work drains. Provider creation
-is single-flight per compatibility key while unrelated keys initialize
-concurrently; coordinator startup and shutdown have bounded deadlines. Directory staging
-also shares one global transfer semaphore on that operation host. Remote packets are bounded by both file count and
-known bytes. A bounded probe prefix is reused by materialization instead of
-being downloaded twice. Native materialization coalesces contiguous rows into
-bounded packets, isolates oversized rows, prepares packets in worker-private
-state, and commits rows through one ordered coordinator. CSV and JSONL output
-use the same ordinal executor: workers encode immutable row ranges into private,
-byte-accounted fragments while one writer owns the header, byte order,
-statistics, earliest error, and final flush. The reorder window retains at most
-one fragment per effective output worker. Stage-specific worker ceilings reuse
-one shared budget-preserving policy helper; branch-heavy CSV encoding is capped
-at four output workers when the host policy is wider, while upstream stages and
-JSONL output can still use the complete operation arena. Local path outputs use sibling staging
-files and atomic replacement, so a failed CSV, JSONL, native Parquet, or PyArrow
-Parquet write cannot truncate a valid previous destination. Native Parquet
-workers prepare independent leaf-column chunks and compression artifacts in
-private memory; one coordinator assigns physical offsets, writes column chunks
-and page indexes in schema order, and emits the footer/trailer once. Small,
-narrow, low-memory, or cheap row groups remain on the serial writer. Remote
-source packets and final remote-output spools additionally reserve bytes from
-one operation-owned temporary-storage permit pool, so concurrent staging cannot
-multiply disk usage beyond the derived spool ceiling.
+| Behavior | `multi_threading=False` | `multi_threading=True` |
+|---|---|---|
+| Execution | Inline on the caller thread | Bounded native concurrency |
+| Worker count | One | Derived from CPUs and memory |
+| Queues and prefetch | One item at a time | Bounded by the execution policy |
+| PyArrow fallback | `use_threads=False` | Uses the derived policy |
+| Remote clients | Blocking | Bounded asynchronous clients |
 
-`memory_limit_bytes` is local to one operation and defaults to `None`. In that
-mode the native extension inspects currently available physical memory and, on
-Linux, the remaining cgroup allowance. It reserves 12.5–25% for the system and
-untracked allocations, then applies the absolute 64 GiB safety ceiling. The
-resolved value is fixed once and propagated through the complete operation, so
-multi-threaded workers can use the additional headroom without racing later
-memory-pressure samples. A positive value is likewise global to the operation,
-regardless of input-file size: Schema-Sanitizer-owned input chunks, queues,
-reorder windows, materialization, writers, and staging cannot each spend the
-full limit independently. File-output paths stream data and atomically publish
-the completed staging file, so an oversized file does not require oversized
-resident memory and a resource failure does not replace an existing output.
+Single mode creates no Schema-Sanitizer thread pool, event-loop host, or child
+process. Remote work also runs on the caller thread, so calling it from an
+active `asyncio` loop blocks that loop.
 
-The budget covers memory owned and tracked by Schema-Sanitizer during the
-operation. It intentionally excludes the final analytical object returned by
-`to_pyarrow`, `to_pandas`, `to_polars`, or `to_duckdb`; materializing that
-object can therefore exhaust process memory. File-output converters do not
-retain such an analytical result and provide the bounded-memory path.
+Multi mode has no public worker-count option. It derives the effective width
+from:
 
-There are no environment-variable overrides or secondary public memory knobs.
-Two concurrent calls may use different budgets without mutating process-global
-state. Provider SDKs may still use their own standard credential discovery
-outside the library.
+- `memory_limit_bytes`;
+- CPUs available through host, affinity, and cgroup limits.
 
-The native extension is the single source of truth for derived limits. Python
-queries that native budget and uses the returned values for input chunks, replay
-spooling, remote scheduling, metadata expansion, Arrow validation, coalescing,
-and Parquet reading/writing. Internal structural ceilings such as maximum schema
-depth, field cardinality, Arrow logical ranges, and row-group count remain
-non-configurable and cannot be raised by callers. Scratch cleanup and hardened
-allocation bookkeeping are always active. Best-effort overwriting cannot
-guarantee physical erasure on copy-on-write filesystems, SSD wear-leveling, or
-after data has been copied by a third-party Arrow consumer.
+There is no fixed global worker ceiling. On machines wider than 32 CPUs, the
+arena can continue growing while the operation memory budget provides at least
+the required per-worker reserve.
+
+When resources are constrained, multi mode may use only one worker. Inspect
+`result.execution_policy` for the effective values and fallback reason.
+
+#### Work performed concurrently
+
+Multi mode can overlap:
+
+- remote discovery, transfer, staging, and source prefetch;
+- supported PyArrow operations;
+- schema inference and native materialization;
+- CSV and JSONL fragment encoding;
+- Parquet column preparation and compression.
+
+All native stages reuse one operation-wide task arena. They do not create
+independent worker pools that could multiply CPU or memory use. Workers start
+lazily, and small or inexpensive batches remain on the serial path.
+
+Branch-heavy or irregular stages use conservative fractions of the arena.
+Those fractions still grow on wider machines; they are not fixed 4-, 16-, or
+32-worker ceilings. Stages with fewer independent work items use only the
+workers that can perform useful work.
+
+#### Ordering and failure safety
+
+Concurrency does not change observable ordering:
+
+- results, diagnostics, output bytes, and failures commit by source ordinal;
+- bounded dispatch also bounds retained out-of-order results;
+- oversized rows are processed without allowing later rows to overtake them;
+- stage-local cancellation stops failed work without invalidating unrelated
+  arena users.
+
+Local CSV, JSONL, and Parquet outputs are written to sibling staging files and
+atomically replace the destination only after success. A failed conversion
+therefore does not truncate an existing output.
+
+#### Memory budget
+
+`memory_limit_bytes` applies to one complete operation:
+
+- `None` selects a safe share of currently available host or container memory;
+- a positive integer sets an explicit budget;
+- the resolved value is fixed once and shared by every stage;
+- separate concurrent calls keep separate budgets.
+
+On Linux, automatic sizing also respects the remaining cgroup allowance. It
+reserves 12.5–25% for the system and untracked allocations, then applies a
+64 GiB ceiling.
+
+The budget covers Schema-Sanitizer-owned input chunks, queues, reorder windows,
+materialization, writers, remote packets, and staging. These components cannot
+each spend the full limit independently.
+
+Input and output files may be larger than the budget because file conversions
+stream them. If an operation cannot proceed safely, it fails before publishing
+its staged output.
+
+The final object returned by `to_pyarrow`, `to_pandas`, `to_polars`, or
+`to_duckdb` is intentionally outside the budget. A very large analytical result
+can therefore exhaust process memory. Use a file-output converter when bounded
+memory is required.
+
+#### Fixed safety limits
+
+The native extension is the source of truth for all derived limits. There are
+no environment-variable overrides or secondary public memory controls.
+
+Structural ceilings such as schema depth, field cardinality, Arrow logical
+ranges, and Parquet row-group count cannot be raised by callers. Scratch cleanup
+and hardened allocation bookkeeping remain enabled.
+
+Best-effort memory overwriting cannot guarantee physical erasure on
+copy-on-write filesystems, SSDs with wear levelling, or after a third-party
+Arrow consumer has copied the data.
 
 ### [Parquet output](#index)
 
@@ -566,45 +561,78 @@ the `schema_registry` value embedded in the output data. See
 
 ## [Local and cloud filesystems](#index)
 
-Local paths, `file://`, `gs://`/`gcs://`, `s3://`, common Azure Blob/ABFS URIs,
-and single-file HTTP(S) sources are supported. Install cloud clients with:
+### Supported locations
+
+| Location | Support |
+|---|---|
+| Local paths and `file://` | Files and directories |
+| `gs://` and `gcs://` | Google Cloud Storage |
+| `s3://` | Amazon S3 and compatible services |
+| Azure Blob and ABFS URIs | Common Azure storage URI forms |
+| HTTP(S) | Single files only |
+
+Generic HTTP directory listing is not supported. Cloud directory listing is
+deterministic, bounded, and non-recursive.
+
+Install the optional provider clients with:
 
 ```bash
 pip install 'schema-sanitizer[cloud]'
 ```
 
-Remote inputs are staged into replayable local temporary files. `single` uses
-strictly blocking same-thread HTTP/GCS/S3/Azure clients; `multi` uses bounded
-provider-native async clients. File outputs are uploaded after conversion. In
-`multi`, one lazy operation-owned event loop is reused from initial remote
-listing through input staging and final output upload; compatible provider
-sessions and connection pools live for that operation and close only after
-cancellation has drained. Local-only and `single` calls do not create it. Remote
-directory listing is bounded, deterministic, and non-recursive; generic HTTP
-directory listing is not supported.
+### Remote execution
 
-Remote concurrency, file prefetch, retries, packet lookahead, discovery workers,
-one-partition pipeline source lookahead, packet file counts, packet byte targets,
-temporary-storage permits, and replay-spool capacity are derived automatically
-from the operation's `memory_limit_bytes`. They are not separate
-API options and have no environment-variable overrides. Absolute internal
-ceilings remain in place so direct internal callers cannot create unbounded
-worker, queue, connection, or staging state. Known/estimated remote packet bytes
-are reserved before prefetch; the reservation is resized to the exact staged
-size and held until the packet is consumed or cancelled. Final remote output
-holds an exact reservation through upload. Completed spools use bounded S3
-multipart publication, GCS resumable sessions with committed-offset
-reconciliation, and Azure SDK block uploads with operation-derived concurrency.
-S3 parts may finish out of order but are completed in ordinal order; failures
-drain workers and abort the multipart/session state before the local spool lease
-is released. HTTP retains one ordered PUT as the portable fallback. Generic
-HTTP GET, HEAD, and idempotent PUT operations use bounded transient retries
-derived from `memory_limit_bytes`. Each GET attempt truncates its staging file,
-and each PUT attempt reopens the completed spool from byte zero. Schema-Sanitizer
-disables aiohttp's implicit connection replay for streamed PUT bodies because an
-internal retry can otherwise resend an already-consumed file as an empty body.
-Redirects are not followed for PUT publication; the destination must return a
-final success status directly.
+Remote inputs are staged into replayable local temporary files. File outputs
+are converted locally and uploaded only after conversion succeeds.
+
+- Single mode uses blocking HTTP, GCS, S3, and Azure clients on the caller
+  thread.
+- Multi mode uses bounded provider-native asynchronous clients.
+- Local-only and single-mode operations do not create an event-loop host.
+
+In multi mode, one lazy event loop serves the complete operation: listing,
+input staging, prefetch, and final upload. Compatible provider sessions and
+connection pools are reused and close after submitted or cancelled work drains.
+
+### Bounded staging
+
+The following values are derived from `memory_limit_bytes` rather than exposed
+as separate options:
+
+- remote concurrency and discovery workers;
+- file prefetch and packet lookahead;
+- packet file counts and byte targets;
+- retry counts;
+- temporary-storage permits;
+- replay-spool capacity;
+- one-partition pipeline source lookahead.
+
+Known or estimated packet bytes are reserved before prefetch. The reservation
+is corrected to the exact staged size and retained until consumption or
+cancellation. Final remote output keeps its exact reservation until upload
+finishes.
+
+Memory-derived windows and the available work count prevent direct callers from
+creating unbounded workers, queues, connections, or staging state.
+
+### Publication and retries
+
+- S3 uses bounded multipart uploads. Parts may upload concurrently but commit in
+  ordinal order.
+- GCS uses resumable sessions and reconciles the committed offset.
+- Azure uses block uploads with operation-derived concurrency.
+- HTTP uses one ordered `PUT` as the portable fallback.
+
+Failures drain active workers and abort multipart or resumable state before the
+local spool lease is released.
+
+HTTP `GET`, `HEAD`, and idempotent `PUT` operations use bounded transient
+retries. Every `GET` attempt truncates its staging file; every `PUT` attempt
+reopens the completed spool from byte zero.
+
+Streamed HTTP uploads disable implicit connection replay to avoid resending an
+already-consumed body as an empty file. `PUT` redirects are not followed: the
+destination must return a final success response directly.
 
 ## [Development](#index)
 
@@ -654,38 +682,44 @@ Invoke the second command separately for each threading domain listed by the
 runner. CI deliberately uses one shell step per domain rather than chaining all
 TSan interpreters inside one script invocation.
 
-The general CI workflow also runs real-loopback HTTP provider fault injection
-against the ABI3 wheel on Linux, Windows, macOS x86-64, and macOS arm64. It
-covers truncated downloads, disconnects during publication, delayed
-cancellation, bounded retry exhaustion, metadata retries, fatal staging cleanup,
-SIGINT drain, and abrupt interpreter shutdown.
+The general CI workflow runs real-loopback HTTP fault injection against the
+ABI3 wheel on Linux, Windows, macOS x86-64, and macOS arm64. It covers:
 
-Native parser fuzzing shares the production JSON, CSV, XML, and Parquet entry
-points. Clang builds may use libFuzzer; GCC, MSVC, and AppleClang platform gates
-can use the deterministic standalone engine. Promoted crash inputs are replayed
-first, followed by bounded mutation campaigns with explicit run count, seed, and
-maximum input length. Linux executes those campaigns under ASan/UBSan and TSan;
-Windows AMD64 executes them with MSVC ASan, and both macOS architectures use
-AppleClang ASan/UBSan. The same platform jobs repeat the sanitized ordinal
-executor probe. No fuzzer setting is a production API or environment-variable
-configuration surface.
+- truncated downloads and publication disconnects;
+- delayed cancellation and bounded retry exhaustion;
+- metadata retries and fatal staging cleanup;
+- SIGINT draining and abrupt interpreter shutdown.
 
-The dedicated CPython launcher links the matching TSan runtime before extension
-modules load and compiles the sanitizer options into the executable, so the gate
-does not depend on process-environment configuration. The runner verifies that
-Python loaded the extension from the requested build directory and executes 64
-native, fixed-clock public-path, and bounded partition-lookahead differential tests, with each domain in a
-fresh sanitizer-first interpreter and CI shell step. A session-result marker is
-written only after `pytest_sessionfinish`; the runner then allows normal teardown
-a short grace period and terminates only a lingering non-instrumented interpreter
-teardown. A timeout before the marker remains a hard failure. This avoids
-cross-domain shutdown interactions with binary PyArrow while keeping failures
-attributable to one stage. CPython and binary PyArrow wheels are not
-TSan-instrumented, so the gate ignores races wholly owned by non-instrumented
-modules while retaining checking for the extension, the native core, and the
-bundled zlib used by Parquet GZIP output. Local development builds are also
-filtered by their CMake sanitizer setting: ordinary Python skips TSan/ASan
-extensions unless the matching runtime was linked before module loading.
+Native parser fuzzing uses the production JSON, CSV, XML, and Parquet entry
+points:
+
+- Clang builds may use libFuzzer.
+- GCC, MSVC, and AppleClang gates can use the deterministic standalone engine.
+- Known crash inputs run before bounded mutation campaigns.
+- Every campaign fixes its run count, seed, and maximum input length.
+- Linux uses ASan/UBSan and TSan, Windows AMD64 uses MSVC ASan, and macOS uses
+  AppleClang ASan/UBSan.
+
+The same jobs repeat the sanitized ordinal-executor probe. Fuzzer settings are
+development controls, not production API or environment configuration.
+
+The dedicated CPython launcher loads the matching TSan runtime before extension
+modules. Its checks are isolated deliberately:
+
+- sanitizer options are compiled into the launcher;
+- the runner verifies that the requested extension build was loaded;
+- 64 native, fixed-clock public-path, and partition-lookahead differential tests
+  run in fresh sanitizer-first interpreters;
+- a success marker is written only after `pytest_sessionfinish`;
+- a timeout before that marker remains a hard failure.
+
+This isolation avoids cross-domain shutdown interactions with binary PyArrow.
+CPython and PyArrow wheels are not TSan-instrumented, so the gate ignores races
+owned entirely by those modules while retaining checks for the extension,
+native core, and bundled zlib.
+
+Ordinary Python also skips local TSan/ASan extensions unless the matching
+runtime was linked before module loading.
 
 Run checks:
 
@@ -739,7 +773,7 @@ regions at each affinity with the operation-local telemetry harness:
 
 ```bash
 PYTHONPATH=src python benchmarks/bench_concurrency_telemetry.py \
-  --workers 1,2,4,8,16,32 --rows 20000 --columns 64 \
+  --workers 1,2,4,8,16,32,64,128 --rows 20000 --columns 64 \
   --memory-mib 512 --warmups 1 --repeats 7 \
   --output concurrency-telemetry.json
 ```
@@ -756,7 +790,7 @@ host, command, and complete source revision before reusing results:
 
 ```bash
 PYTHONPATH=src python benchmarks/bench_high_core_evidence.py \
-  --workers 1,2,4,8,16,32 --columns 64 --memory-mib 512 \
+  --workers 1,2,4,8,16,32,64,128 --columns 64 --memory-mib 2048 \
   --short-rows 20000 --sustained-rows 500000 \
   --warmups 1 --repeats 7 --numa-node 0 --resume \
   --short-dram-json short-dram.json \
@@ -808,9 +842,17 @@ difference before reporting timings.
 
 ### Current concurrency model
 
-Multi-threaded operations use one bounded native arena shared by inference, materialization, Arrow handoff, and output. Worker counts are derived from CPU affinity, cgroup capacity, and the public memory budget. Ordered commit, cancellation, backpressure, deterministic single-thread execution, and logical equivalence remain part of the common source-to-sink contract.
+Multi-threaded operations use one bounded native arena shared by inference,
+materialization, Arrow handoff, and output. Worker counts are derived from CPU
+affinity, cgroup capacity, and the public memory budget; there is no fixed
+32-worker ceiling. Arenas up to 32 workers keep the compact bitset scheduler,
+while wider arenas use scalable per-worker lifecycle state.
 
-Eligible fixed-width flat JSONL uses the complete 32-worker arena for short moderate-cost schemas and a bounded half-arena policy for sustained work. Variable-width, nested, ultra-wide, small, and memory-constrained inputs retain conservative adaptive ceilings.
+Eligible fixed-width flat JSONL can use the complete arena for short,
+moderate-cost schemas and a proportional half-arena policy for sustained work.
+Variable-width, nested, ultra-wide, small, and memory-constrained inputs retain
+conservative adaptive fractions. Those fractions continue scaling above 32
+workers.
 
 For architecture and ownership, see [RESPONSIBILITIES.md](RESPONSIBILITIES.md). For the active threading checklist and benchmark evidence, see [THREADING_TODO.md](THREADING_TODO.md).
 

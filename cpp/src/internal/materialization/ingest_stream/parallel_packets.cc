@@ -21,16 +21,36 @@ sustained_wide_flat_worker_ceiling(std::int64_t effective_workers,
                                    std::int64_t score) noexcept {
   const auto workers = std::max<std::int64_t>(1, effective_workers);
   if (score > kHighCoreWideFlatScoreLimit) {
-    return std::min<std::int64_t>(4, workers);
+    return std::min<std::int64_t>(workers,
+                                  std::max<std::int64_t>(4, workers / 8));
   }
   return std::min<std::int64_t>(workers,
-                                std::clamp<std::int64_t>(workers / 2, 4, 16));
+                                std::max<std::int64_t>(4, workers / 2));
 }
 
 static_assert(sustained_wide_flat_worker_ceiling(8, 64) == 4);
 static_assert(sustained_wide_flat_worker_ceiling(16, 64) == 8);
 static_assert(sustained_wide_flat_worker_ceiling(32, 64) == 16);
 static_assert(sustained_wide_flat_worker_ceiling(32, 128) == 4);
+static_assert(sustained_wide_flat_worker_ceiling(64, 64) == 32);
+static_assert(sustained_wide_flat_worker_ceiling(64, 128) == 8);
+
+[[nodiscard]] constexpr std::int64_t
+scaled_worker_baseline(std::int64_t effective_workers,
+                       std::int64_t baseline_at_32) noexcept {
+  const auto workers = std::max<std::int64_t>(1, effective_workers);
+  if (workers <= 32) {
+    return std::min(workers, baseline_at_32);
+  }
+  return std::min(workers, std::max<std::int64_t>(
+                               baseline_at_32,
+                               (workers * baseline_at_32 + std::int64_t{31}) /
+                                   std::int64_t{32}));
+}
+
+static_assert(scaled_worker_baseline(32, 8) == 8);
+static_assert(scaled_worker_baseline(64, 8) == 16);
+static_assert(scaled_worker_baseline(128, 16) == 64);
 
 [[nodiscard]] std::int64_t saturating_add_score(std::int64_t left,
                                                 std::int64_t right) noexcept {
@@ -271,24 +291,21 @@ ExecutionPolicy materialization_execution_policy(
       useful_workers =
           sustained_wide_flat_worker_ceiling(policy.effective_workers, score);
     } else if (variable_width_heavy) {
-      useful_workers = std::min<std::int64_t>(8, policy.effective_workers);
+      useful_workers = scaled_worker_baseline(policy.effective_workers, 8);
     } else if (score <= kHighCoreWideFlatScoreLimit) {
-      useful_workers = std::min<std::int64_t>(32, policy.effective_workers);
+      useful_workers = policy.effective_workers;
     } else {
-      useful_workers = std::min<std::int64_t>(16, policy.effective_workers);
+      useful_workers = scaled_worker_baseline(policy.effective_workers, 16);
     }
   } else if (score <= 4) {
-    useful_workers = 2;
+    useful_workers = scaled_worker_baseline(policy.effective_workers, 2);
   } else if (score <= 48) {
-    if (policy.effective_workers >= 16) {
-      useful_workers = short_operation ? 9 : 8;
-    } else {
-      useful_workers = 8;
-    }
+    useful_workers = scaled_worker_baseline(policy.effective_workers,
+                                            short_operation ? 9 : 8);
   } else if (score <= 96) {
-    useful_workers = 8;
+    useful_workers = scaled_worker_baseline(policy.effective_workers, 8);
   } else {
-    useful_workers = 16;
+    useful_workers = scaled_worker_baseline(policy.effective_workers, 16);
   }
 
   const auto worker_ceiling = std::max<std::int64_t>(2, useful_workers);
@@ -307,7 +324,9 @@ ExecutionPolicy jsonl_row_parallel_execution_policy(
     const ExecutionPolicy &policy, std::int64_t expected_rows,
     std::int64_t input_size_hint_bytes) noexcept {
   auto out = execution_policy_with_worker_ceiling(
-      policy, std::min<std::int64_t>(16, policy.effective_workers));
+      policy,
+      std::min(policy.effective_workers,
+               std::max<std::int64_t>(16, policy.effective_workers / 2)));
   const auto workers = std::max<std::int64_t>(1, out.effective_workers);
   const auto desired_packets = std::max<std::int64_t>(
       1, std::min<std::int64_t>(out.task_queue_capacity, workers * 2));

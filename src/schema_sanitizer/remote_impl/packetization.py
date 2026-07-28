@@ -25,7 +25,7 @@ def remote_staging_packet_policy(
     concurrent_packets = max(1, budget.remote_chunk_prefetch)
     fair_share = budget.total_bytes // max(4, concurrent_packets * 2)
     return RemoteStagingPacketPolicy(
-        max_files=min(4096, budget.async_prefetch_files * 4),
+        max_files=budget.async_prefetch_files * 4,
         target_bytes=max(
             budget.io_chunk_bytes,
             min(64 * 1024 * 1024, fair_share),

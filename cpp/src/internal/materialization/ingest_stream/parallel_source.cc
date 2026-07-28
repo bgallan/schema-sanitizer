@@ -250,7 +250,9 @@ make_parallel_ingest_stream_source(
       *plan, policy, expected_rows, input_size_hint_bytes);
   if (partition_candidate) {
     stage_policy = execution_policy_with_worker_ceiling(
-        policy, std::min<std::int64_t>(16, policy.effective_workers));
+        policy,
+        std::min(policy.effective_workers,
+                 std::max<std::int64_t>(16, policy.effective_workers / 2)));
     stage_policy.materialization_packet_target_bytes = std::max<std::int64_t>(
         128 * 1024, policy.materialization_packet_target_bytes / 4);
     stage_policy.materialization_packet_max_rows =

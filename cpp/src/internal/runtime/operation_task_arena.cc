@@ -21,9 +21,8 @@ namespace sanitize::internal {
 struct OperationTaskArena::State final {
   struct QueuedTask final {
     Task task;
-    // The validated 32-worker cap makes byte lane bounds lossless and denser.
-    std::uint8_t lane_begin = 0;
-    std::uint8_t lane_end = 1;
+    std::size_t lane_begin = 0;
+    std::size_t lane_end = 1;
     TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther;
     std::int64_t queued_at_ns = 0;
   };
@@ -64,6 +63,12 @@ struct OperationTaskArena::State final {
     // line.
     alignas(64) std::atomic<bool> running{false};
     std::atomic<bool> first_task_pending{false};
+    // Arenas wider than the compact mask path publish lifecycle state per
+    // worker. This removes any fixed worker-count ceiling while preserving the
+    // cache-efficient bitset scheduler for arenas up to 32 workers.
+    std::atomic<bool> admitted{false};
+    std::atomic<bool> started{false};
+    std::atomic<bool> initialized{false};
     // Protected by mutex. Avoids searching queues that contain no dedicated
     // output work when bounded low-core preference is enabled.
     std::size_t dedicated_output_queued = 0;
@@ -73,9 +78,11 @@ struct OperationTaskArena::State final {
   };
   explicit State(std::size_t count,
                  std::shared_ptr<PerformanceTelemetry> telemetry_owner)
-      : worker_count(count), telemetry(std::move(telemetry_owner)) {}
+      : worker_count(count), scalable_scan(count > 32U),
+        telemetry(std::move(telemetry_owner)) {}
 
   const std::size_t worker_count;
+  const bool scalable_scan;
   // The historical publication domain remains the sole 1-8-worker line and
   // the first high-core shard. Three additional aligned shards cover workers
   // 8-31.
@@ -111,19 +118,17 @@ sanitize::Result<std::shared_ptr<OperationTaskArena>>
 OperationTaskArena::Make(std::size_t worker_count,
                          std::shared_ptr<PerformanceTelemetry> telemetry) {
   const auto normalized = std::max<std::size_t>(1, worker_count);
-  if (normalized > 32) {
-    return sanitize::Status::Invalid(
-        "OperationTaskArena::Make: worker count exceeds 32");
-  }
   std::shared_ptr<State> state;
   try {
     state = std::make_shared<State>(normalized, std::move(telemetry));
     state->slots.reserve(normalized);
     for (std::size_t index = 0; index < normalized; ++index) {
       auto slot = std::make_unique<State::WorkerSlot>();
-      slot->visibility = index < 8U
-                             ? &state->primary_queue_visibility
-                             : &state->queue_visibility[(index >> 3U) - 1U];
+      if (!state->scalable_scan) {
+        slot->visibility = index < 8U
+                               ? &state->primary_queue_visibility
+                               : &state->queue_visibility[(index >> 3U) - 1U];
+      }
       state->slots.push_back(std::move(slot));
     }
   } catch (const std::bad_alloc &) {
@@ -162,21 +167,27 @@ OperationTaskArena::PrepareSubmissionPlan(std::size_t lane_width,
   }
   plan.lane_end = plan.lane_begin + plan.width;
   plan.alternative_offset = std::max<std::size_t>(1, plan.width / 2U);
-  plan.allowed_mask = lane_mask(plan.lane_begin, plan.lane_end);
-  auto remaining_visibility = plan.allowed_mask;
-  if ((remaining_visibility & std::uint64_t{0xFF}) != 0U) {
-    plan.visibility_masks[plan.visibility_count++] =
-        &state_->primary_queue_visibility.nonempty_mask;
-    remaining_visibility &= ~std::uint64_t{0xFF};
-  }
-  while (remaining_visibility != 0U) {
-    const auto shard_index =
-        (static_cast<std::size_t>(std::countr_zero(remaining_visibility)) >>
-         3U) -
-        1U;
-    plan.visibility_masks[plan.visibility_count++] =
-        &state_->queue_visibility[shard_index].nonempty_mask;
-    remaining_visibility &= ~(std::uint64_t{0xFF} << ((shard_index + 1U) * 8U));
+  plan.scalable_scan = state_->scalable_scan;
+  if (plan.scalable_scan) {
+    plan.allowed_mask = 0;
+  } else {
+    plan.allowed_mask = lane_mask(plan.lane_begin, plan.lane_end);
+    auto remaining_visibility = plan.allowed_mask;
+    if ((remaining_visibility & std::uint64_t{0xFF}) != 0U) {
+      plan.visibility_masks[plan.visibility_count++] =
+          &state_->primary_queue_visibility.nonempty_mask;
+      remaining_visibility &= ~std::uint64_t{0xFF};
+    }
+    while (remaining_visibility != 0U) {
+      const auto shard_index =
+          (static_cast<std::size_t>(std::countr_zero(remaining_visibility)) >>
+           3U) -
+          1U;
+      plan.visibility_masks[plan.visibility_count++] =
+          &state_->queue_visibility[shard_index].nonempty_mask;
+      remaining_visibility &=
+          ~(std::uint64_t{0xFF} << ((shard_index + 1U) * 8U));
+    }
   }
   plan.cursor = &state_->all_cursor;
   if (lane == TaskArenaLane::kUpstream) {
@@ -256,14 +267,18 @@ sanitize::Status OperationTaskArena::Submit(Task task,
   // all reuse this origin instead of repeating integer division.
   const auto lane_origin = ticket % width;
   const auto initialized_snapshot =
-      state_->initialized_mask.load(std::memory_order_acquire);
+      state_->scalable_scan
+          ? std::uint64_t{0}
+          : state_->initialized_mask.load(std::memory_order_acquire);
   auto physical = idle_started_worker(state_, lane_begin, lane_end, width,
                                       plan.allowed_mask, lane_origin,
                                       initialized_snapshot, plan);
   bool reserved_worker = false;
-  const auto lane_fully_initialized =
+  const auto compact_lane_fully_initialized =
+      !state_->scalable_scan &&
       (initialized_snapshot & plan.allowed_mask) == plan.allowed_mask;
-  if (physical == lane_end && !lane_fully_initialized) {
+  if (physical == lane_end &&
+      (state_->scalable_scan || !compact_lane_fully_initialized)) {
     // If every allowed bit is initialized, every worker is already admitted and
     // started. A stale snapshot can only take this conservative reservation
     // path; it can never skip a worker that still needs startup.
@@ -292,9 +307,12 @@ sanitize::Status OperationTaskArena::Submit(Task task,
       }
     }
   }
+  const auto worker_initialized =
+      state_->scalable_scan
+          ? state_->slots[physical]->initialized.load(std::memory_order_acquire)
+          : (initialized_snapshot & worker_bit(physical)) != 0U;
   const auto startup_status =
-      (initialized_snapshot & worker_bit(physical)) != 0U ||
-              worker_already_started_fast_path(state_, physical)
+      worker_initialized || worker_already_started_fast_path(state_, physical)
           ? sanitize::Status::OK()
           : ensure_worker_started(state_, physical, reserved_worker);
   if (!startup_status.ok()) {
@@ -313,8 +331,11 @@ sanitize::Status OperationTaskArena::Submit(Task task,
     if (state_->stopping.load(std::memory_order_acquire)) {
       if (reserved_worker) {
         slot.first_task_pending.store(false, std::memory_order_release);
-        state_->initialized_mask.fetch_or(worker_bit(physical),
-                                          std::memory_order_release);
+        slot.initialized.store(true, std::memory_order_release);
+        if (!state_->scalable_scan) {
+          state_->initialized_mask.fetch_or(worker_bit(physical),
+                                            std::memory_order_release);
+        }
         slot.wake_epoch.fetch_add(1, std::memory_order_release);
         slot.ready.notify_one();
       }
@@ -324,8 +345,8 @@ sanitize::Status OperationTaskArena::Submit(Task task,
     target_running = slot.running.load(std::memory_order_acquire);
     slot.tasks.push_back(State::QueuedTask{
         .task = std::move(task),
-        .lane_begin = static_cast<std::uint8_t>(lane_begin),
-        .lane_end = static_cast<std::uint8_t>(lane_end),
+        .lane_begin = lane_begin,
+        .lane_end = lane_end,
         .telemetry_kind = telemetry_kind,
         .queued_at_ns =
             state_->telemetry ? PerformanceTelemetry::NowNs() : std::int64_t{0},
@@ -357,8 +378,11 @@ sanitize::Status OperationTaskArena::Submit(Task task,
   } catch (const std::bad_alloc &) {
     if (reserved_worker) {
       slot.first_task_pending.store(false, std::memory_order_release);
-      state_->initialized_mask.fetch_or(worker_bit(physical),
-                                        std::memory_order_release);
+      slot.initialized.store(true, std::memory_order_release);
+      if (!state_->scalable_scan) {
+        state_->initialized_mask.fetch_or(worker_bit(physical),
+                                          std::memory_order_release);
+      }
       slot.wake_epoch.fetch_add(1, std::memory_order_release);
       slot.ready.notify_one();
     }
@@ -436,9 +460,17 @@ std::size_t OperationTaskArena::queued_tasks() const noexcept {
   return total;
 }
 std::size_t OperationTaskArena::started_workers() const noexcept {
-  return state_ ? static_cast<std::size_t>(std::popcount(
-                      state_->started_mask.load(std::memory_order_acquire)))
-                : 0U;
+  if (!state_) {
+    return 0U;
+  }
+  if (!state_->scalable_scan) {
+    return static_cast<std::size_t>(
+        std::popcount(state_->started_mask.load(std::memory_order_acquire)));
+  }
+  return static_cast<std::size_t>(std::count_if(
+      state_->slots.begin(), state_->slots.end(), [](const auto &slot) {
+        return slot->started.load(std::memory_order_acquire);
+      }));
 }
 std::uint64_t OperationTaskArena::wake_epoch_publishes() const noexcept {
   if (!state_) {
@@ -485,14 +517,19 @@ void OperationTaskArena::Shutdown() noexcept {
     slot->queued.store(0, std::memory_order_relaxed);
     slot->running.store(false, std::memory_order_relaxed);
     slot->first_task_pending.store(false, std::memory_order_relaxed);
+    slot->admitted.store(false, std::memory_order_relaxed);
+    slot->started.store(false, std::memory_order_relaxed);
+    slot->initialized.store(false, std::memory_order_relaxed);
   }
   state->primary_queue_visibility.nonempty_mask.store(
       0, std::memory_order_relaxed);
   for (auto &visibility : state->queue_visibility) {
     visibility.nonempty_mask.store(0, std::memory_order_relaxed);
   }
-  state->admitted_mask.store(0, std::memory_order_relaxed);
-  state->started_mask.store(0, std::memory_order_relaxed);
-  state->initialized_mask.store(0, std::memory_order_relaxed);
+  if (!state->scalable_scan) {
+    state->admitted_mask.store(0, std::memory_order_relaxed);
+    state->started_mask.store(0, std::memory_order_relaxed);
+    state->initialized_mask.store(0, std::memory_order_relaxed);
+  }
 }
 } // namespace sanitize::internal

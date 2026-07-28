@@ -78,8 +78,12 @@ inference_execution_policy(const internal::ExecutionPolicy &policy) noexcept {
   if (policy.effective_workers <= 1) {
     return policy;
   }
+  const auto inference_workers =
+      std::min(policy.effective_workers,
+               std::max<std::int64_t>(2, policy.effective_workers / 4));
   internal::ExecutionPolicy out =
-      internal::execution_policy_with_worker_ceiling(policy, 8, 1);
+      internal::execution_policy_with_worker_ceiling(policy, inference_workers,
+                                                     1);
   out.effective_workers = std::max<std::int64_t>(2, out.effective_workers);
   out.task_queue_capacity = out.effective_workers;
   out.reorder_capacity = out.effective_workers;

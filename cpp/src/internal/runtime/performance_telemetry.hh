@@ -160,7 +160,7 @@ private:
     std::array<std::atomic<std::int64_t>, kTaskKindCount> max_run_ns{};
     std::atomic<std::int64_t> batches{0};
     // RecordWorkerTaskBatch is called only by the matching physical worker
-    // across the complete 2-32-worker arena range.
+    // on the compact telemetry path. Wider arenas use aggregate atomics.
     // Keep exact writer-local totals and publish lock-free snapshots with one
     // relaxed store per field instead of shared-style RMW/CAS operations.
     std::array<std::uint64_t, kTaskKindCount> completed_local{};

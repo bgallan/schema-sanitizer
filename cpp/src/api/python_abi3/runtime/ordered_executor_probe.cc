@@ -84,8 +84,9 @@ PyObject *py_ordered_executor_probe(PyObject *, PyObject *args) {
     PyErr_SetString(PyExc_ValueError, "mode must be 0 (single) or 1 (multi)");
     return nullptr;
   }
-  if (requested_workers < 1 || requested_workers > 32) {
-    PyErr_SetString(PyExc_ValueError, "workers must be within [1, 32]");
+  if (requested_workers < 1 || requested_workers > 1024) {
+    PyErr_SetString(PyExc_ValueError,
+                    "diagnostic workers must be within [1, 1024]");
     return nullptr;
   }
   if (task_count < 0 || task_count > 10000) {
@@ -219,10 +220,10 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
                         &tasks_per_stage)) {
     return nullptr;
   }
-  if (requested_workers < 1 || requested_workers > 32 || upstream_workers < 1 ||
-      upstream_workers > requested_workers || output_workers < 1 ||
-      output_workers > requested_workers || tasks_per_stage < 1 ||
-      tasks_per_stage > 1000) {
+  if (requested_workers < 1 || requested_workers > 1024 ||
+      upstream_workers < 1 || upstream_workers > requested_workers ||
+      output_workers < 1 || output_workers > requested_workers ||
+      tasks_per_stage < 1 || tasks_per_stage > 1000) {
     PyErr_SetString(PyExc_ValueError, "invalid arena worker or task count");
     return nullptr;
   }

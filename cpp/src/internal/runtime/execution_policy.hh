@@ -11,9 +11,7 @@
 
 namespace sanitize::internal {
 
-inline constexpr std::int64_t kMaxExecutionWorkers = 32;
 inline constexpr std::int64_t kMinimumWorkerArenaBytes = 8LL * 1024LL * 1024LL;
-inline constexpr std::int64_t kMaxExecutionQueueCapacity = 64;
 inline constexpr std::int64_t kMaxMaterializationPacketRows = 5120;
 inline constexpr std::int64_t kMaxMaterializationPacketBytes =
     1LL * 1024LL * 1024LL;
@@ -61,8 +59,7 @@ execution_policy_from(sanitize::ThreadingMode mode,
     return out;
   }
 
-  const auto cpu_workers =
-      std::min<std::int64_t>(kMaxExecutionWorkers, out.available_cpus);
+  const auto cpu_workers = out.available_cpus;
   // Reserve one quarter of the operation budget for the ordered reader,
   // reducer, writer, and reorder ownership. Workers share the remainder.
   const auto worker_pool_bytes =
@@ -79,9 +76,11 @@ execution_policy_from(sanitize::ThreadingMode mode,
                               : ExecutionFallbackReason::kMemoryLimited;
     return out;
   }
-  out.task_queue_capacity = std::min<std::int64_t>(
-      kMaxExecutionQueueCapacity,
-      std::max<std::int64_t>(1, out.effective_workers * 2));
+  const auto max = std::numeric_limits<std::int64_t>::max();
+  out.task_queue_capacity =
+      out.effective_workers > max / 2
+          ? max
+          : std::max<std::int64_t>(1, out.effective_workers * 2);
   out.reorder_capacity = out.task_queue_capacity;
 
   // Packet outputs live in the ordered reorder window until the coordinator

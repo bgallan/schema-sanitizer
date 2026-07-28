@@ -32,6 +32,7 @@ struct TaskArenaSubmissionPlan final {
   std::uint64_t allowed_mask = 1;
   std::array<std::atomic<std::uint64_t> *, 4> visibility_masks{};
   std::size_t visibility_count = 0;
+  bool scalable_scan = false;
   std::atomic<std::size_t> *cursor = nullptr;
 };
 

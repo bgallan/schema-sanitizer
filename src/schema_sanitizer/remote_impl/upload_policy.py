@@ -12,7 +12,6 @@ from ..core_impl.memory_budget import memory_budget
 _MIB = 1024 * 1024
 _S3_MIN_PART_BYTES = 5 * _MIB
 _GCS_CHUNK_ALIGNMENT = 256 * 1024
-_MAX_UPLOAD_WORKERS = 8
 _MAX_UPLOAD_PARTS = 10_000
 
 
@@ -69,14 +68,7 @@ def remote_upload_policy(
             _round_up(math.ceil(max(1, file_size) / _MAX_UPLOAD_PARTS), _MIB),
         )
 
-    requested_workers = (
-        1
-        if policy.is_single
-        else min(
-            max(1, policy.async_concurrency),
-            _MAX_UPLOAD_WORKERS,
-        )
-    )
+    requested_workers = 1 if policy.is_single else max(1, policy.async_concurrency)
     max_workers_by_memory = max(1, buffer_budget // desired_part)
     concurrency = min(requested_workers, max_workers_by_memory)
     part_count = max(1, math.ceil(max(1, file_size) / desired_part))

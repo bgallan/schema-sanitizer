@@ -97,12 +97,12 @@ sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
   const auto arena_workers = task_arena ? task_arena->worker_count() : 1U;
   // Small Arrow batches are cheapest to encode serially per row group, but
   // independent row groups can overlap with upstream materialization. Reserve
-  // the high half of a four-worker arena for ordered row-group preparation;
-  // larger hosts retain the historical four-worker ceiling.
+  // a conservative fraction of the arena for ordered row-group preparation.
+  // The fraction continues growing on hosts wider than 32 workers.
   const auto row_group_workers =
       arena_workers >= 4U
-          ? std::min<std::size_t>(4U,
-                                  std::max<std::size_t>(2U, arena_workers / 2U))
+          ? std::min(arena_workers,
+                     std::max<std::size_t>(2U, arena_workers / 8U))
           : 1U;
   const auto row_group_retained_limit = static_cast<std::size_t>(
       std::max<std::int64_t>(1, budget.total_bytes / 4));

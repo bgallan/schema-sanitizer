@@ -9,7 +9,6 @@ from typing import Any, TypeVar
 
 T = TypeVar("T")
 
-_MAX_ASYNC_WORKERS = 512
 _MAX_ASYNC_RETRIES = 32
 
 
@@ -85,7 +84,7 @@ async def ordered_indexed_results(
     """Yield indexed async results in input order with bounded prefetch."""
     if count <= 0:
         return
-    worker_count = min(count, max(1, int(window)), _MAX_ASYNC_WORKERS)
+    worker_count = min(count, max(1, int(window)))
     indices: asyncio.Queue[int] = asyncio.Queue(maxsize=worker_count)
     results: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue(
         maxsize=worker_count
@@ -121,7 +120,7 @@ async def unordered_indexed_results(
     """Yield indexed async results as they complete with a fixed worker pool."""
     if count <= 0:
         return
-    worker_count = min(count, max(1, int(window)), _MAX_ASYNC_WORKERS)
+    worker_count = min(count, max(1, int(window)))
     indices: asyncio.Queue[int] = asyncio.Queue(maxsize=worker_count)
     results: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue(
         maxsize=worker_count

@@ -10,6 +10,19 @@
 [[nodiscard]] std::size_t reserve_unstarted_worker(
     const std::shared_ptr<OperationTaskArena::State> &state, std::size_t begin,
     std::size_t end, std::uint64_t allowed, std::size_t lane_origin) noexcept {
+  if (state->scalable_scan) {
+    const auto width = end - begin;
+    for (std::size_t offset = 0; offset < width; ++offset) {
+      const auto index = begin + ((lane_origin + offset) % width);
+      bool expected = false;
+      if (state->slots[index]->admitted.compare_exchange_strong(
+              expected, true, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        return index;
+      }
+    }
+    return end;
+  }
   auto admitted = state->admitted_mask.load(std::memory_order_acquire);
   while (true) {
     auto available = allowed & ~admitted;
@@ -83,6 +96,18 @@ idle_started_worker(const std::shared_ptr<OperationTaskArena::State> &state,
                     std::uint64_t allowed, std::size_t lane_origin,
                     std::uint64_t initialized_snapshot,
                     const TaskArenaSubmissionPlan &plan) noexcept {
+  if (plan.scalable_scan) {
+    for (std::size_t offset = 0; offset < width; ++offset) {
+      const auto index = begin + ((lane_origin + offset) % width);
+      const auto &slot = *state->slots[index];
+      if (slot.initialized.load(std::memory_order_acquire) &&
+          slot.queued.load(std::memory_order_relaxed) == 0U &&
+          !slot.running.load(std::memory_order_acquire)) {
+        return index;
+      }
+    }
+    return end;
+  }
   // initialized_mask is a monotonic subset of both started_mask and
   // admitted_mask during admission: initialized implies started and admitted.
   // Reuse one acquire snapshot instead of
@@ -124,11 +149,17 @@ idle_started_worker(const std::shared_ptr<OperationTaskArena::State> &state,
 }
 void mark_nonempty(const std::shared_ptr<OperationTaskArena::State> &state,
                    std::size_t index) noexcept {
+  if (state->scalable_scan) {
+    return;
+  }
   state->slots[index]->visibility->nonempty_mask.fetch_or(
       worker_bit(index), std::memory_order_release);
 }
 void mark_empty(const std::shared_ptr<OperationTaskArena::State> &state,
                 std::size_t index) noexcept {
+  if (state->scalable_scan) {
+    return;
+  }
   state->slots[index]->visibility->nonempty_mask.fetch_and(
       ~worker_bit(index), std::memory_order_release);
 }
@@ -146,15 +177,14 @@ void mark_empty(const std::shared_ptr<OperationTaskArena::State> &state,
 [[nodiscard]] bool
 compatible(const OperationTaskArena::State::QueuedTask &queued,
            std::size_t index) noexcept {
-  return index >= static_cast<std::size_t>(queued.lane_begin) &&
-         index < static_cast<std::size_t>(queued.lane_end);
+  return index >= queued.lane_begin && index < queued.lane_end;
 }
 [[nodiscard]] bool dedicated_high_output(
     const OperationTaskArena::State::QueuedTask &queued,
     const std::shared_ptr<OperationTaskArena::State> &state) noexcept {
   const auto high_begin = state->worker_count / 2U;
-  return static_cast<std::size_t>(queued.lane_end) == state->worker_count &&
-         static_cast<std::size_t>(queued.lane_begin) >= high_begin;
+  return queued.lane_end == state->worker_count &&
+         queued.lane_begin >= high_begin;
 }
 [[nodiscard]] bool bounded_low_core_output(
     const OperationTaskArena::State::QueuedTask &queued,
@@ -198,8 +228,11 @@ bool take_local(const std::shared_ptr<OperationTaskArena::State> &state,
   // per-slot store and the operation-global initialized-mask RMW.
   if (initialize_worker) {
     slot.first_task_pending.store(false, std::memory_order_release);
-    state->initialized_mask.fetch_or(worker_bit(index),
-                                     std::memory_order_release);
+    slot.initialized.store(true, std::memory_order_release);
+    if (!state->scalable_scan) {
+      state->initialized_mask.fetch_or(worker_bit(index),
+                                       std::memory_order_release);
+    }
   }
   if constexpr (PreferDedicatedOutput) {
     // Above eight workers the dedicated output lane can otherwise remain
@@ -273,6 +306,66 @@ template <bool PreferDedicatedOutput>
 bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
                       std::size_t index, bool allow_preference,
                       OperationTaskArena::State::QueuedTask *out) noexcept {
+  if (state->scalable_scan) {
+    // Wide arenas use per-worker lifecycle publications instead of one fixed
+    // integer mask. Scan from the next physical worker so every queue remains
+    // reachable without imposing a compile-time worker ceiling.
+    for (std::size_t offset = 1; offset < state->worker_count; ++offset) {
+      const auto candidate_index = (index + offset) % state->worker_count;
+      auto &candidate = *state->slots[candidate_index];
+      if (!candidate.initialized.load(std::memory_order_acquire) ||
+          candidate.queued.load(std::memory_order_relaxed) == 0U) {
+        continue;
+      }
+      std::lock_guard lock(candidate.mutex);
+      if (candidate.tasks.empty()) {
+        continue;
+      }
+      auto selected = candidate.tasks.end();
+      if constexpr (PreferDedicatedOutput) {
+        if (allow_preference && index >= state->worker_count / 2U &&
+            dedicated_high_output(candidate.tasks.front(), state) &&
+            compatible(candidate.tasks.front(), index)) {
+          selected = candidate.tasks.begin();
+        }
+      } else if (candidate.shallow_output_preference && allow_preference &&
+                 index >= state->worker_count / 2U &&
+                 output_preference_queue_is_bounded(candidate.tasks.size()) &&
+                 bounded_low_core_output(candidate.tasks.front(), state) &&
+                 compatible(candidate.tasks.front(), index)) {
+        selected = candidate.tasks.begin();
+      }
+      if (selected == candidate.tasks.end()) {
+        const auto reverse = std::find_if(
+            candidate.tasks.rbegin(), candidate.tasks.rend(),
+            [index](const auto &queued) { return compatible(queued, index); });
+        if (reverse == candidate.tasks.rend()) {
+          continue;
+        }
+        selected = std::prev(reverse.base());
+      }
+      *out = std::move(*selected);
+      if constexpr (!PreferDedicatedOutput) {
+        if (candidate.dedicated_output_queued > 0U) {
+          if (bounded_low_core_output(*out, state)) {
+            --candidate.dedicated_output_queued;
+          }
+          refresh_shallow_output_preference(state, candidate);
+        }
+      }
+      candidate.tasks.erase(selected);
+      --candidate.queued_local;
+      candidate.queued.store(candidate.queued_local, std::memory_order_relaxed);
+      auto &thief = *state->slots[index];
+      ++thief.stolen_local;
+      thief.stolen.store(thief.stolen_local, std::memory_order_relaxed);
+      if (state->telemetry) {
+        state->telemetry->RecordWorkerTaskStolen(index);
+      }
+      return true;
+    }
+    return false;
+  }
   const auto initialized_snapshot =
       state->initialized_mask.load(std::memory_order_acquire);
   auto candidates = queue_visibility_snapshot<PreferDedicatedOutput>(
@@ -541,6 +634,9 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
   // smaller arenas retain the historical start-mutex path. The published bit
   // is authoritative because ensure_worker_started sets it only after the
   // jthread owner is installed under start_mutex.
+  if (state->scalable_scan) {
+    return state->slots[index]->started.load(std::memory_order_acquire);
+  }
   return state->worker_count >= 4U &&
          (state->started_mask.load(std::memory_order_acquire) &
           worker_bit(index)) != 0U;
@@ -552,8 +648,12 @@ ensure_worker_started(const std::shared_ptr<OperationTaskArena::State> &state,
   auto &slot = *state->slots[index];
   const auto release_reservation = [&]() noexcept {
     if (reserved_by_caller) {
-      state->admitted_mask.fetch_and(~worker_bit(index),
-                                     std::memory_order_release);
+      if (state->scalable_scan) {
+        slot.admitted.store(false, std::memory_order_release);
+      } else {
+        state->admitted_mask.fetch_and(~worker_bit(index),
+                                       std::memory_order_release);
+      }
     }
   };
   std::lock_guard start_lock(slot.start_mutex);
@@ -582,7 +682,11 @@ ensure_worker_started(const std::shared_ptr<OperationTaskArena::State> &state,
             worker_loop<false, true>(state, index, stop);
           });
     }
-    state->started_mask.fetch_or(worker_bit(index), std::memory_order_release);
+    slot.started.store(true, std::memory_order_release);
+    if (!state->scalable_scan) {
+      state->started_mask.fetch_or(worker_bit(index),
+                                   std::memory_order_release);
+    }
     if (state->telemetry) {
       state->telemetry->RecordWorkerStarted();
     }

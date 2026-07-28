@@ -148,6 +148,22 @@ def test_operation_task_arena_reuses_exact_worker_budget_across_stages() -> None
     assert submitted == 64
 
 
+def test_operation_task_arena_executes_beyond_32_workers() -> None:
+    """The scalable scheduler starts and uses a 64-worker operation arena."""
+    require_native()
+    workers, peak, total_threads, overlap, upstream, output, submitted = (
+        native_core.operation_task_arena_probe(64, 32, 32, 128)
+    )
+
+    assert workers == 64
+    assert peak == 64
+    assert total_threads == 64
+    assert overlap == 0
+    assert upstream == 32
+    assert output == 32
+    assert submitted == 256
+
+
 def test_operation_task_arena_single_mode_is_strictly_inline() -> None:
     """An arena with one worker does not create a native helper thread."""
     require_native()

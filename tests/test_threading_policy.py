@@ -88,6 +88,36 @@ def test_multi_policy_is_bounded_and_can_fall_back_to_one_worker() -> None:
     assert constrained.fallback_to_one_worker_reason == "memory_limited"
 
 
+def test_multi_policy_has_no_32_worker_ceiling() -> None:
+    """CPU capacity above 32 remains usable when memory permits it."""
+    policy_64 = execution_policy(
+        "multi",
+        1024 * 1024 * 1024,
+        available_cpus=64,
+    )
+    policy_128 = execution_policy(
+        "multi",
+        2 * 1024 * 1024 * 1024,
+        available_cpus=128,
+    )
+
+    assert policy_64.effective_workers == 64
+    assert policy_64.task_queue_capacity >= 128
+    assert policy_128.effective_workers == 128
+    assert policy_128.task_queue_capacity >= 256
+    assert policy_128.async_concurrency == 128
+    assert policy_128.remote_chunk_prefetch == 64
+    assert policy_128.source_discovery_concurrency == 256
+
+    memory_limited = execution_policy(
+        "multi",
+        256 * 1024 * 1024,
+        available_cpus=128,
+    )
+    assert memory_limited.effective_workers == 24
+    assert memory_limited.worker_arena_bytes >= 8 * 1024 * 1024
+
+
 def test_internal_threading_mode_normalization_is_strict() -> None:
     """Only the two canonical internal values are accepted."""
     assert normalize_threading_mode(" single ") == "single"

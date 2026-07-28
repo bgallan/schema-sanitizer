@@ -25,27 +25,27 @@ namespace {
 
 namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
-// Variable-width and narrow CSV escaping starts contending on shared cache and
-// allocator metadata beyond four encoders. Wide fixed-cost schemas avoid the
-// row-dependent planner and publish enough uniform packets to use half of a
-// high-core operation arena without starving upstream materialization.
-inline constexpr std::int64_t kCsvOutputWorkerCeiling = 4;
-inline constexpr std::int64_t kMaximumWideFixedCsvWorkers = 16;
+// Variable-width CSV uses a conservative fraction of the operation arena.
+// Wide fixed-cost schemas publish enough uniform packets to use half of it.
+// Both policies continue scaling beyond the historical 32-worker range.
+inline constexpr std::int64_t kMinimumCsvOutputWorkers = 4;
 
 [[nodiscard]] constexpr std::int64_t
-wide_fixed_csv_worker_ceiling_for(std::int64_t operation_workers) noexcept {
-  if (operation_workers <= 8) {
-    return kCsvOutputWorkerCeiling;
-  }
-  return std::clamp<std::int64_t>(
-      std::max<std::int64_t>(kCsvOutputWorkerCeiling, operation_workers / 2),
-      kCsvOutputWorkerCeiling, kMaximumWideFixedCsvWorkers);
+csv_worker_ceiling_for(std::int64_t operation_workers,
+                       bool wide_fixed) noexcept {
+  const auto workers = std::max<std::int64_t>(1, operation_workers);
+  const auto divisor = wide_fixed ? 2 : 8;
+  return std::min(workers, std::max<std::int64_t>(kMinimumCsvOutputWorkers,
+                                                  workers / divisor));
 }
 
-static_assert(wide_fixed_csv_worker_ceiling_for(4) == 4);
-static_assert(wide_fixed_csv_worker_ceiling_for(8) == 4);
-static_assert(wide_fixed_csv_worker_ceiling_for(16) == 8);
-static_assert(wide_fixed_csv_worker_ceiling_for(32) == 16);
+static_assert(csv_worker_ceiling_for(4, true) == 4);
+static_assert(csv_worker_ceiling_for(8, true) == 4);
+static_assert(csv_worker_ceiling_for(16, true) == 8);
+static_assert(csv_worker_ceiling_for(32, true) == 16);
+static_assert(csv_worker_ceiling_for(64, true) == 32);
+static_assert(csv_worker_ceiling_for(32, false) == 4);
+static_assert(csv_worker_ceiling_for(64, false) == 8);
 
 class CsvRowEstimator final {
 public:
@@ -404,18 +404,14 @@ write_stream(ArrowArrayStream *stream, Output &out_file,
   CsvRowEstimator row_estimator(root);
   const auto wide_fixed = row_estimator.high_core_eligible();
   const auto task_arena = sanitize::internal::task_arena_for_stream(stream);
-  std::int64_t operation_workers = 1;
-  if (wide_fixed) {
-    operation_workers =
-        task_arena ? static_cast<std::int64_t>(task_arena->worker_count())
-                   : execution_policy_from(threading_mode, memory_limit_bytes)
-                         .effective_workers;
-  }
+  const auto operation_workers =
+      task_arena ? static_cast<std::int64_t>(task_arena->worker_count())
+                 : execution_policy_from(threading_mode, memory_limit_bytes)
+                       .effective_workers;
   const auto output_worker_ceiling =
-      wide_fixed ? wide_fixed_csv_worker_ceiling_for(operation_workers)
-                 : kCsvOutputWorkerCeiling;
+      csv_worker_ceiling_for(operation_workers, wide_fixed);
   const auto scale_wide_fixed =
-      wide_fixed && output_worker_ceiling > kCsvOutputWorkerCeiling;
+      wide_fixed && output_worker_ceiling > kMinimumCsvOutputWorkers;
   if (task_arena && task_arena->telemetry()) {
     const auto telemetry = task_arena->telemetry();
     telemetry->AddCounter(

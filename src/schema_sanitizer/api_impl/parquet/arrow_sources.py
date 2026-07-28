@@ -119,7 +119,7 @@ def parquet_arrow_source_chunk_size(call_options: Options | None) -> int:
     )
     from ...core_impl.execution_policy import execution_policy
 
-    return min(4096, execution_policy(threading_mode, memory_limit_bytes).async_prefetch_files * 4)
+    return execution_policy(threading_mode, memory_limit_bytes).async_prefetch_files * 4
 
 
 def parquet_arrow_sources_or_none(

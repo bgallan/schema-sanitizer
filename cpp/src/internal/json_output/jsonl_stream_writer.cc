@@ -24,8 +24,6 @@ constexpr std::size_t kFlushThresholdBytes = 1U << 20;
 constexpr std::size_t kMaxRetainedOutputBytes = 4U << 20;
 
 constexpr std::int64_t kMinimumWideFlatJsonlWorkers = 4;
-constexpr std::int64_t kMaximumWideFlatJsonlWorkers = 16;
-constexpr std::int64_t kConservativeWideFlatJsonlWorkers = 8;
 constexpr std::size_t kWideFlatJsonlFieldThreshold = 24;
 constexpr std::size_t kHighCoreWideFlatJsonlFieldLimit = 96;
 constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
@@ -75,14 +73,15 @@ constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
 wide_flat_worker_ceiling_for(std::int64_t operation_workers) noexcept {
   const auto half_arena = std::max<std::int64_t>(
       1, std::max<std::int64_t>(1, operation_workers) / 2);
-  return std::clamp<std::int64_t>(half_arena, kMinimumWideFlatJsonlWorkers,
-                                  kMaximumWideFlatJsonlWorkers);
+  return std::min(std::max<std::int64_t>(1, operation_workers),
+                  std::max(half_arena, kMinimumWideFlatJsonlWorkers));
 }
 
 static_assert(wide_flat_worker_ceiling_for(4) == 4);
 static_assert(wide_flat_worker_ceiling_for(8) == 4);
 static_assert(wide_flat_worker_ceiling_for(16) == 8);
 static_assert(wide_flat_worker_ceiling_for(32) == 16);
+static_assert(wide_flat_worker_ceiling_for(64) == 32);
 
 [[nodiscard]] constexpr std::int64_t
 wide_fixed_worker_ceiling_for(std::int64_t operation_workers,
@@ -90,12 +89,14 @@ wide_fixed_worker_ceiling_for(std::int64_t operation_workers,
   const auto ceiling = wide_flat_worker_ceiling_for(operation_workers);
   return field_count <= kHighCoreWideFlatJsonlFieldLimit
              ? ceiling
-             : std::min(ceiling, kConservativeWideFlatJsonlWorkers);
+             : std::max<std::int64_t>(1, ceiling / 2);
 }
 
 static_assert(wide_fixed_worker_ceiling_for(16, 64) == 8);
 static_assert(wide_fixed_worker_ceiling_for(32, 64) == 16);
 static_assert(wide_fixed_worker_ceiling_for(32, 128) == 8);
+static_assert(wide_fixed_worker_ceiling_for(64, 64) == 32);
+static_assert(wide_fixed_worker_ceiling_for(64, 128) == 16);
 
 [[nodiscard]] constexpr bool
 should_scale_wide_fixed_output(bool wide_fixed_flat,

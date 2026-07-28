@@ -222,8 +222,11 @@ void PerformanceTelemetry::RecordWorkerTaskSubmitted(
     std::size_t worker_index, TaskTelemetryKind kind,
     std::size_t queue_depth) noexcept {
   const auto kind_index = static_cast<std::size_t>(kind);
-  if (worker_index >= worker_submission_shards_.size() ||
-      kind_index >= kTaskKindCount) {
+  if (kind_index >= kTaskKindCount) {
+    return;
+  }
+  if (worker_index >= worker_submission_shards_.size()) {
+    RecordTaskSubmitted(kind, queue_depth);
     return;
   }
   auto &shard = worker_submission_shards_[worker_index];
@@ -288,8 +291,12 @@ void PerformanceTelemetry::RecordWorkerTaskBatch(
     std::int64_t queue_wait_ns, std::int64_t run_ns,
     std::int64_t max_queue_wait_ns, std::int64_t max_run_ns) noexcept {
   const auto kind_index = static_cast<std::size_t>(kind);
-  if (worker_index >= worker_task_shards_.size() ||
-      kind_index >= kTaskKindCount || task_count <= 0) {
+  if (kind_index >= kTaskKindCount || task_count <= 0) {
+    return;
+  }
+  if (worker_index >= worker_task_shards_.size()) {
+    RecordTaskBatch(kind, task_count, queue_wait_ns, run_ns, max_queue_wait_ns,
+                    max_run_ns);
     return;
   }
   auto &shard = worker_task_shards_[worker_index];
@@ -337,6 +344,7 @@ void PerformanceTelemetry::RecordTaskStolen() noexcept {
 void PerformanceTelemetry::RecordWorkerTaskStolen(
     std::size_t worker_index) noexcept {
   if (worker_index >= worker_task_shards_.size()) {
+    RecordTaskStolen();
     return;
   }
   auto &shard = worker_task_shards_[worker_index];
@@ -347,6 +355,7 @@ void PerformanceTelemetry::RecordWorkerTaskStolen(
 void PerformanceTelemetry::RecordWorkerActiveStreak(
     std::size_t worker_index) noexcept {
   if (worker_index >= worker_task_shards_.size()) {
+    AddCounter(PerformanceCounter::kWorkerActiveStreaks);
     return;
   }
   auto &shard = worker_task_shards_[worker_index];

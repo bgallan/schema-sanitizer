@@ -128,19 +128,16 @@ memory_budget_from_limit(std::int64_t requested) noexcept {
       100'000'000, std::max<std::int64_t>(1'000'000, out.total_bytes / 8));
   out.arrow_logical_buffer_bytes =
       std::min<std::int64_t>(1LL * 1024LL * 1024LL * 1024LL, out.total_bytes);
-  out.async_concurrency = std::min<std::int64_t>(
-      64,
-      std::max<std::int64_t>(1, out.total_bytes / (16LL * 1024LL * 1024LL)));
-  out.async_prefetch_files = std::min<std::int64_t>(
-      256, std::max(out.async_concurrency, out.async_concurrency * 2));
+  out.async_concurrency =
+      std::max<std::int64_t>(1, out.total_bytes / (16LL * 1024LL * 1024LL));
+  out.async_prefetch_files =
+      std::max(out.async_concurrency, out.async_concurrency * 2);
   out.async_retries = 4;
   out.async_timeout_seconds = 120.0;
-  out.remote_chunk_prefetch = std::min<std::int64_t>(
-      32,
-      std::max<std::int64_t>(1, out.total_bytes / (32LL * 1024LL * 1024LL)));
-  out.source_discovery_concurrency = std::min<std::int64_t>(
-      128,
-      std::max<std::int64_t>(1, out.total_bytes / (8LL * 1024LL * 1024LL)));
+  out.remote_chunk_prefetch =
+      std::max<std::int64_t>(1, out.total_bytes / (32LL * 1024LL * 1024LL));
+  out.source_discovery_concurrency =
+      std::max<std::int64_t>(1, out.total_bytes / (8LL * 1024LL * 1024LL));
   return out;
 }
 

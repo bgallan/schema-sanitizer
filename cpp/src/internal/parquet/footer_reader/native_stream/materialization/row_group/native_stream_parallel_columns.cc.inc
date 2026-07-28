@@ -71,7 +71,7 @@ std::size_t native_parquet_column_worker_count(
       1, estimated_result.ValueOrDie() / kMinimumWorkBytesPerWorker);
   auto workers = std::min<std::size_t>(
       {task_arena->worker_count(), row_group.columns.size(),
-       static_cast<std::size_t>(std::min<std::int64_t>(work_workers, 32))});
+       static_cast<std::size_t>(work_workers)});
   if (workers < 2) {
     return 1;
   }
@@ -87,9 +87,8 @@ std::size_t native_parquet_column_worker_count(
       std::max<std::int64_t>(1, stream.max_buffer_bytes / 4);
   const auto scratch_workers =
       std::max<std::int64_t>(1, scratch_budget / scratch_per_worker);
-  workers = std::min<std::size_t>(
-      workers,
-      static_cast<std::size_t>(std::min<std::int64_t>(scratch_workers, 32)));
+  workers =
+      std::min<std::size_t>(workers, static_cast<std::size_t>(scratch_workers));
   return workers < 2 ? 1 : workers;
 }
 
