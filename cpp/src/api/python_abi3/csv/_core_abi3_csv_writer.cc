@@ -98,7 +98,10 @@ csv_write_stream_to_path(PyObject *stream_obj, std::string path,
   }
   std::unique_ptr<PyObject, decltype(&Py_DECREF)> capsule_owner(capsule,
                                                                 Py_DECREF);
-  return csv::write_stream(stream, output, memory_limit_bytes, threading_mode);
+  return call_without_gil([&] {
+    return csv::write_stream(stream, output, memory_limit_bytes,
+                             threading_mode);
+  });
 }
 
 sanitize::Result<csv::WriteStats>
@@ -109,7 +112,10 @@ csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
   if (!output.ok()) {
     return sanitize::Status::IOError("CSV writer: failed opening output");
   }
-  return csv::write_stream(stream, output, memory_limit_bytes, threading_mode);
+  return call_without_gil([&] {
+    return csv::write_stream(stream, output, memory_limit_bytes,
+                             threading_mode);
+  });
 }
 
 } // namespace

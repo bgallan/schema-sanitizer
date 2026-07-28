@@ -25,8 +25,10 @@ write_python_jsonl_stream(PyObject *stream_obj, jsonl::Output &output,
   }
   std::unique_ptr<PyObject, decltype(&Py_DECREF)> capsule_owner(capsule,
                                                                 Py_DECREF);
-  return jsonl::write_stream(stream, output, memory_limit_bytes,
-                             threading_mode);
+  return call_without_gil([&] {
+    return jsonl::write_stream(stream, output, memory_limit_bytes,
+                               threading_mode);
+  });
 }
 
 class FileJsonlOutput final : public jsonl::Output {
@@ -95,6 +97,7 @@ public:
     if (!flush_) {
       return sanitize::Status::OK();
     }
+    ScopedGilAcquire gil;
     PyObject *result = PyObject_CallObject(flush_, nullptr);
     if (!result) {
       return sanitize::Status::IOError("JSONL writer: Python flush failed");
@@ -116,6 +119,7 @@ private:
     if (!write_) {
       return sanitize::Status::Invalid(error_);
     }
+    ScopedGilAcquire gil;
     PyObject *bytes = PyBytes_FromStringAndSize(
         buffer_.data(), static_cast<Py_ssize_t>(buffer_.size()));
     if (!bytes) {
@@ -176,8 +180,10 @@ jsonl_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
   if (!output.ok()) {
     return sanitize::Status::IOError("JSONL writer: failed opening output");
   }
-  return jsonl::write_stream(stream, output, memory_limit_bytes,
-                             threading_mode);
+  return call_without_gil([&] {
+    return jsonl::write_stream(stream, output, memory_limit_bytes,
+                               threading_mode);
+  });
 }
 
 sanitize::Result<jsonl::WriteStats>

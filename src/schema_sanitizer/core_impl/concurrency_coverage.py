@@ -176,6 +176,7 @@ def concurrency_guarantees() -> dict[str, dict[str, dict[str, object]]]:
 
 _PAIR_HANDOFF_STAGES = (
     "operation_owned_task_arena",
+    "gil_released_native_wait_boundaries",
     "cacheline_isolated_arena_writer_domains",
     "worker_active_streak_accounting",
     "cacheline_isolated_worker_running_publication",

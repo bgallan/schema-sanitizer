@@ -108,6 +108,78 @@ def test_provider_pool_separates_incompatible_http_header_sets(monkeypatch) -> N
     assert [client.close_calls for client in created] == [1, 1]
 
 
+def test_provider_pool_initializes_distinct_keys_concurrently() -> None:
+    """Slow factories for unrelated provider keys do not share one await lock."""
+    import asyncio
+
+    from schema_sanitizer.remote_impl.provider_session_pool import (
+        RemoteProviderSessionPool,
+    )
+
+    async def exercise() -> tuple[int, list[_FakeClient]]:
+        active = 0
+        peak = 0
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        clients: list[_FakeClient] = []
+
+        async def create() -> _FakeClient:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                both_started.set()
+            await release.wait()
+            active -= 1
+            client = _FakeClient()
+            clients.append(client)
+            return client
+
+        async with RemoteProviderSessionPool() as pool:
+            first = asyncio.create_task(pool.borrow_client(("http", "a"), create))
+            second = asyncio.create_task(pool.borrow_client(("http", "b"), create))
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            release.set()
+            await asyncio.gather(first, second)
+        return peak, clients
+
+    peak, clients = asyncio.run(exercise())
+    assert peak == 2
+    assert len(clients) == 2
+    assert [client.close_calls for client in clients] == [1, 1]
+
+
+def test_provider_pool_keeps_single_flight_for_one_key() -> None:
+    """Concurrent borrows of one key still create and close one client."""
+    import asyncio
+
+    from schema_sanitizer.remote_impl.provider_session_pool import (
+        RemoteProviderSessionPool,
+    )
+
+    async def exercise() -> tuple[int, _FakeClient]:
+        calls = 0
+        client = _FakeClient()
+
+        async def create() -> _FakeClient:
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0)
+            return client
+
+        async with RemoteProviderSessionPool() as pool:
+            first, second = await asyncio.gather(
+                pool.borrow_client(("http", "same"), create),
+                pool.borrow_client(("http", "same"), create),
+            )
+            assert first._value is second._value  # noqa: SLF001
+        return calls, client
+
+    calls, client = asyncio.run(exercise())
+    assert calls == 1
+    assert client.close_calls == 1
+
+
 def test_single_operation_does_not_construct_provider_pool(monkeypatch) -> None:
     """Single mode rejects async sessions and creates no host thread or pool."""
     from schema_sanitizer.api_impl.operation_context import OperationExecutionContext

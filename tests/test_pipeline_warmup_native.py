@@ -82,7 +82,7 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
 
     assert registry == {"schema_generation": 1}
     assert closed == ["raw"]
-    assert created_sources == [[("json", str(source), str(source))]]
+    assert created_sources == [[("jsonl", str(source), str(source))]]
     assert calls == [
         (
             native_plan,

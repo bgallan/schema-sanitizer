@@ -6,12 +6,14 @@ import asyncio
 import threading
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError, Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncContextManager, TypeVar
 
 from .provider_session_pool import activate_provider_session_pool
 
 T = TypeVar("T")
+_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
 
 @asynccontextmanager
@@ -28,9 +30,13 @@ class RemoteIoCoordinator:
         context_factory: Callable[[], AsyncContextManager[Any]] | None = None,
         *,
         thread_name: str = "schema-sanitizer-remote-io",
+        shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ) -> None:
         """Start the coordinator and enter its shared async context."""
+        if shutdown_timeout_seconds <= 0:
+            raise ValueError("shutdown_timeout_seconds must be positive")
         self._context_factory = context_factory or _empty_async_context
+        self._shutdown_timeout_seconds = float(shutdown_timeout_seconds)
         self._ready = threading.Event()
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -45,7 +51,10 @@ class RemoteIoCoordinator:
             daemon=True,
         )
         self._thread.start()
-        self._ready.wait()
+        if not self._ready.wait(timeout=self._shutdown_timeout_seconds):
+            with self._lock:
+                self._closed = True
+            raise RuntimeError("remote I/O coordinator startup exceeded its deadline")
         self._raise_startup_error()
 
     def _raise_startup_error(self) -> None:
@@ -72,8 +81,10 @@ class RemoteIoCoordinator:
 
             future = asyncio.run_coroutine_threadsafe(invoke(), loop)
             self._futures.add(future)
-            future.add_done_callback(self._forget_future)
-            return future
+        # A future may already be complete here. Register outside _lock because
+        # concurrent.futures invokes callbacks synchronously in that case.
+        future.add_done_callback(self._forget_future)
+        return future
 
     def close(self) -> None:
         """Cancel, drain, close the shared context, and join the host thread."""
@@ -93,12 +104,20 @@ class RemoteIoCoordinator:
         if loop is not None and loop.is_running():
             close_future = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
             try:
-                close_future.result()
+                close_future.result(timeout=self._shutdown_timeout_seconds)
+            except FutureTimeoutError:
+                close_future.cancel()
+                close_error = RuntimeError("remote I/O coordinator shutdown exceeded its deadline")
             except BaseException as exc:
                 close_error = exc
             finally:
-                loop.call_soon_threadsafe(loop.stop)
-        self._thread.join()
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(loop.stop)
+        self._thread.join(timeout=self._shutdown_timeout_seconds)
+        if self._thread.is_alive() and close_error is None:
+            close_error = RuntimeError(
+                "remote I/O coordinator host thread did not stop before its deadline"
+            )
         if close_error is not None:
             raise close_error
 
@@ -129,6 +148,15 @@ class RemoteIoCoordinator:
             manager = self._context_factory()
             self._context_manager = manager
             self._context = loop.run_until_complete(manager.__aenter__())
+            with self._lock:
+                startup_abandoned = self._closed
+            if startup_abandoned:
+                loop.run_until_complete(manager.__aexit__(None, None, None))
+                self._context_manager = None
+                self._context = None
+                self._ready.set()
+                loop.close()
+                return
         except BaseException as exc:
             self._startup_error = exc
             self._ready.set()

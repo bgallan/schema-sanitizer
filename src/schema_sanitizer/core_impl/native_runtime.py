@@ -67,21 +67,42 @@ def _build_runtime_is_compatible(build_dir: pathlib.Path) -> bool:
     return required_symbol is None or _process_exports(required_symbol)
 
 
-def _build_candidate_dirs() -> list[pathlib.Path]:
-    """Return compatible extension candidate directories from this checkout."""
-    candidate_dirs: list[pathlib.Path] = []
-    with suppress(Exception):
-        repo_root = pathlib.Path(__file__).resolve().parents[3]
-        build_root = repo_root / "build"
-        if build_root.is_dir():
-            build_dirs = [
+def _ordered_build_dirs(
+    build_roots: tuple[pathlib.Path, ...],
+) -> list[pathlib.Path]:
+    """Order compatible configured and wheel-staging build directories."""
+    build_dirs: list[pathlib.Path] = []
+    for build_root in build_roots:
+        with suppress(Exception):
+            if not build_root.is_dir():
+                continue
+            if _build_runtime_is_compatible(build_root):
+                build_dirs.append(build_root)
+            build_dirs.extend(
                 path
                 for path in build_root.iterdir()
                 if path.is_dir() and _build_runtime_is_compatible(path)
-            ]
-            build_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-            for build_dir in build_dirs:
-                candidate_dirs.extend((build_dir, build_dir / "schema_sanitizer"))
+            )
+
+    def priority(path: pathlib.Path) -> tuple[bool, float]:
+        """Prefer configured builds, then the newest extension artifact."""
+        mtimes = [
+            candidate.stat().st_mtime
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES
+            if (candidate := path / f"_core_abi3{suffix}").is_file()
+        ]
+        return (bool((path / "CMakeCache.txt").is_file()), max(mtimes, default=0.0))
+
+    return sorted(build_dirs, key=priority, reverse=True)
+
+
+def _build_candidate_dirs() -> list[pathlib.Path]:
+    """Return compatible checkout builds with configured/fresh builds first."""
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    build_dirs = _ordered_build_dirs((repo_root / "build", repo_root.parent / "build"))
+    candidate_dirs: list[pathlib.Path] = []
+    for build_dir in build_dirs:
+        candidate_dirs.extend((build_dir, build_dir / "schema_sanitizer"))
     return candidate_dirs
 
 

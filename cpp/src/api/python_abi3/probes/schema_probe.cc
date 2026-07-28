@@ -1,9 +1,7 @@
 /*
  * Python ABI3 schema-probe wrappers.
  *
- * These entry points run native frontend inference without materializing a
- * sink. They are used by pipeline warm-up/bootstrap paths that only need schema
- * or registry state.
+ * Native frontend inference for pipeline warm-up schema and registry probes.
  */
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
@@ -454,8 +452,10 @@ PyObject *schema_probe_or_raise(schema_sanitizer_context *ctx,
     PyErr_SetString(PyExc_RuntimeError, "context is null");
     return nullptr;
   }
-  auto prepared = prepare_probe(ctx, frontend_name, std::move(src),
-                                std::move(prepared_options));
+  auto prepared = call_without_gil([&] {
+    return prepare_probe(ctx, frontend_name, std::move(src),
+                         std::move(prepared_options));
+  });
   if (!prepared.ok())
     return raise_status(prepared.status(), where);
   sanitize::PreparedIngest ingest = std::move(prepared).ValueOrDie();
@@ -480,8 +480,10 @@ PyObject *registry_probe_or_raise(schema_sanitizer_context *ctx,
     raise_status_error(valid, err);
     return nullptr;
   }
-  auto prepared = prepare_probe(ctx, frontend_name, std::move(src),
-                                std::move(prepared_options));
+  auto prepared = call_without_gil([&] {
+    return prepare_probe(ctx, frontend_name, std::move(src),
+                         std::move(prepared_options));
+  });
   if (!prepared.ok())
     return raise_status(prepared.status(), where);
   sanitize::PreparedIngest ingest = std::move(prepared).ValueOrDie();

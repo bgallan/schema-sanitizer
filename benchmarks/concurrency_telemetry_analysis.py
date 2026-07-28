@@ -256,9 +256,18 @@ def _native_diagnosis(runs: dict[str, Any], workers: int) -> dict[str, Any]:
 
 def recommend_frontier(workloads: dict[str, Any], worker_counts: tuple[int, ...]) -> dict[str, Any]:
     """Choose the next experiment from paired Arrow-only and full-pipeline evidence."""
-    low, high = (8, 16) if {8, 16}.issubset(worker_counts) else worker_counts[-2:]
+    low, high = worker_counts[-2:]
     arrow_runs = workloads.get("arrow_stream", {}).get("runs", {})
     full_runs = workloads.get("jsonl_to_jsonl", {}).get("runs", {})
+    adjacent_gains = [
+        {
+            "low_workers": adjacent_low,
+            "high_workers": adjacent_high,
+            "arrow_gain": _gain(arrow_runs, adjacent_low, adjacent_high),
+            "full_pipeline_gain": _gain(full_runs, adjacent_low, adjacent_high),
+        }
+        for adjacent_low, adjacent_high in zip(worker_counts, worker_counts[1:], strict=False)
+    ]
     arrow_gain = _gain(arrow_runs, low, high)
     full_gain = _gain(full_runs, low, high)
     arrow_paired = paired_gain_evidence(arrow_runs, low, high)
@@ -362,6 +371,7 @@ def recommend_frontier(workloads: dict[str, Any], worker_counts: tuple[int, ...]
 
     return {
         "comparison": {"low_workers": low, "high_workers": high},
+        "adjacent_gains": adjacent_gains,
         "primary": primary,
         "recommended_action": action,
         "confidence": confidence,

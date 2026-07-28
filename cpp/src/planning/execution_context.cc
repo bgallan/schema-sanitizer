@@ -53,14 +53,20 @@ ExecutionContext::performance_telemetry() const {
 }
 
 void ExecutionContext::set_interrupt_check(InterruptCheck check) {
+  std::lock_guard lock(interrupt_mutex_);
   interrupt_check_ = std::move(check);
 }
 
 sanitize::Status ExecutionContext::CheckInterrupt() const {
-  if (!interrupt_check_) {
+  InterruptCheck check;
+  {
+    std::lock_guard lock(interrupt_mutex_);
+    check = interrupt_check_;
+  }
+  if (!check) {
     return sanitize::Status::OK();
   }
-  return interrupt_check_();
+  return check();
 }
 
 } // namespace sanitize

@@ -75,6 +75,7 @@ class RemoteProviderSessionPool:
         """Initialize empty loop-affine provider storage."""
         self._entries: dict[tuple[Any, ...], _PoolEntry] = {}
         self._lock: asyncio.Lock | None = None
+        self._key_locks: dict[tuple[Any, ...], asyncio.Lock] = {}
         self._closed = False
 
     async def __aenter__(self) -> RemoteProviderSessionPool:
@@ -89,6 +90,7 @@ class RemoteProviderSessionPool:
         self._closed = True
         entries = tuple(reversed(tuple(self._entries.values())))
         self._entries.clear()
+        self._key_locks.clear()
         first_error: BaseException | None = None
         for entry in entries:
             try:
@@ -114,8 +116,8 @@ class RemoteProviderSessionPool:
         factory: Callable[[], Awaitable[AsyncContextManager[Any]]],
     ) -> AsyncContextManager[Any]:
         """Return a borrowed view of one entered provider context manager."""
-        lock = self._require_lock()
-        async with lock:
+        key_lock = await self._key_lock(key)
+        async with key_lock:
             self._ensure_open()
             entry = self._entries.get(key)
             if entry is None:
@@ -135,9 +137,9 @@ class RemoteProviderSessionPool:
         key: tuple[Any, ...],
         factory: Callable[[], Awaitable[Any]],
     ) -> _PoolEntry:
-        """Create one directly closable client under the pool lock."""
-        lock = self._require_lock()
-        async with lock:
+        """Create one directly closable client under its key-local lock."""
+        key_lock = await self._key_lock(key)
+        async with key_lock:
             self._ensure_open()
             entry = self._entries.get(key)
             if entry is not None:
@@ -159,6 +161,13 @@ class RemoteProviderSessionPool:
             entry = _PoolEntry(value, close_client)
             self._entries[key] = entry
             return entry
+
+    async def _key_lock(self, key: tuple[Any, ...]) -> asyncio.Lock:
+        """Return one single-flight lock without serializing unrelated keys."""
+        lock = self._require_lock()
+        async with lock:
+            self._ensure_open()
+            return self._key_locks.setdefault(key, asyncio.Lock())
 
     def _require_lock(self) -> asyncio.Lock:
         """Return the event-loop lock after context entry."""

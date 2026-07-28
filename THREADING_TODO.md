@@ -2572,3 +2572,26 @@ diagnostic deltas are merged in ordinal order.
   as end-to-end parser, materializer, or sink throughput.
 - [ ] Repeat full adapter workloads on fixed 8/16/32-CPU hosts with allocator,
   LLC, queue-depth, exact-hash, first-error, RSS, and latency measurements.
+
+## Post-v120 integral concurrency correctness hardening
+
+- [x] Release the caller GIL around native probes, source-to-sink waits, and
+  CSV, JSONL, and Parquet stream writers; reacquire it inside Python reader and
+  Python-output callbacks.
+- [x] Add subprocess timeout regressions for Python generators reaching all
+  native file outputs at exact 16- and 32-CPU affinities.
+- [x] Protect mutable execution-context interrupt callbacks independently from
+  telemetry publication.
+- [x] Publish a worker's dequeue claim before it removes visible work, closing
+  the empty-queue admission window that could pin two blocking tasks to one
+  worker and under-admit a nominally full-width stage.
+- [x] Restore JSONL multi-partition warm-up through the native path-source plan
+  and the fixed-clock single/multi golden matrix.
+- [x] Diagnose the highest adjacent benchmark widths, report every adjacent
+  gain, require DRAM evidence at the actual maximum width, and make explicit
+  `/dev/null` runs bypass atomic publication.
+- [x] Prefer configured, fresh checkout ABI3 builds over stale installed or
+  wheel-staging artifacts.
+- [x] Keep provider creation single-flight per compatibility key without
+  serializing unrelated keys, bound coordinator startup/shutdown, and register
+  already-completed future callbacks outside the coordinator lock.

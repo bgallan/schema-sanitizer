@@ -457,9 +457,12 @@ result = ss.to_parquet(
 The Python object iteration and dictionary inspection remain GIL-bound. Multi
 mode amortizes that boundary by consuming up to 4,096 rows per ABI3 call and
 feeds the same bounded C++ inference, materialization, and output workers used
-by file inputs. Generators are not converted to lists; their replay spool is
-bounded by the single public memory budget. Single mode creates no helper
-thread and remains the deterministic inline reference.
+by file inputs. Native probes, source-to-sink execution, and CSV, JSONL, and
+Parquet writers release the caller's GIL while waiting on the operation arena;
+reader and Python-output callbacks acquire it only for the callback duration.
+Generators are not converted to lists; their replay spool is bounded by the
+single public memory budget. Single mode creates no helper thread and remains
+the deterministic inline reference.
 
 `input_mode="single_file"` processes exactly one file. `input_mode="directory"`
 processes matching direct children in deterministic filename order; it does not
@@ -618,7 +621,9 @@ ordinals before scanning an oversized row inline. One lazy operation execution
 context spans the complete public conversion:
 initial listing, single-file or directory staging, probe/stream prefetch, and
 final remote output upload share one event-loop host in `multi`. Compatible HTTP, S3, and Azure provider sessions are pooled for the complete
-operation and close exactly once after submitted work drains. Directory staging
+operation and close exactly once after submitted work drains. Provider creation
+is single-flight per compatibility key while unrelated keys initialize
+concurrently; coordinator startup and shutdown have bounded deadlines. Directory staging
 also shares one global transfer semaphore on that operation host. Remote packets are bounded by both file count and
 known bytes. A bounded probe prefix is reused by materialization instead of
 being downloaded twice. Native materialization coalesces contiguous rows into

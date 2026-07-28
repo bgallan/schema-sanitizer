@@ -378,11 +378,16 @@ public:
       : state_(state), index_(index) {}
   ~WorkerActivityStreak() { Stop(); }
 
+  void AdvertiseDequeue() noexcept {
+    if (!active_) {
+      state_->slots[index_]->running.store(true, std::memory_order_release);
+    }
+  }
+
   void Start() noexcept {
     if (active_) {
       return;
     }
-    state_->slots[index_]->running.store(true, std::memory_order_release);
     const auto active =
         state_->active.fetch_add(1, std::memory_order_relaxed) + 1U;
     bool established_new_peak = false;
@@ -408,12 +413,11 @@ public:
   }
 
   void Stop() noexcept {
-    if (!active_) {
-      return;
+    if (active_) {
+      state_->active.fetch_sub(1, std::memory_order_release);
+      active_ = false;
     }
     state_->slots[index_]->running.store(false, std::memory_order_release);
-    state_->active.fetch_sub(1, std::memory_order_release);
-    active_ = false;
   }
 
 private:
@@ -450,6 +454,7 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
     // passed into the task, so reloading the operation-global stopping flag
     // before every packet would duplicate cancellation traffic on one shared
     // cache line. The flag remains authoritative at admission and park wakeup.
+    activity.AdvertiseDequeue();
     OperationTaskArena::State::QueuedTask queued;
     bool preference_used = false;
     const auto found =

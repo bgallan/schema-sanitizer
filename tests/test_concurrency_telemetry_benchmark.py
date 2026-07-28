@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from benchmarks.bench_concurrency_telemetry import _dram_high_width_coverage
 from benchmarks.concurrency_telemetry_analysis import (
     classify_run,
     parse_perf_stat,
@@ -120,6 +121,51 @@ def test_paired_workloads_select_output_partitioning() -> None:
     assert recommendation["recommended_action"] == ("prototype_partitioned_or_pipelined_output")
 
 
+def test_frontier_uses_the_highest_adjacent_pair_and_reports_every_gain() -> None:
+    """A 32-worker matrix is diagnosed from 16→32 rather than 8→16."""
+    workloads = {
+        "arrow_stream": {
+            "runs": {
+                "8": _run(1.0),
+                "16": _run(0.5),
+                "32": _run(0.49),
+            }
+        },
+        "jsonl_to_jsonl": {
+            "runs": {
+                "8": _run(2.0),
+                "16": _run(1.0),
+                "32": _run(0.98),
+            }
+        },
+    }
+    recommendation = recommend_frontier(workloads, (8, 16, 32))
+    assert recommendation["comparison"] == {
+        "low_workers": 16,
+        "high_workers": 32,
+    }
+    assert [
+        (gain["low_workers"], gain["high_workers"]) for gain in recommendation["adjacent_gains"]
+    ] == [(8, 16), (16, 32)]
+    assert recommendation["primary"] != "scaling_still_useful"
+
+
+def test_dram_coverage_uses_the_highest_requested_width() -> None:
+    """A 32-worker run cannot be certified by a 16-worker DRAM sample."""
+    coverage = _dram_high_width_coverage(
+        {
+            "arrow_stream": {"16": {"measured_gib_s": 1.0}},
+        },
+        ("arrow_stream",),
+        (8, 16, 32),
+    )
+    assert coverage == {
+        "high_workers": 32,
+        "complete": False,
+        "missing_workloads": ["arrow_stream"],
+    }
+
+
 def test_proven_dram_plateau_precedes_cache_guess() -> None:
     """A flat paired curve with platform bandwidth evidence selects memory traffic."""
     workloads = {
@@ -201,6 +247,44 @@ def test_plan_report_can_be_reused_as_exact_affinity_input(tmp_path: Path) -> No
     rerun = json.loads(completed.stdout)
     original = json.loads(plan.read_text(encoding="utf-8"))
     assert rerun["cpu_sets"] == original["cpu_sets"]
+
+
+def test_devnull_mode_bypasses_atomic_publication(tmp_path: Path) -> None:
+    """Explicit /dev/null measurements use the direct native sink successfully."""
+    root = Path(__file__).parents[1]
+    report_path = tmp_path / "devnull.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(root / "benchmarks" / "bench_concurrency_telemetry.py"),
+            "--workers",
+            "1,2",
+            "--workloads",
+            "jsonl_to_jsonl",
+            "--rows",
+            "20",
+            "--columns",
+            "2",
+            "--memory-mib",
+            "64",
+            "--warmups",
+            "0",
+            "--repeats",
+            "1",
+            "--output-mode",
+            "devnull",
+            "--output",
+            str(report_path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["workload"]["output_mode"] == "devnull"
+    assert report["workloads"]["jsonl_to_jsonl"]["runs"]["2"]["representative_output"] == {
+        "batches": 1,
+        "rows": 20,
+    }
 
 
 def test_v35_benchmark_owners_remain_cohesive_and_below_500_lines() -> None:

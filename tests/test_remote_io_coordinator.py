@@ -47,6 +47,74 @@ def test_remote_io_coordinator_reuses_one_thread_and_context() -> None:
     assert thread_ids == {coordinator.thread_ident}
 
 
+def test_remote_io_coordinator_does_not_lock_on_already_completed_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Synchronous done callbacks are registered outside the bookkeeping lock."""
+    from concurrent.futures import Future
+
+    from schema_sanitizer.remote_impl import io_coordinator
+
+    coordinator = RemoteIoCoordinator()
+    real_submit = io_coordinator.asyncio.run_coroutine_threadsafe
+
+    def completed(coroutine, _loop):
+        """Return an already-finished future and close the unused coroutine."""
+        coroutine.close()
+        future: Future[int] = Future()
+        future.set_result(7)
+        return future
+
+    monkeypatch.setattr(io_coordinator.asyncio, "run_coroutine_threadsafe", completed)
+    try:
+        future = coordinator.submit(lambda _context: asyncio.sleep(0))
+        monkeypatch.setattr(
+            io_coordinator.asyncio,
+            "run_coroutine_threadsafe",
+            real_submit,
+        )
+        assert future.result() == 7
+    finally:
+        coordinator.close()
+
+
+def test_remote_io_coordinator_close_has_a_bounded_provider_deadline() -> None:
+    """A stuck provider close fails clearly instead of blocking forever."""
+    exit_started = threading.Event()
+
+    @asynccontextmanager
+    async def context():
+        """Expose a provider whose close waits until coordinator cancellation."""
+        try:
+            yield object()
+        finally:
+            exit_started.set()
+            await asyncio.Event().wait()
+
+    coordinator = RemoteIoCoordinator(context, shutdown_timeout_seconds=0.05)
+    with pytest.raises(RuntimeError, match="shutdown exceeded its deadline"):
+        coordinator.close()
+    assert exit_started.wait(timeout=1)
+
+
+def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:
+    """A provider entering after the startup deadline is closed on its loop."""
+    exited = threading.Event()
+
+    @asynccontextmanager
+    async def context():
+        """Enter too late, then record cleanup of the abandoned provider."""
+        await asyncio.sleep(0.05)
+        try:
+            yield object()
+        finally:
+            exited.set()
+
+    with pytest.raises(RuntimeError, match="startup exceeded its deadline"):
+        RemoteIoCoordinator(context, shutdown_timeout_seconds=0.01)
+    assert exited.wait(timeout=1)
+
+
 def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
     """Closing multi prefetch drains tasks and removes unconsumed staging."""
 

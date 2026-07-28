@@ -253,16 +253,19 @@ bool run_backlog_driven_admission_round() {
     }
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (completed.load(std::memory_order_acquire) != ordinal + 1U &&
+    while ((completed.load(std::memory_order_acquire) != ordinal + 1U ||
+            arena->active_tasks() != 0U || arena->queued_tasks() != 0U) &&
            std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::microseconds(25));
     }
-    if (completed.load(std::memory_order_acquire) != ordinal + 1U) {
+    if (completed.load(std::memory_order_acquire) != ordinal + 1U ||
+        arena->active_tasks() != 0U || arena->queued_tasks() != 0U) {
       return false;
     }
-    std::this_thread::sleep_for(std::chrono::microseconds(50));
   }
   if (arena->started_workers() != 1U) {
+    std::cerr << "sequential admission started " << arena->started_workers()
+              << " workers\n";
     return false;
   }
 
@@ -308,6 +311,13 @@ bool run_backlog_driven_admission_round() {
       completed.load(std::memory_order_acquire) ==
           sequential_tasks + worker_count &&
       arena->queued_tasks() == 0U;
+  if (!valid) {
+    std::cerr << "parallel admission: started=" << arena->started_workers()
+              << " entered=" << entered.load(std::memory_order_acquire)
+              << " completed=" << completed.load(std::memory_order_acquire)
+              << " peak=" << arena->peak_active_tasks()
+              << " queued=" << arena->queued_tasks() << '\n';
+  }
   arena->Shutdown();
   return valid;
 }
@@ -351,6 +361,10 @@ bool run_lane_work_stealing_round() {
   }
   if (entered.load(std::memory_order_acquire) != worker_count ||
       !ownership_ok.load(std::memory_order_acquire)) {
+    std::cerr << "lane setup: entered="
+              << entered.load(std::memory_order_acquire)
+              << " ownership=" << ownership_ok.load(std::memory_order_acquire)
+              << '\n';
     for (auto &gate : release) {
       release_gate(&gate);
     }
@@ -395,6 +409,14 @@ bool run_lane_work_stealing_round() {
       displaced_worker.load(std::memory_order_acquire) != 0U &&
       completed.load(std::memory_order_acquire) == worker_count + 1U &&
       arena->stolen_tasks() > 0U && arena->queued_tasks() == 0U;
+  if (!valid) {
+    std::cerr << "lane steal: displaced="
+              << displaced_finished.load(std::memory_order_acquire)
+              << " worker=" << displaced_worker.load(std::memory_order_acquire)
+              << " completed=" << completed.load(std::memory_order_acquire)
+              << " stolen=" << arena->stolen_tasks()
+              << " queued=" << arena->queued_tasks() << '\n';
+  }
   arena->Shutdown();
   return valid;
 }
@@ -479,15 +501,28 @@ int main() {
     std::cerr << "task telemetry probe failed\n";
     return 1;
   }
+  const auto require_round = [](bool passed, const char *probe,
+                                std::size_t round) {
+    if (!passed) {
+      std::cerr << probe << " failed in round " << round << '\n';
+    }
+    return passed;
+  };
   for (std::size_t round = 0; round < 100U; ++round) {
-    if (!run_ordered_success_round() || !run_earliest_failure_round() ||
-        !run_shared_operation_arena_round() ||
-        !run_arena_completion_reuse_round() ||
-        !run_backlog_driven_admission_round() ||
-        !run_lane_work_stealing_round() || !run_arena_stage_cancellation_round() ||
-        !run_cancellation_round()) {
-      std::cerr << "ordered executor TSan probe failed in round " << round
-                << '\n';
+    if (!require_round(run_ordered_success_round(), "ordered_success", round) ||
+        !require_round(run_earliest_failure_round(), "earliest_failure",
+                       round) ||
+        !require_round(run_shared_operation_arena_round(), "shared_arena",
+                       round) ||
+        !require_round(run_arena_completion_reuse_round(), "completion_reuse",
+                       round) ||
+        !require_round(run_backlog_driven_admission_round(),
+                       "backlog_admission", round) ||
+        !require_round(run_lane_work_stealing_round(), "lane_stealing",
+                       round) ||
+        !require_round(run_arena_stage_cancellation_round(),
+                       "stage_cancellation", round) ||
+        !require_round(run_cancellation_round(), "cancellation", round)) {
       return 1;
     }
   }

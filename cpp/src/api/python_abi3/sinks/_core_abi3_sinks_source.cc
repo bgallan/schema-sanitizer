@@ -123,9 +123,11 @@ PyObject *py_context_to_sink_from_source(PyObject *, PyObject *args) {
     if (!path_bytes)
       return nullptr;
     const char *path = PyBytes_AsString(path_bytes);
-    int st = schema_sanitizer_context_to_sink_path(
-        ctx, sink_name, frontend_name, path, prepared, &main_stream,
-        &diagnostics, &err);
+    int st = call_without_gil([&] {
+      return schema_sanitizer_context_to_sink_path(
+          ctx, sink_name, frontend_name, path, prepared, &main_stream,
+          &diagnostics, &err);
+    });
     Py_DECREF(path_bytes);
 
     return pack_sink_or_raise_with_metadata(st, ctx_obj, main_stream,
@@ -139,11 +141,13 @@ PyObject *py_context_to_sink_from_source(PyObject *, PyObject *args) {
     if (!bytes_or_str_view(payload_obj, &data, &data_len))
       return nullptr;
 
-    int st = schema_sanitizer_context_to_sink_text(
-        ctx, sink_name, frontend_name,
-        reinterpret_cast<const std::uint8_t *>(data),
-        static_cast<std::size_t>(data_len), prepared, &main_stream,
-        &diagnostics, &err);
+    int st = call_without_gil([&] {
+      return schema_sanitizer_context_to_sink_text(
+          ctx, sink_name, frontend_name,
+          reinterpret_cast<const std::uint8_t *>(data),
+          static_cast<std::size_t>(data_len), prepared, &main_stream,
+          &diagnostics, &err);
+    });
 
     return pack_sink_or_raise_with_metadata(st, ctx_obj, main_stream,
                                             diagnostics, err, first_row_columns,
@@ -162,10 +166,12 @@ PyObject *py_context_to_sink_from_source(PyObject *, PyObject *args) {
     }
 
     auto src = make_python_reader_chunk_source(payload_obj);
-    int st = schema_sanitizer_context_to_sink_from_source(
-        ctx, sink_name, frontend_name, std::move(src), prepared_shared,
-        &main_stream, &diagnostics, &err,
-        "schema_sanitizer_context_to_sink_from_source");
+    int st = call_without_gil([&] {
+      return schema_sanitizer_context_to_sink_from_source(
+          ctx, sink_name, frontend_name, std::move(src), prepared_shared,
+          &main_stream, &diagnostics, &err,
+          "schema_sanitizer_context_to_sink_from_source");
+    });
 
     return pack_sink_or_raise_with_metadata(st, payload_obj, main_stream,
                                             diagnostics, err, first_row_columns,

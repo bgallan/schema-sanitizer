@@ -38,6 +38,7 @@ def run_operation(
         write_jsonl_native_first_stream,
     )
     from schema_sanitizer.api_impl.stream_output import write_raw_stream_to_file
+    from schema_sanitizer.core_impl.native_symbols import JSONL_STREAM_WRITE
     from schema_sanitizer.options_impl.call_options import normalize_call_options
 
     options = normalize_call_options(
@@ -58,6 +59,17 @@ def run_operation(
         )
         if workload == "arrow_stream":
             output_stats = consume_arrow_c_stream(sink.raw)
+        elif output == Path(os.devnull):
+            native_output_stats = JSONL_STREAM_WRITE(
+                sink.raw,
+                os.fspath(output),
+                memory_limit_bytes,
+                1,
+            )
+            output_stats = {
+                "rows": int(native_output_stats.get("materialized_rows", 0)),
+                "batches": int(native_output_stats.get("batches", 0)),
+            }
         else:
             write_raw_stream_to_file(
                 sink.raw,

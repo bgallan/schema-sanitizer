@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,9 +23,9 @@ from schema_sanitizer.core_impl.concurrency_coverage import (
 )
 from schema_sanitizer.core_impl.execution import (
     PythonRowsJsonlByteReader,
-    last_python_rows_route,
 )
 from schema_sanitizer.core_impl.native_runtime import native_core
+from schema_sanitizer.core_impl.python_rows import last_python_rows_route
 from schema_sanitizer.input_impl.selection import resolve_source_and_format
 
 _GENERATED_COLUMNS = {
@@ -208,6 +211,62 @@ def test_v76_python_input_reaches_every_native_file_output(tmp_path: Path) -> No
     assert footer["num_rows"] == 2_000
     assert len(_csv_user_rows(csv_path)) == 2_000
     assert len(_jsonl_user_rows(jsonl_path)) == 2_000
+
+
+@pytest.mark.parametrize("width", [16, 32])
+def test_python_generator_file_outputs_do_not_deadlock_at_high_width(
+    tmp_path: Path,
+    width: int,
+) -> None:
+    """Python callbacks can acquire the GIL while native writers await the arena."""
+    require_native()
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        pytest.skip("exact CPU affinity is unavailable")
+    available = sorted(os.sched_getaffinity(0))
+    if len(available) < width:
+        pytest.skip(f"requires at least {width} visible CPUs")
+    output_dir = tmp_path / f"width-{width}"
+    output_dir.mkdir()
+    child = """
+import os
+import sys
+from pathlib import Path
+
+os.sched_setaffinity(0, {int(cpu) for cpu in sys.argv[1].split(",")})
+
+import schema_sanitizer as ss
+
+root = Path(sys.argv[2])
+
+def rows():
+    for ordinal in range(2_000):
+        yield {"ordinal": ordinal, "value": ordinal * 3, "text": f"row-{ordinal}"}
+
+ss.to_csv(rows(), root / "rows.csv", input_format="python", threading_mode="multi")
+ss.to_jsonl(rows(), root / "rows.jsonl", input_format="python", threading_mode="multi")
+ss.to_parquet(
+    rows(),
+    root / "rows.parquet",
+    input_format="python",
+    threading_mode="multi",
+    parquet_compression="snappy",
+)
+assert all(path.stat().st_size > 0 for path in root.iterdir())
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child,
+            ",".join(str(cpu) for cpu in available[:width]),
+            str(output_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize(

@@ -37,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--numa-node", type=int, default=0)
-    parser.add_argument("--output-mode", choices=("devnull", "file"), default="devnull")
+    parser.add_argument("--output-mode", choices=("devnull", "file"), default="file")
     parser.add_argument("--perf-events", default=_DEFAULT_PERF_EVENTS)
     parser.add_argument("--cpu-affinity-json", type=Path)
     parser.add_argument("--short-dram-json", type=Path)

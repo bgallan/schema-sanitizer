@@ -99,7 +99,7 @@ def _dram_high_width_coverage(
     worker_counts: tuple[int, ...],
 ) -> dict[str, Any]:
     """Report whether every workload has a high-width DRAM measurement."""
-    high = 16 if 16 in worker_counts else max(worker_counts)
+    high = max(worker_counts)
     missing = [workload for workload in workloads if dram_entry(payload, workload, high) is None]
     return {
         "high_workers": high,
@@ -227,7 +227,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=("grouped", "interleaved-isolated"),
         default="interleaved-isolated",
     )
-    parser.add_argument("--output-mode", choices=("devnull", "file"), default="devnull")
+    parser.add_argument("--output-mode", choices=("devnull", "file"), default="file")
     parser.add_argument("--hardware-counters", action="store_true")
     parser.add_argument("--perf-events", default=_DEFAULT_PERF_EVENTS)
     parser.add_argument("--numa-node", type=int)

@@ -57,10 +57,11 @@ struct OperationTaskArena::State final {
     // publish it with one relaxed store for lock-free bounded diagnostics.
     std::size_t stolen_local = 0;
     std::atomic<std::size_t> stolen{0};
-    // Producers read running while the owning worker toggles it at activity
-    // streak boundaries. Keep that independently contended publication off the
-    // queue/submission/steal snapshot line so unrelated writers do not exchange
-    // ownership of one cache line.
+    // Producers read running while the owning worker toggles it across dequeue
+    // and activity streaks. Publishing before dequeue closes the empty-queue
+    // window where a task is claimed but its worker still appears idle.
+    // Keep that independently contended publication off the queue snapshot
+    // line.
     alignas(64) std::atomic<bool> running{false};
     std::atomic<bool> first_task_pending{false};
     // Protected by mutex. Avoids searching queues that contain no dedicated

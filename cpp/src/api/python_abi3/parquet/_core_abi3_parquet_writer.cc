@@ -67,7 +67,8 @@ parquet_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
     return sanitize::Status::IOError(
         "native Parquet writer: failed opening output");
   }
-  return parquet::write_stream(stream, output, options);
+  return call_without_gil(
+      [&] { return parquet::write_stream(stream, output, options); });
 }
 
 // Writes a Python Arrow C stream exporter to a local Parquet path.
@@ -82,7 +83,13 @@ parquet_write_stream_to_path(PyObject *stream_obj, std::string path,
   }
   std::unique_ptr<PyObject, decltype(&Py_DECREF)> capsule_owner(capsule,
                                                                 Py_DECREF);
-  return parquet_write_arrow_stream_to_path(stream, std::move(path), options);
+  FileParquetOutput output(std::move(path));
+  if (!output.ok()) {
+    return sanitize::Status::IOError(
+        "native Parquet writer: failed opening output");
+  }
+  return call_without_gil(
+      [&] { return parquet::write_stream(stream, output, options); });
 }
 
 } // namespace

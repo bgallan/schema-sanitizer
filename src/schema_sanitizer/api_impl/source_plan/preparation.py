@@ -213,7 +213,7 @@ def _local_path_source_plan(
     source_kinds = {source.kind for source in sources}
     if source_kinds == {"csv"} and len(csv_delimiter.encode("utf-8")) != 1:
         return None
-    if source_kinds <= {"json", "json_array", "csv"}:
+    if source_kinds <= {"json", "jsonl", "json_array", "csv"}:
         return _native_path_source_plan(
             input_format=input_format,
             route_name="native_manifest_paths",

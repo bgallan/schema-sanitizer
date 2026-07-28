@@ -53,6 +53,7 @@ public:
 
 private:
   std::shared_ptr<sanitize::internal::MemoryPool> memory_pool_;
+  mutable std::mutex interrupt_mutex_;
   InterruptCheck interrupt_check_;
   mutable std::mutex telemetry_mutex_;
   std::shared_ptr<sanitize::internal::PerformanceTelemetry> telemetry_;
