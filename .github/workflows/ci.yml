@@ -837,6 +837,10 @@ jobs:
           schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
           --parallel 4
       - name: Run repeated sanitized concurrency probe
+        # MSVC ASan can hang outside the probe watchdog. Windows still builds
+        # the probe and executes all four native fuzzers below; Linux TSan owns
+        # the repeated race-sensitive concurrency gate.
+        if: runner.os != 'Windows'
         run: >-
           ctest --test-dir build/platform-sanitizer
           -C RelWithDebInfo

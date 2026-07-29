@@ -153,6 +153,14 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "--campaign-runs 500" in ci
     assert "schema_sanitizer_sanitized_ordered_executor" in ci
     assert "--repeat until-fail:2" in ci
+    concurrency_step = ci.split("- name: Run repeated sanitized concurrency probe", 1)[1].split(
+        "- name:", 1
+    )[0]
+    fuzz_step = ci.split("- name: Run native fuzz regressions and bounded mutation campaigns", 1)[
+        1
+    ].split("\n  native-thread-sanitizer:", 1)[0]
+    assert "if: runner.os != 'Windows'" in concurrency_step
+    assert "\n        if:" not in fuzz_step
 
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "SCHEMA_SANITIZER_FUZZ_ENGINE" in cmake
@@ -170,9 +178,8 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
 
     assert "cpp/src/internal/memory/memory_pool.cc" in target
     assert "cpp/src/internal/memory/pool_resource.cc" in target
-    assert 'MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"' in cmake
-    assert "set(_schema_sanitizer_sanitized_executor_rounds 10)" in cmake
-    assert "PROPERTIES TIMEOUT 600" in cmake
+    assert 'if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))' in cmake
+    assert "set(_schema_sanitizer_sanitized_executor_rounds 100)" in cmake
     assert "schema_sanitizer_sanitized_ordered_executor --rounds" in cmake
     assert 'std::string_view(argv[1]) != "--rounds"' in probe
     assert "shared arena startup timed out" in probe
