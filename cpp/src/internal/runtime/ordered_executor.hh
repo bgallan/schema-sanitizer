@@ -538,7 +538,8 @@ private:
         auto completed = observed & kExternalCompletionCountMask;
         while (completed != scheduled[shard]) {
           const auto waiting_value = completed | kExternalCompletionWaiterBit;
-          counter.wait(waiting_value, std::memory_order_acquire);
+          sanitize::internal::WaitOnAtomic(counter, waiting_value,
+                                           std::memory_order_acquire);
           observed = counter.load(std::memory_order_acquire);
           completed = observed & kExternalCompletionCountMask;
         }

@@ -90,7 +90,8 @@ template <bool HighCore> sanitize::Result<Outcome> take_next_arena() {
     auto state = slot.state.load(std::memory_order_acquire);
     while (state == ArenaSlotState::kEmpty ||
            state == ArenaSlotState::kPublishing) {
-      slot.state.wait(state, std::memory_order_acquire);
+      sanitize::internal::WaitOnAtomic(slot.state, state,
+                                       std::memory_order_acquire);
       state = slot.state.load(std::memory_order_acquire);
     }
 

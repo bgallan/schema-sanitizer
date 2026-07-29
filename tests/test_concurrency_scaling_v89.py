@@ -33,7 +33,7 @@ def test_v89_single_completion_rmw_is_superseded_by_v91_shards() -> None:
     assert "completed_external_tasks_[shard].completed" in source
     assert "counter.fetch_add(1, std::memory_order_release)" in source
     assert "counter.notify_all()" in source
-    assert "counter.wait(completed" in source or "counter.wait(waiting_value" in source
+    assert "WaitOnAtomic(counter, waiting_value" in source
     assert "completed != scheduled[shard]" in source
 
 

@@ -41,10 +41,7 @@ def test_v91_scheduled_and_completed_totals_are_exact_per_shard() -> None:
     assert "scheduled_tasks_" not in source + helper
     assert "scheduled = scheduled_external_tasks_;" in source
     assert "completed != scheduled[shard]" in source
-    assert (
-        "counter.wait(completed, std::memory_order_acquire)" in source
-        or "counter.wait(waiting_value, std::memory_order_acquire)" in source
-    )
+    assert "WaitOnAtomic(counter, waiting_value" in source
 
 
 def test_v91_abandonment_carries_the_same_completion_shard() -> None:

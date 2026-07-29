@@ -178,6 +178,7 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
     assert "shared arena startup timed out" in probe
     assert "stage cancellation startup timed out" in probe
     assert "cancellation startup timed out" in probe
+    assert "sanitizer probe watchdog expired" in probe
 
 
 def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> None:
@@ -197,6 +198,7 @@ def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> Non
 def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
     """Intentional alignment and telemetry formatting remain portable."""
     options = (ROOT / "cmake/SchemaSanitizerTargetOptions.cmake").read_text(encoding="utf-8")
+    threads = (ROOT / "cpp/src/internal/runtime/thread_compat.hh").read_text(encoding="utf-8")
     telemetry = (ROOT / "cpp/src/internal/runtime/performance_telemetry.cc").read_text(
         encoding="utf-8"
     )
@@ -205,6 +207,10 @@ def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
     )[0]
 
     assert "$<$<CXX_COMPILER_ID:MSVC>:/wd4324>" in options
+    assert "defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)" in threads
+    assert "SCHEMA_SANITIZER_FORCE_ATOMIC_WAIT_POLLING" in threads
+    assert "SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE" in threads
+    assert "std::this_thread::sleep_for(std::chrono::microseconds(100))" in threads
     assert "std::to_chars" not in formatter
     assert "std::locale::classic()" in formatter
 

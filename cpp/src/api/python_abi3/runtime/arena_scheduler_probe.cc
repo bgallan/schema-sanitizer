@@ -25,11 +25,11 @@ void release_gate(std::atomic<bool> *gate) noexcept {
 
 bool wait_gate_or_stop(std::atomic<bool> *gate,
                        sanitize::internal::StopToken stop) {
-  auto notify_gate = [gate] { gate->notify_all(); };
-  sanitize::internal::StopCallback<decltype(notify_gate)> stop_gate(
-      stop, std::move(notify_gate));
+  auto release_on_stop = [gate] { release_gate(gate); };
+  sanitize::internal::StopCallback<decltype(release_on_stop)> stop_gate(
+      stop, std::move(release_on_stop));
   while (!gate->load(std::memory_order_acquire) && !stop.stop_requested()) {
-    gate->wait(false, std::memory_order_acquire);
+    sanitize::internal::WaitOnAtomic(*gate, false, std::memory_order_acquire);
   }
   return !stop.stop_requested();
 }

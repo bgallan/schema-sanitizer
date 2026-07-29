@@ -268,12 +268,16 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
         state->release.store(true, std::memory_order_release);
         state->release.notify_all();
       }
-      auto notify_release = [state] { state->release.notify_all(); };
-      sanitize::internal::StopCallback<decltype(notify_release)> stop_release(
-          stop, std::move(notify_release));
+      auto release_on_stop = [state] {
+        state->release.store(true, std::memory_order_release);
+        state->release.notify_all();
+      };
+      sanitize::internal::StopCallback<decltype(release_on_stop)> stop_release(
+          stop, std::move(release_on_stop));
       while (!state->release.load(std::memory_order_acquire) &&
              !stop.stop_requested()) {
-        state->release.wait(false, std::memory_order_acquire);
+        sanitize::internal::WaitOnAtomic(state->release, false,
+                                         std::memory_order_acquire);
       }
       state->active.fetch_sub(1, std::memory_order_relaxed);
       if (stop.stop_requested()) {

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -19,8 +20,31 @@
 
 namespace sanitize::internal {
 
+#if defined(SCHEMA_SANITIZER_FORCE_PORTABLE_THREAD_COMPAT) ||                  \
+    (defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__))
+#define SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE 1
+#endif
+
+template <class T>
+void WaitOnAtomic(
+    const std::atomic<T> &value, T old,
+    std::memory_order order = std::memory_order_seq_cst) noexcept {
+#if (defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)) ||                    \
+    defined(SCHEMA_SANITIZER_FORCE_ATOMIC_WAIT_POLLING)
+  // Windows MSVC ASan CI has observed indefinite stalls in native atomic
+  // waits. Keep the same value-based contract while yielding to publishers
+  // through a bounded polling interval. Normal Windows builds and every other
+  // sanitizer retain the native atomic wait.
+  while (value.load(order) == old) {
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+#else
+  value.wait(old, order);
+#endif
+}
+
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L &&              \
-    !defined(SCHEMA_SANITIZER_FORCE_PORTABLE_THREAD_COMPAT)
+    !defined(SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE)
 
 using StopSource = std::stop_source;
 using StopToken = std::stop_token;
@@ -255,7 +279,7 @@ template <class ConditionVariable, class Lock, class Predicate>
 bool WaitWithStop(ConditionVariable &condition, Lock &lock,
                   const StopToken &stop, Predicate predicate) {
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L &&              \
-    !defined(SCHEMA_SANITIZER_FORCE_PORTABLE_THREAD_COMPAT)
+    !defined(SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE)
   return condition.wait(lock, stop, std::move(predicate));
 #else
   auto wake_waiter = [&condition] { condition.notify_all(); };
@@ -268,7 +292,7 @@ bool WaitWithStop(ConditionVariable &condition, Lock &lock,
 
 #if defined(__cpp_lib_move_only_function) &&                                   \
     __cpp_lib_move_only_function >= 202110L &&                                 \
-    !defined(SCHEMA_SANITIZER_FORCE_PORTABLE_THREAD_COMPAT)
+    !defined(SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE)
 
 template <class Signature>
 using MoveOnlyFunction = std::move_only_function<Signature>;
@@ -326,6 +350,10 @@ private:
   std::unique_ptr<Interface> function_;
 };
 
+#endif
+
+#if defined(SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE)
+#undef SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE
 #endif
 
 } // namespace sanitize::internal

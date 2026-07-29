@@ -27,7 +27,7 @@ def _take_next_arena_source() -> str:
 def test_v88_arena_wait_has_no_preliminary_executor_mutex() -> None:
     """The slot wait occurs before the one authoritative executor lock."""
     take = _take_next_arena_source()
-    wait = take.index("slot.state.wait")
+    wait = take.index("WaitOnAtomic(slot.state")
     first_executor_lock = take.index("std::lock_guard lock(mutex_)")
 
     assert "const auto expected_ordinal = next_take_ordinal_;" in take[:wait]

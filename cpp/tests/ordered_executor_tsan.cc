@@ -8,10 +8,13 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -24,6 +27,41 @@ namespace {
 using Executor =
     sanitize::internal::OrderedExecutor<std::uint64_t, std::uint64_t>;
 
+class ProbeWatchdog final {
+public:
+  ProbeWatchdog(const char *probe, std::size_t round)
+      : probe_(probe), round_(round), thread_([this] { Run(); }) {}
+  ProbeWatchdog(const ProbeWatchdog &) = delete;
+  ProbeWatchdog &operator=(const ProbeWatchdog &) = delete;
+  ~ProbeWatchdog() {
+    {
+      std::lock_guard lock(mutex_);
+      finished_ = true;
+    }
+    ready_.notify_one();
+    thread_.join();
+  }
+
+private:
+  void Run() noexcept {
+    std::unique_lock lock(mutex_);
+    if (ready_.wait_for(lock, std::chrono::seconds(30),
+                        [this] { return finished_; })) {
+      return;
+    }
+    std::cerr << "sanitizer probe watchdog expired: round=" << round_
+              << " case=" << probe_ << std::endl;
+    std::_Exit(3);
+  }
+
+  const char *probe_;
+  std::size_t round_;
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  bool finished_ = false;
+  std::thread thread_;
+};
+
 void release_gate(std::atomic<bool> *gate) noexcept {
   gate->store(true, std::memory_order_release);
   gate->notify_all();
@@ -35,7 +73,7 @@ bool wait_gate_or_stop(std::atomic<bool> *gate,
   sanitize::internal::StopCallback<decltype(release)> stop_gate(
       stop, std::move(release));
   while (!gate->load(std::memory_order_acquire) && !stop.stop_requested()) {
-    gate->wait(false, std::memory_order_acquire);
+    sanitize::internal::WaitOnAtomic(*gate, false, std::memory_order_acquire);
   }
   return !stop.stop_requested();
 }
@@ -46,7 +84,7 @@ void wait_for_stop(sanitize::internal::StopToken stop) {
   sanitize::internal::StopCallback<decltype(release)> stop_gate(
       stop, std::move(release));
   while (!stopped.load(std::memory_order_acquire)) {
-    stopped.wait(false, std::memory_order_acquire);
+    sanitize::internal::WaitOnAtomic(stopped, false, std::memory_order_acquire);
   }
 }
 
@@ -548,11 +586,6 @@ int main(int argc, char **argv) {
       return 2;
     }
   }
-  if (!run_high_core_telemetry_batch_round() ||
-      !run_worker_submission_telemetry_round()) {
-    std::cerr << "task telemetry probe failed\n";
-    return 1;
-  }
   const auto require_round = [](bool passed, const char *probe,
                                 std::size_t round) {
     if (!passed) {
@@ -563,8 +596,15 @@ int main(int argc, char **argv) {
   const auto run_round = [&require_round](auto probe, const char *name,
                                           std::size_t round) {
     std::cerr << "sanitizer probe: round=" << round << " case=" << name << '\n';
+    ProbeWatchdog watchdog(name, round);
     return require_round(probe(), name, round);
   };
+  if (!run_round(run_high_core_telemetry_batch_round, "high_core_telemetry",
+                 0U) ||
+      !run_round(run_worker_submission_telemetry_round, "worker_telemetry",
+                 0U)) {
+    return 1;
+  }
   for (std::size_t round = 0; round < rounds; ++round) {
     if (!run_round(run_ordered_success_round, "ordered_success", round) ||
         !run_round(run_earliest_failure_round, "earliest_failure", round) ||
