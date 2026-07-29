@@ -606,8 +606,7 @@ otherwise plain encoding is retained. GZIP is the public default, with Snappy
 and uncompressed output also supported.
 
 Detailed native-reader contract diagnostics and certification helpers are
-implementation-facing adapter concerns. Their code ownership is mapped in
-[responsibilities.md](responsibilities.md#parquet-adapter-and-contracts).
+implementation-facing adapter concerns rather than public contracts.
 
 ## Remote staging heuristics
 

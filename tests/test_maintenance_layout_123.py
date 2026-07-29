@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,11 +46,8 @@ def test_single_remote_dispatch_cannot_submit_a_coroutine() -> None:
 
 def test_cloud_extra_declares_direct_blocking_s3_dependency() -> None:
     """The sync S3 owner may import Botocore without relying on transitive luck."""
-    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    todo = (ROOT / "THREADING_TODO.md").read_text(encoding="utf-8")
-    responsibilities = (ROOT / "RESPONSIBILITIES.md").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = pyproject["project"]["optional-dependencies"]
 
-    assert pyproject.count('"botocore>=1.34"') == 2
-    assert "- [x] Add a synchronous remote backend" in todo
-    assert "remote_impl/sync_backend.py" in responsibilities
-    assert "remote_impl/providers/s3_sync.py" in responsibilities
+    assert "botocore>=1.34" in extras["cloud"]
+    assert "botocore>=1.34" in extras["all"]

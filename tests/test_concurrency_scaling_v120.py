@@ -88,8 +88,3 @@ def test_v120_evidence_is_positive_and_narrowly_scoped() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] >= 13
         assert item["paired_median_reduction_percent"] > 5.0
-
-
-def test_v120_version_is_0373() -> None:
-    """The source package exposes the v120 project version."""
-    assert (ROOT / "meta/VERSION").read_text(encoding="utf-8").strip() == "0.3.73"

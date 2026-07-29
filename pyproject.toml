@@ -150,8 +150,6 @@ include = [
   "/LICENSE",
   "/README.md",
   "/HEURISTICS.md",
-  "/RESPONSIBILITIES.md",
-  "/THREADING_TODO.md",
   "/meta/VERSION",
   "/pyproject.toml"
 ]

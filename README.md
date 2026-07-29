@@ -36,10 +36,6 @@ used by BigQuery external tables.
 - [HEURISTICS.md](HEURISTICS.md) explains inference, field sanitization,
   schema merging and versioning, the registry, drift records, and the BigQuery
   sidecar model.
-- [RESPONSIBILITIES.md](RESPONSIBILITIES.md) maps the Python and C++ source
-  layout for contributors.
-- [THREADING_TODO.md](THREADING_TODO.md) defines the deterministic single-thread
-  and multi-thread architecture and its implementation checklist.
 
 ## [Install](#index)
 
@@ -899,8 +895,6 @@ moderate-cost schemas and a proportional half-arena policy for sustained work.
 Variable-width, nested, ultra-wide, small, and memory-constrained inputs retain
 conservative adaptive fractions. Those fractions continue scaling above 32
 workers.
-
-For architecture and ownership, see [RESPONSIBILITIES.md](RESPONSIBILITIES.md). For the active threading checklist and benchmark evidence, see [THREADING_TODO.md](THREADING_TODO.md).
 
 ## [License](#index)
 
