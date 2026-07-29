@@ -205,6 +205,7 @@ def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> Non
 def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
     """Intentional alignment and telemetry formatting remain portable."""
     options = (ROOT / "cmake/SchemaSanitizerTargetOptions.cmake").read_text(encoding="utf-8")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     threads = (ROOT / "cpp/src/internal/runtime/thread_compat.hh").read_text(encoding="utf-8")
     telemetry = (ROOT / "cpp/src/internal/runtime/performance_telemetry.cc").read_text(
         encoding="utf-8"
@@ -214,6 +215,11 @@ def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
     )[0]
 
     assert "$<$<CXX_COMPILER_ID:MSVC>:/wd4324>" in options
+    assert "schema_sanitizer_stage_msvc_asan_runtime" in options
+    assert "clang_rt.asan_dynamic-${_schema_sanitizer_asan_arch}.dll" in options
+    assert "get_filename_component(_schema_sanitizer_compiler_dir" in options
+    assert '"${CMAKE_CXX_COMPILER}"' in options
+    assert 'schema_sanitizer_stage_msvc_asan_runtime("${CMAKE_BINARY_DIR}/fuzz")' in cmake
     assert "defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)" in threads
     assert "SCHEMA_SANITIZER_FORCE_ATOMIC_WAIT_POLLING" in threads
     assert "SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE" in threads

@@ -85,6 +85,51 @@ function(schema_sanitizer_add_sanitizer target)
   endif()
 endfunction()
 
+# Copies the MSVC AddressSanitizer runtime beside standalone executables.
+#
+# Current MSVC toolsets use clang_rt.asan_dynamic-{arch}.dll for every CRT
+# linkage mode. The DLL is installed next to cl.exe, not in a system search
+# directory, so command-line executables otherwise fail at startup with
+# STATUS_DLL_NOT_FOUND (0xc0000135).
+function(schema_sanitizer_stage_msvc_asan_runtime destination)
+  if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))
+    return()
+  endif()
+
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(_schema_sanitizer_asan_arch "x86_64")
+  elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(_schema_sanitizer_asan_arch "i386")
+  else()
+    message(
+      FATAL_ERROR
+        "MSVC AddressSanitizer requires a 32-bit or 64-bit target architecture")
+  endif()
+
+  get_filename_component(_schema_sanitizer_compiler_dir "${CMAKE_CXX_COMPILER}"
+                         DIRECTORY)
+  set(_schema_sanitizer_asan_runtime_name
+      "clang_rt.asan_dynamic-${_schema_sanitizer_asan_arch}.dll")
+  set(_schema_sanitizer_asan_runtime
+      "${_schema_sanitizer_compiler_dir}/${_schema_sanitizer_asan_runtime_name}"
+  )
+  if(NOT EXISTS "${_schema_sanitizer_asan_runtime}")
+    message(
+      FATAL_ERROR
+        "MSVC AddressSanitizer runtime not found beside the selected compiler: ${_schema_sanitizer_asan_runtime}"
+    )
+  endif()
+
+  file(MAKE_DIRECTORY "${destination}")
+  configure_file(
+    "${_schema_sanitizer_asan_runtime}"
+    "${destination}/${_schema_sanitizer_asan_runtime_name}" COPYONLY)
+  message(
+    STATUS
+      "Staged MSVC AddressSanitizer runtime: ${destination}/${_schema_sanitizer_asan_runtime_name}"
+  )
+endfunction()
+
 # Adds LLVM source coverage instrumentation to a target.
 function(schema_sanitizer_add_coverage target)
   if(NOT SCHEMA_SANITIZER_ENABLE_COVERAGE)

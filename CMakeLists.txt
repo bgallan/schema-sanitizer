@@ -269,6 +269,7 @@ if(SCHEMA_SANITIZER_BUILD_FUZZERS)
     )
   endif()
   message(STATUS "Native fuzz engine: ${_schema_sanitizer_fuzz_engine}")
+  schema_sanitizer_stage_msvc_asan_runtime("${CMAKE_BINARY_DIR}/fuzz")
 
   function(schema_sanitizer_add_fuzzer target source)
     set(_fuzz_sources ${source} cpp/fuzz/sanitizer_runtime_defaults.cc)
