@@ -14,6 +14,7 @@ PyObject *py_diagnostics_json(PyObject *, PyObject *);
 PyObject *py_options_catalog(PyObject *, PyObject *);
 PyObject *py_memory_budget(PyObject *, PyObject *);
 PyObject *py_process_memory_governor_stats(PyObject *, PyObject *);
+PyObject *py_process_cpu_governor_probe(PyObject *, PyObject *);
 PyObject *py_execution_policy(PyObject *, PyObject *);
 PyObject *py_ordered_executor_probe(PyObject *, PyObject *);
 PyObject *py_ordered_executor_arena_completion_probe(PyObject *, PyObject *);

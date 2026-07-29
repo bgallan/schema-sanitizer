@@ -2,6 +2,7 @@
 
 #include "internal/memory/pool_resource.hh"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -56,7 +57,7 @@ void deallocate_direct(void *pool_handle, void *pointer, std::size_t bytes,
 struct PoolResource::CacheState {
   static constexpr std::size_t kEntryCount = 64;
   static constexpr std::size_t kMaxBlockBytes = 1U << 20;
-  static constexpr std::size_t kMaxCachedBytes = 4U << 20;
+  static constexpr std::size_t kDefaultMaxCachedBytes = 4U << 20;
 
   enum class State : std::uint8_t { kEmpty, kActive, kCached };
   struct Entry {
@@ -66,7 +67,9 @@ struct PoolResource::CacheState {
     State state = State::kEmpty;
   };
 
-  explicit CacheState(void *handle) : pool_handle(handle) {}
+  CacheState(void *handle, std::size_t maximum_cached_bytes)
+      : pool_handle(handle),
+        max_cached_bytes(std::max<std::size_t>(1, maximum_cached_bytes)) {}
 
   ~CacheState() {
     for (auto &entry : entries) {
@@ -132,7 +135,8 @@ struct PoolResource::CacheState {
         // Its logical bytes are fully initialized by Arrow builders before
         // export; defer secure wiping until the block leaves this private
         // cache to avoid doubling memory traffic between adjacent packets.
-        if (!poisoned && cached_bytes <= kMaxCachedBytes - entry.bytes) {
+        if (!poisoned && entry.bytes <= max_cached_bytes &&
+            cached_bytes <= max_cached_bytes - entry.bytes) {
           entry.state = State::kCached;
           cached_bytes += entry.bytes;
           return true;
@@ -155,6 +159,7 @@ struct PoolResource::CacheState {
   std::mutex mutex;
   std::array<Entry, kEntryCount> entries{};
   std::size_t cached_bytes = 0;
+  std::size_t max_cached_bytes = kDefaultMaxCachedBytes;
   bool poisoned = false;
 };
 
@@ -167,12 +172,18 @@ PoolResource::PoolResource(std::shared_ptr<void> pool_keepalive)
 
 PoolResource::PoolResource(std::shared_ptr<void> pool_keepalive,
                            bool recycle_exact_blocks)
+    : PoolResource(std::move(pool_keepalive), recycle_exact_blocks,
+                   CacheState::kDefaultMaxCachedBytes) {}
+
+PoolResource::PoolResource(std::shared_ptr<void> pool_keepalive,
+                           bool recycle_exact_blocks,
+                           std::size_t max_cached_bytes)
     : pool_keepalive_(std::move(pool_keepalive)),
       pool_handle_(pool_keepalive_
                        ? pool_keepalive_.get()
                        : static_cast<void *>(default_memory_pool())) {
   if (recycle_exact_blocks) {
-    cache_ = std::make_unique<CacheState>(pool_handle_);
+    cache_ = std::make_unique<CacheState>(pool_handle_, max_cached_bytes);
   }
 }
 

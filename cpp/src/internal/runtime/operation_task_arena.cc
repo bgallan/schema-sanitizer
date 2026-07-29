@@ -4,6 +4,7 @@
 #include "internal/runtime/atomic_worker_bitmap.hh"
 #include "internal/runtime/numa_locality.hh"
 #include "internal/runtime/operation_task_arena_selection.hh"
+#include "internal/runtime/process_cpu_governor.hh"
 
 #include <algorithm>
 #include <array>
@@ -89,6 +90,7 @@ struct OperationTaskArena::State final {
   explicit State(std::size_t count,
                  std::shared_ptr<PerformanceTelemetry> telemetry_owner)
       : worker_count(count), scalable_scan(count > 32U),
+        cpu_registration(process_cpu_governor().MakeRegistration(count > 1U)),
         telemetry(std::move(telemetry_owner)),
         operation_resource(std::make_shared<PoolResource>(
             telemetry ? std::static_pointer_cast<void>(telemetry->memory_pool())
@@ -101,6 +103,7 @@ struct OperationTaskArena::State final {
 
   const std::size_t worker_count;
   const bool scalable_scan;
+  ProcessCpuGovernor::Registration cpu_registration;
   // The historical publication domain remains the sole 1-8-worker line and
   // the first high-core shard. Three additional aligned shards cover workers
   // 8-31.

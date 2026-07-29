@@ -384,6 +384,9 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
             thief.stolen.store(thief.stolen_local, std::memory_order_relaxed);
             if (state->telemetry) {
               state->telemetry->RecordWorkerTaskStolen(index);
+              state->telemetry->AddCounter(
+                  same_domain ? PerformanceCounter::kNumaLocalSteals
+                              : PerformanceCounter::kNumaRemoteSteals);
             }
             stolen = true;
           });
@@ -572,11 +575,7 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
         return;
       }
     }
-    // At four or more workers, shutdown closes admission and requests this
-    // worker's own jthread token. The token is already checked by the loop and
-    // passed into the task, so reloading the operation-global stopping flag
-    // before every packet would duplicate cancellation traffic on one shared
-    // cache line. The flag remains authoritative at admission and park wakeup.
+    // The jthread token is hot; the global flag owns admission and park wakeup.
     activity.AdvertiseDequeue();
     OperationTaskArena::State::QueuedTask queued;
     bool preference_used = false;
@@ -641,6 +640,12 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
             slot.first_task_pending.load(std::memory_order_acquire);
       }
       continue;
+    }
+    auto cpu_lease = state->cpu_registration.Acquire(stop);
+    if (telemetry && cpu_lease.waited()) {
+      telemetry->AddCounter(PerformanceCounter::kProcessCpuGovernorWaits);
+      telemetry->AddCounter(PerformanceCounter::kProcessCpuGovernorWaitNs,
+                            cpu_lease.wait_ns());
     }
     activity.Start();
     const auto task_started_ns =

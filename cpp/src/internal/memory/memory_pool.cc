@@ -330,11 +330,11 @@ public:
     // registry substreams do not each reserve the public operation's complete
     // budget and deadlock one another during lookahead.
     std::unique_lock lock(mutex_);
-    // Freeze the process ceiling on first use. Shrinking it behind an already
-    // queued larger FIFO lease could make that ticket impossible to satisfy.
-    if (capacity_bytes_ == 0) {
-      capacity_bytes_ = safe_capacity;
-    }
+    // Refresh at operation boundaries. Keep enough admission space for an
+    // already-issued lease while allowing cgroup/host pressure to reduce new
+    // work and recovered capacity to expand it again.
+    capacity_bytes_ = std::max({safe_capacity, leased_bytes_,
+                                std::int64_t{kMaximumOperationAdmissionBytes}});
     // Scale the control-plane reservation with the requested operation while
     // leaving the shared parent pool authoritative for actual bytes. Under
     // contention, cap it to a fair share so many small operations can enter
@@ -467,6 +467,7 @@ shared_process_memory_pool(int64_t process_capacity) {
   static const auto pool = make_tracking_memory_pool(
       shared_default_memory_pool(), std::max<int64_t>(1, process_capacity),
       "schema_sanitizer::ProcessMemoryPool");
+  pool->SetLimit(std::max<int64_t>(1, process_capacity));
   return pool;
 }
 

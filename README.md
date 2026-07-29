@@ -338,6 +338,11 @@ All native stages reuse one operation-wide task arena. They do not create
 independent worker pools that could multiply CPU or memory use. Workers start
 lazily, and small or inexpensive batches remain on the serial path.
 
+Concurrent operations also share a process-wide CPU governor. An isolated
+operation keeps the lock-free fast path; when operations overlap, native tasks
+enter through cancelable FIFO admission so their combined active workers do
+not exceed the CPU capacity visible through affinity and cgroups.
+
 On Linux, wide arenas sample each worker's NUMA node. Idle workers first steal
 compatible work from the same node, then fall back to unrestricted stealing so
 cross-node placement never strands work.
@@ -384,6 +389,11 @@ allocations also pass through one process-wide governor. FIFO admission leases
 adapt to operation size and current contention. Files inside one directory
 conversion still share one lease and pool instead of reserving the full budget
 again.
+
+The process ceiling is refreshed when operations start, so later calls observe
+changes in available host or cgroup memory. A running operation keeps its fixed
+public limit, while new aggregate allocations are held to the refreshed
+process ceiling.
 
 Input and output files may be larger than the budget because file conversions
 stream them. If an operation cannot proceed safely, it fails before publishing
@@ -877,6 +887,12 @@ account for directly.
 CSV and JSONL workers encode directly into operation-governed PMR buffers.
 Their ordered window is bounded by bytes and packet count, so a slow early
 packet cannot allow later fragments to consume an unbounded reorder window.
+Each worker reuses a small private, budgeted block cache; first-touch placement
+keeps that scratch local to its NUMA node. Actual-to-estimated expansion adjusts
+later byte credits. A saturated row or high operation-memory pressure drains
+parallel fragments and encodes serially. If a parallel allocation still fails,
+the retained packet descriptors rebuild the unpublished window serially before
+reporting that one packet cannot fit by itself.
 
 Eligible fixed-width flat JSONL can use the complete arena for short,
 moderate-cost schemas and a proportional half-arena policy for sustained work.

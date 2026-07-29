@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,53 @@ def test_wide_worker_bitmap_has_a_nonempty_summary_and_numa_local_stealing() -> 
     assert "same_domain" in arena
 
 
+def test_process_cpu_governor_bounds_two_concurrent_registrations() -> None:
+    """Concurrent operation registrations share one fair CPU capacity."""
+    require_native()
+    capacity, peak, waits, completed = native_core.process_cpu_governor_probe(256)
+
+    assert capacity >= 1
+    assert 1 <= peak <= capacity
+    assert completed == 256
+    if capacity < completed:
+        assert waits > 0
+
+
+def test_text_output_uses_worker_local_governed_scratch() -> None:
+    """Parallel encoders recycle private blocks through the operation pool."""
+    output = (ROOT / "cpp/src/internal/output/ordered_text_output.hh").read_text(encoding="utf-8")
+    resource = (ROOT / "cpp/src/internal/memory/pool_resource.cc").read_text(encoding="utf-8")
+
+    assert "worker_resources" in output
+    assert "recycle_exact_blocks=*/true" in output
+    assert "pending_packets" in output
+    assert "kOutOfMemory" in output
+    assert "max_cached_bytes" in resource
+
+
+def test_skewed_text_row_degrades_to_bounded_serial_encoding(tmp_path: Path) -> None:
+    """A row larger than the packet target drains parallel output safely."""
+    from schema_sanitizer.api_impl.execution_context import default_pool
+
+    require_native()
+    source = tmp_path / "skewed.jsonl"
+    output = tmp_path / "skewed-output.jsonl"
+    value = "x" * (2 * 1024 * 1024)
+    source.write_text(json.dumps({"value": value}) + "\n", encoding="utf-8")
+
+    ss.to_jsonl(
+        source,
+        output,
+        input_format="jsonl",
+        multi_threading=True,
+        memory_limit_bytes=128 * 1024 * 1024,
+    )
+
+    assert json.loads(output.read_text(encoding="utf-8"))["value"] == value
+    counters = default_pool().get().performance_stats()["counters"]
+    assert counters["output_pressure_serializations"] >= 1
+
+
 def test_every_context_routes_actual_bytes_through_the_process_pool() -> None:
     """Per-operation quotas are children of one aggregate native pool."""
     execution_context = (ROOT / "cpp/src/planning/execution_context.cc").read_text(encoding="utf-8")
@@ -88,6 +136,8 @@ def test_every_context_routes_actual_bytes_through_the_process_pool() -> None:
     assert "shared_process_memory_pool(process_capacity)" in execution_context
     assert "make_governed_operation_memory_pool(" in execution_context
     assert "schema_sanitizer::ProcessMemoryPool" in memory_pool
+    assert "pool->SetLimit" in memory_pool
+    assert "capacity_bytes_ =" in memory_pool
     assert "kMinimumOperationAdmissionBytes" in memory_pool
     assert "kMaximumOperationAdmissionBytes" in memory_pool
 

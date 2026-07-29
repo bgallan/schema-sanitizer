@@ -62,6 +62,12 @@ enum class PerformanceCounter : std::uint8_t {
   kCsvOutputWorkerCeiling,
   kLowCoreTaskTelemetryBatches,
   kWorkerActiveStreaks,
+  kProcessCpuGovernorWaits,
+  kProcessCpuGovernorWaitNs,
+  kNumaLocalSteals,
+  kNumaRemoteSteals,
+  kOutputPressureSerializations,
+  kOutputEstimateExpansionBytes,
   kCount,
 };
 

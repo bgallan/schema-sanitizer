@@ -3,6 +3,7 @@
 
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/memory/memory_pool.hh"
+#include "internal/memory/pool_resource.hh"
 #include "internal/output/output_worker_admission.hh"
 #include "internal/output/text_buffer.hh"
 #include "internal/runtime/execution_policy.hh"
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -20,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace sanitize::internal::ordered_text_output {
 
@@ -210,6 +213,8 @@ write_stream(ArrowArrayStream *stream, Output &output,
   Stats stats;
   std::uint64_t ordinal = 0;
   std::int64_t reserved_output_bytes = 0;
+  std::int64_t output_credit_scale = 1;
+  std::deque<BatchPacket> pending_packets;
   const auto max_int64 = std::numeric_limits<std::int64_t>::max();
   const auto output_credit_capacity =
       base_policy.materialization_packet_target_bytes >
@@ -230,21 +235,50 @@ write_stream(ArrowArrayStream *stream, Output &output,
           TaskArenaLane selected_lane) -> sanitize::Status {
     auto executor_arena =
         selected_policy.effective_workers > 1 ? task_arena : nullptr;
+    std::shared_ptr<std::vector<std::shared_ptr<PoolResource>>>
+        worker_resources;
+    if (executor_arena && telemetry) {
+      try {
+        worker_resources =
+            std::make_shared<std::vector<std::shared_ptr<PoolResource>>>();
+        worker_resources->reserve(
+            static_cast<std::size_t>(selected_policy.effective_workers));
+        const auto cache_bytes = static_cast<std::size_t>(
+            std::clamp<std::int64_t>(selected_policy.worker_arena_bytes / 32,
+                                     64LL << 10, 1LL << 20));
+        auto pool_owner =
+            std::static_pointer_cast<void>(telemetry->memory_pool());
+        for (std::int64_t index = 0; index < selected_policy.effective_workers;
+             ++index) {
+          worker_resources->push_back(std::make_shared<PoolResource>(
+              pool_owner, /*recycle_exact_blocks=*/true, cache_bytes));
+        }
+      } catch (const std::bad_alloc &) {
+        return sanitize::Status::OutOfMemory(
+            "text writer: worker-local scratch allocation failed");
+      }
+    }
     SAN_ASSIGN_OR_RAISE(
         auto made,
         Executor::Make(
             static_cast<std::size_t>(selected_policy.effective_workers),
             static_cast<std::size_t>(selected_policy.task_queue_capacity),
             static_cast<std::size_t>(selected_policy.reorder_capacity),
-            [encode_packet_owner, output_memory_resource](
+            [encode_packet_owner, output_memory_resource, worker_resources](
                 BatchPacket &&packet, std::size_t worker_index,
                 std::stop_token stop) -> sanitize::Result<EncodedFragment> {
               if (stop.stop_requested()) {
                 return sanitize::Status::Cancelled(
                     "text output packet cancelled before encoding");
               }
-              TextBuffer bytes(output_memory_resource
-                                   ? output_memory_resource.get()
+              auto fragment_resource = output_memory_resource;
+              if (worker_resources && worker_index < worker_resources->size()) {
+                fragment_resource =
+                    std::static_pointer_cast<std::pmr::memory_resource>(
+                        (*worker_resources)[worker_index]);
+              }
+              TextBuffer bytes(fragment_resource
+                                   ? fragment_resource.get()
                                    : std::pmr::get_default_resource());
               if (packet.estimated_output_bytes > 0) {
                 try {
@@ -260,7 +294,7 @@ write_stream(ArrowArrayStream *stream, Output &output,
               try {
                 return EncodedFragment(
                     std::move(packet.owner), std::move(bytes), packet.row_count,
-                    packet.reserved_output_bytes, output_memory_resource);
+                    packet.reserved_output_bytes, fragment_resource);
               } catch (const std::bad_alloc &) {
                 return sanitize::Status::OutOfMemory(
                     "text output packet allocation exceeded the operation "
@@ -274,19 +308,23 @@ write_stream(ArrowArrayStream *stream, Output &output,
     return sanitize::Status::OK();
   };
 
-  const auto commit_next = [&]() -> sanitize::Status {
-    if (!executor) {
-      return sanitize::Status::Invalid(
-          "text writer: output executor is not initialized");
+  const auto commit_fragment =
+      [&](EncodedFragment &fragment) -> sanitize::Status {
+    const auto actual_bytes = static_cast<std::int64_t>(std::min<std::size_t>(
+        fragment.bytes.size(),
+        static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())));
+    if (actual_bytes > fragment.reserved_output_bytes &&
+        fragment.reserved_output_bytes > 0) {
+      const auto expansion = actual_bytes - fragment.reserved_output_bytes;
+      if (telemetry) {
+        telemetry->AddCounter(PerformanceCounter::kOutputEstimateExpansionBytes,
+                              expansion);
+      }
+      output_credit_scale = std::max<std::int64_t>(
+          output_credit_scale,
+          std::min<std::int64_t>(16, 1 + (actual_bytes - 1) /
+                                             fragment.reserved_output_bytes));
     }
-    SAN_ASSIGN_OR_RAISE(auto outcome, executor->TakeNext());
-    if (!outcome.result.ok()) {
-      cancel_executor();
-      return outcome.result.status();
-    }
-    auto fragment = std::move(outcome.result).ValueOrDie();
-    reserved_output_bytes = std::max<std::int64_t>(
-        0, reserved_output_bytes - fragment.reserved_output_bytes);
     const auto write_status = output.Write(
         std::string_view(fragment.bytes.data(), fragment.bytes.size()));
     if (!write_status.ok()) {
@@ -304,6 +342,64 @@ write_stream(ArrowArrayStream *stream, Output &output,
     }
     fragment.wipe();
     return sanitize::Status::OK();
+  };
+
+  const auto encode_serially = [&](BatchPacket packet) -> sanitize::Status {
+    try {
+      TextBuffer bytes(output_memory_resource
+                           ? output_memory_resource.get()
+                           : std::pmr::get_default_resource());
+      if (packet.estimated_output_bytes > 0) {
+        bytes.reserve(static_cast<std::size_t>(packet.estimated_output_bytes));
+      }
+      SAN_RETURN_NOT_OK((*encode_packet_owner)(packet, 0, {}, &bytes));
+      auto fragment = EncodedFragment(
+          std::move(packet.owner), std::move(bytes), packet.row_count,
+          packet.reserved_output_bytes, output_memory_resource);
+      return commit_fragment(fragment);
+    } catch (const std::bad_alloc &) {
+      return sanitize::Status::OutOfMemory(
+          "text output packet cannot fit within the operation memory limit "
+          "after draining parallel output");
+    }
+  };
+
+  const auto commit_next = [&]() -> sanitize::Status {
+    if (!executor) {
+      return sanitize::Status::Invalid(
+          "text writer: output executor is not initialized");
+    }
+    SAN_ASSIGN_OR_RAISE(auto outcome, executor->TakeNext());
+    if (!outcome.result.ok()) {
+      if (outcome.result.status().code() ==
+              sanitize::StatusCode::kOutOfMemory &&
+          !pending_packets.empty()) {
+        const auto retry_lane = executor_lane;
+        cancel_executor();
+        executor.reset();
+        reserved_output_bytes = 0;
+        if (telemetry) {
+          telemetry->AddCounter(
+              PerformanceCounter::kOutputPressureSerializations,
+              static_cast<std::int64_t>(pending_packets.size()));
+        }
+        while (!pending_packets.empty()) {
+          SAN_RETURN_NOT_OK(encode_serially(pending_packets.front()));
+          pending_packets.pop_front();
+        }
+        ordinal = 0;
+        return create_executor(policy, retry_lane);
+      }
+      cancel_executor();
+      return outcome.result.status();
+    }
+    auto fragment = std::move(outcome.result).ValueOrDie();
+    reserved_output_bytes = std::max<std::int64_t>(
+        0, reserved_output_bytes - fragment.reserved_output_bytes);
+    if (!pending_packets.empty()) {
+      pending_packets.pop_front();
+    }
+    return commit_fragment(fragment);
   };
 
   const auto ensure_executor_for =
@@ -402,10 +498,14 @@ write_stream(ArrowArrayStream *stream, Output &output,
           std::min<std::int64_t>(kMaximumOutputPacketRows, rows_remaining);
       std::int64_t row_count = 0;
       std::int64_t estimated_packet_bytes = 0;
+      bool saturated_single_row = false;
       while (row_count < maximum_rows) {
         const auto row_estimate = std::clamp<std::int64_t>(
             estimate_row(batch->value(), first_row + row_count, target_bytes),
             1, target_bytes);
+        if (row_count == 0 && row_estimate >= target_bytes) {
+          saturated_single_row = true;
+        }
         if (row_count > 0 &&
             row_estimate > target_bytes - estimated_packet_bytes) {
           break;
@@ -419,7 +519,10 @@ write_stream(ArrowArrayStream *stream, Output &output,
       }
       row_count = std::max<std::int64_t>(1, row_count);
       const auto packet_credit =
-          std::max<std::int64_t>(1, estimated_packet_bytes);
+          estimated_packet_bytes > output_credit_capacity / output_credit_scale
+              ? output_credit_capacity
+              : std::max<std::int64_t>(1, estimated_packet_bytes *
+                                              output_credit_scale);
       // Count bounds protect scheduler metadata; this byte bound protects the
       // variable-sized retained fragments. Committing the next ordinal is the
       // cancellation-aware wait path and cannot deadlock behind a later
@@ -427,15 +530,46 @@ write_stream(ArrowArrayStream *stream, Output &output,
       while (reserved_output_bytes > output_credit_capacity - packet_credit) {
         SAN_RETURN_NOT_OK(commit_next());
       }
+      const auto operation_pool =
+          telemetry ? telemetry->memory_pool() : nullptr;
+      const auto operation_limit =
+          operation_pool ? operation_pool->limit_bytes() : -1;
+      const auto memory_pressure =
+          operation_limit > 0 && operation_pool->bytes_allocated() >=
+                                     operation_limit - operation_limit / 8;
+      if (saturated_single_row || memory_pressure) {
+        while (executor->in_flight() > 0) {
+          SAN_RETURN_NOT_OK(commit_next());
+        }
+        if (telemetry) {
+          telemetry->AddCounter(
+              PerformanceCounter::kOutputPressureSerializations);
+        }
+        SAN_RETURN_NOT_OK(encode_serially(
+            BatchPacket{.owner = batch,
+                        .first_row = first_row,
+                        .row_count = row_count,
+                        .estimated_output_bytes = estimated_packet_bytes,
+                        .reserved_output_bytes = packet_credit}));
+        first_row += row_count;
+        continue;
+      }
+      BatchPacket packet{.owner = batch,
+                         .first_row = first_row,
+                         .row_count = row_count,
+                         .estimated_output_bytes = estimated_packet_bytes,
+                         .reserved_output_bytes = packet_credit};
       SAN_RETURN_NOT_OK(executor->Submit(typename Executor::Packet{
           .ordinal = ordinal++,
-          .payload =
-              BatchPacket{.owner = batch,
-                          .first_row = first_row,
-                          .row_count = row_count,
-                          .estimated_output_bytes = estimated_packet_bytes,
-                          .reserved_output_bytes = packet_credit},
+          .payload = packet,
       }));
+      try {
+        pending_packets.push_back(std::move(packet));
+      } catch (const std::bad_alloc &) {
+        cancel_executor();
+        return sanitize::Status::OutOfMemory(
+            "text writer: retry descriptor allocation failed");
+      }
       reserved_output_bytes += packet_credit;
       first_row += row_count;
     }

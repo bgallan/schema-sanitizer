@@ -18,6 +18,8 @@ public:
   explicit PoolResource(void *pool_handle = nullptr);
   explicit PoolResource(std::shared_ptr<void> pool_keepalive);
   PoolResource(std::shared_ptr<void> pool_keepalive, bool recycle_exact_blocks);
+  PoolResource(std::shared_ptr<void> pool_keepalive, bool recycle_exact_blocks,
+               std::size_t max_cached_bytes);
   ~PoolResource() override;
 
   // Returns the opaque pool handle used by this resource.

@@ -75,6 +75,7 @@ target_sources(
     cpp/src/api/python_abi3/options/catalog.cc
     cpp/src/api/python_abi3/options/prepare.cc
     cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc
+    cpp/src/api/python_abi3/runtime/cpu_governor_probe.cc
     cpp/src/api/python_abi3/runtime/ordered_executor_completion_probe.cc
     cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc
     cpp/src/api/python_abi3/runtime/arena_wake_probe.cc

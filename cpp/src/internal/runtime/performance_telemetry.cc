@@ -66,7 +66,13 @@ constexpr std::array<std::string_view,
                      "csv_fixed_plan_dynamic_fields",
                      "csv_output_worker_ceiling",
                      "low_core_task_telemetry_batches",
-                     "worker_active_streaks"};
+                     "worker_active_streaks",
+                     "process_cpu_governor_waits",
+                     "process_cpu_governor_wait_ns",
+                     "numa_local_steals",
+                     "numa_remote_steals",
+                     "output_pressure_serializations",
+                     "output_estimate_expansion_bytes"};
 
 void update_maximum(std::atomic<std::int64_t> *target,
                     std::int64_t value) noexcept {

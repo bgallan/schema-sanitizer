@@ -36,6 +36,9 @@ public:
   [[nodiscard]] virtual int64_t size_mismatch_count() const { return 0; }
   [[nodiscard]] virtual int64_t corruption_count() const { return 0; }
   [[nodiscard]] virtual int64_t limit_bytes() const { return -1; }
+  // Updates a mutable aggregate ceiling. Operation-local pools keep their
+  // fixed public limit and may ignore this hook.
+  virtual void SetLimit(int64_t) noexcept {}
   [[nodiscard]] virtual bool wipes_memory_on_free() const noexcept {
     return false;
   }
