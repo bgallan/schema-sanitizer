@@ -3,12 +3,12 @@
 #include "frontends/builtin_frontends.hh"
 #include "frontends/xml/frontend_internal.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <memory>
 #include <new>
-#include <stop_token>
 #include <string_view>
 #include <utility>
 
@@ -263,9 +263,9 @@ sanitize::Status XmlFrontend::append_streamed_rows_parallel(
     ranges.push_back(XmlParseRange{.begin = begin, .end = end});
   }
 
-  auto worker =
-      [&row_texts](XmlParseRange &&range, std::size_t,
-                   std::stop_token stop) -> sanitize::Result<XmlParsedChunk> {
+  auto worker = [&row_texts](XmlParseRange &&range, std::size_t,
+                             sanitize::internal::StopToken stop)
+      -> sanitize::Result<XmlParsedChunk> {
     XmlParsedChunk nodes;
     nodes.reserve(range.end - range.begin);
     for (std::size_t index = range.begin; index < range.end; ++index) {

@@ -3,13 +3,13 @@
 
 #include "internal/runtime/cpu_capacity.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
-#include <stop_token>
 
 namespace sanitize::internal {
 
@@ -84,7 +84,8 @@ public:
     }
     ~Registration() { Release(); }
 
-    [[nodiscard]] TaskLease Acquire(std::stop_token stop) noexcept {
+    [[nodiscard]] TaskLease
+    Acquire(sanitize::internal::StopToken stop) noexcept {
       return owner_ ? owner_->AcquireTask(stop) : TaskLease{};
     }
 
@@ -152,7 +153,8 @@ private:
     current->next = nullptr;
   }
 
-  [[nodiscard]] TaskLease AcquireTask(std::stop_token stop) noexcept {
+  [[nodiscard]] TaskLease
+  AcquireTask(sanitize::internal::StopToken stop) noexcept {
     if (registered_arenas_.load(std::memory_order_acquire) <= 1) {
       return {};
     }
@@ -164,7 +166,7 @@ private:
     }
     Enqueue(&waiter);
     const bool contended = head_ != &waiter || active_tasks_ >= capacity_;
-    const auto admitted = ready_.wait(lock, stop, [&] {
+    const auto admitted = WaitWithStop(ready_, lock, stop, [&] {
       return registered_arenas_.load(std::memory_order_acquire) <= 1 ||
              (head_ == &waiter && active_tasks_ < capacity_);
     });

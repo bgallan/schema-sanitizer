@@ -12,9 +12,9 @@
 #include "internal/parsing/json/string_decode.hh"
 #include "sanitize/abi/cdata_types.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <cstdint>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -349,7 +349,8 @@ sanitize::Status write_header(Output &out_file, const jsonl::JsonlField &root) {
 sanitize::Status append_rows_csv(const jsonl::JsonlField &root,
                                  const ArrowArray &array,
                                  std::int64_t first_row, std::int64_t row_count,
-                                 std::stop_token stop, TextBuffer *out) {
+                                 sanitize::internal::StopToken stop,
+                                 TextBuffer *out) {
   if (!out || first_row < 0 || row_count < 0 || first_row > array.length ||
       row_count > array.length - first_row) {
     return sanitize::Status::Invalid("CSV writer: invalid output packet range");
@@ -431,7 +432,7 @@ write_stream(ArrowArrayStream *stream, Output &out_file,
       },
       std::move(row_estimator),
       [&root](const ordered_text_output::BatchPacket &packet, std::size_t,
-              std::stop_token stop, TextBuffer *out) {
+              sanitize::internal::StopToken stop, TextBuffer *out) {
         return append_rows_csv(root, packet.owner->value(), packet.first_row,
                                packet.row_count, stop, out);
       },

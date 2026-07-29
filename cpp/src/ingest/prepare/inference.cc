@@ -331,7 +331,7 @@ sanitize::Status scan_inference_parallel(
           static_cast<std::size_t>(inference_policy.task_queue_capacity),
           static_cast<std::size_t>(inference_policy.reorder_capacity),
           [builder](internal::OwnedRowPacket &&packet, std::size_t worker_index,
-                    std::stop_token stop) {
+                    sanitize::internal::StopToken stop) {
             return builder->Build(std::move(packet), worker_index, stop);
           },
           std::move(task_arena), internal::TaskArenaLane::kUpstream,

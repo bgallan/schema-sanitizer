@@ -41,7 +41,7 @@ def test_v98_four_plus_hot_path_has_no_dynamic_global_stop_reload() -> None:
     ]
     assert "if constexpr (CheckGlobalStopping)" in loop
     assert loop.count("state->stopping.load") == 1
-    assert "stop_token" in source
+    assert "StopToken" in source
     assert "admission and park wakeup" in source
 
 

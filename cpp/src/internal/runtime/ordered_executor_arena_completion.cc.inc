@@ -13,14 +13,15 @@ struct ArenaOutcomeSlot final {
 };
 
 void execute_external(ScheduledPacket scheduled, std::size_t worker_index,
-                      std::stop_token arena_stop,
+                      sanitize::internal::StopToken arena_stop,
                       std::size_t completion_shard) noexcept {
   Outcome outcome{
       .ordinal = scheduled.packet.ordinal,
       .result = sanitize::Status::Cancelled("ordered worker stop requested")};
   {
-    std::stop_callback propagate_arena_stop(
-        arena_stop, [this] { stage_stop_source_.request_stop(); });
+    auto propagate_stop = [this] { stage_stop_source_.request_stop(); };
+    StopCallback<decltype(propagate_stop)> propagate_arena_stop(
+        arena_stop, std::move(propagate_stop));
     outcome = execute_packet(std::move(scheduled.packet), worker_index,
                              stage_stop_source_.get_token());
   }

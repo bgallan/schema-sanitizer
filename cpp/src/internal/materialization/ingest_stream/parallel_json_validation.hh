@@ -6,9 +6,9 @@
 #include "internal/runtime/execution_policy.hh"
 #include "sanitize/core/status.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <cstddef>
 #include <memory>
-#include <stop_token>
 #include <vector>
 
 namespace sanitize::internal {
@@ -34,7 +34,7 @@ public:
   // scanner/parser error inside this contiguous packet.
   [[nodiscard]] sanitize::Result<OwnedRowPacket>
   Validate(JsonValidationTask &&task, std::size_t worker_index,
-           std::stop_token stop);
+           sanitize::internal::StopToken stop);
 
 private:
   struct WorkerState;

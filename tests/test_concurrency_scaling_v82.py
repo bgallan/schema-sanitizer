@@ -52,7 +52,7 @@ def test_v82_worker_wait_predicate_uses_its_own_generation() -> None:
     runtime = RUNTIME.read_text(encoding="utf-8")
     recheck = runtime.index("if (!slot.tasks.empty())")
     stop = runtime.index("activity.Stop();", recheck)
-    wait = runtime.index("slot.ready.wait", stop)
+    wait = runtime.index("WaitWithStop(slot.ready", stop)
 
     assert recheck < stop < wait
     assert "slot.wake_epoch.load(std::memory_order_acquire)" in runtime[recheck:]

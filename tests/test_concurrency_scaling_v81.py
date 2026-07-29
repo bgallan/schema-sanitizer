@@ -40,7 +40,7 @@ def test_v81_park_transition_rechecks_local_work_without_stranding() -> None:
     runtime = ARENA_RUNTIME.read_text(encoding="utf-8")
     recheck = runtime.index("if (!slot.tasks.empty())")
     stop = runtime.index("activity.Stop();", recheck)
-    wait = runtime.index("slot.ready.wait", stop)
+    wait = runtime.index("WaitWithStop(slot.ready", stop)
 
     assert recheck < stop < wait
     assert "while this worker was still advertised as running" in runtime

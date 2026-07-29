@@ -54,7 +54,7 @@ struct FlatJsonRootContext {
   const std::shared_ptr<MemoryPool> *parent_pool = nullptr;
   std::int64_t packet_memory_limit = 1;
   std::size_t ordered_index = 0;
-  std::stop_token stop;
+  sanitize::internal::StopToken stop;
 };
 
 sanitize::Status append_json_field(void *raw, std::string_view key,
@@ -103,8 +103,9 @@ sanitize::Status append_json_field(void *raw, std::string_view key,
 
 sanitize::Status append_flat_inference_value(
     InferenceEvidencePacket *packet, std::string_view key,
-    const ValueView &value, const PreparedOptions &opts, std::stop_token stop,
-    std::size_t *ordered_index, const std::shared_ptr<MemoryPool> &parent_pool,
+    const ValueView &value, const PreparedOptions &opts,
+    sanitize::internal::StopToken stop, std::size_t *ordered_index,
+    const std::shared_ptr<MemoryPool> &parent_pool,
     std::int64_t packet_memory_limit) {
   if (stop.stop_requested()) {
     return sanitize::Status::Cancelled(
@@ -145,7 +146,7 @@ sanitize::Status append_flat_json_inference_row(
     JsonOnDemandDoc *document, std::string_view raw, std::size_t base_offset,
     InferenceEvidencePacket *packet, const PreparedOptions &opts,
     const std::shared_ptr<MemoryPool> &parent_pool,
-    std::int64_t packet_memory_limit, std::stop_token stop) {
+    std::int64_t packet_memory_limit, sanitize::internal::StopToken stop) {
   if (!document || !packet) {
     return sanitize::Status::Invalid(
         "flat inference JSON row context is unavailable");

@@ -107,9 +107,9 @@ PyObject *py_ordered_executor_probe(PyObject *, PyObject *args) {
   const auto failure = static_cast<std::int64_t>(fail_ordinal);
   auto executor_result = ProbeExecutor::Make(
       effective_workers, capacity, capacity,
-      [state, task_count,
-       failure](std::uint64_t &&value, std::size_t,
-                std::stop_token stop) -> sanitize::Result<std::uint64_t> {
+      [state, task_count, failure](std::uint64_t &&value, std::size_t,
+                                   sanitize::internal::StopToken stop)
+          -> sanitize::Result<std::uint64_t> {
         {
           std::lock_guard lock(state->mutex);
           state->worker_threads.insert(std::this_thread::get_id());
@@ -246,9 +246,9 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
   };
   auto state = std::make_shared<SharedState>();
   const auto make_worker = [state](bool is_output) {
-    return [state, is_output](
-               std::uint64_t &&value, std::size_t,
-               std::stop_token stop) -> sanitize::Result<std::uint64_t> {
+    return [state, is_output](std::uint64_t &&value, std::size_t,
+                              sanitize::internal::StopToken stop)
+               -> sanitize::Result<std::uint64_t> {
       {
         std::lock_guard lock(state->mutex);
         (is_output ? state->output : state->upstream)
@@ -373,7 +373,7 @@ PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *) {
   };
   for (std::size_t ordinal = 0; ordinal < worker_count; ++ordinal) {
     auto status = arena->Submit(
-        [&](std::size_t worker_index, std::stop_token stop) {
+        [&](std::size_t worker_index, sanitize::internal::StopToken stop) {
           blockers_started.fetch_add(1, std::memory_order_release);
           while (
               !release_worker[worker_index].load(std::memory_order_acquire) &&
@@ -405,7 +405,8 @@ PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *) {
 
   for (std::size_t ordinal = 0; ordinal < worker_count; ++ordinal) {
     auto status = arena->Submit(
-        [&, ordinal](std::size_t worker_index, std::stop_token stop) {
+        [&, ordinal](std::size_t worker_index,
+                     sanitize::internal::StopToken stop) {
           if (stop.stop_requested()) {
             return;
           }

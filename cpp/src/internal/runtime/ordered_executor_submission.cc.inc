@@ -34,7 +34,8 @@ sanitize::Status submit_high_core_arena(Packet packet) {
        scheduled = ScheduledPacket{.packet = std::move(packet),
                                    .completion_slot = completion_slot},
        lease = ExternalLease(this, completion_shard)](
-          std::size_t worker_index, std::stop_token stop) mutable {
+          std::size_t worker_index,
+          sanitize::internal::StopToken stop) mutable {
         execute_external(std::move(scheduled), worker_index, stop,
                          lease.shard());
         lease.Complete();

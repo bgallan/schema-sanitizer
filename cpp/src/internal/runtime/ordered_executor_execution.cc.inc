@@ -1,5 +1,5 @@
 Outcome execute_packet(Packet packet, std::size_t worker_index,
-                       std::stop_token stop) noexcept {
+                       sanitize::internal::StopToken stop) noexcept {
   const auto ordinal = packet.ordinal;
   try {
     if (stop.stop_requested()) {

@@ -11,6 +11,7 @@
 #include "sanitize/abi/cdata_types.hh"
 #include "sanitize/core/status.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <cstdint>
 #include <deque>
@@ -18,7 +19,6 @@
 #include <memory>
 #include <memory_resource>
 #include <new>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -264,9 +264,10 @@ write_stream(ArrowArrayStream *stream, Output &output,
             static_cast<std::size_t>(selected_policy.effective_workers),
             static_cast<std::size_t>(selected_policy.task_queue_capacity),
             static_cast<std::size_t>(selected_policy.reorder_capacity),
-            [encode_packet_owner, output_memory_resource, worker_resources](
-                BatchPacket &&packet, std::size_t worker_index,
-                std::stop_token stop) -> sanitize::Result<EncodedFragment> {
+            [encode_packet_owner, output_memory_resource,
+             worker_resources](BatchPacket &&packet, std::size_t worker_index,
+                               sanitize::internal::StopToken stop)
+                -> sanitize::Result<EncodedFragment> {
               if (stop.stop_requested()) {
                 return sanitize::Status::Cancelled(
                     "text output packet cancelled before encoding");

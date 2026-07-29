@@ -34,12 +34,13 @@ PyObject *py_process_cpu_governor_probe(PyObject *, PyObject *args) {
   std::atomic<std::int64_t> peak{0};
   std::atomic<std::int64_t> waits{0};
   std::atomic<std::int64_t> completed{0};
-  std::vector<std::jthread> threads;
+  std::vector<sanitize::internal::JThread> threads;
   try {
     threads.reserve(static_cast<std::size_t>(requested_tasks));
     for (int index = 0; index < requested_tasks; ++index) {
       auto *registration = (index & 1) == 0 ? &first : &second;
-      threads.emplace_back([&, registration](std::stop_token stop) {
+      threads.emplace_back([&,
+                            registration](sanitize::internal::StopToken stop) {
         auto lease = registration->Acquire(stop);
         if (lease.waited()) {
           waits.fetch_add(1, std::memory_order_relaxed);

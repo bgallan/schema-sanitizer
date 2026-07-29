@@ -82,7 +82,7 @@ struct OperationTaskArena::State final {
     std::size_t dedicated_output_queued = 0;
     bool shallow_output_preference = false;
     std::mutex start_mutex;
-    std::unique_ptr<std::jthread> worker;
+    std::unique_ptr<sanitize::internal::JThread> worker;
 
     explicit WorkerSlot(std::pmr::memory_resource *resource)
         : tasks(resource) {}
@@ -538,7 +538,7 @@ void OperationTaskArena::Shutdown() noexcept {
     slot->ready.notify_all();
   }
   for (auto &slot : state->slots) {
-    std::unique_ptr<std::jthread> worker;
+    std::unique_ptr<sanitize::internal::JThread> worker;
     {
       std::lock_guard start_lock(slot->start_mutex);
       worker = std::move(slot->worker);

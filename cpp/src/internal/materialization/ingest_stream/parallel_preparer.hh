@@ -11,11 +11,11 @@
 #include "sanitize/options/options.hh"
 #include "sanitize/planning/plan.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -67,9 +67,9 @@ public:
   ~ParallelRowPreparer();
 
   // Prepares one ordinary packet or one disjoint column group.
-  sanitize::Result<PreparedRowsPacket> Prepare(MaterializationTask &&task,
-                                               std::size_t worker_index,
-                                               std::stop_token stop);
+  sanitize::Result<PreparedRowsPacket>
+  Prepare(MaterializationTask &&task, std::size_t worker_index,
+          sanitize::internal::StopToken stop);
 
   [[nodiscard]] std::size_t column_group_count() const noexcept {
     return column_ranges_.size();
@@ -90,13 +90,13 @@ private:
                       std::shared_ptr<const CompiledPlan> plan,
                       PreparedOptionsPtr opts);
 
-  sanitize::Result<PreparedRowsPacket> prepare_rows(OwnedRowPacket &&owned,
-                                                    std::size_t worker_index,
-                                                    std::stop_token stop);
+  sanitize::Result<PreparedRowsPacket>
+  prepare_rows(OwnedRowPacket &&owned, std::size_t worker_index,
+               sanitize::internal::StopToken stop);
 
-  sanitize::Result<PreparedRowPacket> prepare_one(const RowRef &row,
-                                                  std::size_t worker_index,
-                                                  std::stop_token stop);
+  sanitize::Result<PreparedRowPacket>
+  prepare_one(const RowRef &row, std::size_t worker_index,
+              sanitize::internal::StopToken stop);
 
   sanitize::Result<PreparedRow> prepare_raw(const RowRef &row,
                                             std::size_t worker_index,
@@ -104,12 +104,12 @@ private:
 
   sanitize::Result<PreparedRowsPacket>
   prepare_columnar(OwnedRowPacket &&owned, std::size_t worker_index,
-                   std::stop_token stop);
+                   sanitize::internal::StopToken stop);
 
   sanitize::Result<PreparedRowsPacket> prepare_column_partition(
       const std::shared_ptr<const ColumnPartitionInput> &input,
       std::size_t group_index, std::size_t column_state_index,
-      std::stop_token stop);
+      sanitize::internal::StopToken stop);
 
   sanitize::Status
   initialize_column_states(const std::shared_ptr<MemoryPool> &parent,

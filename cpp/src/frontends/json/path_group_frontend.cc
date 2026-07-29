@@ -296,14 +296,15 @@ private:
       return sanitize::Status::OK();
     }
 
-    SAN_ASSIGN_OR_RAISE(
-        active_executor_,
-        FetchExecutor::Make(
-            cohort_size, cohort_size, cohort_size,
-            [this](FetchTask &&task, std::size_t, std::stop_token) {
-              return fetch_first(std::move(task));
-            },
-            task_arena_, TaskArenaLane::kOutput, TaskTelemetryKind::kInput));
+    SAN_ASSIGN_OR_RAISE(active_executor_,
+                        FetchExecutor::Make(
+                            cohort_size, cohort_size, cohort_size,
+                            [this](FetchTask &&task, std::size_t,
+                                   sanitize::internal::StopToken) {
+                              return fetch_first(std::move(task));
+                            },
+                            task_arena_, TaskArenaLane::kOutput,
+                            TaskTelemetryKind::kInput));
     active_size_ = cohort_size;
     for (std::size_t ordinal = 0; ordinal < cohort_size; ++ordinal) {
       SAN_RETURN_NOT_OK(active_executor_->Submit(FetchExecutor::Packet{

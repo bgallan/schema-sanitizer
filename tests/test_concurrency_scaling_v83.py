@@ -27,7 +27,7 @@ def test_v83_wake_epoch_is_sampled_only_at_park_wake_boundaries() -> None:
     assert "slot.wake_epoch.load" not in runtime[task_run:loop_end]
     park = runtime.index("// Refresh the generation exactly once at the park boundary")
     stop = runtime.index("activity.Stop();", park)
-    wait = runtime.index("slot.ready.wait", stop)
+    wait = runtime.index("WaitWithStop(slot.ready", stop)
     assert park < stop < wait
     park_comment = " ".join(runtime[park:stop].replace("//", " ").split())
     assert "sampling after every completed packet is redundant" in park_comment

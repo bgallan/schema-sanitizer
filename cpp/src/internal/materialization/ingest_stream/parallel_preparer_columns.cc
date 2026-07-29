@@ -70,7 +70,7 @@ sanitize::Result<PreparedRowsPacket>
 ParallelRowPreparer::prepare_column_partition(
     const std::shared_ptr<const ColumnPartitionInput> &input,
     std::size_t group_index, std::size_t column_state_index,
-    std::stop_token stop) {
+    sanitize::internal::StopToken stop) {
   if (!input || input->owned.rows.empty() ||
       group_index >= column_ranges_.size() ||
       group_index >= column_plans_.size() ||

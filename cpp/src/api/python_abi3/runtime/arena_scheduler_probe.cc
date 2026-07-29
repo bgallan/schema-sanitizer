@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace core_abi3_internal {
@@ -22,8 +23,11 @@ void release_gate(std::atomic<bool> *gate) noexcept {
   gate->notify_all();
 }
 
-bool wait_gate_or_stop(std::atomic<bool> *gate, std::stop_token stop) {
-  std::stop_callback stop_gate(stop, [gate] { gate->notify_all(); });
+bool wait_gate_or_stop(std::atomic<bool> *gate,
+                       sanitize::internal::StopToken stop) {
+  auto notify_gate = [gate] { gate->notify_all(); };
+  sanitize::internal::StopCallback<decltype(notify_gate)> stop_gate(
+      stop, std::move(notify_gate));
   while (!gate->load(std::memory_order_acquire) && !stop.stop_requested()) {
     gate->wait(false, std::memory_order_acquire);
   }
@@ -77,13 +81,14 @@ PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
   std::atomic<std::size_t> tasks_finished{0};
   std::atomic<bool> release_producers{false};
   std::atomic<bool> submit_failed{false};
-  std::vector<std::jthread> producer_threads;
+  std::vector<sanitize::internal::JThread> producer_threads;
   producer_threads.reserve(producers);
 
   for (std::size_t producer = 0; producer < producers; ++producer) {
     producer_threads.emplace_back(
         [arena, plan, per_producer, &producers_ready, &tasks_finished,
-         &release_producers, &submit_failed](std::stop_token stop) mutable {
+         &release_producers,
+         &submit_failed](sanitize::internal::StopToken stop) mutable {
           producers_ready.fetch_add(1, std::memory_order_release);
           if (!wait_gate_or_stop(&release_producers, stop)) {
             return;
@@ -91,7 +96,8 @@ PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
           for (std::size_t task_index = 0; task_index < per_producer;
                ++task_index) {
             auto status = arena->Submit(
-                [&tasks_finished](std::size_t, std::stop_token task_stop) {
+                [&tasks_finished](std::size_t,
+                                  sanitize::internal::StopToken task_stop) {
                   if (!task_stop.stop_requested()) {
                     tasks_finished.fetch_add(1, std::memory_order_release);
                   }
@@ -190,7 +196,7 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
   std::atomic<std::size_t> work_finished{0};
   std::atomic<bool> release_blockers{false};
 
-  const auto blocker = [&](std::size_t, std::stop_token stop) {
+  const auto blocker = [&](std::size_t, sanitize::internal::StopToken stop) {
     blockers_started.fetch_add(1, std::memory_order_release);
     (void)wait_gate_or_stop(&release_blockers, stop);
     blockers_finished.fetch_add(1, std::memory_order_release);
@@ -216,7 +222,7 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  const auto work = [&](std::size_t, std::stop_token stop) {
+  const auto work = [&](std::size_t, sanitize::internal::StopToken stop) {
     if (!stop.stop_requested()) {
       work_finished.fetch_add(1, std::memory_order_release);
     }
@@ -313,7 +319,7 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
 
   for (std::size_t ordinal = 0; ordinal < workers; ++ordinal) {
     auto status = arena->Submit(
-        [&](std::size_t worker_index, std::stop_token stop) {
+        [&](std::size_t worker_index, sanitize::internal::StopToken stop) {
           blockers_started.fetch_add(1, std::memory_order_release);
           auto *release =
               worker_index >= high_begin ? &release_high : &release_low;
@@ -339,7 +345,7 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
 
   for (std::size_t ordinal = 0; ordinal < workers; ++ordinal) {
     auto status = arena->Submit(
-        [&](std::size_t worker_index, std::stop_token stop) {
+        [&](std::size_t worker_index, sanitize::internal::StopToken stop) {
           if (stop.stop_requested()) {
             return;
           }
@@ -360,7 +366,7 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
   for (int wave = 0; wave < output_waves; ++wave) {
     for (std::size_t ordinal = 0; ordinal < workers / 2U; ++ordinal) {
       auto status = arena->Submit(
-          [&](std::size_t relative_worker, std::stop_token stop) {
+          [&](std::size_t relative_worker, sanitize::internal::StopToken stop) {
             if (stop.stop_requested()) {
               return;
             }
@@ -462,7 +468,7 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
 
   for (std::size_t ordinal = 0; ordinal < workers; ++ordinal) {
     auto status = arena->Submit(
-        [&](std::size_t worker_index, std::stop_token stop) {
+        [&](std::size_t worker_index, sanitize::internal::StopToken stop) {
           blockers_started.fetch_add(1, std::memory_order_release);
           while (
               !release_worker[worker_index].load(std::memory_order_acquire) &&
@@ -492,7 +498,7 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
 
   for (std::size_t ordinal = 0; ordinal < output_count; ++ordinal) {
     auto status = arena->Submit(
-        [&](std::size_t, std::stop_token stop) {
+        [&](std::size_t, sanitize::internal::StopToken stop) {
           if (stop.stop_requested()) {
             return;
           }
@@ -512,7 +518,7 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
   }
   for (std::size_t ordinal = 0; ordinal < broad_count; ++ordinal) {
     auto status = arena->Submit(
-        [&](std::size_t, std::stop_token stop) {
+        [&](std::size_t, sanitize::internal::StopToken stop) {
           if (stop.stop_requested()) {
             return;
           }

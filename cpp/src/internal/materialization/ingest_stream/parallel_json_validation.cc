@@ -120,8 +120,10 @@ ParallelJsonRowValidator::Make(
   return validator;
 }
 
-sanitize::Result<OwnedRowPacket> ParallelJsonRowValidator::Validate(
-    JsonValidationTask &&task, std::size_t worker_index, std::stop_token stop) {
+sanitize::Result<OwnedRowPacket>
+ParallelJsonRowValidator::Validate(JsonValidationTask &&task,
+                                   std::size_t worker_index,
+                                   sanitize::internal::StopToken stop) {
   if (worker_index >= workers_.size()) {
     return sanitize::Status::Invalid(
         "ParallelJsonRowValidator::Validate: worker index out of range");

@@ -67,41 +67,7 @@ jobs:
           detect-secrets scan \
             --exclude-files '^(\.git/|build/|dist/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/)' \
             --all-files > .detect-secrets.ci.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          def _is_notebook_cell_id(filename: str, line_number: int | None) -> bool:
-              if not filename.endswith(".ipynb") or line_number is None:
-                  return False
-              try:
-                  line = Path(filename).read_text(encoding="utf-8").splitlines()[line_number - 1]
-              except (OSError, IndexError):
-                  return False
-              stripped = line.strip()
-              return stripped.startswith('"id":') and (
-                  stripped.endswith('"') or stripped.endswith('",')
-              )
-          report = json.loads(Path(".detect-secrets.ci.json").read_text(encoding="utf-8"))
-          findings = {}
-          for filename, items in report.get("results", {}).items():
-              kept = [
-                  item for item in items
-                  if not _is_notebook_cell_id(filename, item.get("line_number"))
-              ]
-              if kept:
-                  findings[filename] = kept
-          if findings:
-              total = sum(len(items) for items in findings.values())
-              print(f"detect-secrets found {total} potential secret(s) in {len(findings)} file(s):")
-              for filename, items in sorted(findings.items()):
-                  for item in items:
-                      kind = item.get("type", "unknown")
-                      line = item.get("line_number", "?")
-                      verified = item.get("is_verified", False)
-                      print(f"- {filename}:{line}: {kind} (verified={verified})")
-              raise SystemExit(f"detect-secrets found {total} potential secret(s) in {len(findings)} file(s)")
-          print("detect-secrets: no findings")
-          PY
+          python meta/ci/check_detect_secrets_report.py .detect-secrets.ci.json
   quality:
     name: lint and static typing
     runs-on: ubuntu-latest

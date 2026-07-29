@@ -12,9 +12,9 @@
 #include "internal/runtime/execution_policy.hh"
 #include "sanitize/abi/cdata_types.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <cstdint>
-#include <stop_token>
 #include <string>
 
 namespace sanitize::internal::jsonl_stream_writer {
@@ -183,11 +183,10 @@ sanitize::Status flush_buffer_if_large(Output &out_file, TextBuffer &buffer) {
   return flush_buffer(out_file, buffer);
 }
 
-sanitize::Status append_rows_jsonl(const JsonlField &root,
-                                   const ArrowArray &array,
-                                   std::int64_t first_row,
-                                   std::int64_t row_count, std::stop_token stop,
-                                   TextBuffer *out) {
+sanitize::Status
+append_rows_jsonl(const JsonlField &root, const ArrowArray &array,
+                  std::int64_t first_row, std::int64_t row_count,
+                  sanitize::internal::StopToken stop, TextBuffer *out) {
   if (!out || first_row < 0 || row_count < 0 || first_row > array.length ||
       row_count > array.length - first_row) {
     return sanitize::Status::Invalid(
@@ -296,7 +295,7 @@ write_stream(ArrowArrayStream *stream, Output &out_file,
       },
       JsonlRowEstimator(root),
       [&root](const ordered_text_output::BatchPacket &packet, std::size_t,
-              std::stop_token stop, TextBuffer *out) {
+              sanitize::internal::StopToken stop, TextBuffer *out) {
         return append_rows_jsonl(root, packet.owner->value(), packet.first_row,
                                  packet.row_count, stop, out);
       },

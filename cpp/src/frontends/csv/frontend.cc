@@ -3,11 +3,11 @@
 #include "frontends/builtin_frontends.hh"
 #include "frontends/csv/frontend_internal.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <new>
-#include <stop_token>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -202,7 +202,7 @@ CsvFrontend::append_records_parallel(CsvBatchStorage *storage,
   const auto cell_hint = projection_.column_count_hint();
   auto worker = [pool = memory_pool_, delimiter = delimiter_, cell_hint,
                  &records](CsvParseRange &&range, std::size_t,
-                           std::stop_token stop)
+                           sanitize::internal::StopToken stop)
       -> sanitize::Result<std::shared_ptr<CsvParsedChunk>> {
     if (stop.stop_requested()) {
       return sanitize::Status::Cancelled(

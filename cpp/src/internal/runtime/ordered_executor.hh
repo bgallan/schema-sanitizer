@@ -3,6 +3,7 @@
 #include "internal/runtime/external_task_lease.hh"
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/ordered_executor_completion_ring.hh"
+#include "internal/runtime/thread_compat.hh"
 #include "sanitize/core/status.hh"
 #include <algorithm>
 #include <array>
@@ -17,7 +18,6 @@
 #include <mutex>
 #include <new>
 #include <optional>
-#include <stop_token>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -43,8 +43,8 @@ public:
   using Packet = OrdinalPacket<Input>;
   using Outcome = OrdinalOutcome<Output>;
   using ScheduledPacket = ScheduledOrdinalPacket<Packet>;
-  using Worker = std::function<sanitize::Result<Output>(Input &&, std::size_t,
-                                                        std::stop_token)>;
+  using Worker = std::function<sanitize::Result<Output>(
+      Input &&, std::size_t, sanitize::internal::StopToken)>;
 
 private:
   void abandon_external_task(std::size_t shard) noexcept {
@@ -198,7 +198,8 @@ public:
            scheduled = ScheduledPacket{.packet = std::move(packet),
                                        .completion_slot = completion_slot},
            lease = ExternalLease(this, completion_shard)](
-              std::size_t worker_index, std::stop_token stop) mutable {
+              std::size_t worker_index,
+              sanitize::internal::StopToken stop) mutable {
             execute_external(std::move(scheduled), worker_index, stop,
                              lease.shard());
             lease.Complete();
@@ -437,7 +438,8 @@ private:
     }
   }
 
-  void worker_loop(std::size_t worker_index, std::stop_token stop) noexcept {
+  void worker_loop(std::size_t worker_index,
+                   sanitize::internal::StopToken stop) noexcept {
     try {
       while (!stop.stop_requested()) {
         std::optional<ScheduledPacket> scheduled;
@@ -556,7 +558,7 @@ private:
   std::mutex take_mutex_;
   std::deque<ScheduledPacket> tasks_;
   std::vector<std::optional<Outcome>> completed_;
-  std::vector<std::jthread> workers_;
+  std::vector<sanitize::internal::JThread> workers_;
   std::shared_ptr<OperationTaskArena> arena_;
   std::vector<ArenaOutcomeSlot> arena_completed_;
   const std::size_t external_completion_shard_count_;
@@ -564,7 +566,7 @@ private:
       completed_external_tasks_{};
   std::array<std::size_t, kMaxExternalCompletionShards>
       scheduled_external_tasks_{};
-  std::stop_source stage_stop_source_;
+  sanitize::internal::StopSource stage_stop_source_;
   TaskArenaLane lane_ = TaskArenaLane::kAll;
   TaskTelemetryKind telemetry_kind_ = TaskTelemetryKind::kOther;
   TaskArenaSubmissionPlan arena_submission_plan_;

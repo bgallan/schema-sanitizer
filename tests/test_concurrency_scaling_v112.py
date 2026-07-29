@@ -32,7 +32,7 @@ def test_v112_local_recheck_and_wait_capture_remove_epoch_reloads() -> None:
     source = RUNTIME.read_text(encoding="utf-8")
     park = source.split("if (!found) {", 1)[1].split("activity.Start();", 1)[0]
     local_recheck = park.split("if (!slot.tasks.empty()) {", 1)[1].split("}", 1)[0]
-    wait = park.split("slot.ready.wait", 1)[1]
+    wait = park.split("WaitWithStop(slot.ready", 1)[1]
 
     assert "wake_epoch.load" not in local_recheck
     assert "const auto current_epoch" in wait

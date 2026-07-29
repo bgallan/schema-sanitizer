@@ -553,7 +553,7 @@ private:
 
 template <bool PreferDedicatedOutput, bool CheckGlobalStopping>
 void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
-                 std::size_t index, std::stop_token stop) noexcept {
+                 std::size_t index, StopToken stop) noexcept {
   auto &slot = *state->slots[index];
   slot.locality_domain.store(current_locality_domain(),
                              std::memory_order_relaxed);
@@ -623,7 +623,7 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
       // condition_variable_any returns.
       observed_epoch = slot.wake_epoch.load(std::memory_order_acquire);
       activity.Stop();
-      slot.ready.wait(lock, stop, [&] {
+      WaitWithStop(slot.ready, lock, stop, [&] {
         if (state->stopping.load(std::memory_order_acquire)) {
           return true;
         }
@@ -703,20 +703,17 @@ ensure_worker_started(const std::shared_ptr<OperationTaskArena::State> &state,
   }
   try {
     if (state->worker_count > 8U) {
-      slot.worker =
-          std::make_unique<std::jthread>([state, index](std::stop_token stop) {
-            worker_loop<true, false>(state, index, stop);
-          });
+      slot.worker = std::make_unique<JThread>([state, index](StopToken stop) {
+        worker_loop<true, false>(state, index, stop);
+      });
     } else if (state->worker_count >= 4U) {
-      slot.worker =
-          std::make_unique<std::jthread>([state, index](std::stop_token stop) {
-            worker_loop<false, false>(state, index, stop);
-          });
+      slot.worker = std::make_unique<JThread>([state, index](StopToken stop) {
+        worker_loop<false, false>(state, index, stop);
+      });
     } else {
-      slot.worker =
-          std::make_unique<std::jthread>([state, index](std::stop_token stop) {
-            worker_loop<false, true>(state, index, stop);
-          });
+      slot.worker = std::make_unique<JThread>([state, index](StopToken stop) {
+        worker_loop<false, true>(state, index, stop);
+      });
     }
     slot.started.store(true, std::memory_order_release);
     if (state->scalable_scan) {

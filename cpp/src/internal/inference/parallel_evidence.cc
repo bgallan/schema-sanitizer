@@ -41,12 +41,14 @@ append_evidence_node(InferenceEvidencePacket *packet) {
 sanitize::Status append_value(InferenceEvidencePacket *packet,
                               std::size_t node_index, const ValueView &value,
                               const PreparedOptions &opts, DepthState depth,
-                              std::stop_token stop);
+                              sanitize::internal::StopToken stop);
 
-sanitize::Status
-append_named_value(InferenceEvidencePacket *packet, std::string_view key,
-                   const ValueView &value, const PreparedOptions &opts,
-                   DepthState parent_depth, std::stop_token stop) {
+sanitize::Status append_named_value(InferenceEvidencePacket *packet,
+                                    std::string_view key,
+                                    const ValueView &value,
+                                    const PreparedOptions &opts,
+                                    DepthState parent_depth,
+                                    sanitize::internal::StopToken stop) {
   SAN_ASSIGN_OR_RAISE(const auto index, append_evidence_node(packet));
   SAN_ASSIGN_OR_RAISE(packet->nodes[index].key_index, packet->keys.Intern(key));
 
@@ -73,7 +75,7 @@ struct ObjectCollectContext {
   InferenceEvidencePacket *packet = nullptr;
   const PreparedOptions *opts = nullptr;
   DepthState depth;
-  std::stop_token stop;
+  sanitize::internal::StopToken stop;
 };
 
 sanitize::Status append_object_field(void *raw, std::string_view key,
@@ -91,7 +93,7 @@ struct ArrayCollectContext {
   InferenceEvidencePacket *packet = nullptr;
   const PreparedOptions *opts = nullptr;
   DepthState depth;
-  std::stop_token stop;
+  sanitize::internal::StopToken stop;
 };
 
 sanitize::Status append_array_element(void *raw, ValueView value) {
@@ -108,7 +110,7 @@ sanitize::Status append_array_element(void *raw, ValueView value) {
 sanitize::Status append_value(InferenceEvidencePacket *packet,
                               std::size_t node_index, const ValueView &value,
                               const PreparedOptions &opts, DepthState depth,
-                              std::stop_token stop) {
+                              sanitize::internal::StopToken stop) {
   if (stop.stop_requested()) {
     return sanitize::Status::Cancelled(
         "parallel inference evidence collection stopped");
@@ -147,7 +149,7 @@ sanitize::Status append_value(InferenceEvidencePacket *packet,
 sanitize::Status append_materialized_row(const RowRef &row,
                                          const PreparedOptions &opts,
                                          InferenceEvidencePacket *packet,
-                                         std::stop_token stop) {
+                                         sanitize::internal::StopToken stop) {
   constexpr DepthState root_depth{};
   for (std::size_t index = 0; index < row.size; ++index) {
     if (stop.stop_requested()) {
@@ -172,7 +174,7 @@ sanitize::Status append_materialized_row(const RowRef &row,
 struct JsonRootContext {
   InferenceEvidencePacket *packet = nullptr;
   const PreparedOptions *opts = nullptr;
-  std::stop_token stop;
+  sanitize::internal::StopToken stop;
 };
 
 sanitize::Status append_json_root_field(void *raw, std::string_view key,
@@ -188,7 +190,7 @@ sanitize::Status append_json_root_field(void *raw, std::string_view key,
 sanitize::Status append_json_row(const RowRef &row, const PreparedOptions &opts,
                                  JsonOnDemandDoc *document,
                                  InferenceEvidencePacket *packet,
-                                 std::stop_token stop) {
+                                 sanitize::internal::StopToken stop) {
   if (row.raw.empty()) {
     return append_materialized_row(row, opts, packet, stop);
   }
@@ -276,7 +278,7 @@ ParallelInferenceEvidenceBuilder::Make(
 
 sanitize::Status ParallelInferenceEvidenceBuilder::append_row(
     const RowRef &row, WorkerState *worker, InferenceEvidencePacket *packet,
-    std::stop_token stop) const {
+    sanitize::internal::StopToken stop) const {
   const auto begin = packet->nodes.size();
   if (parse_json_raw_ && worker->json_document) {
     SAN_RETURN_NOT_OK(append_json_row(row, *opts_, worker->json_document.get(),
@@ -299,7 +301,7 @@ sanitize::Status ParallelInferenceEvidenceBuilder::append_row(
 
 sanitize::Status ParallelInferenceEvidenceBuilder::append_flat_row(
     const RowRef &row, WorkerState *worker, InferenceEvidencePacket *packet,
-    std::stop_token stop) const {
+    sanitize::internal::StopToken stop) const {
   if (stop.stop_requested()) {
     return sanitize::Status::Cancelled(
         "parallel inference evidence collection stopped");
@@ -343,7 +345,7 @@ sanitize::Status ParallelInferenceEvidenceBuilder::append_flat_row(
 sanitize::Result<InferenceEvidencePacket>
 ParallelInferenceEvidenceBuilder::Build(OwnedRowPacket &&owned,
                                         std::size_t worker_index,
-                                        std::stop_token stop) {
+                                        sanitize::internal::StopToken stop) {
   if (worker_index >= workers_.size() || owned.rows.empty()) {
     return sanitize::Status::Invalid(
         "ParallelInferenceEvidenceBuilder::Build: invalid packet");

@@ -30,7 +30,7 @@ def test_v96_started_mask_elides_repeated_start_mutex_checks() -> None:
     assert "state->started_mask.fetch_or(worker_bit(index)" in startup
     normalized_startup = " ".join(startup.split())
     assert normalized_startup.index(
-        "slot.worker = std::make_unique<std::jthread>"
+        "slot.worker = std::make_unique<JThread>"
     ) < normalized_startup.index("state->started_mask.fetch_or(worker_bit(index)")
 
 

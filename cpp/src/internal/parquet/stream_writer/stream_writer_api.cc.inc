@@ -187,9 +187,9 @@ sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
     if (row_group_executor || row_group_workers <= 1) {
       return sanitize::Status::OK();
     }
-    auto worker =
-        [&](ParquetRowGroupTask &&task, std::size_t,
-            std::stop_token stop) -> sanitize::Result<PreparedParquetRowGroup> {
+    auto worker = [&](ParquetRowGroupTask &&task, std::size_t,
+                      sanitize::internal::StopToken stop)
+        -> sanitize::Result<PreparedParquetRowGroup> {
       if (stop.stop_requested()) {
         return sanitize::Status::Cancelled(
             "native Parquet writer: row-group preparation cancelled");

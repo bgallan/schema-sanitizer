@@ -5,8 +5,9 @@ sanitize::Status start_workers() {
   try {
     workers_.reserve(worker_count_);
     for (std::size_t index = 0; index < worker_count_; ++index) {
-      workers_.emplace_back(
-          [this, index](std::stop_token stop) { worker_loop(index, stop); });
+      workers_.emplace_back([this, index](sanitize::internal::StopToken stop) {
+        worker_loop(index, stop);
+      });
     }
   } catch (const std::bad_alloc &) {
     Cancel();

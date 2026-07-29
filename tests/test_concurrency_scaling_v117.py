@@ -38,7 +38,7 @@ def test_v117_preserves_wake_protocol_operations() -> None:
     assert arena.count("wake_epoch.fetch_add(1, std::memory_order_release)") >= 4
     assert "helper_slot.wake_epoch.fetch_add(1, std::memory_order_release)" in arena
     assert "slot.wake_epoch.load(std::memory_order_acquire)" in runtime
-    assert "slot.ready.wait(lock, stop" in runtime
+    assert "WaitWithStop(slot.ready, lock, stop" in runtime
     assert "slot.ready.notify_one()" in arena
     assert "slot->ready.notify_all()" in arena
 

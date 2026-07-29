@@ -244,9 +244,9 @@ sanitize::Status materialize_native_row_group_columns_individual(
       sanitize::internal::OrderedExecutor<std::size_t,
                                           NativeParquetDecodedColumn>;
   auto *worker_states = &stream->parallel_column_workers;
-  auto worker = [path = stream->path, &row_group, window,
-                 worker_states](std::size_t &&column_index,
-                                std::size_t worker_index, std::stop_token stop)
+  auto worker = [path = stream->path, &row_group, window, worker_states](
+                    std::size_t &&column_index, std::size_t worker_index,
+                    sanitize::internal::StopToken stop)
       -> sanitize::Result<NativeParquetDecodedColumn> {
     if (stop.stop_requested()) {
       return sanitize::Status::Cancelled(
@@ -319,9 +319,9 @@ sanitize::Status materialize_native_row_group_columns_grouped(
       sanitize::internal::OrderedExecutor<NativeParquetColumnRange,
                                           NativeParquetDecodedColumnRange>;
   auto *worker_states = &stream->parallel_column_workers;
-  auto worker = [path = stream->path, &row_group, window,
-                 worker_states](NativeParquetColumnRange &&range,
-                                std::size_t worker_index, std::stop_token stop)
+  auto worker = [path = stream->path, &row_group, window, worker_states](
+                    NativeParquetColumnRange &&range, std::size_t worker_index,
+                    sanitize::internal::StopToken stop)
       -> sanitize::Result<NativeParquetDecodedColumnRange> {
     if (range.first >= range.last || range.last > row_group.columns.size() ||
         worker_index >= worker_states->size()) {

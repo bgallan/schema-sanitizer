@@ -5,11 +5,11 @@
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/ordered_executor.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <stop_token>
 #include <utility>
 
 namespace core_abi3_internal {
@@ -18,9 +18,9 @@ namespace {
 using CompletionProbeExecutor =
     sanitize::internal::OrderedExecutor<std::uint64_t, std::uint64_t>;
 
-sanitize::Result<std::uint64_t> completion_probe_work(std::uint64_t value,
-                                                      std::size_t iterations,
-                                                      std::stop_token stop) {
+sanitize::Result<std::uint64_t>
+completion_probe_work(std::uint64_t value, std::size_t iterations,
+                      sanitize::internal::StopToken stop) {
   auto result = value ^ UINT64_C(0x9e3779b97f4a7c15);
   for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
     result ^= result << 7U;
@@ -87,7 +87,8 @@ PyObject *py_ordered_executor_arena_completion_probe(PyObject *,
   auto executor_result = CompletionProbeExecutor::Make(
       workers, capacity, capacity,
       [iterations = static_cast<std::size_t>(work_iterations)](
-          std::uint64_t &&value, std::size_t, std::stop_token stop) {
+          std::uint64_t &&value, std::size_t,
+          sanitize::internal::StopToken stop) {
         return completion_probe_work(value, iterations, stop);
       },
       arena, sanitize::internal::TaskArenaLane::kAll);

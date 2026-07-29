@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +44,25 @@ def test_pr_main_manual_and_publish_share_general_sanity() -> None:
     assert "python -m cibuildwheel" not in publish
     assert ci.count("python meta/ci/validate_release_version.py") == 1
     assert publish.count("python meta/ci/validate_release_version.py") == 2
+
+
+def test_ci_shell_entry_points_are_executable() -> None:
+    """Scripts invoked directly by Actions must retain their executable bit."""
+    scripts = tuple((ROOT / "meta/ci").glob("*.sh"))
+
+    assert scripts
+    for script in scripts:
+        assert script.read_bytes().startswith(b"#!/")
+        if os.name != "nt":
+            assert script.stat().st_mode & stat.S_IXUSR, script
+
+
+def test_secret_scan_uses_the_tested_report_checker() -> None:
+    """Secret exclusions stay narrow and outside the workflow YAML."""
+    ci = _workflow("ci.yml")
+
+    assert "python meta/ci/check_detect_secrets_report.py .detect-secrets.ci.json" in ci
+    assert "_is_notebook_cell_id" not in ci
 
 
 def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:

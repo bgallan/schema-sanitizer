@@ -3,10 +3,10 @@
 
 #include "internal/runtime/operation_task_arena.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <atomic>
 #include <chrono>
 #include <cstddef>
-#include <stop_token>
 #include <thread>
 
 namespace core_abi3_internal {
@@ -67,7 +67,7 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
   std::atomic<std::size_t> work_finished{0};
   std::atomic<bool> release_blockers{false};
 
-  const auto blocker = [&](std::size_t, std::stop_token stop) {
+  const auto blocker = [&](std::size_t, sanitize::internal::StopToken stop) {
     blockers_started.fetch_add(1, std::memory_order_release);
     while (!release_blockers.load(std::memory_order_acquire) &&
            !stop.stop_requested()) {
@@ -95,7 +95,7 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
 
   const auto wake_before_preload = arena->wake_epoch_publishes();
   const auto started_at = std::chrono::steady_clock::now();
-  const auto work = [&](std::size_t, std::stop_token stop) {
+  const auto work = [&](std::size_t, sanitize::internal::StopToken stop) {
     if (!stop.stop_requested()) {
       work_finished.fetch_add(1, std::memory_order_release);
     }

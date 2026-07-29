@@ -4,6 +4,7 @@
 #include "internal/runtime/performance_telemetry.hh"
 #include "sanitize/core/status.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -11,7 +12,6 @@
 #include <functional>
 #include <memory>
 #include <memory_resource>
-#include <stop_token>
 
 namespace sanitize::internal {
 
@@ -39,7 +39,8 @@ struct TaskArenaSubmissionPlan final {
 
 class OperationTaskArena final {
 public:
-  using Task = std::move_only_function<void(std::size_t, std::stop_token)>;
+  using Task = sanitize::internal::MoveOnlyFunction<void(
+      std::size_t, sanitize::internal::StopToken)>;
 
   static sanitize::Result<std::shared_ptr<OperationTaskArena>>
   Make(std::size_t worker_count,

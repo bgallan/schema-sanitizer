@@ -292,7 +292,8 @@ make_parallel_ingest_stream_source(
             static_cast<std::size_t>(stage_policy.task_queue_capacity),
             static_cast<std::size_t>(stage_policy.reorder_capacity),
             [json_validator](JsonValidationTask &&task,
-                             std::size_t worker_index, std::stop_token stop) {
+                             std::size_t worker_index,
+                             sanitize::internal::StopToken stop) {
               return json_validator->Validate(std::move(task), worker_index,
                                               stop);
             },
@@ -307,7 +308,7 @@ make_parallel_ingest_stream_source(
           static_cast<std::size_t>(stage_policy.task_queue_capacity),
           static_cast<std::size_t>(stage_policy.reorder_capacity),
           [preparer](MaterializationTask &&task, std::size_t worker_index,
-                     std::stop_token stop) {
+                     sanitize::internal::StopToken stop) {
             return preparer->Prepare(std::move(task), worker_index, stop);
           },
           task_arena, TaskArenaLane::kUpstream,

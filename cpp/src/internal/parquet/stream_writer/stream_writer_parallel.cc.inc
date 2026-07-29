@@ -327,9 +327,9 @@ sanitize::Status write_row_group_columns(
 
   using Executor = sanitize::internal::OrderedExecutor<ParquetColumnTask,
                                                        PreparedColumnChunk>;
-  auto worker =
-      [&](ParquetColumnTask &&task, std::size_t,
-          std::stop_token stop) -> sanitize::Result<PreparedColumnChunk> {
+  auto worker = [&](ParquetColumnTask &&task, std::size_t,
+                    sanitize::internal::StopToken stop)
+      -> sanitize::Result<PreparedColumnChunk> {
     if (stop.stop_requested()) {
       return sanitize::Status::Cancelled(
           "native Parquet writer: column preparation cancelled");

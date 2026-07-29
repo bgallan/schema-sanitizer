@@ -9,6 +9,7 @@
 #include "sanitize/core/status.hh"
 #include "sanitize/options/options.hh"
 
+#include "internal/runtime/thread_compat.hh"
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -17,7 +18,6 @@
 #include <memory>
 #include <memory_resource>
 #include <new>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -233,7 +233,8 @@ public:
   ~ParallelInferenceEvidenceBuilder();
 
   sanitize::Result<InferenceEvidencePacket>
-  Build(OwnedRowPacket &&owned, std::size_t worker_index, std::stop_token stop);
+  Build(OwnedRowPacket &&owned, std::size_t worker_index,
+        sanitize::internal::StopToken stop);
 
 private:
   struct WorkerState;
@@ -245,11 +246,11 @@ private:
 
   sanitize::Status append_row(const RowRef &row, WorkerState *worker,
                               InferenceEvidencePacket *packet,
-                              std::stop_token stop) const;
+                              sanitize::internal::StopToken stop) const;
 
   sanitize::Status append_flat_row(const RowRef &row, WorkerState *worker,
                                    InferenceEvidencePacket *packet,
-                                   std::stop_token stop) const;
+                                   sanitize::internal::StopToken stop) const;
 
   std::string frontend_name_;
   const PreparedOptions *opts_ = nullptr;

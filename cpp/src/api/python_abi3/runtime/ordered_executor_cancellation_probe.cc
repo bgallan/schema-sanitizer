@@ -34,9 +34,9 @@ PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *) {
   std::atomic<std::size_t> observed_stop{0};
   auto executor_result = CancellationProbeExecutor::Make(
       4, 8, 8,
-      [&active, &observed_stop](
-          std::uint64_t &&value, std::size_t,
-          std::stop_token stop) -> sanitize::Result<std::uint64_t> {
+      [&active, &observed_stop](std::uint64_t &&value, std::size_t,
+                                sanitize::internal::StopToken stop)
+          -> sanitize::Result<std::uint64_t> {
         active.fetch_add(1, std::memory_order_release);
         while (!stop.stop_requested()) {
           std::this_thread::yield();

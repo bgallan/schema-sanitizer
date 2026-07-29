@@ -134,7 +134,8 @@ ParallelRowPreparer::~ParallelRowPreparer() = default;
 
 sanitize::Result<PreparedRowsPacket>
 ParallelRowPreparer::Prepare(MaterializationTask &&task,
-                             std::size_t worker_index, std::stop_token stop) {
+                             std::size_t worker_index,
+                             sanitize::internal::StopToken stop) {
   if (stop.stop_requested()) {
     return sanitize::Status::Cancelled(
         "ParallelRowPreparer::Prepare: stop requested");
@@ -150,8 +151,10 @@ ParallelRowPreparer::Prepare(MaterializationTask &&task,
   return prepare_rows(std::move(task.owned), worker_index, stop);
 }
 
-sanitize::Result<PreparedRowsPacket> ParallelRowPreparer::prepare_rows(
-    OwnedRowPacket &&owned, std::size_t worker_index, std::stop_token stop) {
+sanitize::Result<PreparedRowsPacket>
+ParallelRowPreparer::prepare_rows(OwnedRowPacket &&owned,
+                                  std::size_t worker_index,
+                                  sanitize::internal::StopToken stop) {
   if (owned.rows.empty()) {
     return sanitize::Status::Invalid(
         "ParallelRowPreparer::prepare_rows: packet contains no rows");
@@ -186,7 +189,7 @@ sanitize::Result<PreparedRowsPacket> ParallelRowPreparer::prepare_rows(
 
 sanitize::Result<PreparedRowPacket>
 ParallelRowPreparer::prepare_one(const RowRef &row, std::size_t worker_index,
-                                 std::stop_token stop) {
+                                 sanitize::internal::StopToken stop) {
   if (stop.stop_requested()) {
     return sanitize::Status::Cancelled(
         "ParallelRowPreparer::prepare_one: stop requested");
@@ -227,8 +230,10 @@ ParallelRowPreparer::ParallelRowPreparer(
                          frontend_name_ == "json_array") &&
                         is_flat_scalar_plan(*plan_)) {}
 
-sanitize::Result<PreparedRowsPacket> ParallelRowPreparer::prepare_columnar(
-    OwnedRowPacket &&owned, std::size_t worker_index, std::stop_token stop) {
+sanitize::Result<PreparedRowsPacket>
+ParallelRowPreparer::prepare_columnar(OwnedRowPacket &&owned,
+                                      std::size_t worker_index,
+                                      sanitize::internal::StopToken stop) {
   auto &state = *workers_[worker_index];
   if (!state.appender) {
     SAN_ASSIGN_OR_RAISE(state.appender,
