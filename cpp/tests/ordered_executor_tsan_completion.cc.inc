@@ -10,8 +10,8 @@ bool run_arena_completion_reuse_round() {
   auto arena = std::move(arena_result).ValueOrDie();
   auto made = Executor::Make(
       worker_count, capacity, capacity,
-      [](std::uint64_t &&value, std::size_t,
-         std::stop_token stop) -> sanitize::Result<std::uint64_t> {
+      [](std::uint64_t &&value, std::size_t, sanitize::internal::StopToken stop)
+          -> sanitize::Result<std::uint64_t> {
         if (stop.stop_requested()) {
           return sanitize::Status::Cancelled("arena reuse probe cancelled");
         }

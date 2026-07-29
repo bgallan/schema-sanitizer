@@ -1,5 +1,15 @@
 cmake_minimum_required(VERSION 4.3)
 
+# The native concurrency runtime uses C++20 atomic wait/notify and over-aligned
+# allocation. libc++ exposes the required runtime entry points from macOS 11, so
+# binaries must not advertise an older deployment baseline.
+if(CMAKE_HOST_APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET
+                         OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "11.0"))
+  set(CMAKE_OSX_DEPLOYMENT_TARGET
+      "11.0"
+      CACHE STRING "Minimum supported macOS version" FORCE)
+endif()
+
 # Determine version from VERSION.
 #
 # NOTE: meta/VERSION is the single source of truth for Python packaging and
@@ -197,6 +207,8 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   add_executable(
     schema_sanitizer_sanitized_ordered_executor
     cpp/tests/ordered_executor_tsan.cc
+    cpp/src/internal/memory/memory_pool.cc
+    cpp/src/internal/memory/pool_resource.cc
     cpp/src/internal/runtime/operation_task_arena.cc
     cpp/src/internal/runtime/performance_telemetry.cc
     cpp/src/internal/json_encoding/token_writer.cc)

@@ -7,12 +7,13 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -96,15 +97,14 @@ void append_double_field(std::string &out, bool &first, std::string_view key,
     out += "null";
     return;
   }
-  std::array<char, 64> buffer{};
-  const auto [ptr, error] =
-      std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
-                    std::chars_format::general, 8);
-  if (error == std::errc()) {
-    out.append(buffer.data(), static_cast<std::size_t>(ptr - buffer.data()));
-  } else {
-    out += "0";
-  }
+  // Floating-point to_chars is unavailable below macOS 13.3 even when the
+  // overload is declared. Telemetry is emitted once per operation, so a
+  // locale-stable stream preserves the macOS 11 baseline at negligible cost.
+  std::ostringstream stream;
+  stream.imbue(std::locale::classic());
+  stream.precision(8);
+  stream << value;
+  out += stream.str();
 }
 
 std::int64_t nonnegative(std::int64_t value) noexcept {

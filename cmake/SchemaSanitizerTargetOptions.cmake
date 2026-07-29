@@ -14,7 +14,10 @@ function(schema_sanitizer_enable_warnings target)
     ${target}
     PRIVATE
       $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wshadow>
-      $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+      # C4324 reports the intentional tail padding created by cache-line
+      # alignment. Keep /W4 and /WX for every actionable diagnostic.
+      $<$<CXX_COMPILER_ID:MSVC>:/W4>
+      $<$<CXX_COMPILER_ID:MSVC>:/wd4324>)
 
   if(SCHEMA_SANITIZER_ENABLE_WERROR)
     target_compile_options(

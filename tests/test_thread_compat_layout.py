@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CPP = ROOT / "cpp/src"
-COMPAT = CPP / "internal/runtime/thread_compat.hh"
+CPP = ROOT / "cpp"
+COMPAT = CPP / "src/internal/runtime/thread_compat.hh"
 
 
 def test_nonportable_standard_thread_types_are_isolated() -> None:

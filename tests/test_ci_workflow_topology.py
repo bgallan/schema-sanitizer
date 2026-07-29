@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +158,46 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "SCHEMA_SANITIZER_FUZZ_ENGINE" in cmake
     assert "cpp/fuzz/standalone_main.cc" in cmake
     assert "schema_sanitizer_sanitized_ordered_executor" in cmake
+
+
+def test_native_concurrency_gate_links_its_memory_resource_implementation() -> None:
+    """The standalone sanitizer executable must own every arena dependency."""
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    target = cmake.split("add_executable(\n    schema_sanitizer_sanitized_ordered_executor", 1)[
+        1
+    ].split(")", 1)[0]
+
+    assert "cpp/src/internal/memory/memory_pool.cc" in target
+    assert "cpp/src/internal/memory/pool_resource.cc" in target
+
+
+def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> None:
+    """macOS wheels must not advertise a pre-atomic-wait runtime baseline."""
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    ci = _workflow("ci.yml")
+
+    assert 'CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "11.0"' in cmake
+    assert "MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '11.0' || '' }}" in ci
+    assert (
+        pyproject["tool"]["cibuildwheel"]["macos"]["environment"]["MACOSX_DEPLOYMENT_TARGET"]
+        == "11.0"
+    )
+
+
+def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
+    """Intentional alignment and telemetry formatting remain portable."""
+    options = (ROOT / "cmake/SchemaSanitizerTargetOptions.cmake").read_text(encoding="utf-8")
+    telemetry = (ROOT / "cpp/src/internal/runtime/performance_telemetry.cc").read_text(
+        encoding="utf-8"
+    )
+    formatter = telemetry.split("void append_double_field", 1)[1].split(
+        "std::int64_t nonnegative", 1
+    )[0]
+
+    assert "$<$<CXX_COMPILER_ID:MSVC>:/wd4324>" in options
+    assert "std::to_chars" not in formatter
+    assert "std::locale::classic()" in formatter
 
 
 def test_benchmark_matrix_runs_on_supported_platforms() -> None:

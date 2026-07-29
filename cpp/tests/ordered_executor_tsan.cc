@@ -12,7 +12,6 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <stop_token>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -27,17 +26,22 @@ void release_gate(std::atomic<bool> *gate) noexcept {
   gate->notify_all();
 }
 
-bool wait_gate_or_stop(std::atomic<bool> *gate, std::stop_token stop) {
-  std::stop_callback stop_gate(stop, [gate] { release_gate(gate); });
+bool wait_gate_or_stop(std::atomic<bool> *gate,
+                       sanitize::internal::StopToken stop) {
+  auto release = [gate] { release_gate(gate); };
+  sanitize::internal::StopCallback<decltype(release)> stop_gate(
+      stop, std::move(release));
   while (!gate->load(std::memory_order_acquire) && !stop.stop_requested()) {
     gate->wait(false, std::memory_order_acquire);
   }
   return !stop.stop_requested();
 }
 
-void wait_for_stop(std::stop_token stop) {
+void wait_for_stop(sanitize::internal::StopToken stop) {
   std::atomic<bool> stopped{stop.stop_requested()};
-  std::stop_callback stop_gate(stop, [&stopped] { release_gate(&stopped); });
+  auto release = [&stopped] { release_gate(&stopped); };
+  sanitize::internal::StopCallback<decltype(release)> stop_gate(
+      stop, std::move(release));
   while (!stopped.load(std::memory_order_acquire)) {
     stopped.wait(false, std::memory_order_acquire);
   }
@@ -48,7 +52,8 @@ bool run_ordered_success_round() {
   auto made = Executor::Make(
       8, 16, 16,
       [&active](std::uint64_t &&value, std::size_t,
-                std::stop_token stop) -> sanitize::Result<std::uint64_t> {
+                sanitize::internal::StopToken stop)
+          -> sanitize::Result<std::uint64_t> {
         active.fetch_add(1, std::memory_order_relaxed);
         if ((value % 11U) == 0U) {
           std::this_thread::sleep_for(std::chrono::microseconds(25));
@@ -107,8 +112,8 @@ bool run_ordered_success_round() {
 bool run_earliest_failure_round() {
   auto made = Executor::Make(
       6, 12, 12,
-      [](std::uint64_t &&value, std::size_t,
-         std::stop_token stop) -> sanitize::Result<std::uint64_t> {
+      [](std::uint64_t &&value, std::size_t, sanitize::internal::StopToken stop)
+          -> sanitize::Result<std::uint64_t> {
         if (value == 17U) {
           std::this_thread::sleep_for(std::chrono::milliseconds(2));
           return sanitize::Status::Invalid("failure 17");
@@ -161,8 +166,6 @@ bool run_earliest_failure_round() {
   }
 }
 
-
-
 bool run_shared_operation_arena_round() {
   auto arena_result = sanitize::internal::OperationTaskArena::Make(8);
   if (!arena_result.ok()) {
@@ -171,9 +174,10 @@ bool run_shared_operation_arena_round() {
   auto arena = std::move(arena_result).ValueOrDie();
   std::atomic<std::size_t> started{0};
   std::atomic<bool> release{false};
-  auto worker = [&started, &release](
-                    std::uint64_t &&value, std::size_t worker_index,
-                    std::stop_token stop) -> sanitize::Result<std::uint64_t> {
+  auto worker = [&started, &release](std::uint64_t &&value,
+                                     std::size_t worker_index,
+                                     sanitize::internal::StopToken stop)
+      -> sanitize::Result<std::uint64_t> {
     started.fetch_add(1, std::memory_order_acq_rel);
     if (!wait_gate_or_stop(&release, stop)) {
       return sanitize::Status::Cancelled("shared arena probe cancelled");
@@ -200,8 +204,7 @@ bool run_shared_operation_arena_round() {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
   release_gate(&release);
-  if (!upstream->FinishSubmission().ok() ||
-      !output->FinishSubmission().ok()) {
+  if (!upstream->FinishSubmission().ok() || !output->FinishSubmission().ok()) {
     return false;
   }
   for (std::uint64_t ordinal = 0; ordinal < 4U; ++ordinal) {
@@ -213,7 +216,8 @@ bool run_shared_operation_arena_round() {
     auto upstream_outcome = std::move(upstream_next).ValueOrDie();
     auto output_outcome = std::move(output_next).ValueOrDie();
     if (!upstream_outcome.result.ok() || !output_outcome.result.ok() ||
-        upstream_outcome.ordinal != ordinal || output_outcome.ordinal != ordinal) {
+        upstream_outcome.ordinal != ordinal ||
+        output_outcome.ordinal != ordinal) {
       return false;
     }
   }
@@ -228,7 +232,6 @@ bool run_shared_operation_arena_round() {
 
 #include "ordered_executor_tsan_completion.cc.inc"
 
-
 bool run_backlog_driven_admission_round() {
   constexpr std::size_t worker_count = 8U;
   constexpr std::size_t sequential_tasks = 32U;
@@ -242,7 +245,7 @@ bool run_backlog_driven_admission_round() {
 
   for (std::size_t ordinal = 0; ordinal < sequential_tasks; ++ordinal) {
     const auto status = arena->Submit(
-        [&completed](std::size_t, std::stop_token stop) {
+        [&completed](std::size_t, sanitize::internal::StopToken stop) {
           if (!stop.stop_requested()) {
             completed.fetch_add(1, std::memory_order_release);
           }
@@ -274,7 +277,7 @@ bool run_backlog_driven_admission_round() {
   for (std::size_t ordinal = 0; ordinal < worker_count; ++ordinal) {
     const auto status = arena->Submit(
         [&completed, &entered, &release](std::size_t,
-                                         std::stop_token stop) {
+                                         sanitize::internal::StopToken stop) {
           entered.fetch_add(1, std::memory_order_release);
           if (wait_gate_or_stop(&release, stop)) {
             completed.fetch_add(1, std::memory_order_release);
@@ -294,10 +297,10 @@ bool run_backlog_driven_admission_round() {
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
-  const bool fully_admitted = arena->started_workers() == worker_count &&
-                              entered.load(std::memory_order_acquire) ==
-                                  worker_count &&
-                              arena->peak_active_tasks() == worker_count;
+  const bool fully_admitted =
+      arena->started_workers() == worker_count &&
+      entered.load(std::memory_order_acquire) == worker_count &&
+      arena->peak_active_tasks() == worker_count;
   release_gate(&release);
   const auto drain_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -306,11 +309,10 @@ bool run_backlog_driven_admission_round() {
          std::chrono::steady_clock::now() < drain_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
-  const bool valid =
-      fully_admitted &&
-      completed.load(std::memory_order_acquire) ==
-          sequential_tasks + worker_count &&
-      arena->queued_tasks() == 0U;
+  const bool valid = fully_admitted &&
+                     completed.load(std::memory_order_acquire) ==
+                         sequential_tasks + worker_count &&
+                     arena->queued_tasks() == 0U;
   if (!valid) {
     std::cerr << "parallel admission: started=" << arena->started_workers()
               << " entered=" << entered.load(std::memory_order_acquire)
@@ -339,7 +341,8 @@ bool run_lane_work_stealing_round() {
 
   for (std::size_t ordinal = 0; ordinal < worker_count; ++ordinal) {
     auto status = arena->Submit(
-        [&, ordinal](std::size_t worker_index, std::stop_token stop) {
+        [&, ordinal](std::size_t worker_index,
+                     sanitize::internal::StopToken stop) {
           if (worker_index != ordinal) {
             ownership_ok.store(false, std::memory_order_release);
           }
@@ -372,7 +375,7 @@ bool run_lane_work_stealing_round() {
   }
 
   auto displaced_status = arena->Submit(
-      [&](std::size_t worker_index, std::stop_token stop) {
+      [&](std::size_t worker_index, sanitize::internal::StopToken stop) {
         if (!stop.stop_requested()) {
           displaced_worker.store(worker_index, std::memory_order_release);
           displaced_finished.store(true, std::memory_order_release);
@@ -432,7 +435,7 @@ bool run_arena_stage_cancellation_round() {
   auto made = Executor::Make(
       8, 16, 16,
       [&active, &observed_stop](std::uint64_t &&value, std::size_t,
-                                std::stop_token stop)
+                                sanitize::internal::StopToken stop)
           -> sanitize::Result<std::uint64_t> {
         active.fetch_add(1, std::memory_order_release);
         wait_for_stop(stop);
@@ -466,15 +469,16 @@ bool run_arena_stage_cancellation_round() {
 
 bool run_cancellation_round() {
   std::atomic<std::size_t> active{0};
-  auto made = Executor::Make(
-      8, 16, 16,
-      [&active](std::uint64_t &&, std::size_t,
-                std::stop_token stop) -> sanitize::Result<std::uint64_t> {
-        active.fetch_add(1, std::memory_order_relaxed);
-        wait_for_stop(stop);
-        active.fetch_sub(1, std::memory_order_relaxed);
-        return sanitize::Status::Cancelled("probe cancelled");
-      });
+  auto made =
+      Executor::Make(8, 16, 16,
+                     [&active](std::uint64_t &&, std::size_t,
+                               sanitize::internal::StopToken stop)
+                         -> sanitize::Result<std::uint64_t> {
+                       active.fetch_add(1, std::memory_order_relaxed);
+                       wait_for_stop(stop);
+                       active.fetch_sub(1, std::memory_order_relaxed);
+                       return sanitize::Status::Cancelled("probe cancelled");
+                     });
   if (!made.ok()) {
     return false;
   }

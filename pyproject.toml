@@ -93,6 +93,9 @@ test-command = "python {project}/meta/ci/check_parquet_compression_matrix.py"
 skip = "*-musllinux_*"
 manylinux-x86_64-image = "manylinux_2_28"
 
+[tool.cibuildwheel.macos]
+environment = {MACOSX_DEPLOYMENT_TARGET = "11.0"}
+
 [tool.mypy]
 python_version = "3.11"
 files = ["src/schema_sanitizer"]
