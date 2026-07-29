@@ -6,12 +6,15 @@
 
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -200,8 +203,19 @@ bool run_shared_operation_arena_round() {
       return false;
     }
   }
-  while (started.load(std::memory_order_acquire) < 8U) {
+  const auto startup_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (started.load(std::memory_order_acquire) < 8U &&
+         std::chrono::steady_clock::now() < startup_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
+  }
+  if (started.load(std::memory_order_acquire) < 8U) {
+    std::cerr << "shared arena startup timed out: started="
+              << started.load(std::memory_order_acquire) << '\n';
+    release_gate(&release);
+    upstream->Cancel();
+    output->Cancel();
+    return false;
   }
   release_gate(&release);
   if (!upstream->FinishSubmission().ok() || !output->FinishSubmission().ok()) {
@@ -453,8 +467,18 @@ bool run_arena_stage_cancellation_round() {
       return false;
     }
   }
-  while (active.load(std::memory_order_acquire) == 0U) {
+  const auto startup_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (active.load(std::memory_order_acquire) == 0U &&
+         std::chrono::steady_clock::now() < startup_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
+  }
+  if (active.load(std::memory_order_acquire) == 0U) {
+    std::cerr << "stage cancellation startup timed out\n";
+    executor->Cancel();
+    executor.reset();
+    arena->Shutdown();
+    return false;
   }
   executor->Cancel();
   executor.reset();
@@ -489,8 +513,16 @@ bool run_cancellation_round() {
         return false;
       }
     }
-    while (active.load(std::memory_order_relaxed) == 0U) {
+    const auto startup_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (active.load(std::memory_order_relaxed) == 0U &&
+           std::chrono::steady_clock::now() < startup_deadline) {
       std::this_thread::sleep_for(std::chrono::microseconds(25));
+    }
+    if (active.load(std::memory_order_relaxed) == 0U) {
+      std::cerr << "cancellation startup timed out\n";
+      executor->Cancel();
+      return false;
     }
     executor->Cancel();
   }
@@ -499,7 +531,23 @@ bool run_cancellation_round() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  std::size_t rounds = 100U;
+  if (argc != 1) {
+    if (argc != 3 || std::string_view(argv[1]) != "--rounds") {
+      std::cerr << "usage: schema_sanitizer_sanitized_ordered_executor "
+                   "[--rounds N]\n";
+      return 2;
+    }
+    const auto raw = std::string_view(argv[2]);
+    const auto parsed =
+        std::from_chars(raw.data(), raw.data() + raw.size(), rounds);
+    if (parsed.ec != std::errc{} || parsed.ptr != raw.data() + raw.size() ||
+        rounds == 0U || rounds > 10'000U) {
+      std::cerr << "--rounds must be within [1, 10000]\n";
+      return 2;
+    }
+  }
   if (!run_high_core_telemetry_batch_round() ||
       !run_worker_submission_telemetry_round()) {
     std::cerr << "task telemetry probe failed\n";
@@ -512,21 +560,23 @@ int main() {
     }
     return passed;
   };
-  for (std::size_t round = 0; round < 100U; ++round) {
-    if (!require_round(run_ordered_success_round(), "ordered_success", round) ||
-        !require_round(run_earliest_failure_round(), "earliest_failure",
-                       round) ||
-        !require_round(run_shared_operation_arena_round(), "shared_arena",
-                       round) ||
-        !require_round(run_arena_completion_reuse_round(), "completion_reuse",
-                       round) ||
-        !require_round(run_backlog_driven_admission_round(),
-                       "backlog_admission", round) ||
-        !require_round(run_lane_work_stealing_round(), "lane_stealing",
-                       round) ||
-        !require_round(run_arena_stage_cancellation_round(),
-                       "stage_cancellation", round) ||
-        !require_round(run_cancellation_round(), "cancellation", round)) {
+  const auto run_round = [&require_round](auto probe, const char *name,
+                                          std::size_t round) {
+    std::cerr << "sanitizer probe: round=" << round << " case=" << name << '\n';
+    return require_round(probe(), name, round);
+  };
+  for (std::size_t round = 0; round < rounds; ++round) {
+    if (!run_round(run_ordered_success_round, "ordered_success", round) ||
+        !run_round(run_earliest_failure_round, "earliest_failure", round) ||
+        !run_round(run_shared_operation_arena_round, "shared_arena", round) ||
+        !run_round(run_arena_completion_reuse_round, "completion_reuse",
+                   round) ||
+        !run_round(run_backlog_driven_admission_round, "backlog_admission",
+                   round) ||
+        !run_round(run_lane_work_stealing_round, "lane_stealing", round) ||
+        !run_round(run_arena_stage_cancellation_round, "stage_cancellation",
+                   round) ||
+        !run_round(run_cancellation_round, "cancellation", round)) {
       return 1;
     }
   }

@@ -163,12 +163,21 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
 def test_native_concurrency_gate_links_its_memory_resource_implementation() -> None:
     """The standalone sanitizer executable must own every arena dependency."""
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    probe = (ROOT / "cpp/tests/ordered_executor_tsan.cc").read_text(encoding="utf-8")
     target = cmake.split("add_executable(\n    schema_sanitizer_sanitized_ordered_executor", 1)[
         1
     ].split(")", 1)[0]
 
     assert "cpp/src/internal/memory/memory_pool.cc" in target
     assert "cpp/src/internal/memory/pool_resource.cc" in target
+    assert 'MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"' in cmake
+    assert "set(_schema_sanitizer_sanitized_executor_rounds 10)" in cmake
+    assert "PROPERTIES TIMEOUT 600" in cmake
+    assert "schema_sanitizer_sanitized_ordered_executor --rounds" in cmake
+    assert 'std::string_view(argv[1]) != "--rounds"' in probe
+    assert "shared arena startup timed out" in probe
+    assert "stage cancellation startup timed out" in probe
+    assert "cancellation startup timed out" in probe
 
 
 def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> None:

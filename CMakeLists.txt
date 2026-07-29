@@ -226,11 +226,25 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   schema_sanitizer_enable_warnings(schema_sanitizer_sanitized_ordered_executor)
   schema_sanitizer_enable_repro(schema_sanitizer_sanitized_ordered_executor)
   schema_sanitizer_add_sanitizer(schema_sanitizer_sanitized_ordered_executor)
+  set(_schema_sanitizer_sanitized_executor_rounds 100)
+  if(MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan")
+    # MSVC ASan pays a high fixed cost for every instrumented thread. Each round
+    # already exercises eight executor/arena lifecycles, and CTest runs this
+    # binary twice in CI, so ten rounds retain repeated coverage without
+    # creating several thousand instrumented threads in one process.
+    set(_schema_sanitizer_sanitized_executor_rounds 10)
+  endif()
   add_test(NAME schema_sanitizer_sanitized_ordered_executor
-           COMMAND schema_sanitizer_sanitized_ordered_executor)
+           COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
+                   ${_schema_sanitizer_sanitized_executor_rounds})
+  if(MSVC)
+    set_tests_properties(schema_sanitizer_sanitized_ordered_executor
+                         PROPERTIES TIMEOUT 600)
+  endif()
   if(SCHEMA_SANITIZER_SANITIZER STREQUAL "tsan")
     add_test(NAME schema_sanitizer_tsan_ordered_executor
-             COMMAND schema_sanitizer_sanitized_ordered_executor)
+             COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
+                     ${_schema_sanitizer_sanitized_executor_rounds})
   endif()
 endif()
 
