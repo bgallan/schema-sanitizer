@@ -12,7 +12,7 @@ namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
 template <typename OffsetT>
-sanitize::Status append_string_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_string_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   if (!array.buffers || !array.buffers[1] || !array.buffers[2]) {
     return sanitize::Status::Invalid("JSONL writer: missing string buffer");
@@ -31,7 +31,7 @@ sanitize::Status append_string_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-void append_base64(std::string &out, std::string_view value) {
+void append_base64(TextBuffer &out, std::string_view value) {
   static constexpr char kAlphabet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   std::size_t i = 0;
@@ -62,7 +62,7 @@ void append_base64(std::string &out, std::string_view value) {
 }
 
 template <typename OffsetT>
-sanitize::Status append_binary_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_binary_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, bool quote) {
   if (!array.buffers || !array.buffers[1] || !array.buffers[2]) {
     return sanitize::Status::Invalid("JSONL writer: missing binary buffer");
@@ -88,29 +88,27 @@ sanitize::Status append_binary_value(std::string &out, const ArrowArray &array,
 
 } // namespace
 
-sanitize::Status append_string32_value(std::string &out,
-                                       const ArrowArray &array, int64_t row) {
+sanitize::Status append_string32_value(TextBuffer &out, const ArrowArray &array,
+                                       int64_t row) {
   return append_string_value<int32_t>(out, array, row);
 }
 
-sanitize::Status append_string64_value(std::string &out,
-                                       const ArrowArray &array, int64_t row) {
+sanitize::Status append_string64_value(TextBuffer &out, const ArrowArray &array,
+                                       int64_t row) {
   return append_string_value<int64_t>(out, array, row);
 }
 
-sanitize::Status append_binary32_value(std::string &out,
-                                       const ArrowArray &array, int64_t row,
-                                       bool quote) {
+sanitize::Status append_binary32_value(TextBuffer &out, const ArrowArray &array,
+                                       int64_t row, bool quote) {
   return append_binary_value<int32_t>(out, array, row, quote);
 }
 
-sanitize::Status append_binary64_value(std::string &out,
-                                       const ArrowArray &array, int64_t row,
-                                       bool quote) {
+sanitize::Status append_binary64_value(TextBuffer &out, const ArrowArray &array,
+                                       int64_t row, bool quote) {
   return append_binary_value<int64_t>(out, array, row, quote);
 }
 
-sanitize::Status append_fixed_size_binary_value(std::string &out,
+sanitize::Status append_fixed_size_binary_value(TextBuffer &out,
                                                 const JsonlField &field,
                                                 const ArrowArray &array,
                                                 int64_t row, bool quote) {

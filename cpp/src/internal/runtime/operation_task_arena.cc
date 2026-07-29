@@ -2,6 +2,7 @@
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/memory/pool_resource.hh"
 #include "internal/runtime/atomic_worker_bitmap.hh"
+#include "internal/runtime/numa_locality.hh"
 #include "internal/runtime/operation_task_arena_selection.hh"
 
 #include <algorithm>
@@ -72,6 +73,9 @@ struct OperationTaskArena::State final {
     std::atomic<bool> admitted{false};
     std::atomic<bool> started{false};
     std::atomic<bool> initialized{false};
+    // Sampled once when the native worker starts. Wide-arena stealing first
+    // searches workers from the same NUMA node and only then crosses nodes.
+    std::atomic<int> locality_domain{-1};
     // Protected by mutex. Avoids searching queues that contain no dedicated
     // output work when bounded low-core preference is enabled.
     std::size_t dedicated_output_queued = 0;

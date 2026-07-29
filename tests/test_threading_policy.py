@@ -114,7 +114,7 @@ def test_multi_policy_has_no_32_worker_ceiling() -> None:
         256 * 1024 * 1024,
         available_cpus=128,
     )
-    assert memory_limited.effective_workers == 24
+    assert memory_limited.effective_workers == 21
     assert memory_limited.worker_arena_bytes >= 8 * 1024 * 1024
 
 

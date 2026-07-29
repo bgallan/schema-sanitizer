@@ -139,12 +139,12 @@ private:
   bool use_fixed_estimate_ = false;
 };
 
-void clear_output_buffer(std::string &buffer) noexcept {
+void clear_output_buffer(TextBuffer &buffer) noexcept {
   if (secure_memory_cleanup_enabled() && !buffer.empty()) {
     secure_zero_memory(buffer.data(), buffer.size());
   }
   if (buffer.capacity() > kMaxRetainedOutputBytes) {
-    std::string empty;
+    TextBuffer empty(buffer.get_allocator().resource());
     buffer.swap(empty);
   } else {
     buffer.clear();
@@ -153,7 +153,7 @@ void clear_output_buffer(std::string &buffer) noexcept {
 
 class ScopedStringWipe final {
 public:
-  explicit ScopedStringWipe(std::string *value) noexcept : value_(value) {}
+  explicit ScopedStringWipe(TextBuffer *value) noexcept : value_(value) {}
   ~ScopedStringWipe() {
     if (value_ && secure_memory_cleanup_enabled() && !value_->empty()) {
       secure_zero_memory(value_->data(), value_->size());
@@ -164,10 +164,10 @@ public:
   ScopedStringWipe &operator=(const ScopedStringWipe &) = delete;
 
 private:
-  std::string *value_;
+  TextBuffer *value_;
 };
 
-sanitize::Status flush_buffer(Output &out_file, std::string &buffer) {
+sanitize::Status flush_buffer(Output &out_file, TextBuffer &buffer) {
   if (buffer.empty()) {
     return sanitize::Status::OK();
   }
@@ -176,7 +176,7 @@ sanitize::Status flush_buffer(Output &out_file, std::string &buffer) {
   return status;
 }
 
-sanitize::Status flush_buffer_if_large(Output &out_file, std::string &buffer) {
+sanitize::Status flush_buffer_if_large(Output &out_file, TextBuffer &buffer) {
   if (buffer.size() < kFlushThresholdBytes) {
     return sanitize::Status::OK();
   }
@@ -187,7 +187,7 @@ sanitize::Status append_rows_jsonl(const JsonlField &root,
                                    const ArrowArray &array,
                                    std::int64_t first_row,
                                    std::int64_t row_count, std::stop_token stop,
-                                   std::string *out) {
+                                   TextBuffer *out) {
   if (!out || first_row < 0 || row_count < 0 || first_row > array.length ||
       row_count > array.length - first_row) {
     return sanitize::Status::Invalid(
@@ -223,7 +223,7 @@ sanitize::Status write_batch_jsonl(Output &out_file, const JsonlField &root,
                                    const ArrowArray &array,
                                    const ArrayValidationLimits &limits) {
   SAN_RETURN_NOT_OK(validate_batch(root, array, limits));
-  std::string batch_text;
+  TextBuffer batch_text;
   ScopedStringWipe batch_text_wipe(&batch_text);
   SAN_RETURN_NOT_OK(
       append_rows_jsonl(root, array, 0, array.length, {}, &batch_text));
@@ -296,7 +296,7 @@ write_stream(ArrowArrayStream *stream, Output &out_file,
       },
       JsonlRowEstimator(root),
       [&root](const ordered_text_output::BatchPacket &packet, std::size_t,
-              std::stop_token stop, std::string *out) {
+              std::stop_token stop, TextBuffer *out) {
         return append_rows_jsonl(root, packet.owner->value(), packet.first_row,
                                  packet.row_count, stop, out);
       },

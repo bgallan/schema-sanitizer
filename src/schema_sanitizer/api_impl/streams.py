@@ -211,6 +211,13 @@ class Stream(DiagnosticsAccessMixin, ClosableContextManagerMixin, Iterator):
     def __init__(self, raw: Any):
         """Create an iterator from an Arrow stream-capable backend."""
         self._raw = raw
+        self._keepalive: Any = None
+        self._close_on_exhaustion = False
+        self._exhausted = False
+        self.schema_registry_json: str | None = None
+        self.schema_drifts_json: str | None = None
+        self.native_registry_state: Any = None
+        self.execution_policy: dict[str, Any] | None = None
         if _pyarrow_streams.is_record_batch_reader(raw, feature="Stream construction"):
             self._reader = raw
             return
@@ -237,9 +244,14 @@ class Stream(DiagnosticsAccessMixin, ClosableContextManagerMixin, Iterator):
 
     def __next__(self):
         """Return the next record batch and update diagnostics."""
+        if self._exhausted:
+            raise StopIteration
         try:
             batch = next(self._reader)
         except StopIteration:
+            if self._close_on_exhaustion:
+                self._exhausted = True
+                self.close()
             raise
         except Exception as exc:
             raise translate_core_error(exc) from exc

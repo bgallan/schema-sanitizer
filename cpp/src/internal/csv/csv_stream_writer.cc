@@ -95,7 +95,7 @@ void clear_decode_buffer(std::vector<char> &buffer) noexcept {
 
 class ScopedStringWipe final {
 public:
-  explicit ScopedStringWipe(std::string *value) noexcept : value_(value) {}
+  explicit ScopedStringWipe(TextBuffer *value) noexcept : value_(value) {}
   ~ScopedStringWipe() {
     if (value_ && secure_memory_cleanup_enabled() && !value_->empty()) {
       secure_zero_memory(value_->data(), value_->size());
@@ -106,7 +106,7 @@ public:
   ScopedStringWipe &operator=(const ScopedStringWipe &) = delete;
 
 private:
-  std::string *value_;
+  TextBuffer *value_;
 };
 
 class ScopedDecodeBufferClear final {
@@ -143,7 +143,7 @@ bool needs_csv_quotes(std::string_view value) {
   return value.find_first_of(",\"\r\n") != std::string_view::npos;
 }
 
-void append_csv_escaped(std::string &out, std::string_view value) {
+void append_csv_escaped(TextBuffer &out, std::string_view value) {
   if (!needs_csv_quotes(value)) {
     out.append(value);
     return;
@@ -199,7 +199,7 @@ bool is_json_string_literal(std::string_view value) {
 }
 
 sanitize::Status
-append_direct_csv_logical_scalar(std::string &out,
+append_direct_csv_logical_scalar(TextBuffer &out,
                                  const jsonl::JsonlField &field,
                                  const ArrowArray &array, std::int64_t row) {
   switch (field.kind) {
@@ -261,7 +261,7 @@ is_direct_csv_logical_scalar(jsonl::JsonlKind kind) noexcept {
 }
 
 template <class Offset>
-sanitize::Status append_csv_string(std::string &out, const ArrowArray &array,
+sanitize::Status append_csv_string(TextBuffer &out, const ArrowArray &array,
                                    std::int64_t row) {
   if (!array.buffers || !array.buffers[1]) {
     return sanitize::Status::Invalid("CSV writer: missing string offsets");
@@ -287,7 +287,7 @@ sanitize::Status append_csv_string(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_csv_cell_from_json(std::string &out,
+sanitize::Status append_csv_cell_from_json(TextBuffer &out,
                                            std::string_view json_value,
                                            std::vector<char> *decode_buffer) {
   if (json_value == "null") {
@@ -307,7 +307,7 @@ sanitize::Status append_csv_cell_from_json(std::string &out,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_csv_cell(std::string &out,
+sanitize::Status append_csv_cell(TextBuffer &out,
                                  const jsonl::JsonlField &field,
                                  const ArrowArray &array, std::int64_t row,
                                  std::vector<char> *decode_buffer) {
@@ -327,14 +327,14 @@ sanitize::Status append_csv_cell(std::string &out,
     return append_direct_csv_logical_scalar(out, field, array, row);
   }
 
-  std::string json_value;
+  TextBuffer json_value(out.get_allocator().resource());
   ScopedStringWipe json_value_wipe(&json_value);
   SAN_RETURN_NOT_OK(jsonl::append_value(json_value, field, array, row));
   return append_csv_cell_from_json(out, json_value, decode_buffer);
 }
 
 sanitize::Status write_header(Output &out_file, const jsonl::JsonlField &root) {
-  std::string buffer;
+  TextBuffer buffer;
   ScopedStringWipe buffer_wipe(&buffer);
   for (std::size_t i = 0; i < root.children.size(); ++i) {
     if (i != 0) {
@@ -349,7 +349,7 @@ sanitize::Status write_header(Output &out_file, const jsonl::JsonlField &root) {
 sanitize::Status append_rows_csv(const jsonl::JsonlField &root,
                                  const ArrowArray &array,
                                  std::int64_t first_row, std::int64_t row_count,
-                                 std::stop_token stop, std::string *out) {
+                                 std::stop_token stop, TextBuffer *out) {
   if (!out || first_row < 0 || row_count < 0 || first_row > array.length ||
       row_count > array.length - first_row) {
     return sanitize::Status::Invalid("CSV writer: invalid output packet range");
@@ -431,7 +431,7 @@ write_stream(ArrowArrayStream *stream, Output &out_file,
       },
       std::move(row_estimator),
       [&root](const ordered_text_output::BatchPacket &packet, std::size_t,
-              std::stop_token stop, std::string *out) {
+              std::stop_token stop, TextBuffer *out) {
         return append_rows_csv(root, packet.owner->value(), packet.first_row,
                                packet.row_count, stop, out);
       },

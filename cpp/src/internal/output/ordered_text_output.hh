@@ -4,6 +4,7 @@
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/memory/memory_pool.hh"
 #include "internal/output/output_worker_admission.hh"
+#include "internal/output/text_buffer.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "internal/runtime/ordered_executor.hh"
 #include "sanitize/abi/cdata_types.hh"
@@ -44,27 +45,29 @@ struct BatchPacket {
   std::int64_t first_row = 0;
   std::int64_t row_count = 0;
   std::int64_t estimated_output_bytes = 0;
+  std::int64_t reserved_output_bytes = 0;
 };
 
 class EncodedFragment final {
 public:
   EncodedFragment() = default;
   EncodedFragment(std::shared_ptr<sanitize::CArrayGuard> batch_owner,
-                  std::string encoded, std::int64_t rows,
+                  TextBuffer encoded, std::int64_t rows,
+                  std::int64_t reserved_bytes,
                   std::shared_ptr<std::pmr::memory_resource> resource)
       : owner(std::move(batch_owner)), memory_owner(std::move(resource)),
-        bytes(encoded.begin(), encoded.end(),
-              memory_owner ? memory_owner.get()
-                           : std::pmr::get_default_resource()),
-        row_count(rows) {}
+        bytes(std::move(encoded)), row_count(rows),
+        reserved_output_bytes(reserved_bytes) {}
 
   EncodedFragment(const EncodedFragment &) = delete;
   EncodedFragment &operator=(const EncodedFragment &) = delete;
   EncodedFragment(EncodedFragment &&other) noexcept
       : owner(std::move(other.owner)),
         memory_owner(std::move(other.memory_owner)),
-        bytes(std::move(other.bytes)), row_count(other.row_count) {
+        bytes(std::move(other.bytes)), row_count(other.row_count),
+        reserved_output_bytes(other.reserved_output_bytes) {
     other.row_count = 0;
+    other.reserved_output_bytes = 0;
   }
   EncodedFragment &operator=(EncodedFragment &&other) noexcept {
     if (this != &other) {
@@ -82,12 +85,14 @@ public:
     bytes.clear();
     owner.reset();
     row_count = 0;
+    reserved_output_bytes = 0;
   }
 
   std::shared_ptr<sanitize::CArrayGuard> owner;
   std::shared_ptr<std::pmr::memory_resource> memory_owner;
   std::pmr::string bytes;
   std::int64_t row_count = 0;
+  std::int64_t reserved_output_bytes = 0;
 };
 
 [[nodiscard]] inline ExecutionPolicy output_execution_policy(
@@ -204,6 +209,15 @@ write_stream(ArrowArrayStream *stream, Output &output,
   OutputAdmissionState admission_state;
   Stats stats;
   std::uint64_t ordinal = 0;
+  std::int64_t reserved_output_bytes = 0;
+  const auto max_int64 = std::numeric_limits<std::int64_t>::max();
+  const auto output_credit_capacity =
+      base_policy.materialization_packet_target_bytes >
+              max_int64 / base_policy.reorder_capacity
+          ? max_int64
+          : std::max<std::int64_t>(
+                1, base_policy.materialization_packet_target_bytes *
+                       base_policy.reorder_capacity);
 
   const auto cancel_executor = [&]() noexcept {
     if (executor) {
@@ -229,7 +243,9 @@ write_stream(ArrowArrayStream *stream, Output &output,
                 return sanitize::Status::Cancelled(
                     "text output packet cancelled before encoding");
               }
-              std::string bytes;
+              TextBuffer bytes(output_memory_resource
+                                   ? output_memory_resource.get()
+                                   : std::pmr::get_default_resource());
               if (packet.estimated_output_bytes > 0) {
                 try {
                   bytes.reserve(
@@ -242,9 +258,9 @@ write_stream(ArrowArrayStream *stream, Output &output,
               SAN_RETURN_NOT_OK(
                   (*encode_packet_owner)(packet, worker_index, stop, &bytes));
               try {
-                return EncodedFragment(std::move(packet.owner),
-                                       std::move(bytes), packet.row_count,
-                                       output_memory_resource);
+                return EncodedFragment(
+                    std::move(packet.owner), std::move(bytes), packet.row_count,
+                    packet.reserved_output_bytes, output_memory_resource);
               } catch (const std::bad_alloc &) {
                 return sanitize::Status::OutOfMemory(
                     "text output packet allocation exceeded the operation "
@@ -269,6 +285,8 @@ write_stream(ArrowArrayStream *stream, Output &output,
       return outcome.result.status();
     }
     auto fragment = std::move(outcome.result).ValueOrDie();
+    reserved_output_bytes = std::max<std::int64_t>(
+        0, reserved_output_bytes - fragment.reserved_output_bytes);
     const auto write_status = output.Write(
         std::string_view(fragment.bytes.data(), fragment.bytes.size()));
     if (!write_status.ok()) {
@@ -400,14 +418,25 @@ write_stream(ArrowArrayStream *stream, Output &output,
         }
       }
       row_count = std::max<std::int64_t>(1, row_count);
+      const auto packet_credit =
+          std::max<std::int64_t>(1, estimated_packet_bytes);
+      // Count bounds protect scheduler metadata; this byte bound protects the
+      // variable-sized retained fragments. Committing the next ordinal is the
+      // cancellation-aware wait path and cannot deadlock behind a later
+      // fragment that owns all available credit.
+      while (reserved_output_bytes > output_credit_capacity - packet_credit) {
+        SAN_RETURN_NOT_OK(commit_next());
+      }
       SAN_RETURN_NOT_OK(executor->Submit(typename Executor::Packet{
           .ordinal = ordinal++,
           .payload =
               BatchPacket{.owner = batch,
                           .first_row = first_row,
                           .row_count = row_count,
-                          .estimated_output_bytes = estimated_packet_bytes},
+                          .estimated_output_bytes = estimated_packet_bytes,
+                          .reserved_output_bytes = packet_credit},
       }));
+      reserved_output_bytes += packet_credit;
       first_row += row_count;
     }
   }

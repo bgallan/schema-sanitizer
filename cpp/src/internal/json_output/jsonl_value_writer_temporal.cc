@@ -50,7 +50,7 @@ void civil_from_days(int64_t z, int *year, unsigned *month, unsigned *day) {
   *day = d;
 }
 
-void append_padded_int(std::string &out, int value, int width) {
+void append_padded_int(TextBuffer &out, int value, int width) {
   std::array<char, 32> buffer{};
   auto [ptr, ec] =
       std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
@@ -65,7 +65,7 @@ void append_padded_int(std::string &out, int value, int width) {
   out.append(buffer.data(), static_cast<std::size_t>(len));
 }
 
-void append_iso_date(std::string &out, int64_t days_since_epoch) {
+void append_iso_date(TextBuffer &out, int64_t days_since_epoch) {
   int year = 1970;
   unsigned month = 1;
   unsigned day = 1;
@@ -77,7 +77,7 @@ void append_iso_date(std::string &out, int64_t days_since_epoch) {
   append_padded_int(out, static_cast<int>(day), 2);
 }
 
-void append_iso_time(std::string &out, int64_t seconds_since_midnight,
+void append_iso_time(TextBuffer &out, int64_t seconds_since_midnight,
                      int64_t nanos) {
   const int hour = static_cast<int>(seconds_since_midnight / 3600);
   const int minute = static_cast<int>((seconds_since_midnight % 3600) / 60);
@@ -109,7 +109,7 @@ void append_iso_time(std::string &out, int64_t seconds_since_midnight,
 
 } // namespace
 
-sanitize::Status append_timestamp_value(std::string &out,
+sanitize::Status append_timestamp_value(TextBuffer &out,
                                         const ArrowArray &array, int64_t row,
                                         int64_t units_per_second, bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
@@ -135,7 +135,7 @@ sanitize::Status append_timestamp_value(std::string &out,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_date32_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_date32_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
   if (!values) {
@@ -151,7 +151,7 @@ sanitize::Status append_date32_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_date64_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_date64_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
   if (!values) {
@@ -167,7 +167,7 @@ sanitize::Status append_date64_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_time32s_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_time32s_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
   if (!values) {
@@ -183,9 +183,8 @@ sanitize::Status append_time32s_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_time32ms_value(std::string &out,
-                                       const ArrowArray &array, int64_t row,
-                                       bool quote) {
+sanitize::Status append_time32ms_value(TextBuffer &out, const ArrowArray &array,
+                                       int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing time32 buffer");
@@ -203,7 +202,7 @@ sanitize::Status append_time32ms_value(std::string &out,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_time64_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_time64_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, int64_t units_per_second,
                                      bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);

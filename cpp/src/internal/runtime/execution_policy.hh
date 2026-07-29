@@ -12,6 +12,13 @@
 namespace sanitize::internal {
 
 inline constexpr std::int64_t kMinimumWorkerArenaBytes = 8LL * 1024LL * 1024LL;
+// Native thread stacks are outside the PMR allocation graph. Reserve a
+// conservative resident-stack/runtime allowance per helper before deciding
+// how many helpers a memory budget can safely sustain.
+inline constexpr std::int64_t kWorkerRuntimeReserveBytes =
+    1LL * 1024LL * 1024LL;
+inline constexpr std::int64_t kMinimumWorkerMemoryBytes =
+    kMinimumWorkerArenaBytes + kWorkerRuntimeReserveBytes;
 inline constexpr std::int64_t kMaxMaterializationPacketRows = 5120;
 inline constexpr std::int64_t kMaxMaterializationPacketBytes =
     1LL * 1024LL * 1024LL;
@@ -65,11 +72,12 @@ execution_policy_from(sanitize::ThreadingMode mode,
   const auto worker_pool_bytes =
       std::max<std::int64_t>(1, budget.total_bytes - budget.total_bytes / 4);
   const auto memory_workers =
-      std::max<std::int64_t>(1, worker_pool_bytes / kMinimumWorkerArenaBytes);
+      std::max<std::int64_t>(1, worker_pool_bytes / kMinimumWorkerMemoryBytes);
   out.effective_workers =
       std::max<std::int64_t>(1, std::min(cpu_workers, memory_workers));
   out.worker_arena_bytes =
-      std::max<std::int64_t>(1, worker_pool_bytes / out.effective_workers);
+      std::max<std::int64_t>(1, worker_pool_bytes / out.effective_workers -
+                                    kWorkerRuntimeReserveBytes);
   if (out.effective_workers == 1) {
     out.fallback_reason = cpu_workers <= 1
                               ? ExecutionFallbackReason::kCpuLimited

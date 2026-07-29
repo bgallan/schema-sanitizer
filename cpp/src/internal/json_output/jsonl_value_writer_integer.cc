@@ -28,7 +28,7 @@ inline constexpr std::array<char, 200> kDecimalDigitPairs = [] {
 }();
 
 template <typename UInt>
-void append_unsigned_decimal(std::string &out, UInt value) {
+void append_unsigned_decimal(TextBuffer &out, UInt value) {
   static_assert(std::is_unsigned_v<UInt>);
   std::array<char, 32> buffer{};
   char *cursor = buffer.data() + buffer.size();
@@ -52,7 +52,7 @@ void append_unsigned_decimal(std::string &out, UInt value) {
 }
 
 template <typename T>
-sanitize::Status append_signed(std::string &out, const ArrowArray &array,
+sanitize::Status append_signed(TextBuffer &out, const ArrowArray &array,
                                int64_t row) {
   const T *values = data_buffer<T>(array);
   if (!values) {
@@ -70,7 +70,7 @@ sanitize::Status append_signed(std::string &out, const ArrowArray &array,
 }
 
 template <typename T>
-sanitize::Status append_unsigned(std::string &out, const ArrowArray &array,
+sanitize::Status append_unsigned(TextBuffer &out, const ArrowArray &array,
                                  int64_t row) {
   const T *values = data_buffer<T>(array);
   if (!values) {
@@ -83,42 +83,42 @@ sanitize::Status append_unsigned(std::string &out, const ArrowArray &array,
 
 } // namespace
 
-sanitize::Status append_int8_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_int8_value(TextBuffer &out, const ArrowArray &array,
                                    int64_t row) {
   return append_signed<int8_t>(out, array, row);
 }
 
-sanitize::Status append_uint8_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_uint8_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_unsigned<uint8_t>(out, array, row);
 }
 
-sanitize::Status append_int16_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_int16_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_signed<int16_t>(out, array, row);
 }
 
-sanitize::Status append_uint16_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_uint16_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   return append_unsigned<uint16_t>(out, array, row);
 }
 
-sanitize::Status append_int32_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_int32_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_signed<int32_t>(out, array, row);
 }
 
-sanitize::Status append_uint32_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_uint32_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   return append_unsigned<uint32_t>(out, array, row);
 }
 
-sanitize::Status append_int64_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_int64_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_signed<int64_t>(out, array, row);
 }
 
-sanitize::Status append_uint64_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_uint64_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   return append_unsigned<uint64_t>(out, array, row);
 }

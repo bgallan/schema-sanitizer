@@ -322,20 +322,31 @@ public:
   };
 
   [[nodiscard]] Lease Acquire(std::int64_t requested, std::int64_t capacity) {
-    constexpr std::int64_t kOperationAdmissionBytes = 1 << 20;
+    constexpr std::int64_t kMinimumOperationAdmissionBytes = 1 << 20;
+    constexpr std::int64_t kMaximumOperationAdmissionBytes = 8 << 20;
     const auto safe_capacity = std::max<std::int64_t>(1, capacity);
     // Reserve only fixed operation-control overhead here. Actual variable
     // allocations are governed by the shared process pool, so directory and
     // registry substreams do not each reserve the public operation's complete
     // budget and deadlock one another during lookahead.
-    const auto lease_bytes = std::clamp<std::int64_t>(
-        requested, 1, std::min(safe_capacity, kOperationAdmissionBytes));
     std::unique_lock lock(mutex_);
     // Freeze the process ceiling on first use. Shrinking it behind an already
     // queued larger FIFO lease could make that ticket impossible to satisfy.
     if (capacity_bytes_ == 0) {
       capacity_bytes_ = safe_capacity;
     }
+    // Scale the control-plane reservation with the requested operation while
+    // leaving the shared parent pool authoritative for actual bytes. Under
+    // contention, cap it to a fair share so many small operations can enter
+    // without letting one large caller monopolize admission.
+    const auto proportional =
+        std::max<std::int64_t>(kMinimumOperationAdmissionBytes, requested / 64);
+    const auto fair_share = std::max<std::int64_t>(
+        1,
+        capacity_bytes_ / std::max<std::int64_t>(2, waiting_operations_ + 2));
+    const auto lease_bytes = std::clamp<std::int64_t>(
+        std::min(proportional, fair_share), 1,
+        std::min(capacity_bytes_, kMaximumOperationAdmissionBytes));
     const auto ticket = next_ticket_++;
     ++waiting_operations_;
     ready_.wait(lock, [&] {

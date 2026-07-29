@@ -8,6 +8,7 @@ from typing import Any
 
 from conftest import require_native
 
+import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution import ExecutionContext
 from schema_sanitizer.core_impl.native_runtime import native_core
 from schema_sanitizer.options_impl.call_options import normalize_call_options
@@ -60,6 +61,23 @@ def test_scheduler_queues_and_retained_output_use_operation_pmr() -> None:
     assert "telemetry->memory_pool()" in arena
     assert "std::pmr::string bytes;" in output
     assert "task_arena->memory_resource()" in output
+    assert "TextBuffer bytes(output_memory_resource" in output
+    assert "std::string bytes;" not in output
+    assert "reserved_output_bytes" in output
+
+
+def test_wide_worker_bitmap_has_a_nonempty_summary_and_numa_local_stealing() -> None:
+    """Very wide arenas skip empty shards and prefer local memory domains."""
+    bitmap = (ROOT / "cpp/src/internal/runtime/atomic_worker_bitmap.hh").read_text(encoding="utf-8")
+    arena = (ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text(
+        encoding="utf-8"
+    )
+    numa = (ROOT / "cpp/src/internal/runtime/numa_locality.hh").read_text(encoding="utf-8")
+
+    assert "nonempty_words_" in bitmap
+    assert "mark_word_empty" in bitmap
+    assert "current_locality_domain" in numa
+    assert "same_domain" in arena
 
 
 def test_every_context_routes_actual_bytes_through_the_process_pool() -> None:
@@ -70,7 +88,8 @@ def test_every_context_routes_actual_bytes_through_the_process_pool() -> None:
     assert "shared_process_memory_pool(process_capacity)" in execution_context
     assert "make_governed_operation_memory_pool(" in execution_context
     assert "schema_sanitizer::ProcessMemoryPool" in memory_pool
-    assert "kOperationAdmissionBytes" in memory_pool
+    assert "kMinimumOperationAdmissionBytes" in memory_pool
+    assert "kMaximumOperationAdmissionBytes" in memory_pool
 
 
 def test_operation_pool_lease_tracks_stream_lifetime() -> None:
@@ -87,7 +106,7 @@ def test_operation_pool_lease_tracks_stream_lifetime() -> None:
     try:
         capacity, leased, waiting = _governor_stats()
         assert capacity >= limit
-        assert 0 < leased <= 1024 * 1024
+        assert 0 < leased <= 8 * 1024 * 1024
         assert waiting == 0
     finally:
         output.close()
@@ -137,7 +156,7 @@ def test_process_governor_allows_suboperations_without_double_reserving_budget()
         thread.join(timeout=10.0)
         assert not thread.is_alive()
         _, active_leases, queued = _governor_stats()
-        assert 0 < active_leases <= 1024 * 1024
+        assert 0 < active_leases <= 8 * 1024 * 1024
         assert queued == 0
     finally:
         first.close()
@@ -145,5 +164,34 @@ def test_process_governor_allows_suboperations_without_double_reserving_budget()
     assert not errors
     assert len(result) == 1
     _, leased, waiting = _governor_stats()
+    assert leased == 0
+    assert waiting == 0
+
+
+def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None:
+    """Lazy analytical output owns its operation until the iterator closes."""
+    require_native()
+    source = tmp_path / "lazy.jsonl"
+    source.write_text('{"value":1}\n{"value":2}\n', encoding="utf-8")
+
+    stream = ss.iter_batches(
+        source,
+        input_format="jsonl",
+        multi_threading=True,
+        memory_limit_bytes=64 * 1024 * 1024,
+    )
+    try:
+        _capacity, leased, waiting = _governor_stats()
+        assert leased > 0
+        assert waiting == 0
+        assert sum(batch.num_rows for batch in stream) == 2
+        assert list(stream) == []
+        _capacity, leased, waiting = _governor_stats()
+        assert leased == 0
+        assert waiting == 0
+    finally:
+        stream.close()
+
+    _capacity, leased, waiting = _governor_stats()
     assert leased == 0
     assert waiting == 0

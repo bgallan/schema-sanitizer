@@ -23,7 +23,7 @@ bool array_is_null(const ArrowArray &array, int64_t row) {
 
 } // namespace
 
-sanitize::Status append_value(std::string &out, const JsonlField &field,
+sanitize::Status append_value(TextBuffer &out, const JsonlField &field,
                               const ArrowArray &array, int64_t row) {
   if (array_is_null(array, row)) {
     out += "null";

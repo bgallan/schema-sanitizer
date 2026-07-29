@@ -102,6 +102,7 @@ below.
 
 | Function | Result |
 |---|---|
+| `iter_batches(...)` | Lazy, closeable iterator of `pyarrow.RecordBatch` objects. |
 | `to_pyarrow(...)` | `Result.clean_data` is a `pyarrow.Table`. |
 | `to_pandas(...)` | `Result.clean_data` is a `pandas.DataFrame`. |
 | `to_polars(...)` | `Result.clean_data` is a `polars.DataFrame`. |
@@ -122,6 +123,17 @@ For analytical outputs (`to_pyarrow`, `to_pandas`, `to_polars`, and
 final table, DataFrame, or relation returned in `Result.clean_data` is
 deliberately outside it. That result may exhaust process memory when it is too
 large. Use a file-output converter when bounded-memory completion is required.
+
+`iter_batches(...)` avoids building that final table. It keeps the native
+operation and its memory budget alive until the iterator is exhausted or
+closed. Each yielded batch leaves the operation budget when ownership passes
+to Python, so retaining every batch can still grow caller memory:
+
+```python
+with ss.iter_batches("raw/events.jsonl", input_format="jsonl") as batches:
+    for batch in batches:
+        consume(batch)
+```
 
 `new_schema_registry()` creates an empty registry for a pipeline without
 depending on the registry JSON structure:
@@ -305,8 +317,9 @@ from:
 - CPUs available through host, affinity, and cgroup limits.
 
 There is no fixed global worker ceiling. On machines wider than 32 CPUs, the
-arena uses dynamically sized 64-bit worker maps and can continue growing while
-the operation memory budget provides the required per-worker reserve.
+arena uses dynamically sized worker maps with hierarchical non-empty summaries.
+It can continue growing while the operation memory budget provides both the
+worker arena and a conservative native stack/runtime reserve.
 
 When resources are constrained, multi mode may use only one worker. Inspect
 `result.execution_policy` for the effective values and fallback reason.
@@ -325,6 +338,10 @@ All native stages reuse one operation-wide task arena. They do not create
 independent worker pools that could multiply CPU or memory use. Workers start
 lazily, and small or inexpensive batches remain on the serial path.
 
+On Linux, wide arenas sample each worker's NUMA node. Idle workers first steal
+compatible work from the same node, then fall back to unrestricted stealing so
+cross-node placement never strands work.
+
 Branch-heavy or irregular stages use conservative fractions of the arena.
 Those fractions still grow on wider machines; they are not fixed 4-, 16-, or
 32-worker ceilings. Stages with fewer independent work items use only the
@@ -336,6 +353,7 @@ Concurrency does not change observable ordering:
 
 - results, diagnostics, output bytes, and failures commit by source ordinal;
 - bounded dispatch also bounds retained out-of-order results;
+- text output is bounded by retained bytes as well as packet count;
 - oversized rows are processed without allowing later rows to overtake them;
 - stage-local cancellation stops failed work without invalidating unrelated
   arena users.
@@ -361,11 +379,11 @@ The budget covers Schema-Sanitizer-owned input chunks, queues, reorder windows,
 materialization, writers, remote packets, and staging. These components cannot
 each spend the full limit independently.
 
-Concurrent public calls retain their own operation limit, but their actual
-native allocations also pass through one process-wide governor. They cannot
-each claim the full currently available memory independently. Small FIFO
-admission leases account for operation-control overhead without making the
-files inside one directory conversion reserve the complete budget again.
+Concurrent public calls retain their own operation limit, while actual native
+allocations also pass through one process-wide governor. FIFO admission leases
+adapt to operation size and current contention. Files inside one directory
+conversion still share one lease and pool instead of reserving the full budget
+again.
 
 Input and output files may be larger than the budget because file conversions
 stream them. If an operation cannot proceed safely, it fails before publishing
@@ -852,7 +870,13 @@ Multi-threaded operations use one bounded native arena shared by inference,
 materialization, Arrow handoff, and output. Worker counts are derived from CPU
 affinity, cgroup capacity, and the public memory budget; there is no fixed
 32-worker ceiling. Arenas up to 32 workers keep the compact bitset scheduler,
-while wider arenas use scalable per-worker lifecycle state.
+while wider arenas use summarized dynamic bitmaps and local-first NUMA stealing.
+Worker admission reserves native runtime headroom that PMR allocations cannot
+account for directly.
+
+CSV and JSONL workers encode directly into operation-governed PMR buffers.
+Their ordered window is bounded by bytes and packet count, so a slow early
+packet cannot allow later fragments to consume an unbounded reorder window.
 
 Eligible fixed-width flat JSONL can use the complete arena for short,
 moderate-cost schemas and a proportional half-arena policy for sustained work.

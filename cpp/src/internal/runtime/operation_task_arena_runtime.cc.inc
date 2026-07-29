@@ -313,67 +313,85 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
     // Empty and not-yet-started workers are skipped 64 at a time instead of
     // being inspected individually.
     bool stolen = false;
-    state->initialized_dynamic.VisitIntersection(
-        state->nonempty_dynamic, 0, state->worker_count,
-        (index + 1U) % state->worker_count, [&](std::size_t candidate_index) {
-          if (stolen || candidate_index == index) {
-            return;
-          }
-          auto &candidate = *state->slots[candidate_index];
-          std::lock_guard lock(candidate.mutex);
-          if (candidate.tasks.empty()) {
-            return;
-          }
-          auto selected = candidate.tasks.end();
-          if constexpr (PreferDedicatedOutput) {
-            if (allow_preference && index >= state->worker_count / 2U &&
-                dedicated_high_output(candidate.tasks.front(), state) &&
-                compatible(candidate.tasks.front(), index)) {
-              selected = candidate.tasks.begin();
-            }
-          } else if (candidate.shallow_output_preference && allow_preference &&
-                     index >= state->worker_count / 2U &&
-                     output_preference_queue_is_bounded(
-                         candidate.tasks.size()) &&
-                     bounded_low_core_output(candidate.tasks.front(), state) &&
-                     compatible(candidate.tasks.front(), index)) {
-            selected = candidate.tasks.begin();
-          }
-          if (selected == candidate.tasks.end()) {
-            const auto reverse =
-                std::find_if(candidate.tasks.rbegin(), candidate.tasks.rend(),
-                             [index](const auto &queued) {
-                               return compatible(queued, index);
-                             });
-            if (reverse == candidate.tasks.rend()) {
+    const auto local_domain =
+        state->slots[index]->locality_domain.load(std::memory_order_relaxed);
+    bool remote_pass = local_domain < 0;
+    do {
+      state->initialized_dynamic.VisitIntersection(
+          state->nonempty_dynamic, 0, state->worker_count,
+          (index + 1U) % state->worker_count, [&](std::size_t candidate_index) {
+            if (stolen || candidate_index == index) {
               return;
             }
-            selected = std::prev(reverse.base());
-          }
-          *out = std::move(*selected);
-          if constexpr (!PreferDedicatedOutput) {
-            if (candidate.dedicated_output_queued > 0U) {
-              if (bounded_low_core_output(*out, state)) {
-                --candidate.dedicated_output_queued;
-              }
-              refresh_shallow_output_preference(state, candidate);
+            auto &candidate = *state->slots[candidate_index];
+            const auto candidate_domain =
+                candidate.locality_domain.load(std::memory_order_relaxed);
+            const auto same_domain =
+                local_domain >= 0 && candidate_domain == local_domain;
+            if ((!remote_pass && !same_domain) ||
+                (remote_pass && local_domain >= 0 && same_domain)) {
+              return;
             }
-          }
-          candidate.tasks.erase(selected);
-          --candidate.queued_local;
-          candidate.queued.store(candidate.queued_local,
-                                 std::memory_order_relaxed);
-          if (candidate.tasks.empty()) {
-            mark_empty(state, candidate_index);
-          }
-          auto &thief = *state->slots[index];
-          ++thief.stolen_local;
-          thief.stolen.store(thief.stolen_local, std::memory_order_relaxed);
-          if (state->telemetry) {
-            state->telemetry->RecordWorkerTaskStolen(index);
-          }
-          stolen = true;
-        });
+            std::lock_guard lock(candidate.mutex);
+            if (candidate.tasks.empty()) {
+              return;
+            }
+            auto selected = candidate.tasks.end();
+            if constexpr (PreferDedicatedOutput) {
+              if (allow_preference && index >= state->worker_count / 2U &&
+                  dedicated_high_output(candidate.tasks.front(), state) &&
+                  compatible(candidate.tasks.front(), index)) {
+                selected = candidate.tasks.begin();
+              }
+            } else if (candidate.shallow_output_preference &&
+                       allow_preference && index >= state->worker_count / 2U &&
+                       output_preference_queue_is_bounded(
+                           candidate.tasks.size()) &&
+                       bounded_low_core_output(candidate.tasks.front(),
+                                               state) &&
+                       compatible(candidate.tasks.front(), index)) {
+              selected = candidate.tasks.begin();
+            }
+            if (selected == candidate.tasks.end()) {
+              const auto reverse =
+                  std::find_if(candidate.tasks.rbegin(), candidate.tasks.rend(),
+                               [index](const auto &queued) {
+                                 return compatible(queued, index);
+                               });
+              if (reverse == candidate.tasks.rend()) {
+                return;
+              }
+              selected = std::prev(reverse.base());
+            }
+            *out = std::move(*selected);
+            if constexpr (!PreferDedicatedOutput) {
+              if (candidate.dedicated_output_queued > 0U) {
+                if (bounded_low_core_output(*out, state)) {
+                  --candidate.dedicated_output_queued;
+                }
+                refresh_shallow_output_preference(state, candidate);
+              }
+            }
+            candidate.tasks.erase(selected);
+            --candidate.queued_local;
+            candidate.queued.store(candidate.queued_local,
+                                   std::memory_order_relaxed);
+            if (candidate.tasks.empty()) {
+              mark_empty(state, candidate_index);
+            }
+            auto &thief = *state->slots[index];
+            ++thief.stolen_local;
+            thief.stolen.store(thief.stolen_local, std::memory_order_relaxed);
+            if (state->telemetry) {
+              state->telemetry->RecordWorkerTaskStolen(index);
+            }
+            stolen = true;
+          });
+      if (stolen || remote_pass) {
+        break;
+      }
+      remote_pass = true;
+    } while (true);
     return stolen;
   }
   const auto initialized_snapshot =
@@ -534,6 +552,8 @@ template <bool PreferDedicatedOutput, bool CheckGlobalStopping>
 void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
                  std::size_t index, std::stop_token stop) noexcept {
   auto &slot = *state->slots[index];
+  slot.locality_domain.store(current_locality_domain(),
+                             std::memory_order_relaxed);
   auto observed_epoch = slot.wake_epoch.load(std::memory_order_acquire);
   // The reservation flag changes only during startup failure or after this
   // worker acquires its first real local task. Cache it across the hot loop and

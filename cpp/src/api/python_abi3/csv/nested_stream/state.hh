@@ -10,6 +10,7 @@
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
 #include "internal/json_output/schema/model.hh"
+#include "internal/output/text_buffer.hh"
 
 #include "nanoarrow/nanoarrow.h"
 #include "sanitize/abi/cdata_types.hh"
@@ -45,7 +46,7 @@ struct CsvNestedSchemaState {
 struct CsvNestedUtf8Array {
   std::vector<std::uint8_t> validity;
   std::vector<std::int32_t> offsets;
-  std::string data;
+  sanitize::internal::TextBuffer data;
   const void *buffers[3]{nullptr, nullptr, nullptr};
   ArrowArray array{};
 };

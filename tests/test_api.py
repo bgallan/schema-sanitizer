@@ -135,6 +135,7 @@ def test_public_api_contract() -> None:
         "SchemaSanitizerOutOfMemoryError",
         "SchemaSanitizerResourceError",
         "Result",
+        "iter_batches",
         "new_schema_registry",
         "to_csv",
         "to_duckdb",

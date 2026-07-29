@@ -16,10 +16,15 @@ class AtomicWorkerBitmap final {
 public:
   explicit AtomicWorkerBitmap(std::size_t bit_count)
       : word_count_((bit_count + 63U) / 64U),
+        summary_word_count_((word_count_ + 63U) / 64U),
         words_(
             word_count_ == 0
                 ? nullptr
-                : std::make_unique<std::atomic<std::uint64_t>[]>(word_count_)) {
+                : std::make_unique<std::atomic<std::uint64_t>[]>(word_count_)),
+        nonempty_words_(summary_word_count_ == 0
+                            ? nullptr
+                            : std::make_unique<std::atomic<std::uint64_t>[]>(
+                                  summary_word_count_)) {
     Reset();
   }
 
@@ -28,12 +33,18 @@ public:
 
   void Set(std::size_t index,
            std::memory_order order = std::memory_order_release) noexcept {
-    words_[index >> 6U].fetch_or(bit(index), order);
+    const auto word = index >> 6U;
+    words_[word].fetch_or(bit(index), order);
+    mark_word_nonempty(word);
   }
 
   void Clear(std::size_t index,
              std::memory_order order = std::memory_order_release) noexcept {
-    words_[index >> 6U].fetch_and(~bit(index), order);
+    const auto word = index >> 6U;
+    const auto previous = words_[word].fetch_and(~bit(index), order);
+    if ((previous & ~bit(index)) == 0U) {
+      mark_word_empty(word);
+    }
   }
 
   [[nodiscard]] bool
@@ -104,9 +115,27 @@ public:
     for (std::size_t index = 0; index < word_count_; ++index) {
       words_[index].store(0, std::memory_order_relaxed);
     }
+    for (std::size_t index = 0; index < summary_word_count_; ++index) {
+      nonempty_words_[index].store(0, std::memory_order_relaxed);
+    }
   }
 
 private:
+  void mark_word_nonempty(std::size_t word) noexcept {
+    nonempty_words_[word >> 6U].fetch_or(bit(word), std::memory_order_release);
+  }
+
+  void mark_word_empty(std::size_t word) noexcept {
+    auto &summary = nonempty_words_[word >> 6U];
+    summary.fetch_and(~bit(word), std::memory_order_acq_rel);
+    // A concurrent Set may have published the data word immediately before
+    // the summary clear. Recheck after clearing so the summary can never stay
+    // falsely empty; a later Set publishes its own summary bit.
+    if (words_[word].load(std::memory_order_acquire) != 0U) {
+      summary.fetch_or(bit(word), std::memory_order_release);
+    }
+  }
+
   [[nodiscard]] static constexpr std::uint64_t bit(std::size_t index) noexcept {
     return std::uint64_t{1} << (index & 63U);
   }
@@ -145,6 +174,7 @@ private:
         if (words_[word].compare_exchange_weak(observed, observed | selected,
                                                std::memory_order_acq_rel,
                                                std::memory_order_acquire)) {
+          mark_word_nonempty(word);
           return (word << 6U) +
                  static_cast<std::size_t>(std::countr_zero(selected));
         }
@@ -161,14 +191,26 @@ private:
     }
     const auto first_word = begin >> 6U;
     const auto last_word = (end - 1U) >> 6U;
-    for (auto word = first_word; word <= last_word; ++word) {
-      const auto candidates =
-          words_[word].load(std::memory_order_acquire) &
-          ~excluded.words_[word].load(std::memory_order_acquire) &
-          range_mask(word, begin, end);
-      if (candidates != 0U) {
-        return (word << 6U) +
-               static_cast<std::size_t>(std::countr_zero(candidates));
+    const auto first_summary = first_word >> 6U;
+    const auto last_summary = last_word >> 6U;
+    for (auto summary_word = first_summary; summary_word <= last_summary;
+         ++summary_word) {
+      auto candidate_words =
+          nonempty_words_[summary_word].load(std::memory_order_acquire) &
+          range_mask(summary_word, first_word, last_word + 1U);
+      while (candidate_words != 0U) {
+        const auto word =
+            (summary_word << 6U) +
+            static_cast<std::size_t>(std::countr_zero(candidate_words));
+        const auto candidates =
+            words_[word].load(std::memory_order_acquire) &
+            ~excluded.words_[word].load(std::memory_order_acquire) &
+            range_mask(word, begin, end);
+        if (candidates != 0U) {
+          return (word << 6U) +
+                 static_cast<std::size_t>(std::countr_zero(candidates));
+        }
+        candidate_words &= candidate_words - 1U;
       }
     }
     return end;
@@ -183,21 +225,36 @@ private:
     }
     const auto first_word = begin >> 6U;
     const auto last_word = (end - 1U) >> 6U;
-    for (auto word = first_word; word <= last_word; ++word) {
-      auto candidates = words_[word].load(std::memory_order_acquire) &
-                        other.words_[word].load(std::memory_order_acquire) &
-                        range_mask(word, begin, end);
-      while (candidates != 0U) {
-        const auto relative =
-            static_cast<std::size_t>(std::countr_zero(candidates));
-        visitor((word << 6U) + relative);
-        candidates &= candidates - 1U;
+    const auto first_summary = first_word >> 6U;
+    const auto last_summary = last_word >> 6U;
+    for (auto summary_word = first_summary; summary_word <= last_summary;
+         ++summary_word) {
+      auto candidate_words =
+          nonempty_words_[summary_word].load(std::memory_order_acquire) &
+          other.nonempty_words_[summary_word].load(std::memory_order_acquire) &
+          range_mask(summary_word, first_word, last_word + 1U);
+      while (candidate_words != 0U) {
+        const auto word =
+            (summary_word << 6U) +
+            static_cast<std::size_t>(std::countr_zero(candidate_words));
+        auto candidates = words_[word].load(std::memory_order_acquire) &
+                          other.words_[word].load(std::memory_order_acquire) &
+                          range_mask(word, begin, end);
+        while (candidates != 0U) {
+          const auto relative =
+              static_cast<std::size_t>(std::countr_zero(candidates));
+          visitor((word << 6U) + relative);
+          candidates &= candidates - 1U;
+        }
+        candidate_words &= candidate_words - 1U;
       }
     }
   }
 
   std::size_t word_count_ = 0;
+  std::size_t summary_word_count_ = 0;
   std::unique_ptr<std::atomic<std::uint64_t>[]> words_;
+  std::unique_ptr<std::atomic<std::uint64_t>[]> nonempty_words_;
 };
 
 } // namespace sanitize::internal

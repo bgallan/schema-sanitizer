@@ -17,7 +17,8 @@ namespace {
   return byte < 0x20 || byte == '"' || byte == '\\';
 }
 
-void append_escaped_byte(std::string &out, unsigned char byte) {
+template <class String>
+void append_escaped_byte(String &out, unsigned char byte) {
   static constexpr std::string_view kHex = "0123456789abcdef";
   switch (byte) {
   case '"':
@@ -51,7 +52,8 @@ void append_escaped_byte(std::string &out, unsigned char byte) {
 
 } // namespace
 
-void append_string(std::string &out, std::string_view value) {
+template <class String>
+void append_string_impl(String &out, std::string_view value) {
   out.push_back('"');
   std::size_t run_start = 0;
   for (std::size_t index = 0; index < value.size(); ++index) {
@@ -69,6 +71,14 @@ void append_string(std::string &out, std::string_view value) {
     out.append(value.data() + run_start, value.size() - run_start);
   }
   out.push_back('"');
+}
+
+void append_string(std::string &out, std::string_view value) {
+  append_string_impl(out, value);
+}
+
+void append_string(std::pmr::string &out, std::string_view value) {
+  append_string_impl(out, value);
 }
 
 void append_key(std::string &out, bool &first, std::string_view key) {

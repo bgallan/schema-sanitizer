@@ -30,14 +30,14 @@ struct MonthDayNanoInterval {
   int64_t nanoseconds = 0;
 };
 
-sanitize::Status append_quoted_text(std::string &out, std::string_view value) {
+sanitize::Status append_quoted_text(TextBuffer &out, std::string_view value) {
   sanitize::internal::json_encoding::append_string(out, value);
   return sanitize::Status::OK();
 }
 
 } // namespace
 
-sanitize::Status append_decimal_value(std::string &out, const JsonlField &field,
+sanitize::Status append_decimal_value(TextBuffer &out, const JsonlField &field,
                                       const ArrowArray &array, int64_t row,
                                       bool quote) {
   if (!array.buffers || !array.buffers[1]) {
@@ -55,8 +55,7 @@ sanitize::Status append_decimal_value(std::string &out, const JsonlField &field,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_duration_value(std::string &out,
-                                       const JsonlField &field,
+sanitize::Status append_duration_value(TextBuffer &out, const JsonlField &field,
                                        const ArrowArray &array, int64_t row,
                                        bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
@@ -72,13 +71,12 @@ sanitize::Status append_duration_value(std::string &out,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_interval_value(std::string &out,
-                                       const JsonlField &field,
+sanitize::Status append_interval_value(TextBuffer &out, const JsonlField &field,
                                        const ArrowArray &array, int64_t row) {
   if (!array.buffers || !array.buffers[1]) {
     return sanitize::Status::Invalid("JSONL writer: missing interval buffer");
   }
-  std::string text;
+  TextBuffer text(out.get_allocator().resource());
   if (field.format == "tiM") {
     const int32_t *values = data_buffer<int32_t>(array);
     if (!values) {

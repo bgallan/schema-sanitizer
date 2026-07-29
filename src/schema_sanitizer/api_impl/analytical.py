@@ -30,6 +30,7 @@ from ..options_impl.call_options import (
     unwrap_options,
 )
 from ..options_impl.options import memory_limit_bytes_or_none
+from .batch_streaming import lazy_stream_from_opened
 from .execution_context import default_pool
 from .input.directory_preparation import prepare_single_parquet_file
 from .input.preparation import prepare_public_input
@@ -43,6 +44,7 @@ from .source_plan.registry import (
     materialize_opened_registry_stream,
     open_source_plan_registry_stream,
 )
+from .streams import Stream
 
 
 def _open_single_source_registry_stream(
@@ -172,7 +174,7 @@ def convert_analytical_with_options(
     input_mode: str,
     options: dict[str, Any],
     schema_registry: Mapping[str, Any] | str | None,
-) -> Result:
+) -> Result | Stream:
     """Sanitize one public input into an in-memory analytical object."""
     registry_json = _normalize_registry_json(schema_registry)
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
@@ -184,6 +186,7 @@ def convert_analytical_with_options(
         threading_mode=threading_mode,
         memory_limit_bytes=memory_limit_bytes,
     )
+    resources_transferred = False
     try:
         prepared_input = prepare_public_input(
             input_path,
@@ -234,6 +237,10 @@ def convert_analytical_with_options(
                 },
             )
             if opened is not None:
+                if target == "pyarrow_reader":
+                    stream = lazy_stream_from_opened(opened, prepared_input, operation_context)
+                    resources_transferred = True
+                    return stream
                 result = materialize_opened_registry_stream(
                     opened, target=target, threading_mode=threading_mode
                 )
@@ -251,14 +258,19 @@ def convert_analytical_with_options(
             schema_mode=schema_mode,
             ingestion_timestamp_micros=operation_context.ingestion_timestamp_micros,
         )
+        if target == "pyarrow_reader":
+            stream = lazy_stream_from_opened(opened, prepared_input, operation_context)
+            resources_transferred = True
+            return stream
         result = materialize_opened_registry_stream(
             opened, target=target, threading_mode=threading_mode
         )
         result.execution_policy = operation_context.policy.to_dict()
         return result
     finally:
-        prepared_input.close()
-        operation_context.close()
+        if not resources_transferred:
+            prepared_input.close()
+            operation_context.close()
 
 
 def to_duckdb(
@@ -296,13 +308,16 @@ def to_duckdb(
 ) -> Result:
     """Sanitize input into DuckDB; the returned relation is outside the memory budget."""
     options = locals()
-    return convert_analytical_with_options(
-        input_path,
-        target="duckdb",
-        input_format=input_format,
-        input_mode=input_mode,
-        options=options,
-        schema_registry=schema_registry,
+    return cast(
+        Result,
+        convert_analytical_with_options(
+            input_path,
+            target="duckdb",
+            input_format=input_format,
+            input_mode=input_mode,
+            options=options,
+            schema_registry=schema_registry,
+        ),
     )
 
 
@@ -341,13 +356,16 @@ def to_pandas(
 ) -> Result:
     """Sanitize input into pandas; the returned DataFrame is outside the memory budget."""
     options = locals()
-    return convert_analytical_with_options(
-        input_path,
-        target="pandas",
-        input_format=input_format,
-        input_mode=input_mode,
-        options=options,
-        schema_registry=schema_registry,
+    return cast(
+        Result,
+        convert_analytical_with_options(
+            input_path,
+            target="pandas",
+            input_format=input_format,
+            input_mode=input_mode,
+            options=options,
+            schema_registry=schema_registry,
+        ),
     )
 
 
@@ -386,13 +404,16 @@ def to_polars(
 ) -> Result:
     """Sanitize input into Polars; the returned DataFrame is outside the memory budget."""
     options = locals()
-    return convert_analytical_with_options(
-        input_path,
-        target="polars",
-        input_format=input_format,
-        input_mode=input_mode,
-        options=options,
-        schema_registry=schema_registry,
+    return cast(
+        Result,
+        convert_analytical_with_options(
+            input_path,
+            target="polars",
+            input_format=input_format,
+            input_mode=input_mode,
+            options=options,
+            schema_registry=schema_registry,
+        ),
     )
 
 
@@ -431,11 +452,14 @@ def to_pyarrow(
 ) -> Result:
     """Sanitize input into PyArrow; the returned table is outside the memory budget."""
     options = locals()
-    return convert_analytical_with_options(
-        input_path,
-        target="pyarrow",
-        input_format=input_format,
-        input_mode=input_mode,
-        options=options,
-        schema_registry=schema_registry,
+    return cast(
+        Result,
+        convert_analytical_with_options(
+            input_path,
+            target="pyarrow",
+            input_format=input_format,
+            input_mode=input_mode,
+            options=options,
+            schema_registry=schema_registry,
+        ),
     )
