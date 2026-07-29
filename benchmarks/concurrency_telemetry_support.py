@@ -77,10 +77,14 @@ def apply_exact_affinity(cpus: tuple[int, ...]) -> tuple[int, ...]:
         if max(cpus) >= 64:
             raise ValueError("Windows affinity supports one group of at most 64 CPUs")
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_current_process = kernel32.GetCurrentProcess
+        get_current_process.argtypes = []
+        get_current_process.restype = ctypes.c_void_p
+        set_process_affinity = kernel32.SetProcessAffinityMask
+        set_process_affinity.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        set_process_affinity.restype = ctypes.c_int
         mask_value = sum(1 << cpu for cpu in cpus)
-        if not kernel32.SetProcessAffinityMask(
-            kernel32.GetCurrentProcess(), ctypes.c_size_t(mask_value)
-        ):
+        if not set_process_affinity(get_current_process(), ctypes.c_size_t(mask_value)):
             raise OSError(ctypes.get_last_error(), "SetProcessAffinityMask failed")
         return cpus
     if tuple(range(os.cpu_count() or 1)) != cpus:

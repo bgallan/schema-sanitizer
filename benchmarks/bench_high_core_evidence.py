@@ -180,11 +180,13 @@ def _base_command(args: argparse.Namespace) -> list[str]:
         "interleaved-isolated",
         "--output-mode",
         args.output_mode,
-        "--numa-node",
-        str(args.numa_node),
         "--perf-events",
         args.perf_events,
     ]
+    if not args.allow_unbound:
+        command.extend(["--numa-node", str(args.numa_node)])
+    else:
+        command.append("--allow-unbound")
     if not args.allow_low_core:
         command.append("--require-high-core")
     if not args.allow_unbound:

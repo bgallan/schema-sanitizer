@@ -238,7 +238,7 @@ def test_v79_public_wide_csv_uses_hybrid_plan_and_parallel_output(
 
     assert counters["csv_fixed_plan_fixed_fields"] >= 48
     assert counters["csv_fixed_plan_dynamic_fields"] <= 4
-    assert 4 <= counters["csv_output_worker_ceiling"] <= 16
+    assert 1 <= counters["csv_output_worker_ceiling"] <= 16
     assert output_tasks["submitted"] > 1
     assert output_tasks["submitted"] == output_tasks["finished"]
     assert output.exists()

@@ -18,6 +18,7 @@ from benchmarks.concurrency_telemetry_support import (
     apply_exact_affinity,
     binding_snapshot,
     consume_arrow_c_stream,
+    current_affinity,
     format_cpu_list,
     numactl_prefix,
     parse_cpu_list,
@@ -98,8 +99,15 @@ def run_operation(
 def child_report(args: argparse.Namespace) -> dict[str, Any]:
     """Execute one workload/affinity in an isolated process."""
     cpus = parse_cpu_list(args.child_cpus)
-    applied = apply_exact_affinity(cpus)
-    if len(applied) != args.child_workers:
+    exact_affinity = True
+    try:
+        applied = apply_exact_affinity(cpus)
+    except (OSError, RuntimeError, ValueError):
+        if not args.allow_unbound:
+            raise
+        applied = current_affinity()
+        exact_affinity = False
+    if exact_affinity and len(applied) != args.child_workers:
         raise RuntimeError("child affinity width differs from requested worker count")
     memory_limit_bytes = args.memory_mib * 1024 * 1024
     output = (
@@ -131,6 +139,7 @@ def child_report(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "requested_workers": args.child_workers,
         "applied_workers": len(applied),
+        "exact_affinity": exact_affinity,
         "cpu_set": list(applied),
         "cpu_set_list": format_cpu_list(applied),
         "workload": args.child_workload,
@@ -155,7 +164,7 @@ def child_command(
     repeats: int,
 ) -> list[str]:
     """Build one direct child-process command."""
-    return [
+    command = [
         sys.executable,
         str(Path(args.benchmark_script).resolve()),
         "--fixture",
@@ -179,6 +188,9 @@ def child_command(
         "--child-output",
         str(output),
     ]
+    if args.allow_unbound:
+        command.append("--allow-unbound")
+    return command
 
 
 def launch_command(

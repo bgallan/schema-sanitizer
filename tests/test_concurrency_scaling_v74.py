@@ -123,7 +123,10 @@ def test_v74_csv_chunk_boundaries_preserve_exact_single_multi_values(
             output,
             input_format="csv",
             multi_threading=mode == "multi",
-            memory_limit_bytes=16 << 20,
+            # This test exercises multi-megabyte record framing, not the
+            # minimum-memory contract. Leave enough headroom for the input
+            # owner and the encoded output packet on every allocator.
+            memory_limit_bytes=64 << 20,
             on_error="stop",
         )
         actual[mode] = _user_rows(output)

@@ -243,11 +243,13 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
     std::set<std::thread::id> output;
     std::atomic<std::size_t> active{0};
     std::atomic<std::size_t> peak{0};
+    std::atomic<bool> release{false};
   };
   auto state = std::make_shared<SharedState>();
-  const auto make_worker = [state](bool is_output) {
-    return [state, is_output](std::uint64_t &&value, std::size_t,
-                              sanitize::internal::StopToken stop)
+  const auto expected_peak = static_cast<std::size_t>(requested_workers);
+  const auto make_worker = [state, expected_peak](bool is_output) {
+    return [state, expected_peak, is_output](std::uint64_t &&value, std::size_t,
+                                             sanitize::internal::StopToken stop)
                -> sanitize::Result<std::uint64_t> {
       {
         std::lock_guard lock(state->mutex);
@@ -262,7 +264,17 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
                                                 std::memory_order_relaxed,
                                                 std::memory_order_relaxed)) {
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      if (active == expected_peak) {
+        state->release.store(true, std::memory_order_release);
+        state->release.notify_all();
+      }
+      auto notify_release = [state] { state->release.notify_all(); };
+      sanitize::internal::StopCallback<decltype(notify_release)> stop_release(
+          stop, std::move(notify_release));
+      while (!state->release.load(std::memory_order_acquire) &&
+             !stop.stop_requested()) {
+        state->release.wait(false, std::memory_order_acquire);
+      }
       state->active.fetch_sub(1, std::memory_order_relaxed);
       if (stop.stop_requested()) {
         return sanitize::Status::Cancelled("arena probe cancelled");
@@ -305,6 +317,14 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
     PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
     return nullptr;
   }
+  const auto startup_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (state->peak.load(std::memory_order_acquire) < expected_peak &&
+         std::chrono::steady_clock::now() < startup_deadline) {
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  state->release.store(true, std::memory_order_release);
+  state->release.notify_all();
   for (int ordinal = 0; ordinal < tasks_per_stage; ++ordinal) {
     auto left = upstream->TakeNext();
     auto right = output->TakeNext();

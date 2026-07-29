@@ -178,7 +178,7 @@ def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> Non
     ci = _workflow("ci.yml")
 
     assert 'CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "11.0"' in cmake
-    assert "MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '11.0' || '' }}" in ci
+    assert "MACOSX_DEPLOYMENT_TARGET:" not in ci
     assert (
         pyproject["tool"]["cibuildwheel"]["macos"]["environment"]["MACOSX_DEPLOYMENT_TARGET"]
         == "11.0"

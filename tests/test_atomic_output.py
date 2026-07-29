@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from schema_sanitizer.api_impl.file_conversion.direct_writers import _call_native_writer
+from schema_sanitizer.core_impl import atomic_output
 from schema_sanitizer.core_impl.atomic_output import atomic_local_output
 
 
@@ -21,6 +22,7 @@ def test_atomic_local_output_replaces_only_after_success(tmp_path: Path) -> None
     target = tmp_path / "result.jsonl"
     target.write_bytes(b"previous")
     target.chmod(0o640)
+    existing_mode = stat.S_IMODE(target.stat().st_mode)
 
     with atomic_local_output(target) as staged:
         staged_path = Path(staged)
@@ -30,7 +32,7 @@ def test_atomic_local_output_replaces_only_after_success(tmp_path: Path) -> None
         staged_path.write_bytes(b"replacement")
 
     assert target.read_bytes() == b"replacement"
-    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert stat.S_IMODE(target.stat().st_mode) == existing_mode
     assert not _temporary_siblings(target)
 
 
@@ -45,6 +47,25 @@ def test_atomic_local_output_preserves_destination_on_failure(tmp_path: Path) ->
             raise RuntimeError("forced failure")
 
     assert target.read_bytes() == b"stable"
+    assert not _temporary_siblings(target)
+
+
+def test_atomic_local_output_preserves_mode_without_fchmod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Path chmod provides the Windows fallback for an existing destination."""
+    target = tmp_path / "result.jsonl"
+    target.write_bytes(b"previous")
+    target.chmod(0o640)
+    existing_mode = stat.S_IMODE(target.stat().st_mode)
+    monkeypatch.delattr(atomic_output.os, "fchmod", raising=False)
+
+    with atomic_local_output(target) as staged:
+        Path(staged).write_bytes(b"replacement")
+
+    assert target.read_bytes() == b"replacement"
+    assert stat.S_IMODE(target.stat().st_mode) == existing_mode
     assert not _temporary_siblings(target)
 
 

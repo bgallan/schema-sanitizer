@@ -208,7 +208,11 @@ def test_high_core_suite_plan_locks_one_affinity_for_both_profiles(
     sustained_plan = sustained_command[sustained_command.index("--cpu-affinity-json") + 1]
 
     assert report["plan_only"] is True
+    assert "--allow-unbound" in report["plan_command"]
+    assert "--numa-node" not in report["plan_command"]
     assert short_plan == sustained_plan
+    assert "--allow-unbound" in short_command
+    assert "--allow-unbound" in sustained_command
     assert Path(short_plan).exists()
     assert (tmp_path / "suite.json").exists()
     assert (tmp_path / "suite.md").exists()

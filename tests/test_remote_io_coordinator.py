@@ -104,7 +104,7 @@ def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:
     @asynccontextmanager
     async def context():
         """Enter too late, then record cleanup of the abandoned provider."""
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.5)
         try:
             yield object()
         finally:

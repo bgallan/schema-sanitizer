@@ -17,12 +17,14 @@ ROOT = Path(__file__).resolve().parents[1]
 def _wait_for_file(path: Path, process: subprocess.Popen[str]) -> None:
     """Wait until a child publishes readiness or exits unexpectedly."""
     deadline = time.monotonic() + 10.0
-    while process.poll() is None and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
         try:
             if path.read_text(encoding="utf-8") == "ready":
                 return
         except FileNotFoundError:
             pass
+        if process.poll() is not None:
+            break
         time.sleep(0.005)
     process.terminate()
     stdout, stderr = process.communicate(timeout=5)

@@ -232,6 +232,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--perf-events", default=_DEFAULT_PERF_EVENTS)
     parser.add_argument("--numa-node", type=int)
     parser.add_argument("--require-numa-binding", action="store_true")
+    parser.add_argument(
+        "--allow-unbound",
+        action="store_true",
+        help="continue without exact CPU affinity when the platform cannot apply it",
+    )
     parser.add_argument("--require-high-core", action="store_true")
     parser.add_argument("--cpu-affinity-json", type=Path)
     parser.add_argument("--dram-bandwidth-json", type=Path)
@@ -256,6 +261,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         or args.repeats <= 0
     ):
         parser.error("rows, columns, memory and repeats must be positive")
+    if args.allow_unbound and args.require_numa_binding:
+        parser.error("--allow-unbound conflicts with --require-numa-binding")
 
 
 def _emit_report(args: argparse.Namespace, report: dict[str, Any]) -> None:

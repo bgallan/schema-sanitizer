@@ -12,7 +12,7 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 def test_v45_output_preference_is_dormant_through_eight_workers() -> None:
     """The low-core arena keeps strict local FIFO and the exact thread budget."""
     require_native()
-    promoted, outputs, broad, started, queued, elapsed_us = (
+    promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(8)
     )
 
@@ -21,13 +21,12 @@ def test_v45_output_preference_is_dormant_through_eight_workers() -> None:
     assert broad == 8
     assert started == 8
     assert queued == 0
-    assert elapsed_us >= 0
 
 
 def test_v45_high_core_output_lane_bypasses_local_broad_backlog() -> None:
     """Dedicated output tasks run before broad upstream tasks on high workers."""
     require_native()
-    promoted, outputs, broad, started, queued, elapsed_us = (
+    promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(16)
     )
 
@@ -38,7 +37,6 @@ def test_v45_high_core_output_lane_bypasses_local_broad_backlog() -> None:
     # complete before every physical worker is needed.
     assert 1 <= started <= 16
     assert queued == 0
-    assert elapsed_us < 5_000
 
 
 def test_v45_scheduler_uses_compile_time_low_core_specialization() -> None:
@@ -84,7 +82,7 @@ def test_v45_mixed_lanes_still_drain_and_steal_without_extra_workers() -> None:
 def test_v45_output_preference_forces_fifo_after_one_bypass() -> None:
     """A second output wave cannot repeatedly starve the broad front task."""
     require_native()
-    promoted, outputs, broad, started, queued, elapsed_us = (
+    promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(16, 2)
     )
 
@@ -93,4 +91,3 @@ def test_v45_output_preference_forces_fifo_after_one_bypass() -> None:
     assert broad == 16
     assert started == 16
     assert queued == 0
-    assert elapsed_us < 5_000

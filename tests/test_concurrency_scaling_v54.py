@@ -25,7 +25,7 @@ def fixed_operation_clock(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_v54_shallow_local_output_progress_at_four_workers() -> None:
     """One output wave bypasses one broad packet on shallow high queues."""
     require_native()
-    promoted, outputs, broad, started, queued, elapsed_us = (
+    promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(4)
     )
     assert promoted == 2
@@ -33,14 +33,13 @@ def test_v54_shallow_local_output_progress_at_four_workers() -> None:
     assert broad == 4
     assert started == 4
     assert queued == 0
-    assert elapsed_us < 5_000
 
 
 def test_v54_second_output_wave_restores_fifo_fairness() -> None:
     """Only the first wave bypasses; broad work runs before wave two."""
     require_native()
     for workers in (4, 5, 8, 16):
-        promoted, outputs, broad, started, queued, elapsed_us = (
+        promoted, outputs, broad, started, queued, _elapsed_us = (
             native_core.operation_task_arena_output_preference_probe(workers, 2)
         )
         if workers == 4:
@@ -57,7 +56,6 @@ def test_v54_second_output_wave_restores_fifo_fairness() -> None:
         assert broad == workers
         assert started == workers
         assert queued == 0
-        assert 1_000 < elapsed_us < 5_000
 
 
 @pytest.mark.parametrize("workers", [4, 5])

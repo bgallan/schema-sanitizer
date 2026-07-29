@@ -276,6 +276,7 @@ def test_devnull_mode_bypasses_atomic_publication(tmp_path: Path) -> None:
             "1",
             "--output-mode",
             "devnull",
+            "--allow-unbound",
             "--output",
             str(report_path),
         ],

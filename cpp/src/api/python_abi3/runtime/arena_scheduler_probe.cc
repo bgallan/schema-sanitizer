@@ -39,7 +39,10 @@ bool wait_gate_or_stop(std::atomic<bool> *gate,
                               std::chrono::steady_clock::time_point deadline) {
   while (value.load(std::memory_order_acquire) < target &&
          std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::yield();
+    // SwitchToThread may immediately return to this polling thread on
+    // oversubscribed Windows runners. A bounded sleep gives arena workers a
+    // deterministic opportunity to drain their queues.
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
   return value.load(std::memory_order_acquire) >= target;
 }

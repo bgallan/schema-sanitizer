@@ -30,7 +30,11 @@ def _create_sibling_temp(target: Path) -> Path:
             continue
         try:
             if existing_mode is not None:
-                os.fchmod(descriptor, existing_mode)
+                fchmod = getattr(os, "fchmod", None)
+                if fchmod is not None:
+                    fchmod(descriptor, existing_mode)
+                else:
+                    os.chmod(candidate, existing_mode)
         except Exception:
             os.close(descriptor)
             with suppress(OSError):
