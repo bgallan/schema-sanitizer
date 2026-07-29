@@ -10,8 +10,6 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("aiohttp", reason="aiohttp is an optional test dependency")
-
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 from schema_sanitizer.core_impl.memory_budget import memory_budget
 from schema_sanitizer.input_impl.directory_inputs import RemoteFile

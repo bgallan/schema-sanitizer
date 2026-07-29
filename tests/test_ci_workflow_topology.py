@@ -48,7 +48,6 @@ def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
     """General sanity owns validation without exposing scheduled workloads."""
     ci = _workflow("ci.yml")
     validation_jobs = (
-        "cloud-emulators:",
         "benchmark-matrix-smoke:",
         "coverage-python:",
         "coverage-native:",
@@ -70,6 +69,9 @@ def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
     assert "scheduled-benchmarks:" not in ci
     assert "scheduled-native-fuzz:" not in ci
     assert "scheduled-real-gcp:" not in ci
+    assert "cloud-emulators:" not in ci
+    assert "test_cloud_emulator_integration.py" not in ci
+    assert "test_cloud_real_services.py" not in ci
 
 
 def test_general_sanity_owns_full_extension_tsan_gate() -> None:
@@ -136,14 +138,12 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "schema_sanitizer_sanitized_ordered_executor" in cmake
 
 
-def test_benchmark_matrix_runs_on_supported_platforms_and_cloud_emulators() -> None:
-    """Benchmark gates must cover OS, shape, source, and provider dimensions."""
+def test_benchmark_matrix_runs_on_supported_platforms() -> None:
+    """Benchmark gates must cover supported OS, shape, and source dimensions."""
     ci = _workflow("ci.yml")
 
     assert "benchmark-matrix-smoke:" in ci
     assert "benchmarks/bench_threading_matrix.py" in ci
     assert "--profile ci" in ci
-    assert "benchmarks/bench_remote_providers.py" in ci
-    assert "remote-provider-benchmark.json" in ci
     for artifact in ("linux", "windows", "macos-x86_64", "macos-arm64"):
         assert f"artifact: {artifact}" in ci
