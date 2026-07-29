@@ -108,6 +108,9 @@ public:
   void Finish() noexcept;
   [[nodiscard]] bool finished() const noexcept;
   [[nodiscard]] std::string ToJson() const;
+  [[nodiscard]] std::shared_ptr<MemoryPool> memory_pool() const noexcept {
+    return operation_pool_;
+  }
 
 private:
   static constexpr std::size_t kPhaseCount =

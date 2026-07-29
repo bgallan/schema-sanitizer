@@ -24,7 +24,7 @@ def test_v96_started_mask_elides_repeated_start_mutex_checks() -> None:
 
     assert "state->worker_count >= 4U" in helper
     assert "state->scalable_scan" in helper
-    assert "state->slots[index]->started.load(std::memory_order_acquire)" in helper
+    assert "state->started_dynamic.Test(index)" in helper
     assert "state->started_mask.load(std::memory_order_acquire)" in helper
     assert "worker_already_started_fast_path(state_, physical)" in arena
     assert "state->started_mask.fetch_or(worker_bit(index)" in startup
@@ -48,6 +48,7 @@ def test_v96_started_mask_is_the_only_started_worker_authority() -> None:
     assert "state->started.fetch_add" not in arena
     assert "std::popcount" in started
     assert "state_->started_mask.load(std::memory_order_acquire)" in started
+    assert "state_->started_dynamic.Count()" in started
 
 
 def test_v96_all_56_pairs_inherit_started_mask_fast_path() -> None:

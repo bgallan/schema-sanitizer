@@ -48,9 +48,8 @@ def test_v94_stale_remote_candidate_does_not_repeat_empty_rmw() -> None:
         )
     ]
 
-    assert "continue;" in empty_branch
+    assert "return;" in empty_branch
     assert "mark_empty(" not in empty_branch
-    assert "continue;" in empty_branch
     assert "A stale mask" in steal
 
 
@@ -64,7 +63,7 @@ def test_v94_successful_last_packet_removals_still_publish_empty() -> None:
     assert "if (slot.tasks.empty()) {\n    mark_empty(state, index);" in local
     assert "--candidate.queued_local;" in steal
     assert "if (candidate.tasks.empty()) {\n      mark_empty(state, candidate_index);" in steal
-    assert source.count("mark_empty(state") == 2
+    assert source.count("mark_empty(state") == 3
 
 
 def test_v94_visibility_transitions_keep_existing_ordering() -> None:

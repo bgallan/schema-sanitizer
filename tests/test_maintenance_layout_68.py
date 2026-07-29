@@ -53,7 +53,7 @@ def test_abi3_module_has_one_compile_time_owner() -> None:
     """Initializer, definition, and method table share one sub-500-line TU."""
     owner = ROOT / "cpp/src/api/python_abi3/_core_abi3_module.cc"
     implementation = owner.read_text(encoding="utf-8")
-    assert implementation.count(".ml_name =") == 87
+    assert implementation.count(".ml_name =") == 88
     assert '"options_with_detected_at"' in implementation
     assert "std::to_array<PyMethodDef>" in implementation
     assert "PyMODINIT_FUNC PyInit__core_abi3" in implementation

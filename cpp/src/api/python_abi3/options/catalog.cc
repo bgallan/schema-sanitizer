@@ -3,6 +3,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include "internal/memory/memory_budget.hh"
+#include "internal/memory/memory_pool.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "sanitize/options/options.hh"
 
@@ -146,6 +147,21 @@ PyObject *py_memory_budget(PyObject *, PyObject *args) {
       !set_i64(17, budget.remote_chunk_prefetch) ||
       !set_i64(18, budget.source_discovery_concurrency)) {
     Py_DECREF(out);
+    return nullptr;
+  }
+  return out;
+}
+
+PyObject *py_process_memory_governor_stats(PyObject *, PyObject *) {
+  const auto stats = sanitize::internal::process_memory_governor_stats();
+  PyObject *out = PyTuple_New(3);
+  if (!out ||
+      !tuple_set_item_steal(out, 0,
+                            PyLong_FromLongLong(stats.capacity_bytes)) ||
+      !tuple_set_item_steal(out, 1, PyLong_FromLongLong(stats.leased_bytes)) ||
+      !tuple_set_item_steal(out, 2,
+                            PyLong_FromLongLong(stats.waiting_operations))) {
+    Py_XDECREF(out);
     return nullptr;
   }
   return out;

@@ -23,7 +23,7 @@ def test_v117_isolates_wake_epoch_on_both_sides() -> None:
     slot = source[source.index("struct WorkerSlot final") : source.index("explicit State")]
 
     wake = "alignas(64) std::atomic<std::uint64_t> wake_epoch{0};"
-    queue = "alignas(64) std::deque<QueuedTask> tasks;"
+    queue = "alignas(64) std::pmr::deque<QueuedTask> tasks;"
     assert wake in slot
     assert queue in slot
     assert slot.index(wake) < slot.index(queue)

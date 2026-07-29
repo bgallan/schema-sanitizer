@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -284,6 +285,152 @@ private:
 
 DefaultMemoryPool g_default_pool;
 
+class ProcessMemoryGovernor final {
+public:
+  class Lease final {
+  public:
+    Lease() = default;
+    Lease(ProcessMemoryGovernor *owner, std::int64_t bytes) noexcept
+        : owner_(owner), bytes_(bytes) {}
+    Lease(const Lease &) = delete;
+    Lease &operator=(const Lease &) = delete;
+    Lease(Lease &&other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)),
+          bytes_(std::exchange(other.bytes_, 0)) {}
+    Lease &operator=(Lease &&other) noexcept {
+      if (this != &other) {
+        Release();
+        owner_ = std::exchange(other.owner_, nullptr);
+        bytes_ = std::exchange(other.bytes_, 0);
+      }
+      return *this;
+    }
+    ~Lease() { Release(); }
+    [[nodiscard]] std::int64_t bytes() const noexcept { return bytes_; }
+
+  private:
+    void Release() noexcept {
+      if (owner_ && bytes_ > 0) {
+        owner_->Release(bytes_);
+      }
+      owner_ = nullptr;
+      bytes_ = 0;
+    }
+
+    ProcessMemoryGovernor *owner_ = nullptr;
+    std::int64_t bytes_ = 0;
+  };
+
+  [[nodiscard]] Lease Acquire(std::int64_t requested, std::int64_t capacity) {
+    constexpr std::int64_t kOperationAdmissionBytes = 1 << 20;
+    const auto safe_capacity = std::max<std::int64_t>(1, capacity);
+    // Reserve only fixed operation-control overhead here. Actual variable
+    // allocations are governed by the shared process pool, so directory and
+    // registry substreams do not each reserve the public operation's complete
+    // budget and deadlock one another during lookahead.
+    const auto lease_bytes = std::clamp<std::int64_t>(
+        requested, 1, std::min(safe_capacity, kOperationAdmissionBytes));
+    std::unique_lock lock(mutex_);
+    // Freeze the process ceiling on first use. Shrinking it behind an already
+    // queued larger FIFO lease could make that ticket impossible to satisfy.
+    if (capacity_bytes_ == 0) {
+      capacity_bytes_ = safe_capacity;
+    }
+    const auto ticket = next_ticket_++;
+    ++waiting_operations_;
+    ready_.wait(lock, [&] {
+      return ticket == serving_ticket_ &&
+             lease_bytes <= capacity_bytes_ - leased_bytes_;
+    });
+    --waiting_operations_;
+    ++serving_ticket_;
+    leased_bytes_ += lease_bytes;
+    ready_.notify_all();
+    return Lease(this, lease_bytes);
+  }
+
+  [[nodiscard]] ProcessMemoryGovernorStats Stats() const noexcept {
+    std::lock_guard lock(mutex_);
+    return ProcessMemoryGovernorStats{.capacity_bytes = capacity_bytes_,
+                                      .leased_bytes = leased_bytes_,
+                                      .waiting_operations =
+                                          waiting_operations_};
+  }
+
+private:
+  void Release(std::int64_t bytes) noexcept {
+    {
+      std::lock_guard lock(mutex_);
+      leased_bytes_ = std::max<std::int64_t>(0, leased_bytes_ - bytes);
+    }
+    ready_.notify_all();
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable ready_;
+  std::int64_t capacity_bytes_ = 0;
+  std::int64_t leased_bytes_ = 0;
+  std::int64_t waiting_operations_ = 0;
+  std::uint64_t next_ticket_ = 0;
+  std::uint64_t serving_ticket_ = 0;
+};
+
+ProcessMemoryGovernor &process_memory_governor() {
+  // Process-lifetime ownership keeps late runtime/library destruction safe.
+  static auto *governor = new ProcessMemoryGovernor();
+  return *governor;
+}
+
+class GovernedOperationMemoryPool final : public MemoryPool {
+public:
+  GovernedOperationMemoryPool(ProcessMemoryGovernor::Lease lease,
+                              std::shared_ptr<MemoryPool> pool)
+      : lease_(std::move(lease)), pool_(std::move(pool)) {}
+
+  sanitize::Status Allocate(int64_t size, int64_t alignment,
+                            uint8_t **out) override {
+    return pool_->Allocate(size, alignment, out);
+  }
+  void Free(uint8_t *buffer, int64_t size,
+            int64_t alignment) noexcept override {
+    pool_->Free(buffer, size, alignment);
+  }
+  [[nodiscard]] int64_t bytes_allocated() const override {
+    return pool_->bytes_allocated();
+  }
+  [[nodiscard]] int64_t max_memory() const override {
+    return pool_->max_memory();
+  }
+  [[nodiscard]] int64_t allocation_count() const override {
+    return pool_->allocation_count();
+  }
+  [[nodiscard]] int64_t invalid_free_count() const override {
+    return pool_->invalid_free_count();
+  }
+  [[nodiscard]] int64_t size_mismatch_count() const override {
+    return pool_->size_mismatch_count();
+  }
+  [[nodiscard]] int64_t corruption_count() const override {
+    return pool_->corruption_count();
+  }
+  [[nodiscard]] int64_t limit_bytes() const override {
+    return pool_->limit_bytes();
+  }
+  [[nodiscard]] bool wipes_memory_on_free() const noexcept override {
+    return pool_->wipes_memory_on_free();
+  }
+  void ReleaseOperationLease() noexcept override {
+    lease_ = ProcessMemoryGovernor::Lease{};
+  }
+  [[nodiscard]] std::string backend_name() const override {
+    return pool_->backend_name();
+  }
+
+private:
+  ProcessMemoryGovernor::Lease lease_;
+  std::shared_ptr<MemoryPool> pool_;
+};
+
 } // namespace
 
 bool secure_memory_cleanup_enabled() noexcept { return true; }
@@ -305,6 +452,14 @@ std::shared_ptr<MemoryPool> shared_default_memory_pool() {
 }
 
 std::shared_ptr<MemoryPool>
+shared_process_memory_pool(int64_t process_capacity) {
+  static const auto pool = make_tracking_memory_pool(
+      shared_default_memory_pool(), std::max<int64_t>(1, process_capacity),
+      "schema_sanitizer::ProcessMemoryPool");
+  return pool;
+}
+
+std::shared_ptr<MemoryPool>
 make_tracking_memory_pool(std::shared_ptr<MemoryPool> parent, int64_t limit,
                           std::string backend_name, bool thread_safe_registry) {
   if (!parent) {
@@ -312,6 +467,21 @@ make_tracking_memory_pool(std::shared_ptr<MemoryPool> parent, int64_t limit,
   }
   return std::make_shared<TrackingMemoryPool>(
       std::move(parent), limit, std::move(backend_name), thread_safe_registry);
+}
+
+std::shared_ptr<MemoryPool> make_governed_operation_memory_pool(
+    std::shared_ptr<MemoryPool> parent, int64_t requested_limit,
+    int64_t process_capacity, std::string backend_name) {
+  auto lease =
+      process_memory_governor().Acquire(requested_limit, process_capacity);
+  auto pool = make_tracking_memory_pool(parent, requested_limit,
+                                        std::move(backend_name));
+  return std::make_shared<GovernedOperationMemoryPool>(std::move(lease),
+                                                       std::move(pool));
+}
+
+ProcessMemoryGovernorStats process_memory_governor_stats() noexcept {
+  return process_memory_governor().Stats();
 }
 
 } // namespace sanitize::internal

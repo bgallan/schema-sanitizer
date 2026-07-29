@@ -305,8 +305,8 @@ from:
 - CPUs available through host, affinity, and cgroup limits.
 
 There is no fixed global worker ceiling. On machines wider than 32 CPUs, the
-arena can continue growing while the operation memory budget provides at least
-the required per-worker reserve.
+arena uses dynamically sized 64-bit worker maps and can continue growing while
+the operation memory budget provides the required per-worker reserve.
 
 When resources are constrained, multi mode may use only one worker. Inspect
 `result.execution_policy` for the effective values and fallback reason.
@@ -351,7 +351,7 @@ therefore does not truncate an existing output.
 - `None` selects a safe share of currently available host or container memory;
 - a positive integer sets an explicit budget;
 - the resolved value is fixed once and shared by every stage;
-- separate concurrent calls keep separate budgets.
+- all files and substreams belonging to the call share one native pool.
 
 On Linux, automatic sizing also respects the remaining cgroup allowance. It
 reserves 12.5–25% for the system and untracked allocations, then applies a
@@ -360,6 +360,12 @@ reserves 12.5–25% for the system and untracked allocations, then applies a
 The budget covers Schema-Sanitizer-owned input chunks, queues, reorder windows,
 materialization, writers, remote packets, and staging. These components cannot
 each spend the full limit independently.
+
+Concurrent public calls retain their own operation limit, but their actual
+native allocations also pass through one process-wide governor. They cannot
+each claim the full currently available memory independently. Small FIFO
+admission leases account for operation-control overhead without making the
+files inside one directory conversion reserve the complete budget again.
 
 Input and output files may be larger than the budget because file conversions
 stream them. If an operation cannot proceed safely, it fails before publishing

@@ -27,6 +27,7 @@
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "internal/runtime/operation_task_arena.hh"
+#include "internal/runtime/performance_telemetry.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/ingest/ingest.hh"
@@ -35,6 +36,12 @@
 #include "sanitize/schema_registry/schema_registry.hh"
 
 namespace core_abi3_internal::path_registry_detail {
+
+NativePathSourcesStreamState::~NativePathSourcesStreamState() {
+  if (telemetry) {
+    telemetry->Finish();
+  }
+}
 
 sanitize::Status
 ensure_operation_task_arena(NativePathSourcesStreamState *state) {
@@ -48,10 +55,26 @@ ensure_operation_task_arena(NativePathSourcesStreamState *state) {
   const auto policy = sanitize::internal::execution_policy_from(
       state->prepared->spec.threading_mode,
       state->prepared->spec.memory_limit_bytes);
-  SAN_ASSIGN_OR_RAISE(
-      state->task_arena,
-      sanitize::internal::OperationTaskArena::Make(static_cast<std::size_t>(
-          std::max<std::int64_t>(1, policy.effective_workers))));
+  if (!state->ctx || !state->ctx->ctx) {
+    return sanitize::Status::Invalid(
+        "native path sources stream has no execution context");
+  }
+  state->operation_memory_pool =
+      state->ctx->ctx->make_operation_memory_pool_handle(
+          state->prepared->spec.memory_limit_bytes);
+  if (!state->operation_memory_pool) {
+    return sanitize::Status::OutOfMemory(
+        "operation memory pool allocation failed");
+  }
+  state->telemetry = state->ctx->ctx->begin_performance_telemetry(
+      state->operation_memory_pool, state->prepared->spec.memory_limit_bytes,
+      policy.effective_workers,
+      state->prepared->spec.threading_mode == sanitize::ThreadingMode::kMulti);
+  SAN_ASSIGN_OR_RAISE(state->task_arena,
+                      sanitize::internal::OperationTaskArena::Make(
+                          static_cast<std::size_t>(std::max<std::int64_t>(
+                              1, policy.effective_workers)),
+                          state->telemetry));
   return sanitize::Status::OK();
 }
 
@@ -139,9 +162,7 @@ sanitize::Result<sanitize::IngestStream> ingest_path_source_with_registry_plan(
     return sanitize::Status::Invalid(
         "prepared ingest has no execution context");
   }
-  prepared.operation_memory_pool =
-      prepared.ctx->make_operation_memory_pool_handle(
-          state->prepared->spec.memory_limit_bytes);
+  prepared.operation_memory_pool = state->operation_memory_pool;
   if (!prepared.operation_memory_pool) {
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");

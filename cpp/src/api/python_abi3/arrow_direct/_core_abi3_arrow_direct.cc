@@ -23,6 +23,8 @@
 #include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/plan_compile.hh"
+#include "internal/runtime/execution_policy.hh"
+#include "internal/runtime/operation_task_arena.hh"
 #include "nanoarrow/nanoarrow.h"
 #include "sanitize/abi/cdata_types.hh"
 #include "sanitize/core/diagnostics.hh"
@@ -260,6 +262,17 @@ sanitize::Result<sanitize::IngestStream> ingest_direct_arrow_stream(
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");
   }
+  const auto policy = sanitize::internal::execution_policy_from(
+      opts->spec.threading_mode, opts->spec.memory_limit_bytes);
+  prepared.telemetry = prepared.ctx->begin_performance_telemetry(
+      prepared.operation_memory_pool, opts->spec.memory_limit_bytes,
+      policy.effective_workers,
+      opts->spec.threading_mode == sanitize::ThreadingMode::kMulti);
+  SAN_ASSIGN_OR_RAISE(prepared.task_arena,
+                      sanitize::internal::OperationTaskArena::Make(
+                          static_cast<std::size_t>(std::max<std::int64_t>(
+                              1, policy.effective_workers)),
+                          prepared.telemetry));
   prepared.plan = plan;
   prepared.opts = std::move(opts);
   prepared.diagnostics = diag;

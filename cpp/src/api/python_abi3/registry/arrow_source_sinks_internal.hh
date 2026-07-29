@@ -24,6 +24,9 @@
 
 struct ArrowArray;
 struct ArrowArrayStream;
+namespace sanitize::internal {
+class PerformanceTelemetry;
+}
 
 namespace sanitize::internal {
 class OperationTaskArena;
@@ -58,8 +61,11 @@ struct ArrowSourceSpec {
 };
 
 struct NativeArrowSourcesStreamState {
+  ~NativeArrowSourcesStreamState();
   schema_sanitizer_context *ctx = nullptr;
   sanitize::PreparedOptionsPtr prepared;
+  std::shared_ptr<void> operation_memory_pool;
+  std::shared_ptr<sanitize::internal::PerformanceTelemetry> telemetry;
   std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena;
   std::string registry_json;
   std::string field_name_policy;

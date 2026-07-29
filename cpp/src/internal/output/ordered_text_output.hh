@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <stop_token>
 #include <string>
@@ -49,24 +50,26 @@ class EncodedFragment final {
 public:
   EncodedFragment() = default;
   EncodedFragment(std::shared_ptr<sanitize::CArrayGuard> batch_owner,
-                  std::string encoded, std::int64_t rows)
-      : owner(std::move(batch_owner)), bytes(std::move(encoded)),
+                  std::string encoded, std::int64_t rows,
+                  std::shared_ptr<std::pmr::memory_resource> resource)
+      : owner(std::move(batch_owner)), memory_owner(std::move(resource)),
+        bytes(encoded.begin(), encoded.end(),
+              memory_owner ? memory_owner.get()
+                           : std::pmr::get_default_resource()),
         row_count(rows) {}
 
   EncodedFragment(const EncodedFragment &) = delete;
   EncodedFragment &operator=(const EncodedFragment &) = delete;
   EncodedFragment(EncodedFragment &&other) noexcept
-      : owner(std::move(other.owner)), bytes(std::move(other.bytes)),
-        row_count(other.row_count) {
+      : owner(std::move(other.owner)),
+        memory_owner(std::move(other.memory_owner)),
+        bytes(std::move(other.bytes)), row_count(other.row_count) {
     other.row_count = 0;
   }
   EncodedFragment &operator=(EncodedFragment &&other) noexcept {
     if (this != &other) {
-      wipe();
-      owner = std::move(other.owner);
-      bytes = std::move(other.bytes);
-      row_count = other.row_count;
-      other.row_count = 0;
+      this->~EncodedFragment();
+      std::construct_at(this, std::move(other));
     }
     return *this;
   }
@@ -82,7 +85,8 @@ public:
   }
 
   std::shared_ptr<sanitize::CArrayGuard> owner;
-  std::string bytes;
+  std::shared_ptr<std::pmr::memory_resource> memory_owner;
+  std::pmr::string bytes;
   std::int64_t row_count = 0;
 };
 
@@ -181,6 +185,8 @@ write_stream(ArrowArrayStream *stream, Output &output,
                               reclaim_reorder_window_for_packets);
   auto policy = base_policy;
   auto task_arena = sanitize::internal::task_arena_for_stream(stream);
+  auto output_memory_resource =
+      task_arena ? task_arena->memory_resource() : nullptr;
   auto telemetry = task_arena ? task_arena->telemetry() : nullptr;
   PerformancePhaseScope output_scope(telemetry, PerformancePhase::kOutput);
   PerformanceCompletionScope completion_scope(telemetry);
@@ -216,7 +222,7 @@ write_stream(ArrowArrayStream *stream, Output &output,
             static_cast<std::size_t>(selected_policy.effective_workers),
             static_cast<std::size_t>(selected_policy.task_queue_capacity),
             static_cast<std::size_t>(selected_policy.reorder_capacity),
-            [encode_packet_owner](
+            [encode_packet_owner, output_memory_resource](
                 BatchPacket &&packet, std::size_t worker_index,
                 std::stop_token stop) -> sanitize::Result<EncodedFragment> {
               if (stop.stop_requested()) {
@@ -235,8 +241,15 @@ write_stream(ArrowArrayStream *stream, Output &output,
               }
               SAN_RETURN_NOT_OK(
                   (*encode_packet_owner)(packet, worker_index, stop, &bytes));
-              return EncodedFragment(std::move(packet.owner), std::move(bytes),
-                                     packet.row_count);
+              try {
+                return EncodedFragment(std::move(packet.owner),
+                                       std::move(bytes), packet.row_count,
+                                       output_memory_resource);
+              } catch (const std::bad_alloc &) {
+                return sanitize::Status::OutOfMemory(
+                    "text output packet allocation exceeded the operation "
+                    "memory limit");
+              }
             },
             std::move(executor_arena), selected_lane,
             TaskTelemetryKind::kOutput));
@@ -256,7 +269,8 @@ write_stream(ArrowArrayStream *stream, Output &output,
       return outcome.result.status();
     }
     auto fragment = std::move(outcome.result).ValueOrDie();
-    const auto write_status = output.Write(fragment.bytes);
+    const auto write_status = output.Write(
+        std::string_view(fragment.bytes.data(), fragment.bytes.size()));
     if (!write_status.ok()) {
       cancel_executor();
       return write_status;

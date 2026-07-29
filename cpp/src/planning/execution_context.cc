@@ -14,10 +14,13 @@
 
 namespace sanitize {
 
-ExecutionContext::ExecutionContext()
-    : memory_pool_(sanitize::internal::make_tracking_memory_pool(
-          sanitize::internal::shared_default_memory_pool(), -1,
-          "schema_sanitizer::DefaultMemoryPool")) {}
+ExecutionContext::ExecutionContext() {
+  const auto process_capacity =
+      sanitize::internal::memory_budget_from_limit(-1).total_bytes;
+  memory_pool_ = sanitize::internal::make_tracking_memory_pool(
+      sanitize::internal::shared_process_memory_pool(process_capacity), -1,
+      "schema_sanitizer::DefaultMemoryPool");
+}
 
 void *ExecutionContext::memory_pool_handle() const noexcept {
   return static_cast<void *>(memory_pool_.get());
@@ -26,8 +29,10 @@ void *ExecutionContext::memory_pool_handle() const noexcept {
 std::shared_ptr<void>
 ExecutionContext::make_operation_memory_pool_handle(int64_t limit_bytes) const {
   const auto budget = sanitize::internal::memory_budget_from_limit(limit_bytes);
-  auto pool = sanitize::internal::make_tracking_memory_pool(
-      memory_pool_, budget.total_bytes,
+  const auto process_capacity =
+      sanitize::internal::memory_budget_from_limit(-1).total_bytes;
+  auto pool = sanitize::internal::make_governed_operation_memory_pool(
+      memory_pool_, budget.total_bytes, process_capacity,
       "schema_sanitizer::OperationMemoryPool");
   return std::static_pointer_cast<void>(std::move(pool));
 }

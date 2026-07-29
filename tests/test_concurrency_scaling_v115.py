@@ -17,7 +17,7 @@ STAGE = "sparse_bitset_round_robin_worker_selection"
 
 
 def test_v115_selection_visits_only_ordered_set_bits() -> None:
-    """Admission and helper selection share the exact bit-order primitive."""
+    """Compact admission stays ordered and wide admission uses word shards."""
     helper = SELECTION.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
 
@@ -33,7 +33,8 @@ def test_v115_selection_visits_only_ordered_set_bits() -> None:
         "queue_visibility_snapshot(", 1
     )[0]
     assert "if (state->scalable_scan)" in reservation
-    assert "for (std::size_t offset = 0; offset < width; ++offset)" in reservation
+    assert "admitted_dynamic.TrySetFirstClear(begin, end, lane_origin)" in reservation
+    assert "for (std::size_t offset = 0; offset < width; ++offset)" not in reservation
     assert reservation.index("if (state->scalable_scan)") < reservation.index(
         "task_arena_detail::ordered_lane_candidates("
     )

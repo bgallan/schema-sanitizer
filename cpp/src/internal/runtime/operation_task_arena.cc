@@ -1,5 +1,7 @@
 // Implements the operation-wide bounded native task arena.
 #include "internal/runtime/operation_task_arena.hh"
+#include "internal/memory/pool_resource.hh"
+#include "internal/runtime/atomic_worker_bitmap.hh"
 #include "internal/runtime/operation_task_arena_selection.hh"
 
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <deque>
 #include <exception>
 #include <iterator>
+#include <memory_resource>
 #include <mutex>
 #include <new>
 #include <system_error>
@@ -44,7 +47,7 @@ struct OperationTaskArena::State final {
     // boundary the deque could begin in the unused tail of the epoch line.
     // Producers/workers mutate deque control state independently from helper
     // and park-boundary epoch traffic, so keep both ownership domains apart.
-    alignas(64) std::deque<QueuedTask> tasks;
+    alignas(64) std::pmr::deque<QueuedTask> tasks;
     // Exact mutex-owned counters avoid atomic read-modify-write operations on
     // the queue's hot cache line. Atomic snapshots preserve lock-free public
     // diagnostics and worker-selection reads.
@@ -75,11 +78,22 @@ struct OperationTaskArena::State final {
     bool shallow_output_preference = false;
     std::mutex start_mutex;
     std::unique_ptr<std::jthread> worker;
+
+    explicit WorkerSlot(std::pmr::memory_resource *resource)
+        : tasks(resource) {}
   };
   explicit State(std::size_t count,
                  std::shared_ptr<PerformanceTelemetry> telemetry_owner)
       : worker_count(count), scalable_scan(count > 32U),
-        telemetry(std::move(telemetry_owner)) {}
+        telemetry(std::move(telemetry_owner)),
+        operation_resource(std::make_shared<PoolResource>(
+            telemetry ? std::static_pointer_cast<void>(telemetry->memory_pool())
+                      : std::shared_ptr<void>{})),
+        queue_resource(count > 1U ? operation_resource
+                                  : std::make_shared<PoolResource>(
+                                        std::shared_ptr<void>{})),
+        admitted_dynamic(count), started_dynamic(count),
+        initialized_dynamic(count), nonempty_dynamic(count) {}
 
   const std::size_t worker_count;
   const bool scalable_scan;
@@ -89,7 +103,13 @@ struct OperationTaskArena::State final {
   QueueVisibilityShard primary_queue_visibility;
   std::array<QueueVisibilityShard, 3> queue_visibility;
   std::shared_ptr<PerformanceTelemetry> telemetry;
+  std::shared_ptr<PoolResource> operation_resource;
+  std::shared_ptr<PoolResource> queue_resource;
   std::vector<std::unique_ptr<WorkerSlot>> slots;
+  AtomicWorkerBitmap admitted_dynamic;
+  AtomicWorkerBitmap started_dynamic;
+  AtomicWorkerBitmap initialized_dynamic;
+  AtomicWorkerBitmap nonempty_dynamic;
   // Stage producers reserve independent tickets while workers publish activity.
   // Keep each hot writer domain on its own bounded cache line so upstream,
   // output, all-lane, and worker activity traffic cannot invalidate unrelated
@@ -123,7 +143,8 @@ OperationTaskArena::Make(std::size_t worker_count,
     state = std::make_shared<State>(normalized, std::move(telemetry));
     state->slots.reserve(normalized);
     for (std::size_t index = 0; index < normalized; ++index) {
-      auto slot = std::make_unique<State::WorkerSlot>();
+      auto slot =
+          std::make_unique<State::WorkerSlot>(state->queue_resource.get());
       if (!state->scalable_scan) {
         slot->visibility = index < 8U
                                ? &state->primary_queue_visibility
@@ -309,7 +330,7 @@ sanitize::Status OperationTaskArena::Submit(Task task,
   }
   const auto worker_initialized =
       state_->scalable_scan
-          ? state_->slots[physical]->initialized.load(std::memory_order_acquire)
+          ? state_->initialized_dynamic.Test(physical)
           : (initialized_snapshot & worker_bit(physical)) != 0U;
   const auto startup_status =
       worker_initialized || worker_already_started_fast_path(state_, physical)
@@ -332,7 +353,9 @@ sanitize::Status OperationTaskArena::Submit(Task task,
       if (reserved_worker) {
         slot.first_task_pending.store(false, std::memory_order_release);
         slot.initialized.store(true, std::memory_order_release);
-        if (!state_->scalable_scan) {
+        if (state_->scalable_scan) {
+          state_->initialized_dynamic.Set(physical);
+        } else {
           state_->initialized_mask.fetch_or(worker_bit(physical),
                                             std::memory_order_release);
         }
@@ -379,7 +402,9 @@ sanitize::Status OperationTaskArena::Submit(Task task,
     if (reserved_worker) {
       slot.first_task_pending.store(false, std::memory_order_release);
       slot.initialized.store(true, std::memory_order_release);
-      if (!state_->scalable_scan) {
+      if (state_->scalable_scan) {
+        state_->initialized_dynamic.Set(physical);
+      } else {
         state_->initialized_mask.fetch_or(worker_bit(physical),
                                           std::memory_order_release);
       }
@@ -467,10 +492,7 @@ std::size_t OperationTaskArena::started_workers() const noexcept {
     return static_cast<std::size_t>(
         std::popcount(state_->started_mask.load(std::memory_order_acquire)));
   }
-  return static_cast<std::size_t>(std::count_if(
-      state_->slots.begin(), state_->slots.end(), [](const auto &slot) {
-        return slot->started.load(std::memory_order_acquire);
-      }));
+  return state_->started_dynamic.Count();
 }
 std::uint64_t OperationTaskArena::wake_epoch_publishes() const noexcept {
   if (!state_) {
@@ -485,6 +507,12 @@ std::uint64_t OperationTaskArena::wake_epoch_publishes() const noexcept {
 std::shared_ptr<PerformanceTelemetry>
 OperationTaskArena::telemetry() const noexcept {
   return state_ ? state_->telemetry : nullptr;
+}
+std::shared_ptr<std::pmr::memory_resource>
+OperationTaskArena::memory_resource() const noexcept {
+  return state_ ? std::static_pointer_cast<std::pmr::memory_resource>(
+                      state_->operation_resource)
+                : nullptr;
 }
 void OperationTaskArena::Shutdown() noexcept {
   auto state = std::move(state_);
@@ -530,6 +558,11 @@ void OperationTaskArena::Shutdown() noexcept {
     state->admitted_mask.store(0, std::memory_order_relaxed);
     state->started_mask.store(0, std::memory_order_relaxed);
     state->initialized_mask.store(0, std::memory_order_relaxed);
+  } else {
+    state->admitted_dynamic.Reset();
+    state->started_dynamic.Reset();
+    state->initialized_dynamic.Reset();
+    state->nonempty_dynamic.Reset();
   }
 }
 } // namespace sanitize::internal

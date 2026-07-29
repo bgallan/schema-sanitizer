@@ -375,8 +375,12 @@ void PerformanceTelemetry::ObserveActiveTasks(std::size_t active) noexcept {
 void PerformanceTelemetry::Finish() noexcept {
   auto expected = std::int64_t{0};
   const auto now = NowNs();
-  finished_ns_.compare_exchange_strong(expected, now, std::memory_order_release,
-                                       std::memory_order_relaxed);
+  if (finished_ns_.compare_exchange_strong(expected, now,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed) &&
+      operation_pool_) {
+    operation_pool_->ReleaseOperationLease();
+  }
 }
 
 bool PerformanceTelemetry::finished() const noexcept {

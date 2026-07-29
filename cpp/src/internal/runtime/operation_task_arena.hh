@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <memory_resource>
 #include <stop_token>
 
 namespace sanitize::internal {
@@ -85,6 +86,8 @@ public:
   [[nodiscard]] std::uint64_t wake_epoch_publishes() const noexcept;
   [[nodiscard]] std::shared_ptr<PerformanceTelemetry>
   telemetry() const noexcept;
+  [[nodiscard]] std::shared_ptr<std::pmr::memory_resource>
+  memory_resource() const noexcept;
 
   void Shutdown() noexcept;
 

@@ -29,12 +29,19 @@
 #include "internal/planning/options_schema_serialization.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "internal/runtime/operation_task_arena.hh"
+#include "internal/runtime/performance_telemetry.hh"
 #include "sanitize/registry/registry.hh"
 #include "sanitize/runtime/execution_context.hh"
 
 #include "api/python_abi3/registry/arrow_source_sinks_internal.hh"
 
 namespace core_abi3_internal::arrow_registry_detail {
+
+NativeArrowSourcesStreamState::~NativeArrowSourcesStreamState() {
+  if (telemetry) {
+    telemetry->Finish();
+  }
+}
 
 sanitize::Status
 ensure_operation_task_arena(NativeArrowSourcesStreamState *state) {
@@ -48,10 +55,26 @@ ensure_operation_task_arena(NativeArrowSourcesStreamState *state) {
   const auto policy = sanitize::internal::execution_policy_from(
       state->prepared->spec.threading_mode,
       state->prepared->spec.memory_limit_bytes);
-  SAN_ASSIGN_OR_RAISE(
-      state->task_arena,
-      sanitize::internal::OperationTaskArena::Make(static_cast<std::size_t>(
-          std::max<std::int64_t>(1, policy.effective_workers))));
+  if (!state->ctx || !state->ctx->ctx) {
+    return sanitize::Status::Invalid(
+        "native Arrow sources stream has no execution context");
+  }
+  state->operation_memory_pool =
+      state->ctx->ctx->make_operation_memory_pool_handle(
+          state->prepared->spec.memory_limit_bytes);
+  if (!state->operation_memory_pool) {
+    return sanitize::Status::OutOfMemory(
+        "operation memory pool allocation failed");
+  }
+  state->telemetry = state->ctx->ctx->begin_performance_telemetry(
+      state->operation_memory_pool, state->prepared->spec.memory_limit_bytes,
+      policy.effective_workers,
+      state->prepared->spec.threading_mode == sanitize::ThreadingMode::kMulti);
+  SAN_ASSIGN_OR_RAISE(state->task_arena,
+                      sanitize::internal::OperationTaskArena::Make(
+                          static_cast<std::size_t>(std::max<std::int64_t>(
+                              1, policy.effective_workers)),
+                          state->telemetry));
   return sanitize::Status::OK();
 }
 
@@ -171,9 +194,7 @@ ingest_arrow_source_with_registry_plan(NativeArrowSourcesStreamState *state,
         "prepared ingest has no execution context");
   }
   SAN_RETURN_NOT_OK(ensure_operation_task_arena(state));
-  prepared.operation_memory_pool =
-      prepared.ctx->make_operation_memory_pool_handle(
-          state->prepared->spec.memory_limit_bytes);
+  prepared.operation_memory_pool = state->operation_memory_pool;
   if (!prepared.operation_memory_pool) {
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");
