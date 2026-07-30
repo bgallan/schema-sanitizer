@@ -147,7 +147,9 @@ jobs:
           python meta/ci/check_parquet_contract_runtime_suite.py \
             --certificate-output artifacts/parquet-contract-runtime-certificate.json
       - name: Full suite including adapters, HTTP faults, and concurrency
-        run: pytest -q
+        # Do not prepend src/: on Windows that bypasses the wheel's repaired DLL
+        # bootstrap while still loading its native extension.
+        run: pytest -q -o pythonpath=.
       - name: Cross-platform threading benchmark smoke
         run: >-
           python benchmarks/bench_threading_matrix.py

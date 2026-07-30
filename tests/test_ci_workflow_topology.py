@@ -126,6 +126,13 @@ def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
     assert "test_cloud_real_services.py" not in ci
 
 
+def test_platform_suite_exercises_the_installed_wheel() -> None:
+    """The full suite must retain the wheel's platform-specific runtime bootstrap."""
+    platform_job = _job_body(_workflow("ci.yml"), "platform-wheels")
+
+    assert "pytest -q -o pythonpath=." in platform_job
+
+
 def test_general_sanity_owns_full_extension_tsan_gate() -> None:
     """Linux CI must build and repeatedly exercise the complete TSan extension."""
     ci = _workflow("ci.yml")
