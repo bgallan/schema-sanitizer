@@ -12,20 +12,24 @@ on:
 permissions:
   contents: read
 jobs:
-  security:
+  # Source-only checks that do not need a platform matrix.
+  checks:
+    name: quality and security
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Install security tools
-        run: |
-          python -m pip install -U pip
-          python -m pip install -U pip-audit bandit detect-secrets tomli
-      - name: Build requirements for CVE checks
+      - name: Install development and security tools
+        run: >-
+          python -m pip install -U pip '.[dev]'
+          pip-audit bandit detect-secrets tomli
+      - name: Lint, format, and static typing
+        run: pre-commit run --all-files
+      - name: Build dependency inputs and audit them
+        shell: bash
         run: |
           python - <<'PY'
           try:
@@ -36,190 +40,115 @@ jobs:
           pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
           project = pyproject.get("project", {})
           runtime = list(project.get("dependencies", []))
-          extras = []
-          for values in project.get("optional-dependencies", {}).values():
-              extras.extend(values)
-          def _dedupe(items: list[str]) -> list[str]:
-              out: list[str] = []
-              seen: set[str] = set()
-              for item in items:
-                  if item not in seen:
-                      seen.add(item)
-                      out.append(item)
-              return out
-          Path("runtime-requirements.txt").write_text(
-              "\n".join(_dedupe(runtime)) + "\n",
-              encoding="utf-8",
-          )
-          Path("full-requirements.txt").write_text(
-              "\n".join(_dedupe(runtime + extras)) + "\n",
-              encoding="utf-8",
-          )
+          extras = [
+              requirement
+              for values in project.get("optional-dependencies", {}).values()
+              for requirement in values
+          ]
+          for name, requirements in (
+              ("runtime-requirements.txt", runtime),
+              ("full-requirements.txt", runtime + extras),
+          ):
+              Path(name).write_text(
+                  "\n".join(dict.fromkeys(requirements)) + "\n",
+                  encoding="utf-8",
+              )
           PY
-      - name: Dependency vulnerability audit
-        run: |
           pip-audit -r runtime-requirements.txt --progress-spinner off
           pip-audit -r full-requirements.txt --progress-spinner off
-      - name: Static security scan (Python)
+      - name: Static Python security scan
         run: bandit -r src -ll
       - name: Secret scan
+        shell: bash
         run: |
           detect-secrets scan \
             --exclude-files '^(\.git/|build/|dist/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/)' \
             --all-files > .detect-secrets.ci.json
           python meta/ci/check_detect_secrets_report.py .detect-secrets.ci.json
-  quality:
-    name: lint and static typing
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - name: Install development tools
-        run: python -m pip install -U pip '.[dev]'
-      - name: Pre-commit checks
-        run: pre-commit run --all-files
-      - name: MyPy
-        run: python -m mypy
-      - name: Benchmark suite smoke
+      - name: Benchmark harness smoke
         run: python benchmarks/bench_ingest.py --rows 8 --width 2 --repeats 1
 
-  # Core lane: must build and import without pyarrow installed and without Arrow C++ linkage.
-  core-only:
+  # One task per supported platform builds the release wheel once, then reuses
+  # it for core-only, full-suite, benchmark, contract, and ABI checks.
+  platform-wheels:
+    name: platform and wheel (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: linux-x86_64
             artifact: linux
-          - os: windows-latest
+            os: ubuntu-latest
+            arch: x86_64
+          - name: windows-amd64
             artifact: windows
-          - os: macos-15-intel
+            os: windows-latest
+            arch: AMD64
+          - name: macos-x86_64
             artifact: macos-x86_64
-          - os: macos-14
+            os: macos-15-intel
+            arch: x86_64
+          - name: macos-arm64
             artifact: macos-arm64
+            os: macos-14
+            arch: arm64
     steps:
       - uses: actions/checkout@v5
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Upgrade pip
-        run: python -m pip install -U pip pytest
-      - name: Assert pyarrow is NOT installed
-        run: |
-          python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('pyarrow') is None else 1)"
+      - name: Install wheel tooling
+        run: python -m pip install -U pip cibuildwheel pytest
+      - name: Assert the build environment has no PyArrow
+        run: >-
+          python -c
+          "import importlib.util,sys;
+          sys.exit(0 if importlib.util.find_spec('pyarrow') is None else 1)"
       - name: Prevent Arrow C++ headers
         if: runner.os == 'Linux'
         shell: bash
         run: meta/ci/check_no_arrow_cpp.sh
-      - name: Build wheel (no pyarrow)
-        run: |
-          python -m pip install -U build
-          python -m build --wheel
-      - name: Install wheel
-        run: |
-          python -c "import glob,subprocess,sys; ws=glob.glob('dist/*.whl'); ws or sys.exit('No wheel found in dist/'); subprocess.check_call([sys.executable,'-m','pip','install','-U',*ws])"
-      - name: Import smoke (no adapters)
-        run: |
-          python -c "import schema_sanitizer as s; print('import ok', s.__version__)"
-      - name: Parquet contract collection smoke (no pyarrow)
+      - name: Build and test the CPython 3.11 ABI3 wheel
         run: >-
-          pytest --collect-only -q
-          tests/test_parquet_contract_gates_part01.py
-          tests/test_parquet_contract_gates_part02.py
-          tests/test_parquet_contract_gates_part03.py
-      - name: Verify extension does not link libarrow/libparquet
+          python -m cibuildwheel --output-dir wheelhouse
+          --archs '${{ matrix.arch }}'
+      - name: Install the built wheel without adapters
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install wheelhouse/*.whl
+          python -c "import schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(s.__version__, c.__file__)"
+          pytest --collect-only -q \
+            tests/test_parquet_contract_gates_part01.py \
+            tests/test_parquet_contract_gates_part02.py \
+            tests/test_parquet_contract_gates_part03.py
+      - name: Verify the extension does not link Arrow C++
         if: runner.os != 'Windows'
         shell: bash
         run: |
           EXT_PATH=$(python - <<'PY'
-          import importlib
-          m = importlib.import_module('schema_sanitizer._core_abi3')
-          print(m.__file__)
+          import schema_sanitizer._core_abi3 as core
+          print(core.__file__)
           PY
           )
-          echo "Extension: ${EXT_PATH}"
           meta/ci/check_no_libarrow_linkage.sh "${EXT_PATH}"
-      - name: Upload abi3 wheel artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: abi3-wheel-${{ matrix.artifact }}
-          path: dist/*.whl
-  remote-http-fault-injection:
-    name: remote HTTP faults (${{ matrix.artifact }})
-    needs: [core-only]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: linux
-          - os: windows-latest
-            artifact: windows
-          - os: macos-15-intel
-            artifact: macos-x86_64
-          - os: macos-14
-            artifact: macos-arm64
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - uses: actions/download-artifact@v7
-        with:
-          name: abi3-wheel-${{ matrix.artifact }}
-          path: dist
-      - name: Install wheel and HTTP emulator dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install -U pip pytest aiohttp
-          python -m pip install dist/*.whl
-      - name: Exercise disconnect, truncation, cancellation, and shutdown
+      - name: Install full-suite dependencies
         run: >-
-          python -m pytest -q
-          tests/test_remote_http_fault_injection.py
-          tests/test_remote_process_lifecycle.py
-  benchmark-matrix-smoke:
-    name: threading benchmark matrix (${{ matrix.artifact }})
-    needs: [core-only]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: linux
-          - os: windows-latest
-            artifact: windows
-          - os: macos-15-intel
-            artifact: macos-x86_64
-          - os: macos-14
-            artifact: macos-arm64
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - uses: actions/download-artifact@v7
-        with:
-          name: abi3-wheel-${{ matrix.artifact }}
-          path: dist
-      - name: Install wheel and benchmark adapter
+          python -m pip install -U
+          pytest aiohttp pyarrow pandas polars duckdb
+      - name: Compile and certify the Parquet runtime
         shell: bash
         run: |
-          set -euo pipefail
-          python -m pip install -U pip pyarrow
-          python -m pip install dist/*.whl
-      - name: Run cross-platform benchmark equivalence smoke
+          python -m compileall -q src
+          python meta/ci/check_parquet_contract_runtime.py
+          mkdir -p artifacts
+          python meta/ci/check_parquet_contract_runtime_suite.py \
+            --certificate-output artifacts/parquet-contract-runtime-certificate.json
+      - name: Full suite including adapters, HTTP faults, and concurrency
+        run: pytest -q
+      - name: Cross-platform threading benchmark smoke
         run: >-
           python benchmarks/bench_threading_matrix.py
           --profile ci
@@ -228,122 +157,42 @@ jobs:
           --repeats 1
           --only parquet
           --output artifacts/threading-matrix-${{ matrix.artifact }}.json
+      - name: Set up the newest supported Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Verify the ABI3 wheel on Python 3.14
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          python -m pip install wheelhouse/*.whl
+          python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
       - uses: actions/upload-artifact@v6
         with:
-          name: threading-benchmark-matrix-${{ matrix.artifact }}
-          path: artifacts/threading-matrix-${{ matrix.artifact }}.json
-
-  # ABI smoke lane: install the CPython 3.11-built abi3 wheel per OS.
-  abi3-runtime-compat:
-    runs-on: ${{ matrix.os }}
-    needs: [core-only]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-15-intel, macos-14]
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - name: Download abi3 wheel (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/download-artifact@v7
-        with:
-          name: abi3-wheel-linux
-          path: dist
-      - name: Download abi3 wheel (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: actions/download-artifact@v7
-        with:
-          name: abi3-wheel-windows
-          path: dist
-      - name: Download abi3 wheel (macOS x86_64)
-        if: matrix.os == 'macos-15-intel'
-        uses: actions/download-artifact@v7
-        with:
-          name: abi3-wheel-macos-x86_64
-          path: dist
-      - name: Download abi3 wheel (macOS arm64)
-        if: matrix.os == 'macos-14'
-        uses: actions/download-artifact@v7
-        with:
-          name: abi3-wheel-macos-arm64
-          path: dist
-      - name: Install built wheel
-        run: |
-          python -c "import glob,subprocess,sys; ws=glob.glob('dist/*.whl'); ws or sys.exit('No wheel downloaded to dist/'); subprocess.check_call([sys.executable,'-m','pip','install','-U',*ws])"
-      - name: Import and ABI smoke
-        run: |
-          python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print('python', sys.version.split()[0]); print('pkg', s.__version__); print('core', c.__name__)"
-
-  # Adapter lane: pyarrow installed; run the contract+API gate tests (and then full suite).
-  adapters:
-    runs-on: ${{ matrix.os }}
-    needs: [abi3-runtime-compat]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-15-intel, macos-14]
-    steps:
-      - uses: actions/checkout@v5
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - name: Upgrade pip
-        run: python -m pip install -U pip
-      - name: Install (dev + pyarrow)
-        run: |
-          python -m pip install -U ".[dev,pyarrow]"
-      - name: Compileall
-        run: python -m compileall -q src
-      - name: Parquet contract runtime readiness
-        run: python meta/ci/check_parquet_contract_runtime.py
-      - name: Parquet contract runtime gates
-        run: >-
-          pytest -q
-          tests/test_parquet_contract_gates_part01.py
-          tests/test_parquet_contract_gates_part02.py
-          tests/test_parquet_contract_gates_part03.py
-          -k "parquet_contract_runtime_readiness_status or parquet_contract_certification_status
-          or native_parquet_writer_contract_status or native_parquet_nested_contract_status"
-      - name: Parquet contract runtime suite
-        run: |
-          mkdir -p artifacts
-          python meta/ci/check_parquet_contract_runtime_suite.py --certificate-output artifacts/parquet-contract-runtime-certificate.json
-      - name: Upload Parquet contract certificate
+          name: dist-wheels-${{ matrix.name }}
+          path: wheelhouse/*.whl
+      - name: Upload platform evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: parquet-contract-runtime-certificate-${{ matrix.os }}
-          path: artifacts/parquet-contract-runtime-certificate.json
+          name: platform-evidence-${{ matrix.artifact }}
+          path: artifacts/
           if-no-files-found: ignore
-      - name: Gate tests
-        run: |
-          pytest -q tests/test_api.py::test_public_api_contract tests/test_contracts.py::test_skip_row_does_not_partially_append_columns tests/test_contracts.py::test_result_does_not_expose_bad_rows
-      - name: Full test suite
-        run: pytest -q
 
-  # Publish parity lane: build and validate the same release artifacts before merge.
-  validate-release-version:
-    name: validate release version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Validate package version
-        run: python meta/ci/validate_release_version.py
+  # Source distribution and version are checked once; platform wheels are
+  # already produced by the platform matrix above.
   sdist:
-    name: sdist
-    needs: [validate-release-version]
+    name: source distribution
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Build sdist
+      - name: Validate version and build sdist
         run: |
+          python meta/ci/validate_release_version.py
           python -m pip install -U pip build twine
           python -m build --sdist
           python -m twine check dist/*
@@ -352,148 +201,42 @@ jobs:
         with:
           name: dist-sdist
           path: dist/*
-  wheels:
-    name: wheels (${{ matrix.name }})
-    needs: [validate-release-version]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            os: ubuntu-latest
-            arch_linux: x86_64
-          - name: windows-amd64
-            os: windows-latest
-            arch_windows: AMD64
-          - name: macos-x86_64
-            os: macos-15-intel
-            arch_macos: x86_64
-          - name: macos-arm64
-            os: macos-14
-            arch_macos: arm64
+
+  # A single packaging task validates the complete release set, rebuilds from
+  # the sdist, and checks every optional extra in an isolated environment.
+  distribution:
+    name: release and downstream packaging
+    needs: [sdist, platform-wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Install cibuildwheel
-        run: python -m pip install -U pip cibuildwheel
-      - name: Build wheels (abi3, Linux)
-        if: runner.os == 'Linux'
-        run: >-
-          python -m cibuildwheel --output-dir wheelhouse
-          --archs '${{ matrix.arch_linux }}'
-      - name: Build wheels (abi3, Windows)
-        if: runner.os == 'Windows'
-        run: >-
-          python -m cibuildwheel --output-dir wheelhouse
-          --archs '${{ matrix.arch_windows }}'
-      - name: Build wheels (abi3, macOS)
-        if: runner.os == 'macOS'
-        run: >-
-          python -m cibuildwheel --output-dir wheelhouse
-          --archs '${{ matrix.arch_macos }}'
-      - uses: actions/upload-artifact@v6
-        with:
-          name: dist-wheels-${{ matrix.name }}
-          path: wheelhouse/*
-  validate-artifacts:
-    name: validate artifacts
-    needs: [sdist, wheels]
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/download-artifact@v7
         with:
           path: dist
           pattern: dist-*
           merge-multiple: true
-      - name: Validate built distributions
+      - name: Validate the complete release artifact set
+        shell: bash
+        run: |
+          python -m pip install -U pip twine packaging
+          python -m twine check dist/*
+          python meta/ci/check_distribution_contents.py --release-set dist/*
+      - name: Rebuild and test as an isolated downstream consumer
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install -U pip twine packaging
-          python -m twine check dist/*
-          python - <<'PY'
-          from pathlib import Path
-          from packaging.utils import parse_sdist_filename, parse_wheel_filename
-          files = sorted(Path("dist").iterdir())
-          for path in files:
-              print(path.name)
-          sdists = [p for p in files if p.name.endswith(".tar.gz")]
-          wheels = [p for p in files if p.suffix == ".whl"]
-          if len(sdists) != 1:
-              raise SystemExit(f"Expected exactly 1 sdist, found {len(sdists)}")
-          if len(wheels) != 4:
-              raise SystemExit(f"Expected exactly 4 wheels, found {len(wheels)}")
-          sdist_name, sdist_version = parse_sdist_filename(sdists[0].name)
-          wheel_versions = set()
-          wheel_platforms = set()
-          for wheel in wheels:
-              name, version, _build, tags = parse_wheel_filename(wheel.name)
-              if name != sdist_name:
-                  raise SystemExit(f"Wheel project name {name!s} != sdist name {sdist_name!s}")
-              wheel_versions.add(version)
-              wheel_platforms.update(tag.platform for tag in tags)
-          versions = {sdist_version, *wheel_versions}
-          if len(versions) != 1:
-              raise SystemExit(f"Mismatched distribution versions: {sorted(map(str, versions))}")
-          required_platform_markers = ("manylinux_2_28_x86_64", "win_amd64", "macosx")
-          joined_platforms = " ".join(sorted(wheel_platforms))
-          for marker in required_platform_markers:
-              if marker not in joined_platforms:
-                  raise SystemExit(f"Missing wheel platform marker {marker!r}: {joined_platforms}")
-          PY
-  wheel-smoke:
-    name: wheel smoke (${{ matrix.name }}, py${{ matrix.python-version }})
-    needs: [wheels]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.11', '3.12', '3.13', '3.14']
-        target: [linux-x86_64, windows-amd64, macos-x86_64, macos-arm64]
-        include:
-          - target: linux-x86_64
-            name: linux-x86_64
-            artifact: dist-wheels-linux-x86_64
-            os: ubuntu-latest
-          - target: windows-amd64
-            name: windows-amd64
-            artifact: dist-wheels-windows-amd64
-            os: windows-latest
-          - target: macos-x86_64
-            name: macos-x86_64
-            artifact: dist-wheels-macos-x86_64
-            os: macos-15-intel
-          - target: macos-arm64
-            name: macos-arm64
-            artifact: dist-wheels-macos-arm64
-            os: macos-14
-    steps:
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-      - uses: actions/download-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist
-      - name: Install wheel and smoke test
-        shell: bash
-        run: |-
-          set -euo pipefail
-          python -m pip install -U pip
-          python -m pip install dist/*.whl
-          python - <<'PY'
-          import sys
-          import schema_sanitizer as ss
-          import schema_sanitizer._core_abi3 as core
-          print("python", sys.version.split()[0])
-          print("schema-sanitizer", ss.__version__)
-          print("core", core.__file__)
-          PY
+          mkdir -p downstream-wheel
+          python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
+          python meta/ci/check_distribution_contents.py downstream-wheel/*.whl
+          WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
+          python meta/ci/check_downstream_install.py "${WHEEL}" \
+            --work-root "${{ runner.temp }}/downstream-checks"
   coverage-python:
-    name: coverage reports / python-branch-coverage
+    name: coverage / Python branches
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -543,7 +286,7 @@ jobs:
             coverage-python.json
             coverage-python-risk-gaps.txt
   coverage-native:
-    name: coverage reports / native-llvm-coverage
+    name: coverage / native LLVM
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -634,83 +377,8 @@ jobs:
         with:
           name: native-llvm-coverage
           path: coverage-native/
-  downstream-wheel:
-    name: downstream packaging / downstream-wheel
-    needs: [sdist]
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - uses: actions/download-artifact@v7
-        with:
-          name: dist-sdist
-          path: release-dist
-      - name: Build wheel only from the generated sdist
-        run: |
-          python -m pip install -U pip
-          mkdir -p downstream-wheel
-          python -m pip wheel --no-deps --wheel-dir downstream-wheel release-dist/*.tar.gz
-      - name: Validate wheel contents
-        run: python meta/ci/check_distribution_contents.py downstream-wheel/*.whl
-      - name: Install outside the repository
-        shell: bash
-        run: |
-          python -m venv "${{ runner.temp }}/consumer-venv"
-          source "${{ runner.temp }}/consumer-venv/bin/activate"
-          python -m pip install -U pip mypy pyarrow downstream-wheel/*.whl
-          mkdir -p "${{ runner.temp }}/consumer-work"
-          cp meta/ci/downstream_smoke.py meta/ci/downstream_typecheck.py \
-            "${{ runner.temp }}/consumer-work/"
-          cd "${{ runner.temp }}/consumer-work"
-          python -I downstream_smoke.py
-          python -I -m mypy --strict downstream_typecheck.py
-      - uses: actions/upload-artifact@v6
-        with:
-          name: downstream-wheel
-          path: downstream-wheel/*.whl
-  downstream-extras:
-    name: downstream packaging / optional-extra (${{ matrix.extra }})
-    needs: downstream-wheel
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        extra: [core, pyarrow, pandas, polars, duckdb, cloud]
-    steps:
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      - uses: actions/download-artifact@v7
-        with:
-          name: downstream-wheel
-          path: downstream-wheel
-      - name: Install one consumer extra in isolation
-        shell: bash
-        run: |-
-          python -m venv "${{ runner.temp }}/extra-venv"
-          source "${{ runner.temp }}/extra-venv/bin/activate"
-          python -m pip install -U pip
-          WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
-          if [[ "${{ matrix.extra }}" == "core" ]]; then
-            python -m pip install "${WHEEL}"
-          else
-            python -m pip install "${WHEEL}[${{ matrix.extra }}]"
-          fi
-          cd "${{ runner.temp }}"
-          python -I -c "import schema_sanitizer as s; print(s.__version__)"
-          case "${{ matrix.extra }}" in
-            pyarrow) python -I -c "import pyarrow" ;;
-            pandas) python -I -c "import pandas" ;;
-            polars) python -I -c "import polars" ;;
-            duckdb) python -I -c "import duckdb" ;;
-            cloud) python -I -c "import aiohttp, aiobotocore, azure.identity, azure.storage.blob, google.auth" ;;
-          esac
-  native-sanitizers:
-    name: native sanitizers / Clang ASan + UBSan
+  address-sanitizer:
+    name: sanitizer / Linux ASan + UBSan
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -739,7 +407,7 @@ jobs:
           meta/ci/asan_python_launcher.cc
           $(python3-config --embed --cflags --ldflags)
           -o python-asan
-      - name: Malformed native input and lifecycle suite
+      - name: Exercise malformed input, lifecycle, and nested Parquet
         run: >-
           ./python-asan -m pytest -q
           tests/test_input_python_and_local.py
@@ -747,32 +415,27 @@ jobs:
           tests/test_runtime_lifecycle_part01.py
           tests/test_runtime_lifecycle_part02.py
           tests/test_runtime_lifecycle_part03.py
-      - name: Nested materialization and adversarial Parquet suite
-        run: >-
-          ./python-asan -m pytest -q
           tests/test_parquet_direct_io_runtime_part01.py
           tests/test_parquet_native_nested_list_map_combinators.py
           tests/test_parquet_native_recursive_shapes_part04.py
           tests/test_parquet_native_recursive_extreme_runtime.py
-      - name: Configure ASan/UBSan libFuzzer targets
-        run: >-
-          cmake -S . -B build/asan-fuzz -G Ninja
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DCMAKE_C_COMPILER=clang
-          -DCMAKE_CXX_COMPILER=clang++
-          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
-          -DSCHEMA_SANITIZER_SANITIZER=asan-ubsan
-          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
-          -DSCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer
-          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-      - name: Build ASan/UBSan libFuzzer targets
-        run: >-
-          cmake --build build/asan-fuzz
-          --target schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
-          schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
-          --parallel 4
+      - name: Configure and build ASan/UBSan libFuzzer targets
+        run: |
+          cmake -S . -B build/asan-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
+            -DSCHEMA_SANITIZER_SANITIZER=asan-ubsan \
+            -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
+            -DSCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer \
+            -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
+            -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+            -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+          cmake --build build/asan-fuzz \
+            --target schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv \
+            schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet \
+            --parallel 4
       - name: Run ASan/UBSan fuzz regressions and mutation campaigns
         run: >-
           python meta/ci/run_fuzz_regressions.py
@@ -780,8 +443,8 @@ jobs:
           --campaign-runs 1000
           --seed 15172026
           --max-len 262144
-  native-platform-sanitizers:
-    name: native sanitizer concurrency (${{ matrix.name }})
+  platform-sanitizers:
+    name: sanitizer / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
@@ -804,7 +467,7 @@ jobs:
           python-version: '3.11'
       - name: Install build dependencies
         run: python -m pip install -U pip ninja 'cmake>=4.3,<4.4'
-      - name: Configure Windows ASan native gates
+      - name: Configure Windows ASan
         if: runner.os == 'Windows'
         run: >-
           cmake -S . -B build/platform-sanitizer
@@ -816,7 +479,7 @@ jobs:
           -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
           -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
           -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-      - name: Configure macOS ASan/UBSan native gates
+      - name: Configure macOS ASan/UBSan
         if: runner.os == 'macOS'
         run: >-
           cmake -S . -B build/platform-sanitizer -G Ninja
@@ -847,15 +510,15 @@ jobs:
           -R schema_sanitizer_sanitized_ordered_executor
           --repeat until-fail:2
           --output-on-failure
-      - name: Run native fuzz regressions and bounded mutation campaigns
+      - name: Run native fuzz regressions and mutation campaigns
         run: >-
           python meta/ci/run_fuzz_regressions.py
           --build-root build/platform-sanitizer/fuzz
           --campaign-runs 500
           --seed 15172026
           --max-len 262144
-  native-thread-sanitizer:
-    name: native threading / GCC ThreadSanitizer
+  thread-sanitizer:
+    name: sanitizer / Linux GCC ThreadSanitizer
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -868,23 +531,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-14 g++-14
           python -m pip install -U pip ninja 'cmake>=4.3,<4.4' pytest pyarrow
-      - name: Configure fully instrumented extension
-        run: >-
-          cmake -S . -B build/tsan -G Ninja
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DCMAKE_C_COMPILER=gcc-14
-          -DCMAKE_CXX_COMPILER=g++-14
-          -DPython3_EXECUTABLE=$(which python)
-          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
-          -DSCHEMA_SANITIZER_SANITIZER=tsan
-          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
-          -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
-          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-      - name: Build extension, fuzzers, and bundled Parquet compression
-        run: cmake --build build/tsan --parallel 4
-      - name: TSan native fuzz regressions and bounded mutation campaigns
+      - name: Configure and build the fully instrumented extension
+        run: |
+          cmake -S . -B build/tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DPython3_EXECUTABLE=$(which python) \
+            -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
+            -DSCHEMA_SANITIZER_SANITIZER=tsan \
+            -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
+            -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone \
+            -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
+            -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+            -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+          cmake --build build/tsan --parallel 4
+      - name: Run TSan fuzz regressions and mutation campaigns
         run: >-
           python meta/ci/run_fuzz_regressions.py
           --build-root build/tsan/fuzz
@@ -898,51 +560,8 @@ jobs:
           meta/ci/tsan_python_launcher.cc
           $(python3-config --embed --cflags --ldflags)
           -o python-tsan
-      - name: Verify TSan extension and executor
-        run: >-
-          meta/ci/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 1
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          --verify-only
-      - name: TSan native executor domain
+      - name: Run the executor and all full-extension TSan domains
         run: >-
           meta/ci/run_tsan_extension_suite.sh
           build/tsan ./python-tsan 2
           "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          tests/test_threading_native_executor.py
-      - name: TSan inference domain
-        run: >-
-          meta/ci/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 2
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          tests/test_threading_inference.py
-      - name: TSan materialization domain
-        run: >-
-          meta/ci/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 2
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          tests/test_threading_materialization.py
-      - name: TSan text output domain
-        run: >-
-          meta/ci/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 2
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          tests/test_threading_output.py
-      - name: TSan Parquet output domain
-        run: >-
-          meta/ci/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 2
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          tests/test_threading_parquet_output.py
-      - name: TSan fixed-clock golden domain
-        run: >-
-          meta/ci/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 2
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          tests/test_threading_golden_matrix.py
-      - name: TSan partition lookahead domain
-        run: >-
-          meta/ci/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 2
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-          tests/test_partition_lookahead.py

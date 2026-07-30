@@ -1,4 +1,4 @@
-"""Protect the two-entry-point CI workflow topology."""
+"""Protect the compact two-entry-point CI/CD topology."""
 
 from __future__ import annotations
 
@@ -15,6 +15,19 @@ WORKFLOWS = ROOT / ".github/workflows"
 def _workflow(name: str) -> str:
     """Read one workflow definition."""
     return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def _job_ids(workflow: str) -> set[str]:
+    """Return the top-level job identifiers from a workflow."""
+    jobs = workflow.split("\njobs:\n", 1)[1]
+    return set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE))
+
+
+def _job_body(workflow: str, job_id: str) -> str:
+    """Return one top-level job body."""
+    body = workflow.split(f"\n  {job_id}:\n", 1)[1]
+    next_job = re.search(r"^  [a-z0-9-]+:$", body, re.MULTILINE)
+    return body[: next_job.start()] if next_job else body
 
 
 def test_only_general_sanity_and_publish_are_manually_dispatchable() -> None:
@@ -67,22 +80,39 @@ def test_secret_scan_uses_the_tested_report_checker() -> None:
 
 
 def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
-    """General sanity owns validation without exposing scheduled workloads."""
+    """Nine auditable jobs own every important validation responsibility."""
     ci = _workflow("ci.yml")
-    validation_jobs = (
+    assert _job_ids(ci) == {
+        "checks",
+        "platform-wheels",
+        "sdist",
+        "distribution",
+        "coverage-python",
+        "coverage-native",
+        "address-sanitizer",
+        "platform-sanitizers",
+        "thread-sanitizer",
+    }
+    for removed_job in (
+        "core-only:",
+        "remote-http-fault-injection:",
         "benchmark-matrix-smoke:",
-        "coverage-python:",
-        "coverage-native:",
+        "abi3-runtime-compat:",
+        "adapters:",
+        "validate-release-version:",
+        "wheels:",
+        "validate-artifacts:",
+        "wheel-smoke:",
         "downstream-wheel:",
         "downstream-extras:",
-        "native-sanitizers:",
-        "native-platform-sanitizers:",
-        "native-thread-sanitizer:",
-        "remote-http-fault-injection:",
-    )
-
-    for job in validation_jobs:
-        assert f"  {job}" in ci
+    ):
+        assert f"  {removed_job}" not in ci
+    platform_matrix = _job_body(ci, "platform-wheels").split("    steps:", 1)[0]
+    sanitizer_matrix = _job_body(ci, "platform-sanitizers").split("    steps:", 1)[0]
+    assert len(re.findall(r"^          - name:", platform_matrix, re.MULTILINE)) == 4
+    assert len(re.findall(r"^          - name:", sanitizer_matrix, re.MULTILINE)) == 3
+    assert ci.count("      matrix:") == 2
+    assert "python-version: [" not in ci
     assert "uses: ./.github/workflows/" not in ci
 
     assert "  schedule:" not in ci
@@ -100,14 +130,15 @@ def test_general_sanity_owns_full_extension_tsan_gate() -> None:
     """Linux CI must build and repeatedly exercise the complete TSan extension."""
     ci = _workflow("ci.yml")
 
-    assert "native-thread-sanitizer:" in ci
+    assert "thread-sanitizer:" in ci
     assert "SCHEMA_SANITIZER_SANITIZER=tsan" in ci
     assert "SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled" in ci
     assert "meta/ci/tsan_python_launcher.cc" in ci
-    assert "meta/ci/run_tsan_extension_suite.sh" in ci
+    assert ci.count("meta/ci/run_tsan_extension_suite.sh") == 1
     assert "build/tsan ./python-tsan 2" in ci
-    assert "--verify-only" in ci
     assert "site.getsitepackages()[0]" in ci
+
+    runner = (ROOT / "meta/ci/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
     for domain in (
         "test_threading_native_executor.py",
         "test_threading_inference.py",
@@ -117,23 +148,21 @@ def test_general_sanity_owns_full_extension_tsan_gate() -> None:
         "test_threading_golden_matrix.py",
         "test_partition_lookahead.py",
     ):
-        assert ci.count(domain) == 1
+        assert runner.count(domain) == 1
 
-    runner = (ROOT / "meta/ci/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
     assert "pytest_sessionfinish" in runner
     assert "domain_shutdown_grace_seconds" in runner
     assert "setsid" in runner
 
 
 def test_remote_http_fault_gate_runs_on_every_supported_platform() -> None:
-    """Real-socket transport faults must run against every core wheel."""
+    """The complete suite, including real-socket faults, runs in each platform task."""
     ci = _workflow("ci.yml")
 
-    assert "remote-http-fault-injection:" in ci
-    assert "needs: [core-only]" in ci
-    assert ci.count("abi3-wheel-${{ matrix.artifact }}") >= 2
-    assert "tests/test_remote_http_fault_injection.py" in ci
-    assert "tests/test_remote_process_lifecycle.py" in ci
+    assert "platform-wheels:" in ci
+    assert "Full suite including adapters, HTTP faults, and concurrency" in ci
+    assert "run: pytest -q" in ci
+    assert "--ignore" not in ci
     for runner in ("ubuntu-latest", "windows-latest", "macos-15-intel", "macos-14"):
         assert runner in ci
 
@@ -142,7 +171,7 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     """Native fuzzing must run under TSan and supported platform sanitizers."""
     ci = _workflow("ci.yml")
 
-    assert "native-platform-sanitizers:" in ci
+    assert "platform-sanitizers:" in ci
     assert "windows-amd64-asan" in ci
     assert "macos-x86_64-asan-ubsan" in ci
     assert "macos-arm64-asan-ubsan" in ci
@@ -156,9 +185,9 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     concurrency_step = ci.split("- name: Run repeated sanitized concurrency probe", 1)[1].split(
         "- name:", 1
     )[0]
-    fuzz_step = ci.split("- name: Run native fuzz regressions and bounded mutation campaigns", 1)[
-        1
-    ].split("\n  native-thread-sanitizer:", 1)[0]
+    fuzz_step = ci.split("- name: Run native fuzz regressions and mutation campaigns", 1)[1].split(
+        "\n\n  thread-sanitizer:", 1
+    )[0]
     assert "if: runner.os != 'Windows'" in concurrency_step
     assert "\n        if:" not in fuzz_step
 
@@ -232,8 +261,22 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
     """Benchmark gates must cover supported OS, shape, and source dimensions."""
     ci = _workflow("ci.yml")
 
-    assert "benchmark-matrix-smoke:" in ci
+    assert "platform-wheels:" in ci
     assert "benchmarks/bench_threading_matrix.py" in ci
     assert "--profile ci" in ci
     for artifact in ("linux", "windows", "macos-x86_64", "macos-arm64"):
         assert f"artifact: {artifact}" in ci
+
+
+def test_release_artifacts_and_downstream_extras_use_two_compact_jobs() -> None:
+    """Packaging keeps all guarantees without one task per Python or extra."""
+    ci = _workflow("ci.yml")
+    downstream = (ROOT / "meta/ci/check_downstream_install.py").read_text(encoding="utf-8")
+
+    assert "python-version: '3.11'" in ci
+    assert "python-version: '3.14'" in ci
+    assert "needs: [sdist, platform-wheels]" in ci
+    assert "check_distribution_contents.py --release-set" in ci
+    assert "check_downstream_install.py" in ci
+    for extra in ("core", "pyarrow", "pandas", "polars", "duckdb", "cloud"):
+        assert f'"{extra}"' in downstream

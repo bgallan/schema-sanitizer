@@ -695,25 +695,22 @@ g++ -std=c++17 -fsanitize=thread -fno-omit-frame-pointer \
   $(python3-config --embed --cflags --ldflags) \
   -o python-tsan
 meta/ci/run_tsan_extension_suite.sh \
-  build/tsan ./python-tsan 1 \
-  "$(python -c 'import site; print(site.getsitepackages()[0])')" \
-  --verify-only
-meta/ci/run_tsan_extension_suite.sh \
   build/tsan ./python-tsan 2 \
-  "$(python -c 'import site; print(site.getsitepackages()[0])')" \
-  tests/test_threading_golden_matrix.py
-meta/ci/run_tsan_extension_suite.sh \
-  build/tsan ./python-tsan 2 \
-  "$(python -c 'import site; print(site.getsitepackages()[0])')" \
-  tests/test_partition_lookahead.py
+  "$(python -c 'import site; print(site.getsitepackages()[0])')"
 ```
 
-Invoke the second command separately for each threading domain listed by the
-runner. CI deliberately uses one shell step per domain rather than chaining all
-TSan interpreters inside one script invocation.
+With no final test path, the runner checks the standalone executor and every
+full-extension threading domain. Pass one test path as a final argument for a
+focused local run.
 
-The general CI workflow runs real-loopback HTTP fault injection against the
-ABI3 wheel on Linux, Windows, macOS x86-64, and macOS arm64. It covers:
+The general CI workflow has a small set of responsibility-based lanes. Each
+platform task builds its ABI3 wheel once and reuses it for the core-only import,
+full suite, Parquet certificate, HTTP fault injection, threading benchmark, and
+Python 3.11/3.14 ABI boundary checks. Release packaging is validated once after
+all four platform wheels and the source distribution are available.
+
+Real-loopback HTTP fault injection runs on Linux, Windows, macOS x86-64, and
+macOS arm64. It covers:
 
 - truncated downloads and publication disconnects;
 - delayed cancellation and bounded retry exhaustion;

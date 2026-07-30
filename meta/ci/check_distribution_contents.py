@@ -44,6 +44,7 @@ _SDIST_REQUIRED = {
     "fuzz/regressions/parquet/truncated.parquet",
     "fuzz/regressions/xml/mismatched.xml",
     "meta/VERSION",
+    "meta/ci/check_downstream_install.py",
     "meta/ci/check_parquet_compression_matrix.py",
     "meta/ci/report_risk_coverage.py",
     "meta/ci/run_fuzz_regressions.py",
@@ -154,13 +155,72 @@ def validate(path: Path) -> None:
     print(f"validated {path}: {len(names)} files")
 
 
+def validate_release_filenames(filenames: Iterable[str]) -> None:
+    """Validate the completeness and version consistency of one release set."""
+    from packaging.utils import parse_sdist_filename, parse_wheel_filename
+
+    names = sorted(filenames)
+    sdists = [name for name in names if name.endswith(".tar.gz")]
+    wheels = [name for name in names if name.endswith(".whl")]
+    if len(sdists) != 1:
+        raise AssertionError(f"expected exactly 1 sdist, found {len(sdists)}")
+    if len(wheels) != 4:
+        raise AssertionError(f"expected exactly 4 wheels, found {len(wheels)}")
+
+    sdist_name, sdist_version = parse_sdist_filename(sdists[0])
+    wheel_versions = set()
+    wheel_platforms = set()
+    for wheel in wheels:
+        name, version, _build, tags = parse_wheel_filename(wheel)
+        if name != sdist_name:
+            raise AssertionError(f"wheel project name {name!s} != sdist name {sdist_name!s}")
+        wheel_versions.add(version)
+        wheel_platforms.update(tag.platform for tag in tags)
+
+    versions = {sdist_version, *wheel_versions}
+    if len(versions) != 1:
+        raise AssertionError(f"mismatched distribution versions: {sorted(map(str, versions))}")
+
+    required_platforms = (
+        ("Linux x86_64", lambda platform: "manylinux_2_28_x86_64" in platform),
+        ("Windows AMD64", lambda platform: platform == "win_amd64"),
+        (
+            "macOS x86_64",
+            lambda platform: platform.startswith("macosx") and platform.endswith("_x86_64"),
+        ),
+        (
+            "macOS arm64",
+            lambda platform: platform.startswith("macosx") and platform.endswith("_arm64"),
+        ),
+    )
+    for label, predicate in required_platforms:
+        if not any(predicate(platform) for platform in wheel_platforms):
+            raise AssertionError(f"missing {label} wheel: {' '.join(sorted(wheel_platforms))}")
+
+
+def validate_release_set(paths: Iterable[Path]) -> None:
+    """Validate every archive and the release set as a whole."""
+    artifacts = sorted(paths)
+    for artifact in artifacts:
+        validate(artifact)
+    validate_release_filenames(path.name for path in artifacts)
+
+
 def main() -> None:
     """Parse command-line artifacts and validate each one."""
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--release-set",
+        action="store_true",
+        help="also require one sdist and the four supported, version-consistent wheels",
+    )
     parser.add_argument("artifacts", nargs="+", type=Path)
     args = parser.parse_args()
-    for artifact in args.artifacts:
-        validate(artifact)
+    if args.release_set:
+        validate_release_set(args.artifacts)
+    else:
+        for artifact in args.artifacts:
+            validate(artifact)
 
 
 if __name__ == "__main__":

@@ -94,7 +94,9 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
     assert 'SCHEMA_SANITIZER_ZLIB_PROVIDER = "bundled"' in pyproject
     assert 'SCHEMA_SANITIZER_REQUIRE_ZLIB = "ON"' in pyproject
     assert "check_parquet_compression_matrix.py" in pyproject
-    assert ci_workflow.count("python -m cibuildwheel") == 3
+    assert ci_workflow.count("python -m cibuildwheel") == 1
+    for architecture in ("x86_64", "AMD64", "arm64"):
+        assert f"arch: {architecture}" in ci_workflow
     assert "python -m cibuildwheel" not in publish_workflow
     assert "uses: ./.github/workflows/ci.yml" in publish_workflow
     assert "CIBW_" + "ENVIRONMENT" not in workflows
