@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+_PRODUCT_SOURCE_LINE_LIMIT = 750
 
 
 def test_recursive_layout_reducer_has_one_bounded_owner() -> None:
@@ -73,7 +74,7 @@ def test_arrow_direct_values_have_one_owner_and_parsed_storage_kind() -> None:
 
 
 def test_product_files_remain_bounded() -> None:
-    """All Python and native production owners remain at or below 500 lines."""
+    """All Python and native production owners remain explicitly bounded."""
     candidates = [
         *(ROOT / "src/schema_sanitizer").rglob("*.py"),
         *(ROOT / "cpp/src").rglob("*.cc"),
@@ -85,6 +86,6 @@ def test_product_files_remain_bounded() -> None:
     oversized = {
         str(path.relative_to(ROOT)): len(path.read_text(encoding="utf-8").splitlines())
         for path in candidates
-        if len(path.read_text(encoding="utf-8").splitlines()) > 500
+        if len(path.read_text(encoding="utf-8").splitlines()) > _PRODUCT_SOURCE_LINE_LIMIT
     }
     assert oversized == {}

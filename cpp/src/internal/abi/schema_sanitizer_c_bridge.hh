@@ -53,6 +53,8 @@ void schema_sanitizer_context_free(schema_sanitizer_context *ctx);
 int schema_sanitizer_context_memory_stats_json(schema_sanitizer_context *ctx,
                                                char **out_json,
                                                char **out_error);
+int schema_sanitizer_context_performance_stats_json(
+    schema_sanitizer_context *ctx, char **out_json, char **out_error);
 
 // Prepare/free prepared options from portable bytes.
 //

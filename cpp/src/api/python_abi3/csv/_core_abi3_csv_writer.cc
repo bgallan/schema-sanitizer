@@ -12,6 +12,7 @@
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "internal/csv/csv_stream_writer.hh"
+#include "internal/output/ordered_text_output.hh"
 
 #include <fstream>
 #include <memory>
@@ -83,7 +84,8 @@ private:
 
 sanitize::Result<csv::WriteStats>
 csv_write_stream_to_path(PyObject *stream_obj, std::string path,
-                         std::int64_t memory_limit_bytes) {
+                         std::int64_t memory_limit_bytes,
+                         sanitize::ThreadingMode threading_mode) {
   FileCsvOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError("CSV writer: failed opening output");
@@ -96,17 +98,24 @@ csv_write_stream_to_path(PyObject *stream_obj, std::string path,
   }
   std::unique_ptr<PyObject, decltype(&Py_DECREF)> capsule_owner(capsule,
                                                                 Py_DECREF);
-  return csv::write_stream(stream, output, memory_limit_bytes);
+  return call_without_gil([&] {
+    return csv::write_stream(stream, output, memory_limit_bytes,
+                             threading_mode);
+  });
 }
 
 sanitize::Result<csv::WriteStats>
 csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
-                               std::int64_t memory_limit_bytes) {
+                               std::int64_t memory_limit_bytes,
+                               sanitize::ThreadingMode threading_mode) {
   FileCsvOutput output(std::move(path));
   if (!output.ok()) {
     return sanitize::Status::IOError("CSV writer: failed opening output");
   }
-  return csv::write_stream(stream, output, memory_limit_bytes);
+  return call_without_gil([&] {
+    return csv::write_stream(stream, output, memory_limit_bytes,
+                             threading_mode);
+  });
 }
 
 } // namespace
@@ -115,8 +124,9 @@ PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
   long long memory_limit_bytes = -1;
-  if (!PyArg_ParseTuple(args, "OO|L:csv_stream_write", &stream_obj, &path_obj,
-                        &memory_limit_bytes)) {
+  long long threading_mode_value = 0;
+  if (!PyArg_ParseTuple(args, "OO|LL:csv_stream_write", &stream_obj, &path_obj,
+                        &memory_limit_bytes, &threading_mode_value)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -126,9 +136,16 @@ PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
     return nullptr;
   }
 
+  auto mode_result =
+      sanitize::internal::ordered_text_output::threading_mode_from_int(
+          threading_mode_value);
+  if (!mode_result.ok()) {
+    PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
+    return nullptr;
+  }
   auto result = csv_write_stream_to_path(
       stream_obj, std::string(path, static_cast<std::size_t>(path_len)),
-      memory_limit_bytes);
+      memory_limit_bytes, mode_result.ValueOrDie());
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
@@ -144,10 +161,11 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *row_span_columns = nullptr;
   PyObject *timestamp_columns = nullptr;
   long long memory_limit_bytes = -1;
-  if (!PyArg_ParseTuple(args, "OOOOOO|L:csv_stream_write_with_metadata",
+  long long threading_mode_value = 0;
+  if (!PyArg_ParseTuple(args, "OOOOOO|LL:csv_stream_write_with_metadata",
                         &stream_obj, &path_obj, &first_row_columns,
                         &all_row_columns, &row_span_columns, &timestamp_columns,
-                        &memory_limit_bytes)) {
+                        &memory_limit_bytes, &threading_mode_value)) {
     return nullptr;
   }
   Py_ssize_t path_len = 0;
@@ -164,9 +182,17 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
   if (!wrapped) {
     return nullptr;
   }
+  auto mode_result =
+      sanitize::internal::ordered_text_output::threading_mode_from_int(
+          threading_mode_value);
+  if (!mode_result.ok()) {
+    schema_sanitizer_stream_free(wrapped);
+    PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
+    return nullptr;
+  }
   auto result = csv_write_arrow_stream_to_path(
       wrapped, std::string(path, static_cast<std::size_t>(path_len)),
-      memory_limit_bytes);
+      memory_limit_bytes, mode_result.ValueOrDie());
   schema_sanitizer_stream_free(wrapped);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());

@@ -68,6 +68,13 @@ public:
     return Status::OK();
   }
 
+  Status reserve(int64_t rows, int64_t variable_bytes_per_column) override {
+    for (auto &child : children_) {
+      SAN_RETURN_NOT_OK(child->reserve(rows, variable_bytes_per_column));
+    }
+    return Status::OK();
+  }
+
   // Appends the object state.
   Status append(const Cell &cell) override {
     if (cell.children.size() != children_.size())
@@ -78,11 +85,38 @@ public:
     return Status::OK();
   }
 
+  Status append_direct_row(std::span<const DirectScalarValue> values) override {
+    if (values.size() != children_.size()) {
+      return Status::Invalid("direct root scalar count mismatch");
+    }
+    for (std::size_t index = 0; index < children_.size(); ++index) {
+      SAN_RETURN_NOT_OK(children_[index]->append_direct(values[index]));
+    }
+    ++length_;
+    return Status::OK();
+  }
+
   // Appends null.
   Status append_null() override {
     for (auto &child : children_)
       SAN_RETURN_NOT_OK(child->append_null());
     ++length_;
+    return Status::OK();
+  }
+
+  Status append_array(const ArrowArray &array) override {
+    if (array.length < 0 || array.offset < 0 || array.n_children < 0 ||
+        static_cast<std::size_t>(array.n_children) != children_.size() ||
+        (array.n_children > 0 && !array.children)) {
+      return Status::Invalid("invalid root struct Arrow array");
+    }
+    for (std::size_t index = 0; index < children_.size(); ++index) {
+      if (!array.children[index]) {
+        return Status::Invalid("root struct Arrow array has null child");
+      }
+      SAN_RETURN_NOT_OK(children_[index]->append_array(*array.children[index]));
+    }
+    length_ += array.length;
     return Status::OK();
   }
 

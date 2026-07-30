@@ -65,3 +65,33 @@ def test_source_zip_validator_rejects_scratch_artifacts(
 
     with pytest.raises(AssertionError, match="contains scratch/build files"):
         validator._validate_source_zip(tmp_path / "source.zip", names)
+
+
+def test_release_filename_validator_requires_all_supported_wheels() -> None:
+    """One consistent sdist and the four release platforms form a valid set."""
+    validator = _load_validator()
+    validator.validate_release_filenames(
+        [
+            "schema_sanitizer-0.4.0.tar.gz",
+            "schema_sanitizer-0.4.0-cp311-abi3-manylinux_2_28_x86_64.whl",
+            "schema_sanitizer-0.4.0-cp311-abi3-win_amd64.whl",
+            "schema_sanitizer-0.4.0-cp311-abi3-macosx_11_0_x86_64.whl",
+            "schema_sanitizer-0.4.0-cp311-abi3-macosx_11_0_arm64.whl",
+        ]
+    )
+
+
+def test_release_filename_validator_rejects_version_drift() -> None:
+    """A stale platform wheel cannot enter a release set."""
+    validator = _load_validator()
+
+    with pytest.raises(AssertionError, match="mismatched distribution versions"):
+        validator.validate_release_filenames(
+            [
+                "schema_sanitizer-0.4.0.tar.gz",
+                "schema_sanitizer-0.4.0-cp311-abi3-manylinux_2_28_x86_64.whl",
+                "schema_sanitizer-0.4.0-cp311-abi3-win_amd64.whl",
+                "schema_sanitizer-0.4.0-cp311-abi3-macosx_11_0_x86_64.whl",
+                "schema_sanitizer-0.3.9-cp311-abi3-macosx_11_0_arm64.whl",
+            ]
+        )

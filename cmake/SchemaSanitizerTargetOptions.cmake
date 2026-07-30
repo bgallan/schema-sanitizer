@@ -14,7 +14,10 @@ function(schema_sanitizer_enable_warnings target)
     ${target}
     PRIVATE
       $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wshadow>
-      $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+      # C4324 reports the intentional tail padding created by cache-line
+      # alignment. Keep /W4 and /WX for every actionable diagnostic.
+      $<$<CXX_COMPILER_ID:MSVC>:/W4>
+      $<$<CXX_COMPILER_ID:MSVC>:/wd4324>)
 
   if(SCHEMA_SANITIZER_ENABLE_WERROR)
     target_compile_options(
@@ -29,25 +32,102 @@ function(schema_sanitizer_add_sanitizer target)
     return()
   endif()
 
-  if(NOT (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU|AppleClang"))
-    message(
-      FATAL_ERROR
-        "SCHEMA_SANITIZER_SANITIZER is only supported for Clang/GCC/AppleClang (got ${CMAKE_CXX_COMPILER_ID})"
-    )
-  endif()
-
-  if(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan-ubsan")
+  if(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan")
+    if(MSVC)
+      target_compile_options(${target} PRIVATE /fsanitize=address)
+      get_target_property(_sanitizer_target_type ${target} TYPE)
+      if(_sanitizer_target_type STREQUAL "SHARED_LIBRARY"
+         OR _sanitizer_target_type STREQUAL "MODULE_LIBRARY"
+         OR _sanitizer_target_type STREQUAL "EXECUTABLE")
+        target_link_options(${target} PRIVATE /INCREMENTAL:NO)
+      endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU|AppleClang")
+      target_compile_options(${target} PRIVATE -fsanitize=address
+                                               -fno-omit-frame-pointer)
+      target_link_options(${target} PRIVATE -fsanitize=address
+                          -fno-omit-frame-pointer)
+    else()
+      message(
+        FATAL_ERROR
+          "SCHEMA_SANITIZER_SANITIZER=asan is unsupported for ${CMAKE_CXX_COMPILER_ID}"
+      )
+    endif()
+  elseif(SCHEMA_SANITIZER_SANITIZER STREQUAL "asan-ubsan")
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU|AppleClang")
+      message(
+        FATAL_ERROR
+          "SCHEMA_SANITIZER_SANITIZER=asan-ubsan requires Clang/GCC/AppleClang (got ${CMAKE_CXX_COMPILER_ID})"
+      )
+    endif()
     target_compile_options(
       ${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer
                         -fno-sanitize-recover=all)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined
                         -fno-omit-frame-pointer -fno-sanitize-recover=all)
+  elseif(SCHEMA_SANITIZER_SANITIZER STREQUAL "tsan")
+    if(APPLE
+       OR MSVC
+       OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+      message(
+        FATAL_ERROR
+          "SCHEMA_SANITIZER_SANITIZER=tsan is currently supported only on Linux with Clang or GCC"
+      )
+    endif()
+    target_compile_options(${target} PRIVATE -fsanitize=thread
+                                             -fno-omit-frame-pointer)
+    target_link_options(${target} PRIVATE -fsanitize=thread
+                        -fno-omit-frame-pointer)
   else()
     message(
       FATAL_ERROR
-        "Invalid SCHEMA_SANITIZER_SANITIZER value: '${SCHEMA_SANITIZER_SANITIZER}'. Expected: none or asan-ubsan"
+        "Invalid SCHEMA_SANITIZER_SANITIZER value: '${SCHEMA_SANITIZER_SANITIZER}'. Expected: none, asan, asan-ubsan, or tsan"
     )
   endif()
+endfunction()
+
+# Copies the MSVC AddressSanitizer runtime beside standalone executables.
+#
+# Current MSVC toolsets use clang_rt.asan_dynamic-{arch}.dll for every CRT
+# linkage mode. The DLL is installed next to cl.exe, not in a system search
+# directory, so command-line executables otherwise fail at startup with
+# STATUS_DLL_NOT_FOUND (0xc0000135).
+function(schema_sanitizer_stage_msvc_asan_runtime destination)
+  if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))
+    return()
+  endif()
+
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(_schema_sanitizer_asan_arch "x86_64")
+  elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(_schema_sanitizer_asan_arch "i386")
+  else()
+    message(
+      FATAL_ERROR
+        "MSVC AddressSanitizer requires a 32-bit or 64-bit target architecture")
+  endif()
+
+  get_filename_component(_schema_sanitizer_compiler_dir "${CMAKE_CXX_COMPILER}"
+                         DIRECTORY)
+  set(_schema_sanitizer_asan_runtime_name
+      "clang_rt.asan_dynamic-${_schema_sanitizer_asan_arch}.dll")
+  set(_schema_sanitizer_asan_runtime
+      "${_schema_sanitizer_compiler_dir}/${_schema_sanitizer_asan_runtime_name}"
+  )
+  if(NOT EXISTS "${_schema_sanitizer_asan_runtime}")
+    message(
+      FATAL_ERROR
+        "MSVC AddressSanitizer runtime not found beside the selected compiler: ${_schema_sanitizer_asan_runtime}"
+    )
+  endif()
+
+  file(MAKE_DIRECTORY "${destination}")
+  configure_file(
+    "${_schema_sanitizer_asan_runtime}"
+    "${destination}/${_schema_sanitizer_asan_runtime_name}" COPYONLY)
+  message(
+    STATUS
+      "Staged MSVC AddressSanitizer runtime: ${destination}/${_schema_sanitizer_asan_runtime_name}"
+  )
 endfunction()
 
 # Adds LLVM source coverage instrumentation to a target.

@@ -81,7 +81,10 @@ def test_xml_row_stream_uses_borrowed_slices_and_bounded_retention() -> None:
     assert "secure_zero_memory(buffer_.data(), buffer_.size())" in scanner
     assert "std::memmove" in scanner
     assert ".text = std::string_view(buffer_).substr" in lifecycle
-    assert "storage->raw_rows.emplace_back(slice.text)" in frontend
+    assert "storage->raw_arena.append(slice.text)" in frontend
+    assert "std::vector<std::string_view> raw_rows" in (
+        ROOT / "cpp/src/frontends/xml/frontend_internal.hh"
+    ).read_text(encoding="utf-8")
 
 
 def test_xml_borrowed_row_slice_round_trip_with_secure_cleanup(tmp_path: Path) -> None:

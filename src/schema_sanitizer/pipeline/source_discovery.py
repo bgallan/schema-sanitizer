@@ -8,8 +8,9 @@ from time import perf_counter
 from typing import Protocol
 from urllib.parse import urlparse
 
-from ..core_impl.async_scheduler import unordered_indexed_results
-from ..core_impl.memory_budget import memory_budget
+from ..core_impl.async_scheduler import ordered_indexed_results
+from ..core_impl.execution_policy import execution_policy, normalize_threading_mode
+from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.uris import (
     LocationKind,
     RemoteProvider,
@@ -29,7 +30,6 @@ from ..input_impl.directory_inputs import (
 from ..input_impl.selection import input_format_extensions
 from ..remote_impl import routing
 from ..remote_impl.providers import azure, gcs, s3
-from ..remote_impl.transport import run_sync
 from .types import PartitionRunPlan, SourcePlanDiscovery
 
 
@@ -42,6 +42,7 @@ class _DirectoryDiscoveryModule(Protocol):
         suffixes: tuple[str, ...],
         *,
         memory_limit_bytes: int | None = None,
+        threading_mode: str = "single",
     ) -> DirectoryDiscovery[RemoteFile]:
         """Discover matching files for a group of provider URIs."""
 
@@ -145,6 +146,7 @@ async def _discover_directories(
     discovered_by_uri: dict[str, DiscoveredDirectoryInput],
     discovery_seconds_by_uri: dict[str, float] | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> set[str]:
     """Discover provider-grouped directories and preserve their listings."""
     if discovery_seconds_by_uri is None:
@@ -160,7 +162,10 @@ async def _discover_directories(
             continue
         started_at = perf_counter()
         remote_result = await discovery.directories_containing_files(
-            uris, extensions, memory_limit_bytes=memory_limit_bytes
+            uris,
+            extensions,
+            memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
         elapsed = max(perf_counter() - started_at, 0.0)
         discovery_seconds_by_uri.update(dict.fromkeys(uris, elapsed))
@@ -198,12 +203,16 @@ async def _discover_source(
     input_format: str,
     extensions: tuple[str, ...],
     memory_limit_bytes: int | None,
+    threading_mode: str,
 ) -> tuple[bool, DiscoveredDirectoryInput | None, int | None, int | None]:
     """Return source existence, reusable input metadata, file count, and bytes."""
     if kind not in {"path", "file"}:
         if input_mode == "directory":
             remote_files = await routing.list_remote_directory(
-                uri, extensions, memory_limit_bytes=memory_limit_bytes
+                uri,
+                extensions,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
             )
             discovered = (
                 DiscoveredDirectoryInput(
@@ -216,6 +225,7 @@ async def _discover_source(
         remote_file = await routing.remote_file_metadata(
             uri,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
         if remote_file is None:
             return False, None, None, None
@@ -316,8 +326,20 @@ async def discover_existing_source_plans_async(
     input_format: str = "json_array",
     source_file_extension: str | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> SourcePlanDiscovery:
     """Return plans whose source object or non-recursive directory has input."""
+    memory_limit_bytes = normalize_memory_limit(memory_limit_bytes)
+    if normalize_threading_mode(threading_mode) == "single":
+        from .source_discovery_sync import discover_existing_source_plans_sync
+
+        return discover_existing_source_plans_sync(
+            plans,
+            input_mode=input_mode,
+            input_format=input_format,
+            source_file_extension=source_file_extension,
+            memory_limit_bytes=memory_limit_bytes,
+        )
     if not plans:
         return SourcePlanDiscovery(existing_plans=[], skipped_plans=[])
     if input_mode not in {"single_file", "directory"}:
@@ -325,7 +347,7 @@ async def discover_existing_source_plans_async(
 
     extensions = _source_extensions(input_format, source_file_extension)
     source_locations = _unique_source_locations(plans)
-    window = memory_budget(memory_limit_bytes).source_discovery_concurrency
+    window = execution_policy(threading_mode, memory_limit_bytes).source_discovery_concurrency
     exists_by_uri: dict[str, bool] = {}
     discovered_by_uri: dict[str, DiscoveredDirectoryInput] = {}
     discovery_seconds_by_uri: dict[str, float] = {}
@@ -341,6 +363,7 @@ async def discover_existing_source_plans_async(
             discovered_by_uri=discovered_by_uri,
             discovery_seconds_by_uri=discovery_seconds_by_uri,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
 
     remaining = [
@@ -361,6 +384,7 @@ async def discover_existing_source_plans_async(
                 input_format=input_format,
                 extensions=extensions,
                 memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
             )
             return (
                 exists,
@@ -373,7 +397,7 @@ async def discover_existing_source_plans_async(
             discovery_seconds_by_uri[uri] = max(perf_counter() - started_at, 0.0)
             raise
 
-    async for index, discovered in unordered_indexed_results(
+    async for index, discovered in ordered_indexed_results(
         len(remaining),
         check_index,
         window=window,
@@ -410,8 +434,23 @@ def discover_existing_source_plans(
     input_format: str = "json_array",
     source_file_extension: str | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> SourcePlanDiscovery:
     """Synchronously discover existing source plans."""
+    memory_limit_bytes = normalize_memory_limit(memory_limit_bytes)
+    mode = normalize_threading_mode(threading_mode)
+    if mode == "single":
+        from .source_discovery_sync import discover_existing_source_plans_sync
+
+        return discover_existing_source_plans_sync(
+            plans,
+            input_mode=input_mode,
+            input_format=input_format,
+            source_file_extension=source_file_extension,
+            memory_limit_bytes=memory_limit_bytes,
+        )
+    from ..remote_impl.transport import run_sync
+
     return run_sync(
         discover_existing_source_plans_async(
             plans,
@@ -419,5 +458,7 @@ def discover_existing_source_plans(
             input_format=input_format,
             source_file_extension=source_file_extension,
             memory_limit_bytes=memory_limit_bytes,
-        )
+            threading_mode=mode,
+        ),
+        threading_mode=mode,
     )

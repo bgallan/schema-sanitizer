@@ -267,7 +267,8 @@ merge_arrow_source_schemas(schema_sanitizer_context *ctx,
                                                source.stream_obj, prepared));
     auto merged = sanitize::merge_schema_registry(make_registry_merge_input(
         std::move(input_schema), combined_registry.c_str(), field_name_policy,
-        prepared->spec.default_key_name, prepared->spec.field_order));
+        prepared->spec.default_key_name, prepared->spec.field_order,
+        prepared->operation_detected_at));
     if (!merged.ok()) {
       return merged.status();
     }
@@ -281,7 +282,8 @@ merge_arrow_source_schemas(schema_sanitizer_context *ctx,
   }
   auto merge_input = make_registry_merge_input(
       std::move(combined_schema), registry_json, field_name_policy,
-      prepared->spec.default_key_name, prepared->spec.field_order);
+      prepared->spec.default_key_name, prepared->spec.field_order,
+      prepared->operation_detected_at);
   return previous_schema ? sanitize::merge_schema_registry_with_previous_schema(
                                merge_input, *previous_schema)
                          : sanitize::merge_schema_registry(merge_input);

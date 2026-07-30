@@ -74,7 +74,7 @@ std::optional<int64_t> dictionary_index_at(const ArrowArray &array,
 }
 
 template <typename OffsetT>
-sanitize::Status append_list_value(std::string &out, const JsonlField &field,
+sanitize::Status append_list_value(TextBuffer &out, const JsonlField &field,
                                    const ArrowArray &array, int64_t row) {
   if (field.children.size() != 1 || array.n_children != 1 || !array.children ||
       !array.buffers || !array.buffers[1]) {
@@ -102,22 +102,16 @@ sanitize::Status append_list_value(std::string &out, const JsonlField &field,
 
 } // namespace
 
-sanitize::Status append_struct_value(std::string &out, const JsonlField &field,
+sanitize::Status append_struct_value(TextBuffer &out, const JsonlField &field,
                                      const ArrowArray &array, int64_t row) {
   if (array.n_children != static_cast<int64_t>(field.children.size()) ||
-      (!field.children.empty() && !array.children)) {
+      (!field.children.empty() && !array.children) ||
+      field.member_prefixes.size() != field.children.size()) {
     return sanitize::Status::Invalid("JSONL writer: struct/schema mismatch");
   }
   out.push_back('{');
-  bool first = true;
   for (std::size_t i = 0; i < field.children.size(); ++i) {
-    if (!first) {
-      out.push_back(',');
-    }
-    first = false;
-    sanitize::internal::json_encoding::append_string(out,
-                                                     field.children[i].name);
-    out.push_back(':');
+    out.append(field.member_prefixes[i]);
     if (array.offset > std::numeric_limits<int64_t>::max() - row) {
       return sanitize::Status::Invalid(
           "JSONL writer: struct child row offset overflow");
@@ -129,17 +123,17 @@ sanitize::Status append_struct_value(std::string &out, const JsonlField &field,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_list32_value(std::string &out, const JsonlField &field,
+sanitize::Status append_list32_value(TextBuffer &out, const JsonlField &field,
                                      const ArrowArray &array, int64_t row) {
   return append_list_value<int32_t>(out, field, array, row);
 }
 
-sanitize::Status append_list64_value(std::string &out, const JsonlField &field,
+sanitize::Status append_list64_value(TextBuffer &out, const JsonlField &field,
                                      const ArrowArray &array, int64_t row) {
   return append_list_value<int64_t>(out, field, array, row);
 }
 
-sanitize::Status append_fixed_size_list_value(std::string &out,
+sanitize::Status append_fixed_size_list_value(TextBuffer &out,
                                               const JsonlField &field,
                                               const ArrowArray &array,
                                               int64_t row) {
@@ -162,7 +156,7 @@ sanitize::Status append_fixed_size_list_value(std::string &out,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_dictionary_value(std::string &out,
+sanitize::Status append_dictionary_value(TextBuffer &out,
                                          const JsonlField &field,
                                          const ArrowArray &array, int64_t row) {
   if (field.children.size() != 1 || !array.dictionary) {

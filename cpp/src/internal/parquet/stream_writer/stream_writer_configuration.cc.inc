@@ -6,6 +6,16 @@ WriterOptions normalized_writer_options(const WriterOptions &input) {
   return out;
 }
 
+bool parquet_columns_have_nested_levels(
+    const std::vector<LeafColumn> &columns) noexcept {
+  for (const auto &column : columns) {
+    if (column.max_repetition_level > 0 || column.max_definition_level > 1) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::int64_t
 adaptive_max_bytes_per_row_group(const std::vector<LeafColumn> &columns,
                                  std::int64_t configured_value) {
@@ -20,6 +30,32 @@ adaptive_max_bytes_per_row_group(const std::vector<LeafColumn> &columns,
     adaptive = std::min<std::int64_t>(adaptive, 32LL * 1024LL * 1024LL);
   }
   return std::max<std::int64_t>(adaptive, 1024LL * 1024LL);
+}
+
+std::int64_t parallel_safe_max_bytes_per_row_group(
+    const WriterOptions &options,
+    const sanitize::internal::MemoryBudget &budget,
+    const std::vector<LeafColumn> &columns) {
+  auto target =
+      adaptive_max_bytes_per_row_group(columns, budget.parquet_row_group_bytes);
+  const auto nested = parquet_columns_have_nested_levels(columns);
+  if (options.threading_mode == sanitize::ThreadingMode::kSingle ||
+      columns.size() < 2 || budget.total_bytes < 96LL * 1024LL * 1024LL ||
+      (!nested && columns.size() <= 4)) {
+    return target;
+  }
+
+  // Parallel column preparation retains three classes of memory at once:
+  // collected Arrow values, encoded/compressed artifacts waiting for ordinal
+  // commit, and one page-sized candidate workspace per active worker. Keep the
+  // complete logical row group to at most one quarter of the operation budget;
+  // this leaves a second quarter for prepared artifacts and the remaining half
+  // for page candidates, the source batch, footer metadata, and coordinator
+  // state. The row-group boundary is a physical-layout detail, so narrowing it
+  // in multi mode does not alter logical Parquet contents.
+  const auto parallel_cap =
+      std::max<std::int64_t>(1024LL * 1024LL, budget.total_bytes / 4);
+  return std::min(target, parallel_cap);
 }
 
 sanitize::Result<CompressionCodec>

@@ -8,10 +8,12 @@ namespace sanitize::internal {
 
 JsonStreamingScanner::JsonStreamingScanner(ChunkSourcePtr src,
                                            int64_t chunk_bytes,
-                                           bool require_top_level_array)
+                                           bool require_top_level_array,
+                                           bool line_delimited)
     : src_(std::move(src)),
       chunk_bytes_(chunk_bytes > 0 ? chunk_bytes : (int64_t{1} << 20)),
-      require_top_level_array_(require_top_level_array) {}
+      require_top_level_array_(require_top_level_array),
+      line_delimited_(line_delimited) {}
 
 sanitize::Status JsonStreamingScanner::Reset() {
   eof_ = false;

@@ -16,33 +16,50 @@ async def list_remote_directory(
     suffixes: Sequence[str],
     *,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> list[RemoteFile]:
     """List one supported remote directory non-recursively."""
     accepted = normalize_extensions(suffixes)
     provider = remote_provider(uri)
     if provider == "gcs":
-        return await gcs.list_directory(uri, accepted)
+        return await gcs.list_directory(
+            uri, accepted, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "s3":
-        return await s3.list_files(uri, accepted)
+        return await s3.list_files(
+            uri, accepted, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "azure":
-        return await azure.list_files(uri, accepted)
+        return await azure.list_files(
+            uri, accepted, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "http":
         raise ValueError("HTTP(S) directory listing is not portable; use single_file mode")
     scheme = urlparse(uri).scheme.lower()
     raise ValueError(f"Unsupported remote directory URI scheme: {scheme!r}")
 
 
-async def remote_file_exists(uri: str, *, memory_limit_bytes: int | None = None) -> bool:
+async def remote_file_exists(
+    uri: str, *, memory_limit_bytes: int | None = None, threading_mode: str = "single"
+) -> bool:
     """Return whether one supported remote object exists."""
     provider = remote_provider(uri)
     if provider == "gcs":
-        return await gcs.file_exists(uri)
+        return await gcs.file_exists(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "s3":
-        return await s3.file_exists(uri)
+        return await s3.file_exists(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "azure":
-        return await azure.file_exists(uri)
+        return await azure.file_exists(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "http":
-        return await http_file_exists(uri, memory_limit_bytes=memory_limit_bytes)
+        return await http_file_exists(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     scheme = urlparse(uri).scheme.lower()
     raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
 
@@ -51,16 +68,25 @@ async def remote_file_metadata(
     uri: str,
     *,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> RemoteFile | None:
     """Return one supported remote object's existence and size metadata."""
     provider = remote_provider(uri)
     if provider == "gcs":
-        return await gcs.file_metadata(uri)
+        return await gcs.file_metadata(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "s3":
-        return await s3.file_metadata(uri)
+        return await s3.file_metadata(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "azure":
-        return await azure.file_metadata(uri)
+        return await azure.file_metadata(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     if provider == "http":
-        return await http_file_metadata(uri, memory_limit_bytes=memory_limit_bytes)
+        return await http_file_metadata(
+            uri, memory_limit_bytes=memory_limit_bytes, threading_mode=threading_mode
+        )
     scheme = urlparse(uri).scheme.lower()
     raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")

@@ -29,10 +29,16 @@ def test_parquet_native_file_output_uses_native_writer_when_available(
         compression: str,
         gzip_level: int,
         memory_limit_bytes: int,
+        threading_mode: int,
     ) -> None:
         """Write a marker file through the fake native Parquet writer."""
         assert hasattr(stream, "__arrow_c_stream__")
-        assert (compression, gzip_level, memory_limit_bytes) == ("gzip", -1, -1)
+        assert (compression, gzip_level, memory_limit_bytes, threading_mode) == (
+            "gzip",
+            -1,
+            -1,
+            0,
+        )
         Path(output_path).write_bytes(b"native-parquet")
 
     monkeypatch.setattr(native_parquet_output, "PARQUET_STREAM_WRITE", fake_native_write)
@@ -69,6 +75,7 @@ def test_parquet_native_file_output_falls_back_when_gzip_lacks_zlib(
         _compression: str,
         _gzip_level: int,
         _memory_limit_bytes: int,
+        _threading_mode: int,
     ) -> None:
         """Simulate a native build without zlib."""
         raise RuntimeError(
@@ -113,6 +120,7 @@ def test_parquet_native_file_output_retries_pyarrow_after_native_failure(
         _compression: str,
         _gzip_level: int,
         _memory_limit_bytes: int,
+        _threading_mode: int,
     ) -> None:
         """Consume part of the stream before simulating a native writer bug."""
         assert hasattr(stream, "read_next_batch")
@@ -157,6 +165,7 @@ def test_raw_parquet_file_output_retries_pyarrow_after_native_failure(
         _compression: str,
         _gzip_level: int,
         _memory_limit_bytes: int,
+        _threading_mode: int,
     ) -> None:
         """Fail after reading one batch from each native attempt."""
         assert hasattr(stream, "read_next_batch")
@@ -206,6 +215,7 @@ def test_parquet_native_file_output_writes_metadata_without_pyarrow_sink(
         compression: str,
         gzip_level: int,
         memory_limit_bytes: int,
+        threading_mode: int,
     ) -> None:
         """Write a marker file through the fake native metadata Parquet writer."""
         assert hasattr(stream, "__arrow_c_stream__")
@@ -213,7 +223,12 @@ def test_parquet_native_file_output_writes_metadata_without_pyarrow_sink(
         captured["all_row_columns"] = all_row_columns
         captured["row_span_columns"] = row_span_columns
         captured["timestamp_columns"] = timestamp_columns
-        assert (compression, gzip_level, memory_limit_bytes) == ("gzip", -1, -1)
+        assert (compression, gzip_level, memory_limit_bytes, threading_mode) == (
+            "gzip",
+            -1,
+            -1,
+            0,
+        )
         Path(output_path).write_bytes(b"native-parquet-metadata")
 
     monkeypatch.setattr(

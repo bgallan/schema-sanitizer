@@ -413,13 +413,15 @@ void merge_page_info(PageInfo &target, const PageInfo &page) {
 sanitize::Result<ColumnChunkInfo>
 write_column_pages(CountingOutput &out, const LeafColumn &column,
                    const ColumnPageData &page_data, CompressionCodec codec,
-                   int gzip_level, std::int64_t target_page_bytes) {
+                   int gzip_level, std::int64_t target_page_bytes,
+                   bool allow_single_page_dictionary = true) {
   const auto index = build_page_slice_index(column);
   const auto ranges =
       split_column_page_ranges(column, page_data, index, target_page_bytes);
   ColumnChunkInfo chunk;
   chunk.pages.reserve(ranges.size());
-  const bool allow_dictionary = ranges.size() == 1;
+  const bool allow_dictionary =
+      allow_single_page_dictionary && ranges.size() == 1;
   for (const auto &range : ranges) {
     // The common one-page case writes the original buffers directly. Split
     // columns materialize only the current slice, so memory is bounded by one

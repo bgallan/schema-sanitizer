@@ -63,6 +63,9 @@ def test_file_conversion_core_filters_helper_and_writer_options_before_schema_op
         writer_options={"parquet_compression": "gzip", "parquet_gzip_level": 6},
     )
 
+    assert len(captured_options) == 1
+    resolved_memory_limit = captured_options[0].pop("memory_limit_bytes")
+    assert isinstance(resolved_memory_limit, int) and resolved_memory_limit > 0
     assert captured_options == [
         {
             "field_name_policy": "lower_snake",
@@ -111,6 +114,9 @@ def test_analytical_core_filters_helper_options_before_schema_options(
     )
 
     assert _data_rows(result) == [{"alpha": 1}]
+    assert len(captured_options) == 1
+    resolved_memory_limit = captured_options[0].pop("memory_limit_bytes")
+    assert isinstance(resolved_memory_limit, int) and resolved_memory_limit > 0
     assert captured_options == [
         {
             "field_name_policy": "lower_snake",

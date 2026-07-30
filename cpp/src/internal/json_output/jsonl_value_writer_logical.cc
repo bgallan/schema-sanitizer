@@ -30,45 +30,53 @@ struct MonthDayNanoInterval {
   int64_t nanoseconds = 0;
 };
 
-sanitize::Status append_quoted_text(std::string &out, std::string_view value) {
+sanitize::Status append_quoted_text(TextBuffer &out, std::string_view value) {
   sanitize::internal::json_encoding::append_string(out, value);
   return sanitize::Status::OK();
 }
 
 } // namespace
 
-sanitize::Status append_decimal_value(std::string &out, const JsonlField &field,
-                                      const ArrowArray &array, int64_t row) {
+sanitize::Status append_decimal_value(TextBuffer &out, const JsonlField &field,
+                                      const ArrowArray &array, int64_t row,
+                                      bool quote) {
   if (!array.buffers || !array.buffers[1]) {
     return sanitize::Status::Invalid("JSONL writer: missing decimal buffer");
   }
   const auto *data = static_cast<const uint8_t *>(array.buffers[1]);
   const auto offset =
       static_cast<std::size_t>((array.offset + row) * field.decimal_byte_width);
-  return append_quoted_text(
-      out, sanitize::internal::arrow_format::decimal_to_string(
-               data + offset, field.decimal_byte_width, field.decimal_scale));
+  const auto text = sanitize::internal::arrow_format::decimal_to_string(
+      data + offset, field.decimal_byte_width, field.decimal_scale);
+  if (quote) {
+    return append_quoted_text(out, text);
+  }
+  out.append(text);
+  return sanitize::Status::OK();
 }
 
-sanitize::Status append_duration_value(std::string &out,
-                                       const JsonlField &field,
-                                       const ArrowArray &array, int64_t row) {
+sanitize::Status append_duration_value(TextBuffer &out, const JsonlField &field,
+                                       const ArrowArray &array, int64_t row,
+                                       bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
   if (!values) {
     return sanitize::Status::Invalid("JSONL writer: missing duration buffer");
   }
-  return append_quoted_text(
-      out, sanitize::internal::arrow_format::duration_to_string(
-               values[array.offset + row], field.format));
+  const auto text = sanitize::internal::arrow_format::duration_to_string(
+      values[array.offset + row], field.format);
+  if (quote) {
+    return append_quoted_text(out, text);
+  }
+  out.append(text);
+  return sanitize::Status::OK();
 }
 
-sanitize::Status append_interval_value(std::string &out,
-                                       const JsonlField &field,
+sanitize::Status append_interval_value(TextBuffer &out, const JsonlField &field,
                                        const ArrowArray &array, int64_t row) {
   if (!array.buffers || !array.buffers[1]) {
     return sanitize::Status::Invalid("JSONL writer: missing interval buffer");
   }
-  std::string text;
+  TextBuffer text(out.get_allocator().resource());
   if (field.format == "tiM") {
     const int32_t *values = data_buffer<int32_t>(array);
     if (!values) {

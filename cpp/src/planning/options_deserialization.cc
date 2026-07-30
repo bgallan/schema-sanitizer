@@ -14,7 +14,7 @@ namespace sanitize {
 
 namespace {
 
-constexpr std::string_view kMagic = "SZOPT16";
+constexpr std::string_view kMagic = "SZOPT17";
 constexpr std::size_t kMaxOptionsPayloadBytes = 64U * 1024U * 1024U;
 using internal::options_io::read_u32;
 
@@ -34,7 +34,7 @@ sanitize::Result<Options> deserialize_options(std::string_view bytes) {
 
   std::size_t pos = kMagic.size();
   uint32_t version = 0;
-  if (!read_u32(bytes, &pos, &version) || version != 16u) {
+  if (!read_u32(bytes, &pos, &version) || version != 17u) {
     return sanitize::Status::Invalid(
         "deserialize_options: unsupported version");
   }

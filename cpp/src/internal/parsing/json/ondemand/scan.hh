@@ -16,6 +16,7 @@ struct Cursor {
   const char *end = nullptr;
   std::size_t base = 0;
   const char *text_begin = nullptr;
+  bool saw_escape = false;
 
   // Returns the absolute input offset at the cursor.
   [[nodiscard]] std::size_t offset() const {

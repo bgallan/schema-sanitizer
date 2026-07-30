@@ -58,11 +58,13 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
 
     PyRegistrySinkOutputs outputs;
 
-    int st = schema_sanitizer_context_to_registry_sink_path(
-        ctx, sink_name, frontend_name, path, prepared, registry_json,
-        field_name_policy, schema_mode, &outputs.main_stream,
-        &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
-        &outputs.conversion_timestamp, &outputs.err);
+    int st = call_without_gil([&] {
+      return schema_sanitizer_context_to_registry_sink_path(
+          ctx, sink_name, frontend_name, path, prepared, registry_json,
+          field_name_policy, schema_mode, &outputs.main_stream,
+          &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
+          &outputs.conversion_timestamp, &outputs.err);
+    });
     Py_DECREF(path_bytes);
 
     return pack_registry_or_raise_with_metadata(
@@ -84,12 +86,14 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
     PyRegistrySinkOutputs outputs;
 
     auto src = make_python_reader_chunk_source(payload_obj);
-    int st = schema_sanitizer_context_to_registry_sink_from_source(
-        ctx, sink_name, frontend_name, std::move(src), prepared_shared,
-        registry_json, field_name_policy, schema_mode, &outputs.main_stream,
-        &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
-        &outputs.conversion_timestamp, &outputs.err,
-        "schema_sanitizer_context_to_registry_sink_from_source");
+    int st = call_without_gil([&] {
+      return schema_sanitizer_context_to_registry_sink_from_source(
+          ctx, sink_name, frontend_name, std::move(src), prepared_shared,
+          registry_json, field_name_policy, schema_mode, &outputs.main_stream,
+          &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
+          &outputs.conversion_timestamp, &outputs.err,
+          "schema_sanitizer_context_to_registry_sink_from_source");
+    });
 
     return pack_registry_or_raise_with_metadata(
         st, payload_obj, &outputs, first_row_columns, all_row_columns,
@@ -104,13 +108,15 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
 
     PyRegistrySinkOutputs outputs;
 
-    int st = schema_sanitizer_context_to_registry_sink_text(
-        ctx, sink_name, frontend_name,
-        reinterpret_cast<const std::uint8_t *>(data),
-        static_cast<std::size_t>(data_len), prepared, registry_json,
-        field_name_policy, schema_mode, &outputs.main_stream,
-        &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
-        &outputs.conversion_timestamp, &outputs.err);
+    int st = call_without_gil([&] {
+      return schema_sanitizer_context_to_registry_sink_text(
+          ctx, sink_name, frontend_name,
+          reinterpret_cast<const std::uint8_t *>(data),
+          static_cast<std::size_t>(data_len), prepared, registry_json,
+          field_name_policy, schema_mode, &outputs.main_stream,
+          &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
+          &outputs.conversion_timestamp, &outputs.err);
+    });
 
     return pack_registry_or_raise_with_metadata(
         st, ctx_obj, &outputs, first_row_columns, all_row_columns,

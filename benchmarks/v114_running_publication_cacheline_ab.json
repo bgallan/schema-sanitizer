@@ -1,0 +1,30 @@
+{
+  "scope": "cache-line ownership transfer between queue/accounting publication and worker running-state publication; does not measure parsing, validation, materialization, or sink throughput",
+  "pair_count": 15,
+  "scenarios": [
+    {
+      "worker_pairs": 2,
+      "pair_count": 15,
+      "baseline_median_ns": 11633072,
+      "candidate_median_ns": 8195014,
+      "paired_median_reduction_percent": 24.96,
+      "candidate_wins": 14
+    },
+    {
+      "worker_pairs": 4,
+      "pair_count": 15,
+      "baseline_median_ns": 24692668,
+      "candidate_median_ns": 13807103,
+      "paired_median_reduction_percent": 43.36,
+      "candidate_wins": 15
+    },
+    {
+      "worker_pairs": 8,
+      "pair_count": 15,
+      "baseline_median_ns": 38947365,
+      "candidate_median_ns": 23091865,
+      "paired_median_reduction_percent": 41.03,
+      "candidate_wins": 15
+    }
+  ]
+}

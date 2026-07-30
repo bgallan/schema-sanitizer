@@ -24,7 +24,7 @@ template <typename T> const T *data_buffer(const ArrowArray &array) {
   return static_cast<const T *>(array.buffers[1]);
 }
 
-void append_floating(std::string &out, double value) {
+void append_floating(TextBuffer &out, double value) {
   if (std::isnan(value)) {
     out += "NaN";
     return;
@@ -90,7 +90,7 @@ float half_to_float(uint16_t bits) noexcept {
 
 } // namespace
 
-sanitize::Status append_float32_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_float32_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row) {
   const float *values = data_buffer<float>(array);
   if (!values) {
@@ -100,7 +100,7 @@ sanitize::Status append_float32_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_float16_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_float16_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row) {
   const uint16_t *values = data_buffer<uint16_t>(array);
   if (!values) {
@@ -111,7 +111,7 @@ sanitize::Status append_float16_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-sanitize::Status append_float64_value(std::string &out, const ArrowArray &array,
+sanitize::Status append_float64_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row) {
   const double *values = data_buffer<double>(array);
   if (!values) {

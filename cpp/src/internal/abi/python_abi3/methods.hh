@@ -9,10 +9,28 @@ namespace core_abi3_internal {
 // Context, diagnostics, and prepared options.
 PyObject *py_context_new(PyObject *, PyObject *);
 PyObject *py_context_memory_stats_json(PyObject *, PyObject *);
+PyObject *py_context_performance_stats_json(PyObject *, PyObject *);
 PyObject *py_diagnostics_json(PyObject *, PyObject *);
 PyObject *py_options_catalog(PyObject *, PyObject *);
 PyObject *py_memory_budget(PyObject *, PyObject *);
+PyObject *py_process_memory_governor_stats(PyObject *, PyObject *);
+PyObject *py_process_cpu_governor_probe(PyObject *, PyObject *);
+PyObject *py_execution_policy(PyObject *, PyObject *);
+PyObject *py_ordered_executor_probe(PyObject *, PyObject *);
+PyObject *py_ordered_executor_arena_completion_probe(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_probe(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
+                                                          PyObject *);
+PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
+                                                          PyObject *);
+PyObject *py_operation_task_arena_output_steal_probe(PyObject *, PyObject *);
+PyObject *py_output_worker_admission_probe(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *);
 PyObject *py_options_prepare_bytes(PyObject *, PyObject *);
+PyObject *py_options_with_detected_at(PyObject *, PyObject *);
 
 // Logical-schema payloads.
 PyObject *py_logical_schema_payload_validate(PyObject *, PyObject *);
@@ -42,6 +60,7 @@ PyObject *py_json_array_files_to_jsonl_bytes(PyObject *, PyObject *);
 PyObject *py_xml_folder_effective_row_tag(PyObject *, PyObject *);
 PyObject *py_python_row_json_bytes(PyObject *, PyObject *);
 PyObject *py_python_rows_jsonl_bytes(PyObject *, PyObject *);
+PyObject *py_python_iter_rows_jsonl_bytes(PyObject *, PyObject *);
 PyObject *py_jsonl_schema_supported(PyObject *, PyObject *);
 PyObject *py_arrow_direct_schema_supported(PyObject *, PyObject *);
 PyObject *py_arrow_schema_contract_payload(PyObject *, PyObject *);

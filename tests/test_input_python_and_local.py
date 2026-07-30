@@ -70,9 +70,17 @@ def test_python_rows_generator_spools_incrementally() -> None:
     reader = PythonRowsJsonlByteReader(rows())
     assert reader.read(32)
     assert 0 < yielded < 10_000
-    assert len(reader._iterable_chunk) <= reader._ENCODE_ROWS_PER_CHUNK
+    assert yielded <= reader._MAX_ITERABLE_ROWS_PER_BATCH
+    assert reader._iterable_index == yielded
+    first_yielded = yielded
     reader.seek(0)
+    assert yielded == first_yielded
+    assert reader.read(32)
+    assert yielded == first_yielded
+    while reader.read(1 << 20):
+        pass
     assert yielded == 10_000
+    reader.close()
 
 
 def test_python_rows_jsonl_reader_rejects_unsupported_values_without_fallback() -> None:
@@ -381,33 +389,31 @@ def test_read_json_folder_memory_limit_rejects_large_document(tmp_path) -> None:
 def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypatch) -> None:
     """Verify remote folder staging rejects oversized children with unknown size."""
     pytest.importorskip("pyarrow")
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
-    from schema_sanitizer.remote_impl import routing as remote_routing
-    from schema_sanitizer.remote_impl import staging as remote_staging
+    from contextlib import contextmanager
 
-    async def fake_list(uri, suffixes):
+    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
+    from schema_sanitizer.remote_impl import sync_backend
+    from schema_sanitizer.remote_impl.providers import s3_sync
+
+    def fake_list(uri, suffixes, *, memory_limit_bytes=None):
         """Return one child without a known size."""
         del uri, suffixes
         return [RemoteFile("s3://bucket/events/row.json", "row.json", None)]
 
-    async def fake_download(client, file, local_path):
-        """Write an oversized payload."""
-        del client, file
+    @contextmanager
+    def fake_client():
+        """Yield one inert blocking S3 client."""
+        yield object()
+
+    def fake_download(_context, file, local_path, *, memory_limit_bytes):
+        """Write an oversized payload below the canonical size check."""
+        del memory_limit_bytes
+        assert file.name == "row.json"
         Path(local_path).write_bytes(b"x" * 10_000)
 
-    async def fake_client(files, *, memory_limit_bytes):
-        """Return a reusable fake provider context."""
-        del files, memory_limit_bytes
-        return object()
-
-    async def fake_close(client):
-        """Close no reusable provider client."""
-        del client
-
-    monkeypatch.setattr(remote_routing, "list_remote_directory", fake_list)
-    monkeypatch.setattr(remote_staging, "provider_client_for_downloads", fake_client)
-    monkeypatch.setattr(remote_staging, "close_provider_client", fake_close)
-    monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)
+    monkeypatch.setattr(sync_backend, "list_remote_directory", fake_list)
+    monkeypatch.setattr(s3_sync, "open_client", fake_client)
+    monkeypatch.setattr(sync_backend, "_download_with_context", fake_download)
 
     with pytest.raises(ss.SchemaSanitizerResourceError) as excinfo:
         read_test_json_folder("s3://bucket/events/", memory_limit_bytes=128)

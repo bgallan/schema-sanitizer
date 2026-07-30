@@ -74,6 +74,13 @@ target_sources(
     cpp/src/api/python_abi3/context/_core_abi3_context.cc
     cpp/src/api/python_abi3/options/catalog.cc
     cpp/src/api/python_abi3/options/prepare.cc
+    cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc
+    cpp/src/api/python_abi3/runtime/cpu_governor_probe.cc
+    cpp/src/api/python_abi3/runtime/ordered_executor_completion_probe.cc
+    cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc
+    cpp/src/api/python_abi3/runtime/arena_wake_probe.cc
+    cpp/src/api/python_abi3/runtime/output_admission_probe.cc
+    cpp/src/api/python_abi3/runtime/ordered_executor_cancellation_probe.cc
     cpp/src/api/c/schema_sanitizer_c.cc
     cpp/src/api/c/schema_sanitizer_c_context.cc
     cpp/src/api/c/schema_sanitizer_c_context_stats.cc
@@ -103,11 +110,29 @@ target_sources(
     cpp/src/schema_registry/schema_registry_document_json.cc
     cpp/src/schema_registry/schema_registry_drift_json.cc
     cpp/src/schema_registry/schema_registry_types.cc
+    cpp/src/internal/memory/memory_budget.cc
     cpp/src/internal/memory/memory_pool.cc
+    cpp/src/internal/arrow_c/cdata_stream_runtime.cc
+    cpp/src/internal/runtime/operation_task_arena.cc
+    cpp/src/internal/runtime/performance_telemetry.cc
     cpp/src/internal/materialization/direct_rows.cc
     cpp/src/internal/materialization/ingest_stream/source.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_diagnostics.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_packets.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_json_validation.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_preparer.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_preparer_columns.cc
+    cpp/src/internal/materialization/ingest_stream/column_partition.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_source.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_source_columns.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_source_dispatch.cc
+    cpp/src/internal/materialization/ingest_stream/parallel_source_json_validation.cc
     cpp/src/internal/materialization/ingest_stream/batching.cc
     cpp/src/internal/inference/depth.cc
+    cpp/src/internal/inference/evidence_reduce.cc
+    cpp/src/internal/inference/parallel_evidence.cc
+    cpp/src/internal/inference/parallel_evidence_keys.cc
+    cpp/src/internal/inference/parallel_flat_evidence.cc
     cpp/src/internal/inference/value_observation.cc
     cpp/src/internal/arrow_text/binary.cc
     cpp/src/internal/arrow_text/decimal.cc
@@ -142,6 +167,7 @@ target_sources(
     cpp/src/internal/parsing/json/ondemand/value.cc
     cpp/src/internal/parsing/json/ondemand/array_iteration.cc
     cpp/src/internal/parsing/json/ondemand/object_iteration.cc
+    cpp/src/internal/parsing/json/ondemand/flat_object_iteration.cc
     cpp/src/internal/parsing/json/ondemand/value_iteration.cc
     cpp/src/internal/parsing/json/ondemand/lex.cc
     cpp/src/internal/parsing/json/ondemand/scan.cc
@@ -183,12 +209,16 @@ target_sources(
     cpp/src/internal/parsing/streaming/xml/row_scanner_buffer.cc
     cpp/src/internal/parsing/streaming/xml/row_scanner_markup.cc
     cpp/src/frontends/json/text_frontend.cc
+    cpp/src/frontends/json/text_row_pipeline.cc
+    cpp/src/frontends/json/text_row_materializer.cc
+    cpp/src/frontends/json/path_group_frontend.cc
     cpp/src/frontends/xml/frontend.cc
     cpp/src/frontends/csv/frontend.cc
     cpp/src/internal/parsing/streaming/csv/record_buffer.cc
     cpp/src/internal/parsing/streaming/csv/record_span.cc
     cpp/src/internal/parsing/streaming/csv/scanner.cc
     cpp/src/internal/parsing/streaming/json/scanner_flow.cc
+    cpp/src/internal/parsing/streaming/json/scanner_line.cc
     cpp/src/internal/parsing/streaming/json/scanner_state.cc
     cpp/src/internal/parsing/streaming/json/scanner_value.cc
     cpp/src/internal/parsing/streaming/json/value_span_scanner.cc
@@ -200,6 +230,7 @@ target_sources(
     cpp/src/internal/inference/statistics/state.cc
     cpp/src/planning/schema_evolution.cc
     cpp/src/internal/materialization/batch_appender.cc
+    cpp/src/internal/materialization/direct_scalar_rows.cc
     cpp/src/internal/materialization/builders/factory.cc
     cpp/src/internal/materialization/builders/nested.cc
     cpp/src/internal/materialization/builders/scalar.cc
@@ -212,4 +243,5 @@ target_sources(
     cpp/src/internal/materialization/conversion/variants.cc
     cpp/src/internal/materialization/field_lookup.cc
     cpp/src/internal/materialization/conversion/scalar_text.cc
-    cpp/src/internal/materialization/row_appender.cc)
+    cpp/src/internal/materialization/row_appender.cc
+    cpp/src/internal/materialization/row_appender_json_tokens.cc)

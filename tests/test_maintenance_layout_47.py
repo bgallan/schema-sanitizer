@@ -59,6 +59,7 @@ def test_json_stream_scanner_is_split_by_responsibility() -> None:
     assert not (package / "scanner.cc").exists()
     assert {path.name for path in package.glob("scanner_*.cc")} == {
         "scanner_flow.cc",
+        "scanner_line.cc",
         "scanner_state.cc",
         "scanner_value.cc",
     }

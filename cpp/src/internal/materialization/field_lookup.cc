@@ -92,13 +92,12 @@ sanitize::Status
 RowFieldSnapshot::build(const sanitize::RowRef &input_row,
                         const sanitize::CompiledPlan &plan,
                         const sanitize::PreparedOptions &opts) {
-  fields.clear();
+  row = &input_row;
   column_field_indices.assign(plan.columns.size(), -1);
   if (!input_row.fields) {
     return sanitize::Status::OK();
   }
 
-  fields.reserve(input_row.size);
   for (std::size_t i = 0; i < input_row.size; ++i) {
     const auto &field = input_row.fields[i];
     bool empty_container = false;
@@ -106,8 +105,7 @@ RowFieldSnapshot::build(const sanitize::RowRef &input_row,
     if (empty_container) {
       continue;
     }
-    const std::size_t field_i = fields.size();
-    fields.push_back(field);
+    const std::size_t field_i = i;
 
     const auto *planned =
         find_planned_field(plan.root_layout, field.key, field.key_hash, opts);
@@ -140,12 +138,12 @@ bool RowFieldSnapshot::find(std::size_t column_index,
     return false;
   }
   const int32_t field_index = column_field_indices[column_index];
-  if (field_index < 0 ||
-      static_cast<std::size_t>(field_index) >= fields.size()) {
+  if (!row || !row->fields || field_index < 0 ||
+      static_cast<std::size_t>(field_index) >= row->size) {
     return false;
   }
   if (out) {
-    *out = fields[static_cast<std::size_t>(field_index)].value;
+    *out = row->fields[static_cast<std::size_t>(field_index)].value;
   }
   return true;
 }

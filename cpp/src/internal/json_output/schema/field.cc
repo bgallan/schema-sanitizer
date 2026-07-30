@@ -3,6 +3,7 @@
 #include "internal/json_output/schema/model.hh"
 
 #include "internal/arrow_text/formatters.hh"
+#include "internal/json_encoding/token_writer.hh"
 
 #include <charconv>
 #include <cstdint>
@@ -61,6 +62,23 @@ bool parse_fixed_size_binary_format(std::string_view format,
   }
   field->fixed_size_binary_size = size;
   return true;
+}
+
+void build_member_prefixes(JsonlField *field) {
+  if (!field || field->kind != JsonlKind::kStruct) {
+    return;
+  }
+  field->member_prefixes.reserve(field->children.size());
+  for (std::size_t index = 0; index < field->children.size(); ++index) {
+    std::string prefix;
+    if (index != 0) {
+      prefix.push_back(',');
+    }
+    sanitize::internal::json_encoding::append_string(
+        prefix, field->children[index].name);
+    prefix.push_back(':');
+    field->member_prefixes.push_back(std::move(prefix));
+  }
 }
 
 } // namespace
@@ -130,6 +148,7 @@ sanitize::Result<JsonlField> parse_schema_field_impl(const ArrowSchema &schema,
     field.children.clear();
     field.children.push_back(std::move(dictionary));
   }
+  build_member_prefixes(&field);
   return field;
 }
 

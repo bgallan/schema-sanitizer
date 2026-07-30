@@ -49,7 +49,8 @@ int context_to_registry_sink_from_source_internal(
 
     auto merged_r = sanitize::merge_schema_registry(make_registry_merge_input(
         std::move(prepared.logical_schema), registry_json, field_name_policy,
-        prep->spec.default_key_name, prep->spec.field_order));
+        prep->spec.default_key_name, prep->spec.field_order,
+        prep->operation_detected_at));
     if (!merged_r.ok()) {
       return set_error(out_error, merged_r.status().ToString(),
                        code_for_status(merged_r.status()));

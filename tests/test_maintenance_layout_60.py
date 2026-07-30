@@ -63,6 +63,6 @@ def test_metadata_column_parsing_has_one_bounded_owner() -> None:
     assert {path.name for path in columns.iterdir()} == {"api.hh", "columns.cc"}
     owner = (columns / "columns.cc").read_text(encoding="utf-8")
     assert "append_row_span_columns_from_dict" in owner
-    assert "append_timestamp_columns_from_sequence" in owner
+    assert "append_timestamp_columns" in owner
     assert "std::in_range<std::int64_t>" in owner
     assert len(owner.splitlines()) <= 500

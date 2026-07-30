@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import struct
 from decimal import Decimal
 from pathlib import Path
 
@@ -175,7 +176,12 @@ def test_to_jsonl_native_writes_float16(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
-    batch = pa.record_batch({"half": pa.array([1.5], type=pa.float16())})
+    # PyArrow 20 can segfault while converting a Python float directly to
+    # float16 on CPython 3.13. Build the same valid Arrow array from its IEEE
+    # 754 binary16 buffer so this test remains scoped to Schema-Sanitizer.
+    values = pa.py_buffer(struct.pack("<e", 1.5))
+    half = pa.Array.from_buffers(pa.float16(), 1, [None, values])
+    batch = pa.record_batch({"half": half})
     reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
     out = tmp_path / "out.jsonl"
 

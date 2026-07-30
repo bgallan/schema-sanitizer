@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core_impl.atomic_output import atomic_local_output
 from ...core_impl.dependencies import ensure_pyarrow
+from ...core_impl.execution_policy import normalize_threading_mode
 from ...core_impl.native_symbols import (
     JSONL_SCHEMA_SUPPORTED,
     JSONL_STREAM_WRITE,
@@ -59,17 +61,22 @@ def _native_jsonl_stream_write(
     *,
     feature: str,
     memory_limit_bytes: int | None,
+    threading_mode: str,
 ) -> Any:
     """Write JSONL natively to a local path."""
     del feature
-    return (
-        write(
-            stream,
-            local_output_path_or_reject_remote(out_path, sink_name="JSONL"),
-            -1 if memory_limit_bytes is None else memory_limit_bytes,
+    mode = normalize_threading_mode(threading_mode)
+    output_path = local_output_path_or_reject_remote(out_path, sink_name="JSONL")
+    with atomic_local_output(output_path) as staged_path:
+        return (
+            write(
+                stream,
+                staged_path,
+                -1 if memory_limit_bytes is None else memory_limit_bytes,
+                0 if mode == "single" else 1,
+            )
+            or True
         )
-        or True
-    )
 
 
 def write_jsonl_stream(
@@ -82,6 +89,7 @@ def write_jsonl_stream(
     row_span_columns: RowSpanColumns = None,
     timestamp_columns: TimestampColumns = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> Any:
     """Write an Arrow batch stream to JSON Lines."""
     global _LAST_JSONL_STREAM_ROUTE
@@ -108,6 +116,7 @@ def write_jsonl_stream(
             out_path,
             feature=feature,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
         _LAST_JSONL_STREAM_ROUTE = "native"
         return stats

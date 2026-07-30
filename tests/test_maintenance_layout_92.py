@@ -81,7 +81,7 @@ def test_metadata_parser_has_one_owner_and_reserves_known_sizes() -> None:
     )
     assert registry_text.count("append_registry_metadata_columns") == 13
     assert "append_first_row_columns_from_dict" not in registry_text
-    assert "append_timestamp_columns_from_sequence" not in registry_text
+    assert "append_timestamp_columns" not in registry_text
     manifest = (ROOT / "cmake/SchemaSanitizerSources.cmake").read_text(encoding="utf-8")
     assert manifest.count("metadata/columns/columns.cc") == 1
     assert "metadata/columns/spans.cc" not in manifest

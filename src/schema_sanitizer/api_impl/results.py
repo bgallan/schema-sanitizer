@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 from ..adapters.pyarrow import streams as _pyarrow_streams
@@ -21,6 +22,27 @@ TABLE_ADAPTER_FORMATS = TABLE_OUTPUT_FORMATS - {"pyarrow"}
 TABLE_OUTPUT_FORMAT_ERROR = "output_format must be 'pyarrow', 'pandas', 'polars', or 'duckdb'."
 
 
+@dataclass(frozen=True, slots=True)
+class AnalyticalOutputConversion:
+    """Converted analytical value plus bounded diagnostics and route metadata."""
+
+    clean_data: Any
+    diagnostics_shape: Any
+    route: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalyticalShape:
+    """Minimal table-like shape used to finalize stream-consumer diagnostics."""
+
+    num_rows: int
+    batch_count: int = 0
+
+    def to_batches(self) -> range:
+        """Expose a cheap batch-count-compatible sequence."""
+        return range(max(0, self.batch_count))
+
+
 def normalize_table_output_format(output_format: str) -> str:
     """Normalize and validate a table output format."""
     if not isinstance(output_format, str):
@@ -31,26 +53,224 @@ def normalize_table_output_format(output_format: str) -> str:
     return target
 
 
-def _to_pandas(table: Any, *, feature: str) -> Any:
+def _to_pandas(table: Any, *, feature: str, threading_mode: str = "single") -> Any:
     """Convert one Arrow table to pandas with a stable error boundary."""
     ensure_optional_dependency("pandas", extra="pandas", feature=feature)
     try:
-        return table.to_pandas()
+        return table.to_pandas(use_threads=threading_mode == "multi")
     except Exception as exc:
         raise RuntimeError(
             f"{feature} could not convert the Arrow table to pandas DataFrame."
         ) from exc
 
 
-def convert_arrow_table_output(table: Any, target: str, *, feature: str) -> Any:
+def _reader_row_count_from_pandas(frame: Any) -> int:
+    """Return a pandas row count without converting or copying the frame."""
+    index = getattr(frame, "index", None)
+    if index is not None:
+        try:
+            return int(len(index))
+        except Exception:
+            pass
+    try:
+        return int(len(frame))
+    except Exception:
+        return 0
+
+
+def _polars_from_arrow_preserving_chunks(
+    polars: Any, value: Any, *, feature: str
+) -> tuple[Any, str]:
+    """Convert Arrow input without a full-frame rechunk when supported."""
+    from_arrow = getattr(polars, "from_arrow", None)
+    if not callable(from_arrow):
+        raise RuntimeError(f"{feature} could not access polars.from_arrow().")
+    try:
+        return from_arrow(value, rechunk=False), "record_batch_reader_to_polars"
+    except TypeError as exc:
+        message = str(exc).lower()
+        unsupported_rechunk = "rechunk" in message and any(
+            marker in message
+            for marker in (
+                "unexpected keyword",
+                "keyword argument",
+                "invalid keyword",
+                "unsupported keyword",
+            )
+        )
+        if not unsupported_rechunk:
+            raise
+        try:
+            return from_arrow(value), "record_batch_reader_to_polars"
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                f"{feature} could not convert the Arrow stream to Polars DataFrame."
+            ) from fallback_exc
+
+
+def _reader_row_count_from_polars(frame: Any) -> int:
+    """Return a Polars row count without materializing Python rows."""
+    try:
+        return max(0, int(frame.height))
+    except Exception:
+        shape = getattr(frame, "shape", None)
+        if shape is None:
+            return 0
+        try:
+            return max(0, int(shape[0]))
+        except Exception:
+            return 0
+
+
+def _reader_batch_count(reader: Any) -> int:
+    """Return a reader batch count when an adapter exposes one cheaply."""
+    for name in ("num_record_batches", "num_batches"):
+        value = getattr(reader, name, None)
+        try:
+            if value is not None:
+                return max(0, int(value))
+        except Exception:
+            continue
+    return 0
+
+
+def _reader_batches(reader: Any, *, feature: str) -> tuple[list[Any], int]:
+    """Consume a reader into ordered batches without building an Arrow table."""
+    try:
+        batches = list(reader)
+    except Exception as exc:
+        raise RuntimeError(f"{feature} could not consume the Arrow batches.") from exc
+    row_count = 0
+    for batch in batches:
+        try:
+            row_count += max(0, int(batch.num_rows))
+        except Exception:
+            continue
+    return batches, row_count
+
+
+def _read_all_from_reader(reader: Any, *, feature: str) -> Any:
+    """Consume a record-batch reader into one table with a stable boundary."""
+    read_all = getattr(reader, "read_all", None)
+    if callable(read_all):
+        try:
+            return read_all()
+        except Exception as exc:
+            raise RuntimeError(f"{feature} could not materialize the Arrow stream.") from exc
+    return _pyarrow_streams.table_from_stream_like(reader, feature=feature)
+
+
+def convert_arrow_stream_output(
+    stream: Any,
+    target: str,
+    *,
+    feature: str,
+    threading_mode: str = "single",
+) -> AnalyticalOutputConversion:
+    """Convert an Arrow C Stream directly into one analytical output target."""
+    reader = _pyarrow_streams.reader_from_stream_like(stream, feature=feature)
+    try:
+        if target == "pyarrow":
+            table = _read_all_from_reader(reader, feature=feature)
+            return AnalyticalOutputConversion(
+                table,
+                table,
+                "record_batch_reader_to_pyarrow_table",
+            )
+
+        if target == "pandas":
+            ensure_optional_dependency("pandas", extra="pandas", feature=feature)
+            read_pandas = getattr(reader, "read_pandas", None)
+            if not callable(read_pandas):
+                table = _read_all_from_reader(reader, feature=feature)
+                frame = _to_pandas(
+                    table,
+                    feature=feature,
+                    threading_mode=threading_mode,
+                )
+                return AnalyticalOutputConversion(
+                    frame,
+                    table,
+                    "pyarrow_table_fallback_to_pandas",
+                )
+            try:
+                frame = read_pandas(use_threads=threading_mode == "multi")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{feature} could not convert the Arrow stream to pandas DataFrame."
+                ) from exc
+            return AnalyticalOutputConversion(
+                frame,
+                _AnalyticalShape(
+                    _reader_row_count_from_pandas(frame),
+                    _reader_batch_count(reader),
+                ),
+                "record_batch_reader_to_pandas",
+            )
+
+        if target == "polars":
+            polars = ensure_optional_dependency("polars", extra="polars", feature=feature)
+            try:
+                frame, route = _polars_from_arrow_preserving_chunks(polars, reader, feature=feature)
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{feature} could not convert the Arrow stream to Polars DataFrame."
+                ) from exc
+            return AnalyticalOutputConversion(
+                frame,
+                _AnalyticalShape(
+                    _reader_row_count_from_polars(frame),
+                    _reader_batch_count(reader),
+                ),
+                route,
+            )
+
+        if target == "duckdb":
+            dataset_module = ensure_optional_dependency(
+                "pyarrow.dataset",
+                extra="pyarrow",
+                feature=feature,
+                dependency_name="pyarrow",
+            )
+            duckdb = ensure_optional_dependency("duckdb", extra="duckdb", feature=feature)
+            try:
+                schema = reader.schema
+                batches, row_count = _reader_batches(reader, feature=feature)
+                dataset = dataset_module.dataset(batches, schema=schema)
+                relation = duckdb.from_arrow(dataset)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{feature} could not bind the Arrow stream as a DuckDB relation."
+                ) from exc
+            return AnalyticalOutputConversion(
+                relation,
+                _AnalyticalShape(row_count, len(batches)),
+                "record_batch_reader_to_arrow_dataset_to_duckdb",
+            )
+
+        raise AssertionError(f"validated table output target was not handled: {target!r}")
+    finally:
+        _close_suppressing_errors(reader)
+
+
+def convert_arrow_table_output(
+    table: Any,
+    target: str,
+    *,
+    feature: str,
+    threading_mode: str = "single",
+) -> Any:
     """Convert a PyArrow table to a validated analytical output target."""
     if target == "pyarrow":
         return table
     if target == "pandas":
-        return _to_pandas(table, feature=feature)
+        return _to_pandas(table, feature=feature, threading_mode=threading_mode)
     if target == "polars":
         polars = ensure_optional_dependency("polars", extra="polars", feature=feature)
-        return polars.from_arrow(table)
+        frame, _route = _polars_from_arrow_preserving_chunks(polars, table, feature=feature)
+        return frame
     if target == "duckdb":
         duckdb = ensure_optional_dependency("duckdb", extra="duckdb", feature=feature)
         return duckdb.from_arrow(table)
@@ -74,6 +294,8 @@ class Result(DiagnosticsAccessMixin):
         native_registry_state: Any = None,
         conversion_cpu_seconds: float | None = None,
         file_io_seconds: float | None = None,
+        execution_policy: dict[str, Any] | None = None,
+        conversion_route: str | None = None,
     ):
         """Wrap raw reader output and optional materialized clean data."""
         self._raw = raw
@@ -88,6 +310,8 @@ class Result(DiagnosticsAccessMixin):
         self.native_registry_state = native_registry_state
         self.conversion_cpu_seconds = conversion_cpu_seconds
         self.file_io_seconds = file_io_seconds
+        self.execution_policy = execution_policy
+        self.conversion_route = conversion_route
 
     @property
     def schema_registry(self) -> dict[str, Any] | None:

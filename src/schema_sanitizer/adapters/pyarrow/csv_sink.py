@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core_impl.atomic_output import atomic_local_output
 from ...core_impl.dependencies import ensure_pyarrow
+from ...core_impl.execution_policy import normalize_threading_mode
 from ...core_impl.native_symbols import (
     CSV_NESTED_STREAM_WRAP,
     CSV_SCHEMA_SUPPORTED,
@@ -75,8 +77,10 @@ def _write_native_csv(
     *,
     has_metadata: bool,
     memory_limit_bytes: int | None,
+    threading_mode: str,
 ) -> Any:
     """Write through the native CSV writer or fail before fallback materialization."""
+    mode = normalize_threading_mode(threading_mode)
     native_write = CSV_STREAM_WRITE
     native_stream = metadata.reader if metadata.reader is not None else stream
     if has_metadata and metadata.reader is None:
@@ -85,14 +89,17 @@ def _write_native_csv(
         )
     if not _native_csv_schema_supported(metadata.schema):
         raise RuntimeError("CSV output requires a schema supported by the native C++ CSV writer.")
-    return (
-        native_write(
-            native_stream,
-            local_output_path_or_reject_remote(out_path, sink_name="CSV"),
-            -1 if memory_limit_bytes is None else memory_limit_bytes,
+    output_path = local_output_path_or_reject_remote(out_path, sink_name="CSV")
+    with atomic_local_output(output_path) as staged_path:
+        return (
+            native_write(
+                native_stream,
+                staged_path,
+                -1 if memory_limit_bytes is None else memory_limit_bytes,
+                0 if mode == "single" else 1,
+            )
+            or True
         )
-        or True
-    )
 
 
 def write_csv_stream(
@@ -105,6 +112,7 @@ def write_csv_stream(
     row_span_columns: RowSpanColumns = None,
     timestamp_columns: TimestampColumns = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> Any:
     """Write an Arrow batch stream to CSV."""
     global _LAST_CSV_NESTED_ROUTE, _LAST_CSV_STREAM_ROUTE
@@ -134,6 +142,7 @@ def write_csv_stream(
             out_path,
             has_metadata=metadata.has_metadata,
             memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
         )
         _LAST_CSV_STREAM_ROUTE = "native"
         return stats

@@ -129,12 +129,14 @@ def merge_schema_registry(
     inferred_schema: Any,
     schema_registry: Mapping[str, Any] | str | None = None,
     field_name_policy: str = "lower_snake",
+    detected_at: str = "",
 ) -> SchemaRegistryMergeResult:
     """Merge an inferred schema into registry-backed canonical schema state."""
     return _merge_schema_registry_json(
         inferred_schema=inferred_schema,
         registry_json=_normalize_registry_json(schema_registry),
         field_name_policy=field_name_policy,
+        detected_at=detected_at,
     )
 
 
@@ -143,6 +145,7 @@ def _merge_schema_registry_json(
     inferred_schema: Any,
     registry_json: str,
     field_name_policy: str = "lower_snake",
+    detected_at: str = "",
 ) -> SchemaRegistryMergeResult:
     """Merge an inferred schema into an already-normalized registry JSON string."""
     inferred_schema = _normalize_schema(inferred_schema, name="inferred_schema")
@@ -153,6 +156,7 @@ def _merge_schema_registry_json(
         encode_arrow_schema_payload(inferred_schema),
         registry_json,
         field_name_policy,
+        detected_at,
     )
     return SchemaRegistryMergeResult(
         schema=pyarrow_schema_from_payload(schema_payload),

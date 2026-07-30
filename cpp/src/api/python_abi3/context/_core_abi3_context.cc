@@ -46,6 +46,28 @@ PyObject *py_context_memory_stats_json(PyObject *, PyObject *args) {
   return py;
 }
 
+PyObject *py_context_performance_stats_json(PyObject *, PyObject *args) {
+  PyObject *ctx_obj = nullptr;
+  if (!PyArg_ParseTuple(args, "O:context_performance_stats_json", &ctx_obj))
+    return nullptr;
+  auto *ctx = unwrap_context(ctx_obj);
+  if (!ctx)
+    return nullptr;
+
+  char *out_json = nullptr;
+  char *err = nullptr;
+  int st =
+      schema_sanitizer_context_performance_stats_json(ctx, &out_json, &err);
+  if (st != SCHEMA_SANITIZER_STATUS_OK) {
+    raise_status_error(st, err);
+    return nullptr;
+  }
+  PyObject *py = PyUnicode_FromString(out_json ? out_json : "{}");
+  if (out_json)
+    schema_sanitizer_free_string(out_json);
+  return py;
+}
+
 PyObject *py_diagnostics_json(PyObject *, PyObject *args) {
   PyObject *diagnostics_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:diagnostics_json", &diagnostics_obj))

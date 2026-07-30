@@ -28,6 +28,7 @@ sanitize::Status CsvStreamingScanner::Reset() {
   have_chunk_ = false;
   pos_ = 0;
   pending_consume_lf_ = false;
+  prefer_vector_scan_ = false;
   eof_offset_ = 0;
   chunk_ = Chunk{};
   clear_segments();

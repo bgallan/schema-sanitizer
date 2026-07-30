@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/arrow_c/cdata_stream_runtime.hh"
 
 namespace core_abi3_internal {
 
@@ -36,6 +37,7 @@ void native_multi_source_release(ArrowArrayStream *stream,
   if (state && ops.destroy_state) {
     ops.destroy_state(state);
   }
+  sanitize::internal::detach_task_arena(stream);
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
 
@@ -54,6 +56,9 @@ int native_multi_source_get_schema(ArrowArrayStream *stream, ArrowSchema *out,
           SAN_RETURN_NOT_OK(ops.open_next(state));
         }
         MetadataStreamState *metadata = ops.metadata(state);
+        if (metadata && metadata->inner) {
+          sanitize::internal::inherit_task_arena(stream, metadata->inner);
+        }
         if (!metadata) {
           return sanitize::Status::Invalid(
               ops.empty_message ? ops.empty_message
@@ -80,6 +85,9 @@ int native_multi_source_get_next(ArrowArrayStream *stream, ArrowArray *out,
           if (!metadata) {
             SAN_RETURN_NOT_OK(ops.open_next(state));
             metadata = ops.metadata(state);
+            if (metadata && metadata->inner) {
+              sanitize::internal::inherit_task_arena(stream, metadata->inner);
+            }
             if (!metadata) {
               std::memset(array, 0, sizeof(*array));
               return sanitize::Status::OK();

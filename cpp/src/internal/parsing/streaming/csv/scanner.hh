@@ -52,6 +52,7 @@ private:
   std::size_t pos_ = 0;
   bool eof_ = false;
   bool pending_consume_lf_ = false;
+  bool prefer_vector_scan_ = false;
   std::size_t eof_offset_ = 0;
 };
 

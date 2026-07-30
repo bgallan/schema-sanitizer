@@ -29,7 +29,13 @@ def test_uri_input_uses_async_local_staging(monkeypatch, tmp_path) -> None:
 
     staged_paths: list[str] = []
 
-    def fake_stage(uri: str, *, memory_limit_bytes: int | None) -> _Stage:
+    def fake_stage(
+        uri: str,
+        *,
+        memory_limit_bytes: int | None,
+        threading_mode: str = "single",
+        operation_context=None,
+    ) -> _Stage:
         """Write the remote payload to a local staged file."""
         del memory_limit_bytes
         assert uri == "s3://bucket/events.jsonl"
@@ -55,7 +61,13 @@ def test_uri_input_staging_works_with_converters(monkeypatch, tmp_path) -> None:
 
     out = tmp_path / "out.jsonl"
 
-    def fake_stage(uri: str, *, memory_limit_bytes: int | None) -> _Stage:
+    def fake_stage(
+        uri: str,
+        *,
+        memory_limit_bytes: int | None,
+        threading_mode: str = "single",
+        operation_context=None,
+    ) -> _Stage:
         """Write one remote payload to a local staged file."""
         del memory_limit_bytes
         assert uri == "s3://bucket/events.jsonl"
@@ -94,8 +106,15 @@ def test_uri_input_staging_works_with_converters(monkeypatch, tmp_path) -> None:
 def test_uri_input_allows_non_utf8_after_local_staging(monkeypatch, tmp_path) -> None:
     """Verify URI text inputs can be transcoded after local staging."""
     require_native()
+    pytest.importorskip("pyarrow")
 
-    def fake_stage(uri: str, *, memory_limit_bytes: int | None) -> _Stage:
+    def fake_stage(
+        uri: str,
+        *,
+        memory_limit_bytes: int | None,
+        threading_mode: str = "single",
+        operation_context=None,
+    ) -> _Stage:
         """Write Latin-1 JSONL to a local staged file."""
         del memory_limit_bytes
         assert uri == "s3://bucket/events.jsonl"
@@ -111,12 +130,12 @@ def test_uri_input_allows_non_utf8_after_local_staging(monkeypatch, tmp_path) ->
     assert result.clean_data.to_pylist() == [{"name": "café"}]
 
 
-def test_remote_parquet_directory_stages_children_concurrently(monkeypatch, tmp_path) -> None:
+def test_remote_parquet_directory_stages_children_synchronously(monkeypatch, tmp_path) -> None:
     """Verify remote Parquet directory staging downloads every listed child."""
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
 
-    async def fake_list(uri, suffixes, *, memory_limit_bytes=None):
+    def fake_list(uri, suffixes, *, memory_limit_bytes=None):
         """Return deterministic remote Parquet children."""
         assert uri == "s3://bucket/partition/"
         assert ".parquet" in suffixes
@@ -125,24 +144,14 @@ def test_remote_parquet_directory_stages_children_concurrently(monkeypatch, tmp_
             RemoteFile("s3://bucket/partition/b.parquet", "b.parquet", None),
         ]
 
-    async def fake_client(files, *, memory_limit_bytes=None):
-        """Return a reusable fake provider client."""
-        assert len(files) == 2
-        return object()
+    def fake_download(files, directory, *, memory_limit_bytes):
+        """Write staged payloads serially in canonical file order."""
+        assert memory_limit_bytes is None
+        for file in files:
+            (Path(directory) / file.name).write_bytes(file.name.encode("utf-8"))
 
-    async def fake_close(client):
-        """Accept closing the fake provider client."""
-        assert client is not None
-
-    async def fake_download(client, file, local_path):
-        """Write a staged payload for one remote child."""
-        assert client is not None
-        Path(local_path).write_bytes(file.name.encode("utf-8"))
-
-    monkeypatch.setattr(remote_staging.routing, "list_remote_directory", fake_list)
-    monkeypatch.setattr(remote_staging, "provider_client_for_downloads", fake_client)
-    monkeypatch.setattr(remote_staging, "close_provider_client", fake_close)
-    monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)
+    monkeypatch.setattr(remote_staging.sync_backend, "list_remote_directory", fake_list)
+    monkeypatch.setattr(remote_staging.sync_backend, "download_files_to_directory", fake_download)
 
     staged = remote_staging.stage_remote_parquet_directory(
         "s3://bucket/partition/",
@@ -169,11 +178,13 @@ def test_remote_parquet_directory_public_reader_uses_staged_arrow_path(
 
     require_native()
 
-    def fake_stage_remote_parquet_directory(uri, *, suffixes, memory_limit_bytes):
+    def fake_stage_remote_parquet_directory(
+        uri, *, suffixes, memory_limit_bytes, threading_mode="single", operation_context=None
+    ):
         """Return a local staged Parquet directory for a remote URI."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".parquet", ".pq")
-        assert memory_limit_bytes is None
+        assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
         staged_dir = tmp_path / "staged-parquet"
         staged_dir.mkdir()
         pq.write_table(pa.table({"id": [1, 2]}), staged_dir / "a.parquet")
@@ -224,10 +235,12 @@ def test_remote_parquet_single_file_public_reader_uses_staged_arrow_path(
 
     require_native()
 
-    def fake_stage_remote_single_file(uri, *, memory_limit_bytes):
+    def fake_stage_remote_single_file(
+        uri, *, memory_limit_bytes, threading_mode="single", operation_context=None
+    ):
         """Return a local staged Parquet file for a remote URI."""
         assert uri == "s3://bucket/events.parquet"
-        assert memory_limit_bytes is None
+        assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
         staged_file = tmp_path / "events.parquet"
         pq.write_table(pa.table({"id": [1, 2]}), staged_file)
         return StagedPath(str(staged_file))
@@ -266,10 +279,12 @@ def test_remote_parquet_single_file_writer_uses_staged_arrow_path(
     staged_file = tmp_path / "events.parquet"
     pq.write_table(pa.table({"id": [1, 2]}), staged_file)
 
-    def fake_stage_remote_single_file(uri, *, memory_limit_bytes):
+    def fake_stage_remote_single_file(
+        uri, *, memory_limit_bytes, threading_mode="single", operation_context=None
+    ):
         """Return a local staged Parquet file for a remote URI."""
         assert uri == "s3://bucket/events.parquet"
-        assert memory_limit_bytes is None
+        assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
         return StagedPath(str(staged_file))
 
     monkeypatch.setattr(
@@ -298,7 +313,7 @@ def test_remote_parquet_single_file_writer_uses_staged_arrow_path(
     assert result.stats["materialized_rows"] == 2
 
 
-def test_remote_text_directory_stages_child_sources_concurrently(monkeypatch) -> None:
+def test_remote_text_directory_stages_child_sources_synchronously(monkeypatch) -> None:
     """Verify remote text directory staging preserves child files and source URIs."""
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
@@ -308,23 +323,13 @@ def test_remote_text_directory_stages_child_sources_concurrently(monkeypatch) ->
         RemoteFile("s3://bucket/partition/b.jsonl", "b.jsonl", None),
     ]
 
-    async def fake_client(files, *, memory_limit_bytes=None):
-        """Return a reusable fake provider client."""
-        assert len(files) == 2
-        return object()
+    def fake_download(files, directory, *, memory_limit_bytes):
+        """Write staged payloads serially in canonical file order."""
+        assert memory_limit_bytes is None
+        for file in files:
+            (Path(directory) / file.name).write_bytes(file.uri.encode("utf-8"))
 
-    async def fake_close(client):
-        """Accept closing the fake provider client."""
-        assert client is not None
-
-    async def fake_download(client, file, local_path):
-        """Write a staged payload for one remote child."""
-        assert client is not None
-        Path(local_path).write_bytes(file.uri.encode("utf-8"))
-
-    monkeypatch.setattr(remote_staging, "provider_client_for_downloads", fake_client)
-    monkeypatch.setattr(remote_staging, "close_provider_client", fake_close)
-    monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)
+    monkeypatch.setattr(remote_staging.sync_backend, "download_files_to_directory", fake_download)
 
     staged = remote_staging.stage_remote_files_to_directory(
         files,

@@ -1,0 +1,148 @@
+// Declares the bounded ordered multi-threaded materialization stream state.
+
+#pragma once
+
+#include "internal/arrow_c/cdata_export_internal.hh"
+#include "internal/materialization/batch_appender.hh"
+#include "internal/materialization/batch_sizing.hh"
+#include "internal/materialization/ingest_stream/column_partition.hh"
+#include "internal/materialization/ingest_stream/parallel_diagnostics.hh"
+#include "internal/materialization/ingest_stream/parallel_json_validation.hh"
+#include "internal/materialization/ingest_stream/parallel_preparer.hh"
+#include "internal/materialization/ingest_stream/source_internal.hh"
+#include "internal/runtime/execution_policy.hh"
+#include "internal/runtime/ordered_executor.hh"
+
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <optional>
+#include <vector>
+
+namespace sanitize::internal {
+
+using ParallelPacketExecutor =
+    OrderedExecutor<MaterializationTask, PreparedRowsPacket>;
+using ParallelJsonValidationExecutor =
+    OrderedExecutor<JsonValidationTask, OwnedRowPacket>;
+
+class ParallelIngestStreamSource final : public sanitize::ExportBatchSource {
+public:
+  struct Init {
+    std::vector<RuntimeFieldLayout> fields;
+    FrontendHandle frontend;
+    std::shared_ptr<const CompiledPlan> plan;
+    PreparedOptionsPtr opts;
+    std::shared_ptr<IngestDiagnostics> diagnostics;
+    std::shared_ptr<sanitize::ExecutionContext> owned_ctx;
+    std::shared_ptr<void> operation_memory_pool;
+    std::shared_ptr<OperationTaskArena> task_arena;
+    std::shared_ptr<PerformanceTelemetry> telemetry;
+    BatchAppenderPtr app;
+    std::shared_ptr<PoolResource> pool;
+    std::shared_ptr<ParallelRowPreparer> preparer;
+    std::shared_ptr<ParallelJsonRowValidator> json_validator;
+    std::unique_ptr<ParallelJsonValidationExecutor> json_validation_executor;
+    std::unique_ptr<ParallelPacketExecutor> executor;
+    ExecutionPolicy policy;
+    bool column_partition_mode = false;
+    bool jsonl_row_parallel_mode = false;
+  };
+
+  explicit ParallelIngestStreamSource(Init init);
+  ~ParallelIngestStreamSource() override;
+
+  sanitize::Status GetSchema(struct ArrowSchema *out) override;
+  sanitize::Status GetNext(struct ArrowArray *out) override;
+  sanitize::Status Close() override;
+  [[nodiscard]] std::shared_ptr<OperationTaskArena>
+  TaskArena() const noexcept override;
+
+private:
+  struct BatchLimits {
+    int64_t max_rows = 0;
+    int64_t max_bytes = 0;
+    int64_t capacity = 0;
+  };
+
+  struct ColumnPartitionAssembly {
+    std::vector<std::shared_ptr<sanitize::CArrayGuard>> groups;
+    std::vector<std::uint8_t> received;
+    ColumnPartitionFailure failure;
+    std::size_t expected_groups = 0;
+    std::size_t received_groups = 0;
+    std::size_t source_row_count = 0;
+    std::size_t estimated_source_bytes = 0;
+    std::int64_t materialized_bytes = 0;
+    std::size_t packet_slot = 0;
+    bool active = false;
+  };
+
+  [[nodiscard]] BatchLimits batch_limits() const;
+  [[nodiscard]] bool appender_is_full(const BatchLimits &limits) const;
+  [[nodiscard]] bool byte_limit_reached(const BatchLimits &limits) const;
+  [[nodiscard]] std::size_t column_partition_packet_window() const noexcept;
+  sanitize::Result<std::size_t>
+  acquire_column_partition_slot(std::size_t packet_window);
+  void release_column_partition_slot(std::size_t packet_slot) noexcept;
+  void clear_column_partition_assemblies() noexcept;
+  sanitize::Status consume_column_partition_packet(PreparedRowsPacket &&packet);
+  sanitize::Status check_interrupt() const;
+  sanitize::Result<bool> dispatch_available(const BatchLimits &limits);
+  sanitize::Status validate_current_jsonl_batch(const BatchLimits &limits);
+  sanitize::Status
+  submit_validated_jsonl_packets(std::size_t submission_window);
+  sanitize::Status abort_jsonl_validation(sanitize::Status status);
+  sanitize::Status finish_submission_once();
+  void release_current_batch_if_dispatched();
+  sanitize::Status activate_next_prepared_packet();
+  sanitize::Status consume_next_prepared_row();
+  sanitize::Status fill_appender(const BatchLimits &limits);
+  void update_observed_batch_size();
+
+  std::vector<RuntimeFieldLayout> fields_;
+  FrontendHandle frontend_;
+  std::shared_ptr<const CompiledPlan> plan_keepalive_;
+  PreparedOptionsPtr opts_;
+  ParallelBatchDiagnostics diagnostics_;
+  std::shared_ptr<sanitize::ExecutionContext> owned_ctx_keepalive_;
+  std::shared_ptr<void> operation_memory_pool_keepalive_;
+  std::shared_ptr<OperationTaskArena> task_arena_keepalive_;
+  std::shared_ptr<PerformanceTelemetry> telemetry_keepalive_;
+  BatchAppenderPtr app_;
+  std::shared_ptr<PoolResource> pool_keepalive_;
+  std::shared_ptr<ParallelRowPreparer> preparer_keepalive_;
+  std::shared_ptr<ParallelJsonRowValidator> json_validator_keepalive_;
+  std::unique_ptr<ParallelJsonValidationExecutor> json_validation_executor_;
+  std::unique_ptr<ParallelPacketExecutor> executor_;
+  ExecutionPolicy policy_;
+
+  std::shared_ptr<OwnedRowBatch> current_rows_keepalive_;
+  std::deque<OwnedRowPacket> validated_jsonl_packets_;
+  std::optional<PreparedRowsPacket> active_prepared_packet_;
+  std::shared_ptr<sanitize::CArrayGuard> ready_columnar_array_;
+  std::deque<ColumnPartitionAssembly> column_partition_assemblies_;
+  std::int64_t ready_columnar_bytes_ = 0;
+  std::size_t current_dispatch_index_ = 0;
+  std::size_t outstanding_packets_ = 0;
+  std::size_t active_prepared_index_ = 0;
+  std::uint64_t next_packet_ordinal_ = 0;
+  std::uint64_t next_json_validation_ordinal_ = 0;
+  std::size_t json_token_index_max_fields_ = 0;
+  std::uint8_t column_packet_slots_in_use_ = 0;
+  int64_t row_index_ = 0;
+  int64_t observed_bytes_per_row_ = kInitialEstimatedRowBytes;
+  bool has_observed_batch_size_ = false;
+  std::optional<sanitize::Status> deferred_frontend_status_;
+  bool has_current_batch_ = false;
+  bool frontend_eof_ = false;
+  bool submission_finished_ = false;
+  bool column_partition_mode_ = false;
+  bool jsonl_row_parallel_mode_ = false;
+  bool column_fallback_outstanding_ = false;
+  bool eof_ = false;
+  bool closed_ = false;
+};
+
+} // namespace sanitize::internal

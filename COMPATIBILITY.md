@@ -7,7 +7,7 @@ The release artifacts support:
 - CPython 3.11, 3.12, 3.13, and 3.14 through one ABI3 wheel per platform;
 - Windows AMD64;
 - Linux x86-64 on the manylinux 2.28 baseline;
-- macOS x86-64 and Apple Silicon.
+- macOS 11 or newer on x86-64 and Apple Silicon.
 
 Linux ARM64 and musllinux remain conditional targets and are not compatibility
 commitments until release CI publishes those wheels.
@@ -57,3 +57,9 @@ the partition-key encoding requires a major release or an explicit migration.
 
 The external Parquet data remains the source of truth. Missing, invalid, or
 unavailable sidecar state falls back to scanning embedded registry metadata.
+
+## v114 concurrency layout
+
+The internal `WorkerSlot` layout now cache-line-aligns the `running` atomic.
+This is private implementation state and does not alter the public C, C++,
+Python, Arrow, pandas, Polars, DuckDB, file-format, or ABI contracts.

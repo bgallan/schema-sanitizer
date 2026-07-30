@@ -12,7 +12,7 @@ from ..input_impl.selection import (
     prepare_native_text_data,
     resolve_source_and_format,
 )
-from ..options_impl.options import Options
+from ..options_impl.options import Options, memory_limit_bytes_or_none
 from .input.memory_limits import enforce_materialized_input_limit
 from .parquet.errors import unsupported_direct_parquet_ingestion
 
@@ -68,7 +68,7 @@ def _option_io_settings(call_options: Options | None) -> tuple[int | None, str]:
     """Return memory and text-encoding settings from normalized options."""
     if call_options is None:
         return None, "utf-8"
-    return call_options.performance.memory_limit_bytes, call_options.io.input_text_encoding
+    return memory_limit_bytes_or_none(call_options), call_options.io.input_text_encoding
 
 
 def native_ingest_plan(

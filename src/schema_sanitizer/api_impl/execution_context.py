@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sized
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ from ..core_impl.resource_lifecycle import (
     _close_keepalive_attr,
     _close_suppressing_errors,
 )
+from ..input_impl.prepared import ChainedKeepalive
 from ..input_impl.selection import (
     _Format,
     _Source,
@@ -29,20 +31,21 @@ from ..input_impl.source_plan import (
     _path_sources_for_native,
 )
 from ..options_impl.call_options import unwrap_options
-from ..options_impl.options import Options
+from ..options_impl.options import Options, memory_limit_bytes_or_none
 from ..remote_impl.staging import stage_remote_single_file
 from .ingest import normalize_options, reject_unsupported_binary_direct_input
 from .input.memory_limits import enforce_materialized_input_limit
+from .operation_context import OperationExecutionContext
 from .output_diagnostics import patch_table_diagnostics
 from .parquet.direct_routes import parquet_direct_sink_raw_or_none
 from .results import (
     TABLE_ADAPTER_FORMATS,
     Result,
     SinkResult,
-    convert_arrow_table_output,
+    convert_arrow_stream_output,
 )
 from .source_plan.attached import source_plan_from_data
-from .source_plan.remote import RemotePathSourceChunkProvider
+from .source_plan.remote import RemotePathSourceChunkProvider, prefetched_remote_chunks
 from .streams import ArrowCStream
 
 
@@ -68,9 +71,11 @@ def _open_source_plan_sink_stream_or_none(
         return raw
 
     if plan.kind == REMOTE_CHUNKS:
+        retained_chunks, remaining_start = prefetched_remote_chunks(plan.payload)
         provider = RemotePathSourceChunkProvider(
-            retained_chunks=[],
+            retained_chunks=retained_chunks,
             remaining_manifest=plan.payload,
+            remaining_start=remaining_start,
         )
         try:
             raw = raw_context.to_sink_path_source_chunk_provider(
@@ -109,14 +114,27 @@ def _materialize_table_adapter_sink(
     format: _Format,
     source: _Source,
 ) -> Any:
-    """Materialize a table-backed adapter sink."""
-    result = context.to_table(data, options=options, format=format, source=source)
-    table = result.clean_data
-    if table is None:
-        if sink == "duckdb":
-            return None
-        raise RuntimeError(f"{sink} sink: no table output")
-    return convert_arrow_table_output(table, sink, feature=f"sink={sink!r}")
+    """Consume the native Arrow stream directly in an analytical adapter."""
+    threading_mode = (
+        options.performance.threading_mode if isinstance(options, Options) else "single"
+    )
+    output = context.to_sink(
+        data,
+        sink="stream",
+        options=options,
+        format=format,
+        source=source,
+    )
+    try:
+        conversion = convert_arrow_stream_output(
+            output.raw,
+            sink,
+            feature=f"sink={sink!r}",
+            threading_mode=threading_mode,
+        )
+        return conversion.clean_data
+    finally:
+        output.close()
 
 
 def execution_context_to_sink(
@@ -142,7 +160,7 @@ def execution_context_to_sink(
     memory_limit_bytes = None
     input_text_encoding = "utf-8"
     if isinstance(options, Options):
-        memory_limit_bytes = options.performance.memory_limit_bytes
+        memory_limit_bytes = memory_limit_bytes_or_none(options)
         input_text_encoding = options.io.input_text_encoding
     prepared = unwrap_options(options)
 
@@ -173,10 +191,26 @@ def execution_context_to_sink(
 
     keepalive = None
     if source_name == "uri":
-        staged = stage_remote_single_file(data, memory_limit_bytes=memory_limit_bytes)
+        threading_mode = (
+            options.performance.threading_mode if isinstance(options, Options) else "single"
+        )
+        operation_context = OperationExecutionContext(
+            threading_mode=threading_mode,
+            memory_limit_bytes=memory_limit_bytes,
+        )
+        try:
+            staged = stage_remote_single_file(
+                data,
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                operation_context=operation_context,
+            )
+        except BaseException:
+            operation_context.close()
+            raise
         data = staged.path
         source_name = "path"
-        keepalive = staged
+        keepalive = ChainedKeepalive(operation_context, staged)
 
     if format_name == "parquet" and sink == "stream":
         raw = parquet_direct_sink_raw_or_none(
@@ -239,7 +273,7 @@ def execution_context_to_table(
     source: _Source = "auto",
 ) -> Result:
     """Materialize input through the stream sink as a table result."""
-    source_rows = len(data) if format == "python" and isinstance(data, list) else None
+    source_rows = len(data) if format == "python" and isinstance(data, Sized) else None
     output = context.to_sink(
         data,
         sink="stream",
@@ -281,6 +315,10 @@ class ExecutionContext:
     def memory_stats(self) -> dict[str, Any]:
         """Return memory statistics from the native context."""
         return call_core(self._raw.memory_stats)
+
+    def performance_stats(self) -> dict[str, Any]:
+        """Return telemetry for the most recent operation in this context."""
+        return call_core(self._raw.performance_stats)
 
     def to_sink(
         self,
@@ -383,7 +421,7 @@ def to_table(
     )
     memory_limit_bytes = None
     if isinstance(call_options, Options):
-        memory_limit_bytes = call_options.performance.memory_limit_bytes
+        memory_limit_bytes = memory_limit_bytes_or_none(call_options)
     enforce_materialized_input_limit(
         data,
         format_name,

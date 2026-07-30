@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from ...core_impl.generated_metadata import TimestampColumns
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from .arrow_sources import (
     ParquetArrowSource,
@@ -128,7 +129,7 @@ def parquet_multisource_registry_sink_raw_or_none(
     field_name_policy: str,
     schema_mode: str,
     first_row_columns: dict[str, Any],
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     native_registry_state: Any = None,
 ) -> Any:
     """Return the lazy native multi-Arrow-source registry stream."""

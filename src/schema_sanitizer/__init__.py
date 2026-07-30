@@ -41,6 +41,7 @@ __version__ = _version_str()
 
 if TYPE_CHECKING:  # pragma: no cover
     from .api_impl.analytical import to_duckdb, to_pandas, to_polars, to_pyarrow
+    from .api_impl.batch_streaming import iter_batches
     from .api_impl.file_conversion.converters import to_csv, to_jsonl, to_parquet
     from .api_impl.results import Result
     from .core_impl.schema_registry import new_schema_registry
@@ -48,6 +49,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 _LAZY: dict[str, tuple[str, str]] = {
     "Result": (".api_impl.results", "Result"),
+    "iter_batches": (".api_impl.batch_streaming", "iter_batches"),
     "new_schema_registry": (".core_impl.schema_registry", "new_schema_registry"),
     "to_csv": (".api_impl.file_conversion.converters", "to_csv"),
     "to_duckdb": (".api_impl.analytical", "to_duckdb"),
@@ -86,6 +88,7 @@ __all__ = [
     "SchemaSanitizerOutOfMemoryError",
     "SchemaSanitizerResourceError",
     "__version__",
+    "iter_batches",
     "new_schema_registry",
     "to_csv",
     "to_duckdb",

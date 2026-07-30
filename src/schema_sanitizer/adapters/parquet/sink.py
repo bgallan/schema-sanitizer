@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
+from ...core_impl.atomic_output import atomic_local_output
 from ...core_impl.dependencies import ensure_optional_dependency, ensure_pyarrow
+from ...core_impl.execution_policy import normalize_threading_mode
 from ...core_impl.native_symbols import COALESCING_STREAM_WRAP
 from ...core_impl.uris import local_output_path_or_reject_remote
 from ..pyarrow.file_metadata import prepare_file_output_metadata_stream
@@ -91,8 +95,10 @@ def write_parquet_stream(
     parquet_compression: str | None = None,
     parquet_gzip_level: int | None = None,
     memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
 ) -> None:
     """Write an Arrow batch stream to Parquet."""
+    normalize_threading_mode(threading_mode)
     pa = ensure_pyarrow(feature=feature)
     pq = ensure_optional_dependency(
         "pyarrow.parquet", extra="pyarrow", feature=feature, dependency_name="pyarrow"
@@ -106,31 +112,34 @@ def write_parquet_stream(
         pa=pa,
     )
 
-    target = (
-        local_output_path_or_reject_remote(out_path, sink_name="Parquet")
-        if isinstance(out_path, str)
-        else out_path
-    )
-    writer: Any | None = None
+    output_context: AbstractContextManager[Any]
+    if isinstance(out_path, (str, os.PathLike)):
+        output_path = local_output_path_or_reject_remote(out_path, sink_name="Parquet")
+        output_context = atomic_local_output(output_path)
+    else:
+        output_context = nullcontext(out_path)
+
     try:
-        writer = pq.ParquetWriter(
-            target,
-            metadata.schema,
-            **pyarrow_parquet_writer_options(
-                parquet_compression=parquet_compression,
-                parquet_gzip_level=parquet_gzip_level,
-            ),
-        )
-        _write_coalesced_batches(
-            writer,
-            metadata.batches,
-            schema=metadata.schema,
-            pa=pa,
-            memory_limit_bytes=memory_limit_bytes,
-        )
+        with output_context as target:
+            writer: Any | None = None
+            try:
+                writer = pq.ParquetWriter(
+                    target,
+                    metadata.schema,
+                    **pyarrow_parquet_writer_options(
+                        parquet_compression=parquet_compression,
+                        parquet_gzip_level=parquet_gzip_level,
+                    ),
+                )
+                _write_coalesced_batches(
+                    writer,
+                    metadata.batches,
+                    schema=metadata.schema,
+                    pa=pa,
+                    memory_limit_bytes=memory_limit_bytes,
+                )
+            finally:
+                if writer is not None:
+                    writer.close()
     finally:
-        try:
-            metadata.close()
-        finally:
-            if writer is not None:
-                writer.close()
+        metadata.close()

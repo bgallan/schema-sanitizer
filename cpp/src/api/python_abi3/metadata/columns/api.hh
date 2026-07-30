@@ -35,6 +35,8 @@ struct MetadataColumn {
   MetadataColumnPlacement placement = MetadataColumnPlacement::FirstRowUtf8;
   std::size_t span_index = 0;
   std::int64_t span_offset = 0;
+  std::int64_t timestamp_micros = 0;
+  bool has_fixed_timestamp = false;
   bool is_null = false;
 };
 
@@ -44,8 +46,8 @@ bool append_all_row_columns_from_dict(PyObject *dict,
                                       std::vector<MetadataColumn> *out);
 bool append_row_span_columns_from_dict(PyObject *dict,
                                        std::vector<MetadataColumn> *out);
-bool append_timestamp_columns_from_sequence(PyObject *sequence,
-                                            std::vector<MetadataColumn> *out);
+bool append_timestamp_columns(PyObject *columns,
+                              std::vector<MetadataColumn> *out);
 // Parses the two metadata groups shared by registry entry points in order.
 bool append_registry_metadata_columns(
     PyObject *first_row_columns, PyObject *timestamp_columns,

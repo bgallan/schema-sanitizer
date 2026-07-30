@@ -58,7 +58,7 @@ int validate_registry_sink_mode(const char *schema_mode,
 sanitize::SchemaRegistryMergeInput make_registry_merge_input(
     sanitize::LogicalSchema inferred_schema, const char *registry_json,
     const char *field_name_policy, std::string_view default_key_name,
-    sanitize::FieldOrderPolicy field_order) {
+    sanitize::FieldOrderPolicy field_order, std::string_view detected_at) {
   sanitize::SchemaRegistryMergeInput input;
   input.inferred_schema = std::move(inferred_schema);
   input.registry_json = registry_json ? registry_json : "";
@@ -68,6 +68,7 @@ sanitize::SchemaRegistryMergeInput make_registry_merge_input(
                                ? std::string("default_key")
                                : std::string(default_key_name);
   input.field_order = field_order;
+  input.detected_at = detected_at;
   return input;
 }
 

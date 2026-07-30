@@ -44,7 +44,8 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
         ):
             """Capture the auto-registry call."""
             assert sink == "stream"
-            assert call_options is None
+            assert call_options is not None
+            assert call_options._operation_detected_at.endswith("Z")
             calls.append((sources, kwargs))
             return FakeRaw()
 
@@ -81,7 +82,7 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
 
     assert registry == {"schema_generation": 1}
     assert closed == ["raw"]
-    assert created_sources == [[("json", str(source), str(source))]]
+    assert created_sources == [[("jsonl", str(source), str(source))]]
     assert calls == [
         (
             native_plan,
@@ -592,13 +593,13 @@ def test_pipeline_directory_warm_up_reuses_discovered_input(
     from schema_sanitizer.input_impl.directory_inputs import DiscoveredDirectoryInput
     from schema_sanitizer.input_impl.selection import single_file_descriptor
     from schema_sanitizer.pipeline import registry_warmup
-    from schema_sanitizer.remote_impl import routing
+    from schema_sanitizer.remote_impl import sync_backend
 
     def fail_listing(*_args, **_kwargs):
         """Fail when warm-up performs a redundant directory listing."""
         raise AssertionError("warm-up relisted an already discovered directory")
 
-    monkeypatch.setattr(routing, "list_remote_directory", fail_listing)
+    monkeypatch.setattr(sync_backend, "list_remote_directory", fail_listing)
     plan = PartitionRunPlan(
         date(2026, 1, 1),
         "gs://bucket/date=2026-01-01",

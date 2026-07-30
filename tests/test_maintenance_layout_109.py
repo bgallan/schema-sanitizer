@@ -27,7 +27,7 @@ def test_remote_staging_value_objects_have_one_owner() -> None:
 def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path) -> None:
     """A staged Azure directory must not create one SDK client per child."""
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
-    from schema_sanitizer.remote_impl import staging
+    from schema_sanitizer.remote_impl import directory_downloads
     from schema_sanitizer.remote_impl.providers import azure
 
     opened: list[str] = []
@@ -87,15 +87,15 @@ def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path) -> N
 
     async def exercise() -> None:
         """Download both files through one opened provider context."""
-        context = await staging.provider_client_for_downloads(files)
+        context = await directory_downloads.provider_client_for_downloads(files)
         assert context is not None
         for file in files:
-            await staging.download_file_to_path(
+            await directory_downloads.download_file_to_path(
                 context,
                 file,
                 str(tmp_path / file.name),
             )
-        await staging.close_provider_client(context)
+        await directory_downloads.close_provider_client(context)
 
     asyncio.run(exercise())
     assert opened == ["https://acct.blob.core.windows.net"]

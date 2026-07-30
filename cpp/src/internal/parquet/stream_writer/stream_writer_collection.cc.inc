@@ -246,7 +246,11 @@ logical_column_page_data_bytes(const ColumnPageData &page_data) noexcept {
 sanitize::Result<std::int64_t> determine_bounded_row_group_count(
     const ParquetNode &root, const std::vector<LeafColumn> &leafs,
     const ArrowArray &array, std::int64_t row_offset, std::int64_t max_rows,
-    std::int64_t max_retained_bytes) {
+    std::int64_t max_retained_bytes,
+    std::size_t *estimated_retained_bytes = nullptr) {
+  if (estimated_retained_bytes) {
+    *estimated_retained_bytes = 0;
+  }
   if (row_offset < 0 || row_offset > array.length || max_rows <= 0) {
     return sanitize::Status::Invalid(
         "native Parquet writer: invalid bounded row-group range");
@@ -256,9 +260,19 @@ sanitize::Result<std::int64_t> determine_bounded_row_group_count(
   if (candidate_rows <= 0 || max_retained_bytes <= 0 || leafs.empty()) {
     return candidate_rows;
   }
+  const auto byte_limit = static_cast<std::size_t>(max_retained_bytes);
+  if (const auto flat_count = determine_flat_bounded_row_group_count(
+          root, leafs, array, row_offset, candidate_rows, byte_limit)) {
+    const auto bounded = std::max<std::int64_t>(1, *flat_count);
+    if (estimated_retained_bytes) {
+      *estimated_retained_bytes =
+          flat_row_group_bytes(root, leafs, array, row_offset, bounded)
+              .value_or(byte_limit);
+    }
+    return bounded;
+  }
   std::vector<std::size_t> per_row_bytes(
       static_cast<std::size_t>(candidate_rows), 0);
-  const auto byte_limit = static_cast<std::size_t>(max_retained_bytes);
   for (std::size_t leaf_index = 0; leaf_index < leafs.size(); ++leaf_index) {
     ColumnPageData page;
     std::size_t previous_size = 0;
@@ -281,7 +295,16 @@ sanitize::Result<std::int64_t> determine_bounded_row_group_count(
       }
     }
   }
-  return std::max<std::int64_t>(1, candidate_rows);
+  candidate_rows = std::max<std::int64_t>(1, candidate_rows);
+  if (estimated_retained_bytes) {
+    std::size_t retained = 0;
+    for (std::int64_t row = 0; row < candidate_rows; ++row) {
+      retained = saturating_size_add(
+          retained, per_row_bytes[static_cast<std::size_t>(row)]);
+    }
+    *estimated_retained_bytes = retained;
+  }
+  return candidate_rows;
 }
 
 sanitize::Result<ColumnPageData>

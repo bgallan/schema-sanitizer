@@ -10,17 +10,16 @@ from typing import Any
 from ...adapters.parquet.memory import (
     parquet_batch_size_from_memory_limit,
     parquet_memory_limit_allows_direct_ingest,
-    parquet_use_threads_from_memory_limit,
+    parquet_use_threads,
 )
 from ...adapters.parquet.record_batch_factory import (
     open_parquet_record_batch_stream_factory,
 )
 from ...adapters.parquet.status import parquet_schema_is_direct_native_eligible
 from ...core_impl.dependencies import ensure_pyarrow
-from ...core_impl.memory_budget import memory_budget
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from ...input_impl.selection import _Source
-from ...options_impl.options import Options
+from ...options_impl.options import Options, memory_limit_bytes_or_none
 from .errors import direct_parquet_memory_limit_error
 
 RouteCallback = Callable[[str], None]
@@ -35,11 +34,17 @@ class ParquetArrowSource:
     source_file: str
 
 
-def _parquet_option_settings(call_options: Options | None) -> tuple[int | None, str]:
-    """Return direct Parquet memory and timestamp settings."""
+def _parquet_option_settings(
+    call_options: Options | None,
+) -> tuple[int | None, str, str]:
+    """Return direct Parquet memory, timestamp, and threading settings."""
     if isinstance(call_options, Options):
-        return call_options.performance.memory_limit_bytes, call_options.timestamp_precision
-    return None, "TIMESTAMP_MICROS"
+        return (
+            memory_limit_bytes_or_none(call_options),
+            call_options.timestamp_precision,
+            call_options.performance.threading_mode.name.lower(),
+        )
+    return None, "TIMESTAMP_MICROS", "single"
 
 
 def _set_route(set_route: RouteCallback | None, route: str) -> None:
@@ -70,7 +75,7 @@ def parquet_arrow_stream_factory_or_none(
     set_route: RouteCallback | None = None,
 ) -> Any | None:
     """Return a direct Parquet Arrow stream factory when supported."""
-    memory_limit_bytes, timestamp_precision = _parquet_option_settings(call_options)
+    memory_limit_bytes, timestamp_precision, threading_mode = _parquet_option_settings(call_options)
     if hasattr(data, "__arrow_c_stream__") and hasattr(data, "schema"):
         factory = data
     else:
@@ -86,7 +91,7 @@ def parquet_arrow_stream_factory_or_none(
             source=source,
             feature=feature,
             batch_size=parquet_batch_size_from_memory_limit(memory_limit_bytes),
-            use_threads=parquet_use_threads_from_memory_limit(memory_limit_bytes),
+            use_threads=parquet_use_threads(threading_mode, memory_limit_bytes),
             memory_limit_bytes=memory_limit_bytes,
         )
     if not parquet_memory_limit_allows_direct_ingest(memory_limit_bytes):
@@ -109,8 +114,12 @@ def parquet_arrow_stream_factory_or_none(
 
 def parquet_arrow_source_chunk_size(call_options: Options | None) -> int:
     """Derive the lazy Parquet file window from the memory budget."""
-    memory_limit_bytes, _timestamp_precision = _parquet_option_settings(call_options)
-    return min(4096, memory_budget(memory_limit_bytes).async_prefetch_files * 4)
+    memory_limit_bytes, _timestamp_precision, threading_mode = _parquet_option_settings(
+        call_options
+    )
+    from ...core_impl.execution_policy import execution_policy
+
+    return execution_policy(threading_mode, memory_limit_bytes).async_prefetch_files * 4
 
 
 def parquet_arrow_sources_or_none(

@@ -327,9 +327,22 @@ sanitize::Status prepare_native_row_group(NativeParquetStreamState *stream,
   return {};
 }
 
+// ---- parallel native column materialization ----
+
+std::size_t native_parquet_column_worker_count(
+    const NativeParquetStreamState &stream, const RowGroupInfo &row_group,
+    const NativeFlatRowWindow &window,
+    const std::shared_ptr<sanitize::internal::OperationTaskArena> &task_arena);
+
+sanitize::Status materialize_native_row_group_columns_parallel(
+    ArrowArrayStream *owner_stream, NativeParquetStreamState *stream,
+    const RowGroupInfo &row_group, const NativeFlatRowWindow &window,
+    std::size_t worker_count, NativeParquetArrayState *state);
+
 // ---- native_stream_array ----
 
-sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
+sanitize::Status build_native_row_group_array(ArrowArrayStream *owner_stream,
+                                              NativeParquetStreamState *stream,
                                               ArrowArray *out) {
   if (!stream || !out) {
     return sanitize::Status::Invalid(
@@ -365,12 +378,22 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
         "native Parquet reader: input stream is not readable");
   }
   state->columns.resize(row_group.columns.size());
-  for (std::size_t i = 0; i < row_group.columns.size(); ++i) {
-    SAN_RETURN_NOT_OK(materialize_native_row_group_column(
-        stream->file, row_group.columns[i], window, &stream->page_scratch,
-        &state->columns[i]));
-    SAN_RETURN_NOT_OK(
-        enforce_native_array_retained_budget(*state, stream->max_buffer_bytes));
+  auto task_arena =
+      owner_stream ? sanitize::internal::task_arena_for_stream(owner_stream)
+                   : nullptr;
+  const auto column_workers = native_parquet_column_worker_count(
+      *stream, row_group, window, task_arena);
+  if (column_workers > 1) {
+    SAN_RETURN_NOT_OK(materialize_native_row_group_columns_parallel(
+        owner_stream, stream, row_group, window, column_workers, state.get()));
+  } else {
+    for (std::size_t i = 0; i < row_group.columns.size(); ++i) {
+      SAN_RETURN_NOT_OK(materialize_native_row_group_column(
+          stream->file, row_group.columns[i], window, &stream->page_scratch,
+          &state->columns[i]));
+      SAN_RETURN_NOT_OK(enforce_native_array_retained_budget(
+          *state, stream->max_buffer_bytes));
+    }
   }
   state->structs.resize(stream->recursive_struct_array_count);
   state->lists.resize(stream->recursive_list_array_count);
@@ -399,6 +422,13 @@ sanitize::Status build_native_row_group_array(NativeParquetStreamState *stream,
   if (stream->row_group_row_offset >= row_group.num_rows) {
     release_native_row_group_runtime_state(&row_group);
     trim_native_page_scratch(&stream->page_scratch);
+    // Preserve the already-open worker file handles, but release all parallel
+    // decode scratch at the row-group boundary. This retains the setup win
+    // across windows without allowing capacity from different row groups to
+    // accumulate outside the single operation memory budget.
+    for (auto &worker_state : stream->parallel_column_workers) {
+      worker_state.page_scratch = NativeParquetPageScratch{};
+    }
     stream->row_group_row_offset = 0;
     ++stream->row_group_index;
   }
@@ -448,6 +478,6 @@ int native_parquet_stream_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   return sanitize::internal::cdata_stream::run_array_callback(
       out, state->last_error, "native_parquet_stream.get_next",
       [&](ArrowArray *array) {
-        return build_native_row_group_array(state, array);
+        return build_native_row_group_array(stream, state, array);
       });
 }

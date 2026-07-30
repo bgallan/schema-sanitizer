@@ -1,0 +1,262 @@
+{
+  "benchmark": "all-worker completion telemetry publication",
+  "pair_count": 15,
+  "scenarios": [
+    {
+      "workers": 5,
+      "iterations_per_worker": 250000,
+      "pairs": [
+        {
+          "pair": 1,
+          "baseline": 61630397,
+          "candidate": 2899420
+        },
+        {
+          "pair": 2,
+          "candidate": 2883276,
+          "baseline": 62117639
+        },
+        {
+          "pair": 3,
+          "baseline": 64014112,
+          "candidate": 2300492
+        },
+        {
+          "pair": 4,
+          "candidate": 3700428,
+          "baseline": 62785550
+        },
+        {
+          "pair": 5,
+          "baseline": 72542140,
+          "candidate": 2853633
+        },
+        {
+          "pair": 6,
+          "candidate": 2941262,
+          "baseline": 54526100
+        },
+        {
+          "pair": 7,
+          "baseline": 58554635,
+          "candidate": 2840643
+        },
+        {
+          "pair": 8,
+          "candidate": 2679384,
+          "baseline": 56574809
+        },
+        {
+          "pair": 9,
+          "baseline": 59041798,
+          "candidate": 2790829
+        },
+        {
+          "pair": 10,
+          "candidate": 2803208,
+          "baseline": 58075615
+        },
+        {
+          "pair": 11,
+          "baseline": 58634854,
+          "candidate": 2684131
+        },
+        {
+          "pair": 12,
+          "candidate": 2729579,
+          "baseline": 57241187
+        },
+        {
+          "pair": 13,
+          "baseline": 62282854,
+          "candidate": 2745792
+        },
+        {
+          "pair": 14,
+          "candidate": 2770949,
+          "baseline": 72493798
+        },
+        {
+          "pair": 15,
+          "baseline": 63193315,
+          "candidate": 2840042
+        }
+      ],
+      "baseline_median_ns": 61630397,
+      "candidate_median_ns": 2803208,
+      "paired_median_reduction_percent": 95.29547083722339,
+      "candidate_wins": 15
+    },
+    {
+      "workers": 8,
+      "iterations_per_worker": 250000,
+      "pairs": [
+        {
+          "pair": 1,
+          "baseline": 106520380,
+          "candidate": 4280699
+        },
+        {
+          "pair": 2,
+          "candidate": 4198977,
+          "baseline": 79543694
+        },
+        {
+          "pair": 3,
+          "baseline": 92837076,
+          "candidate": 3787592
+        },
+        {
+          "pair": 4,
+          "candidate": 4940213,
+          "baseline": 94217313
+        },
+        {
+          "pair": 5,
+          "baseline": 103883264,
+          "candidate": 3726057
+        },
+        {
+          "pair": 6,
+          "candidate": 3653820,
+          "baseline": 105027210
+        },
+        {
+          "pair": 7,
+          "baseline": 147457201,
+          "candidate": 4557278
+        },
+        {
+          "pair": 8,
+          "candidate": 3706167,
+          "baseline": 145712287
+        },
+        {
+          "pair": 9,
+          "baseline": 151661065,
+          "candidate": 4209663
+        },
+        {
+          "pair": 10,
+          "candidate": 3005672,
+          "baseline": 179514111
+        },
+        {
+          "pair": 11,
+          "baseline": 187443931,
+          "candidate": 2880442
+        },
+        {
+          "pair": 12,
+          "candidate": 2956775,
+          "baseline": 151168901
+        },
+        {
+          "pair": 13,
+          "baseline": 171647488,
+          "candidate": 2840322
+        },
+        {
+          "pair": 14,
+          "candidate": 3444094,
+          "baseline": 165057714
+        },
+        {
+          "pair": 15,
+          "baseline": 174311179,
+          "candidate": 4176885
+        }
+      ],
+      "baseline_median_ns": 147457201,
+      "candidate_median_ns": 3726057,
+      "paired_median_reduction_percent": 97.22429550392515,
+      "candidate_wins": 15
+    },
+    {
+      "workers": 16,
+      "iterations_per_worker": 250000,
+      "pairs": [
+        {
+          "pair": 1,
+          "baseline": 55131648,
+          "candidate": 3344461
+        },
+        {
+          "pair": 2,
+          "candidate": 3291668,
+          "baseline": 57327024
+        },
+        {
+          "pair": 3,
+          "baseline": 55927608,
+          "candidate": 3462706
+        },
+        {
+          "pair": 4,
+          "candidate": 3849669,
+          "baseline": 62414099
+        },
+        {
+          "pair": 5,
+          "baseline": 61279501,
+          "candidate": 3369878
+        },
+        {
+          "pair": 6,
+          "candidate": 3561482,
+          "baseline": 65446767
+        },
+        {
+          "pair": 7,
+          "baseline": 69510324,
+          "candidate": 5273472
+        },
+        {
+          "pair": 8,
+          "candidate": 5045429,
+          "baseline": 62669718
+        },
+        {
+          "pair": 9,
+          "baseline": 65653038,
+          "candidate": 3464253
+        },
+        {
+          "pair": 10,
+          "candidate": 4237224,
+          "baseline": 50906301
+        },
+        {
+          "pair": 11,
+          "baseline": 47335570,
+          "candidate": 5163368
+        },
+        {
+          "pair": 12,
+          "candidate": 5155517,
+          "baseline": 47105504
+        },
+        {
+          "pair": 13,
+          "baseline": 46800622,
+          "candidate": 4467687
+        },
+        {
+          "pair": 14,
+          "candidate": 4347859,
+          "baseline": 29490859
+        },
+        {
+          "pair": 15,
+          "baseline": 32909214,
+          "candidate": 4293277
+        }
+      ],
+      "baseline_median_ns": 55927608,
+      "candidate_median_ns": 4237224,
+      "paired_median_reduction_percent": 92.41339746884219,
+      "candidate_wins": 15
+    }
+  ],
+  "scope": "Measures task-completion telemetry bookkeeping only; it is not an end-to-end input/output throughput claim."
+}

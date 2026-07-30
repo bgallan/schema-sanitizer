@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "sanitize/core/status.hh"
+#include "sanitize/options/options.hh"
 
 namespace sanitize::internal::jsonl_stream_writer {
 
@@ -27,8 +28,9 @@ public:
 };
 
 // Writes all batches from an Arrow C stream as JSON Lines.
-Result<WriteStats> write_stream(ArrowArrayStream *stream, Output &out_file,
-                                std::int64_t memory_limit_bytes);
+Result<WriteStats> write_stream(
+    ArrowArrayStream *stream, Output &out_file, std::int64_t memory_limit_bytes,
+    sanitize::ThreadingMode threading_mode = sanitize::ThreadingMode::kSingle);
 
 // Writes one Arrow C record batch as JSON Lines.
 Status write_batch(Output &out_file, const ArrowSchema &schema,

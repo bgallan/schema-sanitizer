@@ -6,8 +6,10 @@
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/materialization/batch_appender.hh"
 #include "internal/materialization/direct_rows.hh"
+#include "internal/materialization/ingest_stream/parallel_source.hh"
 #include "internal/materialization/ingest_stream/source_internal.hh"
 #include "internal/memory/pool_resource.hh"
+#include "internal/runtime/execution_policy.hh"
 #include "sanitize/core/status.hh"
 
 #include <memory>
@@ -40,8 +42,16 @@ IngestStreamSource::IngestStreamSource(IngestStreamInit init)
       diagnostics_(std::move(init.diagnostics)),
       owned_ctx_keepalive_(std::move(init.owned_ctx)),
       operation_memory_pool_keepalive_(std::move(init.operation_memory_pool)),
+      task_arena_keepalive_(std::move(init.task_arena)),
+      telemetry_keepalive_(std::move(init.telemetry)),
       app_(std::move(init.app)), pool_keepalive_(std::move(init.pool)),
       direct_(std::move(init.direct)) {}
+
+IngestStreamSource::~IngestStreamSource() {
+  if (telemetry_keepalive_) {
+    telemetry_keepalive_->Finish();
+  }
+}
 
 sanitize::Status IngestStreamSource::GetSchema(struct ArrowSchema *out) {
   return export_fields_as_struct_schema(fields_, out,
@@ -49,6 +59,8 @@ sanitize::Status IngestStreamSource::GetSchema(struct ArrowSchema *out) {
 }
 
 sanitize::Status IngestStreamSource::GetNext(struct ArrowArray *out) {
+  PerformancePhaseScope stream_scope(telemetry_keepalive_,
+                                     PerformancePhase::kStreamGetNext);
   if (!out) {
     return sanitize::Status::Invalid(
         "IngestStreamSource::GetNext: out is null");
@@ -83,7 +95,11 @@ sanitize::Status IngestStreamSource::GetNext(struct ArrowArray *out) {
               : sample;
       has_observed_batch_size_ = true;
     }
-    SAN_RETURN_NOT_OK(batch_appender_finish(app_.get(), out));
+    {
+      PerformancePhaseScope finalize_scope(telemetry_keepalive_,
+                                           PerformancePhase::kArrowFinalize);
+      SAN_RETURN_NOT_OK(batch_appender_finish(app_.get(), out));
+    }
     record_finished_batch(out);
     return sanitize::Status::OK();
   }
@@ -91,6 +107,9 @@ sanitize::Status IngestStreamSource::GetNext(struct ArrowArray *out) {
 
 sanitize::Status IngestStreamSource::Close() {
   closed_ = true;
+  if (telemetry_keepalive_) {
+    telemetry_keepalive_->Finish();
+  }
   return sanitize::Status::OK();
 }
 
@@ -101,7 +120,10 @@ make_ingest_stream_source(std::string_view frontend_name,
                           PreparedOptionsPtr opts,
                           std::shared_ptr<IngestDiagnostics> diagnostics,
                           std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
-                          std::shared_ptr<void> operation_memory_pool) {
+                          std::shared_ptr<void> operation_memory_pool,
+                          std::shared_ptr<OperationTaskArena> task_arena,
+                          std::shared_ptr<PerformanceTelemetry> telemetry,
+                          std::int64_t input_size_hint_bytes) {
   if (!plan) {
     return sanitize::Status::Invalid("make_ingest_stream_source: plan is null");
   }
@@ -110,6 +132,18 @@ make_ingest_stream_source(std::string_view frontend_name,
   }
 
   auto runtime_fields = derive_runtime_fields_from_plan(*plan);
+  const auto policy = execution_policy_from(opts->spec.threading_mode,
+                                            opts->spec.memory_limit_bytes);
+  if (opts->spec.threading_mode == sanitize::ThreadingMode::kMulti &&
+      policy.effective_workers > 1) {
+    return make_parallel_ingest_stream_source(
+        frontend_name, std::move(runtime_fields), std::move(frontend),
+        std::move(plan), std::move(opts), std::move(diagnostics),
+        std::move(owned_ctx), std::move(operation_memory_pool),
+        std::move(task_arena), std::move(telemetry), policy,
+        input_size_hint_bytes);
+  }
+
   auto pool = std::make_shared<PoolResource>(operation_memory_pool);
   SAN_ASSIGN_OR_RAISE(auto app, make_batch_appender(*plan, pool));
   SAN_ASSIGN_OR_RAISE(auto direct,
@@ -124,6 +158,8 @@ make_ingest_stream_source(std::string_view frontend_name,
           .diagnostics = std::move(diagnostics),
           .owned_ctx = std::move(owned_ctx),
           .operation_memory_pool = std::move(operation_memory_pool),
+          .task_arena = std::move(task_arena),
+          .telemetry = std::move(telemetry),
           .app = std::move(app),
           .pool = std::move(pool),
           .direct = std::move(direct),

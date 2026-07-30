@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping, Sequence
+from typing import TypeAlias
 
 SCHEMA_REGISTRY_COLUMN = "schema_registry"
 SCHEMA_DRIFTS_COLUMN = "schema_drifts"
 SOURCE_FILE_COLUMN = "source_file"
 INGESTION_TIMESTAMP_COLUMN = "ingestion_timestamp"
+TimestampColumns: TypeAlias = Mapping[str, int] | Sequence[str] | None
+TimestampColumnValues: TypeAlias = dict[str, int] | tuple[str, ...]
+
 ETL_GENERATED_COLUMN_NAMES = (
     SCHEMA_REGISTRY_COLUMN,
     SCHEMA_DRIFTS_COLUMN,

@@ -22,7 +22,8 @@ class JsonStreamingScanner {
 public:
   // Creates a JsonStreamingScanner.
   JsonStreamingScanner(ChunkSourcePtr src, int64_t chunk_bytes,
-                       bool require_top_level_array = false);
+                       bool require_top_level_array = false,
+                       bool line_delimited = false);
 
   // Rewinds the scanner and its chunk source.
   sanitize::Status Reset();
@@ -30,6 +31,10 @@ public:
   sanitize::Result<TextSlice> next_value(BumpArena *arena);
   // Returns whether input processing is complete.
   [[nodiscard]] bool done() const noexcept;
+  // Enables lightweight structural framing when workers own validation.
+  void set_worker_authoritative_framing(bool enabled) noexcept {
+    worker_authoritative_framing_ = enabled;
+  }
 
 private:
   enum class State : uint8_t { kInit = 0, kArray = 1, kStream = 2, kDone = 3 };
@@ -54,6 +59,8 @@ private:
   void consume() noexcept;
   // Scans one complete JSON value from the current position.
   sanitize::Result<TextSlice> scan_value(BumpArena *arena);
+  // Scans one complete JSON Lines record from the current position.
+  sanitize::Result<TextSlice> scan_line_value(BumpArena *arena);
   // Returns the next array value.
   sanitize::Result<TextSlice> next_array_value(BumpArena *arena);
   // Consumes and validates the tail after a top-level array closes.
@@ -74,6 +81,8 @@ private:
 
   State state_ = State::kInit;
   bool require_top_level_array_ = false;
+  bool line_delimited_ = false;
+  bool worker_authoritative_framing_ = false;
 };
 
 } // namespace sanitize::internal

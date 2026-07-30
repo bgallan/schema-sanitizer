@@ -5,6 +5,7 @@
 
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/json_output/jsonl_value_writer.hh"
 
 #include <cerrno>
@@ -246,6 +247,7 @@ void release_stream(ArrowArrayStream *stream) {
   }
   auto *state = static_cast<CsvNestedStreamState *>(stream->private_data);
   close_stream(state);
+  sanitize::internal::detach_task_arena(stream);
   delete state;
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
@@ -428,6 +430,7 @@ PyObject *py_csv_nested_stream_wrap(PyObject *, PyObject *args) {
   wrapped->get_last_error = &csv_nested_stream::last_error;
   wrapped->release = &csv_nested_stream::release_stream;
   wrapped->private_data = state.release();
+  sanitize::internal::inherit_task_arena(wrapped, inner);
 
   return wrap_stream_capsule_with_keepalive(stream_obj, wrapped);
 }

@@ -38,6 +38,26 @@ sanitize::Result<std::size_t> json_skip_value(std::string_view text,
 // its arena).
 class JsonOnDemandDoc {
 public:
+  struct FlatValue {
+    enum class Kind : std::uint8_t {
+      kNull = 0,
+      kBool,
+      kInt,
+      kFloat,
+      kString,
+      kEmptyObject,
+      kEmptyArray,
+      kNestedObject,
+      kNestedArray,
+    };
+
+    Kind kind = Kind::kNull;
+    std::string_view string_value;
+  };
+
+  using FlatObjectEachFn = sanitize::Status (*)(void *, std::string_view,
+                                                FlatValue);
+
   // `upstream` must be non-null. The ingest pipeline carries a PoolResource
   // backed by Arrow's MemoryPool; we intentionally do not silently fall back
   // to new/delete.
@@ -66,6 +86,13 @@ public:
   sanitize::Status ForEachObjectFieldC(std::string_view text, void *ctx,
                                        ValueView::ObjectEachFn fn,
                                        std::size_t base_offset = 0);
+
+  // Internal flat-inference visitor. It validates one root object while
+  // avoiding key hashing and duplicate primitive-token scans. Numeric values
+  // retain the exact int64-versus-float classification of ParseValue().
+  sanitize::Status ForEachFlatObjectFieldC(std::string_view text, void *ctx,
+                                           FlatObjectEachFn fn,
+                                           std::size_t base_offset = 0);
 
   // Iterate elements of a JSON array (the text must start with '[' after
   // optional whitespace).
@@ -126,6 +153,13 @@ private:
                                    std::string_view text, void *ctx,
                                    ValueView::ObjectEachFn fn,
                                    std::size_t base_offset);
+  sanitize::Result<FlatValue> ParseFlatChildValue(json_scan::Cursor &cursor,
+                                                  std::string_view text,
+                                                  std::size_t base_offset);
+  sanitize::Status EmitFlatObjectField(json_scan::Cursor &cursor,
+                                       std::string_view text, void *ctx,
+                                       FlatObjectEachFn fn,
+                                       std::size_t base_offset);
   // Enters a JSON object iterator and reports whether the object is empty.
   static sanitize::Status EnterObjectIterator(json_scan::Cursor &cursor,
                                               bool *done);

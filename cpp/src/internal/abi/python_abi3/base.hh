@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 namespace sanitize {
 class ChunkSource;
@@ -30,6 +31,36 @@ class ChunkSource;
 namespace core_abi3_internal {
 
 enum class PythonSourceKind { kPath, kText, kStream, kUnknown };
+
+// Releases the GIL for one native blocking region and restores it on every
+// exit path. Python callbacks reached by the native region acquire it locally.
+class ScopedGilRelease final {
+public:
+  ScopedGilRelease() noexcept : state_(PyEval_SaveThread()) {}
+  ScopedGilRelease(const ScopedGilRelease &) = delete;
+  ScopedGilRelease &operator=(const ScopedGilRelease &) = delete;
+  ~ScopedGilRelease() { PyEval_RestoreThread(state_); }
+
+private:
+  PyThreadState *state_;
+};
+
+// Acquires the GIL for a callback that may run on an arena worker.
+class ScopedGilAcquire final {
+public:
+  ScopedGilAcquire() noexcept : state_(PyGILState_Ensure()) {}
+  ScopedGilAcquire(const ScopedGilAcquire &) = delete;
+  ScopedGilAcquire &operator=(const ScopedGilAcquire &) = delete;
+  ~ScopedGilAcquire() { PyGILState_Release(state_); }
+
+private:
+  PyGILState_STATE state_;
+};
+
+template <class Callable> decltype(auto) call_without_gil(Callable &&callable) {
+  ScopedGilRelease release;
+  return std::forward<Callable>(callable)();
+}
 
 void raise_status_error(int status, char *err);
 PyObject *fsencode_path(PyObject *obj);

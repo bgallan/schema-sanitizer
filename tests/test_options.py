@@ -144,6 +144,24 @@ def test_python_options_catalog_facades_are_removed() -> None:
     assert not (package / "defaults.py").exists()
 
 
+def test_memory_limit_helper_translates_only_native_unset_sentinel() -> None:
+    """Python policies see an unset native memory limit as ``None``."""
+    from schema_sanitizer.options_impl.options import (
+        Options,
+        memory_limit_bytes_or_none,
+    )
+
+    options = Options()
+    assert options.performance.memory_limit_bytes == -1
+    assert memory_limit_bytes_or_none(options) is None
+
+    options.performance.memory_limit_bytes = -1
+    assert memory_limit_bytes_or_none(options) is None
+    options.performance.memory_limit_bytes = 1024 * 1024
+    assert memory_limit_bytes_or_none(options) == 1024 * 1024
+    assert memory_limit_bytes_or_none(None) is None
+
+
 def test_options_validate_native_rejects_bad_enum() -> None:
     """Verify options validate native rejects bad enum."""
     require_native()
@@ -178,12 +196,14 @@ def test_public_call_options_map_to_native_options() -> None:
         schema_contract=pa.schema([("a", pa.int64())]),
         schema_mode="strict",
         on_error="stop",
+        multi_threading=True,
         memory_limit_bytes=1024 * 1024,
         xml_row_tag="row",
     )
 
     assert opt.schema.schema_evolution.name == "STRICT"
     assert opt.errors.on_error.name == "STOP"
+    assert opt.performance.threading_mode.name == "MULTI"
     assert opt.performance.memory_limit_bytes == 1024 * 1024
     assert opt.performance.memory_limit_bytes == 1024 * 1024
     assert opt.xml.xml_row_tag == "row"

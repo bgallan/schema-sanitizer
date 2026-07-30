@@ -371,6 +371,9 @@ def test_pipeline_runner_keeps_parquet_writer_options_out_of_registry_compile(
         },
     )
 
+    assert len(seen_to_parquet_kwargs) == 1
+    resolved_memory_limit = seen_to_parquet_kwargs[0].pop("memory_limit_bytes")
+    assert isinstance(resolved_memory_limit, int) and resolved_memory_limit > 0
     assert seen_to_parquet_kwargs == [
         {
             "input_format": "jsonl",

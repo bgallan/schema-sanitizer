@@ -71,8 +71,8 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
     """Verify lazy remote warm-up chunks are not replayed into normal outputs."""
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
-    from schema_sanitizer.remote_impl import routing as remote_routing
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
 
     payloads = {
@@ -80,7 +80,7 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
         "s3://bucket/normal/normal.json": {"id": "normal-row", "normal_only": 2},
     }
 
-    async def fake_list_remote_directory_files(uri, suffixes):
+    def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
         """Return a single child for each fake remote directory."""
         assert suffixes == (".json",)
         if uri == "s3://bucket/warm/":
@@ -91,7 +91,8 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
 
     def fake_stage_remote_files_to_directory(files, **kwargs):
         """Stage only requested fake remote files."""
-        assert kwargs["memory_limit_bytes"] is None
+        assert isinstance(kwargs["memory_limit_bytes"], int)
+        assert kwargs["memory_limit_bytes"] > 0
         staged_dir = tmp_path / f"stage-{len(list(tmp_path.glob('stage-*'))) + 1}"
         staged_dir.mkdir()
         for file in files:
@@ -106,7 +107,7 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
         )
 
     monkeypatch.setattr(
-        remote_routing,
+        sync_backend,
         "list_remote_directory",
         fake_list_remote_directory_files,
     )

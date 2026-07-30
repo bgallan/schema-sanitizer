@@ -1,5 +1,15 @@
 cmake_minimum_required(VERSION 4.3)
 
+# The native concurrency runtime uses C++20 atomic wait/notify and over-aligned
+# allocation. libc++ exposes the required runtime entry points from macOS 11, so
+# binaries must not advertise an older deployment baseline.
+if(CMAKE_HOST_APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET
+                         OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "11.0"))
+  set(CMAKE_OSX_DEPLOYMENT_TARGET
+      "11.0"
+      CACHE STRING "Minimum supported macOS version" FORCE)
+endif()
+
 # Determine version from VERSION.
 #
 # NOTE: meta/VERSION is the single source of truth for Python packaging and
@@ -46,6 +56,8 @@ project(
   HOMEPAGE_URL "https://github.com/bgallan/schema-sanitizer"
   LANGUAGES C CXX)
 
+find_package(Threads REQUIRED)
+
 option(SCHEMA_SANITIZER_ENABLE_LTO
        "Enable IPO/LTO in Release builds when supported" ON)
 option(SCHEMA_SANITIZER_ENABLE_WARNINGS
@@ -58,11 +70,12 @@ option(SCHEMA_SANITIZER_REPRODUCIBLE
 option(SCHEMA_SANITIZER_ENABLE_WERROR
        "Treat compiler warnings as errors for schema-sanitizer targets" ON)
 
-# Developer sanitizer mode: none|asan-ubsan.
+# Developer sanitizer mode: none|asan|asan-ubsan|tsan.
 set(SCHEMA_SANITIZER_SANITIZER
     "none"
-    CACHE STRING "Sanitizer mode: none|asan-ubsan")
-set_property(CACHE SCHEMA_SANITIZER_SANITIZER PROPERTY STRINGS none asan-ubsan)
+    CACHE STRING "Sanitizer mode: none|asan|asan-ubsan|tsan")
+set_property(CACHE SCHEMA_SANITIZER_SANITIZER PROPERTY STRINGS none asan
+                                                       asan-ubsan tsan)
 
 option(SCHEMA_SANITIZER_ENABLE_CLANG_TIDY
        "Enable clang-tidy for schema-sanitizer targets" OFF)
@@ -79,8 +92,13 @@ option(
   OFF)
 option(SCHEMA_SANITIZER_REQUIRE_ZLIB
        "Require zlib for native Parquet GZIP support" OFF)
-option(SCHEMA_SANITIZER_BUILD_FUZZERS
-       "Build libFuzzer entry points for native parsers" OFF)
+option(SCHEMA_SANITIZER_BUILD_FUZZERS "Build native parser fuzz entry points"
+       OFF)
+set(SCHEMA_SANITIZER_FUZZ_ENGINE
+    "auto"
+    CACHE STRING "Native fuzz engine: auto|libfuzzer|standalone")
+set_property(CACHE SCHEMA_SANITIZER_FUZZ_ENGINE PROPERTY STRINGS auto libfuzzer
+                                                         standalone)
 option(SCHEMA_SANITIZER_ENABLE_COVERAGE
        "Build native targets with LLVM source coverage instrumentation" OFF)
 set(SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN
@@ -93,7 +111,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerTargetOptions.cmake")
 # Developer ergonomics (clangd, IDEs).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if(SCHEMA_SANITIZER_ENABLE_LTO)
+if(SCHEMA_SANITIZER_ENABLE_LTO AND SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   include(CheckIPOSupported)
   check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
   if(_ipo_ok)
@@ -102,6 +120,8 @@ if(SCHEMA_SANITIZER_ENABLE_LTO)
   else()
     message(STATUS "IPO/LTO not supported: ${_ipo_err}")
   endif()
+elseif(SCHEMA_SANITIZER_ENABLE_LTO)
+  message(STATUS "IPO/LTO disabled for sanitizer builds")
 endif()
 
 # ---- Arrow integration ------------------------------------------------------
@@ -115,6 +135,14 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerCompression.cmake")
 schema_sanitizer_resolve_zlib(SCHEMA_SANITIZER_ZLIB_TARGET
                               SCHEMA_SANITIZER_ZLIB_PROVIDER_RESOLVED)
+
+# Bundled compression is part of the native Parquet implementation. Sanitizer
+# builds must instrument it too; otherwise GZIP paths cross into an opaque
+# static library and the full-extension gate has an avoidable blind spot.
+if(SCHEMA_SANITIZER_ZLIB_PROVIDER_RESOLVED MATCHES "^bundled-" AND TARGET
+                                                                   zlibstatic)
+  schema_sanitizer_add_sanitizer(zlibstatic)
+endif()
 
 # ---- Python discovery -------------------------------------------------------
 # Python is required to build the ABI3 extension module.
@@ -171,7 +199,50 @@ foreach(_schema_sanitizer_target sanitize_core
 endforeach()
 
 # Link
+target_link_libraries(sanitize_core PUBLIC Threads::Threads)
 target_link_libraries(${_schema_sanitizer_pymod_target} PRIVATE sanitize_core)
+
+if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
+  include(CTest)
+  add_executable(
+    schema_sanitizer_sanitized_ordered_executor
+    cpp/tests/ordered_executor_tsan.cc
+    cpp/src/internal/memory/memory_pool.cc
+    cpp/src/internal/memory/pool_resource.cc
+    cpp/src/internal/runtime/operation_task_arena.cc
+    cpp/src/internal/runtime/performance_telemetry.cc
+    cpp/src/internal/json_encoding/token_writer.cc)
+  target_compile_features(schema_sanitizer_sanitized_ordered_executor
+                          PRIVATE cxx_std_23)
+  set_target_properties(
+    schema_sanitizer_sanitized_ordered_executor
+    PROPERTIES CXX_EXTENSIONS OFF
+               CXX_SCAN_FOR_MODULES OFF
+               INTERPROCEDURAL_OPTIMIZATION OFF)
+  target_include_directories(schema_sanitizer_sanitized_ordered_executor
+                             PRIVATE cpp/src)
+  target_link_libraries(schema_sanitizer_sanitized_ordered_executor
+                        PRIVATE Threads::Threads)
+  schema_sanitizer_enable_warnings(schema_sanitizer_sanitized_ordered_executor)
+  schema_sanitizer_enable_repro(schema_sanitizer_sanitized_ordered_executor)
+  schema_sanitizer_add_sanitizer(schema_sanitizer_sanitized_ordered_executor)
+  set(_schema_sanitizer_sanitized_executor_rounds 100)
+  # Keep compiling the probe with MSVC ASan, but do not register it for
+  # execution there. The Windows ASan runtime can stall indefinitely while
+  # starting or tearing down this deeply threaded process, outside the probe's
+  # own watchdog. Windows still executes every ASan fuzzer; this repeated
+  # concurrency gate runs under macOS ASan/UBSan and Linux TSan.
+  if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))
+    add_test(NAME schema_sanitizer_sanitized_ordered_executor
+             COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
+                     ${_schema_sanitizer_sanitized_executor_rounds})
+  endif()
+  if(SCHEMA_SANITIZER_SANITIZER STREQUAL "tsan")
+    add_test(NAME schema_sanitizer_tsan_ordered_executor
+             COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
+                     ${_schema_sanitizer_sanitized_executor_rounds})
+  endif()
+endif()
 
 if(SCHEMA_SANITIZER_ZLIB_TARGET)
   target_compile_definitions(sanitize_core PRIVATE SCHEMA_SANITIZER_HAS_ZLIB=1)
@@ -179,26 +250,54 @@ if(SCHEMA_SANITIZER_ZLIB_TARGET)
 endif()
 
 if(SCHEMA_SANITIZER_BUILD_FUZZERS)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(
-      FATAL_ERROR "SCHEMA_SANITIZER_BUILD_FUZZERS requires Clang/libFuzzer")
+  set(_schema_sanitizer_fuzz_engine "${SCHEMA_SANITIZER_FUZZ_ENGINE}")
+  if(_schema_sanitizer_fuzz_engine STREQUAL "auto")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      set(_schema_sanitizer_fuzz_engine "libfuzzer")
+    else()
+      set(_schema_sanitizer_fuzz_engine "standalone")
+    endif()
   endif()
+  if(_schema_sanitizer_fuzz_engine STREQUAL "libfuzzer"
+     AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "SCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer requires Clang")
+  endif()
+  if(NOT _schema_sanitizer_fuzz_engine MATCHES "^(libfuzzer|standalone)$")
+    message(
+      FATAL_ERROR
+        "Invalid SCHEMA_SANITIZER_FUZZ_ENGINE value: '${SCHEMA_SANITIZER_FUZZ_ENGINE}'. Expected: auto, libfuzzer, or standalone"
+    )
+  endif()
+  message(STATUS "Native fuzz engine: ${_schema_sanitizer_fuzz_engine}")
+  schema_sanitizer_stage_msvc_asan_runtime("${CMAKE_BINARY_DIR}/fuzz")
 
   function(schema_sanitizer_add_fuzzer target source)
-    add_executable(${target} ${source} cpp/fuzz/sanitizer_runtime_defaults.cc)
+    set(_fuzz_sources ${source} cpp/fuzz/sanitizer_runtime_defaults.cc)
+    if(_schema_sanitizer_fuzz_engine STREQUAL "standalone")
+      list(APPEND _fuzz_sources cpp/fuzz/standalone_main.cc)
+    endif()
+    add_executable(${target} ${_fuzz_sources})
     target_compile_features(${target} PRIVATE cxx_std_23)
     set_target_properties(
       ${target}
       PROPERTIES CXX_EXTENSIONS OFF
                  CXX_SCAN_FOR_MODULES OFF
+                 INTERPROCEDURAL_OPTIMIZATION OFF
                  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fuzz")
+    foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+      set_target_properties(
+        ${target} PROPERTIES "RUNTIME_OUTPUT_DIRECTORY_${_config}"
+                             "${CMAKE_BINARY_DIR}/fuzz")
+    endforeach()
     target_include_directories(${target} PRIVATE cpp/src cpp/thirdparty)
     target_link_libraries(${target} PRIVATE sanitize_core)
     schema_sanitizer_enable_warnings(${target})
     schema_sanitizer_enable_repro(${target})
     schema_sanitizer_add_sanitizer(${target})
-    target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
-    target_link_options(${target} PRIVATE -fsanitize=fuzzer)
+    if(_schema_sanitizer_fuzz_engine STREQUAL "libfuzzer")
+      target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
+      target_link_options(${target} PRIVATE -fsanitize=fuzzer)
+    endif()
   endfunction()
 
   schema_sanitizer_add_fuzzer(schema_sanitizer_fuzz_json cpp/fuzz/fuzz_json.cc)

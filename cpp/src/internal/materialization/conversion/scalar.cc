@@ -249,4 +249,38 @@ Status convert_scalar(const ColumnPlan &plan, ValueView value, ConvertCtx &ctx,
   return Status::OK();
 }
 
+Status convert_direct_scalar(const ColumnPlan &plan, ValueView value,
+                             ConvertCtx &ctx, DirectScalarValue *out) {
+  if (!out) {
+    return Status::Invalid("convert_direct_scalar: out is null");
+  }
+  out->reset(plan.logical_type.kind);
+  if (value.is_null()) {
+    return Status::OK();
+  }
+  if (plan.logical_type.kind == LogicalKind::kStruct ||
+      plan.logical_type.kind == LogicalKind::kList) {
+    return Status::Invalid(
+        "convert_direct_scalar called with nested logical type");
+  }
+
+  out->is_null = false;
+  if (plan.logical_type.kind == LogicalKind::kUtf8 && value.is_string()) {
+    out->borrows_utf8 = true;
+    out->borrowed_utf8 = value.as_string_view();
+    return Status::OK();
+  }
+
+  Cell converted;
+  SAN_RETURN_NOT_OK(convert_scalar(plan, value, ctx, &converted));
+  out->is_null = converted.is_null;
+  out->b = converted.b;
+  out->i64 = converted.i64;
+  out->f64 = converted.f64;
+  if (plan.logical_type.kind == LogicalKind::kUtf8) {
+    out->owned_utf8 = std::move(converted.str);
+  }
+  return Status::OK();
+}
+
 } // namespace sanitize::internal

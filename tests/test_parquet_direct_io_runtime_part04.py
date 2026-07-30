@@ -96,14 +96,13 @@ def test_native_arrow_schema_contract_payload_supports_new_direct_shapes() -> No
 
 
 @_requires_pyarrow
-def test_parquet_threading_uses_memory_guard() -> None:
-    """Verify Parquet direct threading is gated by configured memory."""
+def test_parquet_threading_uses_shared_execution_policy() -> None:
+    """Verify Parquet direct threading follows the operation execution mode."""
     from schema_sanitizer.adapters.parquet import memory as pyarrow_adapter
 
-    assert pyarrow_adapter.parquet_use_threads_from_memory_limit(None)
-    assert pyarrow_adapter.parquet_use_threads_from_memory_limit(0)
-    assert not pyarrow_adapter.parquet_use_threads_from_memory_limit(64 * 1024 * 1024)
-    assert pyarrow_adapter.parquet_use_threads_from_memory_limit(256 * 1024 * 1024)
+    assert not pyarrow_adapter.parquet_use_threads("single", None)
+    assert not pyarrow_adapter.parquet_use_threads("single", 256 * 1024 * 1024)
+    assert not pyarrow_adapter.parquet_use_threads("multi", 1)
 
 
 @_requires_pyarrow

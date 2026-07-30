@@ -25,7 +25,10 @@ make_ingest_c_stream(const std::string &frontend_name, FrontendHandle frontend,
                      PreparedOptionsPtr opts,
                      std::shared_ptr<IngestDiagnostics> diagnostics,
                      std::shared_ptr<sanitize::ExecutionContext> owned_ctx,
-                     std::shared_ptr<void> operation_memory_pool) {
+                     std::shared_ptr<void> operation_memory_pool,
+                     std::shared_ptr<OperationTaskArena> task_arena,
+                     std::shared_ptr<PerformanceTelemetry> telemetry,
+                     std::int64_t input_size_hint_bytes) {
   if (!plan) {
     return sanitize::Status::Invalid("make_ingest_c_stream: plan is null");
   }
@@ -35,10 +38,11 @@ make_ingest_c_stream(const std::string &frontend_name, FrontendHandle frontend,
 
   SAN_ASSIGN_OR_RAISE(
       auto main_source,
-      make_ingest_stream_source(frontend_name, std::move(frontend),
-                                std::move(plan), std::move(opts),
-                                std::move(diagnostics), std::move(owned_ctx),
-                                std::move(operation_memory_pool)));
+      make_ingest_stream_source(
+          frontend_name, std::move(frontend), std::move(plan), std::move(opts),
+          std::move(diagnostics), std::move(owned_ctx),
+          std::move(operation_memory_pool), std::move(task_arena),
+          std::move(telemetry), input_size_hint_bytes));
 
   return sanitize::export_stream_c(std::move(main_source));
 }

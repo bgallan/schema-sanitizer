@@ -3,9 +3,10 @@
 class TrackingMemoryPool final : public MemoryPool {
 public:
   TrackingMemoryPool(std::shared_ptr<MemoryPool> parent, int64_t limit,
-                     std::string backend_name)
+                     std::string backend_name, bool thread_safe_registry)
       : parent_(std::move(parent)), limit_(limit),
-        backend_name_(std::move(backend_name)) {}
+        backend_name_(std::move(backend_name)),
+        live_allocations_(thread_safe_registry) {}
 
   sanitize::Status Allocate(int64_t size, int64_t alignment,
                             uint8_t **out) override {
@@ -47,10 +48,11 @@ public:
             "memory quota accounting overflow");
       }
       const auto next = charged + quota_charge;
-      if (limit_ > 0 && next > limit_) {
+      const auto limit = limit_.load(std::memory_order_relaxed);
+      if (limit > 0 && next > limit) {
         return sanitize::Status::OutOfMemory(
             "memory_limit_bytes limit exceeded including allocator overhead: ",
-            next, " bytes > ", limit_, " bytes");
+            next, " bytes > ", limit, " bytes");
       }
       if (charged_bytes_.compare_exchange_weak(charged, next,
                                                std::memory_order_relaxed,
@@ -198,7 +200,12 @@ public:
   [[nodiscard]] int64_t corruption_count() const override {
     return corruption_count_.load(std::memory_order_relaxed);
   }
-  [[nodiscard]] int64_t limit_bytes() const override { return limit_; }
+  [[nodiscard]] int64_t limit_bytes() const override {
+    return limit_.load(std::memory_order_relaxed);
+  }
+  void SetLimit(int64_t limit) noexcept override {
+    limit_.store(std::max<int64_t>(1, limit), std::memory_order_relaxed);
+  }
   [[nodiscard]] bool wipes_memory_on_free() const noexcept override {
     return secure_memory_cleanup_enabled();
   }
@@ -208,7 +215,7 @@ public:
 
 private:
   std::shared_ptr<MemoryPool> parent_;
-  int64_t limit_ = -1;
+  std::atomic<int64_t> limit_{-1};
   std::string backend_name_;
   std::atomic<int64_t> bytes_allocated_{0};
   std::atomic<int64_t> charged_bytes_{0};

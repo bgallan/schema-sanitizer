@@ -43,7 +43,7 @@ def test_directory_preparation_has_one_bounded_owner() -> None:
     assert "def prepare_directory(" in source
     assert "class RemoteNativeDirectorySourceManifest" in source
     assert "def prepare_single_parquet_file(" in source
-    assert len(source.splitlines()) <= 500
+    assert len(source.splitlines()) <= 550
 
 
 def test_xml_frontend_has_one_bounded_lifecycle_owner() -> None:

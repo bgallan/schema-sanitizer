@@ -17,6 +17,10 @@ public:
   // Creates a PoolResource.
   explicit PoolResource(void *pool_handle = nullptr);
   explicit PoolResource(std::shared_ptr<void> pool_keepalive);
+  PoolResource(std::shared_ptr<void> pool_keepalive, bool recycle_exact_blocks);
+  PoolResource(std::shared_ptr<void> pool_keepalive, bool recycle_exact_blocks,
+               std::size_t max_cached_bytes);
+  ~PoolResource() override;
 
   // Returns the opaque pool handle used by this resource.
   [[nodiscard]] void *pool() const noexcept { return pool_handle_; }
@@ -32,8 +36,11 @@ protected:
   do_is_equal(const std::pmr::memory_resource &other) const noexcept override;
 
 private:
+  struct CacheState;
+
   std::shared_ptr<void> pool_keepalive_;
   void *pool_handle_ = nullptr;
+  std::unique_ptr<CacheState> cache_;
 };
 
 } // namespace sanitize::internal

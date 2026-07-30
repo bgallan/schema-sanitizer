@@ -150,6 +150,29 @@ protected:
     ++length_;
   }
 
+  // Appends validity bits from one Arrow array. The caller must append the
+  // corresponding physical values before or after this call without changing
+  // length_.
+  sanitize::Status append_array_validity(const ArrowArray &array) {
+    if (array.length < 0 || array.offset < 0) {
+      return sanitize::Status::Invalid(
+          "bulk Arrow append received negative length or offset");
+    }
+    const auto *validity = array.n_buffers > 0 && array.buffers
+                               ? static_cast<const uint8_t *>(array.buffers[0])
+                               : nullptr;
+    for (int64_t index = 0; index < array.length; ++index) {
+      const int64_t source_index = array.offset + index;
+      const bool valid =
+          !validity ||
+          ((validity[static_cast<std::size_t>(source_index >> 3)] >>
+            (source_index & 7)) &
+           1u) != 0;
+      push_validity(valid);
+    }
+    return sanitize::Status::OK();
+  }
+
   // Returns the validity bitmap when the array contains nulls.
   static const void *validity_buffer(const ArrayPayload *payload,
                                      int64_t null_count) noexcept {

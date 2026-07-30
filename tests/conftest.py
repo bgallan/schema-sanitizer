@@ -7,20 +7,6 @@ from functools import lru_cache
 import pytest
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    """Register explicit integration-test settings without environment variables."""
-    group = parser.getgroup("schema-sanitizer integration")
-    group.addoption("--run-cloud-emulators", action="store_true", default=False)
-    group.addoption("--s3-emulator-endpoint", default="")
-    group.addoption("--azure-emulator-connection-string", default="")
-    group.addoption("--gcs-emulator-endpoint", default="")
-    group.addoption("--run-real-gcp", action="store_true", default=False)
-    group.addoption("--real-gcp-project", default="")
-    group.addoption("--real-gcs-bucket", default="")
-    group.addoption("--real-bigquery-dataset", default="")
-    group.addoption("--real-bigquery-location", default="")
-
-
 @lru_cache(maxsize=1)
 def native_available() -> bool:
     """Return native available for the test."""
@@ -51,6 +37,9 @@ def read_test_path(
     from schema_sanitizer.api_impl.execution_context import to_table
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
     from schema_sanitizer.api_impl.results import convert_arrow_table_output
+    from schema_sanitizer.core_impl.execution_policy import (
+        threading_mode_from_multi_threading,
+    )
     from schema_sanitizer.options_impl.call_options import normalize_call_options_or_none
 
     prepared = prepare_public_input(
@@ -62,6 +51,7 @@ def read_test_path(
         csv_delimiter=str(options.get("csv_delimiter", ",")),
         csv_has_header=bool(options.get("csv_has_header", True)),
         memory_limit_bytes=options.get("memory_limit_bytes"),
+        threading_mode=threading_mode_from_multi_threading(options.get("multi_threading", False)),
     )
     try:
         if prepared.xml_row_tag is not None:

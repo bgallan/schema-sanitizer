@@ -270,7 +270,7 @@ def test_remote_source_plan_stream_uses_native_chunk_provider(monkeypatch) -> No
     monkeypatch.setattr(
         source_plan_remote_staging,
         "open_staged_remote_chunks",
-        lambda _manifest: FakeStagedChunks(stages),
+        lambda _manifest, **_kwargs: FakeStagedChunks(stages),
     )
 
     raw = execution_context_impl._open_source_plan_sink_stream_or_none(
@@ -315,19 +315,19 @@ def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.api_impl.source_plan import attached as source_plan_attached
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
-    from schema_sanitizer.remote_impl import routing as remote_routing
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl import sync_backend
 
     def fail_native_stage(*args, **kwargs):
         """Fail if remote directories stage eagerly during preparation."""
         raise AssertionError("remote directories should not stage during preparation")
 
-    async def fake_list_remote_directory(*_args, **_kwargs):
+    def fake_list_remote_directory(*_args, **_kwargs):
         """Return one remote child without using the removed sync facade."""
         return (RemoteFile("s3://bucket/partition/row.json", "row.json"),)
 
     monkeypatch.setattr(
-        remote_routing,
+        sync_backend,
         "list_remote_directory",
         fake_list_remote_directory,
     )
@@ -356,6 +356,7 @@ def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
 def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> None:
     """Verify remote directory staging caps active downloads while preserving row order."""
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
+    from schema_sanitizer.remote_impl import directory_downloads as remote_downloads
     from schema_sanitizer.remote_impl import staging as remote_staging
 
     active_downloads = 0
@@ -365,7 +366,7 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         RemoteFile(f"s3://bucket/partition/{index}.jsonl", f"{index}.jsonl") for index in range(5)
     ]
 
-    async def fake_client(files, *, memory_limit_bytes):
+    async def fake_client(files, *, memory_limit_bytes, threading_mode="single"):
         """Return a reusable fake provider client."""
         assert len(files) == 5
         assert memory_limit_bytes == 32 * 1024 * 1024
@@ -385,13 +386,14 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         Path(local_path).write_text(f'{{"file":"{file.name}"}}\n', encoding="utf-8")
         active_downloads -= 1
 
-    monkeypatch.setattr(remote_staging, "provider_client_for_downloads", fake_client)
-    monkeypatch.setattr(remote_staging, "close_provider_client", fake_close)
-    monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)
+    monkeypatch.setattr(remote_downloads, "provider_client_for_downloads", fake_client)
+    monkeypatch.setattr(remote_downloads, "close_provider_client", fake_close)
+    monkeypatch.setattr(remote_downloads, "download_file_to_path", fake_download)
 
     staged = remote_staging.stage_remote_files_to_directory(
         files,
         memory_limit_bytes=32 * 1024 * 1024,
+        threading_mode="multi",
     )
     try:
         assert max_active_downloads == 2
@@ -411,35 +413,33 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
 
 def test_remote_directory_staging_does_not_retry_memory_limit_failure(monkeypatch) -> None:
     """Verify post-download memory-limit failures are not retried as remote I/O."""
+    from contextlib import contextmanager
+
     from schema_sanitizer.errors import SchemaSanitizerResourceError
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl import sync_backend
+    from schema_sanitizer.remote_impl.providers import s3_sync
 
     downloads = 0
 
     files = [RemoteFile("s3://bucket/partition/row.jsonl", "row.jsonl", None)]
 
-    async def fake_client(files, *, memory_limit_bytes):
-        """Return a reusable fake provider client."""
-        assert len(files) == 1
-        assert memory_limit_bytes == 8
-        return object()
+    @contextmanager
+    def fake_client():
+        """Yield one inert blocking S3 client."""
+        yield object()
 
-    async def fake_close(client):
-        """Accept closing the fake provider client."""
-        assert client is not None
-
-    async def fake_download(client, file, local_path):
+    def fake_download(_context, file, local_path, *, memory_limit_bytes):
         """Write an oversized payload."""
         nonlocal downloads
-        assert client is not None
+        assert memory_limit_bytes == 8
         assert file.name == "row.jsonl"
         downloads += 1
         Path(local_path).write_bytes(b'{"payload":"too large"}\n')
 
-    monkeypatch.setattr(remote_staging, "provider_client_for_downloads", fake_client)
-    monkeypatch.setattr(remote_staging, "close_provider_client", fake_close)
-    monkeypatch.setattr(remote_staging, "download_file_to_path", fake_download)
+    monkeypatch.setattr(s3_sync, "open_client", fake_client)
+    monkeypatch.setattr(sync_backend, "_download_with_context", fake_download)
 
     with pytest.raises(SchemaSanitizerResourceError, match="memory_limit_bytes"):
         remote_staging.stage_remote_files_to_directory(

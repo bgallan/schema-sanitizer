@@ -61,7 +61,7 @@ def test_pipeline_source_discovery_filters_local_single_files(tmp_path) -> None:
 
 def test_pipeline_source_discovery_records_per_source_latency(monkeypatch, tmp_path) -> None:
     """Selected plans must carry discovery latency into partition accounting."""
-    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+    import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     existing = tmp_path / "existing.jsonl"
     existing.write_text('{"ok": true}\n', encoding="utf-8")
@@ -153,7 +153,7 @@ def test_pipeline_runner_reuses_discovered_local_directory_files(
 
 def test_pipeline_source_discovery_uses_gcs_bulk_directory_checks(monkeypatch) -> None:
     """Verify GCS directory discovery avoids one remote list call per partition."""
-    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+    import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
         PartitionRunPlan(
@@ -166,13 +166,15 @@ def test_pipeline_source_discovery_uses_gcs_bulk_directory_checks(monkeypatch) -
     ]
     captured: dict[str, object] = {}
 
-    async def fake_bulk(
+    def fake_bulk(
+        provider: str,
         uris: list[str],
         extensions: tuple[str, ...],
         *,
         memory_limit_bytes: int | None = None,
     ) -> DirectoryDiscovery[RemoteFile]:
         """Capture bulk discovery inputs and return one missing hour."""
+        assert provider == "gcs"
         captured["uris"] = uris
         captured["extensions"] = extensions
         exists_by_uri = {uri: not uri.endswith("hour=01") for uri in uris}
@@ -181,13 +183,15 @@ def test_pipeline_source_discovery_uses_gcs_bulk_directory_checks(monkeypatch) -
             files_by_uri={uri: [] for uri in uris},
         )
 
-    async def fail_individual_directory_list(*_args, **_kwargs):
+    def fail_individual_directory_list(*_args, **_kwargs):
         """Fail if the per-directory remote listing path is used."""
         raise AssertionError("per-directory remote listing should not run for GCS")
 
-    monkeypatch.setattr(source_discovery_mod.gcs, "directories_containing_files", fake_bulk)
     monkeypatch.setattr(
-        source_discovery_mod.routing, "list_remote_directory", fail_individual_directory_list
+        source_discovery_mod.sync_backend, "directories_containing_files", fake_bulk
+    )
+    monkeypatch.setattr(
+        source_discovery_mod.sync_backend, "list_remote_directory", fail_individual_directory_list
     )
 
     discovery = discover_existing_source_plans(
@@ -207,7 +211,7 @@ def test_pipeline_source_discovery_uses_gcs_bulk_directory_checks(monkeypatch) -
 
 def test_pipeline_source_discovery_uses_s3_bulk_directory_checks(monkeypatch) -> None:
     """Verify S3 directory discovery avoids one remote list call per partition."""
-    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+    import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
         PartitionRunPlan(
@@ -220,13 +224,15 @@ def test_pipeline_source_discovery_uses_s3_bulk_directory_checks(monkeypatch) ->
     ]
     captured: dict[str, object] = {}
 
-    async def fake_bulk(
+    def fake_bulk(
+        provider: str,
         uris: list[str],
         extensions: tuple[str, ...],
         *,
         memory_limit_bytes: int | None = None,
     ) -> DirectoryDiscovery[RemoteFile]:
         """Capture bulk discovery inputs and return one missing hour."""
+        assert provider == "s3"
         captured["uris"] = uris
         captured["extensions"] = extensions
         exists_by_uri = {uri: not uri.endswith("hour=01") for uri in uris}
@@ -235,13 +241,15 @@ def test_pipeline_source_discovery_uses_s3_bulk_directory_checks(monkeypatch) ->
             files_by_uri={uri: [] for uri in uris},
         )
 
-    async def fail_individual_directory_list(*_args, **_kwargs):
+    def fail_individual_directory_list(*_args, **_kwargs):
         """Fail if the per-directory remote listing path is used."""
         raise AssertionError("per-directory remote listing should not run for S3")
 
-    monkeypatch.setattr(source_discovery_mod.s3, "directories_containing_files", fake_bulk)
     monkeypatch.setattr(
-        source_discovery_mod.routing, "list_remote_directory", fail_individual_directory_list
+        source_discovery_mod.sync_backend, "directories_containing_files", fake_bulk
+    )
+    monkeypatch.setattr(
+        source_discovery_mod.sync_backend, "list_remote_directory", fail_individual_directory_list
     )
 
     discovery = discover_existing_source_plans(
@@ -261,7 +269,7 @@ def test_pipeline_source_discovery_uses_s3_bulk_directory_checks(monkeypatch) ->
 
 def test_pipeline_source_discovery_uses_azure_bulk_directory_checks(monkeypatch) -> None:
     """Verify Azure directory discovery avoids one remote list call per partition."""
-    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+    import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
         PartitionRunPlan(
@@ -274,13 +282,15 @@ def test_pipeline_source_discovery_uses_azure_bulk_directory_checks(monkeypatch)
     ]
     captured: dict[str, object] = {}
 
-    async def fake_bulk(
+    def fake_bulk(
+        provider: str,
         uris: list[str],
         extensions: tuple[str, ...],
         *,
         memory_limit_bytes: int | None = None,
     ) -> DirectoryDiscovery[RemoteFile]:
         """Capture bulk discovery inputs and return one missing hour."""
+        assert provider == "azure"
         captured["uris"] = uris
         captured["extensions"] = extensions
         exists_by_uri = {uri: not uri.endswith("hour=01") for uri in uris}
@@ -289,13 +299,15 @@ def test_pipeline_source_discovery_uses_azure_bulk_directory_checks(monkeypatch)
             files_by_uri={uri: [] for uri in uris},
         )
 
-    async def fail_individual_directory_list(*_args, **_kwargs):
+    def fail_individual_directory_list(*_args, **_kwargs):
         """Fail if the per-directory remote listing path is used."""
         raise AssertionError("per-directory remote listing should not run for Azure")
 
-    monkeypatch.setattr(source_discovery_mod.azure, "directories_containing_files", fake_bulk)
     monkeypatch.setattr(
-        source_discovery_mod.routing, "list_remote_directory", fail_individual_directory_list
+        source_discovery_mod.sync_backend, "directories_containing_files", fake_bulk
+    )
+    monkeypatch.setattr(
+        source_discovery_mod.sync_backend, "list_remote_directory", fail_individual_directory_list
     )
 
     discovery = discover_existing_source_plans(
@@ -318,7 +330,7 @@ def test_pipeline_source_discovery_uses_local_grouped_directory_checks(
     tmp_path: Path,
 ) -> None:
     """Verify local directory discovery uses grouped checks for partition ranges."""
-    import schema_sanitizer.pipeline.source_discovery as source_discovery_mod
+    import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
         PartitionRunPlan(

@@ -11,11 +11,14 @@ from ...adapters.parquet.compression import (
     normalize_parquet_compression,
     normalize_parquet_gzip_level,
 )
+from ...core_impl.execution_policy import threading_mode_from_multi_threading
 from ...core_impl.generated_metadata import INGESTION_TIMESTAMP_COLUMN, SOURCE_FILE_COLUMN
-from ...core_impl.probes import options_for_schema_probe
+from ...core_impl.memory_budget import normalize_memory_limit
+from ...core_impl.probes import options_for_registry_operation
 from ...core_impl.schema_registry import current_native_registry_state
 from ...options_impl.call_options import (
     FILE_CONVERSION_HELPER_KEYS,
+    attach_operation_detected_at,
     call_options_from_locals,
     normalize_call_options_or_none,
 )
@@ -25,6 +28,8 @@ from ...remote_impl.staging import (
     prepare_output_target,
 )
 from ..input.preparation import prepare_public_input
+from ..operation_context import OperationExecutionContext
+from ..partition_resources import take_borrowed_partition_resources
 from ..registry_output import (
     write_csv_registry_file,
     write_jsonl_registry_file,
@@ -49,6 +54,7 @@ def try_convert_source_plan_with_options(
     schema_registry_native_state: Any = None,
     schema_mode: str,
     field_name_policy: str,
+    ingestion_timestamp_micros: int,
     writer_options: Mapping[str, Any] | None = None,
 ) -> Result | None:
     """Write a prepared source-plan input through the canonical native path."""
@@ -73,7 +79,7 @@ def try_convert_source_plan_with_options(
         feature=feature,
         call_options=call_options,
         first_row_columns={},
-        timestamp_columns=(INGESTION_TIMESTAMP_COLUMN,),
+        timestamp_columns={INGESTION_TIMESTAMP_COLUMN: ingestion_timestamp_micros},
         schema_registry_json=schema_registry_json,
         schema_mode=schema_mode,
         field_name_policy=field_name_policy,
@@ -89,7 +95,7 @@ def try_convert_source_plan_with_options(
 
 
 def convert_file_with_options(
-    input_path: str | os.PathLike[str],
+    input_path: Any,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None,
@@ -111,17 +117,51 @@ def convert_file_with_options(
         schema_registry_native_state = current_native_registry_state()
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
     file_io_seconds = 0.0
-    input_started_at = perf_counter()
-    prepared_input = prepare_public_input(
-        input_path,
-        input_format=input_format,
-        input_mode=input_mode,
-        input_text_encoding=str(options.get("input_text_encoding", "utf-8")),
-        xml_row_tag=options.get("xml_row_tag"),
-        csv_delimiter=str(options.get("csv_delimiter", ",")),
-        csv_has_header=bool(options.get("csv_has_header", True)),
-        memory_limit_bytes=options.get("memory_limit_bytes"),
+    threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
+    memory_limit_bytes = normalize_memory_limit(options.get("memory_limit_bytes"))
+    options = dict(options)
+    options["memory_limit_bytes"] = memory_limit_bytes
+    borrowed = (
+        take_borrowed_partition_resources(
+            input_path,
+            threading_mode=threading_mode,
+            memory_limit_bytes=memory_limit_bytes,
+        )
+        if isinstance(input_path, (str, os.PathLike))
+        else None
     )
+    owns_operation_context = borrowed is None
+    partition_resources = None if borrowed is None else borrowed[2]
+    operation_context = (
+        OperationExecutionContext(
+            threading_mode=threading_mode,
+            memory_limit_bytes=memory_limit_bytes,
+        )
+        if borrowed is None
+        else borrowed[1]
+    )
+    input_started_at = perf_counter()
+    try:
+        prepared_input = (
+            prepare_public_input(
+                input_path,
+                input_format=input_format,
+                input_mode=input_mode,
+                input_text_encoding=str(options.get("input_text_encoding", "utf-8")),
+                xml_row_tag=options.get("xml_row_tag"),
+                csv_delimiter=str(options.get("csv_delimiter", ",")),
+                csv_has_header=bool(options.get("csv_has_header", True)),
+                memory_limit_bytes=memory_limit_bytes,
+                threading_mode=threading_mode,
+                operation_context=operation_context,
+            )
+            if borrowed is None
+            else borrowed[0]
+        )
+    except BaseException:
+        if owns_operation_context:
+            operation_context.close()
+        raise
     file_io_seconds += max(perf_counter() - input_started_at, 0.0)
     result: Result | None = None
     all_row_columns = (
@@ -141,16 +181,35 @@ def convert_file_with_options(
             options["input_text_encoding"] = "utf-8"
         output_started_at = perf_counter()
         output_target = prepare_output_target(
-            output_path, memory_limit_bytes=options.get("memory_limit_bytes")
+            output_path,
+            memory_limit_bytes=options.get("memory_limit_bytes"),
+            threading_mode=threading_mode,
+            operation_context=operation_context,
         )
         file_io_seconds += max(perf_counter() - output_started_at, 0.0)
         try:
+            if (
+                partition_resources is not None
+                and partition_resources.allow_early_lookahead
+                and output_target.remote_uri is None
+            ):
+                partition_resources.trigger()
             conversion_cpu_started_at = process_time()
             options = call_options_from_locals(
                 dict(options),
                 FILE_CONVERSION_HELPER_KEYS,
             )
-            call_options = normalize_call_options_or_none(**options_for_schema_probe(options))
+            call_options = normalize_call_options_or_none(
+                **options_for_registry_operation(
+                    options,
+                    registry_json=registry_json,
+                    schema_mode=schema_mode,
+                )
+            )
+            call_options = attach_operation_detected_at(
+                call_options,
+                operation_context.detected_at,
+            )
             field_name_policy = str(options.get("field_name_policy", "lower_alpha"))
             result = try_convert_source_plan_with_options(
                 prepared_input,
@@ -162,6 +221,7 @@ def convert_file_with_options(
                 schema_registry_native_state=schema_registry_native_state,
                 schema_mode=schema_mode,
                 field_name_policy=field_name_policy,
+                ingestion_timestamp_micros=operation_context.ingestion_timestamp_micros,
                 writer_options=resolved_writer_options,
             )
             if result is None:
@@ -176,7 +236,9 @@ def convert_file_with_options(
                     first_row_columns=None,
                     all_row_columns=all_row_columns,
                     row_span_columns=row_span_columns,
-                    timestamp_columns=(INGESTION_TIMESTAMP_COLUMN,),
+                    timestamp_columns={
+                        INGESTION_TIMESTAMP_COLUMN: operation_context.ingestion_timestamp_micros
+                    },
                     schema_mode=schema_mode,
                     field_name_policy=field_name_policy,
                     **resolved_writer_options,
@@ -185,9 +247,18 @@ def convert_file_with_options(
                 process_time() - conversion_cpu_started_at,
                 0.0,
             )
+            if partition_resources is not None and output_target.remote_uri is None:
+                partition_resources.trigger()
             upload_started_at = perf_counter()
-            finalize_output_target(output_target)
+            if partition_resources is None:
+                finalize_output_target(output_target)
+            else:
+                finalize_output_target(
+                    output_target,
+                    before_remote_upload=partition_resources.trigger,
+                )
             file_io_seconds += max(perf_counter() - upload_started_at, 0.0)
+            result.execution_policy = operation_context.policy.to_dict()
             return result
         except Exception:
             cleanup_output_target(output_target)
@@ -195,13 +266,14 @@ def convert_file_with_options(
     finally:
         cleanup_started_at = perf_counter()
         prepared_input.close()
+        operation_context.close()
         file_io_seconds += max(perf_counter() - cleanup_started_at, 0.0)
         if result is not None:
             result.file_io_seconds = file_io_seconds
 
 
 def _convert_public_file(
-    input_path: str | os.PathLike[str],
+    input_path: Any,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None,
@@ -238,7 +310,7 @@ def _convert_public_file(
 
 
 def to_jsonl(
-    input_path: str | os.PathLike[str],
+    input_path: Any,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None = None,
@@ -267,10 +339,11 @@ def to_jsonl(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
-    """Stream-sanitize an input file to JSON Lines without materializing a table."""
+    """Stream-sanitize a file or Python row iterable to JSON Lines."""
     options = locals()
     return _convert_public_file(
         input_path,
@@ -286,7 +359,7 @@ def to_jsonl(
 
 
 def to_csv(
-    input_path: str | os.PathLike[str],
+    input_path: Any,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None = None,
@@ -315,10 +388,11 @@ def to_csv(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
-    """Stream-sanitize an input file to CSV without materializing a table."""
+    """Stream-sanitize a file or Python row iterable to CSV."""
     options = locals()
     return _convert_public_file(
         input_path,
@@ -334,7 +408,7 @@ def to_csv(
 
 
 def to_parquet(
-    input_path: str | os.PathLike[str],
+    input_path: Any,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None = None,
@@ -363,12 +437,13 @@ def to_parquet(
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
     parquet_compression: str | None = "gzip",
     parquet_gzip_level: int | None = None,
     schema_registry: Mapping[str, Any] | str | None = None,
 ) -> Result:
-    """Stream-sanitize an input file to Parquet without materializing a table."""
+    """Stream-sanitize a file or Python row iterable to Parquet."""
     options = locals()
     return _convert_public_file(
         input_path,

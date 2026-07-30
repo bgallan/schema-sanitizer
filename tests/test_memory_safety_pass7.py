@@ -13,14 +13,18 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_async_tuning_is_derived_from_memory_budget() -> None:
     """Verify the defensive regression contract."""
     from schema_sanitizer.core_impl.memory_budget import memory_budget
-    from schema_sanitizer.remote_impl.staging import _directory_download_tuning
+    from schema_sanitizer.remote_impl.directory_downloads import directory_download_tuning
 
     small = memory_budget(16 * 1024 * 1024)
     large = memory_budget(512 * 1024 * 1024)
-    tuning = _directory_download_tuning(512 * 1024 * 1024)
+    tuning = directory_download_tuning(512 * 1024 * 1024, "multi")
+    from schema_sanitizer.core_impl.execution_policy import execution_policy
+
+    policy = execution_policy("multi", 512 * 1024 * 1024)
     assert 1 <= small.async_concurrency <= large.async_concurrency <= 64
-    assert tuning.concurrency == large.async_concurrency
-    assert tuning.window == large.async_prefetch_files
+    assert 1 <= tuning.concurrency <= large.async_concurrency
+    assert tuning.concurrency == policy.async_concurrency
+    assert tuning.window == policy.async_prefetch_files <= large.async_prefetch_files
     assert tuning.retries == large.async_retries
 
 
@@ -45,6 +49,7 @@ def test_remote_prefetch_window_comes_from_memory_limit() -> None:
 
     manifest = Manifest()
     manifest.memory_limit_bytes = 64 * 1024 * 1024
+    manifest.threading_mode = "multi"
     iterator = RemoteChunkPrefetchIterator(manifest)
     assert 1 <= iterator._prefetch_chunks <= 32
 

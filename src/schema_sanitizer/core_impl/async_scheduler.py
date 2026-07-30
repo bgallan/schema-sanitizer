@@ -9,7 +9,6 @@ from typing import Any, TypeVar
 
 T = TypeVar("T")
 
-_MAX_ASYNC_WORKERS = 512
 _MAX_ASYNC_RETRIES = 32
 
 
@@ -85,7 +84,7 @@ async def ordered_indexed_results(
     """Yield indexed async results in input order with bounded prefetch."""
     if count <= 0:
         return
-    worker_count = min(count, max(1, int(window)), _MAX_ASYNC_WORKERS)
+    worker_count = min(count, max(1, int(window)))
     indices: asyncio.Queue[int] = asyncio.Queue(maxsize=worker_count)
     results: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue(
         maxsize=worker_count
@@ -94,16 +93,17 @@ async def ordered_indexed_results(
         indices.put_nowait(index)
     next_to_schedule = worker_count
     workers = _start_indexed_workers(worker_count, indices, results, fetch)
-    pending: dict[int, Any] = {}
+    pending: dict[int, tuple[Any, BaseException | None]] = {}
 
     try:
         for expected in range(count):
             while expected not in pending:
                 index, value, error = await results.get()
-                if error is not None:
-                    raise error
-                pending[index] = value
-            yield expected, pending.pop(expected)
+                pending[index] = (value, error)
+            value, error = pending.pop(expected)
+            if error is not None:
+                raise error
+            yield expected, value
             if next_to_schedule < count:
                 indices.put_nowait(next_to_schedule)
                 next_to_schedule += 1
@@ -120,7 +120,7 @@ async def unordered_indexed_results(
     """Yield indexed async results as they complete with a fixed worker pool."""
     if count <= 0:
         return
-    worker_count = min(count, max(1, int(window)), _MAX_ASYNC_WORKERS)
+    worker_count = min(count, max(1, int(window)))
     indices: asyncio.Queue[int] = asyncio.Queue(maxsize=worker_count)
     results: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue(
         maxsize=worker_count

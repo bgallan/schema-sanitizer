@@ -152,7 +152,7 @@ def test_remote_registry_stream_uses_current_native_auto_provider(monkeypatch) -
     monkeypatch.setattr(
         source_plan_remote_staging,
         "open_staged_remote_chunks",
-        lambda _manifest: contexts.pop(0),
+        lambda _manifest, **_kwargs: contexts.pop(0),
     )
     raw_context = FakeRawContext()
 
@@ -173,12 +173,17 @@ def test_remote_registry_stream_uses_current_native_auto_provider(monkeypatch) -
     assert len(native_chunks) == 2
     assert events == [
         "enter:probe",
-        "close:probe-a",
         "close:probe-b",
         "exit:probe",
     ]
     opened.close()
-    assert events[-1] == "raw-close"
+    assert events == [
+        "enter:probe",
+        "close:probe-b",
+        "exit:probe",
+        "raw-close",
+        "close:probe-a",
+    ]
 
 
 def test_remote_registry_probe_is_owned_by_native_chunk_provider(monkeypatch) -> None:
@@ -216,7 +221,7 @@ def test_remote_registry_probe_is_owned_by_native_chunk_provider(monkeypatch) ->
     monkeypatch.setattr(
         source_plan_remote_staging,
         "open_staged_remote_chunks",
-        lambda _manifest: _fake_staging(events, "probe"),
+        lambda _manifest, **_kwargs: _fake_staging(events, "probe"),
     )
     raw = source_plan_probe.probe_source_plan_registry(
         FakeRawContext(),
@@ -270,7 +275,7 @@ def test_remote_auto_provider_failure_closes_both_providers(monkeypatch) -> None
     monkeypatch.setattr(
         source_plan_remote_staging,
         "open_staged_remote_chunks",
-        lambda _manifest: contexts.pop(0),
+        lambda _manifest, **_kwargs: contexts.pop(0),
     )
 
     with pytest.raises(RuntimeError, match="native open failed"):
@@ -291,3 +296,93 @@ def test_remote_auto_provider_failure_closes_both_providers(monkeypatch) -> None
     ]
     assert "exit:probe" in events
     assert "exit:stream" in events
+
+
+def test_remote_probe_prefix_resume_uses_exact_file_offset(monkeypatch) -> None:
+    """Streaming reuses the probe prefix and resumes at the first unstaged file."""
+    from schema_sanitizer.api_impl.source_plan import remote as remote_source_plan
+    from schema_sanitizer.input_impl.prepared import NativeDirectorySourceManifest
+    from schema_sanitizer.input_impl.source_plan import PreparedSourceBatch, SourceDescriptor
+
+    opened_at: list[int] = []
+    closed: list[str] = []
+    native_chunks: list[tuple[tuple[str, str, str], ...]] = []
+    _patch_native_plan(monkeypatch, native_chunks)
+    manifest = _remote_plan().payload
+
+    class FakeStage:
+        """Own one staged source from the requested manifest suffix."""
+
+        def __init__(self, source_index: int) -> None:
+            """Create a one-file native manifest for the source index."""
+            source = manifest.files[source_index]
+            self.name = source.name
+            self.manifest = NativeDirectorySourceManifest(
+                PreparedSourceBatch(
+                    (
+                        SourceDescriptor(
+                            "json",
+                            f"/tmp/{source.name}",
+                            source.uri,
+                        ),
+                    ),
+                    input_format="json",
+                )
+            )
+
+        def close(self) -> None:
+            """Record ownership release."""
+            closed.append(self.name)
+
+    class FakeStagedChunks:
+        """Yield the exact manifest suffix requested by the provider."""
+
+        def __init__(self, start: int) -> None:
+            """Remember the first file index to stage."""
+            self.start = start
+
+        def __enter__(self):
+            """Return one staged chunk per remaining source file."""
+            return iter(FakeStage(index) for index in range(self.start, len(manifest.files)))
+
+        def __exit__(self, _exc_type, _exc, _tb) -> bool:
+            """Do not suppress provider failures."""
+            return False
+
+    def open_chunks(_manifest, *, start=0):
+        """Record the exact resume offset requested by each provider."""
+        opened_at.append(start)
+        return FakeStagedChunks(start)
+
+    monkeypatch.setattr(remote_source_plan, "open_staged_remote_chunks", open_chunks)
+    probe = remote_source_plan.RemotePathSourceChunkProvider(
+        retained_chunks=[],
+        remaining_manifest=manifest,
+        retain_consumed_chunks=1,
+    )
+    stream = remote_source_plan.RemotePathSourceChunkProvider(
+        retained_chunks=[],
+        remaining_manifest=manifest,
+        retained_chunk_donor=probe,
+    )
+
+    while probe.next_sources() is not None:
+        pass
+    probe.close()
+    probe_chunks = tuple(native_chunks)
+    native_chunks.clear()
+
+    while stream.next_sources() is not None:
+        pass
+    stream.close()
+
+    assert opened_at == [0, 1]
+    assert [chunk[0][2] for chunk in probe_chunks] == [
+        "s3://bucket/a.json",
+        "s3://bucket/b.json",
+    ]
+    assert [chunk[0][2] for chunk in native_chunks] == [
+        "s3://bucket/a.json",
+        "s3://bucket/b.json",
+    ]
+    assert sorted(closed) == ["a.json", "b.json", "b.json"]

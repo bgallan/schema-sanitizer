@@ -22,17 +22,21 @@ def test_options_have_two_bounded_owners_without_helper_facades() -> None:
         assert retired not in production
 
 
-def test_remote_staging_is_one_flat_owner() -> None:
-    """Remote temporary paths, transfers, and lifecycle stay in one bounded module."""
+def test_remote_staging_and_directory_downloads_are_bounded_owners() -> None:
+    """Temporary paths and shared directory transfers have cohesive owners."""
     remote = ROOT / "src/schema_sanitizer/remote_impl"
-    owner = remote / "staging.py"
-    assert owner.is_file()
+    staging = remote / "staging.py"
+    downloads = remote / "directory_downloads.py"
+    assert staging.is_file()
+    assert downloads.is_file()
     assert not (remote / "staging").exists()
-    source = owner.read_text(encoding="utf-8")
+    assert len(staging.read_text(encoding="utf-8").splitlines()) <= 500
+    source = downloads.read_text(encoding="utf-8")
     assert len(source.splitlines()) <= 500
-    assert "class _DownloadContext" in source
+    assert "class DownloadContext" in source
+    assert "class RemoteDirectoryDownloadSession" in source
     assert "download_file_bytes" not in source
-    bulk = source[source.index("async def download_files_to_directory") :]
+    bulk = source[source.index("async def _download_files_with_context") :]
     assert "remote_provider(file.uri)" not in bulk
     assert "await download_file_to_path(context, file" in bulk
 

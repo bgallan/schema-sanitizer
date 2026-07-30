@@ -55,6 +55,37 @@ public:
   // Appends one field reference to the current row.
   void push(FieldRef f) { fields_.push_back(f); }
 
+  // Replaces one field slot relative to the current row start.
+  [[nodiscard]] bool set_current_row_field(std::size_t index,
+                                           FieldRef field) noexcept {
+    if (offsets_.empty() || index >= fields_.size() - offsets_.back()) {
+      return false;
+    }
+    fields_[offsets_.back() + index] = field;
+    return true;
+  }
+
+  // Returns the first field offset of the row currently being built.
+  [[nodiscard]] std::size_t current_row_offset() const noexcept {
+    return offsets_.empty() ? fields_.size() : offsets_.back();
+  }
+
+  // Removes all fields appended since start_row() for the current row.
+  void truncate_current_row_fields() {
+    if (!offsets_.empty()) {
+      fields_.erase(fields_.begin() +
+                        static_cast<std::ptrdiff_t>(offsets_.back()),
+                    fields_.end());
+    }
+  }
+
+  // Replaces the flags of the row currently being built.
+  void set_current_row_flags(uint8_t flags) noexcept {
+    if (!flags_.empty()) {
+      flags_.back() = flags;
+    }
+  }
+
   // Finishes the current row.
   void end_row() {
     const std::size_t off = offsets_.back();

@@ -1,6 +1,5 @@
 // Arrow schema and array builders for generated metadata columns.
 #include "api/python_abi3/metadata/stream/stream.hh"
-
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "sanitize/abi/cdata_types.hh"
 #include <algorithm>
@@ -18,7 +17,6 @@
 #include <vector>
 namespace core_abi3_internal {
 namespace {
-
 struct MetadataSchemaChild {
   ArrowSchema schema{};
   std::string name;
@@ -49,7 +47,6 @@ struct MetadataArrayState {
   std::vector<ArrowArray *> children;
   const void *struct_buffers[1]{nullptr};
 };
-
 void clear_schema(ArrowSchema *schema) noexcept {
   sanitize::internal::cdata_stream::clear_schema(schema);
 }
@@ -332,14 +329,11 @@ sanitize::Status build_utf8_metadata_array(Utf8ColumnData *out,
 }
 
 sanitize::Status build_timestamp_micros_array(TimestampMicrosColumnData *out,
-                                              std::int64_t length) {
+                                              std::int64_t length,
+                                              std::int64_t timestamp) {
   if (length < 0) {
     return sanitize::Status::Invalid("metadata column length is negative");
   }
-  const auto timestamp =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count();
   out->values.assign(static_cast<std::size_t>(length), timestamp);
   out->buffers[0] = nullptr;
   out->buffers[1] = out->values.empty() ? nullptr : out->values.data();
@@ -374,7 +368,6 @@ void build_metadata_schema_children(MetadataSchemaState *state,
 }
 
 } // namespace
-
 sanitize::Status build_metadata_schema(MetadataStreamState *stream_state,
                                        ArrowSchema *out) {
   if (!stream_state || !stream_state->inner) {
@@ -468,7 +461,14 @@ sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
     ArrowArray *metadata_child = nullptr;
     if (column.placement == MetadataColumnPlacement::AllRowsTimestampMicros) {
       auto &data = state->timestamp_columns.emplace_back();
-      SAN_RETURN_NOT_OK(build_timestamp_micros_array(&data, base.length));
+      const auto timestamp =
+          column.has_fixed_timestamp
+              ? column.timestamp_micros
+              : std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+      SAN_RETURN_NOT_OK(
+          build_timestamp_micros_array(&data, base.length, timestamp));
       metadata_child = &data.array;
     } else {
       auto &data = state->utf8_columns.emplace_back();

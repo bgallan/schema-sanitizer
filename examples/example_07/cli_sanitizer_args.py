@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 
-DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
-
 
 def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
     """Add schema-sanitizer conversion arguments."""
@@ -93,11 +91,11 @@ def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--memory-limit-bytes",
         type=int,
-        default=DEFAULT_MEMORY_LIMIT_BYTES,
+        default=None,
         help=(
             "Total memory/resource budget passed to schema_sanitizer. The native "
             "extension derives its chunk, batch, staging, Arrow, and Parquet budgets "
-            f"from this value. Default: {DEFAULT_MEMORY_LIMIT_BYTES} bytes (64 MiB)."
+            "from this value. Default: automatic safe sizing from available memory."
         ),
     )
     parser.add_argument("--arrow-max-depth", type=int, default=32)

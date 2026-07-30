@@ -268,27 +268,30 @@ def test_native_flat_parquet_reader_slices_large_row_group(
 
 
 def test_python_generator_spool_encodes_incrementally() -> None:
-    """One-shot iterables must not concatenate a whole row chunk in memory."""
+    """One-shot iterables use bounded native batches without a Python row list."""
     from schema_sanitizer.core_impl.execution import PythonRowsJsonlByteReader
 
     reader = PythonRowsJsonlByteReader(iter(range(4)), memory_limit_bytes=256)
     calls: list[tuple[int, int, int]] = []
 
-    def encode(rows: list[int], index: int, target_bytes: int) -> tuple[bytes, int]:
-        """Encode exactly one synthetic row for incremental-spool assertions."""
-        calls.append((len(rows), index, target_bytes))
-        return f'{{"value":{rows[index]}}}\n'.encode(), index + 1
+    def encode(
+        rows: object, index: int, target_bytes: int, max_rows: int
+    ) -> tuple[bytes, int, bool]:
+        """Consume one synthetic row directly from the retained iterator."""
+        calls.append((index, target_bytes, max_rows))
+        value = next(rows)  # type: ignore[arg-type]
+        return f'{{"value":{value}}}\n'.encode(), index + 1, False
 
-    reader._native_batch = encode  # type: ignore[method-assign]
+    reader._native_iter_batch = encode  # type: ignore[method-assign]
     try:
-        first = reader._spool_next_iterable_chunk(1)
-        second = reader._spool_next_iterable_chunk(1)
+        first = reader._produce_and_record(1)
+        second = reader._produce_and_record(1)
     finally:
         reader.close()
 
     assert first == b'{"value":0}\n'
     assert second == b'{"value":1}\n'
-    assert calls == [(1, 0, 1), (1, 0, 1)]
+    assert calls == [(0, 1, 4_096), (1, 1, 4_096)]
 
 
 def test_python_generator_spool_checks_temp_disk_capacity(monkeypatch: Any) -> None:
@@ -298,7 +301,9 @@ def test_python_generator_spool_checks_temp_disk_capacity(monkeypatch: Any) -> N
     reader = execution.PythonRowsJsonlByteReader(iter([1]), memory_limit_bytes=256)
     reader._spool_memory_bytes = 1
     reader._MIN_FREE_DISK_BYTES = 16
-    reader._native_batch = lambda rows, index, target: (b"payload", index + 1)  # type: ignore[method-assign]
+    reader._native_iter_batch = (  # type: ignore[method-assign]
+        lambda rows, index, target, max_rows: (b"payload", index + 1, True)
+    )
 
     class _DiskUsage:
         """Expose a fake exhausted filesystem result."""
@@ -312,7 +317,7 @@ def test_python_generator_spool_checks_temp_disk_capacity(monkeypatch: Any) -> N
         import pytest
 
         with pytest.raises(OSError, match="insufficient free space"):
-            reader._spool_next_iterable_chunk(8)
+            reader._produce_and_record(8)
     finally:
         reader.close()
 

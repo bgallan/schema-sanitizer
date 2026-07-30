@@ -17,13 +17,13 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
     )
     from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.input_impl.source_plan import path_source_tuples
-    from schema_sanitizer.remote_impl import routing as remote_routing
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
 
     staged_calls = []
 
-    async def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
+    def fake_list_remote_directory_files(uri, suffixes, *, memory_limit_bytes=None):
         """Return deterministic remote children without staging them."""
         assert uri == "s3://bucket/partition/"
         assert suffixes == (".json",)
@@ -47,7 +47,7 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
         )
 
     monkeypatch.setattr(
-        remote_routing,
+        sync_backend,
         "list_remote_directory",
         fake_list_remote_directory_files,
     )
@@ -106,7 +106,8 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         RemoteFile,
         discovered_directory_inputs,
     )
-    from schema_sanitizer.remote_impl import routing as remote_routing
+    from schema_sanitizer.remote_impl import sync_backend
+    from schema_sanitizer.remote_impl.packetization import remote_staging_packet_policy
 
     files = (
         RemoteFile("s3://bucket/partition/a.json", "a.json", 8),
@@ -117,7 +118,7 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         """Fail if discovered remote inputs are listed again."""
         raise AssertionError("discovered remote directory should not be relisted")
 
-    monkeypatch.setattr(remote_routing, "list_remote_directory", fail_listing)
+    monkeypatch.setattr(sync_backend, "list_remote_directory", fail_listing)
 
     with discovered_directory_inputs(
         {
@@ -148,6 +149,6 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         assert plan.route_name == "remote_native_manifest_chunks"
         assert manifest is not None
         assert manifest.files == list(files)
-        assert manifest.chunk_size == 256
+        assert manifest.chunk_size == remote_staging_packet_policy(None).max_files
     finally:
         prepared.close()

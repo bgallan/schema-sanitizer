@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core_impl.error_translation import call_core
-from ..core_impl.generated_metadata import SCHEMA_DRIFTS_COLUMN, SCHEMA_REGISTRY_COLUMN
+from ..core_impl.generated_metadata import (
+    SCHEMA_DRIFTS_COLUMN,
+    SCHEMA_REGISTRY_COLUMN,
+    TimestampColumns,
+)
 from ..core_impl.native_symbols import PATH_SOURCE_PLAN_CREATE
 from ..core_impl.resource_lifecycle import _close_suppressing_errors
 from .selection import native_input_format
@@ -79,7 +83,7 @@ class SourcePlanRegistryProbeResult:
 def source_kind_for_format(input_format: str) -> str | None:
     """Return the native path-source kind for one public input format."""
     native_format = native_input_format(input_format)
-    if native_format in {"json", "csv", "json_array", "xml"}:
+    if native_format in {"json", "jsonl", "csv", "json_array", "xml"}:
         return native_format
     return None
 
@@ -196,7 +200,7 @@ def _open_path_sources_auto_registry_stream(
     field_name_policy: str,
     schema_mode: str,
     first_row_columns: dict[str, Any],
-    timestamp_columns: tuple[str, ...],
+    timestamp_columns: TimestampColumns,
     skip_invalid_json_sources: bool = False,
     native_registry_state: Any = None,
 ) -> Any:

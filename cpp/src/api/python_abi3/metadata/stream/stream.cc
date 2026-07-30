@@ -5,6 +5,7 @@
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/memory/memory_budget.hh"
 #include "internal/memory/size_math.hh"
 #include "internal/string_lookup.hh"
@@ -147,6 +148,7 @@ void metadata_stream_release(ArrowArrayStream *stream) {
   }
   auto *state = static_cast<MetadataStreamState *>(stream->private_data);
   close_metadata_stream(state);
+  sanitize::internal::detach_task_arena(stream);
   delete state;
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
@@ -190,7 +192,7 @@ bool append_metadata_columns(PyObject *first_row_columns,
     return false;
   }
   return !timestamp_columns || timestamp_columns == Py_None ||
-         append_timestamp_columns_from_sequence(timestamp_columns, columns);
+         append_timestamp_columns(timestamp_columns, columns);
 }
 
 std::unique_ptr<MetadataStreamState>
@@ -229,7 +231,9 @@ ArrowArrayStream *make_stream(std::unique_ptr<MetadataStreamState> state) {
   wrapped->get_next = &metadata_stream_get_next;
   wrapped->get_last_error = &metadata_stream_last_error;
   wrapped->release = &metadata_stream_release;
+  auto *inner = state->inner;
   wrapped->private_data = state.release();
+  sanitize::internal::inherit_task_arena(wrapped, inner);
   return wrapped;
 }
 
