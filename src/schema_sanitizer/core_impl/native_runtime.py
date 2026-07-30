@@ -13,6 +13,8 @@ from contextlib import suppress
 from typing import Any
 
 _NATIVE_MODULE_NAME = "schema_sanitizer._core_abi3"
+_WINDOWS_DLL_DIRECTORY_HANDLES: list[Any] = []
+_WINDOWS_DLL_DIRECTORIES: set[pathlib.Path] = set()
 
 
 def _site_package_dirs() -> list[pathlib.Path]:
@@ -115,6 +117,27 @@ def _native_candidate_dirs() -> list[pathlib.Path]:
     return candidate_dirs
 
 
+def _register_windows_dll_directories(package_dir: pathlib.Path) -> None:
+    """Retain approved wheel DLL directories when loading from a source tree."""
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if os.name != "nt" or add_dll_directory is None:
+        return
+    dependency_dirs = (
+        package_dir,
+        package_dir.parent / "schema_sanitizer.libs",
+    )
+    for dependency_dir in dependency_dirs:
+        try:
+            resolved = dependency_dir.resolve()
+        except Exception:
+            resolved = dependency_dir
+        if resolved in _WINDOWS_DLL_DIRECTORIES or not resolved.is_dir():
+            continue
+        handle = add_dll_directory(os.fspath(resolved))
+        _WINDOWS_DLL_DIRECTORY_HANDLES.append(handle)
+        _WINDOWS_DLL_DIRECTORIES.add(resolved)
+
+
 def _load_native_from_dir(base: pathlib.Path) -> Any:
     """Load the ABI3 extension from one directory when present."""
     if not base.is_dir():
@@ -123,6 +146,7 @@ def _load_native_from_dir(base: pathlib.Path) -> Any:
         extension_path = base / f"_core_abi3{suffix}"
         if not extension_path.exists():
             continue
+        _register_windows_dll_directories(base)
         spec = importlib.util.spec_from_file_location(_NATIVE_MODULE_NAME, extension_path)
         if spec is None or spec.loader is None:
             continue
@@ -146,6 +170,7 @@ def _load_native_module() -> Any:
     """Load the first ABI3 extension found in approved directories."""
     seen: set[pathlib.Path] = set()
     searched: list[str] = []
+    load_errors: list[tuple[pathlib.Path, Exception]] = []
     for base in _native_candidate_dirs():
         try:
             key = base.resolve()
@@ -155,10 +180,20 @@ def _load_native_module() -> Any:
             continue
         seen.add(key)
         searched.append(os.fspath(base))
-        module = _load_native_from_dir(base)
+        try:
+            module = _load_native_from_dir(base)
+        except (ImportError, OSError) as error:
+            load_errors.append((base, error))
+            continue
         if module is not None:
             return module
     searched_text = ", ".join(searched) if searched else "<none>"
+    if load_errors:
+        attempted = "; ".join(f"{base}: {error!r}" for base, error in load_errors)
+        raise ImportError(
+            f"could not load {_NATIVE_MODULE_NAME}; attempts: {attempted}; "
+            f"searched: {searched_text}"
+        ) from load_errors[-1][1]
     raise ImportError(f"could not find {_NATIVE_MODULE_NAME}; searched: {searched_text}")
 
 

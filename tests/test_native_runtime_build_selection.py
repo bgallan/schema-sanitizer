@@ -51,6 +51,71 @@ def test_configured_checkout_build_precedes_newer_wheel_staging(
     assert ordered.index(configured) < ordered.index(wheel)
 
 
+def test_loader_continues_after_one_candidate_has_missing_dependencies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A broken staging extension must not hide an installed repaired wheel."""
+    broken = tmp_path / "broken"
+    installed = tmp_path / "installed"
+    sentinel = object()
+    attempted: list[Path] = []
+
+    monkeypatch.setattr(
+        native_runtime,
+        "_native_candidate_dirs",
+        lambda: [broken, installed],
+    )
+
+    def load(base: Path):
+        """Fail the staging candidate and accept the installed candidate."""
+        attempted.append(base)
+        if base == broken:
+            raise ImportError("dependent DLL is unavailable")
+        return sentinel
+
+    monkeypatch.setattr(native_runtime, "_load_native_from_dir", load)
+
+    assert native_runtime._load_native_module() is sentinel
+    assert attempted == [broken, installed]
+
+
+def test_source_loader_registers_repaired_windows_wheel_directories(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Source imports retain both the package and delvewheel DLL directories."""
+    package = tmp_path / "site-packages" / "schema_sanitizer"
+    libraries = package.parent / "schema_sanitizer.libs"
+    package.mkdir(parents=True)
+    libraries.mkdir()
+    registered: list[str] = []
+    handles: list[object] = []
+    directories: set[Path] = set()
+
+    def add_dll_directory(path: str):
+        """Record one retained DLL search directory."""
+        registered.append(path)
+        return object()
+
+    monkeypatch.setattr(native_runtime.os, "name", "nt")
+    monkeypatch.setattr(
+        native_runtime.os,
+        "add_dll_directory",
+        add_dll_directory,
+        raising=False,
+    )
+    monkeypatch.setattr(native_runtime, "_WINDOWS_DLL_DIRECTORY_HANDLES", handles)
+    monkeypatch.setattr(native_runtime, "_WINDOWS_DLL_DIRECTORIES", directories)
+
+    native_runtime._register_windows_dll_directories(package)
+    native_runtime._register_windows_dll_directories(package)
+
+    assert registered == [str(package.resolve()), str(libraries.resolve())]
+    assert len(handles) == 2
+    assert directories == {package.resolve(), libraries.resolve()}
+
+
 def test_tsan_build_requires_runtime_to_be_linked_first(
     tmp_path: Path,
     monkeypatch,

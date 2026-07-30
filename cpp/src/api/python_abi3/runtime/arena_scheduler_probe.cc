@@ -246,21 +246,32 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
     }
   }
 
-  const auto work_deadline =
+  const auto steal_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(15);
-  const auto drained = wait_until(work_finished, work_count, work_deadline);
-  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now() - started_at);
+  while (arena->stolen_tasks() == 0U &&
+         std::chrono::steady_clock::now() < steal_deadline) {
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  const auto observed_steal = arena->stolen_tasks() > 0U;
   release_gate(&release_blockers);
-  const auto blocker_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto drain_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  const auto work_drained =
+      wait_until(work_finished, work_count, drain_deadline);
   const auto blockers_drained =
-      wait_until(blockers_finished, blocker_count, blocker_deadline);
-  if (!drained || !blockers_drained) {
+      wait_until(blockers_finished, blocker_count, drain_deadline);
+  if (!observed_steal) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "mixed-lane probe did not observe compatible stealing");
+    return nullptr;
+  }
+  if (!work_drained || !blockers_drained) {
     PyErr_SetString(PyExc_RuntimeError,
                     "mixed-lane probe did not drain all tasks");
     return nullptr;
   }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now() - started_at);
 
   PyObject *result = PyTuple_New(7);
   if (!result) {
