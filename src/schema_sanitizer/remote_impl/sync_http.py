@@ -19,7 +19,7 @@ from ..core_impl.sync_retry import retry_sync
 from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from .file_streams import write_sync_reader_to_file
 
 TRANSFER_CHUNK_BYTES = 1024 * 1024

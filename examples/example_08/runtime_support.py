@@ -14,20 +14,19 @@ from time import perf_counter
 from typing import Any, Protocol
 
 import schema_sanitizer as ss
-from schema_sanitizer.input_impl.remote_files import RemoteFile
-from schema_sanitizer.integrations.bigquery import (
+from schema_sanitizer.integrations.bigquery.advanced import (
     bigquery_db_kwargs_from_namespace,
     execute_bigquery_sql,
     import_bigquery_adbc,
     parse_table_ref,
     quote_bq_string,
 )
-from schema_sanitizer.pipeline import (
+from schema_sanitizer.pipeline.advanced import (
     ModifiedTimeWindowPlan,
     build_utc_daily_windows,
     plan_modified_time_windows_from_listing,
 )
-from schema_sanitizer.remote_impl import sync_backend
+from schema_sanitizer.sources import RemoteFile
 
 try:
     from examples.example_08.question_normalization import normalize_question_columns
@@ -162,9 +161,9 @@ class NativeGcsWorkflowClient:
         memory_limit_bytes: int | None,
     ) -> Sequence[RemoteFile]:
         """List one prefix once through the strict synchronous backend."""
-        return sync_backend.list_remote_directory(
+        return ss.sources.list_objects(
             source_prefix,
-            ("csv",),
+            suffixes=("csv",),
             memory_limit_bytes=memory_limit_bytes,
         )
 
@@ -180,12 +179,11 @@ class NativeGcsWorkflowClient:
         memory_limit_bytes: int | None,
     ) -> int:
         """Upload one fully closed file; GCS exposes the object only on commit."""
-        sync_backend.upload_file(
+        return ss.sources.publish_file_atomic(
             local_path,
             destination_uri,
             memory_limit_bytes=memory_limit_bytes,
         )
-        return Path(local_path).stat().st_size
 
 
 class AdbcBigQueryWorkflowClient:

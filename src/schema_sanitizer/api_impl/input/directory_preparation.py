@@ -11,7 +11,7 @@ from ...core_impl.native_options import optional_memory_limit_arg
 from ...core_impl.native_symbols import XML_FOLDER_EFFECTIVE_ROW_TAG
 from ...core_impl.resource_lifecycle import _close_sequence_with_error
 from ...core_impl.safe_errors import add_bounded_note
-from ...input_impl.directory_inputs import FolderFile, RemoteFile, check_document_size, folder_files
+from ...input_impl.directory_inputs import FolderFile, check_document_size, folder_files
 from ...input_impl.prepared import (
     ChainedKeepalive,
     NativeDirectoryManifestCarrier,
@@ -38,6 +38,7 @@ from ...remote_impl.packetization import (
     remote_file_packet,
     remote_file_packet_estimated_bytes,
 )
+from ...sources.models import RemoteFile
 
 if TYPE_CHECKING:
     from ..operation_context import OperationExecutionContext

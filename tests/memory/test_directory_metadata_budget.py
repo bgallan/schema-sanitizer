@@ -10,12 +10,12 @@ from schema_sanitizer.api_impl.operation_context import OperationExecutionContex
 from schema_sanitizer.errors import SchemaSanitizerResourceError
 from schema_sanitizer.input_impl.directory_inputs import (
     DirectoryMetadataBudget,
-    RemoteFile,
     current_directory_metadata_budget,
     folder_files,
 )
 from schema_sanitizer.remote_impl import sync_http
 from schema_sanitizer.remote_impl.transport import read_bounded_response_bytes
+from schema_sanitizer.sources import RemoteFile
 
 
 def _large_remote_file() -> RemoteFile:

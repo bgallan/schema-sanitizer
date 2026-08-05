@@ -15,10 +15,10 @@ from ...core_impl.uris import content_type_for_uri, name_matches, normalize_exte
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
     current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
 from ..file_streams import write_sync_reader_to_file
 from ..sync_http import TRANSFER_CHUNK_BYTES
 from ..upload_policy import (

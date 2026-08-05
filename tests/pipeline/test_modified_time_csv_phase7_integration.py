@@ -15,8 +15,8 @@ from examples.example_08.runtime_support import (
     Example08Config,
     run_modified_time_csv_workflow,
 )
-from schema_sanitizer.input_impl.remote_files import RemoteFile
 from schema_sanitizer.remote_impl import sync_backend
+from schema_sanitizer.sources import RemoteFile
 
 
 class FakeGcsClient:

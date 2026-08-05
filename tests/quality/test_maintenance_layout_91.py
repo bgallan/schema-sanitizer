@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from schema_sanitizer.pipeline import (
+from schema_sanitizer.pipeline.advanced import (
     SchemaDriftDiff,
     discover_existing_source_plans,
     read_parquet_schema,

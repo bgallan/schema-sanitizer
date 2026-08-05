@@ -14,7 +14,8 @@ from schema_sanitizer.api_impl.source_plan import remote as remote_source_plan
 from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 from schema_sanitizer.errors import SchemaSanitizerResourceError
 from schema_sanitizer.input_impl.prepared import PreparedPublicInput
-from schema_sanitizer.pipeline import PartitionRunPlan, run_partitioned_to_parquet
+from schema_sanitizer.pipeline import PartitionRunPlan
+from schema_sanitizer.pipeline.advanced import run_partitioned_to_parquet
 from schema_sanitizer.pipeline.partition_lookahead import PartitionSourceLookahead
 
 

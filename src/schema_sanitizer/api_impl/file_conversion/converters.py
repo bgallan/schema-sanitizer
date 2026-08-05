@@ -16,7 +16,6 @@ from ...core_impl.generated_metadata import INGESTION_TIMESTAMP_COLUMN, SOURCE_F
 from ...core_impl.memory_budget import normalize_memory_limit
 from ...core_impl.probes import options_for_registry_operation
 from ...core_impl.schema_registry import current_native_registry_state
-from ...input_impl.source_manifest import PublicInput
 from ...options_impl.call_options import (
     FILE_CONVERSION_HELPER_KEYS,
     attach_operation_detected_at,
@@ -29,6 +28,7 @@ from ...remote_impl.staging import (
     finalize_output_target,
     prepare_output_target,
 )
+from ...sources.models import PublicInput
 from ..input.preparation import prepare_public_input
 from ..operation_context import OperationExecutionContext
 from ..partition_resources import take_borrowed_partition_resources

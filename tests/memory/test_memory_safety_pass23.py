@@ -1029,9 +1029,9 @@ def test_source_manifest_avoids_three_full_reference_snapshots() -> None:
     """Manifest construction and date summaries avoid redundant full tuples."""
     import inspect
 
-    from schema_sanitizer.input_impl import source_manifest
+    from schema_sanitizer.sources import models
 
-    source = inspect.getsource(source_manifest.SourceManifest)
+    source = inspect.getsource(models.SourceManifest)
     assert "tuple(sorted(tuple(files)" not in source
     assert "ordered_files = list(files)" in source
     assert "ordered_files.sort(" in source

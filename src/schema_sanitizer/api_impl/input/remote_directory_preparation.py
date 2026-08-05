@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ...input_impl.directory_inputs import RemoteFile
 from ...input_impl.prepared import NativeDirectoryManifestCarrier, PreparedPublicInput
 from ...input_impl.selection import native_input_format, unsupported_native_directory_ingestion
 from ...remote_impl.packetization import remote_staging_packet_policy
+from ...sources.models import RemoteFile
 from .directory_preparation import (
     RemoteNativeDirectorySourceManifest,
     _native_directory_supported,

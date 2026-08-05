@@ -12,11 +12,11 @@ import pytest
 
 from schema_sanitizer.input_impl.directory_inputs import (
     DirectoryDiscoveryBuilder,
-    RemoteFile,
 )
 from schema_sanitizer.remote_impl import staging
 from schema_sanitizer.remote_impl.providers import gcs, gcs_sync
 from schema_sanitizer.remote_impl.sync_http import SyncHttpResult
+from schema_sanitizer.sources import RemoteFile
 
 
 def _gcs_item(name: str, *, generation: str, updated: str) -> dict[str, str]:

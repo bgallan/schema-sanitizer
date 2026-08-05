@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from schema_sanitizer.integrations.bigquery import external_table as external_table_owner
+import schema_sanitizer.integrations.bigquery.external_table as external_table_owner
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"

@@ -8,14 +8,13 @@ from typing import TYPE_CHECKING
 
 from ...core_impl.resource_lifecycle import _cleanup_with_note
 from ...input_impl.prepared import ChainedKeepalive, PreparedPublicInput
-from ...input_impl.remote_files import RemoteFile
 from ...input_impl.selection import (
     normalize_public_input_format,
     normalize_public_input_mode,
     validate_suffix,
 )
-from ...input_impl.source_manifest import SourceManifest
 from ...remote_impl import staging as remote_staging
+from ...sources.models import RemoteFile, SourceManifest
 from .directory_preparation import prepare_directory
 from .remote_directory_preparation import remote_native_directory_prepared_from_files
 

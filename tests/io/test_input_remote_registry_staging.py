@@ -69,10 +69,10 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
     """Verify remote JSONL output retains only bounded staged registry chunks."""
     require_native()
     pytest.importorskip("pyarrow")
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
+    from schema_sanitizer.sources import RemoteFile
 
     staged_calls = []
 
@@ -139,10 +139,10 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
     """Verify remote analytical conversion stages chunks but streams them natively."""
     require_native()
     pytest.importorskip("pyarrow")
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
+    from schema_sanitizer.sources import RemoteFile
 
     staged_calls = []
 
@@ -208,10 +208,10 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
     require_native()
     pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.source_plan import registry as source_plan_registry_stream
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
+    from schema_sanitizer.sources import RemoteFile
 
     registry_seed = tmp_path / "registry-seed.json"
     registry_seed.write_text('{"id": "seed"}\n', encoding="utf-8")

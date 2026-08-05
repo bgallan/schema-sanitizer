@@ -6,9 +6,9 @@ from pathlib import Path
 
 from schema_sanitizer.input_impl.directory_inputs import (
     DirectoryDiscoveryBuilder,
-    RemoteFile,
     split_parent_child,
 )
+from schema_sanitizer.sources import RemoteFile
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"

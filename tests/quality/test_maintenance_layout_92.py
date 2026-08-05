@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 
 from schema_sanitizer.core_impl import hive_uris
-from schema_sanitizer.pipeline import HiveRangeConfig, build_hive_range_plan
+from schema_sanitizer.pipeline.advanced import HiveRangeConfig, build_hive_range_plan
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"

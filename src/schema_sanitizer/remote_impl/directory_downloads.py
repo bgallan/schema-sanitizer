@@ -17,7 +17,7 @@ from ..core_impl.temporary_storage import (
     TemporaryStorageLease,
 )
 from ..core_impl.uris import RemoteProvider, remote_provider
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from .providers import azure, gcs, s3
 from .transport import (
     check_download_size,

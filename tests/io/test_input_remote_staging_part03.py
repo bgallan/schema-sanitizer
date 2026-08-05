@@ -15,11 +15,11 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
     from schema_sanitizer.api_impl.source_plan.attached import (
         remote_native_multisource_manifest_from_data,
     )
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.input_impl.source_plan import path_source_tuples
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
+    from schema_sanitizer.sources import RemoteFile
 
     staged_calls = []
 
@@ -103,11 +103,11 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
     from schema_sanitizer.api_impl.source_plan import attached as source_plan_attached
     from schema_sanitizer.input_impl.directory_inputs import (
         DiscoveredDirectoryInput,
-        RemoteFile,
         discovered_directory_inputs,
     )
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.packetization import remote_staging_packet_policy
+    from schema_sanitizer.sources import RemoteFile
 
     files = (
         RemoteFile("s3://bucket/partition/a.json", "a.json", 8),

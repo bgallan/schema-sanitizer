@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..input_impl.source_manifest import SourceManifest
+from ..sources.models import SourceManifest
 from .streams import patch_diagnostics_values
 
 

@@ -10,8 +10,6 @@ from pathlib import Path
 import pytest
 
 import schema_sanitizer.pipeline as pipeline
-from schema_sanitizer.input_impl.remote_files import RemoteFile
-from schema_sanitizer.input_impl.source_manifest import SourceManifest
 from schema_sanitizer.pipeline.modified_time import (
     ModifiedTimeWindowPlan,
     UtcWindow,
@@ -21,6 +19,7 @@ from schema_sanitizer.pipeline.modified_time import (
     plan_modified_time_windows_from_listing,
     select_remote_files_by_modified_time,
 )
+from schema_sanitizer.sources import RemoteFile, SourceManifest
 
 
 def _file(
@@ -154,7 +153,7 @@ def test_source_manifest_is_immutable_ordered_and_version_aware() -> None:
             "gs://bucket/events",
             [_file("naive.csv", datetime(2026, 8, 1), generation="11")],
         )
-    assert pipeline.SourceManifest is SourceManifest
+    assert not hasattr(pipeline, "SourceManifest")
 
 
 def test_one_listing_builds_distinct_deterministic_daily_manifests() -> None:
@@ -375,7 +374,7 @@ def test_modified_time_phase_two_owners_remain_bounded() -> None:
     root = Path(__file__).resolve().parents[2]
     owners = (
         root / "src/schema_sanitizer/pipeline/modified_time.py",
-        root / "src/schema_sanitizer/input_impl/source_manifest.py",
+        root / "src/schema_sanitizer/sources/models.py",
     )
 
     assert all(owner.is_file() for owner in owners)

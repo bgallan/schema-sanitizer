@@ -9,8 +9,8 @@ from pipeline_shared import *  # noqa: F403
 from schema_sanitizer.input_impl.directory_inputs import (
     DirectoryDiscovery,
     FolderFile,
-    RemoteFile,
 )
+from schema_sanitizer.sources import RemoteFile
 
 
 def test_pipeline_hive_range_plan_renders_hourly_prefixes() -> None:

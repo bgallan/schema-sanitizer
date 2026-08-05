@@ -22,10 +22,8 @@ from threading_golden import (
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
-from schema_sanitizer.pipeline import (
-    PartitionRunPlan,
-    infer_warm_up_schema_registry_state,
-)
+from schema_sanitizer.pipeline import PartitionRunPlan
+from schema_sanitizer.pipeline.advanced import infer_warm_up_schema_registry_state
 
 _FIXED_TIME_NS = 1_700_000_000_123_456_000
 _FIXED_TIME = datetime(2023, 11, 14, 22, 13, 20, 123456)

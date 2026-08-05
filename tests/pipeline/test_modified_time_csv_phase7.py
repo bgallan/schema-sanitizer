@@ -22,7 +22,7 @@ from examples.example_08.runtime_support import (
     output_uri_for_day,
     run_modified_time_csv_workflow,
 )
-from schema_sanitizer.input_impl.remote_files import RemoteFile
+from schema_sanitizer.sources import RemoteFile
 
 
 def _remote(

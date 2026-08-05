@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from ..core_impl.memory_budget import memory_budget
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 
 
 @dataclass(frozen=True, slots=True)

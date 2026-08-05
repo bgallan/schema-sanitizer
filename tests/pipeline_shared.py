@@ -11,9 +11,11 @@ from types import SimpleNamespace
 import pytest
 
 from schema_sanitizer.pipeline import (
-    HiveRangeConfig,
     PartitionRunPlan,
     SchemaRegistryState,
+)
+from schema_sanitizer.pipeline.advanced import (
+    HiveRangeConfig,
     build_hive_range_plan,
     compact_stats_for_log,
     cpu_io_wall_percentages,

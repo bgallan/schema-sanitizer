@@ -53,16 +53,31 @@ if TYPE_CHECKING:  # pragma: no cover
     from .api_impl.batch_streaming import iter_batches
     from .api_impl.file_conversion.converters import to_csv, to_jsonl, to_parquet
     from .api_impl.results import Result
+    from .config import (
+        CsvOptions,
+        ParquetOptions,
+        ParsingOptions,
+        ResourceOptions,
+        SanitizeOptions,
+    )
     from .core_impl.cancellation import (
         OperationCancellationToken,
         operation_cancellation,
     )
     from .core_impl.operation_diagnostics import process_operation_diagnostics
     from .core_impl.schema_registry import new_schema_registry
-    from .input_impl.source_manifest import SourceManifest
+    from .sanitizer import Sanitizer
+    from .sources import RemoteFile, SourceManifest
 
 
 _LAZY: dict[str, tuple[str, str]] = {
+    "CsvOptions": (".config", "CsvOptions"),
+    "ParquetOptions": (".config", "ParquetOptions"),
+    "ParsingOptions": (".config", "ParsingOptions"),
+    "ResourceOptions": (".config", "ResourceOptions"),
+    "SanitizeOptions": (".config", "SanitizeOptions"),
+    "Sanitizer": (".sanitizer", "Sanitizer"),
+    "RemoteFile": (".sources", "RemoteFile"),
     "AnalyticalValidationResult": (".analytical_schema", "AnalyticalValidationResult"),
     "FinalizedAnalyticalOutput": (".analytical_schema", "FinalizedAnalyticalOutput"),
     "arrow_schema_from_schema_registry": (
@@ -77,7 +92,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     ),
     "validate_analytical_result": (".analytical_schema", "validate_analytical_result"),
     "Result": (".api_impl.results", "Result"),
-    "SourceManifest": (".input_impl.source_manifest", "SourceManifest"),
+    "SourceManifest": (".sources", "SourceManifest"),
     "iter_batches": (".api_impl.batch_streaming", "iter_batches"),
     "OperationCancellationToken": (
         ".core_impl.cancellation",
@@ -104,8 +119,8 @@ _LAZY: dict[str, tuple[str, str]] = {
 
 def __getattr__(name: str) -> Any:  # pragma: no cover
     """Load native-backed public symbols on first access."""
-    if name == "pipeline":
-        return import_module(f"{__name__}.pipeline")
+    if name in {"pipeline", "sources"}:
+        return import_module(f"{__name__}.{name}")
     spec = _LAZY.get(name)
     if spec is None:
         raise AttributeError(name)
@@ -128,7 +143,14 @@ __all__ = [
     "FinalizedAnalyticalOutput",
     "AnalyticalValidationResult",
     "OperationCancellationToken",
+    "CsvOptions",
+    "ParquetOptions",
+    "ParsingOptions",
+    "RemoteFile",
+    "ResourceOptions",
     "Result",
+    "SanitizeOptions",
+    "Sanitizer",
     "SchemaSanitizerCancelledError",
     "SchemaSanitizerError",
     "SchemaSanitizerImportError",
@@ -148,6 +170,7 @@ __all__ = [
     "to_pandas",
     "to_parquet",
     "pipeline",
+    "sources",
     "to_polars",
     "to_pyarrow",
 ]

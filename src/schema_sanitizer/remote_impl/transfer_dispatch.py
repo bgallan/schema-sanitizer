@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import remote_provider
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from .providers import azure, gcs, s3
 from .transport import download_http_file, upload_http_file
 

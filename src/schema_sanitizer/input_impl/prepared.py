@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from schema_sanitizer.input_impl.source_manifest import SourceManifest
 from schema_sanitizer.input_impl.source_plan import PreparedSourceBatch
+from schema_sanitizer.sources.models import SourceManifest
 
 
 @dataclass(slots=True)

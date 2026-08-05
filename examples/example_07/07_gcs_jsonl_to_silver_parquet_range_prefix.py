@@ -6,7 +6,7 @@ import copy
 import json
 from typing import Any
 
-from schema_sanitizer.integrations.bigquery import (
+from schema_sanitizer.integrations.bigquery.advanced import (
     create_or_replace_external_bigquery_table_from_namespace,
     hive_partition_columns_from_namespace,
     log_schema_drift_from_namespace,
@@ -16,11 +16,11 @@ from schema_sanitizer.integrations.bigquery import (
     update_registry_sidecar_table_from_namespace,
     warn_if_output_uri_not_covered_by_external_source_uris,
 )
-from schema_sanitizer.integrations.bigquery import (
+from schema_sanitizer.integrations.bigquery.advanced import (
     normalize_external_format as _normalize_external_format,
 )
-from schema_sanitizer.integrations.bigquery import parse_table_ref as _parse_table_ref
-from schema_sanitizer.pipeline import (
+from schema_sanitizer.integrations.bigquery.advanced import parse_table_ref as _parse_table_ref
+from schema_sanitizer.pipeline.advanced import (
     build_hive_range_plan_from_namespace,
     build_warm_up_hive_range_plan_from_namespace,
     read_parquet_schema,

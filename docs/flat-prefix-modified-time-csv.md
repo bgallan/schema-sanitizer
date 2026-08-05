@@ -9,6 +9,32 @@ one validated Parquet object per non-empty day.
 The complete executable reference is
 `examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py`.
 
+For a direct sanitize-to-Parquet workflow, the public pipeline facade performs
+discovery, immutable selection, schema evolution, and publication:
+
+```python
+from datetime import date
+
+import schema_sanitizer as ss
+from schema_sanitizer.pipeline import ModifiedTimePartitions, ParquetPipeline
+
+job = ParquetPipeline(
+    source="gs://raw-bucket/responses",
+    output="gs://silver-bucket/responses",
+    partitions=ModifiedTimePartitions.daily(
+        date(2026, 7, 1),
+        date(2026, 7, 7),
+        suffixes=("csv",),
+    ),
+    options=ss.SanitizeOptions(
+        input_format="csv",
+        csv=ss.CsvOptions(header_mode="union"),
+        resources=ss.ResourceOptions(multi_threading=True),
+    ),
+)
+result = job.run()
+```
+
 ## Window semantics
 
 Command-line `--start-date` and `--end-date` are inclusive UTC calendar dates.
@@ -100,7 +126,7 @@ run.
 ## Minimal invocation
 
 ```bash
-pip install "schema-sanitizer[polars,pyarrow,cloud]" adbc-driver-bigquery[dbapi]
+pip install "schema-sanitizer[polars,gcs,bigquery]"
 
 python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
   --source-csv-prefix gs://raw-bucket/responses \

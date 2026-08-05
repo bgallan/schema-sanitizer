@@ -13,10 +13,10 @@ from ...core_impl.uris import name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
     current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
 from ..file_streams import write_sync_reader_to_file
 from .azure import AzureRef, parse_uri, render_uri
 

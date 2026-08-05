@@ -19,7 +19,7 @@ from ..core_impl.memory_budget import (
 from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from .async_bridge import run_sync as run_sync
 from .file_streams import write_async_reader_to_file
 from .provider_session_pool import current_provider_session_pool

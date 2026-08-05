@@ -16,8 +16,8 @@ from schema_sanitizer.core_impl.generated_metadata import (
 )
 from schema_sanitizer.core_impl.memory_budget import normalize_memory_limit
 from schema_sanitizer.input_impl.selection import _Source
-from schema_sanitizer.input_impl.source_manifest import PublicInput
 from schema_sanitizer.input_impl.source_plan import PARQUET_ARROW_SOURCES
+from schema_sanitizer.sources.models import PublicInput
 
 from ..core_impl.probes import options_for_registry_operation
 from ..core_impl.schema_registry import _normalize_registry_json

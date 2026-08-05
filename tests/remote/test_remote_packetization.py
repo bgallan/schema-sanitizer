@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from schema_sanitizer.input_impl.directory_inputs import RemoteFile
 from schema_sanitizer.remote_impl.packetization import (
     remote_file_packet,
     remote_staging_packet_policy,
 )
+from schema_sanitizer.sources import RemoteFile
 
 
 def _file(index: int, size: int | None) -> RemoteFile:

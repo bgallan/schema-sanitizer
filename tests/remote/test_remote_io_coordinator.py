@@ -195,8 +195,8 @@ def test_directory_session_applies_one_global_transfer_limit(
 ) -> None:
     """Concurrent staged chunks share one client and one transfer semaphore."""
     from schema_sanitizer.core_impl.execution_policy import execution_policy
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import directory_downloads
+    from schema_sanitizer.sources import RemoteFile
 
     files = [RemoteFile(f"s3://bucket/{index}.jsonl", f"{index}.jsonl", 8) for index in range(12)]
     opens = 0
@@ -258,8 +258,8 @@ def test_directory_session_applies_one_global_transfer_limit(
 
 def test_coordinator_cancellation_removes_partial_staging(monkeypatch, tmp_path) -> None:
     """Closing the coordinator drains cancellation before leaving temp files."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging
+    from schema_sanitizer.sources import RemoteFile
 
     target = tmp_path / "cancelled-stage"
     started = threading.Event()

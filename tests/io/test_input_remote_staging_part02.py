@@ -34,9 +34,9 @@ class FakeResponse:
 
 def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
     """Verify GCS remote directory listing follows nextPageToken pages."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl.providers import gcs as gcs_listing
     from schema_sanitizer.remote_impl.transport import run_sync
+    from schema_sanitizer.sources import RemoteFile
 
     class FakeSession:
         """Minimal aiohttp-like session with paginated GCS responses."""
@@ -283,9 +283,9 @@ def test_remote_azure_bulk_directory_discovery_groups_parent_prefixes(monkeypatc
 
 def test_remote_s3_directory_listing_reads_all_pages(monkeypatch) -> None:
     """Verify S3 remote directory listing follows continuation tokens."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl.providers import s3 as s3_discovery
     from schema_sanitizer.remote_impl.transport import run_sync
+    from schema_sanitizer.sources import RemoteFile
 
     class FakeS3Client:
         """Minimal async S3 client with paginated list_objects_v2 responses."""

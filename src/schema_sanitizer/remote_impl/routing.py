@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from urllib.parse import urlparse
 
 from ..core_impl.uris import normalize_extensions, remote_provider
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from .providers import azure, gcs, s3
 from .transport import http_file_exists, http_file_metadata
 

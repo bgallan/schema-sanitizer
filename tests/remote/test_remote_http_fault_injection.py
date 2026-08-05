@@ -12,7 +12,6 @@ import pytest
 
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 from schema_sanitizer.core_impl.memory_budget import memory_budget
-from schema_sanitizer.input_impl.directory_inputs import RemoteFile
 from schema_sanitizer.remote_impl import staging
 from schema_sanitizer.remote_impl.staging import StagedPath, stage_remote_single_file
 from schema_sanitizer.remote_impl.transport import (
@@ -20,6 +19,7 @@ from schema_sanitizer.remote_impl.transport import (
     http_file_metadata,
     upload_http_file,
 )
+from schema_sanitizer.sources import RemoteFile
 
 
 @asynccontextmanager

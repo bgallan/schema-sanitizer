@@ -23,8 +23,9 @@ from ..core_impl.uris import (
     looks_like_remote_uri,
 )
 from ..errors import SchemaSanitizerResourceError
+from ..sources.models import RemoteFile as _RemoteFile
+from ..sources.models import remote_file_sort_key
 from .directory_metadata_budget import DirectoryMetadataBudget
-from .remote_files import RemoteFile, remote_file_sort_key
 
 FOLDER_READ_CHUNK_BYTES = 1024 * 1024
 
@@ -177,7 +178,7 @@ class DirectoryDiscoveryBuilder(Generic[DirectoryFileT]):
         uri_values = self._requested_uris(uris)
         if not uri_values:
             return
-        if self.metadata_budget is not None and isinstance(file, (FolderFile, RemoteFile)):
+        if self.metadata_budget is not None and isinstance(file, (FolderFile, _RemoteFile)):
             self.metadata_budget.charge_file(file, associations=len(uri_values))
         for uri in uri_values:
             self.exists_by_uri[uri] = True
@@ -212,8 +213,8 @@ class DirectoryDiscoveryBuilder(Generic[DirectoryFileT]):
         if sort_files:
             for files in self.files_by_uri.values():
                 if len(files) > 1:
-                    if all(isinstance(file, RemoteFile) for file in files):
-                        files.sort(key=lambda file: remote_file_sort_key(cast(RemoteFile, file)))
+                    if all(isinstance(file, _RemoteFile) for file in files):
+                        files.sort(key=lambda file: remote_file_sort_key(cast(_RemoteFile, file)))
                     else:
                         files.sort(key=attrgetter("name"))
         return DirectoryDiscovery(
@@ -228,7 +229,7 @@ class DiscoveredDirectoryInput:
 
     input_format: str
     local_files: tuple[FolderFile, ...] = ()
-    remote_files: tuple[RemoteFile, ...] = ()
+    remote_files: tuple[_RemoteFile, ...] = ()
 
 
 _DISCOVERED_DIRECTORY_INPUTS: ContextVar[Mapping[str, DiscoveredDirectoryInput] | None] = (

@@ -9,10 +9,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 
-from schema_sanitizer.input_impl.directory_inputs import RemoteFile
 from schema_sanitizer.remote_impl import sync_backend
 from schema_sanitizer.remote_impl.providers import azure_sync, gcs_sync, s3_sync
 from schema_sanitizer.remote_impl.sync_http import SyncHttpResult
+from schema_sanitizer.sources import RemoteFile
 
 
 class _BlockingObjectHandler(BaseHTTPRequestHandler):

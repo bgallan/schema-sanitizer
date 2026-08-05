@@ -10,9 +10,9 @@ import pytest
 
 def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
     """Sized reads must target aiobotocore's wrapper, not its context value."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl.providers import s3
     from schema_sanitizer.remote_impl.transport import TRANSFER_CHUNK_BYTES
+    from schema_sanitizer.sources import RemoteFile
 
     class RawResponse:
         """Model aiohttp's response, whose read method accepts no size."""

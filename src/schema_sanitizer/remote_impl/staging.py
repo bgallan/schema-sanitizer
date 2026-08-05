@@ -23,7 +23,7 @@ from ..core_impl.uris import (
     normalize_extensions,
     suffix_from_uri,
 )
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from . import routing, sync_backend
 from .directory_downloads import RemoteDirectoryDownloadSession, download_files_to_directory
 from .transfer_dispatch import download_single_file, upload_file

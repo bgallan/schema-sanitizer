@@ -17,10 +17,10 @@ from ...core_impl.uris import content_type_for_uri, name_matches, normalize_exte
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
     current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
 from ..gcs_resumable import upload_gcs_resumable_file
 from ..transport import (
     MAX_ERROR_RESPONSE_BYTES,

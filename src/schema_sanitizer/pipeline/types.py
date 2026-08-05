@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ..core_impl.schema_registry import _normalize_registry_json
 
 if TYPE_CHECKING:
-    from ..input_impl.source_manifest import SourceManifest
+    from ..sources.models import SourceManifest
     from .modified_time import UtcWindow
 
 

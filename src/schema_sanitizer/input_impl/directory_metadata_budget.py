@@ -10,7 +10,7 @@ from schema_sanitizer.core_impl.safe_errors import add_bounded_note
 
 from ..core_impl.bounded_text import utf8_size_bounded
 from ..errors import SchemaSanitizerResourceError
-from .remote_files import RemoteFile
+from ..sources.models import RemoteFile
 
 if TYPE_CHECKING:
     from ..core_impl.memory_budget import OperationMemoryLedger

@@ -22,10 +22,10 @@ from ...core_impl.uris import content_type_for_uri, name_matches, normalize_exte
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
     current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
 from ..file_streams import write_async_reader_to_file
 from ..provider_session_pool import current_provider_session_pool
 from ..transport import TRANSFER_CHUNK_BYTES

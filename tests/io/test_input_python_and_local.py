@@ -391,9 +391,9 @@ def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypa
     pytest.importorskip("pyarrow")
     from contextlib import contextmanager
 
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.providers import s3_sync
+    from schema_sanitizer.sources import RemoteFile
 
     def fake_list(uri, suffixes, *, memory_limit_bytes=None):
         """Return one child without a known size."""

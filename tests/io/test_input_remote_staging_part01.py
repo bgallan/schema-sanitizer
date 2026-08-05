@@ -132,8 +132,8 @@ def test_uri_input_allows_non_utf8_after_local_staging(monkeypatch, tmp_path) ->
 
 def test_remote_parquet_directory_stages_children_synchronously(monkeypatch, tmp_path) -> None:
     """Verify remote Parquet directory staging downloads every listed child."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.sources import RemoteFile
 
     def fake_list(uri, suffixes, *, memory_limit_bytes=None):
         """Return deterministic remote Parquet children."""
@@ -315,8 +315,8 @@ def test_remote_parquet_single_file_writer_uses_staged_arrow_path(
 
 def test_remote_text_directory_stages_child_sources_synchronously(monkeypatch) -> None:
     """Verify remote text directory staging preserves child files and source URIs."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.sources import RemoteFile
 
     files = [
         RemoteFile("s3://bucket/partition/a.jsonl", "a.jsonl", None),

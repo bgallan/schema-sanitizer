@@ -92,7 +92,10 @@ def test_example_07_always_forces_additive_normal_runs(monkeypatch) -> None:
 def test_example_07_parser_lives_in_cli_module() -> None:
     """Verify the extracted parser preserves core range-prefix defaults."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.integrations.bigquery import hive_partition_columns, registry_order_sql
+    from schema_sanitizer.integrations.bigquery.advanced import (
+        hive_partition_columns,
+        registry_order_sql,
+    )
 
     parser = build_parser()
     args = parser.parse_args(
@@ -150,7 +153,9 @@ def test_example_07_parser_lives_in_cli_module() -> None:
 def test_example_07_warm_up_prefix_plan_uses_warm_up_range() -> None:
     """Verify schema warm-up range options render their own source partitions."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.pipeline import build_warm_up_hive_range_plan_from_namespace
+    from schema_sanitizer.pipeline.advanced import (
+        build_warm_up_hive_range_plan_from_namespace,
+    )
 
     args = build_parser().parse_args(
         [
@@ -185,7 +190,9 @@ def test_example_07_warm_up_prefix_plan_uses_warm_up_range() -> None:
 def test_example_07_warm_up_hourly_plan_uses_warm_up_hours() -> None:
     """Verify hourly schema warm-up uses dedicated warm-up hour bounds."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.pipeline import build_warm_up_hive_range_plan_from_namespace
+    from schema_sanitizer.pipeline.advanced import (
+        build_warm_up_hive_range_plan_from_namespace,
+    )
 
     args = build_parser().parse_args(
         [
@@ -289,7 +296,7 @@ def test_example_07_warm_up_hour_flags_require_warm_up_dates() -> None:
 def test_example_07_hourly_plan_defaults_to_full_day_when_hours_omitted() -> None:
     """Verify explicit hourly mode defaults omitted normal hours to 00..23."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.pipeline import build_hive_range_plan_from_namespace
+    from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
     args = build_parser().parse_args(
         [
@@ -320,7 +327,9 @@ def test_example_07_hourly_plan_defaults_to_full_day_when_hours_omitted() -> Non
 def test_example_07_warm_up_hourly_plan_defaults_to_full_day_when_hours_omitted() -> None:
     """Verify warm-up hourly mode defaults omitted warm-up hours to 00..23."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.pipeline import build_warm_up_hive_range_plan_from_namespace
+    from schema_sanitizer.pipeline.advanced import (
+        build_warm_up_hive_range_plan_from_namespace,
+    )
 
     args = build_parser().parse_args(
         [
@@ -406,7 +415,7 @@ def test_example_07_manual_preflight_stabilizes_integer_float_parquet(
     """Manual warm-up must widen integer and float observations before writes."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.pipeline import run_partitioned_to_parquet_registry_state
+    from schema_sanitizer.pipeline.advanced import run_partitioned_to_parquet_registry_state
 
     example = _load_example_07_runtime_support()
     integer_source = tmp_path / "integer.jsonl"
@@ -473,7 +482,7 @@ def test_example_07_without_preflight_keeps_per_partition_numeric_types(
     """No warm-up leaves an earlier integer file unchanged after float promotion."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.pipeline import run_partitioned_to_parquet_registry_state
+    from schema_sanitizer.pipeline.advanced import run_partitioned_to_parquet_registry_state
 
     example = _load_example_07_runtime_support()
     integer_source = tmp_path / "integer.jsonl"

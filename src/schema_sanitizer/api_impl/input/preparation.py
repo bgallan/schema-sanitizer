@@ -24,10 +24,10 @@ from ...input_impl.selection import (
     validate_local_path_mode,
     validate_suffix,
 )
-from ...input_impl.source_manifest import SourceManifest
 from ...remote_impl import routing, sync_backend
 from ...remote_impl import staging as remote_staging
 from ...remote_impl.transport import run_sync
+from ...sources.models import SourceManifest
 
 if TYPE_CHECKING:
     from ..operation_context import OperationExecutionContext

@@ -17,7 +17,8 @@ from ..core_impl.temporary_storage import (
     TemporaryStorageLease,
 )
 from ..core_impl.uris import RemoteProvider, normalize_extensions, remote_provider
-from ..input_impl.directory_inputs import DirectoryDiscovery, RemoteFile
+from ..input_impl.directory_inputs import DirectoryDiscovery
+from ..sources.models import RemoteFile
 from .providers import azure_sync, gcs_sync, s3_sync
 from .sync_http import (
     download_http_file,

@@ -12,12 +12,13 @@ from schema_sanitizer.api_impl.operation_context import OperationExecutionContex
 from schema_sanitizer.core_impl.execution import ExecutionContext as NativeExecutionContext
 from schema_sanitizer.core_impl.memory_budget import OperationMemoryLedger
 from schema_sanitizer.errors import SchemaSanitizerResourceError
-from schema_sanitizer.input_impl.directory_inputs import DirectoryMetadataBudget, RemoteFile
+from schema_sanitizer.input_impl.directory_inputs import DirectoryMetadataBudget
 from schema_sanitizer.options_impl.call_options import (
     attach_operation_detected_at,
     normalize_call_options,
     unwrap_options,
 )
+from schema_sanitizer.sources import RemoteFile
 
 
 def test_python_ledger_reservations_are_atomic_and_preserve_peak_after_close() -> None:

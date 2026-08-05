@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
-from schema_sanitizer.pipeline import partition_execution
+import schema_sanitizer.pipeline.partition_execution as partition_execution
 from schema_sanitizer.pipeline.types import PartitionRunPlan, SchemaRegistryState
 
 ROOT = Path(__file__).resolve().parents[2]

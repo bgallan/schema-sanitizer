@@ -19,8 +19,8 @@ def test_bigquery_integration_builds_external_table_ddl() -> None:
         BigQueryTableRef,
         ExternalTableSpec,
         external_table_ddl,
-        parse_hive_partition_column,
     )
+    from schema_sanitizer.integrations.bigquery.advanced import parse_hive_partition_column
 
     ddl, skipped = external_table_ddl(
         BigQueryTableRef("project", "dataset", "events"),
@@ -238,7 +238,7 @@ def test_bigquery_external_table_ddl_keeps_etl_columns_last(
 
 def test_bigquery_registry_sidecar_partition_queries() -> None:
     """Verify BigQuery registry sidecar SQL uses encoded Hive partition keys."""
-    from schema_sanitizer.integrations.bigquery import (
+    from schema_sanitizer.integrations.bigquery.advanced import (
         BigQueryTableRef,
         latest_schema_registry_query,
         partition_key_from_uri,

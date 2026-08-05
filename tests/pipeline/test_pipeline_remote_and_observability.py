@@ -70,10 +70,10 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
 ) -> None:
     """Verify lazy remote warm-up chunks are not replayed into normal outputs."""
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.staging import StagedPath
+    from schema_sanitizer.sources import RemoteFile
 
     payloads = {
         "s3://bucket/warm/warm.json": {"id": "warm-row", "warm_only": 1},

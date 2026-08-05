@@ -6,8 +6,8 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..core_impl.resource_lifecycle import _close_and_clear_attrs
-from ..input_impl.source_manifest import PublicInput
 from ..options_impl.options import CsvHeaderMode
+from ..sources.models import PublicInput
 from .streams import Stream
 
 if TYPE_CHECKING:

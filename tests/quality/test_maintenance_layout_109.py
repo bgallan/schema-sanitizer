@@ -31,9 +31,9 @@ def test_remote_staging_value_objects_have_one_owner() -> None:
 
 def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path) -> None:
     """A staged Azure directory must not create one SDK client per child."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import directory_downloads
     from schema_sanitizer.remote_impl.providers import azure
+    from schema_sanitizer.sources import RemoteFile
 
     opened: list[str] = []
     downloaded: list[tuple[str, str]] = []

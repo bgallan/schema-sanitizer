@@ -13,7 +13,7 @@ def _remote_plan():
     from schema_sanitizer.api_impl.input.directory_preparation import (
         RemoteNativeDirectorySourceManifest,
     )
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
+    from schema_sanitizer.sources import RemoteFile
 
     manifest = RemoteNativeDirectorySourceManifest(
         [

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ...input_impl.directory_inputs import RemoteFile
+from ...sources.models import RemoteFile
 
 
 @dataclass(frozen=True, slots=True)

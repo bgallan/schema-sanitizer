@@ -18,8 +18,8 @@ from schema_sanitizer.api_impl.source_manifest_diagnostics import (
 )
 from schema_sanitizer.api_impl.streams import diagnostics_stats
 from schema_sanitizer.input_impl.prepared import PreparedPublicInput
-from schema_sanitizer.input_impl.remote_files import RemoteFile
-from schema_sanitizer.input_impl.source_manifest import PublicInput, SourceManifest
+from schema_sanitizer.sources import RemoteFile, SourceManifest
+from schema_sanitizer.sources.models import PublicInput
 
 
 def _file(name: str, generation: str, *, uri: str | None = None) -> RemoteFile:
@@ -387,7 +387,7 @@ def test_phase_three_owners_and_documentation_remain_bounded() -> None:
     """Manifest input responsibilities remain cohesive and publicly documented."""
     root = Path(__file__).resolve().parents[2]
     owners = (
-        root / "src/schema_sanitizer/input_impl/source_manifest.py",
+        root / "src/schema_sanitizer/sources/models.py",
         root / "src/schema_sanitizer/api_impl/input/manifest_preparation.py",
         root / "src/schema_sanitizer/api_impl/source_manifest_diagnostics.py",
     )

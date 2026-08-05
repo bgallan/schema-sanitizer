@@ -154,9 +154,9 @@ def test_remote_source_plan_stream_uses_native_chunk_provider(monkeypatch) -> No
         RemoteNativeDirectorySourceManifest,
     )
     from schema_sanitizer.api_impl.source_plan import remote as source_plan_remote_staging
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.input_impl.prepared import NativeDirectorySourceManifest
     from schema_sanitizer.input_impl.source_plan import PreparedSourceBatch, SourceDescriptor
+    from schema_sanitizer.sources import RemoteFile
 
     events: list[str] = []
     native_chunks: list[tuple[tuple[str, str, str], ...]] = []
@@ -314,9 +314,9 @@ def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
     """Verify non-UTF-8 remote directories prepare a lazy native source plan."""
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.api_impl.source_plan import attached as source_plan_attached
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
+    from schema_sanitizer.sources import RemoteFile
 
     def fail_native_stage(*args, **kwargs):
         """Fail if remote directories stage eagerly during preparation."""
@@ -355,9 +355,9 @@ def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
 
 def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> None:
     """Verify remote directory staging caps active downloads while preserving row order."""
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import directory_downloads as remote_downloads
     from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.sources import RemoteFile
 
     active_downloads = 0
     max_active_downloads = 0
@@ -424,10 +424,10 @@ def test_remote_directory_staging_does_not_retry_memory_limit_failure(monkeypatc
     from contextlib import contextmanager
 
     from schema_sanitizer.errors import SchemaSanitizerResourceError
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
     from schema_sanitizer.remote_impl.providers import s3_sync
+    from schema_sanitizer.sources import RemoteFile
 
     downloads = 0
 

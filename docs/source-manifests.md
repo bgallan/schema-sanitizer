@@ -1,8 +1,8 @@
 # Source manifest inputs
 
-`schema_sanitizer.SourceManifest` freezes the exact remote objects selected by a
-prior discovery step. It can be supplied directly to `iter_batches`, every
-analytical `to_*` converter, and every file-output `to_*` converter.
+`schema_sanitizer.sources.discover` returns a `SourceManifest` that freezes the
+exact remote objects selected by one discovery step. It can be supplied
+directly to `iter_batches` and every analytical or file-output converter.
 
 Version one supports GCS manifests. Every entry must:
 

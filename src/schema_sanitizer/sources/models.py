@@ -1,4 +1,4 @@
-"""Immutable public manifests for already discovered remote objects."""
+"""Public immutable models for exact remote object selections."""
 
 from __future__ import annotations
 
@@ -10,9 +10,33 @@ from typing import Any, TypeAlias
 from urllib.parse import urlparse
 
 from ..core_impl.uris import RemoteProvider, remote_provider
-from .remote_files import RemoteFile, remote_file_sort_key
 
 _VERSIONED_MANIFEST_PROVIDERS = frozenset({"gcs"})
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteFile:
+    """One immutable remote object selected for staging."""
+
+    uri: str
+    name: str
+    size: int | None = None
+    updated: datetime | None = None
+    time_created: datetime | None = None
+    generation: str | None = None
+    metageneration: str | None = None
+    etag: str | None = None
+    crc32c: str | None = None
+
+    @property
+    def content_identity(self) -> tuple[str, str | None]:
+        """Return the provider-stable identity available at discovery."""
+        return (self.uri, self.generation)
+
+
+def remote_file_sort_key(file: RemoteFile) -> tuple[str, str]:
+    """Return the deterministic identity ordering used by discovery."""
+    return (file.uri, file.generation or "")
 
 
 def _normalized_remote_path(uri: str) -> tuple[str, str]:
@@ -34,13 +58,7 @@ def _belongs_to_source(source_uri: str, object_uri: str) -> bool:
 
 @dataclass(frozen=True, slots=True, init=False)
 class SourceManifest:
-    """A deterministic immutable collection of exact remote-object versions.
-
-    Version-one public consumption is intentionally restricted to GCS because
-    GCS discovery and staging carry an immutable ``generation`` and enforce it
-    during download. ``source_uri`` identifies the prefix from which ``files``
-    were selected; each entry must remain inside that prefix.
-    """
+    """A deterministic immutable collection of exact remote-object versions."""
 
     source_uri: str
     files: tuple[RemoteFile, ...]
@@ -67,8 +85,8 @@ class SourceManifest:
                 raise TypeError("SourceManifest entries must be RemoteFile values")
             if remote_provider(file.uri) != provider:
                 raise ValueError(
-                    "SourceManifest entries must use the same supported filesystem as source_uri: "
-                    f"{file.uri!r}"
+                    "SourceManifest entries must use the same supported filesystem as "
+                    f"source_uri: {file.uri!r}"
                 )
             if not _belongs_to_source(source_uri, file.uri):
                 raise ValueError(
@@ -147,4 +165,4 @@ class SourceManifest:
 
 PublicInput: TypeAlias = str | os.PathLike[str] | Iterable[Mapping[str, Any]] | SourceManifest
 
-__all__ = ["PublicInput", "SourceManifest"]
+__all__ = ["PublicInput", "RemoteFile", "SourceManifest"]

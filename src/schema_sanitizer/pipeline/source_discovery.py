@@ -24,12 +24,12 @@ from ..input_impl.directory_inputs import (
     DirectoryDiscoveryBuilder,
     DiscoveredDirectoryInput,
     FolderFile,
-    RemoteFile,
     folder_files,
 )
 from ..input_impl.selection import input_format_extensions
 from ..remote_impl import routing
 from ..remote_impl.providers import azure, gcs, s3
+from ..sources.models import RemoteFile
 from .source_discovery_budget import (
     run_async_discovery_with_budget,
     run_public_source_discovery,

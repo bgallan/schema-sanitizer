@@ -324,7 +324,7 @@ def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> Non
 def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
     """Verify date-range source discovery removes missing files before conversion."""
     import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
-    from schema_sanitizer.pipeline import discover_existing_source_plans
+    from schema_sanitizer.pipeline.advanced import discover_existing_source_plans
     from schema_sanitizer.pipeline.types import PartitionRunPlan
 
     plans = [
@@ -350,7 +350,7 @@ def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
             return None
         return RemoteFile(uri, uri.rsplit("/", 1)[-1], 42)
 
-    from schema_sanitizer.input_impl.directory_inputs import RemoteFile
+    from schema_sanitizer.sources import RemoteFile
 
     monkeypatch.setattr(
         source_discovery_mod.sync_backend,
@@ -369,7 +369,7 @@ def test_example_07_source_discovery_skips_missing_dates(monkeypatch) -> None:
 def test_example_07_daily_single_file_prefix_plan() -> None:
     """Verify daily single-file mode generates one source and output object per date."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.pipeline import build_hive_range_plan_from_namespace
+    from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
     args = build_parser().parse_args(
         [
@@ -402,8 +402,8 @@ def test_example_07_daily_single_file_prefix_plan() -> None:
 def test_example_07_hourly_directory_prefix_plan() -> None:
     """Verify hourly directory mode aggregates each source partition separately."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.integrations.bigquery import hive_partition_columns
-    from schema_sanitizer.pipeline import build_hive_range_plan_from_namespace
+    from schema_sanitizer.integrations.bigquery.advanced import hive_partition_columns
+    from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
     args = build_parser().parse_args(
         [
@@ -455,7 +455,7 @@ def test_example_07_hourly_directory_prefix_plan() -> None:
 def test_example_07_rejects_source_extension_mismatched_with_input_format() -> None:
     """Verify prefix planning enforces the public input format extension contract."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.pipeline import build_hive_range_plan_from_namespace
+    from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
     args = build_parser().parse_args(
         [
@@ -483,7 +483,7 @@ def test_example_07_rejects_source_extension_mismatched_with_input_format() -> N
 def test_example_07_hourly_uri_templates_render_hour_and_filename() -> None:
     """Verify explicit hourly URI templates render partition and filename placeholders."""
     from examples.example_07.cli import build_parser
-    from schema_sanitizer.pipeline import build_hive_range_plan_from_namespace
+    from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
     args = build_parser().parse_args(
         [
@@ -522,7 +522,7 @@ def test_example_07_hourly_uri_templates_render_hour_and_filename() -> None:
 def test_example_07_directory_discovery_skips_empty_partitions(monkeypatch) -> None:
     """Verify directory mode lists partitions and skips those without matching files."""
     import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
-    from schema_sanitizer.pipeline import discover_existing_source_plans
+    from schema_sanitizer.pipeline.advanced import discover_existing_source_plans
     from schema_sanitizer.pipeline.types import PartitionRunPlan
 
     plans = [

@@ -56,6 +56,10 @@ pip install 'schema-sanitizer[pyarrow]'
 pip install 'schema-sanitizer[pandas]'
 pip install 'schema-sanitizer[polars]'
 pip install 'schema-sanitizer[duckdb]'
+pip install 'schema-sanitizer[gcs]'
+pip install 'schema-sanitizer[s3]'
+pip install 'schema-sanitizer[azure]'
+pip install 'schema-sanitizer[bigquery]'
 pip install 'schema-sanitizer[cloud]'
 pip install 'schema-sanitizer[all]'
 ```
@@ -97,6 +101,24 @@ Every conversion returns a `schema_sanitizer.Result`.
 | `conversion_route` | Terminal analytical handoff selected for PyArrow, pandas, Polars, or DuckDB results. |
 | `schema_registry` / `schema_registry_json` | Updated durable schema state. |
 | `schema_drifts` / `schema_drifts_json` | Drift events produced by this run with the operation-captured UTC timestamp. |
+
+For repeated calls, configure the sanitizer once instead of repeating every
+keyword:
+
+```python
+sanitizer = ss.Sanitizer(
+    ss.SanitizeOptions(
+        input_format="csv",
+        csv=ss.CsvOptions(header_mode="union"),
+        parsing=ss.ParsingOptions(iso_dates=True),
+        resources=ss.ResourceOptions(multi_threading=True),
+    )
+)
+
+frame = sanitizer.to_polars("raw/daily/").clean_data
+```
+
+The functional `to_*` API remains available for short, one-off calls.
 
 ## [Python API](#index)
 
@@ -202,21 +224,17 @@ result = ss.to_pandas(
 )
 ```
 
-A `SourceManifest` is a public immutable input for conversions that must consume
-an already selected set of remote object versions without listing its prefix
-again. Version one accepts GCS objects with a non-empty `generation`; downloads
-request that exact generation with a matching precondition. The default
-`input_mode` may be left unchanged because the manifest already defines the
-multi-file selection:
+A `SourceManifest` freezes selected GCS object generations so a conversion
+never relists the prefix or silently reads a newer object version:
 
 ```python
-plans = ss.pipeline.plan_gcs_modified_time_windows(
+manifest = ss.sources.discover(
     "gs://raw-bucket/events",
-    start_date,
-    end_date,
+    suffixes=("csv",),
+    modified_between=(window_start, window_end),
 )
 result = ss.to_polars(
-    plans[0].source_manifest,
+    manifest,
     input_format="csv",
 )
 ```
@@ -456,49 +474,37 @@ rules are documented in [HEURISTICS.md](HEURISTICS.md).
 
 ## [Partition pipeline](#index)
 
-`schema_sanitizer.pipeline` provides reusable single-writer building blocks for
-Hive-style daily or hourly pipelines:
+`schema_sanitizer.pipeline` can expand and execute a complete daily or hourly
+Parquet workflow from one immutable configuration:
 
 ```python
 from datetime import date
 
 import schema_sanitizer as ss
-from schema_sanitizer.pipeline import (
-    HiveRangeConfig,
-    build_hive_range_plan,
-    discover_existing_source_plans,
-    run_partitioned_to_parquet,
-)
+from schema_sanitizer.pipeline import HivePartitions, ParquetPipeline
 
-plans = build_hive_range_plan(
-    HiveRangeConfig(
-        source_prefix="gs://bronze/events",
-        output_prefix="gs://silver/events",
-        start_date=date(2026, 7, 1),
-        end_date=date(2026, 7, 13),
-        input_format="jsonl",
-        input_mode="single_file",
+job = ParquetPipeline(
+    source="gs://bronze/events",
+    output="gs://silver/events",
+    partitions=HivePartitions.daily(
+        date(2026, 7, 1),
+        date(2026, 7, 13),
         file_name_prefix="events",
-    )
+    ),
+    options=ss.SanitizeOptions(
+        input_format="jsonl",
+        parsing=ss.ParsingOptions(integers=True, iso_timestamps=True),
+        resources=ss.ResourceOptions(multi_threading=True),
+    ),
+    initial_schema_registry=ss.new_schema_registry(),
 )
 
-discovery = discover_existing_source_plans(plans, input_format="jsonl")
-pipeline_result = run_partitioned_to_parquet(
-    discovery.existing_plans,
-    initial_schema_registry=ss.new_schema_registry(),
-    to_parquet_kwargs={
-        "input_format": "jsonl",
-        "schema_mode": "additive",
-        "parse_integers": True,
-        "parse_iso_timestamps": True,
-    },
-)
+pipeline_result = job.run()
 ```
 
-The runner carries the registry returned by each successful partition into the
-next one. `infer_warm_up_schema_registry*` can scan a separate range additively
-before normal writes. Source discovery, warm-up, and writing support the same
-local and remote paths as the public converters.
+The job carries the registry returned by each successful partition into the
+next one. Existing low-level planners, warm-up hooks, callbacks, and schema
+utilities remain available under `schema_sanitizer.pipeline.advanced`.
 
 Pipeline ordering stays deterministic:
 
@@ -520,6 +526,10 @@ the prefix once, divide the immutable `(uri, generation)` snapshot into
 half-open UTC days, reconcile each day with `csv_header_mode="union"`, and
 publish one validated Parquet object per non-empty day. The default exact CSV
 mode and all existing path, URI, directory, and partition inputs are unchanged.
+
+Use `ModifiedTimePartitions.daily(...)` with `ParquetPipeline` when no custom
+dataframe transformation is required. Example 8 keeps its analytical Polars
+step because it performs application-specific question normalization.
 
 Analytical converters still return a caller-owned dataframe/table outside the
 operation memory ledger. Use direct file outputs for bounded-memory completion

@@ -20,10 +20,9 @@ from ..input_impl.directory_inputs import (
     DirectoryMetadataBudget,
     directory_metadata_budget_scope,
 )
-from ..input_impl.remote_files import RemoteFile, remote_file_sort_key
-from ..input_impl.source_manifest import SourceManifest
 from ..remote_impl import routing, sync_backend
 from ..remote_impl.transport import run_sync
+from ..sources.models import RemoteFile, SourceManifest, remote_file_sort_key
 
 if TYPE_CHECKING:
     from .types import PartitionRunPlan
