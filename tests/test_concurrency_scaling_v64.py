@@ -20,6 +20,11 @@ PARALLEL = (
     / "cpp/src/internal/parquet/footer_reader/native_stream/materialization/row_group"
     / "native_stream_parallel_columns.cc.inc"
 )
+RETAINED = (
+    ROOT
+    / "cpp/src/internal/parquet/footer_reader/native_stream/materialization/row_group"
+    / "native_stream_retained_budget.cc.inc"
+)
 
 
 class _CapsuleStream:
@@ -56,13 +61,15 @@ def test_v64_parquet_parallel_scratch_is_derived_and_saturating() -> None:
     """Parallel scratch remains a conservative fraction of the one budget."""
     row_group = ROW_GROUP.read_text(encoding="utf-8")
     parallel = PARALLEL.read_text(encoding="utf-8")
+    retained = RETAINED.read_text(encoding="utf-8")
+    budget_sources = parallel + retained
 
     assert "stream.max_buffer_bytes / 4" in parallel
-    assert "native_parquet_max_column_scratch_bytes" in parallel
-    assert "std::numeric_limits<std::int64_t>::max() - value" in parallel
-    assert "estimate = std::numeric_limits<std::int64_t>::max()" in parallel
-    assert "enforce_native_array_retained_budget" in parallel
-    assert "getenv" not in row_group + parallel
+    assert "native_parquet_max_column_scratch_bytes" in budget_sources
+    assert "std::numeric_limits<std::int64_t>::max() - value" in retained
+    assert "estimate = std::numeric_limits<std::int64_t>::max()" in retained
+    assert "enforce_native_array_retained_budget" in budget_sources
+    assert "getenv" not in row_group + budget_sources
 
 
 def test_v64_parquet_single_and_multi_are_byte_identical(tmp_path: Path) -> None:

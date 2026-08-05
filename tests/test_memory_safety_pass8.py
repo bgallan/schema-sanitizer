@@ -82,7 +82,7 @@ def test_xml_row_stream_uses_borrowed_slices_and_bounded_retention() -> None:
     assert "std::memmove" in scanner
     assert ".text = std::string_view(buffer_).substr" in lifecycle
     assert "storage->raw_arena.append(slice.text)" in frontend
-    assert "std::vector<std::string_view> raw_rows" in (
+    assert "std::pmr::vector<std::string_view> raw_rows" in (
         ROOT / "cpp/src/frontends/xml/frontend_internal.hh"
     ).read_text(encoding="utf-8")
 
@@ -128,7 +128,7 @@ def test_csv_multichunk_segments_release_owners_and_exceptional_capacity() -> No
     assert "void CsvStreamingScanner::clear_segments() noexcept" in scanner
     assert "kMaxRetainedSegments = 1024" in scanner
     assert "segments_.swap(empty)" in scanner
-    assert "kMaxCsvRecordSegments" in record
+    assert "scanner_.max_record_segments_" in record
     assert "CSV record spans too many input chunks" in record
     assert "scanner_.clear_segments();" in record
     assert record.index("scanner_.clear_segments();") < record.index("return make_text_slice")

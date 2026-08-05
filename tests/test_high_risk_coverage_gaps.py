@@ -105,8 +105,9 @@ def test_finalize_remote_output_cleans_temp_when_upload_fails(
     """A failed remote upload never leaves its staged output behind."""
     from schema_sanitizer.remote_impl import staging
 
-    staged = staging.StagedPath(str(tmp_path / "out.parquet"))
-    Path(staged.path).write_bytes(b"parquet")
+    output_path = tmp_path / "out.parquet"
+    output_path.write_bytes(b"parquet")
+    staged = staging.StagedPath(str(output_path))
     target = staging.RemoteOutputTarget(
         local_path=staged.path,
         remote_uri="gs://bucket/out.parquet",

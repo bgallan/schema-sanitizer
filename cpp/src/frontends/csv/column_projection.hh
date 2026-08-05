@@ -1,7 +1,7 @@
 // Declares CSV column projection state for the built-in CSV frontend.
 //
-// Tracks header names, numeric fallback keys, plan keep masks, and direct
-// materialization column indexes derived from a compiled plan.
+// Exact mode retains one canonical mutable header. Union mode consumes shared
+// immutable per-source projections selected by TextSlice::source_index.
 
 #pragma once
 
@@ -9,10 +9,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "frontends/csv/source_projection.hh"
 #include "internal/parsing/csv_direct.hh"
 #include "internal/parsing/flat_row_batch.hh"
 #include "internal/string_lookup.hh"
@@ -23,10 +26,11 @@ namespace sanitize::internal {
 
 class CsvColumnProjection {
 public:
-  // Creates projection state from CSV options and the resolved delimiter.
-  CsvColumnProjection(const sanitize::Options &opts, char delimiter);
+  // Creates projection state from CSV options and optional pre-read headers.
+  CsvColumnProjection(const sanitize::Options &opts, char delimiter,
+                      CsvSourceProjectionSetPtr source_projections = nullptr);
 
-  // Installs the active compiled plan and rebuilds no-header direct mapping.
+  // Installs the active compiled plan and rebuilds exact-mode direct mapping.
   void set_plan(const sanitize::CompiledPlan *plan) noexcept;
 
   // Invalidates header-derived state after a source reset.
@@ -35,10 +39,13 @@ public:
   // Returns whether the CSV input is configured with a header row.
   [[nodiscard]] bool has_header() const noexcept;
 
-  // Returns whether the configured header has been read or skipped.
+  // Returns whether the exact-mode header has been read or skipped.
   [[nodiscard]] bool header_ready() const noexcept;
 
-  // Returns whether the current row can use direct CSV materialization.
+  // Returns whether union mode owns pre-read immutable source projections.
+  [[nodiscard]] bool has_source_projections() const noexcept;
+
+  // Returns whether rows can use exact-mode direct CSV materialization.
   [[nodiscard]] bool can_use_raw_only() const noexcept;
 
   // Returns direct CSV materialization context when available.
@@ -47,46 +54,48 @@ public:
   // Returns the best known column count for per-batch reservations.
   [[nodiscard]] std::size_t column_count_hint() const noexcept;
 
-  // Rejects header fields absent from a strict compiled schema.
+  // Rejects duplicate, colliding, or strict-schema-incompatible fields.
   [[nodiscard]] sanitize::Status
-  validate_header_cells(const std::vector<std::string_view> &cells) const;
+  validate_header_cells(std::span<const std::string_view> cells) const;
 
-  // Stores parsed header cells and updates derived lookup state.
-  void set_header_cells(const std::vector<std::string_view> &cells);
+  // Validates one runtime header against its pre-read immutable source header.
+  [[nodiscard]] sanitize::Status
+  validate_source_header(std::size_t source_index,
+                         std::span<const std::string_view> cells) const;
 
-  // Returns whether parsed header cells match the first stored header.
+  // Stores the exact-mode parsed header and updates derived lookup state.
+  void set_header_cells(std::span<const std::string_view> cells);
+
+  // Returns whether parsed header cells match the exact-mode stored header.
   [[nodiscard]] bool
-  header_cells_equal(const std::vector<std::string_view> &cells) const;
+  header_cells_equal(std::span<const std::string_view> cells) const;
 
-  // Appends projected parsed cells into the current flat row.
-  void append_parsed_cells(FlatRowBatch *batch,
-                           const std::vector<std::string_view> &cells);
+  // Appends projected cells into the current flat row.
+  [[nodiscard]] sanitize::Status append_parsed_cells(
+      FlatRowBatch *batch, std::span<const std::string_view> cells,
+      std::size_t source_index = 0, bool has_source_index = false);
 
 private:
-  // Performs one uncached root field lookup.
   [[nodiscard]] const sanitize::FieldIndex *
   find_root_field_uncached(std::string_view key) const noexcept;
-
-  // Builds direct materialization column indexes from header names.
-  void build_direct_from_headers(const std::vector<std::string_view> &cells);
-
-  // Returns the header or numeric fallback key for a CSV column.
+  void build_direct_from_headers(std::size_t column_count);
   [[nodiscard]] std::string_view column_key(std::size_t index);
-
-  // Ensures numeric fallback keys exist up to the requested column count.
   void ensure_numeric_keys(std::size_t count);
-
-  // Ensures source-key hashes exist up to the requested column count.
   void ensure_column_hashes(std::size_t column_count);
-
-  // Resolves each source column once without duplicating owned key strings.
   void ensure_resolved_fields(std::size_t column_count);
-
-  // Ensures the per-column keep mask matches the active plan.
   void ensure_keep_mask(std::size_t column_count);
+
+  [[nodiscard]] const CsvSourceProjection *
+  source_projection(std::size_t source_index,
+                    bool has_source_index) const noexcept;
+  [[nodiscard]] sanitize::Status
+  append_union_cells(FlatRowBatch *batch,
+                     std::span<const std::string_view> cells,
+                     std::size_t source_index, bool has_source_index) const;
 
   bool has_header_ = true;
   bool strict_schema_ = false;
+  bool union_mode_ = false;
   bool raw_only_ = false;
   bool direct_ready_ = false;
   bool header_ready_ = false;
@@ -95,6 +104,7 @@ private:
   std::string field_name_policy_;
   CsvDirectContext direct_;
   const sanitize::CompiledPlan *plan_ = nullptr;
+  CsvSourceProjectionSetPtr source_projections_;
   std::vector<std::string> headers_;
   std::vector<std::string> numeric_keys_;
   std::vector<std::uint64_t> column_hashes_;

@@ -3,16 +3,57 @@
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..core_impl.execution_policy import execution_policy
-from ..core_impl.memory_budget import memory_budget
+from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.memory_budget import acquire_operation_memory, memory_budget
+from ..core_impl.process_resources import reserve_file_descriptors
 
 _MIB = 1024 * 1024
 _S3_MIN_PART_BYTES = 5 * _MIB
 _GCS_CHUNK_ALIGNMENT = 256 * 1024
 _MAX_UPLOAD_PARTS = 10_000
+
+
+class _BudgetedUploadBytes(bytes):
+    """Multipart bytes retaining their operation-memory reservation."""
+
+    _operation_memory_lease: Any | None
+
+    def __new__(cls, value: bytes, lease: object):
+        """Create immutable upload bytes with one attached lease."""
+        obj = super().__new__(cls, value)
+        obj._operation_memory_lease = lease
+        return obj
+
+    def close(self) -> None:
+        """Release the retained upload charge before clearing ownership."""
+        lease = getattr(self, "_operation_memory_lease", None)
+        if lease is None:
+            return
+        lease.close()
+        if getattr(self, "_operation_memory_lease", None) is lease:
+            self._operation_memory_lease = None
+
+    def __del__(self) -> None:
+        """Return the lease unless interpreter teardown has begun."""
+        try:
+            if runtime_is_finalizing():
+                return
+            self.close()
+        except BaseException:
+            pass
+
+
+def release_upload_payload(payload: bytes) -> None:
+    """Release a multipart payload lease when one is attached."""
+    close = getattr(payload, "close", None)
+    if callable(close):
+        close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,18 +137,31 @@ def remote_upload_policy(
 
 
 def read_upload_range(local_path: str, offset: int, size: int, file_size: int) -> bytes:
-    """Read one deterministic local-file range without sharing file handles."""
+    """Read one deterministic range while retaining its resident-memory lease."""
     if offset < 0 or size < 0 or offset + size > file_size:
         raise ValueError("remote upload range is outside the completed local spool")
-    with Path(local_path).open("rb") as handle:
-        handle.seek(offset)
-        payload = handle.read(size)
-    if len(payload) != size:
-        raise OSError(
-            "remote upload source changed while reading: "
-            f"expected {size} bytes at offset {offset}, got {len(payload)}"
-        )
-    return payload
+    # Reading plus the retained bytes subclass can coexist briefly. Charge
+    # both immutable buffers before materializing either one.
+    lease = acquire_operation_memory(size * 2 + 256, stage="remote_upload_part")
+    try:
+        with reserve_file_descriptors(label="remote_upload_file"):
+            with Path(local_path).open("rb") as handle:
+                handle.seek(offset)
+                payload = handle.read(size)
+        if len(payload) != size:
+            raise OSError(
+                "remote upload source changed while reading: "
+                f"expected {size} bytes at offset {offset}, got {len(payload)}"
+            )
+        if lease is None:
+            return payload
+        retained = _BudgetedUploadBytes(payload, lease)
+        lease.resize(sys.getsizeof(retained))
+        lease = None
+        return retained
+    finally:
+        if lease is not None:
+            lease.close()
 
 
 def read_upload_part(local_path: str, index: int, part_bytes: int, file_size: int) -> bytes:
@@ -121,6 +175,7 @@ def read_upload_part(local_path: str, index: int, part_bytes: int, file_size: in
 __all__ = [
     "RemoteUploadPolicy",
     "read_upload_part",
+    "release_upload_payload",
     "read_upload_range",
     "remote_upload_policy",
 ]

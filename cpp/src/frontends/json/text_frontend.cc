@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
+#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -35,15 +37,20 @@ public:
         field_name_policy_(options.field_name_policy),
         direct_rows_(static_cast<bool>(options.arrow_schema_contract)),
         parallel_rows_(parallel_json_row_frontend_enabled(options)),
-        line_delimited_(line_delimited),
+        line_delimited_(line_delimited), on_error_(options.on_error),
         stop_on_error_(options.on_error == OnErrorPolicy::kStop),
-        raw_only_(line_delimited && parallel_rows_),
+        raw_only_(line_delimited && parallel_rows_ &&
+                  options.on_error == OnErrorPolicy::kStop),
         require_object_rows_(require_object_rows),
         token_index_max_fields_(
             json_token_index_max_fields(options.memory_limit_bytes)) {}
   void set_plan(const CompiledPlan *plan) noexcept {
     plan_ = plan;
     refresh_policy();
+    root_filter_.reset(plan_, field_name_policy_);
+  }
+  void set_memory_pool(const std::shared_ptr<void> &pool) noexcept {
+    root_filter_.set_memory_pool(pool);
     root_filter_.reset(plan_, field_name_policy_);
   }
   void set_materialization_mode(FrontendMaterializationMode mode) noexcept {
@@ -81,20 +88,36 @@ public:
     }
     storage->batch.start_row(slice.view, slice.base_offset, row_flags,
                              direct_ctx, slice.source_file);
+    sanitize::Status status = sanitize::Status::OK();
     if (plan_ordered_) {
       if (!plan_) {
-        return sanitize::Status::Invalid(
+        status = sanitize::Status::Invalid(
             "JSON plan-ordered row is missing its compiled plan");
+      } else {
+        status = append_plan_ordered_json_row(
+            &storage->doc, &storage->batch, &storage->plan_ordered_scratch,
+            *plan_, field_name_policy_, slice.view, slice.base_offset);
       }
-      SAN_RETURN_NOT_OK(append_plan_ordered_json_row(
-          &storage->doc, &storage->batch, &storage->plan_ordered_scratch,
-          *plan_, field_name_policy_, slice.view, slice.base_offset));
     } else if (row_flags == std::to_underlying(RowFlags::kNone)) {
-      SAN_RETURN_NOT_OK(append_materialized_slice(storage, slice));
+      status = append_materialized_slice(storage, slice);
+    }
+    if (!status.ok()) {
+      storage->batch.abort_current_row();
+      return status;
     }
     storage->batch.end_row();
     return sanitize::Status::OK();
   }
+  void append_null_row(JsonTextBatchStorage *storage,
+                       const TextSlice &slice) const {
+    storage->keep_data_owner(slice.owner);
+    storage->keep_source_name(slice.source_file_owner);
+    storage->batch.start_row({}, slice.base_offset,
+                             std::to_underlying(RowFlags::kNone), nullptr,
+                             slice.source_file);
+    storage->batch.end_row();
+  }
+  [[nodiscard]] OnErrorPolicy on_error() const noexcept { return on_error_; }
   [[nodiscard]] std::size_t token_index_max_fields() const noexcept {
     return validate_raw_ ? token_index_max_fields_ : 0;
   }
@@ -125,6 +148,9 @@ private:
   };
   [[nodiscard]] static sanitize::Status
   prefixed_parse_error(const TextSlice &slice, std::string_view message) {
+    if (message.find(" at byte ") != std::string_view::npos) {
+      return sanitize::Status::Invalid(message);
+    }
     return sanitize::Status::Invalid(
         std::string("JSON parse error at byte ") +
         std::to_string(static_cast<int64_t>(slice.base_offset)) + ": " +
@@ -209,6 +235,7 @@ private:
   bool direct_rows_ = false;
   bool parallel_rows_ = false;
   bool line_delimited_ = false;
+  OnErrorPolicy on_error_ = OnErrorPolicy::kStop;
   bool stop_on_error_ = false;
   bool plan_ordered_ = false;
   bool raw_only_ = false;
@@ -242,6 +269,7 @@ public:
   }
   void set_memory_pool(std::shared_ptr<void> pool) noexcept {
     memory_pool_ = std::move(pool);
+    rows_.set_memory_pool(memory_pool_);
   }
   // Rewinds JSON scanning and clears completion state.
   void reset() noexcept {
@@ -280,11 +308,26 @@ public:
         }
         continue;
       }
+      out.reader_diagnostics.records += 1;
+      out.reader_diagnostics.decoded_bytes +=
+          static_cast<std::int64_t>(slice.view.size());
       if (direct_raw) {
         storage->append_deferred_raw(slice, rows_.requires_object_rows(),
                                      &out.rows);
       } else {
-        SAN_RETURN_NOT_OK(rows_.append(storage.get(), slice));
+        const auto status = rows_.append(storage.get(), slice);
+        if (!status.ok()) {
+          if (status.code() != sanitize::StatusCode::kInvalid ||
+              json_error_exceeds_hard_safety_limit(status) ||
+              rows_.requires_object_rows() ||
+              rows_.on_error() == OnErrorPolicy::kStop) {
+            return status;
+          }
+          if (rows_.on_error() == OnErrorPolicy::kSkipRow) {
+            continue;
+          }
+          rows_.append_null_row(storage.get(), slice);
+        }
       }
       ++produced;
     }
@@ -304,7 +347,15 @@ private:
   std::shared_ptr<void> memory_pool_;
 };
 struct JsonArrayGroupBatchStorage {
-  std::vector<RowBatch> batches;
+  JsonArrayGroupBatchStorage(std::shared_ptr<void> pool,
+                             std::shared_ptr<PoolResource> resource)
+      : pool_keepalive(std::move(pool)),
+        resource_keepalive(std::move(resource)),
+        batches(resource_keepalive.get()) {}
+
+  std::shared_ptr<void> pool_keepalive;
+  std::shared_ptr<PoolResource> resource_keepalive;
+  std::pmr::vector<RowBatch> batches;
 };
 FrontendHandle make_json_array_element_frontend(ChunkSourcePtr json,
                                                 const Options &options,
@@ -343,7 +394,15 @@ public:
     if (!open_status_.ok()) {
       return open_status_;
     }
-    auto storage = std::make_shared<JsonArrayGroupBatchStorage>();
+    std::shared_ptr<JsonArrayGroupBatchStorage> storage;
+    try {
+      auto resource = std::make_shared<PoolResource>(memory_pool_);
+      storage = std::make_shared<JsonArrayGroupBatchStorage>(
+          memory_pool_, std::move(resource));
+    } catch (const std::bad_alloc &) {
+      return sanitize::Status::OutOfMemory(
+          "grouped JSON document batch-owner allocation failed");
+    }
     int64_t produced = 0;
     while (produced < capacity && !done_) {
       if (!current_) {
@@ -363,6 +422,7 @@ public:
         continue;
       }
       produced += static_cast<int64_t>(child.rows.size());
+      out.reader_diagnostics.merge(child.reader_diagnostics);
       out.rows.insert(out.rows.end(), child.rows.begin(), child.rows.end());
       storage->batches.push_back(std::move(child));
     }
@@ -432,8 +492,7 @@ static const FrontendVTable kJsonVTable{
     .set_plan = &json_set_plan,
     .destroy = &json_destroy,
     .set_memory_pool = &json_set_memory_pool,
-    .set_materialization_mode = &json_set_materialization_mode,
-};
+    .set_materialization_mode = &json_set_materialization_mode};
 FrontendHandle make_json_array_element_frontend(ChunkSourcePtr json,
                                                 const Options &options,
                                                 bool require_object_rows) {
@@ -465,8 +524,7 @@ static const FrontendVTable kJsonArrayGroupVTable{
     .next_batch = &json_array_group_next_batch,
     .set_plan = &json_array_group_set_plan,
     .destroy = &json_array_group_destroy,
-    .set_memory_pool = &json_array_group_set_memory_pool,
-};
+    .set_memory_pool = &json_array_group_set_memory_pool};
 } // namespace
 FrontendHandle make_json_frontend(ChunkSourcePtr json, const Options &options) {
   auto *fe = new JsonTextFrontend(std::move(json), options);

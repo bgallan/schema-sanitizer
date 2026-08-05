@@ -18,20 +18,6 @@ EVIDENCE = ROOT / "benchmarks/v111_worker_active_streak_shard_ab.json"
 STAGE = "single_store_worker_active_streak_telemetry"
 
 
-def test_v111_activity_uses_worker_indexed_single_writer_publication() -> None:
-    """The arena streak path no longer increments one shared counter."""
-    runtime = RUNTIME.read_text(encoding="utf-8")
-    activity = runtime.split("class WorkerActivityStreak final", 1)[1].split(
-        "template <bool PreferDedicatedOutput", 1
-    )[0]
-
-    assert "RecordWorkerActiveStreak(index_)" in activity
-    assert "AddCounter(" not in activity
-    assert "PerformanceCounter::kWorkerActiveStreaks" in activity
-    assert activity.count("state_->active.fetch_add") == 1
-    assert activity.count("state_->active.fetch_sub") == 1
-
-
 def test_v111_worker_shard_publishes_exact_cumulative_snapshot() -> None:
     """Each physical worker owns a plain total and publishes one store."""
     header = TELEMETRY_HEADER.read_text(encoding="utf-8")

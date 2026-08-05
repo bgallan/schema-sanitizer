@@ -7,9 +7,14 @@ from __future__ import annotations
 from pipeline_shared import *  # noqa: F403
 
 
+def _pyarrow():
+    """Load PyArrow or skip integration tests when it is unavailable."""
+    return pytest.importorskip("pyarrow")
+
+
 def test_bigquery_integration_builds_external_table_ddl() -> None:
     """Verify BigQuery schema/DDL helpers are package-owned."""
-    pa = __import__("pyarrow")
+    pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
         ExternalTableSpec,
@@ -36,7 +41,7 @@ def test_bigquery_integration_builds_external_table_ddl() -> None:
 
 def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> None:
     """Verify BigQuery DDL can mirror column_order='alphabetically' recursively."""
-    pa = __import__("pyarrow")
+    pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
         ExternalTableSpec,
@@ -78,7 +83,7 @@ def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> 
 
 def test_bigquery_external_table_uses_canonical_parquet_reference_schema() -> None:
     """Reference-file mode must avoid explicit positional schema matching."""
-    pa = __import__("pyarrow")
+    pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
         ExternalTableSpec,
@@ -118,7 +123,7 @@ def test_bigquery_external_table_uses_canonical_parquet_reference_schema() -> No
 
 def test_bigquery_reference_schema_rejects_hive_column_collisions() -> None:
     """A reference file cannot hide fields that duplicate Hive partition keys."""
-    pa = __import__("pyarrow")
+    pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
         ExternalTableSpec,
@@ -191,7 +196,7 @@ def test_bigquery_external_table_ddl_keeps_etl_columns_last(
     sort_fields_alphabetically: bool,
 ) -> None:
     """Verify generated ETL columns trail user columns in canonical order."""
-    pa = __import__("pyarrow")
+    pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
         ExternalTableSpec,

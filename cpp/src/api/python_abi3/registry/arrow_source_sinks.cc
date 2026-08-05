@@ -61,7 +61,8 @@ ensure_operation_task_arena(NativeArrowSourcesStreamState *state) {
   }
   state->operation_memory_pool =
       state->ctx->ctx->make_operation_memory_pool_handle(
-          state->prepared->spec.memory_limit_bytes);
+          state->prepared->spec.memory_limit_bytes,
+          state->prepared->operation_memory_ledger);
   if (!state->operation_memory_pool) {
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");
@@ -150,6 +151,7 @@ try_open_passthrough_arrow_source(NativeArrowSourcesStreamState *state,
         "failed");
   }
   auto diag_shared = std::make_shared<sanitize::IngestDiagnostics>();
+  diag_shared->bind_operation_memory_pool(state->operation_memory_pool);
   diag_shared->arrow_schema_depth =
       sanitize::arrow_schema_depth(state->registry_plan->schema);
   diag_shared->parquet_schema_depth =
@@ -178,6 +180,7 @@ ingest_arrow_source_with_registry_plan(NativeArrowSourcesStreamState *state,
   frontend.set_plan(state->registry_plan->plan.get());
 
   auto diagnostics = std::make_shared<sanitize::IngestDiagnostics>();
+  diagnostics->bind_operation_memory_pool(state->operation_memory_pool);
   diagnostics->arrow_schema_depth =
       sanitize::arrow_schema_depth(state->registry_plan->schema);
   diagnostics->parquet_schema_depth =

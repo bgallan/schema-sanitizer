@@ -73,5 +73,6 @@ def test_logical_field_name_traversal_shares_the_field_name_owner() -> None:
     assert owner.is_file()
     assert len(source.splitlines()) <= 500
     assert "sanitize_logical_schema_field_names" in source
-    assert "BorrowedStringLookupMap<std::size_t> base_counts" in source
+    assert "std::pmr::unordered_map<std::string_view, std::size_t" in source
+    assert "base_counts(resource)" in source
     assert not (planning / "logical_field_name_sanitizer.cc").exists()

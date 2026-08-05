@@ -58,8 +58,10 @@ def test_field_name_planning_has_one_native_owner() -> None:
     assert owner.is_file()
     assert contract.is_file()
     assert len(source.splitlines()) <= 500
-    assert "BorrowedStringLookupMap<std::size_t> base_counts" in source
-    assert "BorrowedStringLookupSet used" in source
+    assert "std::pmr::unordered_map<std::string_view, std::size_t" in source
+    assert "base_counts(resource)" in source
+    assert "std::pmr::unordered_set<std::string_view" in source
+    assert "used(resource)" in source
     assert "base_counts.size() == dirty_names.size()" in source
     assert "sanitize_logical_schema_field_names" in source
     assert "out.reserve(base.size() + length)" in source

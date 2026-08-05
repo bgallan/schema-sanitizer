@@ -16,13 +16,15 @@ bool is_json_ws(unsigned char c) {
 JsonValueSpanScanner::JsonValueSpanScanner(JsonStreamingScanner &scanner,
                                            BumpArena *arena)
     : scanner_(scanner), arena_(arena),
+      pmr_pool_(arena ? arena->pool() : nullptr), segments_(&pmr_pool_),
       start_abs_(scanner.chunk_.base_offset + scanner.pos_),
       start_pos_(scanner.pos_), start_owner_(scanner.chunk_.owner),
       start_source_file_owner_(scanner.chunk_.source_name_owner),
       start_source_file_(scanner.chunk_.source_name),
       start_source_index_(scanner.chunk_.source_index),
       start_has_source_index_(scanner.chunk_.has_source_index),
-      seg_start_pos_(start_pos_), seg_owner_(scanner.chunk_.owner) {
+      seg_start_pos_(start_pos_), seg_owner_(scanner.chunk_.owner),
+      stack_(&pmr_pool_) {
   segments_.reserve(4);
   stack_.reserve(8);
 }
@@ -70,7 +72,7 @@ sanitize::Status JsonValueSpanScanner::initialize_mode() {
   } else if (c0 == '{') {
     if (stack_.size() >= json_scan::kMaxJsonNestingDepth) {
       return sanitize::Status::Invalid(
-          "JSON parse error: nesting exceeds safety limit");
+          "JSON parse error: nesting exceeds safety limit 512");
     }
     mode_ = Mode::kComposite;
     stack_.push_back('}');
@@ -78,7 +80,7 @@ sanitize::Status JsonValueSpanScanner::initialize_mode() {
   } else if (c0 == '[') {
     if (stack_.size() >= json_scan::kMaxJsonNestingDepth) {
       return sanitize::Status::Invalid(
-          "JSON parse error: nesting exceeds safety limit");
+          "JSON parse error: nesting exceeds safety limit 512");
     }
     mode_ = Mode::kComposite;
     stack_.push_back(']');
@@ -149,7 +151,7 @@ sanitize::Result<bool> JsonValueSpanScanner::scan_composite_byte(char ch) {
   if (ch == '{') {
     if (stack_.size() >= json_scan::kMaxJsonNestingDepth) {
       return sanitize::Status::Invalid(
-          "JSON parse error: nesting exceeds safety limit");
+          "JSON parse error: nesting exceeds safety limit 512");
     }
     stack_.push_back('}');
     return false;
@@ -157,7 +159,7 @@ sanitize::Result<bool> JsonValueSpanScanner::scan_composite_byte(char ch) {
   if (ch == '[') {
     if (stack_.size() >= json_scan::kMaxJsonNestingDepth) {
       return sanitize::Status::Invalid(
-          "JSON parse error: nesting exceeds safety limit");
+          "JSON parse error: nesting exceeds safety limit 512");
     }
     stack_.push_back(']');
     return false;

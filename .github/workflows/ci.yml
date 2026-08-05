@@ -8,6 +8,8 @@ on:
   # untrusted fork code with elevated repository context.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: 23 3 * * 1
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,6 +17,7 @@ jobs:
   # Source-only checks that do not need a platform matrix.
   checks:
     name: quality and security
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -72,6 +75,7 @@ jobs:
   # it for core-only, full-suite, benchmark, contract, and ABI checks.
   platform-wheels:
     name: platform and wheel (${{ matrix.name }})
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -159,6 +163,13 @@ jobs:
           --repeats 1
           --only parquet
           --output artifacts/threading-matrix-${{ matrix.artifact }}.json
+      - name: Cross-platform reader linear-scaling smoke
+        run: >-
+          python benchmarks/bench_reader_linear_scaling.py
+          --sizes 128,256
+          --repeats 1
+          --maximum-normalized-growth 8
+          --output artifacts/reader-linear-scaling-${{ matrix.artifact }}.json
       - name: Set up the newest supported Python
         uses: actions/setup-python@v6
         with:
@@ -186,6 +197,7 @@ jobs:
   # already produced by the platform matrix above.
   sdist:
     name: source distribution
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -208,6 +220,7 @@ jobs:
   # the sdist, and checks every optional extra in an isolated environment.
   distribution:
     name: release and downstream packaging
+    if: github.event_name != 'schedule'
     needs: [sdist, platform-wheels]
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -239,6 +252,7 @@ jobs:
             --work-root "${{ runner.temp }}/downstream-checks"
   coverage-python:
     name: coverage / Python branches
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -256,7 +270,14 @@ jobs:
             tests/test_api.py \
             tests/test_input_python_and_local.py \
             tests/test_input_xml_and_public_api.py \
-            tests/test_sinks_csv_jsonl.py
+            tests/test_sinks_csv_jsonl.py \
+            tests/test_modified_time_csv_phase1.py \
+            tests/test_modified_time_csv_phase2.py \
+            tests/test_modified_time_csv_phase3.py \
+            tests/test_modified_time_csv_phase4.py \
+            tests/test_modified_time_csv_phase5.py \
+            tests/test_modified_time_csv_phase6.py \
+            tests/test_modified_time_csv_phase8.py
           coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=adversarial -m pytest -q \
             tests/test_contracts.py \
             tests/test_runtime_lifecycle_part01.py \
@@ -271,7 +292,9 @@ jobs:
             tests/test_input_remote_staging_part02.py \
             tests/test_input_remote_staging_part03.py \
             tests/test_cloud_emulator_configuration.py \
-            tests/test_bigquery_integration.py
+            tests/test_bigquery_integration.py \
+            tests/test_modified_time_csv_phase7.py \
+            tests/test_modified_time_csv_phase7_integration.py
           coverage combine
           coverage report
           coverage html --show-contexts -d coverage-python-html
@@ -289,6 +312,7 @@ jobs:
             coverage-python-risk-gaps.txt
   coverage-native:
     name: coverage / native LLVM
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -306,7 +330,7 @@ jobs:
       - name: Install instrumented package
         run: |
           python -m pip install -U pip ninja 'cmake>=4.3,<4.4' scikit-build-core==0.11.6
-          python -m pip install -U pytest pyarrow
+          python -m pip install -U pytest pyarrow polars
           mkdir -p coverage-native/raw
           python -m pip install --no-build-isolation -v \
             --config-settings=install.strip=false \
@@ -325,7 +349,9 @@ jobs:
           pytest -q \
             tests/test_api.py \
             tests/test_input_xml_and_public_api.py \
-            tests/test_sinks_csv_jsonl.py
+            tests/test_sinks_csv_jsonl.py \
+            tests/test_modified_time_csv_phase4.py \
+            tests/test_modified_time_csv_phase5.py
           mv coverage-native/raw/schema-sanitizer-*.profraw \
             coverage-native/raw/regular/
           mkdir -p coverage-native/raw/adversarial
@@ -346,7 +372,14 @@ jobs:
             tests/test_input_remote_staging_part02.py \
             tests/test_input_remote_staging_part03.py \
             tests/test_cloud_emulator_configuration.py \
-            tests/test_bigquery_integration.py
+            tests/test_bigquery_integration.py \
+            tests/test_modified_time_csv_phase1.py \
+            tests/test_modified_time_csv_phase2.py \
+            tests/test_modified_time_csv_phase3.py \
+            tests/test_modified_time_csv_phase6.py \
+            tests/test_modified_time_csv_phase7.py \
+            tests/test_modified_time_csv_phase7_integration.py \
+            tests/test_modified_time_csv_phase8.py
           mv coverage-native/raw/schema-sanitizer-*.profraw \
             coverage-native/raw/integration/
       - name: Render LLVM reports
@@ -381,6 +414,7 @@ jobs:
           path: coverage-native/
   address-sanitizer:
     name: sanitizer / Linux ASan + UBSan
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -421,6 +455,7 @@ jobs:
           tests/test_parquet_native_nested_list_map_combinators.py
           tests/test_parquet_native_recursive_shapes_part04.py
           tests/test_parquet_native_recursive_extreme_runtime.py
+          tests/test_modified_time_csv_phase5.py
       - name: Configure and build ASan/UBSan libFuzzer targets
         run: |
           cmake -S . -B build/asan-fuzz -G Ninja \
@@ -442,11 +477,13 @@ jobs:
         run: >-
           python meta/ci/run_fuzz_regressions.py
           --build-root build/asan-fuzz/fuzz
+          --engine libfuzzer
           --campaign-runs 1000
           --seed 15172026
           --max-len 262144
   platform-sanitizers:
     name: sanitizer / ${{ matrix.name }}
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
@@ -521,6 +558,7 @@ jobs:
           --max-len 262144
   thread-sanitizer:
     name: sanitizer / Linux GCC ThreadSanitizer
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -567,3 +605,68 @@ jobs:
           meta/ci/run_tsan_extension_suite.sh
           build/tsan ./python-tsan 2
           "$(python -c 'import site; print(site.getsitepackages()[0])')"
+  scheduled-native-fuzz:
+    name: scheduled native fuzz campaign
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install Clang and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          python -m pip install -U pip ninja 'cmake>=4.3,<4.4'
+      - name: Configure and build ASan/UBSan libFuzzer targets
+        run: |
+          cmake -S . -B build/scheduled-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
+            -DSCHEMA_SANITIZER_SANITIZER=asan-ubsan \
+            -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
+            -DSCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer \
+            -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
+            -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+            -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+          cmake --build build/scheduled-fuzz \
+            --target schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv \
+            schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet \
+            --parallel 4
+      - name: Run extended deterministic mutation campaigns
+        run: >-
+          python meta/ci/run_fuzz_regressions.py
+          --build-root build/scheduled-fuzz/fuzz
+          --engine libfuzzer
+          --campaign-runs 10000
+          --seed 15172026
+          --max-len 1048576
+          --max-input-ms 10000
+          --max-rss-mb 4096
+          --evidence-output artifacts/reader-fuzz-evidence.json
+      - name: Build the periodic reader-limit review artifact
+        run: >-
+          python meta/ci/review_reader_limits.py
+          --fuzz-evidence artifacts/reader-fuzz-evidence.json
+          --output artifacts/reader-limit-review.json
+      - name: Upload periodic reader-limit evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: scheduled-reader-limit-review
+          path: artifacts/
+          if-no-files-found: warn
+      - name: Upload sanitizer crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: scheduled-native-fuzz-crashes
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore

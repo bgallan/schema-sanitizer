@@ -32,13 +32,16 @@ def test_v113_publication_and_snapshots_use_only_relevant_shards() -> None:
     source = RUNTIME.read_text(encoding="utf-8")
     snapshot = source.split("queue_visibility_snapshot(", 1)[1].split("idle_started_worker(", 1)[0]
 
-    assert "plan.visibility_count == 1U" in snapshot
+    assert "plan.visibility_shard_begin" in snapshot
+    assert "plan.visibility_shard_end" in snapshot
+    assert "for (auto shard" in snapshot
+    assert "state->queue_visibility[shard - 1U]" in snapshot
     assert "if constexpr (!Sharded)" in snapshot
     assert "return snapshot & allowed;" in snapshot
     assert "visibility->nonempty_mask.fetch_or(" in source
     assert "visibility->nonempty_mask.fetch_and(" in source
     assert "queue_visibility_snapshot<PreferDedicatedOutput>" in source
-    assert "queue_visibility_snapshot(plan)" in source
+    assert "queue_visibility_snapshot(state, plan)" in source
     assert "initialized_snapshot) &" in source
 
 

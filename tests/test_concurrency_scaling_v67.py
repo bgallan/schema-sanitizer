@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
+from threading_golden import semantic_stats
 
 ROOT = Path(__file__).resolve().parents[1]
 CSV_WRITER = ROOT / "cpp/src/internal/csv/csv_stream_writer.cc"
@@ -84,7 +85,7 @@ def test_v67_csv_single_multi_and_legacy_bytes_are_identical(tmp_path: Path) -> 
         outputs[mode] = path.read_bytes()
 
     assert outputs["single"] == outputs["multi"]
-    assert stats["single"] == stats["multi"]
+    assert semantic_stats(stats["single"]) == semantic_stats(stats["multi"])
     assert stats["multi"]["materialized_rows"] == rows
     assert b'"row,5 ""quoted""\\slash\nline-5"' in outputs["multi"]
     assert (

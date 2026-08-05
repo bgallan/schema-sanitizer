@@ -42,6 +42,11 @@ Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous(
   std::vector<DriftEvent> drifts;
   drifts.reserve(input.inferred_schema.fields.size());
   LogicalSchema schema;
+  if ((!previous_schema || previous_schema->fields.empty()) &&
+      input.schema_evolution == SchemaEvolutionMode::kStrict) {
+    return Status::Invalid(
+        "Strict schema evolution requires a non-empty canonical schema");
+  }
   if (!previous_schema || previous_schema->fields.empty()) {
     schema = input.inferred_schema;
     schema_registry_internal::normalize_integer_float_schema(schema);
@@ -57,12 +62,20 @@ Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous(
     schema_registry_internal::normalize_integer_float_schema(*previous_schema);
     LogicalSchema inferred_schema = input.inferred_schema;
     schema_registry_internal::normalize_integer_float_schema(inferred_schema);
-    schema.fields = schema_registry_internal::merge_registry_fields(
-        previous_schema->fields, inferred_schema.fields, "", drifts,
-        detected_at, input.default_key_name);
+    if (input.schema_evolution == SchemaEvolutionMode::kStrict) {
+      SAN_ASSIGN_OR_RAISE(
+          schema,
+          internal::evolve_schema(*previous_schema, inferred_schema,
+                                  input.schema_evolution, input.field_order));
+    } else {
+      schema.fields = schema_registry_internal::merge_registry_fields(
+          previous_schema->fields, inferred_schema.fields, "", drifts,
+          detected_at, input.default_key_name);
+    }
   }
   schema_registry_internal::normalize_integer_float_schema(schema);
-  if (input.field_order == FieldOrderPolicy::kAlphabetically) {
+  if (input.schema_evolution != SchemaEvolutionMode::kStrict &&
+      input.field_order == FieldOrderPolicy::kAlphabetically) {
     schema =
         internal::reorder_schema_fields(schema, nullptr, input.field_order);
   }

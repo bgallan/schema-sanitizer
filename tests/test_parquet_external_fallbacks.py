@@ -49,14 +49,8 @@ def test_native_parquet_reader_memory_budget_blocks_native_route(
     assert info is not None
     assert info["native_reader_ready"] == 1
 
-    limited_info = native_parquet_stream_preflight_info(path, memory_limit_bytes=1)
-
-    assert limited_info is not None
-    assert limited_info["native_reader_ready"] == 0
-    assert any(
-        "native buffer estimate" in blocker and "exceeds configured limit 1" in blocker
-        for blocker in limited_info["native_reader_blockers"]
-    )
+    with pytest.raises(RuntimeError, match="metadata capacity|configured limit"):
+        native_parquet_stream_preflight_info(path, memory_limit_bytes=1)
 
     with pytest.raises(ss.SchemaSanitizerResourceError, match="memory_limit_bytes"):
         read_test_parquet(path, memory_limit_bytes=1)

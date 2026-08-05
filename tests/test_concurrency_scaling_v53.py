@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -90,7 +90,7 @@ def test_v53_fixed_wide_planning_preserves_the_single_oracle(
     multi_output = tmp_path / "multi-fixed.jsonl"
     multi = _convert(source, multi_output, "multi")
 
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
     assert multi.schema_registry_json == single.schema_registry_json
     assert multi_output.read_bytes() == single_output.read_bytes()
     assert_logical_files_equivalent(single_output, multi_output)
@@ -109,7 +109,7 @@ def test_v53_nullable_wide_batches_keep_the_row_aware_fallback(
     multi_output = tmp_path / "multi-nullable.jsonl"
     multi = _convert(source, multi_output, "multi")
 
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
     assert multi.schema_registry_json == single.schema_registry_json
     assert multi_output.read_bytes() == single_output.read_bytes()
     assert b"null" in multi_output.read_bytes()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
+from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
@@ -98,8 +99,9 @@ def test_remote_io_coordinator_close_has_a_bounded_provider_deadline() -> None:
 
 
 def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:
-    """A provider entering after the startup deadline is closed on its loop."""
+    """A provider startup is cancelled and its host terminates after timeout."""
     exited = threading.Event()
+    thread_name = "schema-sanitizer-late-startup-test"
 
     @asynccontextmanager
     async def context():
@@ -111,8 +113,20 @@ def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:
             exited.set()
 
     with pytest.raises(RuntimeError, match="startup exceeded its deadline"):
-        RemoteIoCoordinator(context, shutdown_timeout_seconds=0.01)
-    assert exited.wait(timeout=1)
+        RemoteIoCoordinator(
+            context,
+            thread_name=thread_name,
+            shutdown_timeout_seconds=0.01,
+        )
+    deadline = monotonic() + 1.0
+    while monotonic() < deadline and any(
+        thread.name == thread_name and thread.is_alive() for thread in threading.enumerate()
+    ):
+        sleep(0.01)
+    assert not exited.is_set()
+    assert not any(
+        thread.name == thread_name and thread.is_alive() for thread in threading.enumerate()
+    )
 
 
 def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:

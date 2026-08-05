@@ -44,8 +44,8 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   if (!ctx) {
     return sanitize::Status::Invalid("prepare_ingest: ctx is null");
   }
-  auto operation_memory_pool =
-      ctx->make_operation_memory_pool_handle(opts->spec.memory_limit_bytes);
+  auto operation_memory_pool = ctx->make_operation_memory_pool_handle(
+      opts->spec.memory_limit_bytes, opts->operation_memory_ledger);
   if (!operation_memory_pool) {
     return sanitize::Status::OutOfMemory(
         "prepare_ingest: operation memory pool allocation failed");
@@ -79,6 +79,7 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
   const bool need_inference = !strict_fast_path;
 
   auto diagnostics = std::make_shared<IngestDiagnostics>();
+  diagnostics->bind_operation_memory_pool(operation_memory_pool);
   LogicalSchema inferred_schema;
   bool inference_consumed = false;
   if (need_inference) {

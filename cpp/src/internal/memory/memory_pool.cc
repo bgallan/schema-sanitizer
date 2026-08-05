@@ -1,6 +1,7 @@
 // Provides hardened process-wide and operation-scoped memory pools.
 
 #include "internal/memory/memory_pool.hh"
+#include "internal/memory/memory_budget.hh"
 
 #include <algorithm>
 #include <array>
@@ -10,10 +11,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -21,6 +24,128 @@
 #include "sanitize/core/status.hh"
 
 namespace sanitize::internal {
+
+OperationMemoryLedger::OperationMemoryLedger(int64_t limit_bytes) noexcept
+    : limit_bytes_(std::max<int64_t>(1, limit_bytes)) {
+  (void)shared_process_memory_pool(0);
+}
+
+sanitize::Status OperationMemoryLedger::ReserveLocal(int64_t bytes,
+                                                     std::string_view stage) {
+  if (bytes < 0) {
+    return sanitize::Status::Invalid(
+        "operation memory reservation is negative");
+  }
+  if (bytes == 0) {
+    return sanitize::Status::OK();
+  }
+  auto current = bytes_reserved_.load(std::memory_order_relaxed);
+  for (;;) {
+    if (current > std::numeric_limits<int64_t>::max() - bytes) {
+      return sanitize::Status::OutOfMemory(
+          "memory_limit_bytes accounting overflow");
+    }
+    const auto next = current + bytes;
+    if (next > limit_bytes_) {
+      if (stage.empty()) {
+        return sanitize::Status::OutOfMemory(
+            "memory_limit_bytes limit exceeded: ", next, " bytes > ",
+            limit_bytes_, " bytes");
+      }
+      return sanitize::Status::OutOfMemory(
+          "memory_limit_bytes limit exceeded during ", stage, ": ", next,
+          " bytes > ", limit_bytes_, " bytes");
+    }
+    if (bytes_reserved_.compare_exchange_weak(current, next,
+                                              std::memory_order_relaxed,
+                                              std::memory_order_relaxed)) {
+      auto peak = peak_bytes_reserved_.load(std::memory_order_relaxed);
+      while (next > peak && !peak_bytes_reserved_.compare_exchange_weak(
+                                peak, next, std::memory_order_relaxed,
+                                std::memory_order_relaxed)) {
+      }
+      return sanitize::Status::OK();
+    }
+  }
+}
+
+int64_t OperationMemoryLedger::ReleaseLocal(int64_t bytes) noexcept {
+  if (bytes <= 0) {
+    return 0;
+  }
+  auto current = bytes_reserved_.load(std::memory_order_relaxed);
+  for (;;) {
+    const auto next = std::max<int64_t>(0, current - bytes);
+    if (bytes_reserved_.compare_exchange_weak(current, next,
+                                              std::memory_order_relaxed,
+                                              std::memory_order_relaxed)) {
+      if (bytes > current) {
+        over_release_count_.fetch_add(1, std::memory_order_relaxed);
+        over_release_bytes_.fetch_add(bytes - current,
+                                      std::memory_order_relaxed);
+      }
+      return current - next;
+    }
+  }
+}
+
+sanitize::Status OperationMemoryLedger::Reserve(int64_t bytes,
+                                                std::string_view stage) {
+  auto local_status = ReserveLocal(bytes, stage);
+  if (!local_status.ok() || bytes == 0) {
+    return local_status;
+  }
+  auto process_pool = shared_process_memory_pool(0);
+  auto process_status = process_pool->ReserveExternal(bytes, stage);
+  if (!process_status.ok()) {
+    (void)ReleaseLocal(bytes);
+    return process_status;
+  }
+  return sanitize::Status::OK();
+}
+
+void OperationMemoryLedger::Release(int64_t bytes) noexcept {
+  const auto released = ReleaseLocal(bytes);
+  if (released <= 0) {
+    return;
+  }
+  shared_process_memory_pool(0)->ReleaseExternal(released);
+}
+
+sanitize::Status OperationMemoryLedger::ReserveNative(int64_t bytes,
+                                                      std::string_view stage) {
+  return ReserveLocal(bytes, stage);
+}
+
+void OperationMemoryLedger::ReleaseNative(int64_t bytes) noexcept {
+  (void)ReleaseLocal(bytes);
+}
+
+int64_t OperationMemoryLedger::limit_bytes() const noexcept {
+  return limit_bytes_;
+}
+
+int64_t OperationMemoryLedger::bytes_reserved() const noexcept {
+  return bytes_reserved_.load(std::memory_order_relaxed);
+}
+
+int64_t OperationMemoryLedger::peak_bytes_reserved() const noexcept {
+  return peak_bytes_reserved_.load(std::memory_order_relaxed);
+}
+
+int64_t OperationMemoryLedger::over_release_count() const noexcept {
+  return over_release_count_.load(std::memory_order_relaxed);
+}
+
+int64_t OperationMemoryLedger::over_release_bytes() const noexcept {
+  return over_release_bytes_.load(std::memory_order_relaxed);
+}
+
+std::shared_ptr<OperationMemoryLedger>
+make_operation_memory_ledger(int64_t limit_bytes) {
+  return std::make_shared<OperationMemoryLedger>(limit_bytes);
+}
+
 namespace {
 
 constexpr std::uint64_t kDefaultAllocationMagic = 0x53414E4D454D3031ULL;
@@ -347,14 +472,35 @@ public:
     const auto lease_bytes = std::clamp<std::int64_t>(
         std::min(proportional, fair_share), 1,
         std::min(capacity_bytes_, kMaximumOperationAdmissionBytes));
-    const auto ticket = next_ticket_++;
+    if (waiters_.size() >= kMaximumWaitingOperations) {
+      throw std::runtime_error("process memory admission wait queue exhausted");
+    }
+    Waiter waiter;
+    waiters_.push_back(&waiter);
     ++waiting_operations_;
-    ready_.wait(lock, [&] {
-      return ticket == serving_ticket_ &&
-             lease_bytes <= capacity_bytes_ - leased_bytes_;
-    });
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (waiters_.front() != &waiter ||
+           lease_bytes > capacity_bytes_ - leased_bytes_) {
+      if (ready_.wait_until(lock, deadline) == std::cv_status::timeout) {
+        if (waiters_.front() == &waiter &&
+            lease_bytes <= capacity_bytes_ - leased_bytes_) {
+          continue;
+        }
+        --waiting_operations_;
+        const auto position =
+            std::find(waiters_.begin(), waiters_.end(), &waiter);
+        if (position != waiters_.end()) {
+          waiters_.erase(position);
+        }
+        lock.unlock();
+        ready_.notify_all();
+        throw std::runtime_error(
+            "process memory admission exceeded its bounded deadline");
+      }
+    }
     --waiting_operations_;
-    ++serving_ticket_;
+    waiters_.pop_front();
     leased_bytes_ += lease_bytes;
     ready_.notify_all();
     return Lease(this, lease_bytes);
@@ -369,6 +515,10 @@ public:
   }
 
 private:
+  static constexpr std::size_t kMaximumWaitingOperations = 4096;
+
+  struct Waiter final {};
+
   void Release(std::int64_t bytes) noexcept {
     {
       std::lock_guard lock(mutex_);
@@ -382,8 +532,7 @@ private:
   std::int64_t capacity_bytes_ = 0;
   std::int64_t leased_bytes_ = 0;
   std::int64_t waiting_operations_ = 0;
-  std::uint64_t next_ticket_ = 0;
-  std::uint64_t serving_ticket_ = 0;
+  std::deque<Waiter *> waiters_;
 };
 
 ProcessMemoryGovernor &process_memory_governor() {
@@ -465,35 +614,50 @@ std::shared_ptr<MemoryPool> shared_default_memory_pool() {
 std::shared_ptr<MemoryPool>
 shared_process_memory_pool(int64_t process_capacity) {
   static const auto pool = make_tracking_memory_pool(
-      shared_default_memory_pool(), std::max<int64_t>(1, process_capacity),
+      shared_default_memory_pool(),
+      std::max<int64_t>(1, automatic_memory_limit_bytes()),
       "schema_sanitizer::ProcessMemoryPool");
-  pool->SetLimit(std::max<int64_t>(1, process_capacity));
+  if (process_capacity > 0) {
+    pool->SetLimit(std::max<int64_t>(1, process_capacity));
+  }
   return pool;
 }
 
-std::shared_ptr<MemoryPool>
-make_tracking_memory_pool(std::shared_ptr<MemoryPool> parent, int64_t limit,
-                          std::string backend_name, bool thread_safe_registry) {
+std::shared_ptr<MemoryPool> make_tracking_memory_pool(
+    std::shared_ptr<MemoryPool> parent, int64_t limit, std::string backend_name,
+    bool thread_safe_registry,
+    std::shared_ptr<OperationMemoryLedger> operation_ledger) {
   if (!parent) {
     parent = shared_default_memory_pool();
   }
   return std::make_shared<TrackingMemoryPool>(
-      std::move(parent), limit, std::move(backend_name), thread_safe_registry);
+      std::move(parent), limit, std::move(backend_name), thread_safe_registry,
+      std::move(operation_ledger));
 }
 
 std::shared_ptr<MemoryPool> make_governed_operation_memory_pool(
     std::shared_ptr<MemoryPool> parent, int64_t requested_limit,
-    int64_t process_capacity, std::string backend_name) {
+    int64_t process_capacity, std::string backend_name,
+    std::shared_ptr<OperationMemoryLedger> operation_ledger) {
   auto lease =
       process_memory_governor().Acquire(requested_limit, process_capacity);
   auto pool = make_tracking_memory_pool(parent, requested_limit,
-                                        std::move(backend_name));
+                                        std::move(backend_name), true,
+                                        std::move(operation_ledger));
   return std::make_shared<GovernedOperationMemoryPool>(std::move(lease),
                                                        std::move(pool));
 }
 
 ProcessMemoryGovernorStats process_memory_governor_stats() noexcept {
   return process_memory_governor().Stats();
+}
+
+ProcessResidentMemoryStats process_resident_memory_stats() noexcept {
+  const auto pool = shared_process_memory_pool(0);
+  return ProcessResidentMemoryStats{.capacity_bytes = pool->limit_bytes(),
+                                    .reserved_bytes = pool->resident_bytes(),
+                                    .peak_reserved_bytes =
+                                        pool->peak_resident_bytes()};
 }
 
 } // namespace sanitize::internal

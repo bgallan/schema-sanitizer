@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from contextlib import suppress
 from typing import Any, Literal
 
 from ..adapters.pyarrow import streams as _pyarrow_streams
 from ..core_impl.error_translation import translate_core_error
+from ..core_impl.finalization import runtime_is_finalizing
 from ..core_impl.json_payloads import json_object_loads
 from ..core_impl.resource_lifecycle import (
     _close_and_clear_attrs,
@@ -27,6 +29,16 @@ _DIAGNOSTIC_INT_KEYS = (
     "scalar_wrappings",
     "direct_arrow_input",
     "skipped_rows",
+    "cancellations",
+    "current_charged_memory_bytes",
+    "peak_charged_memory_bytes",
+    "operation_memory_limit_bytes",
+    "parser_max_depth",
+    "decoded_bytes",
+    "reader_records",
+    "reader_nodes",
+    "compressed_bytes",
+    "decompressed_bytes",
     "warnings",
     "errors",
     "soft_errors",
@@ -124,6 +136,31 @@ def diagnostics_stats(raw: Any) -> dict[str, Any]:
             out[key] = int(value)
         except Exception:
             out[key] = 0
+    out["cancellation_reason"] = str(
+        getattr(raw, "cancellation_reason", payload.get("cancellation_reason", "")) or ""
+    )
+    compressed = out.get("compressed_bytes", 0)
+    decompressed = out.get("decompressed_bytes", 0)
+    out["decompression_ratio"] = float(decompressed) / float(compressed) if compressed > 0 else 0.0
+    manifest_keys = ("source_manifest_uri", "source_object_count", "source_objects")
+    try:
+        explicit_attributes = vars(raw)
+    except TypeError:
+        explicit_attributes = {}
+    if any(key in payload or key in explicit_attributes for key in manifest_keys):
+        out["source_manifest_uri"] = str(
+            getattr(raw, "source_manifest_uri", payload.get("source_manifest_uri", "")) or ""
+        )
+        try:
+            out["source_object_count"] = int(
+                getattr(raw, "source_object_count", payload.get("source_object_count", 0)) or 0
+            )
+        except Exception:
+            out["source_object_count"] = 0
+        source_objects = getattr(raw, "source_objects", payload.get("source_objects", []))
+        out["source_objects"] = (
+            list(source_objects) if isinstance(source_objects, (list, tuple)) else []
+        )
     return out
 
 
@@ -160,6 +197,7 @@ class ArrowCStream(DiagnosticsAccessMixin, ClosableContextManagerMixin):
 
     def __init__(self, raw: Any):
         """Wrap an Arrow C Stream-capable backend."""
+        self._pid = os.getpid()
         self._raw = raw
 
     @property
@@ -185,13 +223,20 @@ class ArrowCStream(DiagnosticsAccessMixin, ClosableContextManagerMixin):
         return fn()
 
     def close(self) -> None:
-        """Close the primary wrapped stream."""
-        _close_suppressing_errors(self._raw, main_stream_only=True)
-        self._raw = None
+        """Close the primary wrapped stream without losing failed ownership."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        raw = self._raw
+        if raw is not None and not _close_suppressing_errors(raw, main_stream_only=True):
+            return
+        if self._raw is raw:
+            self._raw = None
         _close_keepalive_attr(self)
 
     def __del__(self):
         """Best-effort close the wrapped stream."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         with suppress(Exception):
             self.close()
 
@@ -210,6 +255,7 @@ class Stream(DiagnosticsAccessMixin, ClosableContextManagerMixin, Iterator):
 
     def __init__(self, raw: Any):
         """Create an iterator from an Arrow stream-capable backend."""
+        self._pid = os.getpid()
         self._raw = raw
         self._keepalive: Any = None
         self._close_on_exhaustion = False
@@ -285,22 +331,35 @@ class Stream(DiagnosticsAccessMixin, ClosableContextManagerMixin, Iterator):
         raise AttributeError("__arrow_c_schema__")
 
     def close_main_stream(self) -> None:
-        """Close the primary stream while preserving diagnostic resources."""
-        _close_and_clear_attrs(self, "_reader")
+        """Close the primary stream while preserving failed ownership."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        reader = getattr(self, "_reader", None)
         raw = getattr(self, "_raw", None)
-        if raw is not None:
-            _close_suppressing_errors(raw, main_stream_only=True)
-            with suppress(Exception):
+        if reader is raw and reader is not None:
+            if _close_suppressing_errors(reader):
+                object.__setattr__(self, "_reader", None)
                 object.__setattr__(self, "_raw", None)
-        _close_keepalive_attr(self)
+        else:
+            _close_and_clear_attrs(self, "_reader")
+            raw = getattr(self, "_raw", None)
+            if raw is not None and _close_suppressing_errors(raw, main_stream_only=True):
+                object.__setattr__(self, "_raw", None)
+        if getattr(self, "_reader", None) is None and getattr(self, "_raw", None) is None:
+            _close_keepalive_attr(self)
 
     def close(self) -> None:
-        """Close the stream and all owned resources."""
+        """Close the stream and all owned resources transactionally."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         _close_and_clear_attrs(self, "_reader", "_raw")
-        _close_keepalive_attr(self)
+        if getattr(self, "_reader", None) is None and getattr(self, "_raw", None) is None:
+            _close_keepalive_attr(self)
 
     def __del__(self):
         """Best-effort close the stream."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         with suppress(Exception):
             self.close()
 

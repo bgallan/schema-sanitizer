@@ -1,0 +1,242 @@
+{
+  "comparisons": [
+    {
+      "growth": [
+        {
+          "from_bytes": 12291,
+          "input_growth": 2.0170043120982832,
+          "time_growth": 1.2419292686792662,
+          "to_bytes": 24791
+        },
+        {
+          "from_bytes": 24791,
+          "input_growth": 2.0891049171070146,
+          "time_growth": 1.5071553351224012,
+          "to_bytes": 51791
+        }
+      ],
+      "max_time_growth_per_input_growth": 0.7214359234812892,
+      "name": "csv_multi",
+      "samples": [
+        {
+          "input_bytes": 12291,
+          "median_ns": 3438505,
+          "ns_per_input_byte": 279.7579529737206,
+          "rows": 500
+        },
+        {
+          "input_bytes": 24791,
+          "median_ns": 4270380,
+          "ns_per_input_byte": 172.25525392279457,
+          "rows": 1000
+        },
+        {
+          "input_bytes": 51791,
+          "median_ns": 6436126,
+          "ns_per_input_byte": 124.27112818829526,
+          "rows": 2000
+        }
+      ]
+    },
+    {
+      "growth": [
+        {
+          "from_bytes": 12291,
+          "input_growth": 2.0170043120982832,
+          "time_growth": 0.9984466498102035,
+          "to_bytes": 24791
+        },
+        {
+          "from_bytes": 24791,
+          "input_growth": 2.0891049171070146,
+          "time_growth": 1.596890922452747,
+          "to_bytes": 51791
+        }
+      ],
+      "max_time_growth_per_input_growth": 0.7643900071156389,
+      "name": "csv_single",
+      "samples": [
+        {
+          "input_bytes": 12291,
+          "median_ns": 4648662,
+          "ns_per_input_byte": 378.2167439589944,
+          "rows": 500
+        },
+        {
+          "input_bytes": 24791,
+          "median_ns": 4641441,
+          "ns_per_input_byte": 187.22282279859627,
+          "rows": 1000
+        },
+        {
+          "input_bytes": 51791,
+          "median_ns": 7411875,
+          "ns_per_input_byte": 143.11125485122898,
+          "rows": 2000
+        }
+      ]
+    },
+    {
+      "growth": [
+        {
+          "from_bytes": 42170,
+          "input_growth": 2.0078254683424235,
+          "time_growth": 1.8371253642640877,
+          "to_bytes": 84670
+        },
+        {
+          "from_bytes": 84670,
+          "input_growth": 2.039329160269281,
+          "time_growth": 1.7195340752762793,
+          "to_bytes": 172670
+        }
+      ],
+      "max_time_growth_per_input_growth": 0.9149825984530127,
+      "name": "jsonl_multi",
+      "samples": [
+        {
+          "input_bytes": 42170,
+          "median_ns": 16266701,
+          "ns_per_input_byte": 385.7410718520275,
+          "rows": 500
+        },
+        {
+          "input_bytes": 84670,
+          "median_ns": 29883969,
+          "ns_per_input_byte": 352.9463682532184,
+          "rows": 1000
+        },
+        {
+          "input_bytes": 172670,
+          "median_ns": 51386503,
+          "ns_per_input_byte": 297.59948456593503,
+          "rows": 2000
+        }
+      ]
+    },
+    {
+      "growth": [
+        {
+          "from_bytes": 42170,
+          "input_growth": 2.0078254683424235,
+          "time_growth": 1.818148899837746,
+          "to_bytes": 84670
+        },
+        {
+          "from_bytes": 84670,
+          "input_growth": 2.039329160269281,
+          "time_growth": 2.0052319535383245,
+          "to_bytes": 172670
+        }
+      ],
+      "max_time_growth_per_input_growth": 0.9832801847807374,
+      "name": "jsonl_single",
+      "samples": [
+        {
+          "input_bytes": 42170,
+          "median_ns": 16406989,
+          "ns_per_input_byte": 389.06779701209393,
+          "rows": 500
+        },
+        {
+          "input_bytes": 84670,
+          "median_ns": 29830349,
+          "ns_per_input_byte": 352.31308609897246,
+          "rows": 1000
+        },
+        {
+          "input_bytes": 172670,
+          "median_ns": 59816769,
+          "ns_per_input_byte": 346.4224764000695,
+          "rows": 2000
+        }
+      ]
+    },
+    {
+      "growth": [
+        {
+          "from_bytes": 29793,
+          "input_growth": 2.006947940791461,
+          "time_growth": 1.8198860152736684,
+          "to_bytes": 59793
+        },
+        {
+          "from_bytes": 59793,
+          "input_growth": 2.0369106751626442,
+          "time_growth": 2.4798888531012557,
+          "to_bytes": 121793
+        }
+      ],
+      "max_time_growth_per_input_growth": 1.2174755051068895,
+      "name": "xml_multi",
+      "samples": [
+        {
+          "input_bytes": 29793,
+          "median_ns": 13059469,
+          "ns_per_input_byte": 438.3401805793307,
+          "rows": 500
+        },
+        {
+          "input_bytes": 59793,
+          "median_ns": 23766745,
+          "ns_per_input_byte": 397.4837355543291,
+          "rows": 1000
+        },
+        {
+          "input_bytes": 121793,
+          "median_ns": 58938886,
+          "ns_per_input_byte": 483.9267117157801,
+          "rows": 2000
+        }
+      ]
+    },
+    {
+      "growth": [
+        {
+          "from_bytes": 29793,
+          "input_growth": 2.006947940791461,
+          "time_growth": 2.143600516031474,
+          "to_bytes": 59793
+        },
+        {
+          "from_bytes": 59793,
+          "input_growth": 2.0369106751626442,
+          "time_growth": 2.7381994593756365,
+          "to_bytes": 121793
+        }
+      ],
+      "max_time_growth_per_input_growth": 1.3442903966110322,
+      "name": "xml_single",
+      "samples": [
+        {
+          "input_bytes": 29793,
+          "median_ns": 10739655,
+          "ns_per_input_byte": 360.475782902024,
+          "rows": 500
+        },
+        {
+          "input_bytes": 59793,
+          "median_ns": 23021530,
+          "ns_per_input_byte": 385.02048734801735,
+          "rows": 1000
+        },
+        {
+          "input_bytes": 121793,
+          "median_ns": 63037541,
+          "ns_per_input_byte": 517.5793436404391,
+          "rows": 2000
+        }
+      ]
+    }
+  ],
+  "failures": {},
+  "maximum_normalized_growth": 1.75,
+  "repeats": 3,
+  "schema_version": 1,
+  "sizes": [
+    500,
+    1000,
+    2000
+  ],
+  "within_budget": true
+}

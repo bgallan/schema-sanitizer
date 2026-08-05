@@ -6,6 +6,7 @@ import csv
 from pathlib import Path
 
 from conftest import require_native
+from diagnostics_assertions import assert_diagnostics_semantically_equal
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.concurrency_coverage import (
@@ -46,6 +47,7 @@ def _probe(path: Path, mode: str):
         multi_threading=mode == "multi",
         memory_limit_bytes=64 << 20,
         on_error="stop",
+        field_name_policy="preserve",
     ).raw
     result = context.schema_probe_paths("csv", [str(path)], options)
     return result, context.performance_stats()
@@ -157,7 +159,7 @@ def test_v74_wide_csv_keeps_parallel_decode_and_exact_probe_parity(
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
     assert int(single_stats["tasks"]["input"]["submitted"]) == 0
     assert int(multi_stats["tasks"]["input"]["submitted"]) >= 2
     assert int(multi_stats["counters"]["peak_active_tasks"]) >= 2

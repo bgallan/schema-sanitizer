@@ -4,8 +4,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
 #include <string_view>
-#include <vector>
+
+#include "internal/memory/pool_resource.hh"
 
 namespace sanitize::internal {
 
@@ -42,6 +44,9 @@ public:
   // Copies a string into stable arena storage.
   std::string_view append(std::string_view s);
 
+  // Returns the operation pool used by arena payload and metadata allocations.
+  [[nodiscard]] void *pool() const noexcept { return pool_handle_; }
+
 private:
   struct Block {
     uint8_t *data = nullptr;
@@ -53,8 +58,9 @@ private:
   void add_block(std::size_t want);
 
   void *pool_handle_ = nullptr;
+  PoolResource metadata_resource_;
   std::size_t block_size_ = (1u << 20);
-  std::vector<Block> blocks_;
+  std::pmr::vector<Block> blocks_;
   std::size_t block_index_ = 0;
 };
 

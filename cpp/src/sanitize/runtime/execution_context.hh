@@ -33,8 +33,9 @@ public:
   // Creates an independent operation-scoped pool. A positive limit is a hard
   // quota for allocations routed through this pool; the context pool still
   // aggregates current and peak usage across concurrent operations.
-  [[nodiscard]] std::shared_ptr<void>
-  make_operation_memory_pool_handle(int64_t limit_bytes) const;
+  [[nodiscard]] std::shared_ptr<void> make_operation_memory_pool_handle(
+      int64_t limit_bytes,
+      std::shared_ptr<void> operation_memory_ledger = nullptr) const;
 
   // Starts one operation-local telemetry record and makes it the context
   // snapshot returned by performance_stats(). The caller passes the same

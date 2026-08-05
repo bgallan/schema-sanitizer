@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
 from ..adapters.pyarrow import streams as _pyarrow_streams
 from ..core_impl.dependencies import ensure_optional_dependency
+from ..core_impl.finalization import runtime_is_finalizing
 from ..core_impl.resource_lifecycle import (
     _close_and_clear_attrs,
     _close_keepalive_attr,
@@ -298,6 +300,7 @@ class Result(DiagnosticsAccessMixin):
         conversion_route: str | None = None,
     ):
         """Wrap raw reader output and optional materialized clean data."""
+        self._pid = os.getpid()
         self._raw = raw
         self._clean_data_cache = clean_data
         self._table_cache: Any = self._UNSET
@@ -364,6 +367,8 @@ class Result(DiagnosticsAccessMixin):
     def __del__(self):
         """Best-effort release resources retained by the result."""
         try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
             _close_resource_owner_attr(self)
             _close_keepalive_attr(self)
         except Exception:
@@ -382,6 +387,7 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
 
     def __init__(self, raw: Any):
         """Wrap a raw native sink output."""
+        self._pid = os.getpid()
         self._raw = raw
         self._table: Any | None = None
         self._stream: Stream | None = None
@@ -392,13 +398,18 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
         return self._raw
 
     def close(self) -> None:
-        """Close all sink resources."""
+        """Close all sink resources without orphaning failed ownership."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         _close_and_clear_attrs(self, "_stream", "_raw")
-        _close_keepalive_attr(self)
+        if self._stream is None and self._raw is None:
+            _close_keepalive_attr(self)
 
     def __del__(self):
         """Best-effort close an unconsumed sink result."""
         try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
             if getattr(self, "_stream", None) is None:
                 self.close()
         except Exception:
@@ -416,8 +427,8 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
             try:
                 table = _pyarrow_streams.table_from_stream_like(table, feature="sink table output")
             finally:
-                _close_suppressing_errors(self._raw, main_stream_only=True)
-                _close_keepalive_attr(self)
+                if _close_suppressing_errors(self._raw, main_stream_only=True):
+                    _close_keepalive_attr(self)
         self._table = table
         return table
 

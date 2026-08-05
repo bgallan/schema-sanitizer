@@ -125,6 +125,9 @@ sanitize::Result<TextSlice> JsonStreamingScanner::scan_value(BumpArena *arena) {
                            chunk_.source_name_owner, chunk_.source_name,
                            chunk_.source_index, chunk_.has_source_index);
   }
+  if (!end.ok() && eof_) {
+    return end.status();
+  }
   return scan_json_value_span(*this, arena);
 }
 

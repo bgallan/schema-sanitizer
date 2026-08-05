@@ -26,18 +26,30 @@ struct MaterializationPacketLimits {
 struct OwnedRowBatch {
   std::vector<RowRef> rows;
   std::shared_ptr<const void> source_owner;
+  std::shared_ptr<sanitize::RowBatchReleaser> releaser;
 };
 
 // Owns row views from exactly one frontend batch. The owner keeps both the
 // canonical RowRef storage and all referenced frontend bytes alive.
 struct OwnedRowPacket {
+  OwnedRowPacket() = default;
+  OwnedRowPacket(const OwnedRowPacket &) = delete;
+  OwnedRowPacket &operator=(const OwnedRowPacket &) = delete;
+  OwnedRowPacket(OwnedRowPacket &&other) noexcept;
+  OwnedRowPacket &operator=(OwnedRowPacket &&other) noexcept;
+  ~OwnedRowPacket();
+
   std::span<RowRef> rows;
   std::shared_ptr<const void> owner;
+  std::shared_ptr<sanitize::RowBatchReleaser> releaser;
+  std::size_t release_begin = 0;
+  std::size_t release_count = 0;
   std::size_t estimated_source_bytes = 0;
   std::size_t json_tokenized_rows = 0;
   std::size_t json_tokenized_fields = 0;
   std::size_t json_plan_ordered_rows = 0;
   std::size_t json_token_fallback_rows = 0;
+  std::size_t json_skipped_rows = 0;
 };
 
 // Derives an adaptive row cap from the immutable operation policy and the
@@ -60,9 +72,9 @@ materialization_packet_limits(const ExecutionPolicy &policy,
     std::int64_t input_size_hint_bytes) noexcept;
 
 // Moves one frontend batch into a single shared owner without copying rows.
-sanitize::Result<std::shared_ptr<OwnedRowBatch>>
-make_owned_row_batch(std::vector<RowRef> rows,
-                     std::shared_ptr<const void> source_owner);
+sanitize::Result<std::shared_ptr<OwnedRowBatch>> make_owned_row_batch(
+    std::vector<RowRef> rows, std::shared_ptr<const void> source_owner,
+    std::shared_ptr<sanitize::RowBatchReleaser> releaser = nullptr);
 
 // Builds the next contiguous packet from one canonical frontend batch. Every
 // packet contains at least one row; an individual oversized row is isolated.

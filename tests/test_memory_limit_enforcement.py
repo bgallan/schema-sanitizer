@@ -178,12 +178,14 @@ def test_large_file_does_not_cause_file_sized_resident_memory_growth(
             )
         """
     )
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
     completed = subprocess.run(
         [sys.executable, "-c", child, str(source), str(output), str(limit_bytes)],
         check=True,
         capture_output=True,
         text=True,
         timeout=60,
+        env={"PYTHONPATH": source_root},
     )
     payload = json.loads(completed.stdout)
     memory = payload["memory"]

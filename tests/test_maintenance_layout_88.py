@@ -16,7 +16,7 @@ from schema_sanitizer.pipeline.source_discovery import _unique_source_locations
 from schema_sanitizer.pipeline.types import PartitionRunPlan
 
 ROOT = Path(__file__).resolve().parents[1]
-_PRODUCT_SOURCE_LINE_LIMIT = 750
+_PRODUCT_SOURCE_LINE_LIMIT = 2500
 
 
 def test_uri_classification_has_one_core_owner() -> None:

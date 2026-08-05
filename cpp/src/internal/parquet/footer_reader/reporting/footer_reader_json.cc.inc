@@ -255,6 +255,11 @@ void append_footer_column_pages_json(std::string &out, bool &column_first,
       json_encoding::append_int_field(out, page_first, "compressed_page_size",
                                       page.compressed_page_size);
     }
+    json_encoding::append_int_field(out, page_first, "has_crc",
+                                    page.has_crc ? 1 : 0);
+    if (page.has_crc) {
+      json_encoding::append_int_field(out, page_first, "crc", page.crc);
+    }
     if (page.has_num_values) {
       json_encoding::append_int_field(out, page_first, "num_values",
                                       page.num_values);

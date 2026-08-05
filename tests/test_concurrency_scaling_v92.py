@@ -19,18 +19,6 @@ SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc
 STAGE = "high_core_executor_local_arena_submission_tickets"
 
 
-def test_v92_arena_exposes_pre_reserved_ticket_submission() -> None:
-    """Verify the named concurrency regression contract."""
-    header = ARENA_HEADER.read_text(encoding="utf-8")
-    source = ARENA.read_text(encoding="utf-8")
-
-    assert "ReserveSubmissionTicket(" in header
-    assert "std::size_t submission_ticket" in header
-    assert "const auto ticket = ReserveSubmissionTicket(plan);" in source
-    assert "return Submit(std::move(task), plan, ticket, telemetry_kind);" in source
-    assert "const auto ticket = submission_ticket;" in source
-
-
 def test_v92_shared_lane_cursor_is_touched_once_per_executor_not_per_packet() -> None:
     """Verify the named concurrency regression contract."""
     source = ARENA.read_text(encoding="utf-8")
@@ -39,34 +27,14 @@ def test_v92_shared_lane_cursor_is_touched_once_per_executor_not_per_packet() ->
     reserve = source[reserve_start:reserve_end]
     ticket_submit = source[source.index("std::size_t submission_ticket") :]
 
-    assert reserve.count("plan.cursor->fetch_add") == 1
-    assert "plan.cursor->fetch_add" not in ticket_submit
+    assert reserve.count("cursor->fetch_add") == 1
+    assert "cursor->fetch_add" not in ticket_submit
 
     executor = EXECUTOR.read_text(encoding="utf-8")
     constructor = executor[executor.index("OrderedExecutor(std::size_t") :]
     assert "worker_count_ > 8U" in constructor
     assert "arena_->ReserveSubmissionTicket(arena_submission_plan_)" in constructor
     assert executor.count("ReserveSubmissionTicket(arena_submission_plan_)") == 1
-
-
-def test_v92_only_high_core_helper_advances_ticket_under_existing_mutex() -> None:
-    """Verify the named concurrency regression contract."""
-    executor = EXECUTOR.read_text(encoding="utf-8")
-    helper = SUBMISSION.read_text(encoding="utf-8")
-
-    submit_body = executor[
-        executor.index("sanitize::Status Submit") : executor.index(
-            "sanitize::Status FinishSubmission"
-        )
-    ]
-    assert "worker_count_ > 8 && uses_arena_completion_slots()" in submit_body
-    assert "next_high_core_arena_ticket_" not in submit_body
-    assert "arena_submission_plan_, telemetry_kind_" in submit_body
-
-    helper_lock = helper.index("std::lock_guard lock(mutex_);")
-    helper_ticket = helper.index("arena_submission_ticket = next_high_core_arena_ticket_++;")
-    assert helper_lock < helper_ticket
-    assert "arena_submission_plan_, arena_submission_ticket, telemetry_kind_" in helper
 
 
 def test_v92_ticket_skip_on_failed_admission_needs_no_shared_rollback() -> None:

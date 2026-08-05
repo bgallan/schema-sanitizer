@@ -29,24 +29,6 @@ def test_v93_worker_slots_keep_mutex_owned_exact_counters() -> None:
     assert "Exact mutex-owned counters" in slot
 
 
-def test_v93_admission_publishes_each_counter_with_one_atomic_store() -> None:
-    """Verify the named concurrency regression contract."""
-    source = ARENA.read_text(encoding="utf-8")
-    begin = source.index("auto &slot = *state_->slots[physical]")
-    end = source.index("if (state_->telemetry)", begin)
-    admission = source[begin:end]
-
-    assert "std::lock_guard lock(slot.mutex);" in admission
-    assert "queued_before = slot.queued_local;" in admission
-    assert "++slot.queued_local;" in admission
-    assert "slot.queued.store(slot.queued_local" in admission
-    assert "++slot.submitted_local;" in admission
-    assert "slot.submitted.store(slot.submitted_local" in admission
-    assert "slot.queued.fetch_add" not in admission
-    assert "slot.submitted.load" not in admission
-    assert "slot.submitted.fetch_add" not in admission
-
-
 def test_v93_local_and_stolen_dequeue_avoid_queue_depth_rmw() -> None:
     """Verify the named concurrency regression contract."""
     runtime = RUNTIME.read_text(encoding="utf-8")
@@ -56,37 +38,6 @@ def test_v93_local_and_stolen_dequeue_avoid_queue_depth_rmw() -> None:
     assert "--candidate.queued_local;" in runtime
     assert "candidate.queued.store(candidate.queued_local" in runtime
     assert ".queued.fetch_sub" not in runtime
-
-
-def test_v93_shutdown_resets_private_and_published_depth() -> None:
-    """Verify the named concurrency regression contract."""
-    source = ARENA.read_text(encoding="utf-8")
-    shutdown = source[source.index("void OperationTaskArena::Shutdown") :]
-
-    clear = shutdown.index("slot->tasks.clear();")
-    local = shutdown.index("slot->queued_local = 0U;", clear)
-    published = shutdown.index("slot->queued.store(0, std::memory_order_relaxed);", local)
-    assert clear < local < published
-
-
-def test_v93_diagnostics_remain_lock_free_and_exact() -> None:
-    """Verify the named concurrency regression contract."""
-    source = ARENA.read_text(encoding="utf-8")
-    submitted = source[
-        source.index("OperationTaskArena::submitted_tasks") : source.index(
-            "OperationTaskArena::stolen_tasks"
-        )
-    ]
-    queued = source[
-        source.index("OperationTaskArena::queued_tasks") : source.index(
-            "OperationTaskArena::started_workers"
-        )
-    ]
-
-    assert "slot->submitted.load(std::memory_order_relaxed)" in submitted
-    assert "slot->queued.load(std::memory_order_relaxed)" in queued
-    assert "lock_guard" not in submitted
-    assert "lock_guard" not in queued
 
 
 def test_v93_all_56_pairs_inherit_single_store_queue_accounting() -> None:

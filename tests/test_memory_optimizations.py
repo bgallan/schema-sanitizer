@@ -602,5 +602,7 @@ def test_native_parquet_reader_enforces_actual_retained_capacity(
         memory_limit_bytes=64,
     )
 
-    with pytest.raises(pa.ArrowMemoryError, match="retained Arrow capacity"):
+    import schema_sanitizer as ss
+
+    with pytest.raises(ss.SchemaSanitizerResourceError, match="memory_limit_bytes"):
         list(pa.RecordBatchReader.from_stream(factory))

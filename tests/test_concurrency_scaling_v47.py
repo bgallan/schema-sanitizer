@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
@@ -50,25 +48,6 @@ def test_v47_strict_single_worker_path_remains_inline() -> None:
     assert peak == 0
     assert queued == 0
     assert submitted == 0
-
-
-def test_v47_worker_completion_has_no_executor_wide_result_lock() -> None:
-    """Arena workers publish to ordinal-owned slots without one shared mutex."""
-    root = Path(__file__).resolve().parents[1]
-    executor = (root / "cpp/src/internal/runtime/ordered_executor.hh").read_text(encoding="utf-8")
-    arena_completion = (
-        root / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
-    ).read_text(encoding="utf-8")
-    publisher = arena_completion.split("void publish_external_outcome", 1)[1].split(
-        "sanitize::Result<Outcome> take_next_arena", 1
-    )[0]
-
-    assert "compare_exchange_strong" in publisher
-    assert "ArenaSlotState::kPublishing" in publisher
-    assert "slot.state.notify_one()" in publisher
-    assert "lock(mutex_)" not in publisher
-    assert "shared completion counter" in publisher
-    assert "arena_completed_(uses_arena_completion_slots()" in executor
 
 
 def test_v47_preserves_prompt_arena_stage_cancellation() -> None:

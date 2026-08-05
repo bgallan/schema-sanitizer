@@ -3,6 +3,7 @@
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 
 #include "internal/runtime/operation_task_arena.hh"
+#include "internal/runtime/process_identity.hh"
 
 #include <mutex>
 #include <unordered_map>
@@ -29,7 +30,7 @@ registry() {
 
 void attach_task_arena(ArrowArrayStream *stream,
                        std::shared_ptr<OperationTaskArena> arena) {
-  if (!stream || !arena) {
+  if (!stream || !arena || !runtime_owner_process()) {
     return;
   }
   std::lock_guard lock(registry_mutex());
@@ -38,7 +39,7 @@ void attach_task_arena(ArrowArrayStream *stream,
 
 std::shared_ptr<OperationTaskArena>
 task_arena_for_stream(const ArrowArrayStream *stream) noexcept {
-  if (!stream) {
+  if (!stream || !runtime_owner_process()) {
     return {};
   }
   try {
@@ -58,7 +59,7 @@ task_arena_for_stream(const ArrowArrayStream *stream) noexcept {
 }
 
 void detach_task_arena(const ArrowArrayStream *stream) noexcept {
-  if (!stream) {
+  if (!stream || !runtime_owner_process()) {
     return;
   }
   try {

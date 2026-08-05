@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
+from diagnostics_assertions import assert_diagnostics_semantically_equal
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -74,7 +75,7 @@ def test_v56_wide_mixed_scalar_inference_matches_single() -> None:
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
     assert len(multi.field_names) == 128
 
 
@@ -100,7 +101,7 @@ def test_v56_nested_and_empty_container_fallback_matches_single() -> None:
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
 
 
 def test_v56_wide_mixed_output_is_byte_identical(tmp_path: Path) -> None:

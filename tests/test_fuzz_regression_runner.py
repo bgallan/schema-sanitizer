@@ -49,7 +49,11 @@ def test_regression_runner_discovers_stable_cases_and_commands(
     for target, command in zip(module.TARGETS, calls, strict=True):
         assert Path(command[0]) == module.fuzzer_binary(build_root, target)
         assert command[1] == "-runs=1"
-        assert Path(command[2]) == regression_root / target / "case.bin"
+        assert command[2:4] == [
+            f"-max_input_ms={module.DEFAULT_MAX_INPUT_MS}",
+            f"-max_rss_mb={module.DEFAULT_MAX_RSS_MB}",
+        ]
+        assert Path(command[4]) == regression_root / target / "case.bin"
 
 
 def test_regression_runner_rejects_empty_regression_set(tmp_path: Path) -> None:
@@ -97,5 +101,94 @@ def test_campaign_runner_uses_stable_target_seeds_and_limits(
     assert len(calls) == len(module.TARGETS)
     for ordinal, (target, command) in enumerate(zip(module.TARGETS, calls, strict=True)):
         assert Path(command[0]) == module.fuzzer_binary(build_root, target)
-        assert command[1:4] == ["-runs=17", f"-seed={41 + ordinal}", "-max_len=4096"]
-        assert Path(command[4]) == regression_root / target
+        assert command[1:6] == [
+            "-runs=17",
+            f"-seed={41 + ordinal}",
+            "-max_len=4096",
+            f"-max_input_ms={module.DEFAULT_MAX_INPUT_MS}",
+            f"-max_rss_mb={module.DEFAULT_MAX_RSS_MB}",
+        ]
+        assert Path(command[6]) == regression_root / target
+
+
+def test_libfuzzer_runner_uses_native_timeout_and_rss_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """ASan/UBSan libFuzzer jobs must not receive standalone-only options."""
+    module = _module()
+    build_root = tmp_path / "build"
+    regression_root = tmp_path / "regressions"
+    calls: list[list[str]] = []
+
+    build_root.mkdir()
+    for target in module.TARGETS:
+        module.fuzzer_binary(build_root, target).write_bytes(b"binary")
+        target_root = regression_root / target
+        target_root.mkdir(parents=True)
+        (target_root / "case.bin").write_bytes(target.encode())
+
+    def fake_run(command: list[str], *, check: bool) -> None:
+        """Record one deterministic fuzz-runner subprocess invocation."""
+        assert check is True
+        calls.append(command)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    assert module.run_regressions(
+        build_root,
+        regression_root,
+        max_input_ms=5_001,
+        max_rss_mb=768,
+        engine="libfuzzer",
+    ) == len(module.TARGETS)
+
+    for command in calls:
+        assert command[1:4] == ["-runs=1", "-timeout=6", "-rss_limit_mb=768"]
+        assert all("max_input_ms" not in argument for argument in command)
+        assert all("max_rss_mb" not in argument for argument in command)
+
+
+def test_guard_arguments_reject_unknown_engine() -> None:
+    """Configuration mistakes must fail before starting a fuzz subprocess."""
+    module = _module()
+
+    with pytest.raises(ValueError, match="unsupported fuzz engine"):
+        module.guard_arguments("unknown", max_input_ms=1_000, max_rss_mb=128)
+
+
+def test_main_can_publish_machine_readable_fuzz_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scheduled campaigns emit canonical evidence for limit review automation."""
+    module = _module()
+    output = tmp_path / "evidence.json"
+    monkeypatch.setattr(module, "run_regressions", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(module, "run_campaigns", lambda *args, **kwargs: 4000)
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: type(
+            "Args",
+            (),
+            {
+                "build_root": tmp_path,
+                "regression_root": tmp_path,
+                "campaign_runs": 1000,
+                "seed": 41,
+                "max_len": 4096,
+                "max_input_ms": 5000,
+                "max_rss_mb": 768,
+                "engine": "libfuzzer",
+                "evidence_output": output,
+            },
+        )(),
+    )
+
+    module.main()
+    import json
+
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    assert evidence["status"] == "passed"
+    assert evidence["regression_inputs"] == 10
+    assert evidence["mutation_runs"] == 4000
+    assert evidence["sanitizer_findings"] == 0

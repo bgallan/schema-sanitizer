@@ -307,8 +307,8 @@ def test_cancelled_prefetch_future_releases_preacquired_permit() -> None:
         """Return one future that has not begun executing."""
 
         @staticmethod
-        def submit(_operation: object) -> Future[object]:
-            """Return the pending future."""
+        def submit(_operation: object, **_permit_options: object) -> Future[object]:
+            """Return the pending future while accepting weighted admission."""
             return pending
 
     class Manifest:

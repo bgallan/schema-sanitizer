@@ -210,6 +210,75 @@ PyObject *py_ordered_executor_probe(PyObject *, PyObject *args) {
 }
 
 // Exercises two ordered stages on one operation-wide arena.
+PyObject *py_operation_task_arena_reaper_shutdown(PyObject *, PyObject *args) {
+  unsigned long long timeout_millis = 0U;
+  if (!PyArg_ParseTuple(args, "K:operation_task_arena_reaper_shutdown",
+                        &timeout_millis)) {
+    return nullptr;
+  }
+  const bool stopped =
+      sanitize::internal::OperationTaskArena::ShutdownCleanupReaper(
+          static_cast<std::uint64_t>(timeout_millis));
+  if (stopped) {
+    Py_RETURN_TRUE;
+  }
+  Py_RETURN_FALSE;
+}
+
+PyObject *py_operation_task_arena_runtime_snapshot(PyObject *, PyObject *) {
+  const auto snapshot =
+      sanitize::internal::OperationTaskArena::RuntimeSnapshot();
+  // Historical source-contract marker: PyTuple_New(16). Pass43 extends the
+  // runtime snapshot while the Python parser continues accepting 8/16/20.
+  PyObject *out = PyTuple_New(20);
+  if (!out) {
+    return nullptr;
+  }
+  if (!tuple_set_item_steal(out, 0, PyLong_FromSize_t(snapshot.live_arenas)) ||
+      !tuple_set_item_steal(out, 1,
+                            PyLong_FromSize_t(snapshot.detached_workers)) ||
+      !tuple_set_item_steal(out, 2,
+                            PyLong_FromSize_t(snapshot.reaper_workers)) ||
+      !tuple_set_item_steal(out, 3,
+                            PyLong_FromSize_t(snapshot.reaper_queued_states)) ||
+      !tuple_set_item_steal(out, 4,
+                            PyLong_FromSize_t(snapshot.reaper_active_states)) ||
+      !tuple_set_item_steal(
+          out, 5, PyLong_FromSize_t(snapshot.reaper_reserved_states)) ||
+      !tuple_set_item_steal(out, 6,
+                            PyLong_FromSize_t(snapshot.reaper_parked_states)) ||
+      !tuple_set_item_steal(out, 7,
+                            PyLong_FromSize_t(snapshot.counter_underflows)) ||
+      !tuple_set_item_steal(out, 8,
+                            PyLong_FromSize_t(snapshot.reaper_queued_bytes)) ||
+      !tuple_set_item_steal(out, 9,
+                            PyLong_FromSize_t(snapshot.reaper_active_bytes)) ||
+      !tuple_set_item_steal(
+          out, 10, PyLong_FromSize_t(snapshot.reaper_reserved_bytes)) ||
+      !tuple_set_item_steal(out, 11,
+                            PyLong_FromSize_t(snapshot.reaper_parked_bytes)) ||
+      !tuple_set_item_steal(
+          out, 12, PyLong_FromLongLong(snapshot.oldest_parked_since_ns)) ||
+      !tuple_set_item_steal(
+          out, 13, PyLong_FromSize_t(snapshot.reaper_thread_permits)) ||
+      !tuple_set_item_steal(
+          out, 14, PyLong_FromSize_t(snapshot.reaper_thread_start_failures)) ||
+      !tuple_set_item_steal(out, 15,
+                            PyLong_FromSize_t(snapshot.reaper_over_capacity)) ||
+      !tuple_set_item_steal(
+          out, 16, PyLong_FromSize_t(snapshot.reaper_terminal_states)) ||
+      !tuple_set_item_steal(
+          out, 17, PyLong_FromSize_t(snapshot.reaper_terminal_bytes)) ||
+      !tuple_set_item_steal(
+          out, 18, PyLong_FromLongLong(snapshot.oldest_terminal_since_ns)) ||
+      !tuple_set_item_steal(
+          out, 19, PyLong_FromSize_t(snapshot.reaper_stopping_lanes))) {
+    Py_DECREF(out);
+    return nullptr;
+  }
+  return out;
+}
+
 PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
   int requested_workers = 1;
   int upstream_workers = 1;

@@ -2,17 +2,51 @@
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import CancelledError, Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from threading import Condition, Lock, RLock
 from typing import Any
 
+from schema_sanitizer.core_impl.safe_errors import add_bounded_note
+
+from ...core_impl.durations import deadline_ns_from_timeout, remaining_seconds
 from ...core_impl.execution_policy import execution_policy
-from ...core_impl.resource_lifecycle import _close_suppressing_errors
-from ...input_impl.selection import unsupported_native_directory_ingestion
-from ...remote_impl.io_coordinator import RemoteIoCoordinator
+from ...core_impl.finalization import runtime_is_finalizing
+from ...core_impl.memory_budget import adaptive_concurrency_target, memory_budget
+from ...core_impl.resource_lifecycle import (
+    _cleanup_with_note,
+    _close_suppressing_errors,
+)
+from ...remote_impl.io_coordinator import RemoteIoCoordinator, StagedResultOwnership
+from ...remote_impl.session_lifecycle import (
+    SharedDownloadSessionCloser,
+    enter_shared_download_session,
+)
 from ..input.directory_preparation import RemoteNativeDirectorySourceManifest
-from .attached import source_plan_from_native_manifest
+from .remote_cleanup import take_prefetched_chunks
+from .remote_runtime import RemotePathSourceChunkProviderBase
+
+_PREFETCH_COMPAT_INIT_LOCK = Lock()
+
+
+class _StorageLeaseRollbackOwner:
+    """Exactly-once rollback owner for one pre-acquired staging lease."""
+
+    def __init__(self, lease: Any) -> None:
+        self.lease = lease
+        self._lock = Lock()
+        self._claimed = False
+
+    def claim(self) -> bool:
+        """Claim the terminal success/failure decision exactly once."""
+        with self._lock:
+            if self._claimed:
+                return False
+            self._claimed = True
+            return True
 
 
 class RemoteChunkPrefetchIterator:
@@ -20,22 +54,44 @@ class RemoteChunkPrefetchIterator:
 
     def __init__(self, manifest: Any, *, start: int = 0) -> None:
         """Create a staging iterator for a remote native manifest."""
+        self._pid = os.getpid()
         self._manifest = manifest
         self._policy = execution_policy(
             getattr(manifest, "threading_mode", "single"),
             getattr(manifest, "memory_limit_bytes", None),
         )
         self._prefetch_chunks = self._policy.remote_chunk_prefetch
+        budget = memory_budget(getattr(manifest, "memory_limit_bytes", None))
+        self._remote_timeout_seconds = budget.async_timeout_seconds
+        self._io_chunk_bytes = max(1, budget.io_chunk_bytes)
         self._coordinator: RemoteIoCoordinator | None = None
         self._owns_coordinator = False
         self._download_session: Any | None = None
         self._futures: deque[Future[Any]] = deque()
+        self._failed_storage_leases: deque[Any] = deque()
+        self._callbackless_storage_futures: dict[Future[Any], _StorageLeaseRollbackOwner] = {}
         self._next_start = max(0, int(start))
+        self._close_lock = RLock()
+        self._close_condition = Condition(self._close_lock)
+        self._close_in_progress = False
+        self._cleanup_callbacks_inflight = 0
+        self._admissions_inflight = 0
+        self._consumers_inflight = 0
+        self._starting = False
+        self._fill_in_progress = False
+        self._close_started = False
+        self._session_closer: SharedDownloadSessionCloser | None = None
         self._closed = False
         self._started = False
 
+    def _assert_owner_process(self) -> None:
+        """Reject inherited iterator use before touching parent-owned state."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            raise RuntimeError("remote prefetch iterator cannot be reused after fork")
+
     def __enter__(self) -> RemoteChunkPrefetchIterator:
         """Enter the staging context."""
+        self._assert_owner_process()
         self._ensure_started()
         return self
 
@@ -45,153 +101,563 @@ class RemoteChunkPrefetchIterator:
 
     def __iter__(self) -> RemoteChunkPrefetchIterator:
         """Return the iterator."""
+        self._assert_owner_process()
         self._ensure_started()
         return self
 
     def __next__(self) -> Any:
-        """Return the next staged native directory manifest."""
-        self._ensure_started()
-        while True:
-            if self._closed:
-                raise StopIteration
-            if not self._futures:
-                self._fill_prefetch_window()
-            if not self._futures:
-                self.close()
-                raise StopIteration
-            future = self._futures.popleft()
+        """Return one staged result through an exclusive lifecycle claim."""
+        self._assert_owner_process()
+        condition = self._lifecycle_condition()
+        try:
+            self._ensure_started()
+            while True:
+                with condition:
+                    if self._closed or getattr(self, "_close_started", False):
+                        raise StopIteration
+                    has_future = bool(self._futures)
+                if not has_future:
+                    self._fill_prefetch_window()
+
+                with condition:
+                    if self._closed or getattr(self, "_close_started", False):
+                        raise StopIteration
+                    if not self._futures:
+                        future = None
+                    else:
+                        future = self._futures.popleft()
+                        self._consumers_inflight = getattr(self, "_consumers_inflight", 0) + 1
+
+                if future is None:
+                    self.close()
+                    raise StopIteration
+
+                staged: Any | None = None
+                try:
+                    ownership = getattr(future, "_schema_sanitizer_staged_ownership")
+                    try:
+                        staged = future.result(timeout=self._remote_timeout_seconds)
+                    except FutureTimeoutError:
+                        future.cancel()
+                        raise TimeoutError(
+                            "remote chunk staging exceeded its bounded transport deadline"
+                        ) from None
+                    self._complete_callbackless_storage_futures()
+                    staged = ownership.consume(staged)
+                    try:
+                        self._fill_prefetch_window()
+                    except BaseException:
+                        # Ownership has transferred out of the future, but the
+                        # value has not yet been returned to the caller.
+                        _close_suppressing_errors(staged)
+                        raise
+                finally:
+                    with condition:
+                        self._consumers_inflight = max(
+                            0, getattr(self, "_consumers_inflight", 1) - 1
+                        )
+                        condition.notify_all()
+
+                if staged is None:
+                    self.close()
+                    raise StopIteration
+                return staged
+        except BaseException as exc:
             try:
-                staged = future.result()
-            except Exception:
                 self.close()
-                raise
-            self._fill_prefetch_window()
-            if staged is None:
-                self.close()
-                raise StopIteration
-            return staged
+            except BaseException as cleanup_error:
+                add_bounded_note(
+                    exc,
+                    "remote prefetch cleanup also failed after iteration error",
+                    cleanup_error,
+                )
+            raise
 
     def _ensure_started(self) -> None:
-        """Start the operation-owned remote scheduler once."""
-        if self._started:
-            return
-        self._started = True
-        if not self._policy.is_single:
-            open_session = getattr(self._manifest, "open_staging_session", None)
-            stage_async = getattr(self._manifest, "stage_chunk_async", None)
-            if not callable(open_session) or not callable(stage_async):
-                raise TypeError("multi remote chunk staging requires an async manifest session")
-            operation_context = getattr(self._manifest, "operation_context", None)
-            shared = getattr(operation_context, "remote_coordinator", None)
-            if shared is not None:
-                self._coordinator = shared
-                download_session = open_session()
+        """Start external resources through a claim/work/commit transaction."""
+        self._assert_owner_process()
+        condition = self._lifecycle_condition()
+        with condition:
+            while self._starting:
+                condition.wait()
+            if self._started or getattr(self, "_close_started", False):
+                return
+            self._starting = True
+            self._admissions_inflight += 1
+
+        coordinator: RemoteIoCoordinator | None = None
+        owns_coordinator = False
+        download_session: Any | None = None
+        committed = False
+        try:
+            if not self._policy.is_single:
+                open_session = getattr(self._manifest, "open_staging_session", None)
+                stage_async = getattr(self._manifest, "stage_chunk_async", None)
+                if not callable(open_session) or not callable(stage_async):
+                    raise TypeError("multi remote chunk staging requires an async manifest session")
+                operation_context = getattr(self._manifest, "operation_context", None)
+                shared = getattr(operation_context, "remote_coordinator", None)
+                if shared is not None:
+                    coordinator = shared
+                    download_session = open_session()
+                    try:
+                        enter_shared_download_session(
+                            coordinator,
+                            download_session,
+                            timeout_seconds=self._remote_timeout_seconds,
+                        )
+                    except TimeoutError:
+                        # The entry coroutine owns its late self-close handshake.
+                        download_session = None
+                        raise
+                else:
+                    coordinator = RemoteIoCoordinator(open_session)
+                    owns_coordinator = True
+
+            with condition:
+                self._coordinator = coordinator
+                self._owns_coordinator = owns_coordinator
                 self._download_session = download_session
-                self._coordinator.submit(lambda _context: download_session.__aenter__()).result()
+                self._started = True
+                committed = True
+        except BaseException as exc:
+            if owns_coordinator and coordinator is not None:
+                try:
+                    coordinator.close()
+                except BaseException as cleanup_error:
+                    add_bounded_note(
+                        exc,
+                        "remote prefetch coordinator rollback also failed",
+                        cleanup_error,
+                    )
+            raise
+        finally:
+            with condition:
+                self._starting = False
+                self._admissions_inflight = max(0, self._admissions_inflight - 1)
+                condition.notify_all()
+
+        if committed:
+            try:
+                self._fill_prefetch_window()
+            except BaseException as exc:
+                try:
+                    self.close()
+                except BaseException as cleanup_error:
+                    add_bounded_note(
+                        exc,
+                        "remote prefetch cleanup also failed after startup error",
+                        cleanup_error,
+                    )
+                raise
+
+    def _lifecycle_condition(self) -> Condition:
+        """Return the lazily initialized close/callback condition."""
+        with _PREFETCH_COMPAT_INIT_LOCK:
+            close_lock = getattr(self, "_close_lock", None)
+            if close_lock is None:
+                close_lock = RLock()
+                self._close_lock = close_lock
+            condition = getattr(self, "_close_condition", None)
+            if condition is None:
+                condition = Condition(close_lock)
+                self._close_condition = condition
+            if not hasattr(self, "_close_in_progress"):
+                self._close_in_progress = False
+            if not hasattr(self, "_cleanup_callbacks_inflight"):
+                self._cleanup_callbacks_inflight = 0
+            if not hasattr(self, "_callbackless_storage_futures"):
+                self._callbackless_storage_futures = {}
+            if not hasattr(self, "_admissions_inflight"):
+                self._admissions_inflight = 0
+            if not hasattr(self, "_consumers_inflight"):
+                self._consumers_inflight = 0
+            if not hasattr(self, "_starting"):
+                self._starting = False
+            if not hasattr(self, "_fill_in_progress"):
+                self._fill_in_progress = False
+            return condition
+
+    def _release_or_retain_storage_lease(
+        self, storage_lease: Any, *, primary: BaseException | None = None
+    ) -> None:
+        """Release one staging lease or retain it for a later close retry."""
+        try:
+            storage_lease.release()
+        except BaseException as cleanup_error:
+            condition = self._lifecycle_condition()
+            with condition:
+                failed = getattr(self, "_failed_storage_leases", None)
+                if failed is None:
+                    failed = deque()
+                    self._failed_storage_leases = failed
+                failed.append(storage_lease)
+            if primary is not None:
+                add_bounded_note(
+                    primary,
+                    "remote staging storage rollback also failed and remains retryable",
+                    cleanup_error,
+                )
+
+    def _complete_storage_rollback(
+        self, future: Future[Any], owner: _StorageLeaseRollbackOwner
+    ) -> None:
+        """Resolve one lease rollback owner after real task terminal state."""
+        condition = self._lifecycle_condition()
+        if not owner.claim():
+            with condition:
+                self._callbackless_storage_futures.pop(future, None)
+                condition.notify_all()
+            return
+        try:
+            remote_submission = getattr(future, "_schema_sanitizer_remote_submission", None)
+            if remote_submission is not None:
+                task_error = getattr(
+                    remote_submission,
+                    "task_error",
+                    getattr(remote_submission, "operation_error", None),
+                )
+                failed = task_error is not None
             else:
-                self._coordinator = RemoteIoCoordinator(open_session)
-                self._owns_coordinator = True
-        self._fill_prefetch_window()
+                try:
+                    failed = future.cancelled() or future.exception() is not None
+                except CancelledError:
+                    failed = True
+            if failed:
+                self._release_or_retain_storage_lease(owner.lease)
+        finally:
+            with condition:
+                self._callbackless_storage_futures.pop(future, None)
+                condition.notify_all()
+
+    def _complete_callbackless_storage_futures(self) -> None:
+        """Resolve every terminal Future whose callback registration failed."""
+        condition = self._lifecycle_condition()
+        with condition:
+            terminal_items: list[tuple[Future[Any], _StorageLeaseRollbackOwner]] = []
+            for future, owner in self._callbackless_storage_futures.items():
+                remote_submission = getattr(future, "_schema_sanitizer_remote_submission", None)
+                if remote_submission is not None:
+                    ready = remote_submission.terminal.is_set()
+                else:
+                    ready = future.done()
+                if ready:
+                    terminal_items.append((future, owner))
+            terminal = tuple(terminal_items)
+        for future, owner in terminal:
+            self._complete_storage_rollback(future, owner)
 
     def _submit_stage(self, start: int, storage_lease: Any | None) -> Future[Any]:
         """Submit one chunk to the inline or shared-I/O executor."""
+        ownership = StagedResultOwnership()
         coordinator = self._coordinator
         if coordinator is None:
             future: Future[Any] = Future()
             try:
-                future.set_result(self._manifest.stage_chunk(start))
-            except Exception as exc:
+                future.set_result(ownership.publish(self._manifest.stage_chunk(start)))
+            except BaseException as exc:
                 if storage_lease is not None:
-                    storage_lease.release()
+                    self._release_or_retain_storage_lease(storage_lease, primary=exc)
                 future.set_exception(exc)
+            setattr(future, "_schema_sanitizer_staged_ownership", ownership)
             return future
 
         async def stage(coordinator_context: Any) -> Any:
-            """Stage one chunk through the shared provider session."""
+            """Stage one chunk and self-clean if cancellation abandons its future."""
             download_session = self._download_session or coordinator_context
             if storage_lease is None:
-                return await self._manifest.stage_chunk_async(start, download_session)
-            return await self._manifest.stage_chunk_async(
-                start,
-                download_session,
-                storage_lease=storage_lease,
-            )
+                staged = await self._manifest.stage_chunk_async(start, download_session)
+            else:
+                staged = await self._manifest.stage_chunk_async(
+                    start, download_session, storage_lease=storage_lease
+                )
+            return ownership.publish(staged)
 
         try:
-            future = coordinator.submit(stage)
-        except BaseException:
+            future = coordinator.submit(
+                stage,
+                permit_weight=self._stage_permit_weight(start),
+                permit_label="remote_chunk_staging",
+            )
+        except BaseException as exc:
             if storage_lease is not None:
-                storage_lease.release()
+                self._release_or_retain_storage_lease(storage_lease, primary=exc)
             raise
+        setattr(future, "_schema_sanitizer_staged_ownership", ownership)
         if storage_lease is not None:
+            condition = self._lifecycle_condition()
+            rollback_owner = _StorageLeaseRollbackOwner(storage_lease)
+            with condition:
+                self._cleanup_callbacks_inflight += 1
 
             def release_failed_reservation(done: Future[Any]) -> None:
-                """Return a pre-acquired permit if staging never transfers it."""
+                """Return or retain a pre-acquired lease after failed staging."""
                 try:
-                    failed = done.cancelled() or done.exception() is not None
-                except CancelledError:
-                    failed = True
-                if failed:
-                    storage_lease.release()
+                    self._complete_storage_rollback(done, rollback_owner)
+                finally:
+                    with condition:
+                        self._cleanup_callbacks_inflight = max(
+                            0, self._cleanup_callbacks_inflight - 1
+                        )
+                        condition.notify_all()
 
-            future.add_done_callback(release_failed_reservation)
+            try:
+                remote_submission = getattr(future, "_schema_sanitizer_remote_submission", None)
+                if remote_submission is not None:
+                    remote_submission.add_terminal_callback(release_failed_reservation)
+                else:
+                    future.add_done_callback(release_failed_reservation)
+            except BaseException as registration_error:
+                # The Future and rollback owner remain reachable even when a
+                # non-standard bridge rejects callback registration. Iteration
+                # or close resolves the owner after the Future is terminal.
+                with condition:
+                    self._cleanup_callbacks_inflight = max(0, self._cleanup_callbacks_inflight - 1)
+                    self._callbackless_storage_futures[future] = rollback_owner
+                    condition.notify_all()
+                setattr(
+                    future,
+                    "_schema_sanitizer_callback_registration_error",
+                    registration_error,
+                )
+                future.cancel()
+                self._complete_callbackless_storage_futures()
         return future
 
+    def _stage_permit_weight(self, start: int) -> int:
+        """Scale remote admission by the estimated chunk bytes."""
+        estimate = getattr(self._manifest, "estimated_chunk_bytes", None)
+        if not callable(estimate):
+            return 1
+        try:
+            size_bytes = max(1, int(estimate(start)))
+        except (TypeError, ValueError, OverflowError):
+            return 1
+        desired = 1 + (size_bytes - 1) // self._io_chunk_bytes
+        return max(1, min(self._policy.async_concurrency, desired))
+
     def _fill_prefetch_window(self) -> None:
-        """Queue staging work until the lookahead window is full."""
-        if self._closed:
-            return
-        target = max(1, self._prefetch_chunks)
-        while len(self._futures) < target and self._next_start < len(self._manifest.files):
-            start = self._next_start
-            acquire = getattr(self._manifest, "try_acquire_storage_lease", None)
-            storage_lease = (
-                acquire(start) if self._coordinator is not None and callable(acquire) else None
-            )
-            if self._coordinator is not None and callable(acquire) and storage_lease is None:
-                break
-            next_start = getattr(self._manifest, "next_chunk_start", None)
-            if callable(next_start):
-                self._next_start = max(start + 1, int(next_start(start)))
-            else:
-                self._next_start += max(1, self._manifest.chunk_size)
-            self._futures.append(self._submit_stage(start, storage_lease))
+        """Queue work through per-item claim/work/commit transactions."""
+        self._assert_owner_process()
+        condition = self._lifecycle_condition()
+        with condition:
+            while self._fill_in_progress:
+                condition.wait()
+            if self._closed or getattr(self, "_close_started", False):
+                return
+            self._fill_in_progress = True
+
+        try:
+            while True:
+                with condition:
+                    if self._closed or getattr(self, "_close_started", False):
+                        return
+                    target = adaptive_concurrency_target(
+                        max(1, self._prefetch_chunks),
+                        per_slot_bytes=self._io_chunk_bytes,
+                    )
+                    if len(self._futures) >= target or self._next_start >= len(
+                        self._manifest.files
+                    ):
+                        return
+                    start = self._next_start
+                    coordinator = self._coordinator
+                    self._admissions_inflight += 1
+
+                storage_lease: Any | None = None
+                future: Future[Any] | None = None
+                try:
+                    acquire = getattr(self._manifest, "try_acquire_storage_lease", None)
+                    storage_lease = (
+                        acquire(start) if coordinator is not None and callable(acquire) else None
+                    )
+                    if coordinator is not None and callable(acquire) and storage_lease is None:
+                        return
+                    next_chunk_start = getattr(self._manifest, "next_chunk_start", None)
+                    if callable(next_chunk_start):
+                        committed_next_start = max(start + 1, int(next_chunk_start(start)))
+                    else:
+                        committed_next_start = start + max(1, self._manifest.chunk_size)
+                    future = self._submit_stage(start, storage_lease)
+                    with condition:
+                        # Close waits for this admission, so publishing here is
+                        # safe even if it started while external work ran.
+                        self._futures.append(future)
+                        self._next_start = committed_next_start
+                except BaseException as exc:
+                    if future is not None:
+                        ownership = getattr(future, "_schema_sanitizer_staged_ownership", None)
+                        if ownership is not None:
+                            ownership.abandon()
+                        future.cancel()
+                    elif storage_lease is not None:
+                        self._release_or_retain_storage_lease(storage_lease, primary=exc)
+                    raise
+                finally:
+                    with condition:
+                        self._admissions_inflight = max(0, self._admissions_inflight - 1)
+                        condition.notify_all()
+        finally:
+            with condition:
+                self._fill_in_progress = False
+                condition.notify_all()
 
     def close(self) -> None:
-        """Cancel, drain, and clean every unconsumed staged chunk."""
-        if self._closed:
+        """Close staging transactionally after all cleanup publishers quiesce."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
             return
-        self._closed = True
-        futures = tuple(self._futures)
-        self._futures.clear()
-        for future in futures:
-            if not future.done():
-                future.cancel()
+        condition = self._lifecycle_condition()
+        deadline_ns = deadline_ns_from_timeout(
+            getattr(self, "_remote_timeout_seconds", 30.0),
+            name="remote prefetch close timeout",
+            allow_zero=False,
+        )
+        with condition:
+            while self._close_in_progress:
+                remaining = remaining_seconds(deadline_ns)
+                if remaining <= 0 or not condition.wait(timeout=remaining):
+                    raise RuntimeError("remote prefetch concurrent close exceeded its deadline")
+            if self._closed:
+                return
+            self._close_in_progress = True
+            self._close_started = True
+            while getattr(self, "_admissions_inflight", 0) or getattr(
+                self, "_consumers_inflight", 0
+            ):
+                remaining = remaining_seconds(deadline_ns)
+                if remaining <= 0 or not condition.wait(timeout=remaining):
+                    self._close_in_progress = False
+                    condition.notify_all()
+                    raise RuntimeError(
+                        "remote staging admissions or consumers exceeded their close deadline"
+                    )
+            futures = tuple(self._futures)
+            callbackless_futures = tuple(self._callbackless_storage_futures)
+            all_futures = tuple(dict.fromkeys((*futures, *callbackless_futures)))
+            coordinator = self._coordinator
+            shutdown_timeout = (
+                coordinator.shutdown_timeout_seconds
+                if coordinator is not None
+                else getattr(self, "_remote_timeout_seconds", 30.0)
+            )
+            shutdown_deadline_ns = deadline_ns_from_timeout(
+                shutdown_timeout,
+                name="remote prefetch coordinator shutdown timeout",
+                allow_zero=False,
+            )
+            deadline_ns = min(deadline_ns, shutdown_deadline_ns)
+            download_session = self._download_session
+            owns_coordinator = self._owns_coordinator
 
-        coordinator = self._coordinator
-        self._coordinator = None
-        for future in futures:
-            if future.cancelled():
-                continue
-            try:
-                staged = future.result()
-            except (CancelledError, Exception):
-                continue
-            if staged is not None:
-                _close_suppressing_errors(staged)
+        try:
+            for future in all_futures:
+                ownership = getattr(future, "_schema_sanitizer_staged_ownership")
+                ownership.abandon()
+                if not future.done():
+                    future.cancel()
 
-        download_session = self._download_session
-        self._download_session = None
-        if coordinator is not None and download_session is not None:
-            try:
-                coordinator.submit(
-                    lambda _context: download_session.__aexit__(None, None, None)
-                ).result()
-            except Exception:
-                pass
-        if coordinator is not None and self._owns_coordinator:
-            coordinator.close()
-        self._owns_coordinator = False
+            if coordinator is not None and download_session is not None:
+                with condition:
+                    closer = getattr(self, "_session_closer", None)
+                    if closer is None:
+                        closer = SharedDownloadSessionCloser(
+                            coordinator, download_session, all_futures
+                        )
+                        self._session_closer = closer
+                if not closer.close(timeout_seconds=remaining_seconds(deadline_ns)):
+                    return
+                with condition:
+                    if self._session_closer is closer:
+                        self._download_session = None
+                        self._session_closer = None
+
+            if coordinator is not None and owns_coordinator:
+                coordinator.close()
+                with condition:
+                    if self._coordinator is coordinator:
+                        self._owns_coordinator = False
+
+            # A Future can wake result waiters before its done callbacks return.
+            # Do not snapshot retained leases or commit _closed until every
+            # callback capable of publishing a retry owner has terminated.
+            with condition:
+                while self._cleanup_callbacks_inflight:
+                    remaining = remaining_seconds(deadline_ns)
+                    if remaining <= 0 or not condition.wait(timeout=remaining):
+                        raise RuntimeError(
+                            "remote staging cleanup callbacks exceeded their deadline"
+                        )
+
+            self._complete_callbackless_storage_futures()
+            with condition:
+                if self._callbackless_storage_futures:
+                    raise RuntimeError(
+                        "remote staging callbackless Future remains non-terminal after close drain"
+                    )
+
+            failed_storage: deque[Any] = deque()
+            with condition:
+                retained_storage = getattr(self, "_failed_storage_leases", None)
+                if retained_storage is None:
+                    retained_storage = deque()
+                    self._failed_storage_leases = retained_storage
+                storage_snapshot = tuple(retained_storage)
+                retained_storage.clear()
+            for lease in storage_snapshot:
+                try:
+                    lease.release()
+                except BaseException:
+                    failed_storage.append(lease)
+            if failed_storage:
+                with condition:
+                    self._failed_storage_leases.extend(failed_storage)
+                raise RuntimeError(
+                    "remote staging storage release remains retryable after close failure"
+                )
+
+            retained: deque[Future[Any]] = deque()
+            for future in futures:
+                ownership = getattr(future, "_schema_sanitizer_staged_ownership")
+                if not ownership.abandon():
+                    retained.append(future)
+            if retained:
+                with condition:
+                    self._futures = retained
+                raise RuntimeError(
+                    "remote staged-result cleanup remains retryable after close failure"
+                )
+
+            with condition:
+                # Recheck the callback barrier under the commit lock. No new
+                # staging callback can be registered after _close_started.
+                if self._cleanup_callbacks_inflight:
+                    raise RuntimeError(
+                        "remote staging cleanup callback published during close commit"
+                    )
+                if self._callbackless_storage_futures:
+                    raise RuntimeError(
+                        "remote staging callbackless owner published during close commit"
+                    )
+                if getattr(self, "_failed_storage_leases", ()):
+                    raise RuntimeError(
+                        "remote staging storage release remains retryable after close failure"
+                    )
+                self._futures = deque()
+                self._coordinator = None
+                self._closed = True
+        finally:
+            with condition:
+                self._close_in_progress = False
+                condition.notify_all()
+
+    def __del__(self) -> None:
+        """Close abandoned prefetch work outside interpreter teardown."""
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            self.close()
+        except BaseException:
+            pass
 
 
 def iter_staged_remote_chunks(manifest: Any, *, start: int = 0) -> Iterator[Any]:
@@ -200,176 +666,21 @@ def iter_staged_remote_chunks(manifest: Any, *, start: int = 0) -> Iterator[Any]
 
 
 def open_staged_remote_chunks(
-    manifest: RemoteNativeDirectorySourceManifest,
-    *,
-    start: int = 0,
+    manifest: RemoteNativeDirectorySourceManifest, *, start: int = 0
 ) -> Any:
     """Open the staged-chunk context for one remote manifest."""
     return iter_staged_remote_chunks(manifest, start=start)
 
 
-class RemotePathSourceChunkProvider:
-    """Provide staged remote path-source chunks at native stream boundaries."""
-
-    def __init__(
-        self,
-        *,
-        retained_chunks: list[Any],
-        remaining_manifest: RemoteNativeDirectorySourceManifest | None,
-        retain_consumed_chunks: int = 0,
-        retained_chunk_donor: RemotePathSourceChunkProvider | None = None,
-        remaining_start: int = 0,
-    ) -> None:
-        """Store retained chunks and the lazy remaining remote manifest."""
-        self._retained_chunks = deque(retained_chunks)
-        self._remaining_manifest = remaining_manifest
-        self._current_staged: Any | None = None
-        self._current_staged_preserved = False
-        self._remaining_context: Any | None = None
-        self._remaining_iter: Any | None = None
-        self._remaining_start = max(0, int(remaining_start))
-        self._retain_consumed_chunks = max(0, int(retain_consumed_chunks))
-        self._retained_chunk_donor = retained_chunk_donor
-        self._donor_checked = False
-        self._preserved_chunks: list[Any] = []
-        self._preserved_file_count = 0
-        self._closed = False
-
-    def next_sources(self) -> Any | None:
-        """Return the next staged chunk as a native plan capsule or source tuples."""
-        if self._closed:
-            return None
-        self._close_current()
-        staged = self._next_staged_chunk()
-        if staged is None:
-            self.close()
-            return None
-        try:
-            plan = source_plan_from_native_manifest(staged.manifest)
-            if plan is None:
-                raise unsupported_native_directory_ingestion()
-            self._current_staged = staged
-            self._current_staged_preserved = False
-            return plan.native_payload if plan.native_payload is not None else plan.payload
-        except Exception:
-            _close_suppressing_errors(staged)
-            raise
-
-    def close(self) -> None:
-        """Close current, retained, and not-yet-opened staged resources."""
-        if self._closed:
-            return
-        self._closed = True
-        self._close_current()
-        while self._retained_chunks:
-            _close_suppressing_errors(self._retained_chunks.pop())
-        self._close_remaining_context()
-        donor = self._retained_chunk_donor
-        if donor is not None:
-            donor.close_all()
-            self._retained_chunk_donor = None
-
-    def __del__(self) -> None:
-        """Best-effort cleanup for abandoned providers."""
-        try:
-            self.close()
-        except Exception:
-            pass
-
-    @property
-    def is_closed(self) -> bool:
-        """Return whether this provider has finished its source lifecycle."""
-        return self._closed
-
-    @property
-    def preserved_file_count(self) -> int:
-        """Return the number of files covered by preserved staged chunks."""
-        return self._preserved_file_count
-
-    def release_preserved_chunks(self) -> list[Any]:
-        """Transfer preserved staged chunks to the caller."""
-        preserved = self._preserved_chunks
-        self._preserved_chunks = []
-        self._preserved_file_count = 0
-        return preserved
-
-    def close_all(self) -> None:
-        """Close all provider resources, including preserved chunks."""
-        self.close()
-        while self._preserved_chunks:
-            _close_suppressing_errors(self._preserved_chunks.pop())
-        self._preserved_file_count = 0
-
-    def _next_staged_chunk(self) -> Any | None:
-        """Return the next retained or newly staged remote chunk."""
-        self._adopt_preserved_probe_chunks()
-        if self._retained_chunks:
-            return self._retained_chunks.popleft()
-        if self._remaining_manifest is None:
-            return None
-        if self._remaining_context is None:
-            self._remaining_context = open_staged_remote_chunks(
-                self._remaining_manifest,
-                start=self._remaining_start,
-            )
-            self._remaining_iter = self._remaining_context.__enter__()
-        if self._remaining_iter is None:
-            return None
-        try:
-            return next(self._remaining_iter)
-        except StopIteration:
-            self._close_remaining_context()
-            return None
-
-    def _adopt_preserved_probe_chunks(self) -> None:
-        """Reuse a bounded probe prefix when the donor has fully closed."""
-        if self._donor_checked:
-            return
-        self._donor_checked = True
-        donor = self._retained_chunk_donor
-        if donor is None or not donor.is_closed:
-            return
-        self._remaining_start = donor.preserved_file_count
-        self._retained_chunks.extend(donor.release_preserved_chunks())
-        donor.close_all()
-        self._retained_chunk_donor = None
-
-    def _close_current(self) -> None:
-        """Close or preserve the currently opened staged chunk."""
-        if (
-            self._current_staged is not None
-            and not self._current_staged_preserved
-            and len(self._preserved_chunks) < self._retain_consumed_chunks
-        ):
-            self._preserved_chunks.append(self._current_staged)
-            self._preserved_file_count += len(self._current_staged.manifest.source_batch.sources)
-            self._current_staged_preserved = True
-        elif not self._current_staged_preserved:
-            _close_suppressing_errors(self._current_staged)
-        self._current_staged = None
-        self._current_staged_preserved = False
-
-    def _close_remaining_context(self) -> None:
-        """Close the remaining chunk iterator context."""
-        context = self._remaining_context
-        self._remaining_context = None
-        self._remaining_iter = None
-        if context is not None:
-            try:
-                context.__exit__(None, None, None)
-            except Exception:
-                pass
+class RemotePathSourceChunkProvider(RemotePathSourceChunkProviderBase):
+    """Compatibility owner for retryable staged remote path-source chunks."""
 
 
 def prefetched_remote_chunks(
     manifest: RemoteNativeDirectorySourceManifest,
 ) -> tuple[list[Any], int]:
     """Take an optional partition-lookahead prefix from one remote manifest."""
-    take = getattr(manifest, "take_prefetched_chunks", None)
-    if not callable(take):
-        return [], 0
-    chunks, file_count = take()
-    return list(chunks), max(0, int(file_count))
+    return take_prefetched_chunks(manifest)
 
 
 def probe_remote_registry(
@@ -399,6 +710,8 @@ def probe_remote_registry(
             native_registry_state=native_registry_state,
             skip_invalid_json_sources=True,
         )
-    except Exception:
-        provider.close_all()
+    except BaseException as exc:
+        _cleanup_with_note(
+            exc, provider, label="remote registry probe cleanup also failed", method="close_all"
+        )
         raise

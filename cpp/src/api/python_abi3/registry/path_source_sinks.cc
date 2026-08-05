@@ -61,10 +61,15 @@ ensure_operation_task_arena(NativePathSourcesStreamState *state) {
   }
   state->operation_memory_pool =
       state->ctx->ctx->make_operation_memory_pool_handle(
-          state->prepared->spec.memory_limit_bytes);
+          state->prepared->spec.memory_limit_bytes,
+          state->prepared->operation_memory_ledger);
   if (!state->operation_memory_pool) {
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");
+  }
+  if (state->aggregate_diagnostics) {
+    state->aggregate_diagnostics->bind_operation_memory_pool(
+        state->operation_memory_pool);
   }
   state->telemetry = state->ctx->ctx->begin_performance_telemetry(
       state->operation_memory_pool, state->prepared->spec.memory_limit_bytes,
@@ -81,21 +86,9 @@ ensure_operation_task_arena(NativePathSourcesStreamState *state) {
 void merge_materialization_diagnostics(
     sanitize::IngestDiagnostics *target,
     const sanitize::IngestDiagnostics &child) noexcept {
-  if (!target) {
-    return;
+  if (target) {
+    target->merge(child);
   }
-  target->inferred_rows += child.inferred_rows;
-  target->inferred_bytes += child.inferred_bytes;
-  target->arrow_schema_depth =
-      std::max(target->arrow_schema_depth, child.arrow_schema_depth);
-  target->parquet_schema_depth =
-      std::max(target->parquet_schema_depth, child.parquet_schema_depth);
-  target->materialized_rows += child.materialized_rows;
-  target->batches += child.batches;
-  target->flattened_fields += child.flattened_fields;
-  target->scalar_wrappings += child.scalar_wrappings;
-  target->direct_arrow_input += child.direct_arrow_input;
-  target->skipped_rows += child.skipped_rows;
 }
 
 bool bind_path_source_diagnostics(
@@ -108,6 +101,10 @@ bool bind_path_source_diagnostics(
     if (!state->aggregate_diagnostics) {
       state->aggregate_diagnostics =
           std::make_shared<sanitize::IngestDiagnostics>();
+    }
+    if (state->operation_memory_pool) {
+      state->aggregate_diagnostics->bind_operation_memory_pool(
+          state->operation_memory_pool);
     }
   } catch (const std::bad_alloc &) {
     return false;
@@ -148,6 +145,7 @@ sanitize::Result<sanitize::IngestStream> ingest_path_source_with_registry_plan(
 
   frontend.set_plan(registry_plan->plan.get());
   auto diagnostics = std::make_shared<sanitize::IngestDiagnostics>();
+  diagnostics->bind_operation_memory_pool(state->operation_memory_pool);
   diagnostics->arrow_schema_depth =
       sanitize::arrow_schema_depth(registry_plan->schema);
   diagnostics->parquet_schema_depth =
@@ -212,10 +210,8 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
                                     PathSourceGroupPurpose::kMaterialization,
                                     state->prepared->spec.input_text_encoding));
     if (group.grouped) {
-      SAN_ASSIGN_OR_RAISE(input, path_source_group_input(
-                                     state->sources, group,
-                                     state->prepared->spec.input_text_encoding,
-                                     state->prepared->spec.memory_limit_bytes));
+      SAN_ASSIGN_OR_RAISE(input, path_source_group_input(state->sources, group,
+                                                         state->prepared));
       if (state->source_file_column) {
         if (!state->source_file_registry_plan) {
           SAN_ASSIGN_OR_RAISE(

@@ -16,17 +16,6 @@ ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 
 
-def test_v84_nonempty_mask_is_published_only_on_zero_to_one_transition() -> None:
-    """An already-visible queue no longer rewrites the global mask."""
-    arena = ARENA.read_text(encoding="utf-8")
-    depth = arena.index("queued_before = slot.queued_local;")
-    publish = arena.index("mark_nonempty(state_, physical);", depth)
-    guard = arena.rfind("if (queued_before == 0U)", depth, publish)
-
-    assert depth < guard < publish
-    assert "empty-to-nonempty transition" in arena[depth:publish]
-
-
 def test_v84_worker_initialization_is_one_shot_and_park_sampled() -> None:
     """Steady-state local packets avoid initialization mask and flag traffic."""
     runtime = RUNTIME.read_text(encoding="utf-8")

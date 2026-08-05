@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..input_impl.source_manifest import SourceManifest
 from .hive import (
     HiveRangeConfig,
     build_hive_range_plan,
@@ -9,6 +10,15 @@ from .hive import (
     build_warm_up_hive_range_plan_from_namespace,
     parse_hour,
     parse_iso_date,
+)
+from .modified_time import (
+    ModifiedTimeWindowPlan,
+    UtcWindow,
+    build_utc_daily_windows,
+    plan_gcs_modified_time_windows,
+    plan_gcs_modified_time_windows_async,
+    plan_modified_time_windows_from_listing,
+    select_remote_files_by_modified_time,
 )
 from .observability import (
     compact_stats_for_log,
@@ -46,14 +56,18 @@ from .types import PartitionRunPlan, PartitionRunResult, SchemaRegistryState, So
 
 __all__ = [
     "HiveRangeConfig",
+    "ModifiedTimeWindowPlan",
     "PartitionPipelineResult",
     "PartitionRunPlan",
     "PartitionRunResult",
     "SchemaDriftDiff",
     "SchemaRegistryState",
+    "SourceManifest",
     "SourcePlanDiscovery",
+    "UtcWindow",
     "build_hive_range_plan",
     "build_hive_range_plan_from_namespace",
+    "build_utc_daily_windows",
     "build_warm_up_hive_range_plan_from_namespace",
     "compact_stats_for_log",
     "compact_uri",
@@ -71,10 +85,14 @@ __all__ = [
     "parse_final_schema_registry",
     "parse_hour",
     "parse_iso_date",
+    "plan_gcs_modified_time_windows",
+    "plan_gcs_modified_time_windows_async",
+    "plan_modified_time_windows_from_listing",
     "read_parquet_schema",
     "run_partitioned_to_parquet",
     "run_partitioned_to_parquet_registry_json",
     "run_partitioned_to_parquet_registry_state",
     "sample_items",
     "schema_drift_count",
+    "select_remote_files_by_modified_time",
 ]

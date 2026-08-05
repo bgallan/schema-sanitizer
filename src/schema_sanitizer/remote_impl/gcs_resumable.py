@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
 from ..core_impl.async_scheduler import retry_async, retry_delay
+from ..core_impl.cancellation import cancellable_async_sleep
 from ..core_impl.memory_budget import memory_budget
 from ..core_impl.uris import content_type_for_uri
-from .upload_policy import read_upload_range, remote_upload_policy
+from .transport import (
+    MAX_CONTROL_RESPONSE_BYTES,
+    MAX_ERROR_RESPONSE_BYTES,
+    read_bounded_response_bytes,
+    read_bounded_response_text,
+)
+from .upload_policy import (
+    read_upload_range,
+    release_upload_payload,
+    remote_upload_policy,
+)
 
 
 class TransientGcsUploadError(RuntimeError):
@@ -39,12 +49,24 @@ async def _status(session: Any, upload_url: str, *, total_bytes: int) -> int:
     headers = {"Content-Length": "0", "Content-Range": f"bytes */{total_bytes}"}
     async with session.put(upload_url, headers=headers, data=b"") as response:
         if response.status == 308:
-            await response.read()
+            await read_bounded_response_bytes(
+                response,
+                maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                stage="remote_control_response",
+            )
             return _committed_end(response) + 1
         if response.status in {200, 201}:
-            await response.read()
+            await read_bounded_response_bytes(
+                response,
+                maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                stage="remote_control_response",
+            )
             return total_bytes
-        body = await response.text()
+        body = await read_bounded_response_text(
+            response,
+            maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
+            stage="remote_error_response",
+        )
         if response.status == 429 or 500 <= response.status <= 599:
             raise TransientGcsUploadError(
                 f"GCS resumable status failed: status={response.status}, body={body[:1000]!r}"
@@ -72,12 +94,20 @@ async def _send_range(
     }
     async with session.put(upload_url, headers=headers, data=payload) as response:
         if response.status in {200, 201}:
-            await response.read()
+            await read_bounded_response_bytes(
+                response,
+                maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                stage="remote_control_response",
+            )
             if end != total_bytes - 1:
                 raise RuntimeError("GCS finalized a resumable upload before the final byte")
             return total_bytes
         if response.status == 308:
-            await response.read()
+            await read_bounded_response_bytes(
+                response,
+                maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                stage="remote_control_response",
+            )
             next_offset = _committed_end(response) + 1
             if not start <= next_offset <= end + 1:
                 raise RuntimeError(
@@ -85,7 +115,11 @@ async def _send_range(
                     f"start={start}, end={end}, next={next_offset}"
                 )
             return next_offset
-        body = await response.text()
+        body = await read_bounded_response_text(
+            response,
+            maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
+            stage="remote_error_response",
+        )
         if response.status == 429 or 500 <= response.status <= 599:
             raise TransientGcsUploadError(
                 f"GCS resumable chunk failed: status={response.status}, body={body[:1000]!r}"
@@ -120,7 +154,7 @@ async def _send_with_reconciliation(
                 return next_offset
             if attempt >= retries:
                 raise RuntimeError("GCS resumable upload made no forward progress")
-            await asyncio.sleep(retry_delay(attempt))
+            await cancellable_async_sleep(retry_delay(attempt), stage="gcs_resumable_backoff")
             continue
         except Exception as exc:
             if attempt >= retries or not _retryable(exc):
@@ -130,15 +164,16 @@ async def _send_with_reconciliation(
                     lambda: _status(session, upload_url, total_bytes=total_bytes),
                     retries=retries - attempt,
                     should_retry=_retryable,
+                    throttle_key="gcs",
                 )
             except Exception:
                 if attempt >= retries:
                     raise
-                await asyncio.sleep(retry_delay(attempt))
+                await cancellable_async_sleep(retry_delay(attempt), stage="gcs_resumable_backoff")
                 continue
             if next_offset > start:
                 return next_offset
-            await asyncio.sleep(retry_delay(attempt))
+            await cancellable_async_sleep(retry_delay(attempt), stage="gcs_resumable_backoff")
     raise RuntimeError("unreachable GCS resumable retry state")
 
 
@@ -146,7 +181,11 @@ async def _abort(session: Any, upload_url: str) -> None:
     """Best-effort cancel one incomplete GCS resumable session."""
     try:
         async with session.delete(upload_url) as response:
-            await response.read()
+            await read_bounded_response_bytes(
+                response,
+                maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                stage="remote_control_response",
+            )
     except Exception:
         return
 
@@ -185,12 +224,20 @@ async def upload_gcs_resumable_file(
             data=b"",
         ) as response:
             if response.status in {200, 201}:
-                await response.read()
+                await read_bounded_response_bytes(
+                    response,
+                    maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                    stage="remote_control_response",
+                )
                 location = response.headers.get("Location")
                 if isinstance(location, str) and location:
                     return location
                 raise RuntimeError("GCS resumable initiation returned no session location")
-            body = await response.text()
+            body = await read_bounded_response_text(
+                response,
+                maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
+                stage="remote_error_response",
+            )
             if response.status == 429 or 500 <= response.status <= 599:
                 raise TransientGcsUploadError(
                     "GCS resumable initiation failed: "
@@ -204,7 +251,9 @@ async def upload_gcs_resumable_file(
     retries = memory_budget(memory_limit_bytes).async_retries
     source = Path(local_path)
     initial_stat = source.stat()
-    upload_url = await retry_async(initiate, retries=retries, should_retry=_retryable)
+    upload_url = await retry_async(
+        initiate, retries=retries, should_retry=_retryable, throttle_key="gcs"
+    )
     try:
         offset = 0
         while offset < tuning.file_size:
@@ -216,18 +265,21 @@ async def upload_gcs_resumable_file(
                 raise OSError("remote upload spool changed before GCS resumable commit")
             size = min(tuning.part_bytes, tuning.file_size - offset)
             payload = read_upload_range(local_path, offset, size, tuning.file_size)
-            next_offset = await _send_with_reconciliation(
-                session,
-                upload_url,
-                payload,
-                start=offset,
-                total_bytes=tuning.file_size,
-                content_type=content_type,
-                retries=retries,
-            )
-            if next_offset <= offset:
-                raise RuntimeError("GCS resumable upload made no forward progress")
-            offset = next_offset
+            try:
+                next_offset = await _send_with_reconciliation(
+                    session,
+                    upload_url,
+                    payload,
+                    start=offset,
+                    total_bytes=tuning.file_size,
+                    content_type=content_type,
+                    retries=retries,
+                )
+                if next_offset <= offset:
+                    raise RuntimeError("GCS resumable upload made no forward progress")
+                offset = next_offset
+            finally:
+                release_upload_payload(payload)
     except BaseException:
         await _abort(session, upload_url)
         raise

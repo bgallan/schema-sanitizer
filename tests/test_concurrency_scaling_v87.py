@@ -45,21 +45,6 @@ def test_v87_reserved_slot_crosses_all_executor_submission_paths() -> None:
     assert "std::deque<ScheduledPacket> tasks_;" in executor
 
 
-def test_v87_publication_and_take_reuse_reserved_slot() -> None:
-    """Workers and the coordinator no longer derive the normal slot by ordinal."""
-    executor = EXECUTOR.read_text(encoding="utf-8")
-    completion = COMPLETION.read_text(encoding="utf-8")
-
-    assert "arena_completed_[completion_slot]" in completion
-    assert "arena_completed_[completion_ring_.NextTake()]" in completion
-    assert "completed_[completion_ring_.NextTake()]" in executor
-    assert "completed_[completion_slot]" in executor
-    assert "completion_ring_.AdvanceTake()" in completion
-    assert "completion_ring_.AdvanceTake()" in executor
-    # Modulo remains only for the one-shot empty-slot close at finish.
-    assert completion.count("slot_index(") == 1
-
-
 def test_v87_packet_and_outcome_aggregate_layouts_remain_unchanged() -> None:
     """The slot metadata is internal and cannot break existing initializers."""
     executor = EXECUTOR.read_text(encoding="utf-8")

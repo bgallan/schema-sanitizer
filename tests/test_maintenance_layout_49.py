@@ -41,9 +41,10 @@ def test_csv_frontend_has_bounded_cohesive_owners() -> None:
         "column_projection.hh",
         "frontend.cc",
         "frontend_internal.hh",
+        "source_projection.hh",
     }
     assert not (package / "column_projection").exists()
-    for name in ("column_projection.cc", "frontend.cc"):
+    for name in ("column_projection.cc", "frontend.cc", "source_projection.hh"):
         assert len((package / name).read_text(encoding="utf-8").splitlines()) <= 500
     source = (package / "frontend.cc").read_text(encoding="utf-8")
     assert "CsvFrontend::next_batch" in source

@@ -14,6 +14,7 @@ import schema_sanitizer as ss
 # Split from test_parquet_native_nested_scalars_lists.py: test_native_parquet_footer_info_reads_schema_sanitizer_file, test_native_parquet_stream_materializes_simple_integer_lists, test_native_parquet_stream_materializes_simple_lists_across_pages, ...
 
 
+@_requires_pyarrow
 def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) -> None:
     """Verify native footer parsing understands schema-sanitizer Parquet output."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info

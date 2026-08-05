@@ -6,6 +6,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+from ..core_impl.error_translation import translate_core_error
 from ..core_impl.execution_policy import normalize_threading_mode
 from ..core_impl.generated_metadata import TimestampColumns
 from ..core_impl.native_results import SinkOutput as NativeSinkOutput
@@ -157,9 +158,9 @@ def write_raw_stream_to_file(
         result = diagnostics_only_result(raw)
         patch_file_output_diagnostics(result, out_path, feature, native_stats=native_stats)
         return result
-    except Exception:
+    except Exception as exc:
         close_sink_output_or_stream(raw, stream)
-        raise
+        raise translate_core_error(exc) from exc
     finally:
         if replay is not None:
             replay.close()
@@ -237,9 +238,9 @@ def write_table_or_stream(
         stream = replay.reader() if replay is not None else _stream_from_sink_or_close(sink_out)
         try:
             native_stats = write_stream(stream, out_path)
-        except Exception:
+        except Exception as exc:
             close_sink_output_or_stream(sink_out, stream)
-            raise
+            raise translate_core_error(exc) from exc
         else:
             close_consumed_stream(stream)
 

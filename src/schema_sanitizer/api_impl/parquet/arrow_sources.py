@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import islice
@@ -17,6 +18,7 @@ from ...adapters.parquet.record_batch_factory import (
 )
 from ...adapters.parquet.status import parquet_schema_is_direct_native_eligible
 from ...core_impl.dependencies import ensure_pyarrow
+from ...core_impl.finalization import runtime_is_finalizing
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from ...input_impl.selection import _Source
 from ...options_impl.options import Options, memory_limit_bytes_or_none
@@ -60,10 +62,26 @@ def close_parquet_arrow_factory(factory: Any) -> None:
         close()
 
 
-def close_parquet_arrow_sources(sources: Iterable[tuple[Any, str]]) -> None:
-    """Close every factory in a native Arrow-source sequence."""
-    for factory, _source_file in sources:
-        _close_suppressing_errors(factory)
+def close_parquet_arrow_sources(
+    sources: Iterable[tuple[Any, str]],
+) -> list[tuple[Any, str]]:
+    """Close factories in LIFO order and retain failures in mutable inputs."""
+    owned = sources if isinstance(sources, list) else list(sources)
+    failed: list[tuple[Any, str]] = []
+    outcomes: dict[int, bool] = {}
+    failed_ids: set[int] = set()
+    while owned:
+        entry = owned.pop()
+        ident = id(entry[0])
+        succeeded = outcomes.get(ident)
+        if succeeded is None:
+            succeeded = _close_suppressing_errors(entry[0])
+            outcomes[ident] = succeeded
+        if not succeeded and ident not in failed_ids:
+            failed.append(entry)
+            failed_ids.add(ident)
+    owned.extend(reversed(failed))
+    return failed
 
 
 def parquet_arrow_stream_factory_or_none(
@@ -162,6 +180,7 @@ class ParquetArrowSourceChunkProvider:
         set_route: RouteCallback | None = None,
     ) -> None:
         """Store source descriptors without opening Parquet files yet."""
+        self._pid = os.getpid()
         self._sources = iter(sources)
         self._call_options = call_options
         self._feature = feature
@@ -175,6 +194,8 @@ class ParquetArrowSourceChunkProvider:
         if self._closed:
             return None
         self._close_current()
+        if self._current:
+            raise RuntimeError("previous Parquet source chunk cleanup failed and must be retried")
         chunk = list(islice(self._sources, self._chunk_size))
         if not chunk:
             self.close()
@@ -192,7 +213,9 @@ class ParquetArrowSourceChunkProvider:
 
     def close(self) -> None:
         """Close the active chunk and mark the provider exhausted."""
-        if self._closed:
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        if self._closed and not self._current:
             return
         self._closed = True
         self._close_current()
@@ -200,6 +223,8 @@ class ParquetArrowSourceChunkProvider:
     def __del__(self) -> None:
         """Best-effort cleanup for abandoned providers."""
         try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
             self.close()
         except Exception:
             pass
@@ -208,4 +233,3 @@ class ParquetArrowSourceChunkProvider:
         """Close factories from the currently yielded chunk."""
         if self._current:
             close_parquet_arrow_sources(self._current)
-            self._current = []

@@ -16,12 +16,14 @@ from ...core_impl.generated_metadata import INGESTION_TIMESTAMP_COLUMN, SOURCE_F
 from ...core_impl.memory_budget import normalize_memory_limit
 from ...core_impl.probes import options_for_registry_operation
 from ...core_impl.schema_registry import current_native_registry_state
+from ...input_impl.source_manifest import PublicInput
 from ...options_impl.call_options import (
     FILE_CONVERSION_HELPER_KEYS,
     attach_operation_detected_at,
     call_options_from_locals,
     normalize_call_options_or_none,
 )
+from ...options_impl.options import CsvHeaderMode, require_implemented_csv_header_mode
 from ...remote_impl.staging import (
     cleanup_output_target,
     finalize_output_target,
@@ -36,6 +38,7 @@ from ..registry_output import (
     write_parquet_registry_file,
 )
 from ..results import Result
+from ..source_manifest_diagnostics import patch_source_manifest_diagnostics
 from .writers import (
     write_csv_native_first_stream,
     write_jsonl_native_first_stream,
@@ -95,7 +98,7 @@ def try_convert_source_plan_with_options(
 
 
 def convert_file_with_options(
-    input_path: Any,
+    input_path: PublicInput,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None,
@@ -109,6 +112,7 @@ def convert_file_with_options(
     writer_options: Mapping[str, Any] | None = None,
 ) -> Result:
     """Normalize file conversion options and invoke a streaming writer."""
+    require_implemented_csv_header_mode(options.get("csv_header_mode", "exact"))
     from ...core_impl.schema_registry import _normalize_registry_json
 
     registry_json = _normalize_registry_json(schema_registry)
@@ -209,6 +213,7 @@ def convert_file_with_options(
             call_options = attach_operation_detected_at(
                 call_options,
                 operation_context.detected_at,
+                operation_context.memory_ledger,
             )
             field_name_policy = str(options.get("field_name_policy", "lower_alpha"))
             result = try_convert_source_plan_with_options(
@@ -259,6 +264,7 @@ def convert_file_with_options(
                 )
             file_io_seconds += max(perf_counter() - upload_started_at, 0.0)
             result.execution_policy = operation_context.policy.to_dict()
+            patch_source_manifest_diagnostics(result, prepared_input.source_manifest)
             return result
         except Exception:
             cleanup_output_target(output_target)
@@ -273,7 +279,7 @@ def convert_file_with_options(
 
 
 def _convert_public_file(
-    input_path: Any,
+    input_path: PublicInput,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None,
@@ -310,7 +316,7 @@ def _convert_public_file(
 
 
 def to_jsonl(
-    input_path: Any,
+    input_path: PublicInput,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None = None,
@@ -336,6 +342,7 @@ def to_jsonl(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
@@ -359,7 +366,7 @@ def to_jsonl(
 
 
 def to_csv(
-    input_path: Any,
+    input_path: PublicInput,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None = None,
@@ -385,6 +392,7 @@ def to_csv(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
@@ -408,7 +416,7 @@ def to_csv(
 
 
 def to_parquet(
-    input_path: Any,
+    input_path: PublicInput,
     output_path: str | os.PathLike[str],
     *,
     input_format: str | None = None,
@@ -434,6 +442,7 @@ def to_parquet(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",

@@ -8,6 +8,7 @@
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/memory/memory_budget.hh"
 #include "internal/memory/size_math.hh"
+#include "internal/runtime/process_identity.hh"
 #include "internal/string_lookup.hh"
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -143,6 +145,9 @@ const char *metadata_stream_last_error(ArrowArrayStream *stream) {
 }
 
 void metadata_stream_release(ArrowArrayStream *stream) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!stream || !stream->release) {
     return;
   }
@@ -247,6 +252,7 @@ void configure_metadata_stream_budget(
   }
   const auto budget =
       sanitize::internal::memory_budget_from_limit(memory_limit_bytes);
+  stream_state->configured_memory_limit_bytes = memory_limit_bytes;
   stream_state->max_generated_metadata_bytes = budget.metadata_bytes;
   stream_state->max_logical_slots = budget.arrow_logical_slots;
 }
@@ -327,7 +333,14 @@ validate_generated_metadata_budget(const MetadataStreamState &stream_state,
       estimate_generated_metadata_bytes(stream_state, base, timestamp_count);
   if (estimated > limit) {
     return sanitize::Status::OutOfMemory(
-        "generated metadata batch exceeds byte safety limit");
+        "generated metadata batch exceeds byte safety limit "
+        "(estimated_bytes=" +
+        std::to_string(estimated) + ", limit_bytes=" + std::to_string(limit) +
+        ", rows=" + std::to_string(base.length) +
+        ", base_columns=" + std::to_string(base.n_children) +
+        ", generated_columns=" + std::to_string(stream_state.columns.size()) +
+        ", configured_memory_limit_bytes=" +
+        std::to_string(stream_state.configured_memory_limit_bytes) + ")");
   }
   return sanitize::Status::OK();
 }

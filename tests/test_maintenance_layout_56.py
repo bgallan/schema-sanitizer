@@ -8,18 +8,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_cloud_providers_have_one_module_per_backend() -> None:
-    """Each cloud backend owns URI, discovery, and transfer behavior in one module."""
+def test_cloud_providers_have_one_bounded_backend_owner() -> None:
+    """Each cloud backend keeps discovery and transfer in one bounded module."""
     providers = ROOT / "src/schema_sanitizer/remote_impl/providers"
     for name in ("gcs", "s3", "azure"):
         owner = providers / f"{name}.py"
         assert owner.is_file()
         assert not (providers / name).exists()
         source = owner.read_text(encoding="utf-8")
-        assert "def parse_uri" in source
         assert "async def directories_containing_files" in source
         assert "async def file_exists" in source
         assert len(source.splitlines()) <= 500
+
+    gcs_source = (providers / "gcs.py").read_text(encoding="utf-8")
+    gcs_objects = providers / "gcs_objects.py"
+    object_source = gcs_objects.read_text(encoding="utf-8")
+    assert gcs_objects.is_file()
+    assert "from .gcs_objects import" in gcs_source
+    assert "def parse_uri" in object_source
+    assert "def remote_file_from_metadata" in object_source
+    assert len(object_source.splitlines()) <= 500
+
+    for name in ("s3", "azure"):
+        source = (providers / f"{name}.py").read_text(encoding="utf-8")
+        assert "def parse_uri" in source
 
 
 def test_partition_execution_has_one_bounded_owner() -> None:

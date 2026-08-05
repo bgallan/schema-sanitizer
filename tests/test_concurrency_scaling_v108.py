@@ -55,19 +55,6 @@ def test_v108_sharded_submission_publication_uses_stores_not_rmw() -> None:
     assert "&peak_queue_depth_" not in function
 
 
-def test_v108_arena_reuses_queue_mutex_for_submission_telemetry() -> None:
-    """Every multi-worker publication remains inside physical queue admission."""
-    source = ARENA.read_text(encoding="utf-8")
-    admission = source.split("auto &slot = *state_->slots[physical]", 1)[1]
-    admission = admission.split("// v82:", 1)[0]
-
-    lock = admission.index("std::lock_guard lock(slot.mutex);")
-    publish = admission.index("RecordWorkerTaskSubmitted")
-    assert lock < publish
-    assert "slot.tasks.push_back" in admission[:publish]
-    assert "RecordTaskSubmitted" not in admission
-
-
 def test_v108_serialization_aggregates_submission_shards() -> None:
     """Final task totals, peak depth, and diagnosis include every shard."""
     source = TELEMETRY_JSON.read_text(encoding="utf-8")

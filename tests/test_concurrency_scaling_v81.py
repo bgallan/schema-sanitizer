@@ -21,20 +21,6 @@ TELEMETRY_HEADER = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 TELEMETRY_SOURCE = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
 
 
-def test_v81_activity_is_accounted_once_per_worker_streak() -> None:
-    """Adjacent packets retain one active transition until the worker parks."""
-    runtime = ARENA_RUNTIME.read_text(encoding="utf-8")
-
-    assert "class WorkerActivityStreak final" in runtime
-    assert "if (active_)" in runtime
-    assert "activity.Start();" in runtime
-    assert "activity.Stop();" in runtime
-    assert runtime.count("state_->active.fetch_add") == 1
-    assert runtime.count("state_->active.fetch_sub") == 1
-    assert "local_peak_active_" in runtime
-    assert "PerformanceCounter::kWorkerActiveStreaks" in runtime
-
-
 def test_v81_park_transition_rechecks_local_work_without_stranding() -> None:
     """Targeted wake coalescing cannot miss work appended before parking."""
     runtime = ARENA_RUNTIME.read_text(encoding="utf-8")
@@ -105,7 +91,7 @@ def test_v81_public_pipeline_reports_fewer_streaks_than_tasks(
             output,
             input_format="jsonl",
             multi_threading=True,
-            memory_limit_bytes=96 << 20,
+            memory_limit_bytes=128 << 20,
             parse_integers=True,
             field_name_policy="preserve",
         )

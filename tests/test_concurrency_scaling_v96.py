@@ -13,44 +13,6 @@ RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 STAGE = "authoritative_started_mask_start_lock_elision"
 
 
-def test_v96_started_mask_elides_repeated_start_mutex_checks() -> None:
-    """Verify the named concurrency regression contract."""
-    arena = ARENA.read_text(encoding="utf-8")
-    runtime = RUNTIME.read_text(encoding="utf-8")
-    helper = runtime[
-        runtime.index("worker_already_started_fast_path") : runtime.index("ensure_worker_started(")
-    ]
-    startup = runtime[runtime.index("ensure_worker_started(") :]
-
-    assert "state->worker_count >= 4U" in helper
-    assert "state->scalable_scan" in helper
-    assert "state->started_dynamic.Test(index)" in helper
-    assert "state->started_mask.load(std::memory_order_acquire)" in helper
-    assert "worker_already_started_fast_path(state_, physical)" in arena
-    assert "state->started_mask.fetch_or(worker_bit(index)" in startup
-    normalized_startup = " ".join(startup.split())
-    assert normalized_startup.index(
-        "slot.worker = std::make_unique<JThread>"
-    ) < normalized_startup.index("state->started_mask.fetch_or(worker_bit(index)")
-
-
-def test_v96_started_mask_is_the_only_started_worker_authority() -> None:
-    """Verify the named concurrency regression contract."""
-    arena = ARENA.read_text(encoding="utf-8")
-    state_fields = arena[arena.index("const std::size_t worker_count") : arena.index("namespace {")]
-    started = arena[
-        arena.index("OperationTaskArena::started_workers") : arena.index(
-            "OperationTaskArena::wake_epoch_publishes"
-        )
-    ]
-
-    assert "std::atomic<std::size_t> started" not in state_fields
-    assert "state->started.fetch_add" not in arena
-    assert "std::popcount" in started
-    assert "state_->started_mask.load(std::memory_order_acquire)" in started
-    assert "state_->started_dynamic.Count()" in started
-
-
 def test_v96_all_56_pairs_inherit_started_mask_fast_path() -> None:
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

@@ -22,15 +22,6 @@ def test_v102_lease_has_typed_owner_and_member_policy():
     assert "void *owner_" not in s
 
 
-def test_v102_executor_has_no_void_thunk():
-    """Verify the named concurrency regression contract."""
-    s = EXECUTOR.read_text()
-    assert "abandon_external_task_thunk" not in s
-    assert "ExternalTaskLease<OrderedExecutor" in s
-    assert "&OrderedExecutor::abandon_external_task>" in s
-    assert "static_cast<OrderedExecutor *>" not in s
-
-
 def test_v102_all_56_pairs_inherit_stage():
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

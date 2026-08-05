@@ -61,7 +61,7 @@ def test_forwarding_modules_are_removed() -> None:
     assert importlib.util.find_spec("schema_sanitizer.api_impl.source_plan.streams") is None
     assert importlib.util.find_spec("schema_sanitizer.core_impl.runtime_context_probes") is None
     assert importlib.util.find_spec("schema_sanitizer.core_impl.runtime_probes") is None
-    assert importlib.util.find_spec("schema_sanitizer.core_impl.runtime_registry") is None
+    assert importlib.util.find_spec("schema_sanitizer.core_impl.runtime_registry") is not None
     assert importlib.util.find_spec("schema_sanitizer.core_impl.runtime_registry_arrow") is None
     assert (
         importlib.util.find_spec("schema_sanitizer.core_impl.runtime_registry_arrow_sinks") is None
@@ -431,6 +431,7 @@ def test_path_source_and_scalar_builder_layouts_are_cohesive() -> None:
     scalar = root / "cpp" / "src" / "internal" / "materialization" / "builders"
 
     assert {path.name for path in path_sources.iterdir() if path.is_file()} == {
+        "csv_source_projections.cc",
         "path_sources.cc",
         "path_source_plan.cc",
         "path_source_probe.cc",

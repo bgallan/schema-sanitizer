@@ -5,7 +5,8 @@ sanitize::Status project_footer_row_group_columns(
 
 sanitize::Result<FooterInfo>
 read_footer_metadata_impl(const std::string &path,
-                          const std::vector<std::string> &projected_columns) {
+                          const std::vector<std::string> &projected_columns,
+                          std::int64_t memory_limit_bytes = -1) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
     return sanitize::Status::IOError("Parquet footer: failed opening input");
@@ -27,9 +28,17 @@ read_footer_metadata_impl(const std::string &path,
   }
   const auto footer_len =
       static_cast<std::uint64_t>(read_u32_le(trailer.data()));
-  if (footer_len > kMaxFooterBytes) {
+  const auto budget =
+      sanitize::internal::memory_budget_from_limit(memory_limit_bytes);
+  const auto footer_budget = static_cast<std::uint64_t>(
+      std::max<std::int64_t>(1, budget.parquet_footer_bytes));
+  const auto effective_footer_limit = std::min<std::uint64_t>(
+      static_cast<std::uint64_t>(kMaxFooterBytes), footer_budget);
+  if (footer_len >= effective_footer_limit) {
     return sanitize::Status::Invalid(
-        "Parquet footer: footer exceeds security limit");
+        "Parquet footer: footer length ", footer_len,
+        " leaves no metadata capacity within effective limit ",
+        effective_footer_limit);
   }
   if (footer_len == 0 || footer_len > file_size - 8 ||
       file_size - 8 - footer_len < 4) {
@@ -43,7 +52,9 @@ read_footer_metadata_impl(const std::string &path,
     return sanitize::Status::IOError("Parquet footer: failed reading footer");
   }
   FooterInfo info;
-  SAN_ASSIGN_OR_RAISE(info, parse_footer(footer));
+  const auto materialized_limit =
+      static_cast<std::size_t>(effective_footer_limit - footer_len);
+  SAN_ASSIGN_OR_RAISE(info, parse_footer(footer, materialized_limit));
   std::vector<LeafLevelInfo> leaves;
   SAN_ASSIGN_OR_RAISE(leaves, assign_column_levels(&info));
   SAN_RETURN_NOT_OK(
@@ -141,7 +152,8 @@ make_arrow_stream(const std::string &path,
                   const std::vector<std::string> &projected_columns,
                   std::int64_t memory_limit_bytes) {
   FooterInfo info;
-  SAN_ASSIGN_OR_RAISE(info, read_footer_metadata_impl(path, projected_columns));
+  SAN_ASSIGN_OR_RAISE(info, read_footer_metadata_impl(path, projected_columns,
+                                                      memory_limit_bytes));
   if (info.created_by != "schema-sanitizer native parquet writer") {
     return sanitize::Status::NotImplemented(
         "native Parquet reader: file was not written by schema-sanitizer "
@@ -165,6 +177,12 @@ make_arrow_stream(const std::string &path,
       configured_native_reader_max_buffer_bytes(memory_limit_bytes);
   state->max_batch_rows =
       configured_native_reader_max_batch_rows(memory_limit_bytes);
+  const auto operation_budget =
+      sanitize::internal::memory_budget_from_limit(memory_limit_bytes);
+  state->max_page_bytes = operation_budget.parquet_page_bytes;
+  state->max_row_group_bytes = operation_budget.parquet_row_group_bytes;
+  state->page_scratch.max_page_bytes = static_cast<std::size_t>(
+      std::max<std::int64_t>(1, state->max_page_bytes));
   state->file.open(path, std::ios::binary);
   if (!state->file) {
     return sanitize::Status::IOError(
@@ -298,14 +316,21 @@ sanitize::Result<std::string>
 read_stream_preflight_json(const std::string &path,
                            const std::vector<std::string> &projected_columns,
                            std::int64_t memory_limit_bytes) {
-  SAN_ASSIGN_OR_RAISE(auto info,
-                      read_footer_metadata_impl(path, projected_columns));
+  SAN_ASSIGN_OR_RAISE(
+      auto info,
+      read_footer_metadata_impl(path, projected_columns, memory_limit_bytes));
   NativeParquetStreamState state;
   state.path = path;
   state.max_buffer_bytes =
       configured_native_reader_max_buffer_bytes(memory_limit_bytes);
   state.max_batch_rows =
       configured_native_reader_max_batch_rows(memory_limit_bytes);
+  const auto operation_budget =
+      sanitize::internal::memory_budget_from_limit(memory_limit_bytes);
+  state.max_page_bytes = operation_budget.parquet_page_bytes;
+  state.max_row_group_bytes = operation_budget.parquet_row_group_bytes;
+  state.page_scratch.max_page_bytes =
+      static_cast<std::size_t>(std::max<std::int64_t>(1, state.max_page_bytes));
   state.file.open(path, std::ios::binary);
   if (!state.file) {
     return sanitize::Status::IOError(

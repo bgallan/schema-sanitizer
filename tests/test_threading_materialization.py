@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 pa = pytest.importorskip("pyarrow")
+from threading_golden import semantic_stats
 
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
@@ -45,7 +46,7 @@ def test_multi_materialization_preserves_rows_stats_and_batch_boundaries() -> No
     multi_batch_rows = [batch.num_rows for batch in multi.clean_data.to_batches()]
     assert sum(multi_batch_rows) == 70_000
     assert all(0 < rows <= 65_536 for rows in multi_batch_rows)
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
 
 
 @pytest.mark.parametrize("on_error", ["skip_row", "emit_null_row"])
@@ -75,7 +76,7 @@ def test_multi_materialization_preserves_error_policy_diagnostics(on_error: str)
     multi = _read_python(rows, threading_mode="multi", **options)
 
     assert multi.clean_data.equals(single.clean_data)
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
     if on_error == "skip_row":
         assert multi.clean_data.column("ordinal").to_pylist() == [0, 2, 4]
         assert multi.stats["skipped_rows"] == 2
@@ -147,7 +148,7 @@ def test_multi_raw_jsonl_materializer_preserves_source_order(tmp_path: Path) -> 
     stable_columns = ["ordinal", "label", "nested", "source_file"]
     assert multi.clean_data.select(stable_columns).equals(single.clean_data.select(stable_columns))
     assert multi.clean_data.column("ordinal").to_pylist() == list(range(8_000))
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
     assert multi.execution_policy["effective_workers"] > 1
 
 
@@ -169,7 +170,7 @@ def test_multi_packet_accounting_isolates_large_nested_python_rows() -> None:
 
     assert multi.clean_data.equals(single.clean_data)
     assert multi.clean_data.column("ordinal").to_pylist() == list(range(520))
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
 
 
 def test_multi_packet_accounting_isolates_large_raw_json_row(tmp_path: Path) -> None:
@@ -203,7 +204,7 @@ def test_multi_packet_accounting_isolates_large_raw_json_row(tmp_path: Path) -> 
     stable_columns = ["ordinal", "payload", "source_file"]
     assert multi.clean_data.select(stable_columns).equals(single.clean_data.select(stable_columns))
     assert multi.clean_data.column("ordinal").to_pylist() == [0, 1, 2]
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
 
 
 def test_multi_raw_jsonl_direct_scalars_preserve_utf8_and_nulls(tmp_path: Path) -> None:
@@ -246,7 +247,7 @@ def test_multi_raw_jsonl_direct_scalars_preserve_utf8_and_nulls(tmp_path: Path) 
     stable_columns = ["ordinal", "enabled", "ratio", "label"]
     assert multi.clean_data.select(stable_columns).equals(single.clean_data.select(stable_columns))
     assert multi.clean_data.column("label").to_pylist() == [row["label"] for row in rows]
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
 
 
 @pytest.mark.parametrize("on_error", ["skip_row", "emit_null_row"])
@@ -285,7 +286,7 @@ def test_multi_raw_jsonl_direct_scalars_preserve_error_policy(
 
     stable_columns = ["ordinal", "value", "label"]
     assert multi.clean_data.select(stable_columns).equals(single.clean_data.select(stable_columns))
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
 
 
 @pytest.mark.parametrize("utf8_columns", [0, 8])
@@ -319,4 +320,4 @@ def test_wide_flat_adaptive_materialization_preserves_single_oracle(
     multi = _read_jsonl(path, threading_mode="multi", **options)
 
     assert multi.clean_data.equals(single.clean_data)
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from enum import Enum
 from threading import Lock
 from typing import Any
 
+from .fork_safety import quarantine_inherited_state
 from .logical_schema import LogicalSchemaPayload, encode_arrow_schema_payload
 from .native_runtime import native_core as _native
 
@@ -170,9 +172,11 @@ class Options:
     _prepared_capsule: Any
     _prepared_string_lists: tuple[tuple[Any, ...], ...] | None
     _operation_detected_at: str | None
+    _operation_memory_ledger: Any
     _operation_capsule: Any
     _operation_capsule_base: Any
     _operation_capsule_detected_at: str | None
+    _operation_capsule_memory_ledger: Any
     __slots__ = ("__dict__",)
 
     def __init__(self) -> None:
@@ -180,9 +184,11 @@ class Options:
         object.__setattr__(self, "_prepared_capsule", None)
         object.__setattr__(self, "_prepared_string_lists", None)
         object.__setattr__(self, "_operation_detected_at", None)
+        object.__setattr__(self, "_operation_memory_ledger", None)
         object.__setattr__(self, "_operation_capsule", None)
         object.__setattr__(self, "_operation_capsule_base", None)
         object.__setattr__(self, "_operation_capsule_detected_at", None)
+        object.__setattr__(self, "_operation_capsule_memory_ledger", None)
         for spec in OPTIONS:
             object.__setattr__(self, spec.name, _clone_default_value(spec.default))
 
@@ -196,6 +202,7 @@ class Options:
         object.__setattr__(self, "_operation_capsule", None)
         object.__setattr__(self, "_operation_capsule_base", None)
         object.__setattr__(self, "_operation_capsule_detected_at", None)
+        object.__setattr__(self, "_operation_capsule_memory_ledger", None)
 
 
 def _require_int_value(name: str, value: Any) -> int:
@@ -334,6 +341,21 @@ def _encode_options_bytes(options: Options) -> bytes:
 _PREPARED_OPTIONS_CACHE: OrderedDict[bytes, Any] = OrderedDict()
 _PREPARED_OPTIONS_CACHE_BYTES = 0
 _PREPARED_OPTIONS_CACHE_LOCK = Lock()
+_FORKED_OPTIONS_CACHE_KEEPALIVE: list[object] = []
+
+
+def _reset_prepared_options_cache_after_fork() -> None:
+    """Discard inherited locks and native capsules in a forked child."""
+    global _PREPARED_OPTIONS_CACHE, _PREPARED_OPTIONS_CACHE_BYTES
+    global _PREPARED_OPTIONS_CACHE_LOCK
+    quarantine_inherited_state("native-options-cache", _PREPARED_OPTIONS_CACHE)
+    _PREPARED_OPTIONS_CACHE = OrderedDict()
+    _PREPARED_OPTIONS_CACHE_BYTES = 0
+    _PREPARED_OPTIONS_CACHE_LOCK = Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_prepared_options_cache_after_fork)
 
 
 def _cached_options_capsule(encoded: bytes) -> Any:
@@ -426,31 +448,46 @@ def _options_capsule(options: Any) -> Any:
             object.__setattr__(options, "_prepared_string_lists", None)
 
     detected_at = options._operation_detected_at
-    if not detected_at:
+    ledger = options._operation_memory_ledger
+    if not detected_at and ledger is None:
         return base_capsule
+    if not detected_at:
+        raise RuntimeError("operation memory ledger requires detected_at metadata")
     if (
         options._operation_capsule is not None
         and options._operation_capsule_base is base_capsule
         and options._operation_capsule_detected_at == detected_at
+        and options._operation_capsule_memory_ledger is ledger
     ):
         return options._operation_capsule
-    operation_capsule = _native.options_with_detected_at(base_capsule, detected_at)
+    operation_capsule = (
+        _native.options_with_operation_context(base_capsule, detected_at, ledger.capsule)
+        if ledger is not None
+        else _native.options_with_detected_at(base_capsule, detected_at)
+    )
     object.__setattr__(options, "_operation_capsule", operation_capsule)
     object.__setattr__(options, "_operation_capsule_base", base_capsule)
     object.__setattr__(options, "_operation_capsule_detected_at", detected_at)
+    object.__setattr__(options, "_operation_capsule_memory_ledger", ledger)
     return operation_capsule
 
 
-def set_operation_detected_at(options: Options, detected_at: str) -> None:
-    """Attach one internal operation timestamp without changing public options."""
+def set_operation_detected_at(
+    options: Options,
+    detected_at: str,
+    operation_memory_ledger: Any = None,
+) -> None:
+    """Attach internal timestamp and optional shared operation memory ledger."""
     if not isinstance(options, Options):
         raise TypeError("operation metadata requires native Options")
     if not isinstance(detected_at, str) or not detected_at:
         raise ValueError("operation detected_at must be a non-empty string")
     object.__setattr__(options, "_operation_detected_at", detected_at)
+    object.__setattr__(options, "_operation_memory_ledger", operation_memory_ledger)
     object.__setattr__(options, "_operation_capsule", None)
     object.__setattr__(options, "_operation_capsule_base", None)
     object.__setattr__(options, "_operation_capsule_detected_at", None)
+    object.__setattr__(options, "_operation_capsule_memory_ledger", None)
 
 
 def validate_options(options: Any) -> None:

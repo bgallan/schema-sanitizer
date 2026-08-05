@@ -99,6 +99,9 @@ def test_parquet_stream_factory_observability_counts_are_defensive() -> None:
         "native_nested_contract_applicable": False,
         "native_nested_contract_satisfied": False,
         "native_nested_contract_issues": [],
+        "compressed_bytes": 0,
+        "decompressed_bytes": 0,
+        "decompression_ratio": 0.0,
     }
 
 

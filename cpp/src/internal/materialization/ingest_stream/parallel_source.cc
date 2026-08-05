@@ -40,6 +40,7 @@ ParallelIngestStreamSource::ParallelIngestStreamSource(Init init)
 }
 
 ParallelIngestStreamSource::~ParallelIngestStreamSource() {
+  diagnostics_.capture_operation_memory();
   if (telemetry_keepalive_) {
     telemetry_keepalive_->Finish();
   }
@@ -121,7 +122,11 @@ sanitize::Status ParallelIngestStreamSource::GetNext(struct ArrowArray *out) {
 }
 
 sanitize::Status ParallelIngestStreamSource::Close() {
+  if (!eof_) {
+    diagnostics_.record_cancellation("consumer_close");
+  }
   closed_ = true;
+  diagnostics_.capture_operation_memory();
   active_prepared_packet_.reset();
   ready_columnar_array_.reset();
   clear_column_partition_assemblies();
@@ -147,8 +152,13 @@ ParallelIngestStreamSource::batch_limits() const {
       rows_per_batch_from_memory_limit(memory_limit, observed_bytes_per_row_);
   const int64_t target_bytes =
       batch_target_bytes_from_memory_limit(memory_limit);
-  return BatchLimits{
-      .max_rows = max_rows, .max_bytes = target_bytes, .capacity = max_rows};
+  // Parser/source metadata stays operation-budgeted even though exported
+  // analytical buffers do not. Do not let a narrow observed output row expand
+  // the next frontend batch beyond its conservative input allowance.
+  const int64_t input_capacity = rows_per_batch_from_memory_limit(memory_limit);
+  return BatchLimits{.max_rows = max_rows,
+                     .max_bytes = target_bytes,
+                     .capacity = input_capacity};
 }
 
 bool ParallelIngestStreamSource::appender_is_full(
@@ -272,7 +282,10 @@ make_parallel_ingest_stream_source(
         FrontendMaterializationMode::kWorkerAuthoritativeRaw);
   }
 
-  auto pool = std::make_shared<PoolResource>(operation_memory_pool);
+  // The coordinator appender owns exported Arrow buffers. Those buffers leave
+  // the operation with the analytical consumer, unlike worker-local packet
+  // scratch below, which remains charged to operation_memory_pool.
+  auto pool = std::make_shared<PoolResource>(std::shared_ptr<void>{});
   SAN_ASSIGN_OR_RAISE(auto app, make_batch_appender(*plan, pool));
   SAN_ASSIGN_OR_RAISE(auto preparer, ParallelRowPreparer::Make(
                                          frontend_name, plan, opts,
@@ -282,9 +295,9 @@ make_parallel_ingest_stream_source(
   std::shared_ptr<ParallelJsonRowValidator> json_validator;
   std::unique_ptr<ParallelJsonValidationExecutor> json_validation_executor;
   if (jsonl_row_parallel) {
-    SAN_ASSIGN_OR_RAISE(json_validator,
-                        ParallelJsonRowValidator::Make(operation_memory_pool,
-                                                       plan, stage_policy));
+    SAN_ASSIGN_OR_RAISE(json_validator, ParallelJsonRowValidator::Make(
+                                            operation_memory_pool, plan,
+                                            opts->spec.on_error, stage_policy));
     SAN_ASSIGN_OR_RAISE(
         json_validation_executor,
         ParallelJsonValidationExecutor::Make(

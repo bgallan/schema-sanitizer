@@ -7,16 +7,57 @@ import socket
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
-from ..core_impl.memory_budget import memory_budget
+from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.memory_budget import (
+    acquire_operation_memory,
+    memory_budget,
+)
 from ..core_impl.sync_retry import retry_sync
+from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import content_type_for_uri
+from ..errors import SchemaSanitizerResourceError
 from ..input_impl.directory_inputs import RemoteFile
+from .file_streams import write_sync_reader_to_file
 
 TRANSFER_CHUNK_BYTES = 1024 * 1024
+_MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 64 * 1024
 _MAX_REDIRECTS = 5
+
+
+class _BudgetedBytes(bytes):
+    """Response bytes retaining their operation-memory reservation."""
+
+    _operation_memory_lease: Any | None
+
+    def __new__(cls, value: bytes, lease: object):
+        """Create bytes that retain an operation-memory lease."""
+        obj = super().__new__(cls, value)
+        obj._operation_memory_lease = lease
+        return obj
+
+    def close(self) -> None:
+        """Close the retained lease before clearing local ownership."""
+        lease = getattr(self, "_operation_memory_lease", None)
+        close = getattr(lease, "close", None)
+        if not callable(close):
+            self._operation_memory_lease = None
+            return
+        close()
+        if getattr(self, "_operation_memory_lease", None) is lease:
+            self._operation_memory_lease = None
+
+    def __del__(self) -> None:
+        """Release retained memory unless interpreter teardown has begun."""
+        try:
+            if runtime_is_finalizing():
+                return
+            self.close()
+        except BaseException:
+            pass
 
 
 class SyncHttpStatusError(RuntimeError):
@@ -99,6 +140,40 @@ def _headers(response: http.client.HTTPResponse) -> dict[str, str]:
     return headers
 
 
+def _read_bounded_response(
+    response: http.client.HTTPResponse,
+    *,
+    maximum_bytes: int,
+    stage: str,
+) -> bytes:
+    """Read one control response without materializing beyond its ceiling."""
+    limit = max(1, int(maximum_bytes))
+    lease = acquire_operation_memory(limit + 1, stage=stage)
+    try:
+        payload = response.read(limit + 1)
+        if len(payload) <= limit:
+            if lease is None:
+                return payload
+            retained = _BudgetedBytes(payload, lease)
+            lease = None
+            return retained
+    except BaseException:
+        if lease is not None:
+            lease.close()
+        raise
+    if lease is not None:
+        lease.close()
+    raise SchemaSanitizerResourceError(
+        f"memory_limit_bytes limit exceeded during {stage}: response body exceeds {limit} bytes",
+        detail={
+            "stage": stage,
+            "limit_name": "control_response_bytes",
+            "limit_bytes": limit,
+            "actual_bytes": len(payload),
+        },
+    )
+
+
 def request_bytes(
     method: str,
     url: str,
@@ -107,6 +182,7 @@ def request_bytes(
     body: bytes | None = None,
     timeout: float,
     allow_redirects: bool = False,
+    max_response_bytes: int = _MAX_CONTROL_RESPONSE_BYTES,
 ) -> SyncHttpResult:
     """Perform one blocking request and fully consume its body."""
     current = url
@@ -120,7 +196,11 @@ def request_bytes(
             timeout=timeout,
         )
         try:
-            payload = response.read()
+            payload = _read_bounded_response(
+                response,
+                maximum_bytes=max_response_bytes,
+                stage="remote_control_response",
+            )
             result_headers = _headers(response)
             status = response.status
         finally:
@@ -155,23 +235,29 @@ def download_to_file(
     headers: Mapping[str, str] | None,
     timeout: float,
     expected_status: int = 200,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Stream one response to disk and reject truncated Content-Length bodies."""
     connection, response = _request_once("GET", url, headers=headers, timeout=timeout)
     try:
         if response.status != expected_status:
-            body = response.read()
+            body = _read_bounded_response(
+                response,
+                maximum_bytes=_MAX_ERROR_RESPONSE_BYTES,
+                stage="remote_error_response",
+            )
             raise SyncHttpStatusError(
                 response.status,
                 f"HTTP download failed for {url!r}: {response.status} {body[:1000]!r}",
             )
         raw_length = response.getheader("Content-Length")
         expected_length = int(raw_length) if raw_length and raw_length.isdigit() else None
-        written = 0
-        with Path(local_path).open("wb") as file_handle:
-            while chunk := response.read(TRANSFER_CHUNK_BYTES):
-                file_handle.write(chunk)
-                written += len(chunk)
+        written = write_sync_reader_to_file(
+            response.read,
+            local_path,
+            chunk_bytes=TRANSFER_CHUNK_BYTES,
+            storage_reservation=storage_reservation,
+        )
         if expected_length is not None and written != expected_length:
             raise ConnectionError(
                 f"truncated HTTP response for {url!r}: {written} of {expected_length} bytes"
@@ -187,6 +273,7 @@ def upload_file_request(
     *,
     headers: Mapping[str, str] | None,
     timeout: float,
+    max_response_bytes: int = _MAX_CONTROL_RESPONSE_BYTES,
 ) -> SyncHttpResult:
     """Upload one file from byte zero through a same-thread request."""
     source = Path(local_path)
@@ -201,7 +288,11 @@ def upload_file_request(
             timeout=timeout,
         )
         try:
-            payload = response.read()
+            payload = _read_bounded_response(
+                response,
+                maximum_bytes=max_response_bytes,
+                stage="remote_control_response",
+            )
             return SyncHttpResult(response.status, _headers(response), payload)
         finally:
             connection.close()
@@ -251,6 +342,7 @@ def download_http_file(
     local_path: str,
     *,
     memory_limit_bytes: int | None,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download HTTP content with bounded replay from a truncated destination."""
     budget = memory_budget(memory_limit_bytes)
@@ -260,6 +352,7 @@ def download_http_file(
             local_path,
             headers=None,
             timeout=budget.async_timeout_seconds,
+            storage_reservation=storage_reservation,
         ),
         retries=budget.async_retries,
         should_retry=retryable_http_error,

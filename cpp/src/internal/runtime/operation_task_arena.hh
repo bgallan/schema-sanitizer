@@ -5,7 +5,7 @@
 #include "sanitize/core/status.hh"
 
 #include "internal/runtime/thread_compat.hh"
-#include <array>
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -15,9 +15,6 @@
 
 namespace sanitize::internal {
 
-// Selects a stable subset of physical workers for one pipeline stage. Upstream
-// stages use the low worker indices and sinks use the high worker indices so
-// two narrow stages can overlap without creating more than N native workers.
 enum class TaskArenaLane : unsigned char {
   kUpstream,
   kOutputCompact,
@@ -25,16 +22,101 @@ enum class TaskArenaLane : unsigned char {
   kAll,
 };
 
-struct TaskArenaSubmissionPlan final {
-  std::size_t lane_begin = 0;
-  std::size_t lane_end = 1;
-  std::size_t width = 1;
-  std::size_t alternative_offset = 1;
-  std::uint64_t allowed_mask = 1;
-  std::array<std::atomic<std::uint64_t> *, 4> visibility_masks{};
-  std::size_t visibility_count = 0;
-  bool scalable_scan = false;
-  std::atomic<std::size_t> *cursor = nullptr;
+struct OperationTaskArenaRuntimeSnapshot final {
+  std::size_t live_arenas = 0U;
+  std::size_t detached_workers = 0U;
+  std::size_t reaper_workers = 0U;
+  std::size_t reaper_queued_states = 0U;
+  std::size_t reaper_active_states = 0U;
+  std::size_t reaper_reserved_states = 0U;
+  std::size_t reaper_parked_states = 0U;
+  std::size_t counter_underflows = 0U;
+  std::size_t reaper_queued_bytes = 0U;
+  std::size_t reaper_active_bytes = 0U;
+  std::size_t reaper_reserved_bytes = 0U;
+  std::size_t reaper_parked_bytes = 0U;
+  std::int64_t oldest_parked_since_ns = 0;
+  std::size_t reaper_thread_permits = 0U;
+  std::size_t reaper_thread_start_failures = 0U;
+  std::size_t reaper_over_capacity = 0U;
+  std::size_t reaper_terminal_states = 0U;
+  std::size_t reaper_terminal_bytes = 0U;
+  std::int64_t oldest_terminal_since_ns = 0;
+  std::size_t reaper_stopping_lanes = 0U;
+};
+
+struct TaskMemoryCharge final {
+  constexpr TaskMemoryCharge() noexcept = default;
+  explicit constexpr TaskMemoryCharge(std::size_t bytes) noexcept
+      : retained_bytes(std::max<std::size_t>(1U, bytes)),
+        explicit_charge(true) {}
+
+  std::size_t retained_bytes = 256U;
+  bool explicit_charge = false;
+};
+
+class TaskMemoryLease final {
+public:
+  TaskMemoryLease() noexcept = default;
+  TaskMemoryLease(std::shared_ptr<void> owner, std::size_t bytes) noexcept
+      : owner_(std::move(owner)),
+        retained_bytes_(std::max<std::size_t>(1U, bytes)) {}
+
+  TaskMemoryLease(const TaskMemoryLease &) = delete;
+  TaskMemoryLease &operator=(const TaskMemoryLease &) = delete;
+  TaskMemoryLease(TaskMemoryLease &&) noexcept = default;
+  TaskMemoryLease &operator=(TaskMemoryLease &&) noexcept = default;
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return static_cast<bool>(owner_);
+  }
+  [[nodiscard]] std::size_t retained_bytes() const noexcept {
+    return retained_bytes_;
+  }
+
+private:
+  friend class OperationTaskArena;
+  std::shared_ptr<void> owner_;
+  std::size_t retained_bytes_ = 0U;
+};
+
+class TaskArenaSubmissionPlan final {
+public:
+  [[nodiscard]] std::uint64_t generation() const noexcept {
+    return generation_;
+  }
+  [[nodiscard]] std::size_t lane_begin() const noexcept { return lane_begin_; }
+  [[nodiscard]] std::size_t lane_end() const noexcept { return lane_end_; }
+  [[nodiscard]] std::size_t width() const noexcept { return width_; }
+  [[nodiscard]] std::size_t alternative_offset() const noexcept {
+    return alternative_offset_;
+  }
+  [[nodiscard]] std::uint64_t allowed_mask() const noexcept {
+    return allowed_mask_;
+  }
+  [[nodiscard]] bool scalable_scan() const noexcept { return scalable_scan_; }
+  [[nodiscard]] std::uint8_t visibility_shard_begin() const noexcept {
+    return visibility_shard_begin_;
+  }
+  [[nodiscard]] std::uint8_t visibility_shard_end() const noexcept {
+    return visibility_shard_end_;
+  }
+  [[nodiscard]] TaskArenaLane cursor_lane() const noexcept {
+    return cursor_lane_;
+  }
+
+private:
+  friend class OperationTaskArena;
+  std::uint64_t generation_ = 0;
+  std::size_t lane_begin_ = 0;
+  std::size_t lane_end_ = 1;
+  std::size_t width_ = 1;
+  std::size_t alternative_offset_ = 1;
+  std::uint64_t allowed_mask_ = 1;
+  bool scalable_scan_ = false;
+  std::uint8_t visibility_shard_begin_ = 0;
+  std::uint8_t visibility_shard_end_ = 1;
+  TaskArenaLane cursor_lane_ = TaskArenaLane::kAll;
 };
 
 class OperationTaskArena final {
@@ -48,13 +130,19 @@ public:
 
   OperationTaskArena(const OperationTaskArena &) = delete;
   OperationTaskArena &operator=(const OperationTaskArena &) = delete;
-  ~OperationTaskArena();
+  ~OperationTaskArena() noexcept;
 
-  // Schedules one task on a stable worker inside the selected lane. The task's
-  // worker index is relative to the lane, not the physical arena index.
   sanitize::Status
   Submit(Task task, std::size_t lane_width, TaskArenaLane lane,
          TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
+  sanitize::Status
+  SubmitCharged(Task task, std::size_t lane_width, TaskArenaLane lane,
+                TaskMemoryCharge charge,
+                TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
+  sanitize::Status
+  SubmitLeased(Task task, std::size_t lane_width, TaskArenaLane lane,
+               TaskMemoryLease lease,
+               TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
 
   [[nodiscard]] TaskArenaSubmissionPlan
   PrepareSubmissionPlan(std::size_t lane_width, TaskArenaLane lane) noexcept;
@@ -62,10 +150,15 @@ public:
   sanitize::Status
   Submit(Task task, const TaskArenaSubmissionPlan &plan,
          TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
+  sanitize::Status
+  SubmitCharged(Task task, const TaskArenaSubmissionPlan &plan,
+                TaskMemoryCharge charge,
+                TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
+  sanitize::Status
+  SubmitLeased(Task task, const TaskArenaSubmissionPlan &plan,
+               TaskMemoryLease lease,
+               TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
 
-  // Reserve a round-robin seed from the arena-wide lane cursor. Ordered
-  // executors call this once and then advance a mutex-owned local ticket,
-  // avoiding one shared atomic RMW per packet.
   [[nodiscard]] std::size_t
   ReserveSubmissionTicket(const TaskArenaSubmissionPlan &plan) noexcept;
 
@@ -73,6 +166,10 @@ public:
   Submit(Task task, const TaskArenaSubmissionPlan &plan,
          std::size_t submission_ticket,
          TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
+  sanitize::Status
+  SubmitCharged(Task task, const TaskArenaSubmissionPlan &plan,
+                std::size_t submission_ticket, TaskMemoryCharge charge,
+                TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther);
 
   [[nodiscard]] std::size_t worker_count() const noexcept;
   [[nodiscard]] bool inline_mode() const noexcept;
@@ -81,9 +178,30 @@ public:
   [[nodiscard]] std::size_t submitted_tasks() const noexcept;
   [[nodiscard]] std::size_t stolen_tasks() const noexcept;
   [[nodiscard]] std::size_t queued_tasks() const noexcept;
+  [[nodiscard]] std::size_t peak_queued_tasks() const noexcept;
+  [[nodiscard]] std::size_t queue_capacity() const noexcept;
+  [[nodiscard]] std::size_t queued_retained_bytes() const noexcept;
+  [[nodiscard]] std::size_t active_retained_bytes() const noexcept;
+  [[nodiscard]] std::size_t retained_bytes() const noexcept;
+  [[nodiscard]] std::size_t peak_queued_retained_bytes() const noexcept;
+  [[nodiscard]] std::size_t peak_active_retained_bytes() const noexcept;
+  [[nodiscard]] std::size_t peak_retained_bytes() const noexcept;
+  [[nodiscard]] std::size_t queue_byte_capacity() const noexcept;
+  [[nodiscard]] std::size_t rejected_submissions() const noexcept;
+  [[nodiscard]] std::size_t rejected_byte_submissions() const noexcept;
+  [[nodiscard]] std::size_t unknown_charge_submissions() const noexcept;
+  [[nodiscard]] std::size_t detached_workers() const noexcept;
+  [[nodiscard]] std::size_t total_detached_workers() const noexcept;
+  [[nodiscard]] std::uint64_t detached_worker_age_millis() const noexcept;
+  [[nodiscard]] std::size_t shutdown_timeouts() const noexcept;
+  [[nodiscard]] std::size_t abandoned_queued_tasks() const noexcept;
+  [[nodiscard]] std::size_t abandoned_queued_bytes() const noexcept;
+  [[nodiscard]] std::size_t reaper_queued_states() const noexcept;
+  [[nodiscard]] std::size_t reaper_active_states() const noexcept;
+  [[nodiscard]] std::size_t reaper_queued_bytes() const noexcept;
+  [[nodiscard]] std::size_t reaper_active_bytes() const noexcept;
+  [[nodiscard]] std::size_t post_shutdown_retained_bytes() const noexcept;
   [[nodiscard]] std::size_t started_workers() const noexcept;
-  // Sum of targeted park generations published to physical workers. This is
-  // observable for scheduler diagnostics without adding a hot-path counter.
   [[nodiscard]] std::uint64_t wake_epoch_publishes() const noexcept;
   [[nodiscard]] std::shared_ptr<PerformanceTelemetry>
   telemetry() const noexcept;
@@ -91,14 +209,27 @@ public:
   memory_resource() const noexcept;
 
   void Shutdown() noexcept;
+  [[nodiscard]] static bool
+  ShutdownCleanupReaper(std::uint64_t timeout_millis) noexcept;
+  [[nodiscard]] static OperationTaskArenaRuntimeSnapshot
+  RuntimeSnapshot() noexcept;
 
 public:
   struct State;
+  struct DetachedMetrics;
 
 private:
-  explicit OperationTaskArena(std::shared_ptr<State> state) noexcept;
+  explicit OperationTaskArena(
+      std::shared_ptr<State> state,
+      std::shared_ptr<DetachedMetrics> metrics) noexcept;
+  [[nodiscard]] static bool
+  ValidPlan(const State &state, const TaskArenaSubmissionPlan &plan) noexcept;
 
-  std::shared_ptr<State> state_;
+  std::atomic<std::shared_ptr<State>> state_;
+  std::shared_ptr<DetachedMetrics> detached_metrics_;
+  std::atomic<std::size_t> shutdown_timeouts_{0};
+  std::atomic<std::size_t> abandoned_queued_tasks_{0};
+  std::atomic<std::size_t> abandoned_queued_bytes_{0};
 };
 
 } // namespace sanitize::internal

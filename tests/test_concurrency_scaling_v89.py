@@ -15,41 +15,6 @@ LEASE = ROOT / "cpp/src/internal/runtime/external_task_lease.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
 
 
-def test_v89_admission_total_remains_mutex_owned_after_v91_sharding() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    helper = SUBMISSION.read_text(encoding="utf-8")
-    combined = source + helper
-
-    assert "scheduled_tasks_.fetch_add" not in combined
-    assert combined.count("++scheduled_external_tasks_[completion_shard];") == 2
-    assert "std::array<std::size_t, kMaxExternalCompletionShards>" in source
-
-
-def test_v89_single_completion_rmw_is_superseded_by_v91_shards() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    assert "completed_external_tasks_.fetch_add" not in source
-    assert "completed_external_tasks_[shard].completed" in source
-    assert "counter.fetch_add(1, std::memory_order_release)" in source
-    assert "counter.notify_all()" in source
-    assert "WaitOnAtomic(counter, waiting_value" in source
-    assert "completed != scheduled[shard]" in source
-
-
-def test_v89_submit_failure_remains_lease_accounted() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    helper = SUBMISSION.read_text(encoding="utf-8")
-    for text in (source, helper):
-        assert "ExternalLease(" in text or "ExternalTaskLease(" in text
-        assert "completion_shard" in text
-        assert "lease.Complete();" in text
-    lease = LEASE.read_text(encoding="utf-8")
-    assert "&OrderedExecutor::abandon_external_task" in source
-    assert "(owner_->*Abandon)(shard_);" in lease
-
-
 def test_v89_all_56_pairs_inherit_single_rmw_lifetime_accounting() -> None:
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

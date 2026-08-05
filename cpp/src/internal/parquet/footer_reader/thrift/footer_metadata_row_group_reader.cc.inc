@@ -172,8 +172,9 @@ sanitize::Status read_row_groups(CompactReader &reader, FooterInfo *info) {
   }
   return {};
 }
-sanitize::Result<FooterInfo> parse_footer(std::string_view footer) {
-  CompactReader reader(footer);
+sanitize::Result<FooterInfo> parse_footer(std::string_view footer,
+                                          std::size_t materialized_limit = 0) {
+  CompactReader reader(footer, materialized_limit);
   FooterInfo info;
   std::int16_t last_field_id = 0;
   while (true) {

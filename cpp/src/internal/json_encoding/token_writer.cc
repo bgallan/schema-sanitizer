@@ -4,6 +4,7 @@
 
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -106,6 +107,23 @@ void append_int_field(std::string &out, bool &first, std::string_view key,
     return;
   }
   out += std::to_string(value);
+}
+
+void append_double_field(std::string &out, bool &first, std::string_view key,
+                         double value) {
+  append_key(out, first, key);
+  if (!std::isfinite(value)) {
+    out += "0";
+    return;
+  }
+  std::array<char, 64> buffer{};
+  auto [ptr, ec] = std::to_chars(buffer.data(), buffer.data() + buffer.size(),
+                                 value, std::chars_format::general);
+  if (ec == std::errc()) {
+    out.append(buffer.data(), static_cast<std::size_t>(ptr - buffer.data()));
+    return;
+  }
+  out += "0";
 }
 
 } // namespace sanitize::internal::json_encoding

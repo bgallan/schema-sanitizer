@@ -60,7 +60,12 @@ make_registry_merge_input(sanitize::LogicalSchema inferred_schema,
                           std::string_view default_key_name = "default_key",
                           sanitize::FieldOrderPolicy field_order =
                               sanitize::FieldOrderPolicy::kAlphabetically,
-                          std::string_view detected_at = {});
+                          std::string_view detected_at = {},
+                          sanitize::SchemaEvolutionMode schema_evolution =
+                              sanitize::SchemaEvolutionMode::kAdditive);
+// Maps the validated public registry mode to native schema evolution.
+sanitize::SchemaEvolutionMode
+registry_schema_evolution_mode(const char *schema_mode) noexcept;
 // Copies registry/drift JSON strings into optional sink outputs.
 int copy_registry_json_outputs(
     const sanitize::SchemaRegistryMergeResult &merged,

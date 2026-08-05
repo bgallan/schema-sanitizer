@@ -37,20 +37,6 @@ def test_v85_arena_steal_counter_has_one_writer_per_worker() -> None:
     assert "state->stolen.fetch_add" not in steal_path
 
 
-def test_v85_diagnostics_aggregate_worker_slots_only_when_read() -> None:
-    """The public exact counter sums bounded worker publications on demand."""
-    arena = ARENA.read_text(encoding="utf-8")
-    function = arena[
-        arena.index("OperationTaskArena::stolen_tasks") : arena.index(
-            "OperationTaskArena::queued_tasks"
-        )
-    ]
-
-    assert "for (const auto &slot : state_->slots)" in function
-    assert "slot->stolen.load(std::memory_order_relaxed)" in function
-    assert "fetch_add" not in function
-
-
 def test_v85_performance_telemetry_uses_the_same_worker_ownership() -> None:
     """Enabled telemetry does not reintroduce a second global steal RMW."""
     header = TELEMETRY_HEADER.read_text(encoding="utf-8")

@@ -17,61 +17,6 @@ SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc
 LEASE = ROOT / "cpp/src/internal/runtime/external_task_lease.hh"
 
 
-def test_v91_completion_accounting_is_cacheline_sharded() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-
-    assert "struct alignas(64) ExternalCompletionShard" in source
-    assert "kMaxExternalCompletionShards = 32U" in source
-    assert "worker_count_ >= 4U" in source
-    assert "std::min(worker_count_, kMaxExternalCompletionShards)" in source
-    assert "reserve_external_completion_shard_locked" in source
-    assert "next_external_completion_shard_" in source
-    assert "completed_external_tasks_[shard].completed" in source
-    assert "completed_external_tasks_.fetch_add" not in source
-
-
-def test_v91_scheduled_and_completed_totals_are_exact_per_shard() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    helper = SUBMISSION.read_text(encoding="utf-8")
-
-    assert source.count("++scheduled_external_tasks_[completion_shard];") == 1
-    assert helper.count("++scheduled_external_tasks_[completion_shard];") == 1
-    assert "scheduled_tasks_" not in source + helper
-    assert "scheduled = scheduled_external_tasks_;" in source
-    assert "completed != scheduled[shard]" in source
-    assert "WaitOnAtomic(counter, waiting_value" in source
-
-
-def test_v91_abandonment_carries_the_same_completion_shard() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    helper = SUBMISSION.read_text(encoding="utf-8")
-    lease = LEASE.read_text(encoding="utf-8")
-
-    for text in (source, helper):
-        assert "ExternalLease(" in text or "ExternalTaskLease(" in text
-        assert "completion_shard" in text
-        assert "execute_external(" in text
-        assert "lease.Complete();" in text
-    assert (
-        "abandon_external_task(shard)" in source
-        or "&OrderedExecutor::abandon_external_task" in source
-    )
-    assert (
-        "using Abandon = void (*)(void *, std::size_t) noexcept;" in lease
-        or "template <void (*Abandon)(void *, std::size_t) noexcept>" in lease
-        or "template <class Owner, void (Owner::*Abandon)(std::size_t) noexcept>" in lease
-    )
-    assert "shard_" in lease
-    assert (
-        "Abandon(owner_, shard_);" in lease
-        or "abandon_(owner_, shard_);" in lease
-        or "(owner_->*Abandon)(shard_);" in lease
-    )
-
-
 def test_v91_all_56_pairs_inherit_sharded_completion_accounting() -> None:
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 pa = pytest.importorskip("pyarrow")
+from threading_golden import semantic_stats
 
 from schema_sanitizer.adapters.pyarrow.csv_sink import write_csv_stream
 from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
@@ -89,7 +90,7 @@ def test_text_output_multi_is_byte_identical_and_ordered(
         )
 
     assert paths["multi"].read_bytes() == paths["single"].read_bytes()
-    assert stats["multi"] == stats["single"]
+    assert semantic_stats(stats["multi"]) == semantic_stats(stats["single"])
     assert stats["multi"]["materialized_rows"] == 4_097
     assert stats["multi"]["batches"] == len(batches)
 
@@ -217,7 +218,7 @@ def test_text_output_promotes_after_small_first_batch(
         )
 
     assert paths["multi"].read_bytes() == paths["single"].read_bytes()
-    assert stats["multi"] == stats["single"]
+    assert semantic_stats(stats["multi"]) == semantic_stats(stats["single"])
     assert stats["multi"]["batches"] == 2
     assert stats["multi"]["materialized_rows"] == rows + 1
 

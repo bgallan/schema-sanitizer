@@ -12,9 +12,28 @@ sanitize::Status materialization_payload(std::ifstream &file,
     return sanitize::Status::Invalid(
         "native Parquet reader: page payload sizes are incomplete");
   }
+  if (page.compressed_page_size < 0 || page.uncompressed_page_size < 0) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: negative page payload size");
+  }
+  const auto compressed_size =
+      static_cast<std::size_t>(page.compressed_page_size);
+  const auto uncompressed_size =
+      static_cast<std::size_t>(page.uncompressed_page_size);
+  if (compressed_size > scratch->max_page_bytes ||
+      uncompressed_size > scratch->max_page_bytes ||
+      (column.codec != kCompressionUncompressed &&
+       compressed_size > scratch->max_page_bytes - uncompressed_size)) {
+    return sanitize::Status::Invalid(
+        "native Parquet reader: page scratch exceeds effective operation "
+        "limit ",
+        scratch->max_page_bytes);
+  }
   SAN_RETURN_NOT_OK(read_exact_payload_into(
       file, page.compressed_payload_offset, page.compressed_page_size,
       &scratch->compressed_payload));
+  SAN_RETURN_NOT_OK(
+      validate_parquet_page_checksum(page, scratch->compressed_payload));
   if (column.codec == kCompressionUncompressed) {
     if (page.compressed_page_size != page.uncompressed_page_size) {
       return sanitize::Status::Invalid(

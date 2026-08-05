@@ -3,11 +3,15 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include <memory_resource>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "internal/memory/pool_resource.hh"
 #include "internal/string_lookup.hh"
 #include "sanitize/planning/plan.hh"
 
@@ -15,6 +19,11 @@ namespace sanitize::internal {
 
 class JsonRootFieldFilter {
 public:
+  JsonRootFieldFilter();
+
+  // Rebinds optional cache allocations to the operation-wide memory pool.
+  void set_memory_pool(std::shared_ptr<void> pool) noexcept;
+
   // Installs the compiled root layout and field-name policy.
   void reset(const CompiledPlan *plan, std::string_view field_name_policy);
 
@@ -26,10 +35,26 @@ private:
   static constexpr std::size_t kMapCacheEntryLimit = 4096;
   static constexpr std::size_t kCacheKeyByteLimit = 1U << 20;
 
+  using CacheEntry = std::pair<std::pmr::string, bool>;
+  using CacheMap =
+      std::pmr::unordered_map<std::pmr::string, bool, TransparentStringHash,
+                              std::equal_to<>>;
+
+  struct CacheState {
+    explicit CacheState(std::shared_ptr<void> pool)
+        : resource(std::move(pool)), cache(&resource), cache_map(&resource) {}
+
+    PoolResource resource;
+    std::pmr::vector<CacheEntry> cache;
+    CacheMap cache_map;
+  };
+
+  void rebuild_cache() noexcept;
+
   const CompiledPlan *plan_ = nullptr;
   std::string field_name_policy_;
-  mutable std::vector<std::pair<std::string, bool>> cache_;
-  mutable StringLookupMap<bool> cache_map_;
+  std::shared_ptr<void> memory_pool_;
+  mutable std::unique_ptr<CacheState> cache_state_;
   mutable std::size_t cache_key_bytes_ = 0;
 };
 

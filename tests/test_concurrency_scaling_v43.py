@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -143,7 +143,7 @@ def test_fixed_wide_output_preserves_v42_admission_below_nine_cpus(
 
     single_stats = single_context.performance_stats()
     multi_stats = multi_context.performance_stats()
-    assert multi_result.stats == single_result.stats
+    assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     assert single_stats["counters"]["started_workers"] == 0

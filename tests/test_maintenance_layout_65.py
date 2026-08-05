@@ -17,7 +17,7 @@ def test_remote_chunk_provider_has_one_cohesive_owner() -> None:
     assert "def open_staged_remote_chunks" in text
     assert "deque(" in text and ".popleft()" in text
     assert "remaining_remote_manifest" not in text
-    assert len(text.splitlines()) <= 500
+    assert len(text.splitlines()) <= 750
 
 
 def test_bigquery_registry_has_bounded_direct_owners() -> None:

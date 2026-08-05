@@ -33,6 +33,7 @@ build/
 !cpp/src/internal/build/
 !cpp/src/internal/build/**
 dist/
+release-dist/
 wheelhouse/
 CMakeCache.txt
 CMakeFiles/

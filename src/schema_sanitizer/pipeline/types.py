@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Any
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
 from ..core_impl.schema_registry import _normalize_registry_json
+
+if TYPE_CHECKING:
+    from ..input_impl.source_manifest import SourceManifest
+    from .modified_time import UtcWindow
 
 
 @dataclass(frozen=True, init=False)
@@ -61,6 +65,10 @@ class PartitionRunPlan:
     discovery_seconds: float = field(default=0.0, compare=False, repr=False)
     source_file_count: int | None = field(default=None, compare=False, repr=False)
     source_bytes: int | None = field(default=None, compare=False, repr=False)
+    source_earliest_update: datetime | None = field(default=None, compare=False, repr=False)
+    source_latest_update: datetime | None = field(default=None, compare=False, repr=False)
+    source_window: UtcWindow | None = field(default=None, repr=False)
+    source_manifest: SourceManifest | None = field(default=None, repr=False)
 
     def __init__(
         self,
@@ -73,6 +81,10 @@ class PartitionRunPlan:
         discovery_seconds: float = 0.0,
         source_file_count: int | None = None,
         source_bytes: int | None = None,
+        source_earliest_update: datetime | None = None,
+        source_latest_update: datetime | None = None,
+        source_window: UtcWindow | None = None,
+        source_manifest: SourceManifest | None = None,
     ):
         """Initialize a partition run plan."""
         if source_uri is None:
@@ -85,16 +97,36 @@ class PartitionRunPlan:
         object.__setattr__(self, "logical_hour", logical_hour)
         object.__setattr__(self, "discovered_input", discovered_input)
         object.__setattr__(self, "discovery_seconds", max(float(discovery_seconds), 0.0))
+        manifest_count = getattr(source_manifest, "object_count", None)
+        manifest_bytes = getattr(source_manifest, "total_bytes", None)
+        manifest_earliest = getattr(source_manifest, "earliest_update", None)
+        manifest_latest = getattr(source_manifest, "latest_update", None)
         object.__setattr__(
             self,
             "source_file_count",
-            None if source_file_count is None else max(int(source_file_count), 0),
+            manifest_count
+            if source_file_count is None and manifest_count is not None
+            else (None if source_file_count is None else max(int(source_file_count), 0)),
         )
         object.__setattr__(
             self,
             "source_bytes",
-            None if source_bytes is None else max(int(source_bytes), 0),
+            manifest_bytes
+            if source_bytes is None and manifest_bytes is not None
+            else (None if source_bytes is None else max(int(source_bytes), 0)),
         )
+        object.__setattr__(
+            self,
+            "source_earliest_update",
+            source_earliest_update if source_earliest_update is not None else manifest_earliest,
+        )
+        object.__setattr__(
+            self,
+            "source_latest_update",
+            source_latest_update if source_latest_update is not None else manifest_latest,
+        )
+        object.__setattr__(self, "source_window", source_window)
+        object.__setattr__(self, "source_manifest", source_manifest)
 
     def with_discovered_input(self, discovered_input: Any | None) -> PartitionRunPlan:
         """Return the same partition plan with internal discovered source metadata."""
@@ -107,6 +139,10 @@ class PartitionRunPlan:
             discovery_seconds=self.discovery_seconds,
             source_file_count=self.source_file_count,
             source_bytes=self.source_bytes,
+            source_earliest_update=self.source_earliest_update,
+            source_latest_update=self.source_latest_update,
+            source_window=self.source_window,
+            source_manifest=self.source_manifest,
         )
 
     def with_discovery_timing(
@@ -127,6 +163,10 @@ class PartitionRunPlan:
             discovery_seconds=discovery_seconds,
             source_file_count=source_file_count,
             source_bytes=source_bytes,
+            source_earliest_update=self.source_earliest_update,
+            source_latest_update=self.source_latest_update,
+            source_window=self.source_window,
+            source_manifest=self.source_manifest,
         )
 
     @property

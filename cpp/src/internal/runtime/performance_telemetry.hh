@@ -117,6 +117,9 @@ public:
   [[nodiscard]] std::shared_ptr<MemoryPool> memory_pool() const noexcept {
     return operation_pool_;
   }
+  [[nodiscard]] std::int64_t memory_limit_bytes() const noexcept {
+    return memory_limit_bytes_;
+  }
 
 private:
   static constexpr std::size_t kPhaseCount =

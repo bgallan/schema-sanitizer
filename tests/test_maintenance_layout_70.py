@@ -45,6 +45,7 @@ def test_small_cpp_domains_do_not_use_hidden_include_fragments() -> None:
         "stream.hh",
     }
     assert {path.name for path in path_sources.iterdir() if path.is_file()} == {
+        "csv_source_projections.cc",
         "path_sources.cc",
         "path_source_plan.cc",
         "path_source_probe.cc",
@@ -52,6 +53,10 @@ def test_small_cpp_domains_do_not_use_hidden_include_fragments() -> None:
     }
     assert not list(metadata_stream.rglob("*.inc"))
     assert not list(path_sources.rglob("*.inc"))
+    assert (
+        len((path_sources / "csv_source_projections.cc").read_text(encoding="utf-8").splitlines())
+        <= 500
+    )
 
 
 def test_path_source_probe_borrows_capsule_storage() -> None:

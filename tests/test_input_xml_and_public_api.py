@@ -27,8 +27,7 @@ def test_read_xml_row_tag_maps_attributes_text_and_repeated_children(tmp_path) -
 
     path = tmp_path / "rows.xml"
     path.write_text(
-        """
-        <?xml version="1.0"?>
+        """<?xml version="1.0"?>
         <rows>
           <row id="1"><name>Ana</name><tag>x</tag><tag>y</tag></row>
           <row id="2"><name>Alex</name><note lang="en">hello</note></row>

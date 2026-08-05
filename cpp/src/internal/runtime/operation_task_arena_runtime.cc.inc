@@ -41,17 +41,21 @@
     }
   }
 }
-[[nodiscard]] std::uint64_t
-queue_visibility_snapshot(const TaskArenaSubmissionPlan &plan) noexcept {
-  if (plan.visibility_count == 1U) {
-    return plan.visibility_masks[0]->load(std::memory_order_acquire) &
-           plan.allowed_mask;
+[[nodiscard]] std::uint64_t queue_visibility_snapshot(
+    const std::shared_ptr<OperationTaskArena::State> &state,
+    const TaskArenaSubmissionPlan &plan) noexcept {
+  std::uint64_t snapshot = 0U;
+  for (auto shard = plan.visibility_shard_begin();
+       shard < plan.visibility_shard_end(); ++shard) {
+    if (shard == 0U) {
+      snapshot |= state->primary_queue_visibility.nonempty_mask.load(
+          std::memory_order_acquire);
+    } else {
+      snapshot |= state->queue_visibility[shard - 1U].nonempty_mask.load(
+          std::memory_order_acquire);
+    }
   }
-  std::uint64_t snapshot = 0;
-  for (std::size_t index = 0; index < plan.visibility_count; ++index) {
-    snapshot |= plan.visibility_masks[index]->load(std::memory_order_acquire);
-  }
-  return snapshot & plan.allowed_mask;
+  return snapshot & plan.allowed_mask();
 }
 template <bool Sharded>
 [[nodiscard]] std::uint64_t queue_visibility_snapshot(
@@ -91,7 +95,7 @@ idle_started_worker(const std::shared_ptr<OperationTaskArena::State> &state,
                     std::uint64_t allowed, std::size_t lane_origin,
                     std::uint64_t initialized_snapshot,
                     const TaskArenaSubmissionPlan &plan) noexcept {
-  if (plan.scalable_scan) {
+  if (plan.scalable_scan()) {
     auto origin = lane_origin;
     for (std::size_t examined = 0; examined < width; ++examined) {
       const auto index = state->initialized_dynamic.FindSetNotIn(
@@ -111,7 +115,7 @@ idle_started_worker(const std::shared_ptr<OperationTaskArena::State> &state,
   // Reuse one acquire snapshot instead of
   // reloading weaker startup state.
   const auto candidates =
-      initialized_snapshot & allowed & ~queue_visibility_snapshot(plan);
+      initialized_snapshot & allowed & ~queue_visibility_snapshot(state, plan);
   if (candidates == 0U) {
     return end;
   }
@@ -299,6 +303,8 @@ bool take_local(const std::shared_ptr<OperationTaskArena::State> &state,
   }
   --slot.queued_local;
   slot.queued.store(slot.queued_local, std::memory_order_relaxed);
+  SaturatingAtomicSubtract(state->queued_total, 1U);
+  SaturatingAtomicSubtract(state->queued_bytes, out->retained_bytes);
   if (slot.tasks.empty()) {
     mark_empty(state, index);
   }
@@ -376,6 +382,8 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
             --candidate.queued_local;
             candidate.queued.store(candidate.queued_local,
                                    std::memory_order_relaxed);
+            SaturatingAtomicSubtract(state->queued_total, 1U);
+            SaturatingAtomicSubtract(state->queued_bytes, out->retained_bytes);
             if (candidate.tasks.empty()) {
               mark_empty(state, candidate_index);
             }
@@ -471,6 +479,8 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
     candidate.tasks.erase(selected);
     --candidate.queued_local;
     candidate.queued.store(candidate.queued_local, std::memory_order_relaxed);
+    SaturatingAtomicSubtract(state->queued_total, 1U);
+    SaturatingAtomicSubtract(state->queued_bytes, out->retained_bytes);
     if (candidate.tasks.empty()) {
       mark_empty(state, candidate_index);
     }
@@ -538,7 +548,7 @@ public:
 
   void Stop() noexcept {
     if (active_) {
-      state_->active.fetch_sub(1, std::memory_order_release);
+      SaturatingAtomicSubtract(state_->active, 1U);
       active_ = false;
     }
     state_->slots[index_]->running.store(false, std::memory_order_release);
@@ -549,6 +559,30 @@ private:
   std::size_t index_ = 0;
   std::size_t local_peak_active_ = 0;
   bool active_ = false;
+};
+
+class ActiveRetainedCharge final {
+public:
+  ActiveRetainedCharge(const std::shared_ptr<OperationTaskArena::State> &state,
+                       OperationTaskArena::State::QueuedTask *queued) noexcept
+      : state_(state), queued_(queued), bytes_(queued->retained_bytes) {
+    const auto active =
+        state_->active_bytes.fetch_add(bytes_, std::memory_order_acq_rel) +
+        bytes_;
+    (void)update_peak(&state_->peak_active_bytes, active);
+  }
+  ActiveRetainedCharge(const ActiveRetainedCharge &) = delete;
+  ActiveRetainedCharge &operator=(const ActiveRetainedCharge &) = delete;
+  ~ActiveRetainedCharge() noexcept {
+    queued_->task = OperationTaskArena::Task{};
+    SaturatingAtomicSubtract(state_->active_bytes, bytes_);
+    SaturatingAtomicSubtract(state_->retained_bytes_total, bytes_);
+  }
+
+private:
+  std::shared_ptr<OperationTaskArena::State> state_;
+  OperationTaskArena::State::QueuedTask *queued_;
+  std::size_t bytes_;
 };
 
 template <bool PreferDedicatedOutput, bool CheckGlobalStopping>
@@ -641,6 +675,7 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
       }
       continue;
     }
+    ActiveRetainedCharge retained_charge(state, &queued);
     auto cpu_lease = state->cpu_registration.Acquire(stop);
     if (telemetry && cpu_lease.waited()) {
       telemetry->AddCounter(PerformanceCounter::kProcessCpuGovernorWaits);
@@ -703,17 +738,20 @@ ensure_worker_started(const std::shared_ptr<OperationTaskArena::State> &state,
   }
   try {
     if (state->worker_count > 8U) {
-      slot.worker = std::make_unique<JThread>([state, index](StopToken stop) {
-        worker_loop<true, false>(state, index, stop);
-      });
+      slot.worker =
+          std::make_unique<ArenaWorkerThread>([state, index](StopToken stop) {
+            worker_loop<true, false>(state, index, stop);
+          });
     } else if (state->worker_count >= 4U) {
-      slot.worker = std::make_unique<JThread>([state, index](StopToken stop) {
-        worker_loop<false, false>(state, index, stop);
-      });
+      slot.worker =
+          std::make_unique<ArenaWorkerThread>([state, index](StopToken stop) {
+            worker_loop<false, false>(state, index, stop);
+          });
     } else {
-      slot.worker = std::make_unique<JThread>([state, index](StopToken stop) {
-        worker_loop<false, true>(state, index, stop);
-      });
+      slot.worker =
+          std::make_unique<ArenaWorkerThread>([state, index](StopToken stop) {
+            worker_loop<false, true>(state, index, stop);
+          });
     }
     slot.started.store(true, std::memory_order_release);
     if (state->scalable_scan) {

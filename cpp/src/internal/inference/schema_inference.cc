@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -92,7 +93,7 @@ sanitize::LogicalType type_from_stats(const InferenceContext &ctx,
   }
 
   if (st.is_struct) {
-    std::vector<std::string_view> raw_names;
+    std::pmr::vector<std::string_view> raw_names(ctx.memory_resource());
     raw_names.reserve(st.key_order.size());
     for (StrId k : st.key_order) {
       StatsNode *child = st.find_child(k);
@@ -100,7 +101,7 @@ sanitize::LogicalType type_from_stats(const InferenceContext &ctx,
         raw_names.push_back(ctx.strings.str(k));
     }
     const std::vector<std::string> clean_names =
-        clean_sibling_field_names(raw_names, opts);
+        clean_sibling_field_names(raw_names, opts, ctx.memory_resource());
 
     std::vector<sanitize::LogicalField> fields;
     fields.reserve(raw_names.size());
@@ -128,7 +129,7 @@ sanitize::LogicalSchema
 infer_logical_schema(const InferenceContext &ctx,
                      const sanitize::PreparedOptions &opts) {
   sanitize::LogicalSchema schema;
-  std::vector<std::string_view> raw_names;
+  std::pmr::vector<std::string_view> raw_names(ctx.memory_resource());
   raw_names.reserve(ctx.root.key_order.size());
   for (StrId k : ctx.root.key_order) {
     StatsNode *child = ctx.root.find_child(k);
@@ -136,7 +137,7 @@ infer_logical_schema(const InferenceContext &ctx,
       raw_names.push_back(ctx.strings.str(k));
   }
   std::vector<std::string> clean_names =
-      clean_sibling_field_names(raw_names, opts);
+      clean_sibling_field_names(raw_names, opts, ctx.memory_resource());
   for (std::size_t i = 0; i < raw_names.size(); ++i) {
     if (is_reserved_etl_column_name(raw_names[i]))
       clean_names[i] = raw_names[i];

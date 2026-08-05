@@ -6,6 +6,8 @@ import json
 import random
 from typing import Any
 
+from diagnostics_assertions import assert_diagnostics_semantically_equal
+
 from schema_sanitizer.core_impl.execution import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
@@ -51,7 +53,7 @@ def _assert_probe_equivalent(rows: list[dict[str, Any]], **options: Any) -> None
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
 
 
 def test_parallel_inference_preserves_order_sensitive_shape_promotions() -> None:
@@ -184,7 +186,7 @@ def test_parallel_inference_repeated_nested_runs_are_stable() -> None:
     for _ in range(3):
         candidate = _probe(rows, threading_mode="multi")
         assert candidate.schema_payload == reference.schema_payload
-        assert candidate.diagnostics.to_json() == reference.diagnostics.to_json()
+        assert_diagnostics_semantically_equal(candidate.diagnostics, reference.diagnostics)
 
 
 def test_parallel_inference_differential_mixed_nested_matrix() -> None:

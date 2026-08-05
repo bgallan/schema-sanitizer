@@ -114,17 +114,58 @@ sanitize::Result<std::int16_t> read_little_level_value(std::string_view data,
   }
   return static_cast<std::int16_t>(value);
 }
+sanitize::Status reserve_level_derived_bytes(
+    std::int32_t expected_count, bool capture_validity_bitmap,
+    bool capture_level_values, std::uint64_t max_derived_bytes,
+    std::uint64_t *planned_derived_bytes) {
+  if (!planned_derived_bytes || expected_count < 0) {
+    return sanitize::Status::Invalid(
+        "Parquet levels: invalid derived-budget state");
+  }
+  const auto count = static_cast<std::uint64_t>(expected_count);
+  std::uint64_t required = 0;
+  if (capture_level_values) {
+    if (count >
+        std::numeric_limits<std::uint64_t>::max() / sizeof(std::int16_t)) {
+      return sanitize::Status::Invalid(
+          "Parquet levels: level output size overflows");
+    }
+    required = count * sizeof(std::int16_t);
+  }
+  if (capture_validity_bitmap) {
+    const auto validity = (count + 7U) / 8U;
+    if (validity > std::numeric_limits<std::uint64_t>::max() - required) {
+      return sanitize::Status::Invalid(
+          "Parquet levels: validity output size overflows");
+    }
+    required += validity;
+  }
+  if (*planned_derived_bytes > max_derived_bytes ||
+      required > max_derived_bytes - *planned_derived_bytes) {
+    return sanitize::Status::Invalid(
+        "Parquet levels: derived level output exceeds effective operation "
+        "limit ",
+        max_derived_bytes);
+  }
+  *planned_derived_bytes += required;
+  return {};
+}
+
 sanitize::Result<LevelDecodeInfo>
 decode_level_stream(std::string_view payload, std::size_t *offset,
                     std::int16_t max_level, std::int32_t expected_count,
-                    bool capture_validity_bitmap = false,
-                    bool capture_level_values = false) {
+                    bool capture_validity_bitmap, bool capture_level_values,
+                    std::uint64_t max_derived_bytes,
+                    std::uint64_t *planned_derived_bytes) {
   if (!offset) {
     return sanitize::Status::Invalid("Parquet levels: internal offset error");
   }
   if (expected_count < 0) {
     return sanitize::Status::Invalid("Parquet levels: negative expected count");
   }
+  SAN_RETURN_NOT_OK(reserve_level_derived_bytes(
+      expected_count, capture_validity_bitmap, capture_level_values,
+      max_derived_bytes, planned_derived_bytes));
   if (max_level <= 0) {
     LevelDecodeInfo info;
     info.max_level_count = expected_count;

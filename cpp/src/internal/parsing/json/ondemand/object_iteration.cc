@@ -5,6 +5,7 @@
 #include "internal/parsing/json/string_decode.hh"
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 #include "sanitize/core/status.hh"
@@ -115,8 +116,16 @@ JsonOnDemandDoc::ForEachObjectFieldC(std::string_view text, void *ctx,
 
   auto cursor = MakeCursor(text, base_offset);
   bool done = false;
+  std::size_t fields = 0;
   SAN_RETURN_NOT_OK(EnterObjectIterator(cursor, &done));
   while (!done) {
+    if (fields >= json_scan::kMaxJsonObjectFields) {
+      return sanitize::Status::Invalid(
+          "JSON object field count exceeds safety limit: ",
+          std::to_string(fields + 1U), " > ",
+          std::to_string(json_scan::kMaxJsonObjectFields));
+    }
+    ++fields;
     SAN_RETURN_NOT_OK(EmitObjectField(cursor, text, ctx, fn, base_offset));
     SAN_RETURN_NOT_OK(AdvanceObjectIterator(cursor, &done));
   }

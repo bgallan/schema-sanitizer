@@ -6,8 +6,10 @@ from .arrow_schema import (
     arrow_decimal_to_bq_type,
     arrow_schema_to_bq_column_ddl,
     arrow_type_to_bq_sql,
+    read_external_table_arrow_schema,
     remove_embedded_metadata_fields,
     remove_hive_partition_fields,
+    resolve_bigquery_arrow_schema,
 )
 from .client import (
     execute_bigquery_sql,
@@ -136,6 +138,8 @@ __all__ = [
     "registry_order_sql",
     "remove_embedded_metadata_fields",
     "remove_hive_partition_fields",
+    "read_external_table_arrow_schema",
+    "resolve_bigquery_arrow_schema",
     "sidecar_last_partition_query",
     "sidecar_table_ddl",
     "sidecar_upsert_query",

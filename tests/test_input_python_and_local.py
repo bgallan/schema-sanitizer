@@ -405,9 +405,16 @@ def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypa
         """Yield one inert blocking S3 client."""
         yield object()
 
-    def fake_download(_context, file, local_path, *, memory_limit_bytes):
+    def fake_download(
+        _context,
+        file,
+        local_path,
+        *,
+        memory_limit_bytes,
+        storage_reservation=None,
+    ):
         """Write an oversized payload below the canonical size check."""
-        del memory_limit_bytes
+        del memory_limit_bytes, storage_reservation
         assert file.name == "row.json"
         Path(local_path).write_bytes(b"x" * 10_000)
 

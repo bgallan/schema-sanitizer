@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..core_impl.error_translation import call_core
+from ..core_impl.finalization import runtime_is_finalizing
 from ..core_impl.generated_metadata import (
     SCHEMA_DRIFTS_COLUMN,
     SCHEMA_REGISTRY_COLUMN,
     TimestampColumns,
 )
 from ..core_impl.native_symbols import PATH_SOURCE_PLAN_CREATE
-from ..core_impl.resource_lifecycle import _close_suppressing_errors
+from ..core_impl.resource_lifecycle import (
+    _close_sequence_retryably,
+    _close_suppressing_errors,
+)
 from .selection import native_input_format
 
 PATH_SOURCES = "path_sources"
@@ -62,14 +67,35 @@ class NativeSourcePlan:
     source_batch: PreparedSourceBatch | None = None
     native_payload: Any | None = None
     close_items: list[Any] = field(default_factory=list)
+    _pid: int = field(default_factory=os.getpid, init=False, repr=False)
 
     def close(self) -> None:
-        """Close resources owned by this plan."""
+        """Close plan resources while retaining failures for a later retry."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         if self.kind == SEQUENCE:
-            for item in self.payload:
-                _close_suppressing_errors(item)
-        while self.close_items:
-            _close_suppressing_errors(self.close_items.pop())
+            sequence = list(self.payload)
+            _close_sequence_retryably(sequence)
+            self.payload = tuple(sequence) if isinstance(self.payload, tuple) else sequence
+            payload_closed = not sequence
+        else:
+            payload = self.payload
+            payload_closed = _close_suppressing_errors(payload)
+            if payload_closed and self.payload is payload:
+                self.payload = None
+        _close_sequence_retryably(self.close_items)
+        if payload_closed and not self.close_items:
+            self.native_payload = None
+            self.source_batch = None
+
+    def __del__(self) -> None:
+        """Retry abandoned cleanup outside shutdown and post-fork children."""
+        try:
+            if runtime_is_finalizing():
+                return
+            self.close()
+        except BaseException:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +234,7 @@ def _open_path_sources_auto_registry_stream(
     metadata_first_row_columns = dict(first_row_columns or {})
     metadata_first_row_columns.pop(SCHEMA_REGISTRY_COLUMN, None)
     metadata_first_row_columns.pop(SCHEMA_DRIFTS_COLUMN, None)
-    common = {
+    common: dict[str, Any] = {
         "field_name_policy": field_name_policy,
         "schema_mode": schema_mode,
         "first_row_columns": metadata_first_row_columns,

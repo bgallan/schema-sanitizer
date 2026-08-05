@@ -24,4 +24,8 @@ void append_string_field(std::string &out, bool &first, std::string_view key,
 void append_int_field(std::string &out, bool &first, std::string_view key,
                       int64_t value);
 
+// Appends a finite JSON floating-point field to an object.
+void append_double_field(std::string &out, bool &first, std::string_view key,
+                         double value);
+
 } // namespace sanitize::internal::json_encoding

@@ -25,9 +25,9 @@ def test_csv_cell_metadata_is_bounded_and_all_callers_propagate_failure() -> Non
     """Hostile delimiter density must stop before the cell vector grows forever."""
     parser = (ROOT / "cpp/src/internal/parsing/csv_parse.hh").read_text(encoding="utf-8")
     frontend = (ROOT / "cpp/src/frontends/csv/frontend.cc").read_text(encoding="utf-8")
-    path_sources = (ROOT / "cpp/src/api/python_abi3/path_sources/path_sources.cc").read_text(
-        encoding="utf-8"
-    )
+    csv_projections = (
+        ROOT / "cpp/src/api/python_abi3/path_sources/csv_source_projections.cc"
+    ).read_text(encoding="utf-8")
     row_appender = (ROOT / "cpp/src/internal/materialization/row_appender.cc").read_text(
         encoding="utf-8"
     )
@@ -37,7 +37,7 @@ def test_csv_cell_metadata_is_bounded_and_all_callers_propagate_failure() -> Non
     assert "sanitize::Status parse_csv_cells" in parser
     assert "SAN_RETURN_NOT_OK(append_record" in frontend
     assert "SAN_RETURN_NOT_OK(parse_csv_cells" in frontend
-    assert "SAN_RETURN_NOT_OK(sanitize::internal::parse_csv_cells" in path_sources
+    assert "SAN_RETURN_NOT_OK(sanitize::internal::parse_csv_cells" in csv_projections
     assert "SAN_RETURN_NOT_OK(parse_csv_cells" in row_appender
 
 
@@ -49,10 +49,13 @@ def test_json_root_field_cache_has_entry_and_byte_budgets() -> None:
     assert "kMapCacheEntryLimit = 4096" in header
     assert "kCacheKeyByteLimit = 1U << 20" in header
     assert "cache_key_bytes_" in header
+    assert "PoolResource resource" in header
+    assert "std::pmr::vector<CacheEntry>" in header
+    assert "std::pmr::unordered_map" in header
     assert "key.size() > kCacheKeyByteLimit - cache_key_bytes_" in source
-    assert "cache_map_.size() < kMapCacheEntryLimit" in source
-    assert "cache_map_.swap(empty_map)" in source
-    assert "Filtering remains correct when the optional cache cannot grow" in source
+    assert "state->cache_map.size() < kMapCacheEntryLimit" in source
+    assert "state->cache_map.swap(promoted)" in source
+    assert "operation-budget cache cannot grow" in source
 
 
 def test_json_object_field_vectors_are_bounded_in_both_materializers() -> None:

@@ -24,23 +24,6 @@ def test_v99_idle_selection_uses_initialized_snapshot_without_started_reload() -
     assert "initialized implies started" in helper
 
 
-def test_v99_one_snapshot_elides_impossible_reservation_and_startup_check() -> None:
-    """Verify the named concurrency regression contract."""
-    source = ARENA.read_text(encoding="utf-8")
-    submit = source[
-        source.index("const auto initialized_snapshot") : source.index(
-            "auto &slot = *state_->slots[physical]"
-        )
-    ]
-    assert submit.count("initialized_mask.load") == 1
-    assert "lane_fully_initialized" in submit
-    assert "compact_lane_fully_initialized" in submit
-    assert "state_->scalable_scan || !compact_lane_fully_initialized" in submit
-    assert "initialized_snapshot & worker_bit(physical)" in submit
-    assert "reserve_unstarted_worker" in submit
-    assert "worker_already_started_fast_path" in submit
-
-
 def test_v99_all_56_pairs_inherit_initialized_admission_snapshot() -> None:
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

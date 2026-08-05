@@ -1,145 +1,3 @@
-constexpr std::size_t kRetainedPagePayloadScratchBytes =
-    8ULL * 1024ULL * 1024ULL;
-constexpr std::size_t kRetainedPageHeaderScratchBytes = 64ULL * 1024ULL;
-
-void clear_or_release_page_scratch(std::string *value,
-                                   std::size_t retained_capacity) noexcept {
-  if (!value) {
-    return;
-  }
-  if (secure_memory_cleanup_enabled() && !value->empty()) {
-    secure_zero_memory(value->data(), value->size());
-  }
-  if (value->capacity() > retained_capacity) {
-    std::string empty;
-    value->swap(empty);
-    return;
-  }
-  value->clear();
-}
-
-struct PageVerificationScratch {
-  std::string page_header_bytes;
-  std::string compressed_payload;
-  std::string decompressed_payload;
-  std::uint64_t compressed_bytes = 0;
-  std::uint64_t decompressed_bytes = 0;
-  std::uint64_t derived_bytes = 0;
-
-  ~PageVerificationScratch() {
-    clear_or_release_page_scratch(&page_header_bytes, 0);
-    clear_or_release_page_scratch(&compressed_payload, 0);
-    clear_or_release_page_scratch(&decompressed_payload, 0);
-  }
-
-  void reset_budget() noexcept {
-    clear_or_release_page_scratch(&page_header_bytes,
-                                  kRetainedPageHeaderScratchBytes);
-    clear_or_release_page_scratch(&compressed_payload,
-                                  kRetainedPagePayloadScratchBytes);
-    clear_or_release_page_scratch(&decompressed_payload,
-                                  kRetainedPagePayloadScratchBytes);
-    compressed_bytes = 0;
-    decompressed_bytes = 0;
-    derived_bytes = 0;
-  }
-
-  void retire_compressed_payload() noexcept {
-    clear_or_release_page_scratch(&compressed_payload,
-                                  kRetainedPagePayloadScratchBytes);
-  }
-
-  void retire_decompressed_payload() noexcept {
-    clear_or_release_page_scratch(&decompressed_payload,
-                                  kRetainedPagePayloadScratchBytes);
-  }
-};
-
-sanitize::Status
-charge_page_verification_budget(PageVerificationScratch *scratch,
-                                std::size_t compressed,
-                                std::size_t decompressed) {
-  if (!scratch) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: verification scratch is null");
-  }
-  if (compressed > std::numeric_limits<std::uint64_t>::max() -
-                       scratch->compressed_bytes ||
-      decompressed > std::numeric_limits<std::uint64_t>::max() -
-                         scratch->decompressed_bytes) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: decompression budget overflow");
-  }
-  const auto next_compressed =
-      scratch->compressed_bytes + static_cast<std::uint64_t>(compressed);
-  const auto next_decompressed =
-      scratch->decompressed_bytes + static_cast<std::uint64_t>(decompressed);
-  if (next_decompressed > kMaxDecompressedBytesPerRowGroup) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: row-group decompression budget exceeded");
-  }
-  constexpr std::uint64_t kSmallPayloadAllowance = 64ULL * 1024ULL * 1024ULL;
-  const auto ratio_limit =
-      next_compressed > std::numeric_limits<std::uint64_t>::max() /
-                            kMaxDecompressionExpansionRatio
-          ? std::numeric_limits<std::uint64_t>::max()
-          : next_compressed * kMaxDecompressionExpansionRatio;
-  if (next_decompressed > std::max(kSmallPayloadAllowance, ratio_limit)) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: decompression expansion ratio exceeded");
-  }
-  scratch->compressed_bytes = next_compressed;
-  scratch->decompressed_bytes = next_decompressed;
-  return {};
-}
-
-sanitize::Status charge_page_derived_budget(PageVerificationScratch *scratch,
-                                            const PageHeaderInfo &page) {
-  if (!scratch) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: verification scratch is null");
-  }
-  std::uint64_t bytes = 0;
-  const auto charge = [&](std::int32_t value) -> bool {
-    if (value <= 0) {
-      return true;
-    }
-    const auto amount = static_cast<std::uint64_t>(value);
-    if (amount > std::numeric_limits<std::uint64_t>::max() - bytes) {
-      return false;
-    }
-    bytes += amount;
-    return true;
-  };
-  if (!charge(page.decoded_validity_bytes) ||
-      !charge(page.materialized_offset_bytes) ||
-      !charge(page.materialized_value_bytes)) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: derived buffer budget overflow");
-  }
-  const auto definition_bytes =
-      static_cast<std::uint64_t>(page.decoded_definition_level_values.size()) *
-      sizeof(std::int16_t);
-  const auto repetition_bytes =
-      static_cast<std::uint64_t>(page.decoded_repetition_level_values.size()) *
-      sizeof(std::int16_t);
-  if (definition_bytes > std::numeric_limits<std::uint64_t>::max() - bytes ||
-      repetition_bytes > std::numeric_limits<std::uint64_t>::max() - bytes -
-                             definition_bytes) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: derived level budget overflow");
-  }
-  bytes += definition_bytes + repetition_bytes;
-  if (bytes >
-          std::numeric_limits<std::uint64_t>::max() - scratch->derived_bytes ||
-      scratch->derived_bytes + bytes > kMaxDerivedBytesPerRowGroup) {
-    return sanitize::Status::Invalid(
-        "Parquet page payload: row-group derived buffer budget exceeded");
-  }
-  scratch->derived_bytes += bytes;
-  return {};
-}
-
 sanitize::Result<PageHeaderInfo> read_page_header_at(std::ifstream &file,
                                                      std::uint64_t offset,
                                                      std::uint64_t limit,
@@ -181,12 +39,52 @@ sanitize::Result<PageHeaderInfo> read_page_header_at(std::ifstream &file,
   page.header_offset = static_cast<std::int64_t>(offset);
   page.compressed_payload_offset = static_cast<std::int64_t>(
       offset + static_cast<std::uint64_t>(page.header_size));
-  const auto page_end = offset + static_cast<std::uint64_t>(page.header_size) +
-                        static_cast<std::uint64_t>(page.compressed_page_size);
+  if (page.header_size < 0 || page.compressed_page_size < 0) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: negative header or payload size");
+  }
+  const auto header_size = static_cast<std::uint64_t>(page.header_size);
+  const auto payload_size =
+      static_cast<std::uint64_t>(page.compressed_page_size);
+  if (header_size > std::numeric_limits<std::uint64_t>::max() - offset ||
+      payload_size >
+          std::numeric_limits<std::uint64_t>::max() - offset - header_size) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: page range overflow");
+  }
+  const auto page_end = offset + header_size + payload_size;
   if (page_end > limit) {
     return sanitize::Status::Invalid("Parquet page header: page exceeds chunk");
   }
   return page;
+}
+
+std::uint32_t parquet_page_crc32(std::string_view payload) noexcept {
+  std::uint32_t crc = 0xFFFFFFFFU;
+  for (const auto byte : payload) {
+    crc ^= static_cast<std::uint8_t>(byte);
+    for (int bit = 0; bit < 8; ++bit) {
+      const auto mask =
+          static_cast<std::uint32_t>(-static_cast<std::int32_t>(crc & 1U));
+      crc = (crc >> 1U) ^ (0xEDB88320U & mask);
+    }
+  }
+  return ~crc;
+}
+
+sanitize::Status
+validate_parquet_page_checksum(const PageHeaderInfo &page,
+                               std::string_view compressed_payload) {
+  if (!page.has_crc) {
+    return {};
+  }
+  const auto actual = parquet_page_crc32(compressed_payload);
+  if (actual != page.crc) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: CRC32 checksum mismatch at byte ",
+        page.compressed_payload_offset);
+  }
+  return {};
 }
 
 sanitize::Status read_exact_payload_into(std::ifstream &file,
@@ -233,6 +131,13 @@ sanitize::Result<std::string> read_exact_payload(std::ifstream &file,
   return payload;
 }
 
+std::uint64_t
+remaining_page_derived_budget(const PageVerificationScratch &scratch) noexcept {
+  return scratch.derived_bytes >= scratch.max_derived_bytes
+             ? 0
+             : scratch.max_derived_bytes - scratch.derived_bytes;
+}
+
 sanitize::Status verify_page_payload(std::ifstream &file,
                                      const ColumnChunkInfo &column,
                                      PageHeaderInfo *page,
@@ -250,6 +155,19 @@ sanitize::Status verify_page_payload(std::ifstream &file,
       static_cast<std::size_t>(page->compressed_page_size);
   const auto uncompressed_size =
       static_cast<std::size_t>(page->uncompressed_page_size);
+  if (compressed_size > scratch->max_page_bytes ||
+      uncompressed_size > scratch->max_page_bytes) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: page exceeds effective operation limit ",
+        scratch->max_page_bytes);
+  }
+  if (column.codec != kCompressionUncompressed &&
+      compressed_size > scratch->max_page_bytes - uncompressed_size) {
+    return sanitize::Status::Invalid(
+        "Parquet page payload: compressed and decompressed scratch exceed "
+        "effective operation limit ",
+        scratch->max_page_bytes);
+  }
   SAN_RETURN_NOT_OK(charge_page_verification_budget(scratch, compressed_size,
                                                     uncompressed_size));
   if (compressed_size > kMaxPayloadVerificationBytes ||
@@ -270,6 +188,8 @@ sanitize::Status verify_page_payload(std::ifstream &file,
   SAN_RETURN_NOT_OK(read_exact_payload_into(
       file, page->compressed_payload_offset, page->compressed_page_size,
       &scratch->compressed_payload));
+  SAN_RETURN_NOT_OK(
+      validate_parquet_page_checksum(*page, scratch->compressed_payload));
   if (column.codec == kCompressionUncompressed) {
     page->decompressed_page_size = page->compressed_page_size;
     page->has_decompressed_page_size = true;
@@ -281,7 +201,8 @@ sanitize::Status verify_page_payload(std::ifstream &file,
           "Parquet page payload: uncompressed size mismatch");
     }
     const auto decode_status = decode_verified_page_payload(
-        scratch->compressed_payload, column, page, dictionary);
+        scratch->compressed_payload, column, page, dictionary,
+        remaining_page_derived_budget(*scratch));
     scratch->retire_compressed_payload();
     SAN_RETURN_NOT_OK(decode_status);
     return charge_page_derived_budget(scratch, *page);
@@ -300,7 +221,8 @@ sanitize::Status verify_page_payload(std::ifstream &file,
     page->has_decompressed_page_size = true;
     page->payload_verified = true;
     const auto decode_status = decode_verified_page_payload(
-        scratch->decompressed_payload, column, page, dictionary);
+        scratch->decompressed_payload, column, page, dictionary,
+        remaining_page_derived_budget(*scratch));
     scratch->retire_decompressed_payload();
     SAN_RETURN_NOT_OK(decode_status);
     return charge_page_derived_budget(scratch, *page);
@@ -320,7 +242,8 @@ sanitize::Status verify_page_payload(std::ifstream &file,
     page->has_decompressed_page_size = true;
     page->payload_verified = true;
     const auto decode_status = decode_verified_page_payload(
-        scratch->decompressed_payload, column, page, dictionary);
+        scratch->decompressed_payload, column, page, dictionary,
+        remaining_page_derived_budget(*scratch));
     scratch->retire_decompressed_payload();
     SAN_RETURN_NOT_OK(decode_status);
     return charge_page_derived_budget(scratch, *page);
@@ -333,9 +256,10 @@ sanitize::Status verify_page_payload(std::ifstream &file,
   return {};
 }
 
-sanitize::Status
-read_page_headers_for_column(std::ifstream &file, ColumnChunkInfo *column,
-                             PageVerificationScratch *scratch) {
+sanitize::Status read_page_headers_for_column(std::ifstream &file,
+                                              ColumnChunkInfo *column,
+                                              PageVerificationScratch *scratch,
+                                              std::uint64_t data_end) {
   if (!column || !scratch || !column->has_total_compressed_size ||
       column->total_compressed_size <= 0) {
     return {};
@@ -351,18 +275,34 @@ read_page_headers_for_column(std::ifstream &file, ColumnChunkInfo *column,
   if (!has_dictionary && !column->has_data_page_offset) {
     return {};
   }
-  auto start =
-      static_cast<std::uint64_t>(has_dictionary ? column->dictionary_page_offset
-                                                : column->data_page_offset);
+  const auto selected_offset = has_dictionary ? column->dictionary_page_offset
+                                              : column->data_page_offset;
+  if (selected_offset < 0 ||
+      (column->has_data_page_offset && column->data_page_offset < 0) ||
+      (has_dictionary && column->dictionary_page_offset < 0)) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: negative page offset");
+  }
+  auto start = static_cast<std::uint64_t>(selected_offset);
   const auto data_offset =
       column->has_data_page_offset
           ? static_cast<std::uint64_t>(column->data_page_offset)
           : start;
-  if (has_dictionary) {
-    start = std::min(start, data_offset);
+  if (has_dictionary && data_offset < start) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: dictionary page follows data page");
   }
-  const auto limit =
-      start + static_cast<std::uint64_t>(column->total_compressed_size);
+  const auto compressed_size =
+      static_cast<std::uint64_t>(column->total_compressed_size);
+  if (start > data_end || compressed_size > data_end - start) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: column chunk exceeds data section");
+  }
+  const auto limit = start + compressed_size;
+  if (data_offset < start || data_offset >= limit) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: data page offset is outside column chunk");
+  }
   column->pages.clear();
   std::uint64_t offset = start;
   std::int64_t data_values = 0;
@@ -399,16 +339,48 @@ read_page_headers_for_column(std::ifstream &file, ColumnChunkInfo *column,
   return {};
 }
 
-sanitize::Status read_page_headers(std::ifstream &file, FooterInfo *info) {
+sanitize::Status read_page_headers(
+    std::ifstream &file, FooterInfo *info,
+    std::size_t max_page_bytes = kMaxPayloadVerificationBytes,
+    std::uint64_t max_row_group_bytes = kMaxDecompressedBytesPerRowGroup) {
   if (!info) {
     return sanitize::Status::Invalid("Parquet page header: internal error");
   }
+  file.clear();
+  file.seekg(0, std::ios::end);
+  const auto end_pos = file.tellg();
+  if (end_pos < static_cast<std::streampos>(8)) {
+    return sanitize::Status::Invalid("Parquet page header: file is too small");
+  }
+  const auto file_size = static_cast<std::uint64_t>(end_pos);
+  std::array<char, 8> trailer{};
+  file.seekg(-8, std::ios::end);
+  file.read(trailer.data(), static_cast<std::streamsize>(trailer.size()));
+  if (!file || std::string_view(trailer.data() + 4, 4) != kParquetMagic) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: invalid trailing magic");
+  }
+  const auto footer_len =
+      static_cast<std::uint64_t>(read_u32_le(trailer.data()));
+  if (footer_len > file_size - 8) {
+    return sanitize::Status::Invalid(
+        "Parquet page header: invalid footer range");
+  }
+  const auto data_end = file_size - 8 - footer_len;
+
   PageVerificationScratch scratch;
+  scratch.max_page_bytes =
+      std::min(max_page_bytes, kMaxPayloadVerificationBytes);
+  scratch.max_decompressed_bytes = std::min<std::uint64_t>(
+      max_row_group_bytes, kMaxDecompressedBytesPerRowGroup);
+  scratch.max_derived_bytes =
+      std::min<std::uint64_t>(max_row_group_bytes, kMaxDerivedBytesPerRowGroup);
   scratch.page_header_bytes.reserve(256);
   for (auto &row_group : info->row_groups) {
     scratch.reset_budget();
     for (auto &column : row_group.columns) {
-      SAN_RETURN_NOT_OK(read_page_headers_for_column(file, &column, &scratch));
+      SAN_RETURN_NOT_OK(
+          read_page_headers_for_column(file, &column, &scratch, data_end));
     }
   }
   return {};

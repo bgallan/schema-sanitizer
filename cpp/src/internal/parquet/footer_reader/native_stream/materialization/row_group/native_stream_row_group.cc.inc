@@ -305,7 +305,12 @@ sanitize::Status prepare_native_row_group(NativeParquetStreamState *stream,
   // vectors and prevents all row groups from being resident simultaneously.
   FooterInfo current;
   current.row_groups.push_back(std::move(row_group));
-  auto status = read_page_headers(stream->file, &current);
+  auto status =
+      read_page_headers(stream->file, &current,
+                        static_cast<std::size_t>(
+                            std::max<std::int64_t>(1, stream->max_page_bytes)),
+                        static_cast<std::uint64_t>(std::max<std::int64_t>(
+                            1, stream->max_row_group_bytes)));
   if (status.ok()) {
     status = read_page_indexes(stream->file, &current);
   }
@@ -428,6 +433,8 @@ sanitize::Status build_native_row_group_array(ArrowArrayStream *owner_stream,
     // accumulate outside the single operation memory budget.
     for (auto &worker_state : stream->parallel_column_workers) {
       worker_state.page_scratch = NativeParquetPageScratch{};
+      worker_state.page_scratch.max_page_bytes = static_cast<std::size_t>(
+          std::max<std::int64_t>(1, stream->max_page_bytes));
     }
     stream->row_group_row_offset = 0;
     ++stream->row_group_index;
@@ -445,6 +452,9 @@ const char *native_parquet_stream_last_error(ArrowArrayStream *stream) {
 }
 
 void native_parquet_stream_release(ArrowArrayStream *stream) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!stream || !stream->release) {
     return;
   }

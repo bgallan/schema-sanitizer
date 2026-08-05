@@ -13,6 +13,7 @@ from parquet_runtime_shared import recursive_arrow_type as arrow_type
 from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_generated_extreme_recursive_shapes(
     tmp_path: Path,
 ) -> None:

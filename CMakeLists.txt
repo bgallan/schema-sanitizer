@@ -207,6 +207,7 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   add_executable(
     schema_sanitizer_sanitized_ordered_executor
     cpp/tests/ordered_executor_tsan.cc
+    cpp/src/internal/memory/memory_budget.cc
     cpp/src/internal/memory/memory_pool.cc
     cpp/src/internal/memory/pool_resource.cc
     cpp/src/internal/runtime/operation_task_arena.cc

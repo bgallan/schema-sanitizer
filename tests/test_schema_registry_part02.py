@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from conftest import require_native
 from schema_registry_shared import without_detected_at as _without_detected_at
 
@@ -22,7 +23,7 @@ from schema_sanitizer.core_impl.schema_registry import (
 def test_native_schema_registry_versions_struct_to_list_drift() -> None:
     """Verify existing struct fields still version when incoming values are lists."""
     require_native()
-    pa = __import__("pyarrow")
+    pa = pytest.importorskip("pyarrow")
 
     sentence_struct = pa.struct([pa.field("text", pa.string())])
     previous_schema = pa.schema([pa.field("sentences", sentence_struct)])
@@ -39,7 +40,7 @@ def test_native_schema_registry_versions_struct_to_list_drift() -> None:
 def test_native_schema_registry_versions_lowest_incompatible_nested_field() -> None:
     """Verify nested scalar drift versions the leaf under an existing container variant."""
     require_native()
-    pa = __import__("pyarrow")
+    pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])
     string_sentiment = pa.struct([pa.field("magnitude", pa.string())])
@@ -87,7 +88,7 @@ def test_native_schema_registry_versions_lowest_incompatible_nested_field() -> N
 def test_native_schema_registry_nested_versions_are_replay_stable() -> None:
     """Verify repeated and older shapes reuse nested versions without schema growth."""
     require_native()
-    pa = __import__("pyarrow")
+    pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])
     string_sentiment = pa.struct([pa.field("magnitude", pa.string())])
@@ -122,7 +123,7 @@ def test_native_schema_registry_nested_versions_are_replay_stable() -> None:
 def test_native_schema_registry_reprocessing_prefers_exact_historical_parent_variant() -> None:
     """Verify historical registries reuse an exact ancestor before evolving a newer one."""
     require_native()
-    pa = __import__("pyarrow")
+    pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])
     string_sentiment = pa.struct([pa.field("magnitude", pa.string())])
@@ -151,7 +152,7 @@ def test_native_schema_registry_reprocessing_prefers_exact_historical_parent_var
 def test_native_schema_registry_uses_canonical_schema_as_previous_state() -> None:
     """Verify merge reconstructs previous state from the registry document."""
     require_native()
-    pa = __import__("pyarrow")
+    pa = pytest.importorskip("pyarrow")
 
     previous_schema = pa.schema([pa.field("a", pa.struct([pa.field("x", pa.string())]))])
     first = merge_schema_registry(inferred_schema=previous_schema, schema_registry=None)
@@ -180,7 +181,7 @@ def test_native_schema_registry_uses_canonical_schema_as_previous_state() -> Non
 def test_native_schema_contract_payload_handles_missing_canonical_schema() -> None:
     """Verify the native contract query is the sole canonical-schema probe."""
     require_native()
-    pa = __import__("pyarrow")
+    pa = pytest.importorskip("pyarrow")
 
     registry = merge_schema_registry(
         inferred_schema=pa.schema([pa.field("a", pa.string())]),

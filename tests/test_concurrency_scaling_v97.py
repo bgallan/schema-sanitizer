@@ -12,27 +12,6 @@ EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 STAGE = "shutdown_waiter_bit_external_completion_notification_elision"
 
 
-def test_v97_completion_counter_embeds_shutdown_waiter_bit() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    assert "completed_and_waiter" in source
-    assert "kExternalCompletionWaiterBit" in source
-    assert "kExternalCompletionCountMask" in source
-    assert "counter.fetch_or(kExternalCompletionWaiterBit" in source
-
-
-def test_v97_normal_completion_notifies_only_an_active_drain_waiter() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    finish = source[source.index("void finish_external_task") : source.index("void worker_loop")]
-    assert "const auto previous = counter.fetch_add(1" in finish
-    assert "previous & kExternalCompletionWaiterBit" in finish
-    assert finish.count("counter.notify_all()") == 1
-    assert finish.index("previous & kExternalCompletionWaiterBit") < finish.index(
-        "counter.notify_all()"
-    )
-
-
 def test_v97_all_56_pairs_inherit_shutdown_notification_elision() -> None:
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

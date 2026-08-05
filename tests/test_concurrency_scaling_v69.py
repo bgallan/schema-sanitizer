@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from diagnostics_assertions import assert_diagnostics_semantically_equal
+
 from schema_sanitizer.core_impl.execution import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
@@ -34,7 +36,7 @@ def _assert_probe_equivalent(rows: list[dict[str, Any]]) -> None:
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
 
 
 def test_v69_generic_evidence_uses_compact_packet_local_key_indices() -> None:

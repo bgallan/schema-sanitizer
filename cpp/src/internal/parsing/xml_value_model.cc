@@ -2,10 +2,11 @@
 
 #include "internal/parsing/xml/document.hh"
 
-#include <algorithm>
-#include <cctype>
-#include <memory>
-#include <string>
+#include "internal/parsing/xml/token_match.hh"
+
+#include <cstddef>
+#include <memory_resource>
+#include <new>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -15,20 +16,43 @@
 namespace sanitize::internal {
 namespace {
 
-/// Return a copy of text with XML-significant surrounding whitespace removed.
-std::string trim_copy(std::string_view text) {
-  auto is_ws = [](unsigned char c) { return std::isspace(c) != 0; };
-  while (!text.empty() && is_ws(static_cast<unsigned char>(text.front()))) {
-    text.remove_prefix(1);
+std::string_view trim_xml_whitespace(std::string_view text) noexcept {
+  while (!text.empty() && xml_tokens::is_xml_whitespace(text.front())) {
+    text.remove_prefix(1U);
   }
-  while (!text.empty() && is_ws(static_cast<unsigned char>(text.back()))) {
-    text.remove_suffix(1);
+  while (!text.empty() && xml_tokens::is_xml_whitespace(text.back())) {
+    text.remove_suffix(1U);
   }
-  return std::string(text);
+  return text;
 }
 
-void append_xml_field(XmlNode *node, XmlField field) {
+void append_scalar_field(XmlNode *node, std::string_view key,
+                         std::string_view value) {
+  XmlField field(node->resource);
+  field.key.assign(key);
   field.key_hash = sanitize::detail::hash_key64(field.key);
+  field.kind = XmlField::Kind::kScalar;
+  field.scalar.assign(value);
+  node->fields.push_back(std::move(field));
+}
+
+void append_node_field(XmlNode *node, std::string_view key,
+                       const XmlNode *child) {
+  XmlField field(node->resource);
+  field.key.assign(key);
+  field.key_hash = sanitize::detail::hash_key64(field.key);
+  field.kind = XmlField::Kind::kNode;
+  field.node = child;
+  node->fields.push_back(std::move(field));
+}
+
+void append_group_field(XmlNode *node, std::string_view key,
+                        const XmlArrayGroup *group) {
+  XmlField field(node->resource);
+  field.key.assign(key);
+  field.key_hash = sanitize::detail::hash_key64(field.key);
+  field.kind = XmlField::Kind::kGroup;
+  field.group = group;
   node->fields.push_back(std::move(field));
 }
 
@@ -57,6 +81,83 @@ const ValueView::ArrayVTable kXmlArrayVTable{.for_each = &xml_array_for_each};
 const ValueView::ObjectVTable kXmlObjectVTable{.for_each =
                                                    &xml_object_for_each};
 
+struct GroupAccumulator {
+  GroupAccumulator(std::string_view group_name,
+                   std::pmr::memory_resource *resource)
+      : name(group_name), elements(resource) {}
+
+  std::string_view name;
+  std::pmr::vector<const XmlNode *> elements;
+};
+
+sanitize::Status build_one_xml_node(XmlNode *node) {
+  const std::string_view text = trim_xml_whitespace(node->text);
+  node->groups.clear();
+  node->fields.clear();
+  node->scalar.clear();
+
+  if (node->attrs.empty() && node->children.empty()) {
+    node->scalar_only = true;
+    node->scalar_is_null = text.empty();
+    node->scalar.assign(text);
+    return sanitize::Status::OK();
+  }
+
+  node->scalar_only = false;
+  node->scalar_is_null = false;
+  node->fields.reserve(node->attrs.size() + node->children.size() +
+                       (text.empty() ? 0U : 1U));
+  for (const auto &attribute : node->attrs) {
+    std::pmr::string key(node->resource);
+    key.reserve(attribute.name.size() + 1U);
+    key.push_back('@');
+    key.append(attribute.name);
+    append_scalar_field(node, key, attribute.value);
+  }
+  if (!text.empty()) {
+    append_scalar_field(node, "#text", text);
+  }
+
+  if (node->children.size() == 1U) {
+    const XmlNode *child = node->children.front().get();
+    append_node_field(node, child->name, child);
+    return sanitize::Status::OK();
+  }
+
+  std::pmr::vector<GroupAccumulator> groups(node->resource);
+  groups.reserve(node->children.size());
+  std::pmr::unordered_map<std::string_view, std::size_t> group_index(
+      node->resource);
+  group_index.reserve(node->children.size());
+  for (const auto &child : node->children) {
+    const std::string_view name(child->name);
+    auto [iterator, inserted] = group_index.try_emplace(name, groups.size());
+    if (inserted) {
+      groups.emplace_back(name, node->resource);
+    }
+    groups[iterator->second].elements.push_back(child.get());
+  }
+
+  std::size_t repeated_groups = 0;
+  for (const auto &group : groups) {
+    if (group.elements.size() > 1U) {
+      ++repeated_groups;
+    }
+  }
+  node->groups.reserve(repeated_groups);
+  for (const auto &group : groups) {
+    if (group.elements.size() == 1U) {
+      append_node_field(node, group.name, group.elements.front());
+      continue;
+    }
+    node->groups.emplace_back(node->resource);
+    node->groups.back().elements.assign(group.elements.begin(),
+                                        group.elements.end());
+    append_group_field(node, group.name, &node->groups.back());
+  }
+  return sanitize::Status::OK();
+}
+
 } // namespace
 
 ValueView xml_field_to_value(const XmlField &field) {
@@ -82,83 +183,32 @@ ValueView xml_node_to_value(const XmlNode *node) {
   return ValueView::ObjectView(node, &kXmlObjectVTable);
 }
 
-void build_xml_node_model(XmlNode *node) {
-  for (auto &child : node->children) {
-    build_xml_node_model(child.get());
+sanitize::Status build_xml_node_model(XmlNode *node) {
+  if (!node) {
+    return sanitize::Status::Invalid("XML model root is null");
   }
-
-  const std::string text = trim_copy(node->text);
-  if (node->attrs.empty() && node->children.empty()) {
-    node->scalar_only = true;
-    node->scalar_is_null = text.empty();
-    node->scalar = text;
-    return;
-  }
-
-  node->scalar_only = false;
-  node->fields.reserve(node->attrs.size() + node->children.size() +
-                       (text.empty() ? 0u : 1u));
-  for (const auto &attr : node->attrs) {
-    append_xml_field(node, XmlField{
-                               .key = "@" + attr.name,
-                               .kind = XmlField::Kind::kScalar,
-                               .scalar = attr.value,
-                           });
-  }
-  if (!text.empty()) {
-    append_xml_field(node, XmlField{
-                               .key = "#text",
-                               .kind = XmlField::Kind::kScalar,
-                               .scalar = text,
-                           });
-  }
-
-  if (node->children.size() == 1) {
-    const XmlNode *child = node->children.front().get();
-    append_xml_field(node, XmlField{
-                               .key = child->name,
-                               .kind = XmlField::Kind::kNode,
-                               .scalar = {},
-                               .node = child,
-                           });
-    return;
-  }
-
-  std::vector<std::string_view> order;
-  order.reserve(node->children.size());
-  std::unordered_map<std::string_view, std::vector<const XmlNode *>> by_name;
-  by_name.reserve(node->children.size());
-  for (const auto &child : node->children) {
-    const std::string_view name(child->name);
-    auto [it, inserted] = by_name.try_emplace(name);
-    if (inserted) {
-      order.push_back(name);
+  try {
+    using Visit = std::pair<XmlNode *, bool>;
+    std::pmr::vector<Visit> stack(node->resource);
+    stack.reserve(64U);
+    stack.emplace_back(node, false);
+    while (!stack.empty()) {
+      const Visit visit = stack.back();
+      stack.pop_back();
+      if (visit.second) {
+        SAN_RETURN_NOT_OK(build_one_xml_node(visit.first));
+        continue;
+      }
+      stack.emplace_back(visit.first, true);
+      for (auto iterator = visit.first->children.rbegin();
+           iterator != visit.first->children.rend(); ++iterator) {
+        stack.emplace_back(iterator->get(), false);
+      }
     }
-    it->second.push_back(child.get());
-  }
-
-  for (std::string_view name : order) {
-    const auto &items = by_name[name];
-    if (items.size() == 1) {
-      append_xml_field(node, XmlField{
-                                 .key = std::string(name),
-                                 .kind = XmlField::Kind::kNode,
-                                 .scalar = {},
-                                 .node = items.front(),
-                             });
-      continue;
-    }
-    auto group = std::make_unique<XmlArrayGroup>();
-    group->elements = items;
-    const XmlArrayGroup *group_ptr = group.get();
-    node->groups.push_back(std::move(group));
-    append_xml_field(node, XmlField{
-                               .key = std::string(name),
-                               .kind = XmlField::Kind::kGroup,
-                               .scalar = {},
-                               .node = nullptr,
-                               .group = group_ptr,
-                           });
+    return sanitize::Status::OK();
+  } catch (const std::bad_alloc &) {
+    return sanitize::Status::OutOfMemory(
+        "XML model construction allocation failed");
   }
 }
 

@@ -58,13 +58,27 @@ sanitize::Status scan_inference_batch(internal::InferenceContext *ctx,
                                       InferenceProgress *progress,
                                       ExecutionContext *execution_context) {
   std::size_t interrupt_countdown = 0;
-  for (const auto &row : batch.rows) {
+  for (std::size_t row_index = 0; row_index < batch.rows.size(); ++row_index) {
+    const auto &row = batch.rows[row_index];
     if (execution_context && (interrupt_countdown++ & std::size_t{1023}) == 0) {
-      SAN_RETURN_NOT_OK(execution_context->CheckInterrupt());
+      const auto status = execution_context->CheckInterrupt();
+      if (!status.ok()) {
+        return status;
+      }
     }
-    SAN_RETURN_NOT_OK(internal::scan_shapes_row(ctx, row, opts, diagnostics));
-    SAN_RETURN_NOT_OK(internal::update_stats_row(ctx, row, opts, diagnostics));
-    record_inferred_row(progress, row);
+    auto status = internal::scan_shapes_row(ctx, row, opts, diagnostics);
+    if (status.ok()) {
+      status = internal::update_stats_row(ctx, row, opts, diagnostics);
+    }
+    if (status.ok()) {
+      record_inferred_row(progress, row);
+    }
+    if (batch.releaser) {
+      batch.releaser->ReleaseRows(row_index, 1);
+    }
+    if (!status.ok()) {
+      return status;
+    }
   }
   return sanitize::Status::OK();
 }
@@ -293,6 +307,9 @@ sanitize::Status scan_remaining_inference_serial(
     if (batch.rows.empty()) {
       return sanitize::Status::OK();
     }
+    if (diagnostics) {
+      diagnostics->merge_reader(batch.reader_diagnostics);
+    }
     SAN_RETURN_NOT_OK(scan_inference_batch(ctx, batch, opts, diagnostics,
                                            progress, execution_context));
   }
@@ -313,6 +330,9 @@ sanitize::Status scan_inference_parallel(
   SAN_ASSIGN_OR_RAISE(RowBatch first_batch, frontend.next_batch(wanted_rows));
   if (first_batch.rows.empty()) {
     return sanitize::Status::OK();
+  }
+  if (diagnostics) {
+    diagnostics->merge_reader(first_batch.reader_diagnostics);
   }
   if (!should_parallelize_inference(frontend_name, first_batch, policy)) {
     return scan_remaining_inference_serial(frontend, ctx, opts, diagnostics,
@@ -341,8 +361,9 @@ sanitize::Status scan_inference_parallel(
   RowBatch batch = std::move(first_batch);
   while (true) {
     SAN_ASSIGN_OR_RAISE(auto row_owner,
-                        internal::make_owned_row_batch(std::move(batch.rows),
-                                                       std::move(batch.owner)));
+                        internal::make_owned_row_batch(
+                            std::move(batch.rows), std::move(batch.owner),
+                            std::move(batch.releaser)));
     std::size_t dispatch_index = 0;
     std::size_t pending_packets = 0;
     auto limits = internal::materialization_packet_limits(inference_policy, 1);
@@ -414,6 +435,9 @@ sanitize::Status scan_inference_parallel(
     if (batch.rows.empty()) {
       break;
     }
+    if (diagnostics) {
+      diagnostics->merge_reader(batch.reader_diagnostics);
+    }
   }
   return executor->FinishSubmission();
 }
@@ -435,6 +459,12 @@ sanitize::Result<LogicalSchema> infer_schema_from_frontend(
     bool *out_consumed, ExecutionContext *execution_context,
     std::shared_ptr<void> operation_memory_pool,
     std::shared_ptr<internal::OperationTaskArena> task_arena) {
+  if (diagnostics) {
+    // Some registry routes probe more than once while converging a schema.
+    // Keep reader counters scoped to the current canonical pass, matching the
+    // existing inferred_rows/inferred_bytes replacement semantics.
+    diagnostics->reader = ReaderResourceDiagnostics{};
+  }
   if (!operation_memory_pool) {
     return sanitize::Status::Invalid(
         "infer_schema_from_frontend: operation memory pool is null");
@@ -462,6 +492,9 @@ sanitize::Result<LogicalSchema> infer_schema_from_frontend(
       SAN_ASSIGN_OR_RAISE(RowBatch batch, frontend.next_batch(want));
       if (batch.rows.empty()) {
         break;
+      }
+      if (diagnostics) {
+        diagnostics->merge_reader(batch.reader_diagnostics);
       }
       SAN_RETURN_NOT_OK(scan_inference_batch(&ctx, batch, opts, diagnostics,
                                              &progress, execution_context));

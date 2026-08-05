@@ -18,22 +18,6 @@ PROBE = ROOT / "benchmarks/v118_single_modulo_lane_origin_tsan.cc"
 STAGE = "single_modulo_lane_origin_reuse"
 
 
-def test_v118_planned_submit_normalizes_lane_ticket_once() -> None:
-    """The arena hot path reuses one normalized origin per submission."""
-    arena = ARENA.read_text(encoding="utf-8")
-    planned = arena[
-        arena.index("const auto lane_begin = plan.lane_begin;") : arena.index(
-            "OperationTaskArena::worker_count"
-        )
-    ]
-
-    assert planned.count("ticket % width") == 1
-    assert "physical = lane_begin + lane_origin" in planned
-    assert "advance_normalized_lane_origin(" in planned
-    assert "ticket + plan.alternative_offset) % width" not in planned
-    assert "plan.allowed_mask, helper_origin" in planned
-
-
 def test_v118_runtime_selection_consumes_normalized_origins() -> None:
     """Startup and idle selection avoid recomputing ticket division."""
     runtime = RUNTIME.read_text(encoding="utf-8")

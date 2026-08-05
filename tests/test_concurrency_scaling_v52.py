@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -96,7 +96,7 @@ def test_v52_zero_copy_packets_preserve_single_oracle(tmp_path: Path) -> None:
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
     assert multi.schema_registry_json == single.schema_registry_json
     assert single_output.read_bytes() == multi_output.read_bytes()
     assert_logical_files_equivalent(single_output, multi_output)

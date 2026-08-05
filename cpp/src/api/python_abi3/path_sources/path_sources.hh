@@ -8,10 +8,12 @@
 
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "frontends/csv/source_projection.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/row_stream.hh"
 #include "sanitize/core/status.hh"
@@ -36,6 +38,7 @@ struct PathSourceInput {
   sanitize::ChunkSourcePtr chunk_source;
   std::vector<std::string> paths;
   std::vector<std::string> source_names;
+  sanitize::internal::CsvSourceProjectionSetPtr csv_source_projections;
   std::int64_t input_size_hint_bytes = 0;
 };
 
@@ -76,6 +79,11 @@ bool parse_path_sources_view(PyObject *sources_obj, ParsedPathSources *out);
 
 PyObject *py_path_source_plan_create(PyObject *, PyObject *);
 
+sanitize::Result<sanitize::internal::CsvSourceProjectionSetPtr>
+csv_source_projections_from_path_sources(
+    std::span<const PathSourceSpec> sources,
+    const sanitize::PreparedOptionsPtr &prepared);
+
 sanitize::Result<PathSourceInput>
 path_source_input(const sanitize::PreparedOptionsPtr &prepared,
                   const PathSourceSpec &source);
@@ -88,8 +96,7 @@ next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
 sanitize::Result<PathSourceInput>
 path_source_group_input(const std::vector<PathSourceSpec> &sources,
                         const PathSourceGroupPlan &group,
-                        std::string_view input_text_encoding,
-                        std::int64_t memory_limit_bytes);
+                        const sanitize::PreparedOptionsPtr &prepared);
 
 sanitize::Result<sanitize::FrontendHandle> path_source_frontend(
     PathSourceInput input, const sanitize::Options &options,
@@ -117,6 +124,8 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
     schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources = false,
-    const sanitize::LogicalSchema *previous_schema = nullptr);
+    const sanitize::LogicalSchema *previous_schema = nullptr,
+    sanitize::SchemaEvolutionMode schema_evolution =
+        sanitize::SchemaEvolutionMode::kAdditive);
 
 } // namespace core_abi3_internal

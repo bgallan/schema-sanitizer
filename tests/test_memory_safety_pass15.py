@@ -9,8 +9,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_repository_has_no_environment_configuration_hooks() -> None:
-    """No source, test, build, example, or workflow configures via process state."""
+def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
+    """Only documented resource-hardening modules may read process environment."""
     forbidden = (
         "os." + "getenv",
         "os." + "environ",
@@ -53,7 +53,43 @@ def test_repository_has_no_environment_configuration_hooks() -> None:
             line.strip() == "env:" for line in text.splitlines()
         ):
             yaml_env_blocks.append(str(path.relative_to(ROOT)))
-    assert offenders == []
+    allowed_environment_files = {
+        "src/schema_sanitizer/core_impl/allocator_control.py",
+        "src/schema_sanitizer/core_impl/cross_process_memory.py",
+        "src/schema_sanitizer/core_impl/cross_process_storage.py",
+        "src/schema_sanitizer/core_impl/path_identity.py",
+        "src/schema_sanitizer/core_impl/process_resources.py",
+        "src/schema_sanitizer/core_impl/safety_margins.py",
+        "src/schema_sanitizer/core_impl/temporary_janitor.py",
+        "tests/test_concurrency_memory_hardening_pass4.py",
+        "tests/test_concurrency_memory_hardening_pass5.py",
+        "tests/test_memory_safety_pass31.py",
+        "tests/test_memory_safety_pass35.py",
+        "tests/test_memory_safety_pass36.py",
+        "tests/test_memory_safety_pass41.py",
+    }
+    assert set(offenders) <= allowed_environment_files
+    allowed_names = {
+        "SCHEMA_SANITIZER_COORDINATION_DIR",
+        "SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS",
+        "SCHEMA_SANITIZER_CROSS_PROCESS_TEMP_RESERVATIONS",
+        "SCHEMA_SANITIZER_MALLOC_TRIM",
+        "SCHEMA_SANITIZER_MAX_OPEN_FILES",
+        "SCHEMA_SANITIZER_MAX_PROJECT_THREADS",
+        "SCHEMA_SANITIZER_TELEMETRY_TUNING",
+    }
+    production = "\n".join(
+        (ROOT / relative).read_text(encoding="utf-8")
+        for relative in sorted(allowed_environment_files)
+        if relative.startswith("src/")
+    )
+    configured_names = {
+        token.split('"', 1)[0]
+        for token in production.split('"SCHEMA_SANITIZER_')[1:]
+        if '"' in token
+    }
+    configured_names = {f"SCHEMA_SANITIZER_{name}" for name in configured_names}
+    assert configured_names == allowed_names
     assert yaml_env_blocks == []
 
 

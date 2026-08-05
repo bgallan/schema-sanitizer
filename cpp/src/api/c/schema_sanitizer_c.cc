@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "internal/abi/schema_sanitizer_c_bridge.hh"
+#include "internal/runtime/process_identity.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/options/options.hh"
 #include "sanitize/options/options_io.hh"
@@ -129,5 +130,7 @@ int schema_sanitizer_options_prepare_bytes(
 }
 void schema_sanitizer_prepared_options_free(
     schema_sanitizer_prepared_options *p) {
+  if (!sanitize::internal::runtime_owner_process())
+    return;
   delete p;
 }

@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
 from conftest import require_native
 
 import schema_sanitizer as ss
@@ -220,6 +221,7 @@ def test_process_governor_allows_suboperations_without_double_reserving_budget()
 
 def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None:
     """Lazy analytical output owns its operation until the iterator closes."""
+    pytest.importorskip("pyarrow")
     require_native()
     source = tmp_path / "lazy.jsonl"
     source.write_text('{"value":1}\n{"value":2}\n', encoding="utf-8")

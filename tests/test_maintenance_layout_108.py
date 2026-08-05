@@ -39,8 +39,15 @@ def test_directory_discovery_has_one_input_model() -> None:
     source = owner.read_text(encoding="utf-8")
     assert "class DirectoryDiscovery" in source
     assert "class DirectoryDiscoveryBuilder" in source
-    assert "class RemoteFile" in source
+    assert "from .remote_files import RemoteFile" in source
     assert "def split_parent_child" in source
+
+    remote_files = SRC / "input_impl/remote_files.py"
+    remote_source = remote_files.read_text(encoding="utf-8")
+    assert remote_files.is_file()
+    assert "class RemoteFile" in remote_source
+    assert "def remote_file_sort_key" in remote_source
+    assert len(remote_source.splitlines()) <= 500
     assert "class RemoteDirectoryDiscovery" not in source
     assert "class LocalDirectoryDiscovery" not in source
 

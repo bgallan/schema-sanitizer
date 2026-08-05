@@ -10,6 +10,7 @@
 namespace sanitize::internal::json_scan {
 
 inline constexpr std::size_t kMaxJsonNestingDepth = 512;
+inline constexpr std::size_t kMaxJsonObjectFields = 65'536;
 
 struct Cursor {
   const char *p = nullptr;

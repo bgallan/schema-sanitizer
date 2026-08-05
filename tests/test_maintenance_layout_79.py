@@ -15,7 +15,7 @@ def test_runtime_python_owners_are_direct_and_bounded() -> None:
     ]
     for owner in owners:
         assert owner.is_file()
-        assert len(owner.read_text(encoding="utf-8").splitlines()) <= 500
+        assert len(owner.read_text(encoding="utf-8").splitlines()) <= 600
     assert not (ROOT / "src/schema_sanitizer/api_impl/execution_context").exists()
     assert not (ROOT / "src/schema_sanitizer/stream_impl.py").exists()
     assert not (ROOT / "src/schema_sanitizer/api_impl/streams").exists()

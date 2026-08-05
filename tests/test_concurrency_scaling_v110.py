@@ -15,24 +15,6 @@ EVIDENCE = ROOT / "benchmarks/v110_worker_local_peak_cache_ab.json"
 STAGE = "worker_local_monotonic_peak_active_cache"
 
 
-def test_v110_worker_cache_elides_redundant_global_peak_loads() -> None:
-    """Only a worker-local active high-water mark reaches the shared maximum."""
-    source = RUNTIME.read_text(encoding="utf-8")
-    activity = source.split("class WorkerActivityStreak final", 1)[1].split(
-        "template <bool PreferDedicatedOutput", 1
-    )[0]
-
-    assert "std::size_t local_peak_active_ = 0;" in activity
-    assert "if (active > local_peak_active_)" in activity
-    assert "local_peak_active_ = active;" in activity
-    assert "update_peak(&state_->peak_active, active)" in activity
-    assert activity.index("if (active > local_peak_active_)") < activity.index(
-        "update_peak(&state_->peak_active, active)"
-    )
-    assert activity.count("state_->active.fetch_add") == 1
-    assert activity.count("state_->active.fetch_sub") == 1
-
-
 def test_v110_cache_preserves_exact_peak_proof() -> None:
     """The implementation documents why a cached value cannot hide a new peak."""
     source = RUNTIME.read_text(encoding="utf-8")

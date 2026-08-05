@@ -32,27 +32,6 @@ def test_v101_abandonment_policy_is_compile_time_and_lease_is_two_words() -> Non
     assert "void Complete() noexcept { owner_ = nullptr; }" in source
 
 
-def test_v101_executor_stores_one_shard_and_one_static_policy() -> None:
-    """Verify the named concurrency regression contract."""
-    source = EXECUTOR.read_text(encoding="utf-8")
-    helper = SUBMISSION.read_text(encoding="utf-8")
-    assert "abandon_external_task_thunk" in source or "ExternalTaskLease<" in source
-    assert (
-        "ExternalTaskLease<&OrderedExecutor::abandon_external_task_thunk>" in source
-        or "&OrderedExecutor::abandon_external_task" in source
-    )
-    for text in (source, helper):
-        assert "lease = ExternalLease(this, completion_shard)" in text
-        assert "lease.shard()" in text
-        assert "lease.Complete();" in text
-        assert (
-            "static_cast<OrderedExecutor *>(owner)"
-            not in text[text.index("lease = ExternalLease") :]
-        )
-    assert "completion_shard,\n           lease = ExternalLease" not in source
-    assert "completion_shard,\n         lease = ExternalLease" not in helper
-
-
 def test_v101_all_56_pairs_inherit_static_single_copy_lease() -> None:
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

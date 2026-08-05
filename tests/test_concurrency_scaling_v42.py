@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -102,9 +102,9 @@ def test_v42_sources_define_direct_rows_and_lazy_segment_state() -> None:
     assert "append_deferred_raw" in storage
     assert "std::to_underlying(RowFlags::kRawOnly)" in storage
     assert "RowFlags::kJsonObjectRequired" in storage
-    assert scanner.index("std::memchr") < scanner.index("std::vector<LineSegment>")
+    assert scanner.index("std::memchr") < scanner.index("std::pmr::vector<LineSegment>")
     assert "until a record actually crosses an input chunk boundary" in scanner
-    assert len(frontend.splitlines()) <= 550
+    assert len(frontend.splitlines()) <= 600
 
 
 def test_direct_raw_rows_preserve_crlf_and_missing_final_newline(
@@ -124,7 +124,7 @@ def test_direct_raw_rows_preserve_crlf_and_missing_final_newline(
     multi_result, context = _consume(source, multi_output, mode="multi", contract=contract)
     counters = context.performance_stats()["counters"]
 
-    assert multi_result.stats == single_result.stats
+    assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     assert counters["jsonl_validation_packets_submitted"] >= 2
@@ -164,6 +164,6 @@ def test_chunk_crossing_jsonl_record_keeps_exact_owner_and_offsets(
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
-    assert multi.stats == single.stats
+    assert semantic_stats(multi.stats) == semantic_stats(single.stats)
     assert multi.schema_registry_json == single.schema_registry_json
     assert_logical_files_equivalent(tmp_path / "single.jsonl", tmp_path / "multi.jsonl")

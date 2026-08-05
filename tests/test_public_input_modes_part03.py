@@ -335,7 +335,7 @@ def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
     second = provider.next_sources()
     assert [source_file for _factory, source_file in second or []] == ["file-2", "file-3"]
     assert opened == ["file-0.parquet", "file-1.parquet", "file-2.parquet", "file-3.parquet"]
-    assert closed == ["file-0.parquet", "file-1.parquet"]
+    assert closed == ["file-1.parquet", "file-0.parquet"]
 
     third = provider.next_sources()
     assert [source_file for _factory, source_file in third or []] == ["file-4"]
@@ -346,14 +346,14 @@ def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
         "file-3.parquet",
         "file-4.parquet",
     ]
-    assert closed == ["file-0.parquet", "file-1.parquet", "file-2.parquet", "file-3.parquet"]
+    assert closed == ["file-1.parquet", "file-0.parquet", "file-3.parquet", "file-2.parquet"]
 
     assert provider.next_sources() is None
     assert closed == [
-        "file-0.parquet",
         "file-1.parquet",
-        "file-2.parquet",
+        "file-0.parquet",
         "file-3.parquet",
+        "file-2.parquet",
         "file-4.parquet",
     ]
 

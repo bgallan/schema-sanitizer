@@ -26,7 +26,8 @@ def test_remote_directory_discovery_has_one_accumulator_owner() -> None:
     for name in ("azure.py", "gcs.py", "s3.py"):
         provider = SRC / "remote_impl/providers" / name
         source = provider.read_text(encoding="utf-8")
-        assert "DirectoryDiscoveryBuilder[RemoteFile].from_uris(uris)" in source
+        assert "DirectoryDiscoveryBuilder[RemoteFile].from_uris(" in source
+        assert "metadata_budget=current_directory_metadata_budget(memory_limit_bytes)" in source
         assert "discovery.add(child_uris, remote_file)" in source
         assert "return discovery.finish()" in source
         assert "def _parent_child" not in source

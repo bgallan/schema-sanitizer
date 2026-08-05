@@ -183,8 +183,8 @@ def test_invalid_memory_limits_fail_before_native_execution() -> None:
             normalize_memory_limit(value)
 
 
-def test_repository_contains_no_environment_access() -> None:
-    """Runtime, tests, examples, and project utilities never inspect process environment."""
+def test_repository_environment_access_is_limited_to_resource_hardening() -> None:
+    """Only documented resource-hardening owners inspect process environment."""
     root = Path(__file__).resolve().parents[1]
     ignored = {".git", "build-pass14", "__pycache__", ".pytest_cache"}
     offenders: list[str] = []
@@ -213,4 +213,19 @@ def test_repository_contains_no_environment_access() -> None:
         text = path.read_text(encoding="utf-8", errors="ignore")
         if any(token in text for token in _ENV_ACCESS_TOKENS):
             offenders.append(str(path.relative_to(root)))
-    assert offenders == []
+    allowed_environment_files = {
+        "src/schema_sanitizer/core_impl/allocator_control.py",
+        "src/schema_sanitizer/core_impl/cross_process_memory.py",
+        "src/schema_sanitizer/core_impl/cross_process_storage.py",
+        "src/schema_sanitizer/core_impl/process_resources.py",
+        "src/schema_sanitizer/core_impl/path_identity.py",
+        "src/schema_sanitizer/core_impl/safety_margins.py",
+        "src/schema_sanitizer/core_impl/temporary_janitor.py",
+        "tests/test_concurrency_memory_hardening_pass4.py",
+        "tests/test_concurrency_memory_hardening_pass5.py",
+        "tests/test_memory_safety_pass31.py",
+        "tests/test_memory_safety_pass35.py",
+        "tests/test_memory_safety_pass36.py",
+        "tests/test_memory_safety_pass41.py",
+    }
+    assert set(offenders) <= allowed_environment_files

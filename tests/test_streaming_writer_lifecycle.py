@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from schema_sanitizer.errors import SchemaSanitizerError
+
 
 def _assert_python_stream_sink_call(
     data: object,
@@ -374,7 +376,7 @@ def test_streaming_writer_failure_preserves_writer_exception_when_cleanup_fails(
         """Return fail writer for the test."""
         raise ValueError("writer failed")
 
-    with pytest.raises(ValueError, match="writer failed"):
+    with pytest.raises(SchemaSanitizerError, match="writer failed") as caught:
         stream_output.write_table_or_stream(
             object(),
             tmp_path / "out",
@@ -383,6 +385,7 @@ def test_streaming_writer_failure_preserves_writer_exception_when_cleanup_fails(
             source="python",
             write_stream=fail_writer,
         )
+    assert isinstance(caught.value.__cause__, ValueError)
 
 
 def test_streaming_writer_stream_property_error_closes_sink(monkeypatch, tmp_path: Path) -> None:

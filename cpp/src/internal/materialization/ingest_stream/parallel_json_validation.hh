@@ -5,6 +5,7 @@
 #include "internal/materialization/ingest_stream/parallel_packets.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "sanitize/core/status.hh"
+#include "sanitize/options/options.hh"
 
 #include "internal/runtime/thread_compat.hh"
 #include <cstddef>
@@ -28,7 +29,7 @@ public:
       std::shared_ptr<ParallelJsonRowValidator>>
   Make(std::shared_ptr<void> operation_memory_pool,
        std::shared_ptr<const sanitize::CompiledPlan> plan,
-       const ExecutionPolicy &policy);
+       sanitize::OnErrorPolicy on_error, const ExecutionPolicy &policy);
 
   // Validates every row before returning the packet. A failure is the first
   // scanner/parser error inside this contiguous packet.
@@ -39,12 +40,13 @@ public:
 private:
   struct WorkerState;
 
-  ParallelJsonRowValidator(
-      std::shared_ptr<void> operation_memory_pool,
-      std::shared_ptr<const sanitize::CompiledPlan> plan) noexcept;
+  ParallelJsonRowValidator(std::shared_ptr<void> operation_memory_pool,
+                           std::shared_ptr<const sanitize::CompiledPlan> plan,
+                           sanitize::OnErrorPolicy on_error) noexcept;
 
   std::shared_ptr<void> operation_memory_pool_;
   std::shared_ptr<const sanitize::CompiledPlan> plan_;
+  sanitize::OnErrorPolicy on_error_ = sanitize::OnErrorPolicy::kStop;
   bool plan_order_candidate_ = false;
   std::vector<std::unique_ptr<WorkerState>> workers_;
 };

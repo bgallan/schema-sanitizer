@@ -115,7 +115,7 @@ def test_parquet_stream_result_drop_closes_reader(tmp_path: Path) -> None:
     pq.write_table(sample_table(pa), path)
 
     out = ExecutionContext().to_sink(path, sink="stream", format="parquet")
-    assert getattr(out, "_keepalive", None) is None
+    assert getattr(out, "_keepalive", None) is not None
 
     del out
     gc.collect()
@@ -133,7 +133,7 @@ def test_parquet_stream_survives_sink_result_drop(tmp_path: Path) -> None:
     out = ExecutionContext().to_sink(path, sink="stream", format="parquet")
     stream = out.stream
     assert stream is not None
-    assert getattr(stream, "_keepalive", None) is None
+    assert getattr(stream, "_keepalive", None) is not None
 
     del out
     gc.collect()

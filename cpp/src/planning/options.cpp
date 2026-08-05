@@ -87,6 +87,10 @@ static sanitize::Status validate_option_values(const Options &opts) {
         "field_name_policy must be preserve, lower_alpha, or lower_snake");
   }
 
+  if (opts.csv_header_mode != "exact" && opts.csv_header_mode != "union") {
+    return sanitize::Status::Invalid("csv_header_mode must be exact or union");
+  }
+
   if (!opts.csv_delimiter.empty() && opts.csv_delimiter.size() != 1) {
     return sanitize::Status::Invalid(
         "csv_delimiter must be a 1-character string");

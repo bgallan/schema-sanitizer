@@ -18,7 +18,11 @@ sanitize::Status ParallelIngestStreamSource::check_interrupt() const {
   if (!owned_ctx_keepalive_) {
     return sanitize::Status::OK();
   }
-  return owned_ctx_keepalive_->CheckInterrupt();
+  auto status = owned_ctx_keepalive_->CheckInterrupt();
+  if (!status.ok() && status.code() == sanitize::StatusCode::kCancelled) {
+    diagnostics_.record_cancellation("interrupt");
+  }
+  return status;
 }
 
 sanitize::Result<bool>
@@ -92,9 +96,11 @@ ParallelIngestStreamSource::dispatch_available(const BatchLimits &limits) {
         return *deferred_frontend_status_;
       }
       auto current = std::move(next).ValueOrDie();
+      diagnostics_.merge_reader(current.reader_diagnostics);
       current_dispatch_index_ = 0;
-      auto owned_batch_result = make_owned_row_batch(std::move(current.rows),
-                                                     std::move(current.owner));
+      auto owned_batch_result = make_owned_row_batch(
+          std::move(current.rows), std::move(current.owner),
+          std::move(current.releaser));
       if (!owned_batch_result.ok()) {
         deferred_frontend_status_ = owned_batch_result.status();
         clear_column_partition_assemblies();

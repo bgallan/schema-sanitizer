@@ -8,16 +8,24 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ...core_impl.memory_budget import memory_budget
+from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.sync_retry import retry_sync
+from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     RemoteFile,
+    current_directory_metadata_budget,
     split_parent_child,
 )
+from ..file_streams import write_sync_reader_to_file
 from ..sync_http import TRANSFER_CHUNK_BYTES
-from ..upload_policy import read_upload_part, remote_upload_policy
+from ..upload_policy import (
+    read_upload_part,
+    release_upload_payload,
+    remote_upload_policy,
+)
 from .s3 import parse_uri
 
 
@@ -80,7 +88,9 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
             return client.head_object(Bucket=ref.bucket, Key=ref.key)
 
         try:
-            response = retry_sync(request, retries=retries, should_retry=_retryable)
+            response = retry_sync(
+                request, retries=retries, should_retry=_retryable, throttle_key="s3"
+            )
         except Exception as exc:
             status, code = _error_identity(exc)
             if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
@@ -95,15 +105,24 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
     return RemoteFile(uri, Path(ref.key).name, size)
 
 
-def download_file_with_client(client: Any, file: RemoteFile, local_path: str) -> None:
-    """Download one object through an already-open blocking S3 client."""
+def download_file_with_client(
+    client: Any,
+    file: RemoteFile,
+    local_path: str,
+    *,
+    storage_reservation: StreamingStorageReservation | None = None,
+) -> None:
+    """Download one object while reserving local storage before writes."""
     ref = parse_uri(file.uri)
     response = client.get_object(Bucket=ref.bucket, Key=ref.key)
     body = response["Body"]
     try:
-        with Path(local_path).open("wb") as file_handle:
-            while chunk := body.read(TRANSFER_CHUNK_BYTES):
-                file_handle.write(chunk)
+        write_sync_reader_to_file(
+            body.read,
+            local_path,
+            chunk_bytes=TRANSFER_CHUNK_BYTES,
+            storage_reservation=storage_reservation,
+        )
     finally:
         close = getattr(body, "close", None)
         if close is not None:
@@ -115,6 +134,7 @@ def download_file(
     local_path: str,
     *,
     memory_limit_bytes: int | None = None,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one S3 object on the calling thread with bounded replay."""
     file = RemoteFile(uri, Path(parse_uri(uri).key).name)
@@ -125,10 +145,12 @@ def download_file(
         def request() -> None:
             """Truncate the destination before each blocking GET attempt."""
             target.unlink(missing_ok=True)
-            download_file_with_client(client, file, local_path)
+            download_file_with_client(
+                client, file, local_path, storage_reservation=storage_reservation
+            )
 
         try:
-            retry_sync(request, retries=retries, should_retry=_retryable)
+            retry_sync(request, retries=retries, should_retry=_retryable, throttle_key="s3")
         except BaseException:
             target.unlink(missing_ok=True)
             raise
@@ -176,11 +198,16 @@ def _multipart_upload(
                     Body=payload,
                 )
 
-            response = retry_sync(send_part, retries=retries, should_retry=_retryable)
-            etag = response.get("ETag") if isinstance(response, dict) else None
-            if not isinstance(etag, str) or not etag:
-                raise RuntimeError(f"S3 multipart part {part_number} did not return an ETag")
-            parts.append({"ETag": etag, "PartNumber": part_number})
+            try:
+                response = retry_sync(
+                    send_part, retries=retries, should_retry=_retryable, throttle_key="s3"
+                )
+                etag = response.get("ETag") if isinstance(response, dict) else None
+                if not isinstance(etag, str) or not etag:
+                    raise RuntimeError(f"S3 multipart part {part_number} did not return an ETag")
+                parts.append({"ETag": etag, "PartNumber": part_number})
+            finally:
+                release_upload_payload(payload)
         final_stat = source.stat()
         if (final_stat.st_size, final_stat.st_mtime_ns) != (
             initial_stat.st_size,
@@ -201,7 +228,7 @@ def _multipart_upload(
                 UploadId=upload_id,
             )
         except BaseException as abort_exc:
-            exc.add_note(f"S3 multipart abort also failed: {abort_exc!r}")
+            add_bounded_note(exc, "S3 multipart abort also failed", abort_exc)
         raise
 
 
@@ -230,7 +257,7 @@ def upload_file(
             with Path(local_path).open("rb") as file_handle:
                 client.put_object(Bucket=ref.bucket, Key=ref.key, Body=file_handle)
 
-        retry_sync(request, retries=retries, should_retry=_retryable)
+        retry_sync(request, retries=retries, should_retry=_retryable, throttle_key="s3")
 
 
 def _list_page(client: Any, bucket: str, prefix: str, token: str | None) -> dict[str, Any]:
@@ -256,6 +283,7 @@ def list_files(
     ref = parse_uri(uri)
     prefix = ref.key.rstrip("/") + "/"
     files: list[RemoteFile] = []
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     retries = memory_budget(memory_limit_bytes).async_retries
     with open_client() as client:
         token: str | None = None
@@ -264,6 +292,7 @@ def list_files(
                 lambda: _list_page(client, ref.bucket, prefix, token),
                 retries=retries,
                 should_retry=_retryable,
+                throttle_key="s3",
             )
             for item in payload.get("Contents", ()):
                 key = item.get("Key")
@@ -273,7 +302,9 @@ def list_files(
                 if not relative or "/" in relative or not name_matches(relative, suffixes):
                     continue
                 size = item.get("Size") if isinstance(item.get("Size"), int) else None
-                files.append(RemoteFile(f"s3://{ref.bucket}/{key}", relative, size))
+                remote_file = RemoteFile(f"s3://{ref.bucket}/{key}", relative, size)
+                metadata_budget.charge_file(remote_file)
+                files.append(remote_file)
             if not payload.get("IsTruncated"):
                 break
             token = payload.get("NextContinuationToken")
@@ -291,7 +322,10 @@ def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Discover requested S3 child directories serially in canonical order."""
     accepted = normalize_extensions(suffixes)
-    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(uris)
+    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
+        uris,
+        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+    )
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
     for uri in uris:
         ref = parse_uri(uri)
@@ -310,6 +344,7 @@ def directories_containing_files(
                     lambda: _list_page(client, bucket, prefix, token),
                     retries=retries,
                     should_retry=_retryable,
+                    throttle_key="s3",
                 )
                 for item in payload.get("Contents", ()):
                     key = item.get("Key")

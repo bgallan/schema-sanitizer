@@ -17,8 +17,14 @@ IngestStreamSource::BatchLimits IngestStreamSource::batch_limits() const {
       rows_per_batch_from_memory_limit(memory_limit, observed_bytes_per_row_);
   const int64_t target_bytes =
       batch_target_bytes_from_memory_limit(memory_limit);
-  return BatchLimits{
-      .max_rows = max_rows, .max_bytes = target_bytes, .capacity = max_rows};
+  // Output rows may adapt down to their observed Arrow footprint, but the
+  // frontend also retains parser metadata and source owners per row. Keep its
+  // batch capacity on the conservative initial estimate so a narrow output
+  // schema cannot make the next input batch exceed the operation budget.
+  const int64_t input_capacity = rows_per_batch_from_memory_limit(memory_limit);
+  return BatchLimits{.max_rows = max_rows,
+                     .max_bytes = target_bytes,
+                     .capacity = input_capacity};
 }
 
 bool IngestStreamSource::appender_is_full(const BatchLimits &limits) const {
@@ -54,6 +60,9 @@ IngestStreamSource::ensure_current_row(const BatchLimits &limits) {
   }
   cur_ = std::move(next).ValueOrDie();
   cur_i_ = 0;
+  if (diagnostics_) {
+    diagnostics_->merge_reader(cur_.reader_diagnostics);
+  }
   if (telemetry_keepalive_) {
     telemetry_keepalive_->AddCounter(PerformanceCounter::kFrontendBatches);
     telemetry_keepalive_->AddCounter(
@@ -85,7 +94,12 @@ sanitize::Status IngestStreamSource::check_interrupt() const {
   if (!owned_ctx_keepalive_) {
     return sanitize::Status::OK();
   }
-  return owned_ctx_keepalive_->CheckInterrupt();
+  auto status = owned_ctx_keepalive_->CheckInterrupt();
+  if (!status.ok() && status.code() == sanitize::StatusCode::kCancelled &&
+      diagnostics_) {
+    diagnostics_->record_cancellation("interrupt");
+  }
+  return status;
 }
 
 sanitize::Status IngestStreamSource::fill_appender(const BatchLimits &limits) {
@@ -102,11 +116,15 @@ sanitize::Status IngestStreamSource::fill_appender(const BatchLimits &limits) {
       break;
     }
 
-    const RowRef &row = cur_.rows[cur_i_++];
+    const auto current_row_index = cur_i_++;
+    const RowRef &row = cur_.rows[current_row_index];
     const int64_t rows_before = batch_appender_length(app_.get());
     const int64_t skipped_before =
         diagnostics_ ? diagnostics_->skipped_rows : 0;
     auto result = append_current_row(row);
+    if (cur_.releaser) {
+      cur_.releaser->ReleaseRows(current_row_index, 1);
+    }
     if (!result.ok()) {
       return result.status();
     }

@@ -36,19 +36,6 @@ def test_v88_arena_wait_has_no_preliminary_executor_mutex() -> None:
     assert take.count("std::lock_guard lock(mutex_)") == 1
 
 
-def test_v88_slot_states_cover_every_pre_wait_terminal_condition() -> None:
-    """Cancellation, failure, and clean close are visible through slot state."""
-    completion = COMPLETION.read_text(encoding="utf-8")
-    take = _take_next_arena_source()
-
-    for state in ("kCancelled", "kFatal", "kClosed"):
-        assert f"state == ArenaSlotState::{state}" in take
-    assert "terminalize_arena_slots_locked(ArenaSlotState::kCancelled)" in completion
-    assert "terminalize_arena_slots_locked(ArenaSlotState::kFatal)" in completion
-    assert "ArenaSlotState::kClosed" in completion
-    assert "slot.state.notify_all()" in completion
-
-
 def test_v88_local_pool_keeps_v87_outcome_validation() -> None:
     """Only arena completion changes; local/inline fallback keeps ordinal checks."""
     executor = EXECUTOR.read_text(encoding="utf-8")

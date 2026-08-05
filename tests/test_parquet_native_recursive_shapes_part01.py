@@ -11,6 +11,7 @@ from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 # Split from test_parquet_native_recursive_shapes.py: test_native_parquet_stream_materializes_list_list_map_values, test_native_parquet_stream_materializes_list_list_map_struct_values, test_native_parquet_stream_materializes_list_list_map_struct_map_values, ...
 
 
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_list_list_map_values(
     tmp_path: Path,
 ) -> None:

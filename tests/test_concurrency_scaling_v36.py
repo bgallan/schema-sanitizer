@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 
@@ -113,6 +113,6 @@ def test_wide_rows_repeat_under_low_budget_without_output_drift(tmp_path: Path) 
             memory_limit_bytes=_MEMORY_LIMIT,
         )
         gc.collect()
-        assert multi_result.stats == single_result.stats
+        assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
         assert multi_result.schema_registry_json == single_result.schema_registry_json
         assert_logical_files_equivalent(single, multi)

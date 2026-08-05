@@ -77,23 +77,6 @@ def test_v54_shallow_remote_output_steal_preserves_thread_budget(
     assert submitted == workers + expected_outputs + workers - 1
 
 
-def test_v54_scheduler_is_queue_bounded_and_keeps_v49_telemetry_gate() -> None:
-    """Low-core preference adds no scan to queues lacking dedicated output."""
-    root = Path(__file__).resolve().parents[1]
-    arena = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
-    runtime = (root / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
-    assert "dedicated_output_queued" in arena
-    assert "bounded_low_core_output(slot.tasks.back(), state_)" in arena
-    assert "bounded_low_core_output" in runtime
-    assert "output_preference_queue_is_bounded" in runtime
-    assert "queue_size <= 4U" in runtime
-    assert "state->worker_count > 5U" in runtime
-    assert "slot.shallow_output_preference" in runtime
-    assert "TaskTelemetryBatch telemetry_batch(" in runtime
-    assert "if constexpr (PreferDedicatedOutput)" in runtime
-    assert "telemetry_batch.Flush()" in runtime
-
-
 def test_v54_single_and_multi_jsonl_outputs_remain_byte_identical(
     tmp_path: Path,
 ) -> None:

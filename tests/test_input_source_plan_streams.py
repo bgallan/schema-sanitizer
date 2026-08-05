@@ -367,8 +367,9 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
     ]
 
     async def fake_client(files, *, memory_limit_bytes, threading_mode="single"):
-        """Return a reusable fake provider client."""
-        assert len(files) == 5
+        """Return a reusable fake provider client from bounded provider metadata."""
+        assert len(files) == 1
+        assert files[0].uri == "s3://bucket/partition/0.jsonl"
         assert memory_limit_bytes == 32 * 1024 * 1024
         return object()
 
@@ -376,8 +377,15 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         """Accept closing the fake provider client."""
         assert client is not None
 
-    async def fake_download(client, file, local_path):
+    async def fake_download(
+        client,
+        file,
+        local_path,
+        *,
+        storage_reservation=None,
+    ):
         """Write a payload while tracking active download count."""
+        assert storage_reservation is not None
         nonlocal active_downloads, max_active_downloads
         assert client is not None
         active_downloads += 1
@@ -430,8 +438,16 @@ def test_remote_directory_staging_does_not_retry_memory_limit_failure(monkeypatc
         """Yield one inert blocking S3 client."""
         yield object()
 
-    def fake_download(_context, file, local_path, *, memory_limit_bytes):
-        """Write an oversized payload."""
+    def fake_download(
+        _context,
+        file,
+        local_path,
+        *,
+        memory_limit_bytes,
+        storage_reservation=None,
+    ):
+        """Write an oversized payload through the current streaming contract."""
+        assert storage_reservation is not None
         nonlocal downloads
         assert memory_limit_bytes == 8
         assert file.name == "row.jsonl"

@@ -30,6 +30,7 @@ private:
   BumpArena *arena_ = nullptr;
   std::size_t record_start_pos_ = 0;
   std::size_t record_start_abs_ = 0;
+  std::size_t opening_quote_abs_ = std::string_view::npos;
   std::shared_ptr<const void> record_owner_;
   std::shared_ptr<const std::string> record_source_file_owner_;
   std::string_view record_source_file_;

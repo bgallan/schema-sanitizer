@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from schema_sanitizer.api_impl import execution_context
 from schema_sanitizer.api_impl import results as result_adapters
+from schema_sanitizer.api_impl import table_adapter_sink
 from schema_sanitizer.api_impl.source_plan import registry as registry_streams
 from schema_sanitizer.core_impl.concurrency_coverage import (
     INPUT_CONCURRENCY_COVERAGE,
@@ -327,7 +327,7 @@ def test_v78_internal_adapter_sink_uses_stream_not_table(
             raise AssertionError("table barrier must not be used")
 
     monkeypatch.setattr(
-        execution_context,
+        table_adapter_sink,
         "convert_arrow_stream_output",
         lambda *_args, **_kwargs: result_adapters.AnalyticalOutputConversion(
             "adapter-value",
@@ -336,7 +336,7 @@ def test_v78_internal_adapter_sink_uses_stream_not_table(
         ),
     )
 
-    value = execution_context._materialize_table_adapter_sink(
+    value = table_adapter_sink.materialize_table_adapter_sink(
         FakeContext(),
         "rows",
         sink="polars",

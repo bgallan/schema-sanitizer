@@ -30,9 +30,11 @@ def test_native_parquet_contract_gates_have_one_owner() -> None:
 def test_page_verification_reuses_buffers_and_moves_decoded_pages() -> None:
     """Footer scanning must not allocate or deep-copy page state per page."""
     owner = FOOTER / "pages/footer_reader_page_read.cc.inc"
+    scratch_owner = FOOTER / "pages/footer_reader_page_scratch.cc.inc"
     source = owner.read_text(encoding="utf-8")
+    scratch = scratch_owner.read_text(encoding="utf-8")
 
-    assert "struct PageVerificationScratch" in source
+    assert "struct PageVerificationScratch" in scratch
     assert "PageVerificationScratch scratch;" in source
     assert "&scratch->compressed_payload" in source
     assert "&scratch->decompressed_payload" in source
@@ -40,6 +42,7 @@ def test_page_verification_reuses_buffers_and_moves_decoded_pages() -> None:
     assert "column->pages.push_back(page)" not in source
     assert "std::string decompressed;" not in source
     assert len(source.splitlines()) <= 500
+    assert len(scratch.splitlines()) <= 500
 
 
 def test_value_layout_classification_shares_repeated_plan_owner() -> None:

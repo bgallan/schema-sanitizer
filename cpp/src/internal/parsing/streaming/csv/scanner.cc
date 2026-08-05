@@ -2,15 +2,22 @@
 
 #include "internal/parsing/streaming/csv/scanner.hh"
 
+#include <algorithm>
 #include <string_view>
 #include <utility>
 
 namespace sanitize::internal {
 
 CsvStreamingScanner::CsvStreamingScanner(ChunkSourcePtr source,
-                                         int64_t chunk_bytes)
-    : source_(std::move(source)),
-      chunk_bytes_(chunk_bytes > 0 ? chunk_bytes : kDefaultCsvChunkBytes) {
+                                         int64_t chunk_bytes,
+                                         std::size_t max_record_bytes,
+                                         std::size_t max_record_segments,
+                                         void *pool_handle)
+    : segment_resource_(pool_handle), segments_(&segment_resource_),
+      source_(std::move(source)),
+      chunk_bytes_(chunk_bytes > 0 ? chunk_bytes : kDefaultCsvChunkBytes),
+      max_record_bytes_(std::max<std::size_t>(1, max_record_bytes)),
+      max_record_segments_(std::max<std::size_t>(1, max_record_segments)) {
   segments_.reserve(4);
 }
 
@@ -18,7 +25,7 @@ void CsvStreamingScanner::clear_segments() noexcept {
   segments_.clear();
   constexpr std::size_t kMaxRetainedSegments = 1024;
   if (segments_.capacity() > kMaxRetainedSegments) {
-    std::vector<Segment> empty;
+    std::pmr::vector<Segment> empty(&segment_resource_);
     segments_.swap(empty);
   }
 }

@@ -40,17 +40,58 @@ from .errors import (
 __version__ = _version_str()
 
 if TYPE_CHECKING:  # pragma: no cover
+    from .analytical_schema import (
+        AnalyticalValidationResult,
+        FinalizedAnalyticalOutput,
+        arrow_schema_from_schema_registry,
+        finalize_analytical_output,
+        project_ingress_scalar_schema,
+        schema_registry_from_arrow_schema,
+        validate_analytical_result,
+    )
     from .api_impl.analytical import to_duckdb, to_pandas, to_polars, to_pyarrow
     from .api_impl.batch_streaming import iter_batches
     from .api_impl.file_conversion.converters import to_csv, to_jsonl, to_parquet
     from .api_impl.results import Result
+    from .core_impl.cancellation import (
+        OperationCancellationToken,
+        operation_cancellation,
+    )
+    from .core_impl.operation_diagnostics import process_operation_diagnostics
     from .core_impl.schema_registry import new_schema_registry
+    from .input_impl.source_manifest import SourceManifest
 
 
 _LAZY: dict[str, tuple[str, str]] = {
+    "AnalyticalValidationResult": (".analytical_schema", "AnalyticalValidationResult"),
+    "FinalizedAnalyticalOutput": (".analytical_schema", "FinalizedAnalyticalOutput"),
+    "arrow_schema_from_schema_registry": (
+        ".analytical_schema",
+        "arrow_schema_from_schema_registry",
+    ),
+    "finalize_analytical_output": (".analytical_schema", "finalize_analytical_output"),
+    "project_ingress_scalar_schema": (".analytical_schema", "project_ingress_scalar_schema"),
+    "schema_registry_from_arrow_schema": (
+        ".analytical_schema",
+        "schema_registry_from_arrow_schema",
+    ),
+    "validate_analytical_result": (".analytical_schema", "validate_analytical_result"),
     "Result": (".api_impl.results", "Result"),
+    "SourceManifest": (".input_impl.source_manifest", "SourceManifest"),
     "iter_batches": (".api_impl.batch_streaming", "iter_batches"),
+    "OperationCancellationToken": (
+        ".core_impl.cancellation",
+        "OperationCancellationToken",
+    ),
+    "operation_cancellation": (
+        ".core_impl.cancellation",
+        "operation_cancellation",
+    ),
     "new_schema_registry": (".core_impl.schema_registry", "new_schema_registry"),
+    "process_operation_diagnostics": (
+        ".core_impl.operation_diagnostics",
+        "process_operation_diagnostics",
+    ),
     "to_csv": (".api_impl.file_conversion.converters", "to_csv"),
     "to_duckdb": (".api_impl.analytical", "to_duckdb"),
     "to_jsonl": (".api_impl.file_conversion.converters", "to_jsonl"),
@@ -79,6 +120,14 @@ def __getattr__(name: str) -> Any:  # pragma: no cover
 
 
 __all__ = [
+    "validate_analytical_result",
+    "schema_registry_from_arrow_schema",
+    "project_ingress_scalar_schema",
+    "finalize_analytical_output",
+    "arrow_schema_from_schema_registry",
+    "FinalizedAnalyticalOutput",
+    "AnalyticalValidationResult",
+    "OperationCancellationToken",
     "Result",
     "SchemaSanitizerCancelledError",
     "SchemaSanitizerError",
@@ -87,9 +136,12 @@ __all__ = [
     "SchemaSanitizerInvalidArgumentError",
     "SchemaSanitizerOutOfMemoryError",
     "SchemaSanitizerResourceError",
+    "SourceManifest",
     "__version__",
     "iter_batches",
     "new_schema_registry",
+    "operation_cancellation",
+    "process_operation_diagnostics",
     "to_csv",
     "to_duckdb",
     "to_jsonl",

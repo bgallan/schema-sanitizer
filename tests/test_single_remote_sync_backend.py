@@ -314,7 +314,7 @@ def test_s3_single_download_retries_from_an_empty_destination(
         """Yield one reusable direct client."""
         yield Client()
 
-    monkeypatch.setattr(sync_retry, "sleep", lambda _delay: None)
+    monkeypatch.setattr(sync_retry, "cancellable_sleep", lambda _delay, *, stage: None)
     monkeypatch.setattr(s3_sync, "open_client", fake_open_client)
     target = tmp_path / "retried.bin"
 
@@ -352,7 +352,7 @@ def test_s3_single_upload_reopens_spool_for_retry(monkeypatch, tmp_path: Path) -
         """Yield one reusable direct client."""
         yield Client()
 
-    monkeypatch.setattr(sync_retry, "sleep", lambda _delay: None)
+    monkeypatch.setattr(sync_retry, "cancellable_sleep", lambda _delay, *, stage: None)
     monkeypatch.setattr(s3_sync, "open_client", fake_open_client)
 
     s3_sync.upload_file(

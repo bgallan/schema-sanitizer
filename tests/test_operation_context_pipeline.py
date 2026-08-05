@@ -90,7 +90,7 @@ def test_context_construction_releases_resources_when_clock_capture_fails(
     monkeypatch.setattr(
         context_module,
         "_OperationExecutionResources",
-        lambda _policy, _memory_limit_bytes: resources,
+        lambda _policy, _memory_limit_bytes, *, thread_lease=None: resources,
     )
 
     def fail_clock() -> None:

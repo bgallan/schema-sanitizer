@@ -207,11 +207,15 @@ def test_retry_async_exhausts_selected_transient_failures(
             attempts += 1
             raise RuntimeError("transient")
 
-        async def fake_sleep(delay: float) -> None:
-            """Record each configured backoff call."""
+        async def fake_sleep(delay: float, *, stage: str) -> None:
+            """Record each configured cancellable backoff call."""
+            assert stage == "async_retry_backoff"
             sleeps.append(delay)
 
-        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(
+            "schema_sanitizer.core_impl.async_scheduler.cancellable_async_sleep",
+            fake_sleep,
+        )
         with pytest.raises(RuntimeError, match="transient"):
             await retry_async(
                 operation,

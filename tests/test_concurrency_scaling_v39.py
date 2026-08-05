@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -136,7 +136,7 @@ def test_wide_jsonl_uses_row_packets_with_exact_output(tmp_path: Path) -> None:
     stats = context.performance_stats()
     counters = stats["counters"]
 
-    assert multi_result.stats == single_result.stats
+    assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     assert counters["jsonl_row_packets_submitted"] >= 2

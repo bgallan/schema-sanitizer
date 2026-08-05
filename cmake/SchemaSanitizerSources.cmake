@@ -37,6 +37,7 @@ target_sources(
     cpp/src/api/python_abi3/json/_core_abi3_jsonl_writer.cc
     cpp/src/api/python_abi3/parquet/_core_abi3_parquet_reader.cc
     cpp/src/api/python_abi3/parquet/_core_abi3_parquet_writer.cc
+    cpp/src/api/python_abi3/path_sources/csv_source_projections.cc
     cpp/src/api/python_abi3/path_sources/path_sources.cc
     cpp/src/api/python_abi3/path_sources/path_source_plan.cc
     cpp/src/api/python_abi3/path_sources/path_source_probe.cc
@@ -199,6 +200,7 @@ target_sources(
     cpp/src/internal/memory/arena.cc
     cpp/src/internal/memory/pool_resource.cc
     cpp/src/frontends/csv/column_projection.cc
+    cpp/src/frontends/csv/source_projection.hh
     cpp/src/frontends/json/root_field_filter.cc
     cpp/src/internal/parsing/xml/document.cc
     cpp/src/internal/parsing/xml/element.cc

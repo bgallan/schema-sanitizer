@@ -152,6 +152,7 @@ else
     tests/test_threading_parquet_output.py
     tests/test_threading_golden_matrix.py
     tests/test_partition_lookahead.py
+    tests/test_modified_time_csv_phase5.py
   )
 fi
 for ((round = 1; round <= rounds; ++round)); do

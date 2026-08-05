@@ -189,6 +189,16 @@ json_token_index_max_fields(std::int64_t memory_limit_bytes) noexcept {
          sizeof(JsonValidatedFieldToken);
 }
 
+bool json_error_exceeds_hard_safety_limit(
+    const sanitize::Status &status) noexcept {
+  if (status.code() != sanitize::StatusCode::kInvalid) {
+    return false;
+  }
+  const std::string &message = status.message();
+  return message.find("exceeds safety limit") != std::string::npos ||
+         message.find("exceeds internal safety limit") != std::string::npos;
+}
+
 bool parallel_json_row_frontend_enabled(
     const sanitize::Options &options) noexcept {
   return options.threading_mode == sanitize::ThreadingMode::kMulti &&

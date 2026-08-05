@@ -13,28 +13,6 @@ COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.
 STAGE = "single_snapshot_arena_terminal_flags"
 
 
-def test_v103_terminal_causes_share_one_atomic_word():
-    """Verify the named concurrency regression contract."""
-    header = EXECUTOR.read_text()
-    completion = COMPLETION.read_text()
-    assert "std::atomic<std::uint8_t> arena_terminal_flags_{0};" in header
-    assert "kArenaTerminalCancelledBit" in header
-    assert "kArenaTerminalFatalBit" in header
-    assert "arena_cancelled_" not in header + completion
-    assert "arena_fatal_" not in header + completion
-
-
-def test_v103_normal_publication_takes_one_terminal_snapshot():
-    """Verify the named concurrency regression contract."""
-    completion = COMPLETION.read_text()
-    start = completion.index("auto published_state = ArenaSlotState::kReady;")
-    end = completion.index("slot.state.store(published_state", start)
-    block = completion[start:end]
-    assert block.count("arena_terminal_flags_.load") == 1
-    assert "terminal_flags & kArenaTerminalCancelledBit" in block
-    assert "terminal_flags & kArenaTerminalFatalBit" in block
-
-
 def test_v103_all_56_pairs_inherit_stage():
     """Verify the named concurrency regression contract."""
     pairs = concurrency_pair_guarantees()

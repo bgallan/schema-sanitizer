@@ -92,6 +92,7 @@ def test_csv_frontend_has_one_lifecycle_owner_and_no_header_allocations() -> Non
         "column_projection.hh",
         "frontend.cc",
         "frontend_internal.hh",
+        "source_projection.hh",
     }
     frontend = (package / "frontend.cc").read_text(encoding="utf-8")
     projection = (package / "column_projection.cc").read_text(encoding="utf-8")

@@ -48,6 +48,9 @@ IngestStreamSource::IngestStreamSource(IngestStreamInit init)
       direct_(std::move(init.direct)) {}
 
 IngestStreamSource::~IngestStreamSource() {
+  if (diagnostics_) {
+    diagnostics_->capture_operation_memory();
+  }
   if (telemetry_keepalive_) {
     telemetry_keepalive_->Finish();
   }
@@ -106,7 +109,13 @@ sanitize::Status IngestStreamSource::GetNext(struct ArrowArray *out) {
 }
 
 sanitize::Status IngestStreamSource::Close() {
+  if (!eof_ && diagnostics_) {
+    diagnostics_->record_cancellation("consumer_close");
+  }
   closed_ = true;
+  if (diagnostics_) {
+    diagnostics_->capture_operation_memory();
+  }
   if (telemetry_keepalive_) {
     telemetry_keepalive_->Finish();
   }
@@ -144,7 +153,12 @@ make_ingest_stream_source(std::string_view frontend_name,
         input_size_hint_bytes);
   }
 
-  auto pool = std::make_shared<PoolResource>(operation_memory_pool);
+  // Exported Arrow buffers become consumer-owned analytical output. Keep their
+  // batch size bounded by the operation policy, but allocate them outside the
+  // tracked operation pool so a consumer may retain completed batches while
+  // the next one is produced. File writers still consume one bounded batch at
+  // a time and apply their own output-memory budget.
+  auto pool = std::make_shared<PoolResource>(std::shared_ptr<void>{});
   SAN_ASSIGN_OR_RAISE(auto app, make_batch_appender(*plan, pool));
   SAN_ASSIGN_OR_RAISE(auto direct,
                       make_direct_materializer(frontend_name, pool.get()));

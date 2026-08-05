@@ -13,11 +13,16 @@ SCHEMA = ROOT / "cpp/src/internal/parquet/footer_reader/native_stream/schema"
 
 def test_remote_staging_value_objects_have_one_owner() -> None:
     """Temporary path and output lifecycle must stay with remote staging."""
-    owner = SRC / "remote_impl/staging.py"
+    owner = SRC / "remote_impl/staging_paths.py"
     source = owner.read_text(encoding="utf-8")
     assert "class StagedPath" in source
     assert "class RemoteOutputTarget" in source
+    assert "quarantine_temporary_artifact" in source
     assert len(source.splitlines()) <= 500
+
+    facade = (SRC / "remote_impl/staging.py").read_text(encoding="utf-8")
+    assert "from .staging_paths import" in facade
+    assert len(facade.splitlines()) <= 500
     assert not (SRC / "remote_impl/types.py").exists()
 
     production = "\n".join(path.read_text(encoding="utf-8") for path in SRC.rglob("*.py"))

@@ -79,8 +79,8 @@ def test_secret_scan_uses_the_tested_report_checker() -> None:
     assert "_is_notebook_cell_id" not in ci
 
 
-def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
-    """Nine auditable jobs own every important validation responsibility."""
+def test_general_sanity_owns_validation_and_scheduled_fuzzing() -> None:
+    """One auditable workflow owns regular validation and scheduled fuzzing."""
     ci = _workflow("ci.yml")
     assert _job_ids(ci) == {
         "checks",
@@ -92,6 +92,7 @@ def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
         "address-sanitizer",
         "platform-sanitizers",
         "thread-sanitizer",
+        "scheduled-native-fuzz",
     }
     for removed_job in (
         "core-only:",
@@ -115,11 +116,12 @@ def test_general_sanity_owns_validation_without_scheduled_jobs() -> None:
     assert "python-version: [" not in ci
     assert "uses: ./.github/workflows/" not in ci
 
-    assert "  schedule:" not in ci
-    assert "github.event.schedule" not in ci
-    assert "github.event_name != 'schedule'" not in ci
+    assert "  schedule:" in ci
+    assert re.search(r"^\s+- cron: [\'\"]?23 3 \* \* 1[\'\"]?$", ci, re.MULTILINE)
+    assert ci.count("github.event_name != 'schedule'") == 9
+    assert ci.count("github.event_name == 'schedule'") == 1
     assert "scheduled-benchmarks:" not in ci
-    assert "scheduled-native-fuzz:" not in ci
+    assert "scheduled-native-fuzz:" in ci
     assert "scheduled-real-gcp:" not in ci
     assert "cloud-emulators:" not in ci
     assert "test_cloud_emulator_integration.py" not in ci
@@ -154,6 +156,7 @@ def test_general_sanity_owns_full_extension_tsan_gate() -> None:
         "test_threading_parquet_output.py",
         "test_threading_golden_matrix.py",
         "test_partition_lookahead.py",
+        "test_modified_time_csv_phase5.py",
     ):
         assert runner.count(domain) == 1
 
@@ -184,7 +187,8 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "macos-arm64-asan-ubsan" in ci
     assert ci.count("SCHEMA_SANITIZER_BUILD_FUZZERS=ON") >= 3
     assert ci.count("SCHEMA_SANITIZER_FUZZ_ENGINE=standalone") >= 3
-    assert ci.count("meta/ci/run_fuzz_regressions.py") >= 2
+    assert ci.count("meta/ci/run_fuzz_regressions.py") >= 3
+    assert ci.count("--engine libfuzzer") >= 2
     assert "--campaign-runs 1000" in ci
     assert "--campaign-runs 500" in ci
     assert "schema_sanitizer_sanitized_ordered_executor" in ci
@@ -192,9 +196,9 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     concurrency_step = ci.split("- name: Run repeated sanitized concurrency probe", 1)[1].split(
         "- name:", 1
     )[0]
-    fuzz_step = ci.split("- name: Run native fuzz regressions and mutation campaigns", 1)[1].split(
-        "\n\n  thread-sanitizer:", 1
-    )[0]
+    fuzz_step = _job_body(ci, "platform-sanitizers").split(
+        "- name: Run native fuzz regressions and mutation campaigns", 1
+    )[1]
     assert "if: runner.os != 'Windows'" in concurrency_step
     assert "\n        if:" not in fuzz_step
 
@@ -202,6 +206,33 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "SCHEMA_SANITIZER_FUZZ_ENGINE" in cmake
     assert "cpp/fuzz/standalone_main.cc" in cmake
     assert "schema_sanitizer_sanitized_ordered_executor" in cmake
+
+
+def test_scheduled_fuzz_campaign_is_longer_and_isolated() -> None:
+    """The weekly trigger must run only the extended sanitised fuzz campaign."""
+    ci = _workflow("ci.yml")
+    scheduled = _job_body(ci, "scheduled-native-fuzz")
+
+    assert "if: github.event_name == 'schedule'" in scheduled
+    assert "SCHEMA_SANITIZER_SANITIZER=asan-ubsan" in scheduled
+    assert "SCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer" in scheduled
+    assert "--engine libfuzzer" in scheduled
+    assert "--campaign-runs 10000" in scheduled
+    assert "--max-input-ms 10000" in scheduled
+    assert "--max-rss-mb 4096" in scheduled
+    assert "if: failure()" in scheduled
+    for job_id in (
+        "checks",
+        "platform-wheels",
+        "sdist",
+        "distribution",
+        "coverage-python",
+        "coverage-native",
+        "address-sanitizer",
+        "platform-sanitizers",
+        "thread-sanitizer",
+    ):
+        assert "if: github.event_name != 'schedule'" in _job_body(ci, job_id)
 
 
 def test_native_concurrency_gate_links_its_memory_resource_implementation() -> None:
@@ -267,10 +298,13 @@ def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
 def test_benchmark_matrix_runs_on_supported_platforms() -> None:
     """Benchmark gates must cover supported OS, shape, and source dimensions."""
     ci = _workflow("ci.yml")
+    platform_job = _job_body(ci, "platform-wheels")
 
-    assert "platform-wheels:" in ci
-    assert "benchmarks/bench_threading_matrix.py" in ci
-    assert "--profile ci" in ci
+    assert "benchmarks/bench_threading_matrix.py" in platform_job
+    assert "--profile ci" in platform_job
+    assert "benchmarks/bench_reader_linear_scaling.py" in platform_job
+    assert "--maximum-normalized-growth 8" in platform_job
+    assert "reader-linear-scaling-${{ matrix.artifact }}.json" in platform_job
     for artifact in ("linux", "windows", "macos-x86_64", "macos-arm64"):
         assert f"artifact: {artifact}" in ci
 

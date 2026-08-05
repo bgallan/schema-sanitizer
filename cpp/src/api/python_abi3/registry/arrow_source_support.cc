@@ -26,6 +26,7 @@
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/options_schema_serialization.hh"
+#include "internal/runtime/process_identity.hh"
 #include "sanitize/registry/registry.hh"
 
 #include "api/python_abi3/registry/arrow_source_sinks_internal.hh"
@@ -292,6 +293,9 @@ const char *passthrough_get_last_error(ArrowArrayStream *stream) noexcept {
 }
 
 void passthrough_release(ArrowArrayStream *stream) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!stream || !stream->release) {
     return;
   }

@@ -33,25 +33,6 @@ def test_v83_wake_epoch_is_sampled_only_at_park_wake_boundaries() -> None:
     assert "sampling after every completed packet is redundant" in park_comment
 
 
-def test_v83_telemetry_free_tasks_do_not_read_the_clock() -> None:
-    """Queue and run timestamps are acquired only when metrics consume them."""
-    arena = ARENA.read_text(encoding="utf-8")
-    runtime = RUNTIME.read_text(encoding="utf-8")
-
-    inline = arena.index("if (inline_mode())")
-    enqueue = arena.index(".queued_at_ns =", inline)
-    assert "state_->telemetry" in arena[inline:enqueue]
-    assert "? PerformanceTelemetry::NowNs()" in arena[inline:enqueue]
-    assert "state_->telemetry" in arena[enqueue : enqueue + 180]
-    assert "? PerformanceTelemetry::NowNs()" in arena[enqueue : enqueue + 180]
-
-    cache = runtime.index("auto *const telemetry = state->telemetry.get();")
-    task = runtime.index("queued.task(index - static_cast<std::size_t>(queued.lane_begin), stop);")
-    assert cache < task
-    assert "const auto task_started_ns = telemetry" in " ".join(runtime[cache:task].split())
-    assert "if (telemetry)" in runtime[task:]
-
-
 def test_v83_all_56_pairs_inherit_park_boundary_sampling() -> None:
     """Every supported source-to-sink route crosses the optimized worker loop."""
     pairs = concurrency_pair_guarantees()

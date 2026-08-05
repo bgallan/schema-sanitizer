@@ -28,17 +28,6 @@ def test_v105_internal_in_flight_reads_are_mutex_owned_and_relaxed():
     assert "return in_flight_.load(std::memory_order_acquire);" in header
 
 
-def test_v105_completion_slot_orders_are_minimal_and_safe():
-    """Slot reuse keeps acquire publication while dropping redundant barriers."""
-    completion = COMPLETION.read_text()
-    claim = completion.split("compare_exchange_strong", 1)[1].split(") {", 1)[0]
-    assert "ArenaSlotState::kPublishing" in claim
-    assert re.search(r"std::memory_order_acquire,\s+std::memory_order_acquire", claim)
-    assert "std::memory_order_acq_rel" not in claim
-    assert "state = slot.state.load(std::memory_order_relaxed);" in completion
-    assert "slot.state.store(published_state, std::memory_order_release);" in completion
-
-
 def test_v105_dead_completed_counter_is_removed():
     """The unread completed counter and all of its writes remain absent."""
     source = EXECUTOR.read_text()

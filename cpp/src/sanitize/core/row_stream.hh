@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/status.hh"
 
 #include <cstddef>
@@ -19,6 +20,14 @@ namespace sanitize {
 namespace internal {
 class OperationTaskArena;
 }
+
+// Optional frontend-owned hook that can release row-specific backing storage
+// after materialization has copied the row into the analytical output.
+class RowBatchReleaser {
+public:
+  virtual ~RowBatchReleaser() = default;
+  virtual void ReleaseRows(std::size_t begin, std::size_t count) noexcept = 0;
+};
 
 struct CompiledPlan;
 
@@ -83,6 +92,10 @@ struct RowRef {
 struct RowBatch {
   std::vector<RowRef> rows;
   std::shared_ptr<const void> owner;
+  // When present, rows may release heavyweight parser state independently of
+  // the batch owner once their values have been materialized.
+  std::shared_ptr<RowBatchReleaser> releaser;
+  ReaderResourceDiagnostics reader_diagnostics;
 };
 
 struct FrontendVTable {

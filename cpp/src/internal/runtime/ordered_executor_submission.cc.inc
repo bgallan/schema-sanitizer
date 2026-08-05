@@ -1,4 +1,5 @@
-sanitize::Status submit_high_core_arena(Packet packet) {
+sanitize::Status submit_high_core_arena(Packet packet,
+                                        std::size_t retained_bytes) {
   std::size_t completion_slot = 0;
   std::size_t completion_shard = 0;
   std::size_t arena_submission_ticket = 0;
@@ -27,20 +28,21 @@ sanitize::Status submit_high_core_arena(Packet packet) {
     arena_submission_ticket = next_high_core_arena_ticket_++;
     ++next_submit_ordinal_;
     increment_high_core_in_flight_locked();
-    ++scheduled_external_tasks_[completion_shard];
+    arena_shared_->Schedule(completion_shard);
   }
-  const auto submit_status = arena_->Submit(
-      [this,
+  auto shared = arena_shared_;
+  const auto submit_status = arena_->SubmitCharged(
+      [shared,
        scheduled = ScheduledPacket{.packet = std::move(packet),
                                    .completion_slot = completion_slot},
-       lease = ExternalLease(this, completion_shard)](
+       lease = ExternalLease(shared, completion_shard)](
           std::size_t worker_index,
           sanitize::internal::StopToken stop) mutable {
-        execute_external(std::move(scheduled), worker_index, stop,
-                         lease.shard());
+        shared->ExecuteExternal(std::move(scheduled), worker_index, stop);
         lease.Complete();
       },
-      arena_submission_plan_, arena_submission_ticket, telemetry_kind_);
+      arena_submission_plan_, arena_submission_ticket,
+      TaskMemoryCharge{retained_bytes}, telemetry_kind_);
   if (!submit_status.ok()) {
     std::lock_guard lock(mutex_);
     --next_submit_ordinal_;

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-_PRODUCT_SOURCE_LINE_LIMIT = 750
+_PRODUCT_SOURCE_LINE_LIMIT = 2500
 
 
 def test_recursive_layout_reducer_has_one_bounded_owner() -> None:

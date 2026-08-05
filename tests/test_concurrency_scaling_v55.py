@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
+from diagnostics_assertions import assert_diagnostics_semantically_equal
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -55,7 +56,7 @@ def test_v55_wide_reordered_flat_inference_matches_single() -> None:
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
     assert len(multi.field_names) == len(columns)
 
 
@@ -73,7 +74,7 @@ def test_v55_field_ceiling_falls_back_to_generic_without_semantic_drift() -> Non
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
     assert len(multi.field_names) == len(columns)
 
 

@@ -24,6 +24,7 @@ used by BigQuery external tables.
   - [Parquet output](#parquet-output)
 - [Incremental schemas](#incremental-schemas)
 - [Partition pipeline](#partition-pipeline)
+- [Flat-prefix modified-time CSV ingestion](#flat-prefix-modified-time-csv-ingestion)
 - [BigQuery external tables](#bigquery-external-tables)
   - [Registry sidecar table](#registry-sidecar-table)
 - [Local and cloud filesystems](#local-and-cloud-filesystems)
@@ -36,6 +37,12 @@ used by BigQuery external tables.
 - [HEURISTICS.md](HEURISTICS.md) explains inference, field sanitization,
   schema merging and versioning, the registry, drift records, and the BigQuery
   sidecar model.
+- [Flat-prefix CSV ingestion by modification time](docs/flat-prefix-modified-time-csv.md)
+  documents UTC windows, immutable GCS generations, late arrivals, header union,
+  publication safety, and analytical memory limits.
+- [Concurrency and memory hardening](docs/concurrency-memory-hardening.md)
+  documents cross-operation resident memory, filesystem reservations, remote
+  ownership, cancellation, and bounded shutdown.
 
 ## [Install](#index)
 
@@ -107,12 +114,19 @@ below.
 | `to_jsonl(input_path, output_path, ...)` | Writes JSON Lines; `clean_data` is `None`. |
 | `to_parquet(input_path, output_path, ...)` | Writes Parquet; `clean_data` is `None`. |
 
-For file outputs, `memory_limit_bytes` is an operation-wide resident-memory
-budget, independent of input or output file size. Input parsing, bounded
-queues, transformation, writer buffers, and local or remote staging all share
-the same resolved budget. Files larger than the budget are streamed; if the
-operation cannot make progress within the budget, it fails without publishing
-a partial replacement.
+For file outputs, `memory_limit_bytes` is the single public memory/resource
+control, independent of input or output file size. Native parsing, inference,
+materialization, writers, directory metadata, materialized input, remote control
+responses, and transfer windows debit one operation-wide atomic ledger across
+Python and C++. Temporary files use operation permits plus one process-wide
+per-filesystem governor because their contents are not resident memory. Files
+larger than the budget are streamed; if the operation cannot make progress
+within its limits, it fails without
+publishing a partial replacement. The ownership boundary is documented in
+[Reader memory accounting](docs/reader-memory-accounting.md).
+
+See also [concurrency and memory hardening](docs/concurrency-memory-hardening.md)
+for cross-operation resident, disk, and remote-lifecycle guarantees.
 
 For analytical outputs (`to_pyarrow`, `to_pandas`, `to_polars`, and
 `to_duckdb`), source processing still respects the operation budget, but the
@@ -196,6 +210,32 @@ result = ss.to_pandas(
     input_mode="directory",
 )
 ```
+
+A `SourceManifest` is a public immutable input for conversions that must consume
+an already selected set of remote object versions without listing its prefix
+again. Version one accepts GCS objects with a non-empty `generation`; downloads
+request that exact generation with a matching precondition. The default
+`input_mode` may be left unchanged because the manifest already defines the
+multi-file selection:
+
+```python
+plans = ss.pipeline.plan_gcs_modified_time_windows(
+    "gs://raw-bucket/events",
+    start_date,
+    end_date,
+)
+result = ss.to_polars(
+    plans[0].source_manifest,
+    input_format="csv",
+)
+```
+
+The emitted `source_file` column remains the object URI. `Result.stats` also
+contains `source_manifest_uri`, `source_object_count`, and deterministic
+`source_objects` entries with both `uri` and `generation`. Reusing the same
+manifest for inference and materialization therefore reuses the same immutable
+object identities. Empty manifests are valid planning values but are rejected
+as conversion inputs.
 
 ### [Generated ETL columns](#index)
 
@@ -286,11 +326,12 @@ prices = ss.to_pyarrow(
 |---|---:|---|
 | `csv_has_header` | `True` | Treat the first CSV row as names; directory mode removes matching repeated headers. |
 | `csv_delimiter` | `","` | One-character delimiter. |
+| `csv_header_mode` | `"exact"` | Multi-source header policy. `exact` preserves current behavior; `union` builds immutable per-source projections, accepts reordered/additive headers, and null-fills missing fields. See `docs/csv-header-modes.md`. |
 | `input_text_encoding` | `"utf-8"` | `utf-8`, `utf-16`, `utf-16-le`, `utf-16-be`, or `iso8859-1`. Not used for Parquet. |
 | `xml_row_tag` | `None` | Stream each matching direct XML element as a row; `None` treats the document as one row. |
 | `on_error` | `"emit_null_row"` | `stop`, `skip_row`, or `emit_null_row`. |
 | `multi_threading` | `False` | `False` is the deterministic inline reference executor; `True` enables bounded concurrency derived from memory and CPUs. |
-| `memory_limit_bytes` | `None` | The only public memory/resource control. `None` selects a safe share of currently available system/container memory. A positive integer sets a strict operation-wide budget. The native extension derives all chunk, batch, coalescing, metadata, spool, concurrency, Arrow, and Parquet sub-budgets from the resolved value. |
+| `memory_limit_bytes` | `None` | The only public memory/resource control. `None` selects a safe share of currently available system/container memory. A positive integer creates one atomic operation ledger shared by Python discovery/staging resources and native readers, inference, materialization, writers, workers, Arrow, and Parquet paths. Stage-specific sub-budgets may reject earlier. See `docs/reader-memory-accounting.md` for the ownership boundary. |
 
 #### Execution modes
 
@@ -369,22 +410,31 @@ therefore does not truncate an existing output.
 
 - `None` selects a safe share of currently available host or container memory;
 - a positive integer sets an explicit budget;
-- the resolved value is fixed once and shared by every stage;
-- all files and substreams belonging to the call share one native pool.
+- the resolved value is fixed once and derives every internal quota;
+- all native files, substreams, stages, and workers belonging to the call share
+  one governed native pool; and
+- Python-owned materialized input, directory metadata, control responses, and
+  transfer windows reserve from the same native atomic ledger before retention
+  or I/O.
 
 On Linux, automatic sizing also respects the remaining cgroup allowance. It
 reserves 12.5–25% for the system and untracked allocations, then applies a
 64 GiB ceiling.
 
-The budget covers Schema-Sanitizer-owned input chunks, queues, reorder windows,
-materialization, writers, remote packets, and staging. These components cannot
-each spend the full limit independently.
+The resident ledger covers Schema-Sanitizer-owned input chunks, conservative
+leases for retained in-memory input, directory metadata, control bodies,
+transfer windows, queues, reorder windows, inference, materialization, and
+writers. These components cannot each spend the full limit independently.
+Temporary-file contents are governed separately by operation permits plus a
+process-wide per-filesystem reservation ceiling; interpreter, thread-stack,
+opaque SDK-runtime, and post-transfer analytical-result memory is outside the
+ledger as documented in `docs/reader-memory-accounting.md`.
 
-Concurrent public calls retain their own operation limit, while actual native
-allocations also pass through one process-wide governor. FIFO admission leases
-adapt to operation size and current contention. Files inside one directory
-conversion still share one lease and pool instead of reserving the full budget
-again.
+Concurrent public calls retain their own operation limit, while every scalable
+native allocation and Python-owned retained reservation also passes through one
+exact process-wide resident pool. FIFO control-plane admission adapts to
+operation size and contention. Files inside one directory conversion still
+share one lease and pool instead of reserving the full budget again.
 
 The process ceiling is refreshed when operations start, so later calls observe
 changes in available host or cgroup memory. A running operation keeps its fixed
@@ -400,6 +450,39 @@ The final object returned by `to_pyarrow`, `to_pandas`, `to_polars`, or
 can therefore exhaust process memory. Use a file-output converter when bounded
 memory is required.
 
+#### Reader resource diagnostics
+
+Every completed conversion exposes privacy-safe resource counters in
+`Result.stats`. The counters are aggregated across inference, materialization,
+files, and workers without including field names or input values:
+
+- `current_charged_memory_bytes`, `peak_charged_memory_bytes`, and
+  `operation_memory_limit_bytes` describe the tracked operation pool;
+- `parser_max_depth`, `decoded_bytes`, `reader_records`, and `reader_nodes`
+  describe work observed by the active reader;
+- `compressed_bytes`, `decompressed_bytes`, and `decompression_ratio` describe
+  Parquet footer totals when available; and
+- `cancellations` plus `cancellation_reason` report stable reason codes such as
+  `consumer_close` or `interrupt`, never payload text.
+
+The current charged value is zero after a completed or closed operation. Peak
+charged memory can legitimately differ between serial and parallel plans; the
+semantic counters remain plan-independent. A zero parser depth or node count
+means that the selected frontend does not expose that structural metric, not
+that input validation was skipped.
+
+#### Reader hardening performance gate
+
+`benchmarks/bench_reader_hardening_ab.py` compares two isolated Release trees
+on valid CSV, JSONL, XML, and Parquet fixtures. The reviewed envelope in
+`benchmarks/reader_hardening_performance_budget.json` is enforced against the
+recorded matched-build evidence. The envelope treats the cost of strict UTF-8,
+syntax, resource, and allocator validation as an explicit security tradeoff; a
+future change that exceeds it requires a new benchmark, explanation, and review
+rather than silently moving the baseline. The complementary
+[`reader complexity contract`](docs/reader-complexity.md) defines the accepted
+linear-work model and its cross-platform scaling smoke.
+
 #### Fixed safety limits
 
 The native extension is the source of truth for all derived limits. There are
@@ -412,6 +495,77 @@ and hardened allocation bookkeeping remain enabled.
 Best-effort memory overwriting cannot guarantee physical erasure on
 copy-on-write filesystems, SSDs with wear levelling, or after a third-party
 Arrow consumer has copied the data.
+
+#### Reader strictness and XML subset
+
+The complete trust model and immutable reader ceilings are documented in
+[`SECURITY.md`](SECURITY.md) and
+[`docs/reader-security-limits.md`](docs/reader-security-limits.md).
+
+Native readers treat source bytes, offsets, lengths, nesting, and decoded sizes
+as untrusted. Malformed records fail with a structured public exception. Existing exception
+classes remain stable, while `exc.detail` carries privacy-safe fields such as
+`format`, `source`, `stage`, `byte_offset`, structural indices, and applicable
+limit/observed values when available; input payload values are not echoed. Safety
+limits are checked before configurable projection limits such as
+`arrow_max_depth`.
+
+XML accepts well-formed UTF-8 in the supported XML 1.0 character repertoire.
+Element and attribute names use the normal ASCII XML name characters; validated
+non-ASCII UTF-8 bytes are also accepted in names. Comments, CDATA sections, and
+processing instructions are supported. An XML declaration is accepted only at
+the start of a document. The parser deliberately does not support `DOCTYPE`,
+general `ENTITY` declarations, external entities, XInclude, or any other
+network or filesystem resolution.
+
+Only the five predefined XML entities and valid numeric character references
+are decoded. Unknown, incomplete, malformed, surrogate, out-of-range, NUL, and
+XML-forbidden character references are rejected in both element text and
+attributes. Document and `xml_row_tag` modes share the same name, entity,
+UTF-8, and markup validation.
+
+XML has non-configurable parser safeguards of 512 nested elements, 1,000,000
+nodes, 4,096 attributes on one element, 1,000,000 total attributes, and 512 MiB
+of decoded text. These are denial-of-service ceilings, not promises that an
+input of that size fits a smaller `memory_limit_bytes`; the operation-wide
+budget always takes precedence. XML tree/model containers and all parallel XML
+workers allocate from the same operation pool. Duplicate raw document bytes are
+released once analytical execution no longer needs them, and streamed row trees
+are released immediately after the ordered consumer commits each materialized
+row rather than being retained until the frontend batch is destroyed.
+
+CSV parsing is intentionally strict; implicit repair and lenient ingestion are
+not supported. Quoted fields must terminate, doubled quotes
+are decoded, quotes cannot appear inside an unquoted field, and only spaces,
+tabs, a delimiter, or record end may follow a closing quote. Embedded newlines,
+empty final fields, BOM handling, and configured single-byte delimiters remain
+supported. CSV record and decoded-field allocations are bounded by the shared
+operation budget, with a fixed ceiling of 65,536 cells per record.
+
+Duplicate non-empty CSV header names and distinct names that collide after the
+configured name-reconciliation policy are rejected before object
+materialization. Every record is validated as UTF-8 even when a direct or
+multi-threaded path would otherwise avoid decoding individual cells.
+
+JSON document, JSON array, and JSON Lines readers share strict lexical
+validation. Invalid UTF-8, escapes, surrogate pairs, numbers, trailing content,
+and malformed values in projected-out fields are rejected on optimized,
+deferred, and worker-authoritative paths. JSON nesting is capped at 512 and an
+individual object is capped at 65,536 fields. These parser ceilings are fatal
+operation errors rather than recoverable `skip_row` or `emit_null_row` events;
+ordinary malformed JSON Lines rows still follow the selected `on_error` policy
+with source offsets preserved.
+
+Native Parquet input keeps immutable format ceilings while deriving stricter
+effective footer, metadata, page, decompression, row-group, and reader-buffer
+limits from `memory_limit_bytes`; the lower limit always wins. Footer size is
+checked before the footer is read or decoded, and page/column ranges are
+validated for negative, overflowing, backward, out-of-file, and footer-overlap
+conditions before seeking, allocation, or decompression. Corrupt payloads for
+compiled uncompressed, Snappy, and GZIP paths fail closed. Page CRC32 checksums
+are validated when present before decompression or value decoding. Parallel
+column decoders reserve scratch and estimated output from one shared atomic
+operation coordinator rather than treating the limit as worker-local.
 
 ### [Parquet output](#index)
 
@@ -523,6 +677,22 @@ The complete production-shaped example is
 It includes daily/hourly planning, directory inputs, missing-partition skips,
 warm-up, BigQuery registry bootstrap, external-table creation, and sidecar
 updates.
+
+## [Flat-prefix modified-time CSV ingestion](#index)
+
+For CSV objects stored under a flat GCS prefix, modified-time planning can list
+the prefix once, divide the immutable `(uri, generation)` snapshot into
+half-open UTC days, reconcile each day with `csv_header_mode="union"`, and
+publish one validated Parquet object per non-empty day. The default exact CSV
+mode and all existing path, URI, directory, and partition inputs are unchanged.
+
+Analytical converters still return a caller-owned dataframe/table outside the
+operation memory ledger. Use direct file outputs for bounded-memory completion
+when no custom dataframe transformation is required. Late objects created after
+the one listing are not part of that run, so production pipelines should use a
+defined lookback or rerun policy. See
+[Flat-prefix CSV ingestion by modification time](docs/flat-prefix-modified-time-csv.md)
+and the executable [example 8](examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py).
 
 ## [BigQuery external tables](#index)
 
@@ -644,6 +814,13 @@ finishes.
 
 Memory-derived windows and the available work count prevent direct callers from
 creating unbounded workers, queues, connections, or staging state.
+
+Remote-directory sessions retain only the first file needed to classify the
+provider and reuse each bounded chunk sequence directly. They do not duplicate
+the complete manifest or allocate a second list of file references per chunk.
+Process-wide endpoint throttling also uses a bounded registry that evicts only
+closed-circuit idle state, and provider single-flight locks exist only while
+creators or waiters are active.
 
 ### Publication and retries
 
@@ -875,7 +1052,11 @@ affinity, cgroup capacity, and the public memory budget; there is no fixed
 32-worker ceiling. Arenas up to 32 workers keep the compact bitset scheduler,
 while wider arenas use summarized dynamic bitmaps and local-first NUMA stealing.
 Worker admission reserves native runtime headroom that PMR allocations cannot
-account for directly.
+account for directly. Remote submissions retain their process-wide admission and
+staging owners until the underlying event-loop Task reaches its real terminal
+`finally`; cancellation of a bridge Future is only a notification. Native arena
+shutdown similarly destroys queued closures before detaching a task that ignores
+cooperative stop, so one late task cannot retain the complete queued workload.
 
 CSV and JSONL workers encode directly into operation-governed PMR buffers.
 Their ordered window is bounded by bytes and packet count, so a slow early
@@ -893,6 +1074,138 @@ Variable-width, nested, ultra-wide, small, and memory-constrained inputs retain
 conservative adaptive fractions. Those fractions continue scaling above 32
 workers.
 
+The process-wide retry scheduler treats callback ownership as one transaction. A
+keyed replacement becomes visible only after it has been admitted; rejection
+therefore leaves the old pending or ready callback intact. Item and retained-byte
+charges follow work through pending, ready, and active states, and ready queues
+are serviced round-robin by subsystem. Captures removed by cancellation,
+replacement, or compaction are destroyed outside scheduler locks. Terminal
+resource releases that have no caller able to retry are transferred to one
+bounded release guardian rather than to subsystem-specific orphan threads.
+
+Filesystem claims use bounded live-owner admission and process-instance
+authority. A foreign-owned legacy root in a shared temporary directory is
+replaced by an ownership-verified effective-UID namespace, while a securely
+owned legacy root remains usable during rolling upgrades. A child created by
+`fork()` may close its copied descriptor and return its logical FD lease, but it
+cannot remove the parent's xattr or external claim.
+External coordination sweeps count every directory entry against their work
+budget and retain one governed `scandir` cursor, so unrelated files cannot turn a
+bounded sweep into an unbounded scan. Claim publication rolls back a linked
+record if the directory durability sync fails; interrupted private write and
+delete records are recovered incrementally.
+
+Remote host shutdown is accepted even during the interval between thread start
+and event-loop `run_forever()`. Terminal callback work is drained while the host
+thread is still alive, and recursive asyncio cancellation uses bounded backoff.
+Explicit lifecycle methods still surface their first cleanup error to the caller;
+only terminal paths with no remaining caller transfer the owner to the bounded
+guardian.
+
+### Pass38 lifecycle guarantees
+
+Keyed retries are single-flight and cancellation is linearized against the exact
+`CLAIMED -> RUNNING` transition. An active key can retain one coalesced
+successor, while generation state is pruned after the last owner disappears.
+Cleanup callbacks use subsystem-aware Deficit Round Robin, and failed worker
+permits remain bounded, retryable owners rather than being truncated.
+
+Crash-left claim publication aliases are recovered only when they match the
+canonical record and inode. Claim publication syncs both the canonical link and
+the subsequent removal of its private alias. Fork-child reset callbacks never
+call inherited owners; the supported policy remains `spawn`, `forkserver`, or
+`fork()+exec`. Native arena admission rejects oversized inline charges before
+unsigned arithmetic and enforces reaper state/byte ceilings. Internal callers
+may use `shutdown_concurrency_runtime()` for dependency-ordered bounded shutdown.
+
 ## [License](#index)
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+### Pass39 quiescence and immutable lease guarantees
+
+Process-owned helper services now register in a weak generation-safe lifecycle
+registry. The structured shutdown closes remote coordinators, async bridges, and
+partition lookahead producers before the scheduler, janitor, cleanup dispatcher,
+and release guardian, using one monotonic deadline. A service is not considered
+quiescent merely because admission is closed: its own shutdown result also
+accounts for live host threads, failed permit owners, pending callbacks, and
+parked cleanup.
+
+Thread and file-descriptor leases release through an internal lease-ID ledger;
+the exposed amount is read-only and is not trusted for accounting. Retry keys
+containing custom objects use stable identity rather than user hashing, cleanup
+callbacks survive transient exceptions and close attempts, stale janitor scans
+hold governed descriptors, and initialized runtime entry points reject use in a
+post-`fork()` child until `exec()`.
+
+`concurrency_debug_snapshot()` retains its original v1 schema.
+`concurrency_runtime_debug_snapshot()` provides the additive integral v2 view of
+scheduler, guardian, dispatcher, janitor, process governors, registered helpers,
+and fork-poison state.
+
+### Pass40 capability-ledger and terminal-shutdown guarantees
+
+Thread and file-descriptor governors now accept a release only from the exact
+capability-bearing lease recorded in their private ledger. Amount-only releases,
+mutated authority fields, replayed leases, and cross-governor substitutions
+cannot manufacture capacity. Bounded one-shot availability notifications run on
+a governed notifier instead of synchronously on the thread returning capacity.
+
+Retry keys are tagged by exact primitive type and bounded before publication;
+custom objects use identity without invoking user hashing or equality under
+scheduler locks. Cleanup work is physically separated into runnable, delayed,
+dead-letter, and parked domains, while hostile exception formatting cannot kill
+the dispatcher or release guardian.
+
+Threaded services reserve registry authority before they start. Process shutdown
+is terminal, phased, and single-flight, and includes remote/async/lookahead
+hosts, janitor, dispatcher, retries, guardian, availability notifier, emergency
+budgets, and the native joinable cleanup reaper under one monotonic deadline.
+`concurrency_runtime_debug_snapshot()` now returns the additive integral v3
+view; the compatibility v1 snapshot is unchanged.
+
+## Pass41: teardown reserves and verified quiescence
+
+Pass41 separates public admission from the resources needed to finish a clean
+shutdown. New user work is rejected first, while a teardown-only thread and FD
+reserve remains available to janitor, dispatcher, retry, guardian, notifier, and
+remote cleanup. The reserve closes only after those consumers have either
+released their owners or reported bounded terminal retention.
+
+Availability callbacks are now transactionally delivered: a governor keeps a
+one-shot subscription until the bounded notifier accepts it, and notifier start
+failure schedules its own retry. Exact ledger release is the commit point for a
+process-resource lease; diagnostic or notification failure after that commit
+cannot make an already returned permit appear live again.
+
+The quarantine namespace remains fixed by an open descriptor and production
+operations are relative to that descriptor. The integral runtime snapshot is
+version 4 and includes Python services plus native arenas, detached workers,
+reaper queues, reservations, parking, and invariant underflows. Native arena
+construction uses an RAII teardown-reservation guard, and both explicit and
+`atexit` reaper shutdown are bounded.
+
+## Pass42: sealed wakeups and terminal-owner integrity
+
+Availability notification is now a closed internal protocol rather than a
+callback executor. Governors publish sealed, generation-tagged wakeup events for
+retry, cleanup, or janitor work; mutable function metadata cannot authorize code
+for the privileged notifier. Delivery is acknowledged only after successful
+execution, transient failures are retried within bounded state, and a stopped
+notifier cannot be restarted by a late resource release.
+
+Failed scheduler leases and quarantine-root handles transfer ownership one item
+at a time and remain retained until release or guardian adoption is confirmed.
+The guardian never tries to release its own bootstrap permits through itself.
+Runtime registry and terminal-host state are bounded by circuit breakers, cleanup
+fairness uses explicit subsystem tokens, and inherited post-fork graphs share one
+bounded process capsule.
+
+`concurrency_runtime_debug_snapshot()` advances additively to version 5. It
+reports the sealed notifier lifecycle, registry saturation, unified fork
+capsule, terminal remote hosts, and the sixteen-field native arena/reaper state.
+Native reaper lanes reserve capacity before startup, use bounded teardown thread
+permits, promote parked owners when capacity returns, and cannot report shutdown
+success while arenas, detached workers, reservations, parking, or reaper workers
+remain.

@@ -14,11 +14,14 @@ PyObject *py_diagnostics_json(PyObject *, PyObject *);
 PyObject *py_options_catalog(PyObject *, PyObject *);
 PyObject *py_memory_budget(PyObject *, PyObject *);
 PyObject *py_process_memory_governor_stats(PyObject *, PyObject *);
+PyObject *py_process_resident_memory_stats(PyObject *, PyObject *);
 PyObject *py_process_cpu_governor_probe(PyObject *, PyObject *);
 PyObject *py_execution_policy(PyObject *, PyObject *);
 PyObject *py_ordered_executor_probe(PyObject *, PyObject *);
 PyObject *py_ordered_executor_arena_completion_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_probe(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_reaper_shutdown(PyObject *, PyObject *);
+PyObject *py_operation_task_arena_runtime_snapshot(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
@@ -31,6 +34,12 @@ PyObject *py_output_worker_admission_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *);
 PyObject *py_options_prepare_bytes(PyObject *, PyObject *);
 PyObject *py_options_with_detected_at(PyObject *, PyObject *);
+PyObject *py_options_with_operation_context(PyObject *, PyObject *);
+PyObject *py_operation_memory_ledger_create(PyObject *, PyObject *);
+PyObject *py_operation_memory_ledger_reserve(PyObject *, PyObject *);
+PyObject *py_operation_memory_ledger_release(PyObject *, PyObject *);
+PyObject *py_operation_memory_ledger_snapshot(PyObject *, PyObject *);
+PyObject *py_operation_memory_ledger_diagnostics(PyObject *, PyObject *);
 
 // Logical-schema payloads.
 PyObject *py_logical_schema_payload_validate(PyObject *, PyObject *);

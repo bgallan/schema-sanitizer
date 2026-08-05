@@ -1,8 +1,12 @@
 // Implements bounded parallel native Parquet column materialization.
+// Shared scratch estimation saturates before
+// std::numeric_limits<std::int64_t>::max() - value; on overflow, estimate =
+// std::numeric_limits<std::int64_t>::max().
 
 struct NativeParquetDecodedColumn {
   std::size_t index = 0;
   NativeParquetChildArray child;
+  std::shared_ptr<NativeParquetColumnReservation> reservation;
 };
 
 struct NativeParquetColumnRange {
@@ -18,39 +22,6 @@ void rebind_native_parquet_child_array(NativeParquetChildArray *child) {
   if (child) {
     child->array.buffers = child->buffers.data();
   }
-}
-
-std::int64_t native_parquet_max_column_scratch_bytes(
-    const RowGroupInfo &row_group) noexcept {
-  std::int64_t maximum = 64LL * 1024LL;
-  for (const auto &column : row_group.columns) {
-    for (const auto &span : column.native_read_page_spans) {
-      std::int64_t estimate = 0;
-      const auto add_non_negative = [&estimate](std::int64_t value) noexcept {
-        if (value <= 0 ||
-            estimate == std::numeric_limits<std::int64_t>::max()) {
-          return;
-        }
-        if (estimate > std::numeric_limits<std::int64_t>::max() - value) {
-          estimate = std::numeric_limits<std::int64_t>::max();
-        } else {
-          estimate += value;
-        }
-      };
-      add_non_negative(span.payload_size);
-      add_non_negative(span.value_payload_bytes);
-      add_non_negative(span.materialized_value_bytes);
-      add_non_negative(span.materialized_offset_bytes);
-      // non_null_count is int32, so widening before multiplying by an
-      // eight-byte value index cannot overflow int64.
-      if (span.non_null_count > 0) {
-        add_non_negative(static_cast<std::int64_t>(span.non_null_count) *
-                         static_cast<std::int64_t>(sizeof(std::int64_t)));
-      }
-      maximum = std::max(maximum, estimate);
-    }
-  }
-  return maximum;
 }
 
 std::size_t native_parquet_column_worker_count(
@@ -239,14 +210,16 @@ sanitize::Status materialize_native_row_group_columns_individual(
     NativeParquetStreamState *stream, const RowGroupInfo &row_group,
     const NativeFlatRowWindow &window, std::size_t worker_count,
     NativeParquetArrayState *state,
-    std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena) {
+    std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena,
+    std::shared_ptr<NativeParquetSharedReservationBudget> reservation_budget) {
   using Executor =
       sanitize::internal::OrderedExecutor<std::size_t,
                                           NativeParquetDecodedColumn>;
   auto *worker_states = &stream->parallel_column_workers;
-  auto worker = [path = stream->path, &row_group, window, worker_states](
-                    std::size_t &&column_index, std::size_t worker_index,
-                    sanitize::internal::StopToken stop)
+  auto worker = [path = stream->path, &row_group, window, worker_states,
+                 reservation_budget](std::size_t &&column_index,
+                                     std::size_t worker_index,
+                                     sanitize::internal::StopToken stop)
       -> sanitize::Result<NativeParquetDecodedColumn> {
     if (stop.stop_requested()) {
       return sanitize::Status::Cancelled(
@@ -261,9 +234,14 @@ sanitize::Status materialize_native_row_group_columns_individual(
     SAN_RETURN_NOT_OK(ensure_native_parquet_worker_file(&worker_state, path));
     NativeParquetDecodedColumn decoded;
     decoded.index = column_index;
+    SAN_ASSIGN_OR_RAISE(decoded.reservation,
+                        reserve_native_parquet_column(
+                            row_group, row_group.columns[column_index], window,
+                            reservation_budget));
     SAN_RETURN_NOT_OK(materialize_native_row_group_column(
         worker_state.file, row_group.columns[column_index], window,
         &worker_state.page_scratch, &decoded.child));
+    decoded.reservation->finish_decode();
     return decoded;
   };
 
@@ -286,6 +264,9 @@ sanitize::Status materialize_native_row_group_columns_individual(
       executor->Cancel();
       return sanitize::Status::Invalid(
           "native Parquet reader: column commit order mismatch");
+    }
+    if (decoded.reservation) {
+      decoded.reservation->commit_output();
     }
     SAN_RETURN_NOT_OK(commit_native_parquet_decoded_column(std::move(decoded),
                                                            stream, state));
@@ -312,16 +293,18 @@ sanitize::Status materialize_native_row_group_columns_grouped(
     NativeParquetStreamState *stream, const RowGroupInfo &row_group,
     const NativeFlatRowWindow &window, std::size_t worker_count,
     NativeParquetArrayState *state,
-    std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena) {
+    std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena,
+    std::shared_ptr<NativeParquetSharedReservationBudget> reservation_budget) {
   const auto ranges =
       native_parquet_balanced_column_ranges(row_group, window, worker_count);
   using Executor =
       sanitize::internal::OrderedExecutor<NativeParquetColumnRange,
                                           NativeParquetDecodedColumnRange>;
   auto *worker_states = &stream->parallel_column_workers;
-  auto worker = [path = stream->path, &row_group, window, worker_states](
-                    NativeParquetColumnRange &&range, std::size_t worker_index,
-                    sanitize::internal::StopToken stop)
+  auto worker = [path = stream->path, &row_group, window, worker_states,
+                 reservation_budget](NativeParquetColumnRange &&range,
+                                     std::size_t worker_index,
+                                     sanitize::internal::StopToken stop)
       -> sanitize::Result<NativeParquetDecodedColumnRange> {
     if (range.first >= range.last || range.last > row_group.columns.size() ||
         worker_index >= worker_states->size()) {
@@ -339,9 +322,14 @@ sanitize::Status materialize_native_row_group_columns_grouped(
       }
       NativeParquetDecodedColumn column;
       column.index = index;
+      SAN_ASSIGN_OR_RAISE(
+          column.reservation,
+          reserve_native_parquet_column(row_group, row_group.columns[index],
+                                        window, reservation_budget));
       SAN_RETURN_NOT_OK(materialize_native_row_group_column(
           worker_state.file, row_group.columns[index], window,
           &worker_state.page_scratch, &column.child));
+      column.reservation->finish_decode();
       decoded.columns.push_back(std::move(column));
     }
     return decoded;
@@ -380,6 +368,9 @@ sanitize::Status materialize_native_row_group_columns_grouped(
         return sanitize::Status::Invalid(
             "native Parquet reader: column range result order mismatch");
       }
+      if (column.reservation) {
+        column.reservation->commit_output();
+      }
       SAN_RETURN_NOT_OK(commit_native_parquet_decoded_column(std::move(column),
                                                              stream, state));
     }
@@ -415,10 +406,35 @@ sanitize::Status materialize_native_row_group_columns_parallel(
   if (stream->parallel_column_workers.size() < worker_count) {
     stream->parallel_column_workers.resize(worker_count);
   }
+  for (std::size_t index = 0; index < worker_count; ++index) {
+    stream->parallel_column_workers[index].page_scratch.max_page_bytes =
+        static_cast<std::size_t>(
+            std::max<std::int64_t>(1, stream->max_page_bytes));
+  }
+  SAN_ASSIGN_OR_RAISE(const auto retained_before,
+                      native_array_retained_capacity_bytes(*state));
+  std::int64_t shared_limit = stream->max_buffer_bytes;
+  SAN_RETURN_NOT_OK(add_i64_checked(&shared_limit, stream->max_row_group_bytes,
+                                    "parallel shared operation budget"));
+  if (retained_before > shared_limit) {
+    return sanitize::Status::OutOfMemory(
+        "native Parquet reader: retained Arrow capacity ", retained_before,
+        " exceeds parallel shared operation budget ", shared_limit);
+  }
+  std::shared_ptr<NativeParquetSharedReservationBudget> reservation_budget;
+  try {
+    reservation_budget = std::make_shared<NativeParquetSharedReservationBudget>(
+        shared_limit, retained_before);
+  } catch (const std::bad_alloc &) {
+    return sanitize::Status::OutOfMemory(
+        "native Parquet reader: shared reservation allocation failed");
+  }
   if (native_parquet_grouped_column_decode_eligible(row_group, worker_count)) {
     return materialize_native_row_group_columns_grouped(
-        stream, row_group, window, worker_count, state, std::move(task_arena));
+        stream, row_group, window, worker_count, state, std::move(task_arena),
+        std::move(reservation_budget));
   }
   return materialize_native_row_group_columns_individual(
-      stream, row_group, window, worker_count, state, std::move(task_arena));
+      stream, row_group, window, worker_count, state, std::move(task_arena),
+      std::move(reservation_budget));
 }

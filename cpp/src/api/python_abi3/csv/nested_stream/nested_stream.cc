@@ -7,6 +7,7 @@
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/json_output/jsonl_value_writer.hh"
+#include "internal/runtime/process_identity.hh"
 
 #include <cerrno>
 #include <climits>
@@ -242,6 +243,9 @@ const char *last_error(ArrowArrayStream *stream) {
 }
 
 void release_stream(ArrowArrayStream *stream) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!stream || !stream->release) {
     return;
   }
@@ -321,7 +325,8 @@ int get_next(ArrowArrayStream *stream, ArrowArray *out) {
         const int rc = stream_state->inner->get_next(stream_state->inner,
                                                      state->base.get());
         if (rc != 0) {
-          return sanitize::Status::IOError(
+          return sanitize::internal::cdata_stream::status_from_stream_error(
+              rc, stream_state->inner,
               "CSV nested stream inner get_next failed");
         }
         ArrowArray &base_array = state->base.value();

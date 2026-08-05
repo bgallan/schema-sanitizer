@@ -1,0 +1,69 @@
+"""PID-reuse- and reboot-safe process identity helpers for coordination state."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+_UNKNOWN_START_TOKEN = "unknown"
+_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+
+
+def parse_linux_proc_start_token(raw_stat: str) -> str:
+    """Return Linux ``/proc/<pid>/stat`` field 22 without splitting ``comm``."""
+    closing = raw_stat.rfind(")")
+    if closing < 0:
+        return _UNKNOWN_START_TOKEN
+    fields = raw_stat[closing + 1 :].strip().split()
+    if len(fields) <= 19:
+        return _UNKNOWN_START_TOKEN
+    token = fields[19]
+    return token if token.isdecimal() else _UNKNOWN_START_TOKEN
+
+
+def linux_boot_id() -> str:
+    """Return the current Linux boot identifier in one bounded canonical form."""
+    try:
+        value = _BOOT_ID_PATH.read_text(encoding="ascii").strip().lower()
+    except OSError:
+        return _UNKNOWN_START_TOKEN
+    if not value or len(value) > 128:
+        return _UNKNOWN_START_TOKEN
+    if any(character not in "0123456789abcdef-" for character in value):
+        return _UNKNOWN_START_TOKEN
+    return value
+
+
+def process_start_token(pid: int) -> str:
+    """Return a PID-instance token that also distinguishes Linux reboots."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="ascii")
+    except (OSError, ValueError, OverflowError):
+        return _UNKNOWN_START_TOKEN
+    start = parse_linux_proc_start_token(raw)
+    if start == _UNKNOWN_START_TOKEN:
+        return start
+    boot = linux_boot_id()
+    return start if boot == _UNKNOWN_START_TOKEN else f"{boot}:{start}"
+
+
+def process_identity_matches(recorded: str, current: str) -> bool:
+    """Compare new composite tokens while accepting legacy start-only writers."""
+    recorded = str(recorded)
+    current = str(current)
+    if recorded == _UNKNOWN_START_TOKEN or current == _UNKNOWN_START_TOKEN:
+        return True
+    if recorded == current:
+        return True
+    recorded_composite = ":" in recorded
+    current_composite = ":" in current
+    if recorded_composite and current_composite:
+        return False
+    return recorded.rsplit(":", 1)[-1] == current.rsplit(":", 1)[-1]
+
+
+__all__ = [
+    "linux_boot_id",
+    "parse_linux_proc_start_token",
+    "process_identity_matches",
+    "process_start_token",
+]

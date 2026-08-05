@@ -165,6 +165,16 @@ sanitize::Result<PageHeaderInfo> read_page_header(std::string_view bytes) {
         SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
       }
       break;
+    case 4:
+      if (type == kTypeI32) {
+        std::int32_t crc = 0;
+        SAN_ASSIGN_OR_RAISE(crc, reader.read_i32());
+        page.crc = static_cast<std::uint32_t>(crc);
+        page.has_crc = true;
+      } else {
+        SAN_RETURN_NOT_OK(reader.skip_type(type, 0));
+      }
+      break;
     case 5:
       if (type == kTypeStruct) {
         SAN_ASSIGN_OR_RAISE(page, read_data_page_header(reader, page));

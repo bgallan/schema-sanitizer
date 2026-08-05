@@ -26,6 +26,7 @@ def test_parquet_stream_plans_layout_once_and_loads_row_groups_lazily() -> None:
     row_group = (
         reader / "native_stream/materialization/row_group/native_stream_row_group.cc.inc"
     ).read_text(encoding="utf-8")
+    compact_row_group = " ".join(row_group.split())
     schema = (reader / "native_stream/schema/native_stream_arrow_schema_root.cc.inc").read_text(
         encoding="utf-8"
     )
@@ -34,7 +35,7 @@ def test_parquet_stream_plans_layout_once_and_loads_row_groups_lazily() -> None:
     assert "initialize_native_stream_output_layout(state.get())" in public
     assert "native_reader_readiness(info, &planned_output_layout)" not in public
     assert "prepare_native_row_group" in row_group
-    assert "read_page_headers(stream->file, &current)" in row_group
+    assert "auto status = read_page_headers(stream->file, &current," in compact_row_group
     assert "release_native_row_group_runtime_state(&row_group)" in row_group
     assert "validate_native_recursive_row_group_output_layout(" in row_group
     assert "finalize_native_stream_output_layout_plan" in schema

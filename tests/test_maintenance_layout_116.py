@@ -52,7 +52,8 @@ def test_footer_root_parser_shares_the_metadata_owner() -> None:
     reader = ROOT / "cpp/src/internal/parquet/footer_reader"
     owner = reader / "thrift/footer_metadata_row_group_reader.cc.inc"
     source = owner.read_text(encoding="utf-8")
-    assert "sanitize::Result<FooterInfo> parse_footer" in source
+    assert "sanitize::Result<FooterInfo>" in source
+    assert "parse_footer(std::string_view footer" in source
     assert "read_row_groups" in source
     assert len(source.splitlines()) <= 500
     assert not (reader / "runtime/footer_reader_footer_parse.cc.inc").exists()

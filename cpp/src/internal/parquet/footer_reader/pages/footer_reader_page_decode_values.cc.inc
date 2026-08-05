@@ -53,17 +53,20 @@ sanitize::Status decode_page_values(std::string_view payload,
 sanitize::Status decode_page_levels(std::string_view payload,
                                     const ColumnChunkInfo &column,
                                     PageHeaderInfo *page,
-                                    const DictionaryPageState *dictionary) {
+                                    const DictionaryPageState *dictionary,
+                                    std::uint64_t max_derived_bytes) {
   if (!page || page->is_dictionary_page || !page->has_num_values) {
     return {};
   }
   std::size_t offset = 0;
+  std::uint64_t planned_level_bytes = 0;
   if (column.max_repetition_level > 0) {
     LevelDecodeInfo repetition;
-    SAN_ASSIGN_OR_RAISE(repetition,
-                        decode_level_stream(payload, &offset,
-                                            column.max_repetition_level,
-                                            page->num_values, false, true));
+    SAN_ASSIGN_OR_RAISE(
+        repetition,
+        decode_level_stream(payload, &offset, column.max_repetition_level,
+                            page->num_values, false, true, max_derived_bytes,
+                            &planned_level_bytes));
     page->decoded_repetition_levels = repetition.decoded_count;
     page->decoded_repetition_level_values = std::move(repetition.level_values);
   }
@@ -75,11 +78,11 @@ sanitize::Status decode_page_levels(std::string_view payload,
        (column.path_in_schema.size() > 2 ||
         (column.path_in_schema.size() == 2 && !column.top_level_required)));
   if (column.max_definition_level > 0) {
-    SAN_ASSIGN_OR_RAISE(definition,
-                        decode_level_stream(payload, &offset,
-                                            column.max_definition_level,
-                                            page->num_values, true,
-                                            capture_definition_level_values));
+    SAN_ASSIGN_OR_RAISE(
+        definition, decode_level_stream(
+                        payload, &offset, column.max_definition_level,
+                        page->num_values, true, capture_definition_level_values,
+                        max_derived_bytes, &planned_level_bytes));
     page->decoded_definition_levels = definition.decoded_count;
   } else {
     SAN_RETURN_NOT_OK(initialize_validity_bitmap(page->num_values, true,
@@ -157,9 +160,11 @@ sanitize::Status decode_dictionary_page_values(std::string_view payload,
 sanitize::Status decode_verified_page_payload(std::string_view payload,
                                               const ColumnChunkInfo &column,
                                               PageHeaderInfo *page,
-                                              DictionaryPageState *dictionary) {
+                                              DictionaryPageState *dictionary,
+                                              std::uint64_t max_derived_bytes) {
   if (page && page->is_dictionary_page) {
     return decode_dictionary_page_values(payload, column, page, dictionary);
   }
-  return decode_page_levels(payload, column, page, dictionary);
+  return decode_page_levels(payload, column, page, dictionary,
+                            max_derived_bytes);
 }

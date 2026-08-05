@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from contextlib import suppress
 
+from .finalization import runtime_is_finalizing
+
 _COMPACT_AFTER_BYTES = 1 << 20
 _ZERO_CHUNK = b"\x00" * (1 << 20)
 
@@ -124,5 +126,7 @@ class BufferedGeneratedBytesReader:
 
     def __del__(self) -> None:
         """Best-effort release transient buffered bytes."""
+        if runtime_is_finalizing():
+            return
         with suppress(Exception):
             self.close()

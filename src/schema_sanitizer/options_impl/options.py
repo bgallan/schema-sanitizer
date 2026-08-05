@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, TypeAlias, cast
 
 from ..core_impl.logical_schema import LogicalSchemaPayload
 from ..core_impl.native_options import ENUM_BY_KIND, OPTIONS, coerce_enum_member
 from ..core_impl.native_options import Options as _RawOptions
 from ..core_impl.native_options import validate_options as _validate_options
+
+CsvHeaderMode: TypeAlias = Literal["exact", "union"]
+_CSV_HEADER_MODES = frozenset({"exact", "union"})
+
+
+def normalize_csv_header_mode(value: object) -> CsvHeaderMode:
+    """Return one canonical CSV header reconciliation mode."""
+    if not isinstance(value, str):
+        raise TypeError("Option 'csv_header_mode' must be a string")
+    normalized = value.strip().lower()
+    if normalized not in _CSV_HEADER_MODES:
+        raise ValueError("Option 'csv_header_mode' must be one of 'exact', 'union'")
+    return cast(CsvHeaderMode, normalized)
+
+
+def require_implemented_csv_header_mode(value: object) -> CsvHeaderMode:
+    """Return a validated CSV header mode supported by the native reader."""
+    return normalize_csv_header_mode(value)
+
 
 _BOOL_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind == "bool")
 _INT_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind in {"i32", "i64"})

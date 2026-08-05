@@ -1,5 +1,6 @@
 // Adapts CSV and JSON inputs into materialized Arrow rows.
 
+#include "frontends/json/text_row_pipeline.hh"
 #include "internal/materialization/batch_appender_internal.hh"
 #include "internal/materialization/conversion/variants.hh"
 #include "internal/planning/variant_field_names.hh"
@@ -278,7 +279,9 @@ sanitize::Result<PreparedRow> prepare_row_csv_text(
     arena->reset();
   }
   CsvDirectScratchReset scratch_reset(arena, cells);
-  SAN_RETURN_NOT_OK(parse_csv_cells(raw, ctx.delimiter, cells, arena));
+  SAN_RETURN_NOT_OK(parse_csv_cells(raw, ctx.delimiter, cells, arena,
+                                    base_offset, ctx.max_field_bytes,
+                                    ctx.max_decoded_record_bytes));
 
   fields->clear();
   if (fields->capacity() < plan.columns.size()) {
@@ -343,7 +346,18 @@ prepare_row_json_text(const sanitize::CompiledPlan &plan, JsonOnDemandDoc *doc,
   }
   doc->Reset();
   JsonDirectScratchReset scratch_reset(doc);
-  SAN_ASSIGN_OR_RAISE(ValueView root, doc->ParseValue(raw, base_offset));
+  auto parsed = doc->ParseValue(raw, base_offset);
+  if (!parsed.ok()) {
+    const auto status = parsed.status();
+    if (json_error_exceeds_hard_safety_limit(status)) {
+      return status;
+    }
+    CoerceError error;
+    error.code = DiagnosticCode::kCoercionFailure;
+    error.detail = status.message();
+    return prepared_error_for_policy(opts, diagnostics, error);
+  }
+  ValueView root = std::move(parsed).ValueOrDie();
 
   fields->clear();
   if (fields->capacity() < 16) {
@@ -397,7 +411,22 @@ append_row_json_text(BatchAppender *app, JsonOnDemandDoc *doc,
   }
   doc->Reset();
   JsonDirectScratchReset scratch_reset(doc);
-  SAN_ASSIGN_OR_RAISE(ValueView root, doc->ParseValue(raw, base_offset));
+  auto parsed = doc->ParseValue(raw, base_offset);
+  if (!parsed.ok()) {
+    const auto status = parsed.status();
+    if (json_error_exceeds_hard_safety_limit(status)) {
+      return status;
+    }
+    CoerceError error;
+    error.code = DiagnosticCode::kCoercionFailure;
+    error.detail = status.message();
+    SAN_ASSIGN_OR_RAISE(auto prepared,
+                        prepared_error_for_policy(opts, diagnostics, error));
+    const auto result = prepared.result;
+    SAN_RETURN_NOT_OK(append_prepared_row(app, std::move(prepared)));
+    return result;
+  }
+  ValueView root = std::move(parsed).ValueOrDie();
   fields.clear();
   if (fields.capacity() < 16) {
     fields.reserve(16);

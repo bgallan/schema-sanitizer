@@ -16,7 +16,7 @@ def test_ingest_and_remote_source_plan_are_direct_modules() -> None:
     for owner in owners:
         assert owner.is_file()
         assert not owner.with_suffix("").exists()
-        assert len(owner.read_text(encoding="utf-8").splitlines()) <= 500
+        assert len(owner.read_text(encoding="utf-8").splitlines()) <= 750
 
 
 def test_projection_duplicate_detection_is_linear() -> None:

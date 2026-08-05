@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "description": "Maximum accepted Release-to-Release median ratios for the hardened valid-reader benchmark. The envelope records the deliberate cost of strict validation and budget accounting while preventing unreviewed regressions.",
+  "maximum_candidate_to_baseline_ratio": {
+    "csv_multi": 1.5,
+    "csv_single": 1.5,
+    "jsonl_multi": 1.5,
+    "jsonl_single": 1.5,
+    "parquet_preflight": 1.2,
+    "xml_multi": 1.2,
+    "xml_single": 1.2
+  }
+}

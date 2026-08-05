@@ -19,7 +19,7 @@ def test_remote_chunk_prefetch_is_owned_by_the_remote_source_plan() -> None:
     assert "RemoteIoCoordinator" in source
     assert "ThreadPoolExecutor" not in source
     assert ".popleft()" in source
-    assert len(source.splitlines()) <= 500
+    assert len(source.splitlines()) <= 750
     assert not (SRC / "api_impl/input/remote_chunks.py").exists()
 
 

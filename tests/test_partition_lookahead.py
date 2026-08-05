@@ -356,7 +356,7 @@ def test_fixed_partition_timestamps_are_identical_across_modes(
     """Lookahead scheduling cannot change per-partition generated UTC metadata."""
     import json
 
-    import pyarrow.parquet as pq
+    pq = pytest.importorskip("pyarrow.parquet")
 
     from schema_sanitizer.api_impl import operation_context as context_module
 

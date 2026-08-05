@@ -90,7 +90,11 @@ def test_v66_fixed_wide_parquet_single_and_multi_are_byte_identical(
     rows = (
         {f"value_{column:02d}": row * (column + 3) for column in range(32)} for row in range(65_536)
     )
-    source_stream = ExecutionContext().to_sink_python("stream", rows, None)
+    source_options = normalize_call_options(
+        memory_limit_bytes=512 << 20,
+        on_error="stop",
+    ).raw
+    source_stream = ExecutionContext().to_sink_python("stream", rows, source_options)
     PARQUET_STREAM_WRITE(source_stream, str(source), "uncompressed", -1, 128 << 20)
 
     outputs: dict[str, bytes] = {}

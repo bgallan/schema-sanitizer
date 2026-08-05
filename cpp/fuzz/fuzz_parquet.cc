@@ -2,9 +2,11 @@
 #include "sanitize/abi/cdata_types.hh"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <fstream>
 #include <string>
 
@@ -27,9 +29,11 @@ std::filesystem::path fuzz_path() {
           ".parquet");
 }
 
-void consume_native_stream(const std::string &path, std::size_t input_size) {
+void consume_native_stream(const std::string &path, std::size_t input_size,
+                           std::int64_t memory_limit_bytes) {
   auto stream_result =
-      sanitize::internal::parquet_footer_reader::make_arrow_stream(path);
+      sanitize::internal::parquet_footer_reader::make_arrow_stream(
+          path, {}, memory_limit_bytes);
   if (!stream_result.ok()) {
     return;
   }
@@ -67,7 +71,20 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
   }
   (void)sanitize::internal::parquet_footer_reader::read_footer_info(
       path.string());
-  consume_native_stream(path.string(), size);
+  constexpr std::size_t kMaxScaledLimit = 64U * 1024U * 1024U;
+  const auto bounded_size = std::min<std::size_t>(
+      size, (kMaxScaledLimit - 1U) / 8U);
+  const auto scaled_limit = static_cast<std::int64_t>(
+      std::max<std::size_t>(1U, bounded_size * 8U + 1U));
+  constexpr std::array<std::int64_t, 4> fixed_limits = {
+      1, 64LL * 1024LL, 1024LL * 1024LL, 16LL * 1024LL * 1024LL};
+  for (const auto limit : fixed_limits) {
+    (void)sanitize::internal::parquet_footer_reader::read_stream_preflight_json(
+        path.string(), {}, limit);
+  }
+  (void)sanitize::internal::parquet_footer_reader::read_stream_preflight_json(
+      path.string(), {}, scaled_limit);
+  consume_native_stream(path.string(), size, scaled_limit);
   std::error_code ignored;
   std::filesystem::remove(path, ignored);
   return 0;

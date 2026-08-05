@@ -7,6 +7,9 @@ import random
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, TypeVar
 
+from ..errors import SchemaSanitizerCancelledError
+from .cancellation import cancellable_async_sleep, check_operation_cancelled
+
 T = TypeVar("T")
 
 _MAX_ASYNC_RETRIES = 32
@@ -23,17 +26,47 @@ async def retry_async(
     *,
     retries: int,
     should_retry: Callable[[Exception], bool] | None = None,
+    throttle_key: str | None = None,
 ) -> T:
     """Run one async operation with bounded retry/backoff."""
     bounded_retries = min(max(int(retries), 0), _MAX_ASYNC_RETRIES)
     for attempt in range(bounded_retries + 1):
+        check_operation_cancelled(stage="async_retry")
+        lease = None
         try:
-            return await operation()
+            if throttle_key is not None:
+                from ..remote_impl.provider_throttle import acquire_provider_request
+
+                lease = await acquire_provider_request(throttle_key)
+            result = await operation()
+        except SchemaSanitizerCancelledError:
+            if lease is not None:
+                lease.release()
+            raise
+        except asyncio.CancelledError:
+            if lease is not None:
+                lease.release()
+            raise
         except Exception as exc:
+            if lease is not None:
+                lease.failure(exc)
             retryable = should_retry(exc) if should_retry is not None else True
             if attempt >= bounded_retries or not retryable:
                 raise
-            await asyncio.sleep(retry_delay(attempt))
+            await cancellable_async_sleep(retry_delay(attempt), stage="async_retry_backoff")
+            continue
+        except BaseException:
+            if lease is not None:
+                lease.release()
+            raise
+
+        # The user operation has already completed successfully.  Keep success
+        # accounting outside the retry exception handler so an instrumentation
+        # failure cannot repeat a non-idempotent operation.
+        if lease is not None:
+            lease.success()
+        check_operation_cancelled(stage="async_retry")
+        return result
     raise RuntimeError("unreachable async retry state")
 
 
@@ -44,10 +77,16 @@ async def _indexed_worker(
 ) -> None:
     """Consume scheduled indices and publish one result per fetch."""
     while True:
+        check_operation_cancelled(stage="async_worker")
         index = await indices.get()
         try:
             value = await fetch(index)
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            # A worker must always publish a terminal outcome. Otherwise a
+            # non-Exception failure (for example a custom BaseException) would
+            # terminate the worker and leave the ordered consumer blocked.
             await results.put((index, None, exc))
         else:
             await results.put((index, value, None))
@@ -97,6 +136,7 @@ async def ordered_indexed_results(
 
     try:
         for expected in range(count):
+            check_operation_cancelled(stage="ordered_async_results")
             while expected not in pending:
                 index, value, error = await results.get()
                 pending[index] = (value, error)
@@ -132,6 +172,7 @@ async def unordered_indexed_results(
 
     try:
         for _ in range(count):
+            check_operation_cancelled(stage="unordered_async_results")
             index, value, error = await results.get()
             if error is not None:
                 raise error

@@ -6,6 +6,7 @@ import inspect
 from pathlib import Path
 
 import pytest
+from diagnostics_assertions import assert_diagnostics_semantically_equal
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.concurrency_coverage import (
@@ -35,6 +36,7 @@ def _options(*, threading_mode: str, xml_row_tag: str | None = None):
     kwargs = {
         "multi_threading": threading_mode == "multi",
         "memory_limit_bytes": 128 * 1024 * 1024,
+        "field_name_policy": "preserve",
     }
     if xml_row_tag is not None:
         kwargs["xml_row_tag"] = xml_row_tag
@@ -56,7 +58,7 @@ def _assert_probe_equal(single, multi) -> None:
     """Require exact schema, field order, and diagnostics parity."""
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
 
 
 def _input_tasks(stats: dict) -> int:

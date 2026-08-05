@@ -1,12 +1,19 @@
-// Shared XML whitespace and token matching.
+// Shared XML safety limits, whitespace, name validation, and token matching.
 
 #pragma once
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 namespace sanitize::internal::xml_tokens {
+
+inline constexpr std::uint32_t kMaxXmlNestingDepth = 512U;
+inline constexpr std::size_t kMaxXmlNodes = 1'000'000U;
+inline constexpr std::size_t kMaxXmlAttributesPerElement = 4'096U;
+inline constexpr std::size_t kMaxXmlTotalAttributes = 1'000'000U;
+inline constexpr std::size_t kMaxXmlDecodedBytes = std::size_t{512} << 20U;
 
 /// Return whether one byte is XML whitespace as defined by XML 1.0.
 [[nodiscard]] constexpr bool is_xml_whitespace(char value) noexcept {
@@ -16,6 +23,39 @@ namespace sanitize::internal::xml_tokens {
 /// Return whether text contains only XML whitespace characters.
 [[nodiscard]] inline bool xml_is_ws(std::string_view text) noexcept {
   return std::ranges::all_of(text, is_xml_whitespace);
+}
+
+/// Return whether one ASCII byte can start an XML name in the supported subset.
+[[nodiscard]] constexpr bool
+is_ascii_xml_name_start(unsigned char value) noexcept {
+  return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
+         value == '_' || value == ':';
+}
+
+/// Return whether one ASCII byte can continue an XML name.
+[[nodiscard]] constexpr bool
+is_ascii_xml_name_char(unsigned char value) noexcept {
+  return is_ascii_xml_name_start(value) || (value >= '0' && value <= '9') ||
+         value == '-' || value == '.';
+}
+
+/// Validate one XML name after the containing input has passed UTF-8
+/// validation.
+[[nodiscard]] inline bool is_valid_xml_name(std::string_view name) noexcept {
+  if (name.empty()) {
+    return false;
+  }
+  const auto first = static_cast<unsigned char>(name.front());
+  if (first < 0x80U && !is_ascii_xml_name_start(first)) {
+    return false;
+  }
+  for (std::size_t index = 1; index < name.size(); ++index) {
+    const auto byte = static_cast<unsigned char>(name[index]);
+    if (byte < 0x80U && !is_ascii_xml_name_char(byte)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /// Return whether text has token at the requested byte offset.

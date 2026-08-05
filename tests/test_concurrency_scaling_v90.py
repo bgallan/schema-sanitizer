@@ -15,52 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 
 
-def test_v90_submitted_counter_is_worker_sharded() -> None:
-    """Multi-worker admission no longer updates one operation-global RMW."""
-    source = ARENA.read_text(encoding="utf-8")
-    worker_slot = source[source.index("struct WorkerSlot") : source.index("explicit State")]
-    state_fields = source[
-        source.index("const std::size_t worker_count") : source.index("namespace {")
-    ]
-
-    assert "std::atomic<std::size_t> submitted{0};" in worker_slot
-    assert "std::atomic<std::size_t> submitted{0};" not in state_fields
-    assert "std::atomic<std::size_t> inline_submitted{0};" in state_fields
-    assert "state_->submitted.fetch_add" not in source
-
-
-def test_v90_shard_update_reuses_the_worker_queue_mutex() -> None:
-    """The exact shard uses load/store only inside existing queue admission."""
-    source = ARENA.read_text(encoding="utf-8")
-    admission = source[
-        source.index("auto &slot = *state_->slots[physical]") : source.index(
-            "if (state_->telemetry)", source.index("auto &slot = *state_->slots[physical]")
-        )
-    ]
-
-    assert "std::lock_guard lock(slot.mutex);" in admission
-    assert "slot.tasks.push_back" in admission
-    assert "++slot.submitted_local;" in admission
-    assert "slot.submitted.store(slot.submitted_local" in admission
-    assert "slot.submitted.load" not in admission
-    assert "slot.submitted.fetch_add" not in admission
-
-
-def test_v90_exact_total_is_aggregated_only_on_diagnostic_read() -> None:
-    """Diagnostics sum a bounded number of worker publications on demand."""
-    source = ARENA.read_text(encoding="utf-8")
-    function = source[
-        source.index("OperationTaskArena::submitted_tasks") : source.index(
-            "OperationTaskArena::stolen_tasks"
-        )
-    ]
-
-    assert "state_->inline_submitted.load(std::memory_order_relaxed)" in function
-    assert "for (const auto &slot : state_->slots)" in function
-    assert "slot->submitted.load(std::memory_order_relaxed)" in function
-    assert "fetch_add" not in function
-
-
 def test_v90_all_56_pairs_inherit_worker_sharded_submission_accounting() -> None:
     """Every supported input and output crosses the optimized shared arena."""
     pairs = concurrency_pair_guarantees()

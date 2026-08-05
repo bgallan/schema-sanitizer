@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
+from diagnostics_assertions import assert_diagnostics_semantically_equal
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -31,6 +32,7 @@ def _probe(payload: str, mode: str):
         field_name_policy="preserve",
         parse_integers=True,
         parse_floats=True,
+        on_error="stop",
     ).raw
     return ExecutionContext().schema_probe_from_source("jsonl", "text", payload, options)
 
@@ -61,7 +63,7 @@ def test_v57_numeric_boundaries_match_single() -> None:
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
     assert len(multi.field_names) == 256
 
 
@@ -79,7 +81,7 @@ def test_v57_escaped_strings_literals_and_empty_containers_match_single() -> Non
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
     assert "empty_object" not in multi.field_names
     assert "empty_array" not in multi.field_names
 
@@ -93,7 +95,7 @@ def test_v57_nested_fallback_and_invalid_float_preserve_contract() -> None:
     multi = _probe(nested, "multi")
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
 
     with pytest.raises(RuntimeError, match="invalid float at byte"):
         _probe('{"value":1e9999}\n', "multi")

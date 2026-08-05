@@ -69,7 +69,10 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
 
     return pack_registry_or_raise_with_metadata(
         st, ctx_obj, &outputs, first_row_columns, all_row_columns,
-        row_span_columns, timestamp_columns);
+        row_span_columns, timestamp_columns,
+        prepared && prepared->prepared
+            ? prepared->prepared->spec.memory_limit_bytes
+            : -1);
   }
 
   case PythonSourceKind::kStream: {
@@ -97,7 +100,8 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
 
     return pack_registry_or_raise_with_metadata(
         st, payload_obj, &outputs, first_row_columns, all_row_columns,
-        row_span_columns, timestamp_columns);
+        row_span_columns, timestamp_columns,
+        prepared_shared ? prepared_shared->spec.memory_limit_bytes : -1);
   }
 
   case PythonSourceKind::kText: {
@@ -120,7 +124,10 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
 
     return pack_registry_or_raise_with_metadata(
         st, ctx_obj, &outputs, first_row_columns, all_row_columns,
-        row_span_columns, timestamp_columns);
+        row_span_columns, timestamp_columns,
+        prepared && prepared->prepared
+            ? prepared->prepared->spec.memory_limit_bytes
+            : -1);
   }
 
   case PythonSourceKind::kUnknown:

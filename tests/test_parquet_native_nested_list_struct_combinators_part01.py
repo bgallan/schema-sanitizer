@@ -11,6 +11,7 @@ from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 # Split from test_parquet_native_nested_list_struct_combinators.py: test_native_parquet_stream_materializes_list_struct_with_inner_list, test_native_parquet_stream_materializes_list_struct_with_inner_list_chain, test_native_parquet_stream_materializes_list_struct_with_nested_struct_child, ...
 
 
+@_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_inner_list(
     tmp_path: Path,
 ) -> None:

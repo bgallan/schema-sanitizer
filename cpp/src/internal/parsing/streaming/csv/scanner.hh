@@ -5,10 +5,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
 #include <string_view>
 #include <vector>
 
 #include "internal/memory/arena.hh"
+#include "internal/memory/pool_resource.hh"
 #include "internal/parsing/row_scanner.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/ingest/chunk_source.hh"
@@ -24,7 +26,10 @@ inline constexpr std::size_t kMaxCsvRecordSegments = 65'536;
 
 class CsvStreamingScanner {
 public:
-  CsvStreamingScanner(ChunkSourcePtr source, int64_t chunk_bytes);
+  CsvStreamingScanner(ChunkSourcePtr source, int64_t chunk_bytes,
+                      std::size_t max_record_bytes = kMaxCsvRecordBytes,
+                      std::size_t max_record_segments = kMaxCsvRecordSegments,
+                      void *pool_handle = nullptr);
 
   sanitize::Status Reset();
   sanitize::Result<TextSlice> next_record(BumpArena *arena);
@@ -44,7 +49,8 @@ private:
 
   friend class CsvRecordSpanScanner;
 
-  std::vector<Segment> segments_;
+  PoolResource segment_resource_;
+  std::pmr::vector<Segment> segments_;
   ChunkSourcePtr source_;
   int64_t chunk_bytes_ = kDefaultCsvChunkBytes;
   Chunk chunk_;
@@ -54,6 +60,8 @@ private:
   bool pending_consume_lf_ = false;
   bool prefer_vector_scan_ = false;
   std::size_t eof_offset_ = 0;
+  std::size_t max_record_bytes_ = kMaxCsvRecordBytes;
+  std::size_t max_record_segments_ = kMaxCsvRecordSegments;
 };
 
 sanitize::Result<TextSlice> scan_csv_record_span(CsvStreamingScanner &scanner,

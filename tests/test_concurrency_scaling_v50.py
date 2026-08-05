@@ -2,32 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
-
-
-def test_v50_startup_fast_path_is_preserved_and_broadened_by_v96() -> None:
-    """The original high-core gate now safely covers sustained 4+ worker lanes."""
-    root = Path(__file__).resolve().parents[1]
-    arena = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
-    runtime = (root / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text(
-        encoding="utf-8"
-    )
-
-    assert "worker_already_started_fast_path" in runtime
-    assert "state->worker_count >= 4U" in runtime
-    assert "started_mask.load(std::memory_order_acquire)" in runtime
-    assert "worker_already_started_fast_path(state_, physical)" in arena
-    assert "const auto wake_target = !target_running" in arena
-    assert "const auto wake_helper" in arena
-    assert "slot.wake_epoch.fetch_add(1" in arena
-    assert "helper_slot.wake_epoch.fetch_add(1" in arena
-    assert "state_->work_epoch.fetch_add(1" not in arena
-    assert "if (candidates == 0U)" in runtime
-    assert "return end;" in runtime
 
 
 def test_v50_high_core_mixed_lanes_drain_without_extra_workers() -> None:

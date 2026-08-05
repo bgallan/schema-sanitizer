@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from diagnostics_assertions import assert_diagnostics_semantically_equal
+
 from schema_sanitizer.core_impl.execution import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
@@ -103,4 +105,4 @@ def test_v70_nested_inference_preserves_single_multi_semantics() -> None:
 
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
-    assert multi.diagnostics.to_json() == single.diagnostics.to_json()
+    assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)

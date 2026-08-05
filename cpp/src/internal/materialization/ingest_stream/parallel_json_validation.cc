@@ -64,16 +64,17 @@ struct ParallelJsonRowValidator::WorkerState {
 
 ParallelJsonRowValidator::ParallelJsonRowValidator(
     std::shared_ptr<void> operation_memory_pool,
-    std::shared_ptr<const sanitize::CompiledPlan> plan) noexcept
+    std::shared_ptr<const sanitize::CompiledPlan> plan,
+    sanitize::OnErrorPolicy on_error) noexcept
     : operation_memory_pool_(std::move(operation_memory_pool)),
-      plan_(std::move(plan)),
+      plan_(std::move(plan)), on_error_(on_error),
       plan_order_candidate_(plan_ && plan_order_token_candidate(*plan_)) {}
 
 sanitize::Result<std::shared_ptr<ParallelJsonRowValidator>>
 ParallelJsonRowValidator::Make(
     std::shared_ptr<void> operation_memory_pool,
     std::shared_ptr<const sanitize::CompiledPlan> plan,
-    const ExecutionPolicy &policy) {
+    sanitize::OnErrorPolicy on_error, const ExecutionPolicy &policy) {
   if (!operation_memory_pool) {
     return sanitize::Status::Invalid(
         "ParallelJsonRowValidator::Make: operation memory pool is null");
@@ -90,7 +91,7 @@ ParallelJsonRowValidator::Make(
 
   auto validator = std::shared_ptr<ParallelJsonRowValidator>(
       new (std::nothrow) ParallelJsonRowValidator(
-          std::move(operation_memory_pool), std::move(plan)));
+          std::move(operation_memory_pool), std::move(plan), on_error));
   if (!validator) {
     return sanitize::Status::OutOfMemory(
         "ParallelJsonRowValidator::Make: allocation failed");
@@ -141,6 +142,7 @@ ParallelJsonRowValidator::Validate(JsonValidationTask &&task,
   task.owned.json_tokenized_fields = 0;
   task.owned.json_plan_ordered_rows = 0;
   task.owned.json_token_fallback_rows = 0;
+  task.owned.json_skipped_rows = 0;
 
   std::shared_ptr<ValidatedPacketStorage> storage;
   try {
@@ -161,47 +163,74 @@ ParallelJsonRowValidator::Validate(JsonValidationTask &&task,
   }
 
   auto &doc = *workers_[worker_index]->doc;
-  for (auto &row : task.owned.rows) {
+  std::size_t write_index = 0;
+  for (std::size_t read_index = 0; read_index < task.owned.rows.size();
+       ++read_index) {
     if (stop.stop_requested()) {
       return sanitize::Status::Cancelled(
           "ParallelJsonRowValidator::Validate: stop requested");
     }
+    auto &row = task.owned.rows[read_index];
     row.flags = kRawOnlyFlag;
     row.direct_ctx = nullptr;
     const auto token_begin = storage->tokens.size();
-    SAN_ASSIGN_OR_RAISE(
-        auto validation,
+    auto validation_result =
         validate_json_text_row(&doc, row.raw, row.base_offset,
                                capture_tokens ? &storage->tokens : nullptr,
                                capture_tokens ? task.max_token_fields : 0,
-                               plan_order_candidate_ ? plan_.get() : nullptr));
-    if (!validation.tokenized_object) {
-      ++task.owned.json_token_fallback_rows;
-      continue;
-    }
-
-    try {
-      storage->rows.push_back(JsonValidatedRowTokens{
-          .fields = nullptr,
-          .field_offset = validation.field_offset,
-          .field_count = validation.field_count,
-      });
-    } catch (const std::bad_alloc &) {
+                               plan_order_candidate_ ? plan_.get() : nullptr);
+    if (!validation_result.ok()) {
       storage->tokens.resize(token_begin);
-      capture_tokens = false;
-      ++task.owned.json_token_fallback_rows;
-      continue;
+      const auto status = validation_result.status();
+      if (status.code() != sanitize::StatusCode::kInvalid ||
+          json_error_exceeds_hard_safety_limit(status) ||
+          on_error_ == sanitize::OnErrorPolicy::kStop) {
+        return status;
+      }
+      if (on_error_ == sanitize::OnErrorPolicy::kSkipRow) {
+        ++task.owned.json_skipped_rows;
+        continue;
+      }
+      row.fields = nullptr;
+      row.size = 0;
+      row.raw = {};
+      row.flags = std::to_underlying(RowFlags::kNone);
+      row.direct_ctx = nullptr;
+    } else {
+      const auto validation = std::move(validation_result).ValueOrDie();
+      if (!validation.tokenized_object) {
+        ++task.owned.json_token_fallback_rows;
+      } else {
+        try {
+          storage->rows.push_back(JsonValidatedRowTokens{
+              .fields = nullptr,
+              .field_offset = validation.field_offset,
+              .field_count = validation.field_count,
+          });
+        } catch (const std::bad_alloc &) {
+          storage->tokens.resize(token_begin);
+          capture_tokens = false;
+          ++task.owned.json_token_fallback_rows;
+        }
+        if (storage->tokens.size() != token_begin) {
+          row.flags = static_cast<std::uint8_t>(
+              kRawOnlyFlag | kTokenFlag |
+              (validation.plan_ordered_tokens ? kPlanOrderedTokenFlag : 0));
+          row.direct_ctx = &storage->rows.back();
+          ++task.owned.json_tokenized_rows;
+          task.owned.json_tokenized_fields += validation.field_count;
+          if (validation.plan_ordered_tokens) {
+            ++task.owned.json_plan_ordered_rows;
+          }
+        }
+      }
     }
-    row.flags = static_cast<std::uint8_t>(
-        kRawOnlyFlag | kTokenFlag |
-        (validation.plan_ordered_tokens ? kPlanOrderedTokenFlag : 0));
-    row.direct_ctx = &storage->rows.back();
-    ++task.owned.json_tokenized_rows;
-    task.owned.json_tokenized_fields += validation.field_count;
-    if (validation.plan_ordered_tokens) {
-      ++task.owned.json_plan_ordered_rows;
+    if (write_index != read_index) {
+      task.owned.rows[write_index] = row;
     }
+    ++write_index;
   }
+  task.owned.rows = task.owned.rows.first(write_index);
 
   storage->finalize();
   task.owned.owner = std::move(storage);

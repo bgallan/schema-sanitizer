@@ -75,7 +75,8 @@ bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
                                         PyObject *first_row_columns,
                                         PyObject *all_row_columns,
                                         PyObject *row_span_columns,
-                                        PyObject *timestamp_columns) {
+                                        PyObject *timestamp_columns,
+                                        std::int64_t memory_limit_bytes) {
   if (!outputs || !outputs->main_stream ||
       !registry_metadata_requested(first_row_columns, all_row_columns,
                                    row_span_columns, timestamp_columns)) {
@@ -90,7 +91,7 @@ bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
       outputs->main_stream, merged_first,
       all_row_columns ? all_row_columns : Py_None,
       row_span_columns ? row_span_columns : Py_None,
-      timestamp_columns ? timestamp_columns : Py_None);
+      timestamp_columns ? timestamp_columns : Py_None, memory_limit_bytes);
   Py_DECREF(merged_first);
   if (!wrapped) {
     return false;
@@ -99,20 +100,19 @@ bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
   return true;
 }
 
-PyObject *pack_registry_or_raise_with_metadata(int status, PyObject *keepalive,
-                                               PyRegistrySinkOutputs *outputs,
-                                               PyObject *first_row_columns,
-                                               PyObject *all_row_columns,
-                                               PyObject *row_span_columns,
-                                               PyObject *timestamp_columns) {
+PyObject *pack_registry_or_raise_with_metadata(
+    int status, PyObject *keepalive, PyRegistrySinkOutputs *outputs,
+    PyObject *first_row_columns, PyObject *all_row_columns,
+    PyObject *row_span_columns, PyObject *timestamp_columns,
+    std::int64_t memory_limit_bytes) {
   if (status != SCHEMA_SANITIZER_STATUS_OK) {
     release_registry_outputs(outputs);
     raise_status_error(status, outputs->err);
     return nullptr;
   }
-  if (!wrap_registry_stream_with_metadata(outputs, first_row_columns,
-                                          all_row_columns, row_span_columns,
-                                          timestamp_columns)) {
+  if (!wrap_registry_stream_with_metadata(
+          outputs, first_row_columns, all_row_columns, row_span_columns,
+          timestamp_columns, memory_limit_bytes)) {
     release_registry_outputs(outputs);
     return nullptr;
   }
@@ -282,7 +282,8 @@ merge_path_source_provider_schemas(
     schema_sanitizer_context *ctx, PyObject *provider_obj,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources,
-    const sanitize::LogicalSchema *previous_schema) {
+    const sanitize::LogicalSchema *previous_schema,
+    sanitize::SchemaEvolutionMode schema_evolution) {
   if (!provider_has_next_sources(provider_obj)) {
     return sanitize::Status::Invalid("invalid path-source chunk provider");
   }
@@ -314,7 +315,7 @@ merge_path_source_provider_schemas(
         has_schema ? &current_schema : previous_schema;
     auto merged = merge_path_source_schemas(
         ctx, sources, prepared, current_registry.c_str(), field_name_policy,
-        skip_invalid_json_sources, base_schema);
+        skip_invalid_json_sources, base_schema, schema_evolution);
     if (!merged.ok()) {
       close_python_provider(provider_obj);
       return merged.status();

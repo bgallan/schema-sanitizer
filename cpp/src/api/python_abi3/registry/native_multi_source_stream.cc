@@ -8,6 +8,7 @@
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
+#include "internal/runtime/process_identity.hh"
 
 namespace core_abi3_internal {
 
@@ -27,6 +28,9 @@ native_multi_source_last_error(ArrowArrayStream *stream,
 
 void native_multi_source_release(ArrowArrayStream *stream,
                                  const NativeMultiSourceStreamOps &ops) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!stream || !stream->release) {
     return;
   }

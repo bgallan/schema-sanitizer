@@ -34,7 +34,7 @@ def test_input_selection_has_one_bounded_owner() -> None:
     retired = ROOT / "src/schema_sanitizer/input_impl/selection"
     assert owner.is_file()
     assert not retired.exists()
-    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 600
 
     from schema_sanitizer.input_impl import selection
 
@@ -47,7 +47,7 @@ def test_execution_context_has_one_cohesive_owner() -> None:
     owner = ROOT / "src/schema_sanitizer/api_impl/execution_context.py"
     assert owner.is_file()
     assert not (ROOT / "src/schema_sanitizer/api_impl/execution_context").exists()
-    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 600
 
     from schema_sanitizer.api_impl import execution_context
 

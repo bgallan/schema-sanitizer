@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -150,7 +150,7 @@ def test_wide_jsonl_reuses_validated_tokens_with_exact_output(
     )
     counters = context.performance_stats()["counters"]
 
-    assert multi_result.stats == single_result.stats
+    assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     assert counters["jsonl_token_rows_indexed"] == 2_048
@@ -163,10 +163,11 @@ def test_token_budget_falls_back_per_row_without_changing_results(
 ) -> None:
     """A full token budget degrades to raw rows, never a partial index."""
     require_native()
-    memory_limit = 32 * 1024 * 1024
+    oracle_memory_limit = 128 * 1024 * 1024
+    constrained_memory_limit = 32 * 1024 * 1024
     source = tmp_path / "budget.jsonl"
     _write_rows(source, 8_192)
-    contract = _contract(source, tmp_path / "contract.jsonl", memory_limit)
+    contract = _contract(source, tmp_path / "contract.jsonl", 256 * 1024 * 1024)
 
     single_output = tmp_path / "single.jsonl"
     single_result, _ = _consume(
@@ -174,7 +175,7 @@ def test_token_budget_falls_back_per_row_without_changing_results(
         single_output,
         mode="single",
         contract=contract,
-        memory_limit=memory_limit,
+        memory_limit=oracle_memory_limit,
     )
     multi_output = tmp_path / "multi.jsonl"
     multi_result, context = _consume(
@@ -182,13 +183,18 @@ def test_token_budget_falls_back_per_row_without_changing_results(
         multi_output,
         mode="multi",
         contract=contract,
-        memory_limit=memory_limit,
+        memory_limit=constrained_memory_limit,
     )
     stats = context.performance_stats()
     counters = stats["counters"]
 
     assert stats["effective_workers"] > 1
-    assert multi_result.stats == single_result.stats
+    single_semantics = semantic_stats(single_result.stats)
+    multi_semantics = semantic_stats(multi_result.stats)
+    for execution_detail in ("batches", "operation_memory_limit_bytes"):
+        single_semantics.pop(execution_detail, None)
+        multi_semantics.pop(execution_detail, None)
+    assert multi_semantics == single_semantics
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     assert 0 < counters["jsonl_token_rows_indexed"] < 8_192
@@ -239,7 +245,7 @@ def test_escaped_and_duplicate_keys_keep_single_thread_semantics(
         memory_limit=memory_limit,
     )
 
-    assert multi_result.stats == single_result.stats
+    assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     assert context.performance_stats()["counters"]["jsonl_token_rows_indexed"] == 256

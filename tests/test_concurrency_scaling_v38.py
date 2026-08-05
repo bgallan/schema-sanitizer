@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import require_native
-from threading_golden import assert_logical_files_equivalent
+from threading_golden import assert_logical_files_equivalent, semantic_stats
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -129,7 +129,7 @@ def test_column_slots_are_reused_with_exact_single_multi_output(tmp_path: Path) 
     multi_result, context = _consume_strict(source, multi_output, mode="multi", contract=contract)
     counters = context.performance_stats()["counters"]
 
-    assert multi_result.stats == single_result.stats
+    assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
     if counters["column_groups_submitted"] > 0:

@@ -1,6 +1,5 @@
 // Provides bounded inline and worker-pool execution with ordinal commit order.
 #pragma once
-#include "internal/runtime/external_task_lease.hh"
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/ordered_executor_completion_ring.hh"
 #include "internal/runtime/thread_compat.hh"
@@ -8,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -47,27 +47,235 @@ public:
       Input &&, std::size_t, sanitize::internal::StopToken)>;
 
 private:
-  void abandon_external_task(std::size_t shard) noexcept {
-    finish_external_task(shard);
-  }
-  using ExternalLease =
-      ExternalTaskLease<OrderedExecutor,
-                        &OrderedExecutor::abandon_external_task>;
-
   static constexpr std::size_t kMaxExternalCompletionShards = 32U;
-  struct alignas(64) ExternalCompletionShard final {
-    // The high bit announces that shutdown is waiting on this shard. Keeping
-    // the waiter flag in the same atomic as the completed count gives one total
-    // modification order: either shutdown observes a preceding completion, or
-    // the completing task observes the waiter bit and performs the wake.
-    std::atomic<std::size_t> completed_and_waiter{0};
-  };
-  static constexpr std::size_t kExternalCompletionWaiterBit =
-      std::size_t{1} << (sizeof(std::size_t) * 8U - 1U);
-  static constexpr std::size_t kExternalCompletionCountMask =
-      ~kExternalCompletionWaiterBit;
   static constexpr std::uint8_t kArenaTerminalCancelledBit = 1U << 0U;
   static constexpr std::uint8_t kArenaTerminalFatalBit = 1U << 1U;
+
+  enum class ArenaSlotState : unsigned char {
+    kEmpty,
+    kPublishing,
+    kReady,
+    kCancelled,
+    kFatal,
+    kClosed,
+  };
+
+  struct ArenaOutcomeSlot final {
+    std::atomic<ArenaSlotState> state{ArenaSlotState::kEmpty};
+    std::optional<Outcome> outcome;
+  };
+
+  struct ArenaSharedState final {
+    explicit ArenaSharedState(std::size_t capacity, std::size_t shards,
+                              Worker worker_fn)
+        : slots(capacity), worker(std::move(worker_fn)),
+          shard_count(std::max<std::size_t>(1U, shards)) {}
+
+    std::vector<ArenaOutcomeSlot> slots;
+    std::mutex slots_mutex;
+    Worker worker;
+    sanitize::internal::StopSource stop_source;
+    std::atomic<std::uint8_t> terminal_flags{0};
+    const std::size_t shard_count;
+    std::array<std::atomic<std::size_t>, kMaxExternalCompletionShards>
+        scheduled{};
+    std::array<std::atomic<std::size_t>, kMaxExternalCompletionShards>
+        completed{};
+    std::mutex completion_mutex;
+    std::condition_variable completion_ready;
+    std::atomic<bool> completion_waiter{false};
+    std::atomic<bool> drain_timed_out{false};
+
+    void Schedule(std::size_t shard) noexcept {
+      scheduled[shard].fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    void Finish(std::size_t shard) noexcept {
+      completed[shard].fetch_add(1U, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool AllScheduledFinished() const noexcept {
+      std::size_t scheduled_total = 0U;
+      std::size_t completed_total = 0U;
+      for (std::size_t shard = 0; shard < shard_count; ++shard) {
+        scheduled_total += scheduled[shard].load(std::memory_order_acquire);
+        completed_total += completed[shard].load(std::memory_order_acquire);
+      }
+      // Shards distribute completion writes for cache locality; draining is a
+      // stage-wide property. Comparing totals avoids an inconsistent
+      // cross-shard snapshot while completions are being published.
+      return completed_total >= scheduled_total;
+    }
+
+    [[nodiscard]] bool
+    WaitUntil(std::chrono::steady_clock::time_point deadline) noexcept {
+      // Completion counters are deliberately sharded and lock-free on the hot
+      // path. A condition variable would require every completion to take one
+      // shared mutex to prevent a lost wake-up. Poll only on bounded shutdown
+      // instead, keeping normal worker publication contention-free.
+      while (!AllScheduledFinished() &&
+             std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+      }
+      const auto finished = AllScheduledFinished();
+      if (!finished) {
+        drain_timed_out.store(true, std::memory_order_release);
+      }
+      return finished;
+    }
+
+    Outcome ExecutePacket(Packet packet, std::size_t worker_index,
+                          sanitize::internal::StopToken stop) noexcept {
+      const auto ordinal = packet.ordinal;
+      try {
+        if (stop.stop_requested()) {
+          return Outcome{.ordinal = ordinal,
+                         .result = sanitize::Status::Cancelled(
+                             "ordered worker stop requested")};
+        }
+        return Outcome{
+            .ordinal = ordinal,
+            .result = worker(std::move(packet.payload), worker_index, stop)};
+      } catch (const std::bad_alloc &) {
+        return Outcome{.ordinal = ordinal,
+                       .result = sanitize::Status::OutOfMemory(
+                           "ordered worker allocation failed")};
+      } catch (const std::exception &error) {
+        return Outcome{.ordinal = ordinal,
+                       .result = sanitize::Status::Invalid(
+                           "ordered worker raised: ", error.what())};
+      } catch (...) {
+        return Outcome{.ordinal = ordinal,
+                       .result = sanitize::Status::Invalid(
+                           "ordered worker raised an unknown exception")};
+      }
+    }
+
+    void Terminalize(ArenaSlotState terminal) noexcept {
+      std::lock_guard outcomes_lock(slots_mutex);
+      for (auto &slot : slots) {
+        auto state = slot.state.load(std::memory_order_acquire);
+        for (;;) {
+          if (state == ArenaSlotState::kPublishing ||
+              state == ArenaSlotState::kCancelled ||
+              state == ArenaSlotState::kFatal) {
+            break;
+          }
+          if (state == ArenaSlotState::kReady) {
+            slot.outcome.reset();
+            slot.state.store(terminal, std::memory_order_release);
+            slot.state.notify_all();
+            break;
+          }
+          if (slot.state.compare_exchange_weak(state, terminal,
+                                               std::memory_order_release,
+                                               std::memory_order_acquire)) {
+            slot.state.notify_all();
+            break;
+          }
+        }
+      }
+    }
+
+    void Fail() noexcept {
+      terminal_flags.fetch_or(kArenaTerminalFatalBit,
+                              std::memory_order_release);
+      Terminalize(ArenaSlotState::kFatal);
+    }
+
+    void Cancel() noexcept {
+      stop_source.request_stop();
+      terminal_flags.fetch_or(kArenaTerminalCancelledBit,
+                              std::memory_order_release);
+      Terminalize(ArenaSlotState::kCancelled);
+    }
+
+    void Publish(Outcome outcome, std::size_t completion_slot) noexcept {
+      auto &slot = slots[completion_slot];
+      auto expected = ArenaSlotState::kEmpty;
+      if (!slot.state.compare_exchange_strong(
+              expected, ArenaSlotState::kPublishing, std::memory_order_acquire,
+              std::memory_order_acquire)) {
+        if (expected == ArenaSlotState::kCancelled ||
+            expected == ArenaSlotState::kFatal ||
+            expected == ArenaSlotState::kClosed) {
+          return;
+        }
+        Fail();
+        return;
+      }
+
+      auto published_state = ArenaSlotState::kReady;
+      bool publication_failed = false;
+      {
+        std::lock_guard outcomes_lock(slots_mutex);
+        try {
+          slot.outcome.emplace(std::move(outcome));
+        } catch (...) {
+          publication_failed = true;
+        }
+        if (!publication_failed) {
+          const auto flags = terminal_flags.load(std::memory_order_acquire);
+          if ((flags & kArenaTerminalCancelledBit) != 0U) {
+            slot.outcome.reset();
+            published_state = ArenaSlotState::kCancelled;
+          } else if ((flags & kArenaTerminalFatalBit) != 0U) {
+            slot.outcome.reset();
+            published_state = ArenaSlotState::kFatal;
+          }
+        }
+      }
+      if (publication_failed) {
+        slot.state.store(ArenaSlotState::kFatal, std::memory_order_release);
+        slot.state.notify_all();
+        Fail();
+        return;
+      }
+      slot.state.store(published_state, std::memory_order_release);
+      slot.state.notify_one();
+    }
+
+    void ExecuteExternal(ScheduledPacket scheduled_packet,
+                         std::size_t worker_index,
+                         sanitize::internal::StopToken arena_stop) noexcept {
+      Outcome outcome{.ordinal = scheduled_packet.packet.ordinal,
+                      .result = sanitize::Status::Cancelled(
+                          "ordered worker stop requested")};
+      {
+        auto propagate_stop = [this] { stop_source.request_stop(); };
+        StopCallback<decltype(propagate_stop)> propagate_arena_stop(
+            arena_stop, std::move(propagate_stop));
+        outcome = ExecutePacket(std::move(scheduled_packet.packet),
+                                worker_index, stop_source.get_token());
+      }
+      Publish(std::move(outcome), scheduled_packet.completion_slot);
+    }
+  };
+
+  class ExternalLease final {
+  public:
+    ExternalLease(std::shared_ptr<ArenaSharedState> owner,
+                  std::size_t shard) noexcept
+        : owner_(std::move(owner)), shard_(shard) {}
+    ExternalLease(const ExternalLease &) = delete;
+    ExternalLease &operator=(const ExternalLease &) = delete;
+    ExternalLease(ExternalLease &&other) noexcept
+        : owner_(std::move(other.owner_)), shard_(other.shard_) {}
+    ExternalLease &operator=(ExternalLease &&) = delete;
+    ~ExternalLease() { Complete(); }
+
+    [[nodiscard]] std::size_t shard() const noexcept { return shard_; }
+    void Complete() noexcept {
+      if (owner_) {
+        owner_->Finish(shard_);
+        owner_.reset();
+      }
+    }
+
+  private:
+    std::shared_ptr<ArenaSharedState> owner_;
+    std::size_t shard_ = 0;
+  };
 
 public:
   // One worker is strictly inline and creates no helper thread or process.
@@ -103,12 +311,18 @@ public:
   ~OrderedExecutor() { shutdown(); }
   // Submit contiguous ordinals; consume once the dispatch window is full.
   sanitize::Status Submit(Packet packet) {
+    return SubmitCharged(std::move(packet),
+                         std::max<std::size_t>(256U, sizeof(Packet)));
+  }
+
+  sanitize::Status SubmitCharged(Packet packet, std::size_t retained_bytes) {
+    retained_bytes = std::max<std::size_t>(1U, retained_bytes);
     // Above eight arena workers, reserve directly at the authoritative
     // submission point. The legacy preliminary check would acquire the same
     // executor mutex twice per packet and becomes visible under high-core
     // submission pressure. One-through-eight workers keep the v47 path.
     if (worker_count_ > 8 && uses_arena_completion_slots()) {
-      return submit_high_core_arena(std::move(packet));
+      return submit_high_core_arena(std::move(packet), retained_bytes);
     }
     {
       std::lock_guard lock(mutex_);
@@ -191,20 +405,21 @@ public:
         completion_shard = reserve_external_completion_shard_locked();
         ++next_submit_ordinal_;
         in_flight_.fetch_add(1, std::memory_order_release);
-        ++scheduled_external_tasks_[completion_shard];
+        arena_shared_->Schedule(completion_shard);
       }
-      const auto submit_status = arena_->Submit(
-          [this,
+      auto shared = arena_shared_;
+      const auto submit_status = arena_->SubmitCharged(
+          [shared,
            scheduled = ScheduledPacket{.packet = std::move(packet),
                                        .completion_slot = completion_slot},
-           lease = ExternalLease(this, completion_shard)](
+           lease = ExternalLease(shared, completion_shard)](
               std::size_t worker_index,
               sanitize::internal::StopToken stop) mutable {
-            execute_external(std::move(scheduled), worker_index, stop,
-                             lease.shard());
+            shared->ExecuteExternal(std::move(scheduled), worker_index, stop);
             lease.Complete();
           },
-          arena_submission_plan_, telemetry_kind_);
+          arena_submission_plan_, TaskMemoryCharge{retained_bytes},
+          telemetry_kind_);
       if (!submit_status.ok()) {
         std::lock_guard lock(mutex_);
         --next_submit_ordinal_;
@@ -314,7 +529,9 @@ public:
   // Cancels queued/later work and requests cooperative stop from active
   // workers.
   void Cancel() noexcept {
-    stage_stop_source_.request_stop();
+    if (arena_shared_) {
+      arena_shared_->stop_source.request_stop();
+    }
     {
       std::lock_guard lock(mutex_);
       if (cancelled_) {
@@ -322,8 +539,10 @@ public:
       }
       cancelled_ = true;
       accepting_ = false;
-      arena_terminal_flags_.fetch_or(kArenaTerminalCancelledBit,
-                                     std::memory_order_release);
+      if (arena_shared_) {
+        arena_shared_->terminal_flags.fetch_or(kArenaTerminalCancelledBit,
+                                               std::memory_order_release);
+      }
       tasks_.clear();
       for (auto &slot : completed_) {
         slot.reset();
@@ -343,6 +562,11 @@ public:
 
   [[nodiscard]] std::size_t worker_count() const noexcept {
     return worker_count_;
+  }
+
+  [[nodiscard]] bool external_drain_timed_out() const noexcept {
+    return arena_shared_ &&
+           arena_shared_->drain_timed_out.load(std::memory_order_acquire);
   }
 
   [[nodiscard]] std::size_t dispatch_window() const noexcept {
@@ -393,8 +617,6 @@ private:
         completion_ring_(reorder_capacity_), worker_(std::move(worker)),
         completed_((!arena || arena->inline_mode()) ? reorder_capacity_ : 0U),
         arena_(std::move(arena)),
-        arena_completed_(uses_arena_completion_slots() ? reorder_capacity_
-                                                       : 0U),
         external_completion_shard_count_(
             uses_arena_completion_slots() && worker_count_ >= 4U
                 ? std::min(worker_count_, kMaxExternalCompletionShards)
@@ -406,6 +628,10 @@ private:
       // The >8-worker submission helper already owns a single coordinator
       // transaction. Seed its local lane ticket once instead of touching the
       // arena-global cursor for every high-core packet.
+      if (!arena_->inline_mode()) {
+        arena_shared_ = std::make_shared<ArenaSharedState>(
+            reorder_capacity_, external_completion_shard_count_, worker_);
+      }
       if (!arena_->inline_mode() && worker_count_ > 8U) {
         next_high_core_arena_ticket_ =
             arena_->ReserveSubmissionTicket(arena_submission_plan_);
@@ -424,18 +650,6 @@ private:
       next_external_completion_shard_ = 0U;
     }
     return shard;
-  }
-
-  void finish_external_task(std::size_t shard) noexcept {
-    auto &counter = completed_external_tasks_[shard].completed_and_waiter;
-    const auto previous = counter.fetch_add(1, std::memory_order_release);
-    // Normal execution has no waiter: shutdown is the only consumer of these
-    // lifetime counters. Avoid a futile atomic notify for every external task,
-    // but preserve a lost-wakeup-proof drain by testing the waiter bit returned
-    // by the same RMW that publishes completion.
-    if ((previous & kExternalCompletionWaiterBit) != 0U) {
-      counter.notify_all();
-    }
   }
 
   void worker_loop(std::size_t worker_index,
@@ -524,26 +738,12 @@ private:
   }
   void shutdown() noexcept {
     Cancel();
-    if (arena_) {
-      std::array<std::size_t, kMaxExternalCompletionShards> scheduled{};
-      {
-        std::lock_guard lock(mutex_);
-        scheduled = scheduled_external_tasks_;
-      }
-      for (std::size_t shard = 0; shard < external_completion_shard_count_;
-           ++shard) {
-        auto &counter = completed_external_tasks_[shard].completed_and_waiter;
-        auto observed = counter.fetch_or(kExternalCompletionWaiterBit,
-                                         std::memory_order_acq_rel);
-        auto completed = observed & kExternalCompletionCountMask;
-        while (completed != scheduled[shard]) {
-          const auto waiting_value = completed | kExternalCompletionWaiterBit;
-          sanitize::internal::WaitOnAtomic(counter, waiting_value,
-                                           std::memory_order_acquire);
-          observed = counter.load(std::memory_order_acquire);
-          completed = observed & kExternalCompletionCountMask;
-        }
-      }
+    if (arena_shared_) {
+      // External arena tasks own only this shared control block. A non-
+      // cooperative task can no longer pin or dereference the executor object
+      // after the bounded drain deadline.
+      (void)arena_shared_->WaitUntil(std::chrono::steady_clock::now() +
+                                     std::chrono::seconds(2));
     }
     workers_.clear();
   }
@@ -561,13 +761,8 @@ private:
   std::vector<std::optional<Outcome>> completed_;
   std::vector<sanitize::internal::JThread> workers_;
   std::shared_ptr<OperationTaskArena> arena_;
-  std::vector<ArenaOutcomeSlot> arena_completed_;
+  std::shared_ptr<ArenaSharedState> arena_shared_;
   const std::size_t external_completion_shard_count_;
-  std::array<ExternalCompletionShard, kMaxExternalCompletionShards>
-      completed_external_tasks_{};
-  std::array<std::size_t, kMaxExternalCompletionShards>
-      scheduled_external_tasks_{};
-  sanitize::internal::StopSource stage_stop_source_;
   TaskArenaLane lane_ = TaskArenaLane::kAll;
   TaskTelemetryKind telemetry_kind_ = TaskTelemetryKind::kOther;
   TaskArenaSubmissionPlan arena_submission_plan_;
@@ -578,7 +773,6 @@ private:
   std::atomic<std::size_t> in_flight_{0};
   // Monotonic cancellation/fatality bits share one cache location so normal
   // result publication needs one acquire snapshot rather than two loads.
-  std::atomic<std::uint8_t> arena_terminal_flags_{0};
   bool accepting_ = true;
   bool cancelled_ = false;
   bool fatal_ = false;

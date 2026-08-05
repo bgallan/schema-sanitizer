@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any
+
+from ...core_impl.operation_diagnostics import _bounded_diagnostic_snapshot
+
+_MAX_COUNTER_KEYS = 128
+_MAX_FALLBACK_HISTORY = 64
+_MAX_LABEL_CHARS = 160
+_MAX_ERROR_CHARS = 512
+_LABEL_HASH_CHUNK_CHARS = 4096
+_OVERFLOW_KEY = "<other>"
 
 
 def _default_native_reader_diagnostics() -> dict[str, Any]:
@@ -30,25 +42,50 @@ def _default_native_reader_diagnostics() -> dict[str, Any]:
         "native_nested_contract_applicable": False,
         "native_nested_contract_satisfied": False,
         "native_nested_contract_issues": [],
+        "compressed_bytes": 0,
+        "decompressed_bytes": 0,
+        "decompression_ratio": 0.0,
     }
 
 
-def _copy_diagnostic_value(value: Any) -> Any:
-    """Copy supported diagnostic containers without generic deepcopy machinery."""
-    if isinstance(value, dict):
-        return {key: _copy_diagnostic_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_copy_diagnostic_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_copy_diagnostic_value(item) for item in value)
-    if isinstance(value, set):
-        return {_copy_diagnostic_value(item) for item in value}
-    return value
+def _bounded_label(value: object) -> str:
+    """Return one stable label without retaining attacker-sized text."""
+    if type(value) is str:
+        text = value
+    else:
+        try:
+            text = str(value)
+        except BaseException:
+            value_type = type(value)
+            text = f"<{value_type.__module__}.{value_type.__qualname__}>"
+    if len(text) <= _MAX_LABEL_CHARS:
+        return text
+    digest = hashlib.blake2b(digest_size=16)
+    for offset in range(0, len(text), _LABEL_HASH_CHUNK_CHARS):
+        digest.update(
+            text[offset : offset + _LABEL_HASH_CHUNK_CHARS].encode("utf-8", errors="surrogatepass")
+        )
+    return f"long-label:{len(text)}:{digest.hexdigest()}"
+
+
+def _bounded_exception_text(exc: BaseException) -> str:
+    """Return bounded exception telemetry without trusting ``__str__``."""
+    error_type = type(exc)
+    name = f"{error_type.__module__}.{error_type.__qualname__}"
+    if error_type.__module__ == "builtins":
+        name = error_type.__qualname__
+    try:
+        detail = str(exc)
+    except BaseException:
+        detail = "<exception text unavailable>"
+    if len(detail) > _MAX_ERROR_CHARS:
+        detail = f"{detail[:_MAX_ERROR_CHARS]}..."
+    return f"{name}: {detail}"
 
 
 def _diagnostics_snapshot(diagnostics: dict[str, Any]) -> dict[str, Any]:
-    """Return a recursive defensive copy of one diagnostics record."""
-    return {key: _copy_diagnostic_value(value) for key, value in diagnostics.items()}
+    """Return a bounded recursive defensive copy of diagnostics."""
+    return _bounded_diagnostic_snapshot(diagnostics)
 
 
 _PYARROW_PARQUET_FALLBACK_ROUTES = frozenset(
@@ -110,7 +147,7 @@ def _parquet_pipeline_contract_status_from_diagnostics(
 
 @dataclass(slots=True)
 class ParquetReaderTelemetryState:
-    """Own the latest route, diagnostics, and route counters."""
+    """Own the latest route, diagnostics, and bounded route counters."""
 
     last_route: str = "none"
     last_native_reader_diagnostics: dict[str, Any] = field(
@@ -137,37 +174,44 @@ class ParquetReaderTelemetryState:
         return _diagnostics_snapshot(self.last_native_reader_diagnostics)
 
     def normalized_diagnostics(self, updates: dict[str, Any]) -> dict[str, Any]:
-        """Build a fresh diagnostics record from defaults and updates."""
+        """Build a fresh bounded diagnostics record from defaults and updates."""
         diagnostics = _default_native_reader_diagnostics()
         diagnostics.update(updates)
         return _diagnostics_snapshot(diagnostics)
 
 
+_LOCK = Lock()
 _STATE = ParquetReaderTelemetryState()
 
 
-def _increment(counter: dict[str, int], route: str) -> None:
-    """Increment one route counter."""
-    counter[route] = counter.get(route, 0) + 1
+def _increment_locked(counter: dict[str, int], raw_key: object) -> None:
+    """Increment one bounded counter while ``_LOCK`` is held."""
+    key = _bounded_label(raw_key)
+    if key not in counter and len(counter) >= _MAX_COUNTER_KEYS - 1:
+        key = _OVERFLOW_KEY
+    counter[key] = counter.get(key, 0) + 1
 
 
-def update_parquet_native_reader_diagnostics(**updates: Any) -> None:
-    """Update the latest diagnostics without incrementing reason counters."""
+def _update_diagnostics_locked(updates: dict[str, Any]) -> None:
+    """Merge bounded diagnostics while ``_LOCK`` is held."""
     diagnostics = _STATE.diagnostics_snapshot()
     diagnostics.update(updates)
     _STATE.last_native_reader_diagnostics = _diagnostics_snapshot(diagnostics)
 
 
-def _fallback_history_with(
+def _fallback_history_with_locked(
     route: str,
     status: str,
     *,
     error: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return fallback history with one appended immutable-style event."""
+    """Return bounded fallback history while ``_LOCK`` is held."""
+    raw_history = _STATE.last_native_reader_diagnostics.get("fallback_attempt_history", [])
+    history_items = raw_history if isinstance(raw_history, list) else []
     history = [
         dict(event)
-        for event in _STATE.last_native_reader_diagnostics.get("fallback_attempt_history", [])
+        for event in history_items[-(_MAX_FALLBACK_HISTORY - 1) :]
+        if isinstance(event, dict)
     ]
     event: dict[str, Any] = {"route": route, "status": status}
     if error is not None:
@@ -176,100 +220,146 @@ def _fallback_history_with(
     return history
 
 
+def update_parquet_native_reader_diagnostics(**updates: Any) -> None:
+    """Update the latest diagnostics without incrementing reason counters."""
+    with _LOCK:
+        _update_diagnostics_locked(updates)
+
+
 def set_parquet_stream_factory_route(route: str) -> None:
     """Record the route used by the most recent Parquet stream factory."""
-    _STATE.last_route = route
-    _increment(_STATE.route_counts, route)
+    bounded_route = _bounded_label(route)
+    with _LOCK:
+        _STATE.last_route = bounded_route
+        _increment_locked(_STATE.route_counts, bounded_route)
 
 
 def set_parquet_native_reader_diagnostics(**diagnostics: Any) -> None:
     """Replace diagnostics for the most recent native reader attempt."""
-    normalized = _STATE.normalized_diagnostics(diagnostics)
-    _STATE.last_native_reader_diagnostics = normalized
-    reason = str(normalized.get("reason") or "none")
-    _increment(_STATE.native_reader_reason_counts, reason)
+    with _LOCK:
+        normalized = _STATE.normalized_diagnostics(diagnostics)
+        reason = _bounded_label(normalized.get("reason") or "none")
+        normalized["reason"] = reason
+        _STATE.last_native_reader_diagnostics = normalized
+        _increment_locked(_STATE.native_reader_reason_counts, reason)
 
 
 def record_parquet_fallback_attempt(route: str) -> None:
     """Record that a PyArrow fallback route is being attempted."""
-    _increment(_STATE.fallback_attempt_counts, route)
-    diagnostics = _STATE.last_native_reader_diagnostics
-    if diagnostics.get("ready") is not True or diagnostics.get("reason") != "native_stream":
-        update_parquet_native_reader_diagnostics(
-            fallback_attempted=True,
-            fallback_succeeded=False,
-            fallback_route=route,
-            fallback_attempt_history=_fallback_history_with(route, "attempted"),
-        )
+    bounded_route = _bounded_label(route)
+    with _LOCK:
+        _increment_locked(_STATE.fallback_attempt_counts, bounded_route)
+        diagnostics = _STATE.last_native_reader_diagnostics
+        if diagnostics.get("ready") is not True or diagnostics.get("reason") != "native_stream":
+            _update_diagnostics_locked(
+                {
+                    "fallback_attempted": True,
+                    "fallback_succeeded": False,
+                    "fallback_route": bounded_route,
+                    "fallback_attempt_history": _fallback_history_with_locked(
+                        bounded_route, "attempted"
+                    ),
+                }
+            )
 
 
 def record_parquet_fallback_success(route: str) -> None:
     """Record a successful PyArrow fallback route."""
-    _increment(_STATE.fallback_success_counts, route)
-    set_parquet_stream_factory_route(route)
-    diagnostics = _STATE.last_native_reader_diagnostics
-    if diagnostics.get("ready") is not True or diagnostics.get("reason") != "native_stream":
-        update_parquet_native_reader_diagnostics(
-            fallback_attempted=True,
-            fallback_succeeded=True,
-            fallback_route=route,
-            fallback_error=None,
-            fallback_attempt_history=_fallback_history_with(route, "succeeded"),
-            pipeline_contract_satisfied=True,
-            pipeline_contract_route=route,
-            pipeline_contract_error=None,
-            safe_fallback_contract_satisfied=True,
-            native_reader_contract_satisfied=False,
-        )
+    bounded_route = _bounded_label(route)
+    with _LOCK:
+        _increment_locked(_STATE.fallback_success_counts, bounded_route)
+        _STATE.last_route = bounded_route
+        _increment_locked(_STATE.route_counts, bounded_route)
+        diagnostics = _STATE.last_native_reader_diagnostics
+        if diagnostics.get("ready") is not True or diagnostics.get("reason") != "native_stream":
+            _update_diagnostics_locked(
+                {
+                    "fallback_attempted": True,
+                    "fallback_succeeded": True,
+                    "fallback_route": bounded_route,
+                    "fallback_error": None,
+                    "fallback_attempt_history": _fallback_history_with_locked(
+                        bounded_route, "succeeded"
+                    ),
+                    "pipeline_contract_satisfied": True,
+                    "pipeline_contract_route": bounded_route,
+                    "pipeline_contract_error": None,
+                    "safe_fallback_contract_satisfied": True,
+                    "native_reader_contract_satisfied": False,
+                }
+            )
 
 
 def record_parquet_fallback_failure(route: str, exc: BaseException) -> None:
     """Record a failed PyArrow fallback attempt before it is re-raised."""
-    _increment(_STATE.fallback_failure_counts, route)
-    diagnostics = _STATE.last_native_reader_diagnostics
-    if diagnostics.get("ready") is not True or diagnostics.get("reason") != "native_stream":
-        error = f"{type(exc).__name__}: {exc}"
-        update_parquet_native_reader_diagnostics(
-            fallback_attempted=True,
-            fallback_succeeded=False,
-            fallback_route=route,
-            fallback_error=error,
-            fallback_attempt_history=_fallback_history_with(route, "failed", error=error),
-            pipeline_contract_satisfied=False,
-            pipeline_contract_route=route,
-            pipeline_contract_error=error,
-            safe_fallback_contract_satisfied=False,
-        )
+    bounded_route = _bounded_label(route)
+    error = _bounded_exception_text(exc)
+    with _LOCK:
+        _increment_locked(_STATE.fallback_failure_counts, bounded_route)
+        diagnostics = _STATE.last_native_reader_diagnostics
+        if diagnostics.get("ready") is not True or diagnostics.get("reason") != "native_stream":
+            _update_diagnostics_locked(
+                {
+                    "fallback_attempted": True,
+                    "fallback_succeeded": False,
+                    "fallback_route": bounded_route,
+                    "fallback_error": error,
+                    "fallback_attempt_history": _fallback_history_with_locked(
+                        bounded_route, "failed", error=error
+                    ),
+                    "pipeline_contract_satisfied": False,
+                    "pipeline_contract_route": bounded_route,
+                    "pipeline_contract_error": error,
+                    "safe_fallback_contract_satisfied": False,
+                }
+            )
 
 
 def last_parquet_stream_factory_route() -> str:
     """Return the route used by the most recent Parquet stream factory."""
-    return _STATE.last_route
+    with _LOCK:
+        return _STATE.last_route
 
 
 def last_parquet_native_reader_diagnostics() -> dict[str, Any]:
     """Return diagnostics for the most recent native Parquet reader attempt."""
-    return _STATE.diagnostics_snapshot()
+    with _LOCK:
+        return _STATE.diagnostics_snapshot()
 
 
 def parquet_stream_factory_observability() -> dict[str, Any]:
     """Return a defensive snapshot of route and fallback telemetry."""
-    return {
-        "last_route": _STATE.last_route,
-        "route_counts": dict(_STATE.route_counts),
-        "last_native_reader_diagnostics": _STATE.diagnostics_snapshot(),
-        "native_reader_reason_counts": dict(_STATE.native_reader_reason_counts),
-        "fallback_attempt_counts": dict(_STATE.fallback_attempt_counts),
-        "fallback_success_counts": dict(_STATE.fallback_success_counts),
-        "fallback_failure_counts": dict(_STATE.fallback_failure_counts),
-    }
+    with _LOCK:
+        return {
+            "last_route": _STATE.last_route,
+            "route_counts": dict(_STATE.route_counts),
+            "last_native_reader_diagnostics": _STATE.diagnostics_snapshot(),
+            "native_reader_reason_counts": dict(_STATE.native_reader_reason_counts),
+            "fallback_attempt_counts": dict(_STATE.fallback_attempt_counts),
+            "fallback_success_counts": dict(_STATE.fallback_success_counts),
+            "fallback_failure_counts": dict(_STATE.fallback_failure_counts),
+        }
 
 
 def last_parquet_pipeline_contract_status() -> dict[str, Any]:
     """Return a compact gate for the most recent Parquet pipeline read."""
-    return _parquet_pipeline_contract_status_from_diagnostics(_STATE.diagnostics_snapshot())
+    with _LOCK:
+        diagnostics = _STATE.diagnostics_snapshot()
+    return _parquet_pipeline_contract_status_from_diagnostics(diagnostics)
 
 
 def reset_parquet_stream_factory_observability() -> None:
     """Reset Parquet route/fallback telemetry and latest diagnostics."""
-    _STATE.reset()
+    with _LOCK:
+        _STATE.reset()
+
+
+def _reset_after_fork() -> None:
+    """Discard inherited telemetry locks and parent-process observations."""
+    global _LOCK, _STATE
+    _LOCK = Lock()
+    _STATE = ParquetReaderTelemetryState()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_after_fork)

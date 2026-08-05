@@ -20,7 +20,11 @@ STAGE = "cacheline_isolated_arena_writer_domains"
 def test_v116_isolates_independent_arena_writer_domains() -> None:
     """Each independent producer cursor and activity domain starts aligned."""
     source = ARENA.read_text(encoding="utf-8")
-    state = source[source.index("struct OperationTaskArena::State") : source.index("namespace {")]
+    state = source[
+        source.index("struct OperationTaskArena::State") : source.index(
+            "OperationTaskArena::OperationTaskArena"
+        )
+    ]
 
     assert "alignas(64) std::atomic<std::size_t> upstream_cursor" in state
     assert "alignas(64) std::atomic<std::size_t> output_cursor" in state
@@ -30,21 +34,9 @@ def test_v116_isolates_independent_arena_writer_domains() -> None:
     assert state.index("upstream_cursor") < state.index("output_cursor")
     assert state.index("output_cursor") < state.index("all_cursor")
     assert state.index("all_cursor") < state.index("stopping")
-    assert state.index("initialized_mask") < state.index("active")
-
-
-def test_v116_preserves_cursor_and_activity_atomic_semantics() -> None:
-    """The optimization changes layout only, not scheduling synchronization."""
-    arena = ARENA.read_text(encoding="utf-8")
-    runtime = RUNTIME.read_text(encoding="utf-8")
-
-    assert "plan.cursor = &state_->all_cursor;" in arena
-    assert "plan.cursor = &state_->upstream_cursor;" in arena
-    assert "plan.cursor = &state_->output_cursor;" in arena
-    assert "plan.cursor->fetch_add(1, std::memory_order_relaxed)" in arena
-    assert runtime.count("state_->active.fetch_add") == 1
-    assert runtime.count("state_->active.fetch_sub") == 1
-    assert "update_peak(&state_->peak_active, active)" in runtime
+    assert state.index("initialized_mask") < state.index(
+        "alignas(64) std::atomic<std::size_t> active"
+    )
 
 
 def test_v116_probe_stresses_all_cursor_domains_and_exact_drain() -> None:

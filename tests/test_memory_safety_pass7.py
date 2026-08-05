@@ -98,7 +98,7 @@ def test_native_consumers_share_the_memory_budget_helper() -> None:
 def test_parquet_page_scratch_releases_exceptional_capacity() -> None:
     """Verify the defensive regression contract."""
     source = (
-        ROOT / "cpp/src/internal/parquet/footer_reader/pages/footer_reader_page_read.cc.inc"
+        ROOT / "cpp/src/internal/parquet/footer_reader/pages/footer_reader_page_scratch.cc.inc"
     ).read_text(encoding="utf-8")
     assert "kRetainedPagePayloadScratchBytes" in source
     assert "clear_or_release_page_scratch" in source

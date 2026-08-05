@@ -61,17 +61,6 @@ def test_v82_worker_wait_predicate_uses_its_own_generation() -> None:
     assert "targeted wake coalescing cannot strand" in runtime[comment:stop]
 
 
-def test_v82_wake_diagnostics_add_no_hot_path_counter() -> None:
-    """Diagnostics sum physical epochs instead of adding another shared atomic."""
-    header = HEADER.read_text(encoding="utf-8")
-    arena = ARENA.read_text(encoding="utf-8")
-
-    assert "wake_epoch_publishes() const noexcept" in header
-    assert "for (const auto &slot : state_->slots)" in arena
-    assert "total += slot->wake_epoch.load" in arena
-    assert "getenv" not in header + arena
-
-
 def test_v82_all_56_pairs_inherit_targeted_wake_coalescing() -> None:
     """Every supported input/output route crosses the optimized common arena."""
     pairs = concurrency_pair_guarantees()

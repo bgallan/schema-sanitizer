@@ -172,16 +172,16 @@ def test_run_sync_single_refuses_to_create_async_helper_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An active event loop cannot silently force a helper host thread in single mode."""
-    from schema_sanitizer.remote_impl import transport
+    from schema_sanitizer.remote_impl import async_bridge, transport
 
-    class ForbiddenExecutor:
-        """Fail if any project-owned helper executor is constructed."""
+    class ForbiddenThread:
+        """Fail if the extracted async bridge constructs a host thread."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            """Reject construction of the forbidden executor."""
-            raise AssertionError("single mode constructed ThreadPoolExecutor")
+            """Reject construction of the forbidden helper thread."""
+            raise AssertionError("single mode constructed async helper thread")
 
-    monkeypatch.setattr(transport, "ThreadPoolExecutor", ForbiddenExecutor)
+    monkeypatch.setattr(async_bridge, "Thread", ForbiddenThread)
 
     async def run() -> None:
         """Exercise the synchronous bridge from an active event loop."""
@@ -344,18 +344,20 @@ def test_detected_cpu_capacity_respects_process_affinity() -> None:
     script = """
 import json
 import os
-import os
 available = sorted(os.sched_getaffinity(0))
 os.sched_setaffinity(0, {available[0]})
 from schema_sanitizer.core_impl.execution_policy import execution_policy
 policy = execution_policy('multi', 512 * 1024 * 1024)
 print(json.dumps({'available': policy.available_cpus, 'workers': policy.effective_workers}))
 """
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
+    env = {"PYTHONPATH": source_root}
     completed = subprocess.run(
         [sys.executable, "-c", script],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
     payload = json.loads(completed.stdout)
     assert payload == {"available": 1, "workers": 1}
