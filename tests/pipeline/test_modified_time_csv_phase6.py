@@ -18,18 +18,18 @@ from schema_sanitizer.integrations.bigquery import (
 
 def _final_schema() -> pa.Schema:
     """Return a representative normalized final schema."""
-    question = pa.struct(
+    event = pa.struct(
         [
-            pa.field("question_id", pa.int64(), nullable=False),
-            pa.field("question_text", pa.string(), nullable=False),
-            pa.field("answer", pa.string()),
+            pa.field("event_id", pa.int64(), nullable=False),
+            pa.field("event_text", pa.string(), nullable=False),
+            pa.field("payload", pa.string()),
         ]
     )
     return pa.schema(
         [
-            pa.field("response_id", pa.int64(), nullable=False),
+            pa.field("record_id", pa.int64(), nullable=False),
             pa.field("country", pa.string()),
-            pa.field("questions", pa.list_(question)),
+            pa.field("event", pa.list_(event)),
             pa.field("source_file", pa.string()),
             pa.field("ingestion_timestamp", pa.timestamp("us", tz="UTC")),
             pa.field("schema_registry", pa.string(), nullable=False),
@@ -47,9 +47,9 @@ def test_arrow_registry_round_trip_preserves_final_nested_schema() -> None:
 
 
 def test_ingress_projection_keeps_only_non_generated_scalar_fields() -> None:
-    """Nested questions and generated metadata must not leak into CSV ingress state."""
+    """Nested event and generated metadata must not leak into CSV ingress state."""
     projected = ss.project_ingress_scalar_schema(_final_schema())
-    assert projected.names == ["response_id", "country"]
+    assert projected.names == ["record_id", "country"]
 
 
 def test_ingress_projection_rejects_unknown_explicit_fields() -> None:
@@ -66,8 +66,8 @@ def test_validate_analytical_result_checks_exact_final_schema() -> None:
             pa.array([1], type=pa.int64()),
             pa.array(["ES"]),
             pa.array(
-                [[{"question_id": 7, "question_text": "Why?", "answer": "Yes"}]],
-                type=schema.field("questions").type,
+                [[{"event_id": 7, "event_text": "Created", "payload": "active"}]],
+                type=schema.field("event").type,
             ),
             pa.array(["gs://bucket/a.csv"]),
             pa.array([0], type=pa.timestamp("us", tz="UTC")),
@@ -80,7 +80,7 @@ def test_validate_analytical_result_checks_exact_final_schema() -> None:
     assert result.row_count == 1
     with pytest.raises(ValueError, match="analytical schema mismatch"):
         ss.validate_analytical_result(
-            table.append_column("1/raw question", pa.array(["x"])),
+            table.append_column("1/raw event", pa.array(["x"])),
             schema,
         )
 
@@ -90,11 +90,11 @@ def test_finalize_replaces_intermediate_registry_and_preserves_provenance() -> N
     schema = _final_schema()
     table = pa.Table.from_pydict(
         {
-            "response_id": pa.array([1], type=pa.int64()),
+            "record_id": pa.array([1], type=pa.int64()),
             "country": ["ES"],
-            "questions": pa.array(
-                [[{"question_id": 10, "question_text": "A/B", "answer": None}]],
-                type=schema.field("questions").type,
+            "event": pa.array(
+                [[{"event_id": 10, "event_text": "A/B", "payload": None}]],
+                type=schema.field("event").type,
             ),
             "source_file": ["gs://bucket/day/a.csv"],
             "ingestion_timestamp": pa.array([0], type=pa.timestamp("us", tz="UTC")),
@@ -113,20 +113,20 @@ def test_finalize_replaces_intermediate_registry_and_preserves_provenance() -> N
     assert output["ingestion_timestamp"].to_pylist() == table["ingestion_timestamp"].to_pylist()
     registry = json.loads(output["schema_registry"][0].as_py())
     names = [field["name"] for field in registry["canonical_schema"]["fields"]]
-    assert "questions" in names
+    assert "event" in names
     assert "schema_registry" not in names
     assert "schema_drifts" not in names
-    assert all("raw question" not in name for name in names)
+    assert all("raw event" not in name for name in names)
 
 
-def test_finalize_rejects_remaining_raw_question_columns() -> None:
-    """Publication cannot proceed while dynamic wide question columns remain."""
+def test_finalize_rejects_remaining_raw_event_columns() -> None:
+    """Publication cannot proceed while dynamic wide event columns remain."""
     schema = _final_schema()
     table = pa.table(
         {
-            "response_id": pa.array([], type=pa.int64()),
+            "record_id": pa.array([], type=pa.int64()),
             "country": pa.array([], type=pa.string()),
-            "questions": pa.array([], type=schema.field("questions").type),
+            "event": pa.array([], type=schema.field("event").type),
             "source_file": pa.array([], type=pa.string()),
             "ingestion_timestamp": pa.array([], type=pa.timestamp("us", tz="UTC")),
             "schema_registry": pa.array([], type=pa.string()),
@@ -141,22 +141,22 @@ def test_finalize_rejects_remaining_raw_question_columns() -> None:
 def test_external_bigquery_schema_reader_supports_nested_repeated_fields() -> None:
     """The optional table-metadata fallback must preserve nested repetition."""
     fields = [
-        SimpleNamespace(name="response_id", field_type="INT64", mode="REQUIRED", fields=()),
+        SimpleNamespace(name="record_id", field_type="INT64", mode="REQUIRED", fields=()),
         SimpleNamespace(
-            name="questions",
+            name="event",
             field_type="RECORD",
             mode="REPEATED",
             fields=(
-                SimpleNamespace(name="question_id", field_type="INT64", mode="REQUIRED", fields=()),
-                SimpleNamespace(name="answer", field_type="STRING", mode="NULLABLE", fields=()),
+                SimpleNamespace(name="event_id", field_type="INT64", mode="REQUIRED", fields=()),
+                SimpleNamespace(name="payload", field_type="STRING", mode="NULLABLE", fields=()),
             ),
         ),
     ]
     client = SimpleNamespace(get_table=lambda _table: SimpleNamespace(schema=fields))
     schema = read_external_table_arrow_schema(client, "p.d.t")
-    assert schema.field("response_id").nullable is False
-    assert pa.types.is_list(schema.field("questions").type)
-    assert pa.types.is_struct(schema.field("questions").type.value_type)
+    assert schema.field("record_id").nullable is False
+    assert pa.types.is_list(schema.field("event").type)
+    assert pa.types.is_struct(schema.field("event").type.value_type)
 
 
 def test_bigquery_resolution_prefers_embedded_registry() -> None:

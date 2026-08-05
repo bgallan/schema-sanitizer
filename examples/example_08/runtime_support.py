@@ -29,9 +29,9 @@ from schema_sanitizer.pipeline.advanced import (
 from schema_sanitizer.sources import RemoteFile
 
 try:
-    from examples.example_08.question_normalization import normalize_question_columns
+    from examples.example_08.event_normalization import normalize_event_columns
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
-    from question_normalization import normalize_question_columns
+    from event_normalization import normalize_event_columns
 
 LOGGER = logging.getLogger("gcs_csv_modified_window_to_polars_parquet")
 _METADATA_COLUMNS = frozenset({"schema_registry", "schema_drifts"})
@@ -87,9 +87,9 @@ class Example08Config:
     start_date: date
     end_date: date
     target_table: str
-    question_separator: str = "/"
-    questions_column: str = "questions"
-    omit_null_answers: bool = False
+    event_separator: str = "/"
+    event_column: str = "event"
+    omit_null_payloads: bool = False
     csv_delimiter: str = ","
     csv_escape_char: str | None = "\\"
     on_error: str = "stop"
@@ -99,7 +99,7 @@ class Example08Config:
     field_name_policy: str = "preserve"
 
     def __post_init__(self) -> None:
-        """Reject settings that would make question detection ambiguous."""
+        """Reject settings that would make event detection ambiguous."""
         if not self.source_csv_prefix.startswith("gs://"):
             raise ValueError("source_csv_prefix must be a gs:// URI")
         if not self.silver_parquet_prefix.startswith("gs://"):
@@ -108,10 +108,10 @@ class Example08Config:
             raise ValueError("start_date must be on or before end_date")
         if not self.target_table.strip():
             raise ValueError("target_table must not be empty")
-        if not self.question_separator:
-            raise ValueError("question_separator must not be empty")
-        if not self.questions_column:
-            raise ValueError("questions_column must not be empty")
+        if not self.event_separator:
+            raise ValueError("event_separator must not be empty")
+        if not self.event_column:
+            raise ValueError("event_column must not be empty")
         if len(self.csv_delimiter.encode("utf-8")) != 1:
             raise ValueError("csv_delimiter must be exactly one UTF-8 byte")
         if self.field_name_policy != "preserve":
@@ -133,7 +133,7 @@ class DayRunResult:
     source_object_count: int
     input_bytes: int | None
     row_count: int
-    question_column_count: int
+    event_column_count: int
     output_bytes: int
     conversion_seconds: float
     normalization_seconds: float
@@ -289,7 +289,7 @@ def run_modified_time_csv_workflow(
 
     final_schema = bigquery_client.read_target_schema(config.target_table)
     required_final_names = {
-        config.questions_column,
+        config.event_column,
         "source_file",
         "ingestion_timestamp",
         "schema_registry",
@@ -366,12 +366,12 @@ def _run_one_day(
     conversion_seconds = max(perf_counter() - conversion_started, 0.0)
 
     normalization_started = perf_counter()
-    normalized = normalize_question_columns(
+    normalized = normalize_event_columns(
         frame,
         final_schema,
-        separator=config.question_separator,
-        output_column=config.questions_column,
-        omit_null_answers=config.omit_null_answers,
+        separator=config.event_separator,
+        output_column=config.event_column,
+        omit_null_payloads=config.omit_null_payloads,
     )
     arrow_table = _cast_polars_to_final_data_schema(normalized.frame, final_schema)
     finalized = ss.finalize_analytical_output(
@@ -417,7 +417,7 @@ def _run_one_day(
         source_object_count=plan.selected_object_count,
         input_bytes=plan.total_bytes,
         row_count=validation.row_count,
-        question_column_count=len(normalized.question_columns),
+        event_column_count=len(normalized.event_columns),
         output_bytes=output_bytes,
         conversion_seconds=conversion_seconds,
         normalization_seconds=normalization_seconds,
@@ -467,14 +467,14 @@ def _write_and_validate_parquet(
 def _log_day_result(logger: logging.Logger, result: DayRunResult) -> None:
     """Emit all required per-day volume and timing metrics."""
     logger.info(
-        "day=%s source_objects=%d input_bytes=%s rows=%d question_columns=%d "
+        "day=%s source_objects=%d input_bytes=%s rows=%d event_columns=%d "
         "output_bytes=%d conversion_seconds=%.6f normalization_seconds=%.6f "
         "parquet_seconds=%.6f upload_seconds=%.6f",
         result.logical_date.isoformat(),
         result.source_object_count,
         result.input_bytes,
         result.row_count,
-        result.question_column_count,
+        result.event_column_count,
         result.output_bytes,
         result.conversion_seconds,
         result.normalization_seconds,

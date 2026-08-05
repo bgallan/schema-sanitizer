@@ -36,6 +36,8 @@ the detailed guides and contracts.
   primitives.
 - [Modification-time CSV](flat-prefix-modified-time-csv.md): UTC windows over a
   flat GCS prefix.
+- [CI/CD pipeline](ci-cd.md): shared validation gates, artifacts, and
+  publication.
 - [BigQuery](bigquery.md): external-table DDL, registries, and sidecars.
 - [Concurrency and memory](concurrency-memory-hardening.md): budgets, workers,
   cancellation, and shutdown.

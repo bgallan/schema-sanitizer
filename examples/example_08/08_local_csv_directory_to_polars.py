@@ -29,9 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-parquet", type=Path)
     parser.add_argument("--csv-delimiter", default=",")
     parser.add_argument("--csv-escape-char", default="\\")
-    parser.add_argument("--question-separator", default="/")
-    parser.add_argument("--questions-column", default="questions")
-    parser.add_argument("--include-null-answers", action="store_true")
+    parser.add_argument("--event-separator", default="/")
+    parser.add_argument("--event-column", default="event")
+    parser.add_argument("--include-null-payloads", action="store_true")
     parser.add_argument(
         "--multi-threading",
         action=argparse.BooleanOptionalAction,
@@ -45,9 +45,9 @@ def main() -> int:
     args = build_parser().parse_args()
     result = load_local_csv_directory_to_polars(
         args.source_directory,
-        question_separator=args.question_separator,
-        questions_column=args.questions_column,
-        omit_null_answers=not args.include_null_answers,
+        event_separator=args.event_separator,
+        event_column=args.event_column,
+        omit_null_payloads=not args.include_null_payloads,
         csv_delimiter=args.csv_delimiter,
         csv_escape_char=args.csv_escape_char,
         multi_threading=args.multi_threading,
@@ -59,9 +59,9 @@ def main() -> int:
     csv_count = sum(1 for path in args.source_directory.iterdir() if path.suffix.lower() == ".csv")
     print(f"CSV files: {csv_count}")
     print(f"Rows: {frame.height}")
-    print(f"Question source columns: {len(result.question_columns)}")
+    print(f"Event source columns: {len(result.event_columns)}")
     print(f"Normalized columns: {frame.width}")
-    print(f"questions dtype: {frame.schema[args.questions_column]}")
+    print(f"event dtype: {frame.schema[args.event_column]}")
     if args.output_parquet is not None:
         print(f"Parquet: {args.output_parquet}")
     return 0

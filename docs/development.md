@@ -91,8 +91,9 @@ errors or operation diagnostics.
 
 ## [CI](#index)
 
-The workflow and scripts under [`.github/workflows/`](../.github/workflows/) and
-[`meta/ci/`](../meta/ci/) are the source of truth. CI covers:
+The [CI/CD pipeline guide](ci-cd.md) explains the shared PR, merge, and publish
+gate. Workflows under [`.github/workflows/`](../.github/workflows/) and scripts
+under [`meta/ci/`](../meta/ci/) are the source of truth. CI covers:
 
 - lint, formatting, typing, and tests;
 - native builds and ABI3 wheel installation;

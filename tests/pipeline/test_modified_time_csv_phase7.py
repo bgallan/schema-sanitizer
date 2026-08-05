@@ -1,4 +1,4 @@
-"""Example-08 orchestration and question-header contracts."""
+"""Example-08 orchestration and event-header contracts."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import pytest
 
 from examples.example_08 import runtime_support
 from examples.example_08.cli import build_parser
-from examples.example_08.question_normalization import (
-    detect_question_columns,
-    parse_question_column,
+from examples.example_08.event_normalization import (
+    detect_event_columns,
+    parse_event_column,
 )
 from examples.example_08.runtime_support import (
     DayRunResult,
@@ -90,7 +90,7 @@ class FakeBigQueryClient:
         self.read_calls += 1
         return SimpleNamespace(
             names=[
-                "questions",
+                "event",
                 "source_file",
                 "ingestion_timestamp",
                 "schema_registry",
@@ -110,12 +110,12 @@ def _config() -> Example08Config:
         silver_parquet_prefix="gs://silver/output",
         start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 2),
-        target_table="project.dataset.responses",
+        target_table="project.dataset.records",
     )
 
 
 def test_example_08_parser_exposes_required_contract() -> None:
-    """The CLI exposes source, dates, target, questions, and operational knobs."""
+    """The CLI exposes source, dates, target, event, and operational knobs."""
     args = build_parser().parse_args(
         [
             "--source-csv-prefix",
@@ -132,11 +132,11 @@ def test_example_08_parser_exposes_required_contract() -> None:
             "p",
             "--bigquery-location",
             "EU",
-            "--question-separator",
+            "--event-separator",
             "|",
-            "--questions-column",
-            "answers",
-            "--omit-null-answers",
+            "--event-column",
+            "event_items",
+            "--omit-null-payloads",
             "--on-error",
             "skip_row",
             "--memory-limit-bytes",
@@ -152,32 +152,30 @@ def test_example_08_parser_exposes_required_contract() -> None:
     )
     assert args.start_date == date(2026, 7, 1)
     assert args.end_date == date(2026, 7, 2)
-    assert args.question_separator == "|"
-    assert args.questions_column == "answers"
-    assert args.omit_null_answers is True
+    assert args.event_separator == "|"
+    assert args.event_column == "event_items"
+    assert args.omit_null_payloads is True
     assert args.multi_threading is True
     assert args.parquet_compression == "gzip"
 
 
-def test_question_header_splits_only_on_first_separator() -> None:
-    """A slash inside the question text remains part of the final text."""
-    parsed = parse_question_column("17/Path / nested / value")
+def test_event_header_splits_only_on_first_separator() -> None:
+    """A slash inside the event text remains part of the final text."""
+    parsed = parse_event_column("17/Path / nested / value")
     assert parsed is not None
-    assert parsed.question_id == 17
-    assert parsed.question_text == "Path / nested / value"
-    assert parse_question_column("not-an-id/question") is None
-    assert parse_question_column("18/") is None
+    assert parsed.event_id == 17
+    assert parsed.event_text == "Path / nested / value"
+    assert parse_event_column("not-an-id/event") is None
+    assert parse_event_column("18/") is None
 
 
-def test_question_detection_preserves_unicode_and_column_order() -> None:
-    """Unicode and renamed questions remain distinct deterministic columns."""
-    detected = detect_question_columns(
-        ["country", "2/¿Cómo estás?", "1/旧しい質問", "1/Renamed/question"]
-    )
-    assert [(item.question_id, item.question_text) for item in detected] == [
-        (2, "¿Cómo estás?"),
-        (1, "旧しい質問"),
-        (1, "Renamed/question"),
+def test_event_detection_preserves_unicode_and_column_order() -> None:
+    """Unicode and renamed event remain distinct deterministic columns."""
+    detected = detect_event_columns(["country", "2/Métrica Δ", "1/状態変更", "1/Renamed/event"])
+    assert [(item.event_id, item.event_text) for item in detected] == [
+        (2, "Métrica Δ"),
+        (1, "状態変更"),
+        (1, "Renamed/event"),
     ]
 
 
@@ -188,8 +186,8 @@ def test_output_uri_is_one_deterministic_object_per_day() -> None:
     )
 
 
-def test_config_rejects_non_preserving_question_policy() -> None:
-    """Question patterns cannot survive a field-name rewrite policy."""
+def test_config_rejects_non_preserving_event_policy() -> None:
+    """Event patterns cannot survive a field-name rewrite policy."""
     with pytest.raises(ValueError, match="requires field_name_policy='preserve'"):
         Example08Config(
             source_csv_prefix="gs://source/csv",
@@ -253,7 +251,7 @@ def test_workflow_lists_once_and_groups_three_objects_into_two_days(
             source_object_count=plan.selected_object_count,
             input_bytes=plan.total_bytes,
             row_count=plan.selected_object_count,
-            question_column_count=1,
+            event_column_count=1,
             output_bytes=100,
             conversion_seconds=0.1,
             normalization_seconds=0.1,
@@ -321,9 +319,26 @@ def test_example_08_files_remain_small_and_separated() -> None:
         "08_gcs_csv_modified_window_to_polars_parquet.py",
         "__init__.py",
         "cli.py",
-        "question_normalization.py",
+        "event_normalization.py",
         "runtime_support.py",
     }
     assert expected <= {path.name for path in root.glob("*.py")}
     for path in root.glob("*.py"):
         assert len(path.read_text(encoding="utf-8").splitlines()) <= 500
+
+
+def test_example_08_uses_domain_neutral_event_vocabulary() -> None:
+    """The example must not expose the domain-specific terminology it replaced."""
+    root = Path(__file__).parents[2]
+    sources = [
+        *(root / "examples/example_08").glob("*.py"),
+        root / "examples/README.md",
+        root / "docs/analytical-schema-finalization.md",
+        root / "docs/flat-prefix-modified-time-csv.md",
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8").lower() for path in sources)
+
+    for legacy_term in ("question", "answer", "qualifio", "response"):
+        assert legacy_term not in text
+    for generic_term in ("event_id", "event_text", "payload"):
+        assert generic_term in text

@@ -29,6 +29,7 @@ def test_documentation_index_covers_public_guides() -> None:
     index = (DOCS_ROOT / "README.md").read_text(encoding="utf-8")
     expected = {
         "bigquery.md",
+        "ci-cd.md",
         "compatibility.md",
         "concurrency-memory-hardening.md",
         "development.md",

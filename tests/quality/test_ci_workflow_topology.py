@@ -1,4 +1,4 @@
-"""Protect the compact two-entry-point CI/CD topology."""
+"""Protect the compact CI/CD topology and its shared release validation."""
 
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ def _job_body(workflow: str, job_id: str) -> str:
     return body[: next_job.start()] if next_job else body
 
 
-def test_only_general_sanity_and_publish_are_manually_dispatchable() -> None:
-    """GitHub Actions must expose exactly two manual workflow buttons."""
+def test_workflow_entry_points_are_explicit() -> None:
+    """Only validation and publication are user-facing."""
     dispatched = {
         path.name
         for path in WORKFLOWS.glob("*.yml")
@@ -41,12 +41,15 @@ def test_only_general_sanity_and_publish_are_manually_dispatchable() -> None:
     assert dispatched == {"ci.yml", "publish.yml"}
 
 
-def test_actions_sidebar_has_only_general_sanity_and_publish() -> None:
-    """Only the two user-facing workflow files should appear in Actions."""
-    assert {path.name for path in WORKFLOWS.glob("*.yml")} == {"ci.yml", "publish.yml"}
+def test_actions_sidebar_has_only_two_purposeful_workflows() -> None:
+    """Validation and publication remain the only CI/CD entry points."""
+    workflows = tuple(WORKFLOWS.glob("*.yml"))
+
+    assert {path.name for path in workflows} == {"ci.yml", "publish.yml"}
+    assert all("  schedule:" not in path.read_text(encoding="utf-8") for path in workflows)
 
 
-def test_pr_main_manual_and_publish_share_general_sanity() -> None:
+def test_pr_main_manual_and_publish_share_canonical_validation() -> None:
     """PR, post-merge, manual sanity, and publish must use one validation owner."""
     ci = _workflow("ci.yml")
     publish = _workflow("publish.yml")
@@ -55,7 +58,11 @@ def test_pr_main_manual_and_publish_share_general_sanity() -> None:
         assert f"  {trigger}" in ci
     assert "branches: [main]" in ci
     assert "uses: ./.github/workflows/ci.yml" in publish
+    assert "needs: [validation]" in publish
     assert "python -m cibuildwheel" not in publish
+    assert "python -m build" not in publish
+    assert "pattern: dist-*" in publish
+    assert "id-token: write" in publish
     assert ci.count("python meta/ci/validate_release_version.py") == 1
     assert publish.count("python meta/ci/validate_release_version.py") == 2
 
@@ -79,20 +86,16 @@ def test_secret_scan_uses_the_tested_report_checker() -> None:
     assert "_is_notebook_cell_id" not in ci
 
 
-def test_general_sanity_owns_validation_and_scheduled_fuzzing() -> None:
-    """One auditable workflow owns regular validation and scheduled fuzzing."""
+def test_validation_has_six_consolidated_job_owners() -> None:
+    """Related gates share environments without dropping their coverage."""
     ci = _workflow("ci.yml")
     assert _job_ids(ci) == {
         "checks",
         "platform-wheels",
-        "sdist",
         "distribution",
-        "coverage-python",
         "coverage-native",
-        "address-sanitizer",
         "platform-sanitizers",
         "thread-sanitizer",
-        "scheduled-native-fuzz",
     }
     for removed_job in (
         "core-only:",
@@ -111,18 +114,14 @@ def test_general_sanity_owns_validation_and_scheduled_fuzzing() -> None:
     platform_matrix = _job_body(ci, "platform-wheels").split("    steps:", 1)[0]
     sanitizer_matrix = _job_body(ci, "platform-sanitizers").split("    steps:", 1)[0]
     assert len(re.findall(r"^          - name:", platform_matrix, re.MULTILINE)) == 4
-    assert len(re.findall(r"^          - name:", sanitizer_matrix, re.MULTILINE)) == 3
+    assert len(re.findall(r"^          - name:", sanitizer_matrix, re.MULTILINE)) == 4
     assert ci.count("      matrix:") == 2
     assert "python-version: [" not in ci
     assert "uses: ./.github/workflows/" not in ci
 
-    assert "  schedule:" in ci
-    assert re.search(r"^\s+- cron: [\'\"]?23 3 \* \* 1[\'\"]?$", ci, re.MULTILINE)
-    assert ci.count("github.event_name != 'schedule'") == 9
-    assert ci.count("github.event_name == 'schedule'") == 1
-    assert "scheduled-benchmarks:" not in ci
-    assert "scheduled-native-fuzz:" in ci
-    assert "scheduled-real-gcp:" not in ci
+    assert "  schedule:" not in ci
+    assert "github.event_name != 'schedule'" not in ci
+    assert "github.event_name == 'schedule'" not in ci
     assert "cloud-emulators:" not in ci
     assert "test_cloud_emulator_integration.py" not in ci
     assert "test_cloud_real_services.py" not in ci
@@ -135,7 +134,7 @@ def test_platform_suite_exercises_the_installed_wheel() -> None:
     assert "pytest -q -o pythonpath=." in platform_job
 
 
-def test_general_sanity_owns_full_extension_tsan_gate() -> None:
+def test_validation_owns_full_extension_tsan_gate() -> None:
     """Linux CI must build and repeatedly exercise the complete TSan extension."""
     ci = _workflow("ci.yml")
 
@@ -188,7 +187,7 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert ci.count("SCHEMA_SANITIZER_BUILD_FUZZERS=ON") >= 3
     assert ci.count("SCHEMA_SANITIZER_FUZZ_ENGINE=standalone") >= 3
     assert ci.count("meta/ci/run_fuzz_regressions.py") >= 3
-    assert ci.count("--engine libfuzzer") >= 2
+    assert ci.count("--engine libfuzzer") >= 1
     assert "--campaign-runs 1000" in ci
     assert "--campaign-runs 500" in ci
     assert "schema_sanitizer_sanitized_ordered_executor" in ci
@@ -196,43 +195,19 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     concurrency_step = ci.split("- name: Run repeated sanitized concurrency probe", 1)[1].split(
         "- name:", 1
     )[0]
-    fuzz_step = _job_body(ci, "platform-sanitizers").split(
-        "- name: Run native fuzz regressions and mutation campaigns", 1
-    )[1]
-    assert "if: runner.os != 'Windows'" in concurrency_step
-    assert "\n        if:" not in fuzz_step
+    fuzz_step = (
+        _job_body(ci, "platform-sanitizers")
+        .split("- name: Run platform fuzz regressions and mutation campaigns", 1)[1]
+        .split("- name:", 1)[0]
+    )
+    assert "matrix.mode == 'native'" in concurrency_step
+    assert "runner.os != 'Windows'" in concurrency_step
+    assert "if: matrix.mode == 'native'" in fuzz_step
 
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "SCHEMA_SANITIZER_FUZZ_ENGINE" in cmake
     assert "cpp/fuzz/standalone_main.cc" in cmake
     assert "schema_sanitizer_sanitized_ordered_executor" in cmake
-
-
-def test_scheduled_fuzz_campaign_is_longer_and_isolated() -> None:
-    """The weekly trigger must run only the extended sanitised fuzz campaign."""
-    ci = _workflow("ci.yml")
-    scheduled = _job_body(ci, "scheduled-native-fuzz")
-
-    assert "if: github.event_name == 'schedule'" in scheduled
-    assert "SCHEMA_SANITIZER_SANITIZER=asan-ubsan" in scheduled
-    assert "SCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer" in scheduled
-    assert "--engine libfuzzer" in scheduled
-    assert "--campaign-runs 10000" in scheduled
-    assert "--max-input-ms 10000" in scheduled
-    assert "--max-rss-mb 4096" in scheduled
-    assert "if: failure()" in scheduled
-    for job_id in (
-        "checks",
-        "platform-wheels",
-        "sdist",
-        "distribution",
-        "coverage-python",
-        "coverage-native",
-        "address-sanitizer",
-        "platform-sanitizers",
-        "thread-sanitizer",
-    ):
-        assert "if: github.event_name != 'schedule'" in _job_body(ci, job_id)
 
 
 def test_native_concurrency_gate_links_its_memory_resource_implementation() -> None:
@@ -316,7 +291,9 @@ def test_release_artifacts_and_downstream_extras_use_two_compact_jobs() -> None:
 
     assert "python-version: '3.11'" in ci
     assert "python-version: '3.14'" in ci
-    assert "needs: [sdist, platform-wheels]" in ci
+    assert "needs: [platform-wheels]" in ci
+    assert "pattern: dist-wheels-*" in ci
+    assert "name: dist-sdist" in ci
     assert "check_distribution_contents.py --release-set" in ci
     assert "check_downstream_install.py" in ci
     for extra in ("core", "pyarrow", "pandas", "polars", "duckdb", "cloud"):

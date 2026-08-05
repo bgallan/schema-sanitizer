@@ -37,8 +37,8 @@ def test_csv_escape_char_is_explicit_and_validated() -> None:
 @pytest.mark.parametrize("multi_threading", [False, True])
 def test_csv_escape_char_decodes_heterogeneous_directory(tmp_path, multi_threading: bool) -> None:
     """Union-mode framing and decoding both honor escaped quotes."""
-    (tmp_path / "a.csv").write_bytes(b'id,1/First question\n1,"He said \\"yes\\""\n')
-    (tmp_path / "b.csv").write_bytes(b'2/Second question,id\n"line one\nline \\"two\\"",2\n')
+    (tmp_path / "a.csv").write_bytes(b'id,1/First event\n1,"He said \\"yes\\""\n')
+    (tmp_path / "b.csv").write_bytes(b'2/Second event,id\n"line one\nline \\"two\\"",2\n')
 
     with pytest.raises(ss.SchemaSanitizerInvalidArgumentError):
         ss.to_polars(
@@ -60,9 +60,9 @@ def test_csv_escape_char_decodes_heterogeneous_directory(tmp_path, multi_threadi
         on_error="stop",
         multi_threading=multi_threading,
     ).clean_data
-    assert frame.select(["id", "1/First question", "2/Second question"]).to_dicts() == [
-        {"id": "1", "1/First question": 'He said "yes"', "2/Second question": None},
-        {"id": "2", "1/First question": None, "2/Second question": 'line one\nline "two"'},
+    assert frame.select(["id", "1/First event", "2/Second event"]).to_dicts() == [
+        {"id": "1", "1/First event": 'He said "yes"', "2/Second event": None},
+        {"id": "2", "1/First event": None, "2/Second event": 'line one\nline "two"'},
     ]
     direct = ss.to_pyarrow(
         tmp_path / "a.csv",
@@ -72,20 +72,20 @@ def test_csv_escape_char_decodes_heterogeneous_directory(tmp_path, multi_threadi
         on_error="stop",
         multi_threading=True,
     ).clean_data
-    assert direct["1/First question"].to_pylist() == ['He said "yes"']
+    assert direct["1/First event"].to_pylist() == ['He said "yes"']
 
     normalized = load_local_csv_directory_to_polars(
         tmp_path,
         multi_threading=multi_threading,
     )
-    assert normalized.frame.columns == ["id", "source_file", "ingestion_timestamp", "questions"]
-    assert normalized.frame.get_column("questions").to_list() == [
-        [{"question_id": 1, "question_text": "First question", "answer": 'He said "yes"'}],
+    assert normalized.frame.columns == ["id", "source_file", "ingestion_timestamp", "event"]
+    assert normalized.frame.get_column("event").to_list() == [
+        [{"event_id": 1, "event_text": "First event", "payload": 'He said "yes"'}],
         [
             {
-                "question_id": 2,
-                "question_text": "Second question",
-                "answer": 'line one\nline "two"',
+                "event_id": 2,
+                "event_text": "Second event",
+                "payload": 'line one\nline "two"',
             }
         ],
     ]

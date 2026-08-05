@@ -107,18 +107,18 @@ def _remote(name: str, updated: datetime, generation: str, payload: bytes) -> Re
 
 def _final_schema(pa: Any) -> Any:
     """Return the target analytical schema used by both integration cases."""
-    question = pa.struct(
+    event = pa.struct(
         [
-            pa.field("question_id", pa.int64(), nullable=False),
-            pa.field("question_text", pa.string(), nullable=False),
-            pa.field("answer", pa.string()),
+            pa.field("event_id", pa.int64(), nullable=False),
+            pa.field("event_text", pa.string(), nullable=False),
+            pa.field("payload", pa.string()),
         ]
     )
     return pa.schema(
         [
-            pa.field("response_id", pa.string()),
+            pa.field("record_id", pa.string()),
             pa.field("country", pa.string()),
-            pa.field("questions", pa.list_(question)),
+            pa.field("event", pa.list_(event)),
             pa.field("source_file", pa.string()),
             pa.field("ingestion_timestamp", pa.timestamp("us", tz="UTC")),
             pa.field("schema_registry", pa.string()),
@@ -134,8 +134,8 @@ def _config() -> Example08Config:
         silver_parquet_prefix="gs://silver/output",
         start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 2),
-        target_table="project.dataset.responses",
-        omit_null_answers=True,
+        target_table="project.dataset.records",
+        omit_null_payloads=True,
         parquet_compression="none",
     )
 
@@ -146,9 +146,9 @@ def test_example_08_fake_cloud_end_to_end() -> None:
     pq = pytest.importorskip("pyarrow.parquet")
     pytest.importorskip("polars")
 
-    a = ('response_id,country,1/How are you?,2/Path/with/slash\nr1,ES,Bien,"A/B"\n').encode()
-    b = ("3/¿Nueva pregunta?,response_id,country,1/How are you?\nSí,r2,MX,\n").encode()
-    c = ('response_id,country,1/How do you feel?\nr3,FR,"Très bien, merci"\n').encode()
+    a = ('record_id,country,1/Created,2/Path/with/slash\nr1,ES,active,"A/B"\n').encode()
+    b = ("3/Estado Δ,record_id,country,1/Created\nlisto,r2,MX,\n").encode()
+    c = ('record_id,country,1/Updated\nr3,FR,"revision, complete"\n').encode()
     gcs = FakeGcsClient(
         [
             (_remote("a.csv", datetime(2026, 7, 1, 1, tzinfo=UTC), "11", a), a),
@@ -188,19 +188,17 @@ def test_example_08_fake_cloud_end_to_end() -> None:
     assert second.schema.equals(bigquery.schema, check_metadata=False)
     assert first.column_names == bigquery.schema.names
     assert all("/" not in name for name in first.column_names)
-    first_questions = first["questions"].to_pylist()
-    assert first_questions[0] == [
-        {"question_id": 1, "question_text": "How are you?", "answer": "Bien"},
-        {"question_id": 2, "question_text": "Path/with/slash", "answer": "A/B"},
+    first_event = first["event"].to_pylist()
+    assert first_event[0] == [
+        {"event_id": 1, "event_text": "Created", "payload": "active"},
+        {"event_id": 2, "event_text": "Path/with/slash", "payload": "A/B"},
     ]
-    assert first_questions[1] == [
-        {"question_id": 3, "question_text": "¿Nueva pregunta?", "answer": "Sí"}
-    ]
-    assert second["questions"].to_pylist()[0] == [
+    assert first_event[1] == [{"event_id": 3, "event_text": "Estado Δ", "payload": "listo"}]
+    assert second["event"].to_pylist()[0] == [
         {
-            "question_id": 1,
-            "question_text": "How do you feel?",
-            "answer": "Très bien, merci",
+            "event_id": 1,
+            "event_text": "Updated",
+            "payload": "revision, complete",
         }
     ]
     assert first["source_file"].to_pylist() == [
@@ -209,7 +207,7 @@ def test_example_08_fake_cloud_end_to_end() -> None:
     ]
     registry = json.loads(first["schema_registry"][0].as_py())
     registry_names = [field["name"] for field in registry["canonical_schema"]["fields"]]
-    assert "questions" in registry_names
+    assert "event" in registry_names
     assert all("/" not in name for name in registry_names)
     assert len(bigquery.replace_calls) == 1
     assert bigquery.replace_calls[0]["reference_file_schema_uri"] == (
@@ -221,7 +219,7 @@ def test_example_08_validation_failure_publishes_nothing() -> None:
     """A final-schema mismatch prevents both object publication and table update."""
     pa = pytest.importorskip("pyarrow")
     pytest.importorskip("polars")
-    payload = b"response_id,country,1/Question\nr1,ES,yes\n"
+    payload = b"record_id,country,1/Event\nr1,ES,yes\n"
     remote = _remote("a.csv", datetime(2026, 7, 1, 1, tzinfo=UTC), "1", payload)
     gcs = FakeGcsClient([(remote, payload)])
     schema = _final_schema(pa).insert(2, pa.field("missing_scalar", pa.string()))

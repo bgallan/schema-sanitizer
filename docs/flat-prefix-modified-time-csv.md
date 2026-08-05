@@ -19,8 +19,8 @@ import schema_sanitizer as ss
 from schema_sanitizer.pipeline import ModifiedTimePartitions, ParquetPipeline
 
 job = ParquetPipeline(
-    source="gs://raw-bucket/responses",
-    output="gs://silver-bucket/responses",
+    source="gs://raw-bucket/records",
+    output="gs://silver-bucket/records",
     partitions=ModifiedTimePartitions.daily(
         date(2026, 7, 1),
         date(2026, 7, 7),
@@ -97,7 +97,7 @@ A previously persisted manifest instead reproduces its original generations.
 ## [CSV header reconciliation](#index)
 
 Use `csv_header_mode="union"` when files for one day can reorder columns, omit
-question columns, or introduce new ones. The engine pre-reads each header,
+event columns, or introduce new ones. The engine pre-reads each header,
 builds immutable per-source projections, preserves first-appearance column
 order, and emits nulls for missing fields. Duplicate headers, mixed
 header/no-header sources, and rows wider than their own header remain errors.
@@ -138,18 +138,18 @@ run.
 pip install "schema-sanitizer[polars,gcs,bigquery]"
 
 python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
-  --source-csv-prefix gs://raw-bucket/responses \
-  --silver-parquet-prefix gs://silver-bucket/responses \
+  --source-csv-prefix gs://raw-bucket/records \
+  --silver-parquet-prefix gs://silver-bucket/records \
   --start-date 2026-07-01 \
   --end-date 2026-07-07 \
-  --target-table project_id.dataset_id.external_responses \
-  --omit-null-answers \
+  --target-table project_id.dataset_id.external_records \
+  --omit-null-payloads \
   --memory-limit-bytes 268435456 \
   --multi-threading
 ```
 
 The target table schema is the final analytical contract. The example derives
 an ingress scalar schema for the wide CSVs, normalizes headers matching
-`<integer>/<question text>` into one `list<struct>` column, replaces the
+`<integer>/<event text>` into one `list<struct>` column, replaces the
 intermediate registry metadata, validates the final schema, and publishes
 `YYYY-MM-DD.parquet` for every non-empty UTC day.

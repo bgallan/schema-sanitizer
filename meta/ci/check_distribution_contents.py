@@ -37,6 +37,7 @@ _SDIST_REQUIRED = {
     "cmake/SchemaSanitizerSources.cmake",
     "cmake/SchemaSanitizerTargetOptions.cmake",
     "docs/README.md",
+    "docs/ci-cd.md",
     "docs/compatibility.md",
     "docs/heuristics.md",
     "docs/python-api.md",

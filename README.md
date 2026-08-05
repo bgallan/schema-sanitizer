@@ -134,6 +134,7 @@ The [documentation guide](docs/README.md) organizes detailed material by task:
 - [Concurrency and memory](docs/concurrency-memory-hardening.md)
 - [Reader security](docs/reader-security-limits.md)
 - [Compatibility](docs/compatibility.md)
+- [CI/CD pipeline](docs/ci-cd.md)
 - [Development and contribution](docs/development.md)
 
 Complete programs live in [`examples/`](examples/).

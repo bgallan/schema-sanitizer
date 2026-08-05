@@ -394,5 +394,7 @@ def test_phase_three_owners_and_documentation_remain_bounded() -> None:
 
     assert all(owner.is_file() for owner in owners)
     assert all(len(owner.read_text(encoding="utf-8").splitlines()) <= 500 for owner in owners)
-    assert (root / "docs/source-manifests.md").is_file()
-    assert "SourceManifest" in (root / "README.md").read_text(encoding="utf-8")
+    guide = root / "docs/source-manifests.md"
+    assert guide.is_file()
+    assert "SourceManifest" in guide.read_text(encoding="utf-8")
+    assert "source-manifests.md" in (root / "docs/README.md").read_text(encoding="utf-8")

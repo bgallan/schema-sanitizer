@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Read a flat GCS CSV prefix once, group exact object generations by "
-            "UTC modification day, normalize question columns with Polars, and "
+            "UTC modification day, normalize event columns with Polars, and "
             "publish one validated Parquet object per non-empty day."
         )
     )
@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument(
         "--csv-escape-char",
         default="\\",
-        help=r"Escape used inside quoted fields (default: backslash for Qualifio CSV exports).",
+        help=r"Escape used inside quoted fields (default: backslash).",
     )
 
     output = parser.add_argument_group("silver output")
@@ -60,10 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--credentials-file")
     target.add_argument("--credentials-json")
 
-    questions = parser.add_argument_group("question normalization")
-    questions.add_argument("--question-separator", default="/")
-    questions.add_argument("--questions-column", default="questions")
-    questions.add_argument("--omit-null-answers", action="store_true")
+    event = parser.add_argument_group("event normalization")
+    event.add_argument("--event-separator", default="/")
+    event.add_argument("--event-column", default="event")
+    event.add_argument("--omit-null-payloads", action="store_true")
 
     sanitizer = parser.add_argument_group("schema-sanitizer")
     sanitizer.add_argument(
@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="preserve",
         choices=("preserve",),
         help=(
-            "Question headers must remain byte-for-byte recognizable; this "
+            "Event headers must remain byte-for-byte recognizable; this "
             "workflow therefore requires the preserve policy."
         ),
     )

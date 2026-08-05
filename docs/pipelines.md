@@ -57,8 +57,8 @@ Use this mode for a flat GCS prefix without Hive paths:
 from schema_sanitizer.pipeline import ModifiedTimePartitions, ParquetPipeline
 
 job = ParquetPipeline(
-    source="gs://raw-bucket/responses",
-    output="gs://silver-bucket/responses",
+    source="gs://raw-bucket/records",
+    output="gs://silver-bucket/records",
     partitions=ModifiedTimePartitions.daily(
         date(2026, 8, 1),
         date(2026, 8, 5),

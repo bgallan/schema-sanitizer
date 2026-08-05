@@ -3,16 +3,16 @@
 Modified-time CSV ingestion has two deliberately different schema contracts.
 
 The **ingress schema** describes only stable scalar columns that can be read
-directly from each wide CSV row. Dynamic question columns are discovered by
+directly from each wide CSV row. Dynamic event columns are discovered by
 `csv_header_mode="union"` and remain temporary. Nested target fields such as
-`questions: list<struct<...>>` do not belong to the CSV ingress registry.
+`event: list<struct<...>>` do not belong to the CSV ingress registry.
 Generated columns (`schema_registry`, `schema_drifts`, `source_file`, and
 `ingestion_timestamp`) are also excluded from the ingress projection because
 the reader creates them.
 
 The **final schema** describes the normalized analytical result that will be
 published. It includes nested fields and the generated provenance columns, but
-must not contain any raw dynamic question header.
+must not contain any raw dynamic event header.
 
 ## Index
 

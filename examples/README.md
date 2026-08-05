@@ -49,7 +49,7 @@ This folder contains end-to-end tutorial notebooks and scripts for
      `SourceManifest` conversion per non-empty day
    - Opts into backslash-escaped quotes used by the source exports while the
      library-wide CSV default remains strict
-   - Normalizes `<question id>/<question text>` columns into a final Polars
+   - Normalizes `<event id>/<event text>` columns into a final Polars
      `list<struct>` field while preserving source provenance
    - Validates a local daily Parquet before atomic upload and replaces a
      non-Hive BigQuery external table only after all publications succeed
@@ -59,7 +59,7 @@ This folder contains end-to-end tutorial notebooks and scripts for
      analytical memory risk
 
    Run `example_08/08_local_csv_directory_to_polars.py debug/csv` to validate
-   the same reconciliation and question normalization locally, without cloud
+   the same reconciliation and event normalization locally, without cloud
    infrastructure or a target-table schema.
 
 The examples use the public API surface described in the
@@ -298,12 +298,12 @@ Run with Google ADC configured for GCS and BigQuery ADBC:
 pip install "schema-sanitizer[polars,pyarrow,cloud]" adbc-driver-bigquery[dbapi]
 
 python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
-  --source-csv-prefix gs://raw-bucket/responses \
-  --silver-parquet-prefix gs://silver-bucket/responses \
+  --source-csv-prefix gs://raw-bucket/records \
+  --silver-parquet-prefix gs://silver-bucket/records \
   --start-date 2026-07-01 \
   --end-date 2026-07-07 \
-  --target-table project_id.dataset_id.external_responses \
-  --omit-null-answers \
+  --target-table project_id.dataset_id.external_records \
+  --omit-null-payloads \
   --memory-limit-bytes 268435456
 ```
 
