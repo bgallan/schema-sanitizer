@@ -95,6 +95,21 @@ static sanitize::Status validate_option_values(const Options &opts) {
     return sanitize::Status::Invalid(
         "csv_delimiter must be a 1-character string");
   }
+  if (opts.csv_escape_char.size() > 1) {
+    return sanitize::Status::Invalid(
+        "csv_escape_char must be empty or a 1-character string");
+  }
+  if (!opts.csv_escape_char.empty()) {
+    const char escape = opts.csv_escape_char[0];
+    const char delimiter =
+        opts.csv_delimiter.empty() ? ',' : opts.csv_delimiter[0];
+    if (escape == delimiter || escape == '"' || escape == '\r' ||
+        escape == '\n' || escape == '\0') {
+      return sanitize::Status::Invalid(
+          "csv_escape_char must differ from the delimiter and quote, and "
+          "must not be a line break or NUL");
+    }
+  }
 
   if (!opts.xml_row_tag.empty()) {
     for (const char ch : opts.xml_row_tag) {

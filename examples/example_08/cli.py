@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--start-date", required=True, type=_iso_date)
     source.add_argument("--end-date", required=True, type=_iso_date)
     source.add_argument("--csv-delimiter", default=",")
+    source.add_argument(
+        "--csv-escape-char",
+        default="\\",
+        help=r"Escape used inside quoted fields (default: backslash for Qualifio CSV exports).",
+    )
 
     output = parser.add_argument_group("silver output")
     output.add_argument("--silver-parquet-prefix", required=True)

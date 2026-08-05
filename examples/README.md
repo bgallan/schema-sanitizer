@@ -47,6 +47,8 @@ This folder contains end-to-end tutorial notebooks and scripts for
      inclusive UTC calendar dates using half-open daily windows
    - Reconciles heterogeneous headers with `csv_header_mode="union"` and one
      `SourceManifest` conversion per non-empty day
+   - Opts into backslash-escaped quotes used by the source exports while the
+     library-wide CSV default remains strict
    - Normalizes `<question id>/<question text>` columns into a final Polars
      `list<struct>` field while preserving source provenance
    - Validates a local daily Parquet before atomic upload and replaces a
@@ -55,6 +57,10 @@ This folder contains end-to-end tutorial notebooks and scripts for
      [`docs/flat-prefix-modified-time-csv.md`](../docs/flat-prefix-modified-time-csv.md)
      for generation consistency, late-arrival limitations, reruns, and
      analytical memory risk
+
+   Run `example_08/08_local_csv_directory_to_polars.py debug/csv` to validate
+   the same reconciliation and question normalization locally, without cloud
+   infrastructure or a target-table schema.
 
 The examples use the public API surface documented in the main README:
 

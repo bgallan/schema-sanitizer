@@ -37,6 +37,7 @@ private:
   std::size_t record_source_index_ = 0;
   bool record_has_source_index_ = false;
   bool in_quotes_ = false;
+  bool escape_pending_ = false;
   bool multi_ = false;
   std::size_t segment_start_pos_ = 0;
   std::shared_ptr<const void> segment_owner_;

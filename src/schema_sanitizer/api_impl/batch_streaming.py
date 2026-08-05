@@ -82,6 +82,7 @@ def iter_batches(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_escape_char: str | None = None,
     csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,

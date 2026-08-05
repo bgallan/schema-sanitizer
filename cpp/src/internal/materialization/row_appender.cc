@@ -279,9 +279,9 @@ sanitize::Result<PreparedRow> prepare_row_csv_text(
     arena->reset();
   }
   CsvDirectScratchReset scratch_reset(arena, cells);
-  SAN_RETURN_NOT_OK(parse_csv_cells(raw, ctx.delimiter, cells, arena,
-                                    base_offset, ctx.max_field_bytes,
-                                    ctx.max_decoded_record_bytes));
+  SAN_RETURN_NOT_OK(parse_csv_cells(
+      raw, ctx.delimiter, cells, arena, base_offset, ctx.max_field_bytes,
+      ctx.max_decoded_record_bytes, ctx.escape_char));
 
   fields->clear();
   if (fields->capacity() < plan.columns.size()) {

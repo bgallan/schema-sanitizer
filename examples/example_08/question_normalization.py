@@ -126,6 +126,43 @@ def normalize_question_columns(
     return QuestionNormalizationResult(normalized, question_columns)
 
 
+def normalize_question_columns_inferred(
+    frame: Any,
+    *,
+    separator: str = "/",
+    output_column: str = "questions",
+    omit_null_answers: bool = True,
+) -> QuestionNormalizationResult:
+    """Normalize a sanitized wide frame without requiring a target schema.
+
+    This local-validation variant retains every non-question data/provenance
+    column. Intermediate registry metadata is removed because it describes the
+    wide ingress shape, not the normalized analytical result.
+    """
+    pl = import_module("polars")
+    if type(frame).__module__.split(".", 1)[0] != "polars":
+        raise TypeError("frame must be a polars.DataFrame")
+
+    question_columns = detect_question_columns(frame.columns, separator=separator)
+    question_names = {column.name for column in question_columns}
+    if output_column in frame.columns and output_column not in question_names:
+        raise ValueError(f"input already contains output column {output_column!r}")
+    passthrough = [
+        name
+        for name in frame.columns
+        if name not in question_names
+        and name not in {_SCHEMA_REGISTRY_COLUMN, _SCHEMA_DRIFTS_COLUMN}
+    ]
+    question_expr = _questions_expression(
+        pl,
+        question_columns,
+        output_column=output_column,
+        omit_null_answers=omit_null_answers,
+    )
+    normalized = frame.with_columns(question_expr).select([*passthrough, output_column])
+    return QuestionNormalizationResult(normalized, question_columns)
+
+
 def _questions_expression(
     pl: Any,
     columns: tuple[QuestionColumn, ...],
@@ -187,5 +224,6 @@ __all__ = [
     "QuestionNormalizationResult",
     "detect_question_columns",
     "normalize_question_columns",
+    "normalize_question_columns_inferred",
     "parse_question_column",
 ]

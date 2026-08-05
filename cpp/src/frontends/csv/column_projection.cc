@@ -32,6 +32,8 @@ CsvColumnProjection::CsvColumnProjection(
                                opts.threading_mode == ThreadingMode::kMulti);
   field_name_policy_ = opts.field_name_policy;
   direct_.delimiter = delimiter;
+  direct_.escape_char =
+      opts.csv_escape_char.empty() ? '\0' : opts.csv_escape_char[0];
   const auto budget = memory_budget_from_limit(opts.memory_limit_bytes);
   const auto total =
       static_cast<std::size_t>(std::max<std::int64_t>(1, budget.total_bytes));

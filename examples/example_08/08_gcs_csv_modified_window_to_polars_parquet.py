@@ -46,6 +46,7 @@ def main() -> int:
         questions_column=args.questions_column,
         omit_null_answers=args.omit_null_answers,
         csv_delimiter=args.csv_delimiter,
+        csv_escape_char=args.csv_escape_char,
         on_error=args.on_error,
         memory_limit_bytes=args.memory_limit_bytes,
         multi_threading=args.multi_threading,

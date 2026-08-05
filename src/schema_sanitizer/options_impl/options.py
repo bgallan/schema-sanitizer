@@ -29,6 +29,22 @@ def require_implemented_csv_header_mode(value: object) -> CsvHeaderMode:
     return normalize_csv_header_mode(value)
 
 
+def normalize_csv_escape_char(value: object, delimiter: str) -> str:
+    """Validate an opt-in one-byte escape used inside quoted CSV fields."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError("Option 'csv_escape_char' must be a string or None")
+    if len(value) != 1 or not value.isascii():
+        raise ValueError("Option 'csv_escape_char' must be one ASCII character or None")
+    if value in {delimiter, '"', "\r", "\n", "\0"}:
+        raise ValueError(
+            "Option 'csv_escape_char' must differ from the delimiter and quote, "
+            "and must not be a line break or NUL"
+        )
+    return value
+
+
 _BOOL_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind == "bool")
 _INT_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind in {"i32", "i64"})
 _STRING_OPTION_NAMES = frozenset(spec.name for spec in OPTIONS if spec.kind == "string")

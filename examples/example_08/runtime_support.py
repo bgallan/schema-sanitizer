@@ -92,6 +92,7 @@ class Example08Config:
     questions_column: str = "questions"
     omit_null_answers: bool = False
     csv_delimiter: str = ","
+    csv_escape_char: str | None = "\\"
     on_error: str = "stop"
     memory_limit_bytes: int | None = None
     multi_threading: bool = False
@@ -356,6 +357,7 @@ def _run_one_day(
         field_name_policy=config.field_name_policy,
         csv_has_header=True,
         csv_delimiter=config.csv_delimiter,
+        csv_escape_char=config.csv_escape_char,
         csv_header_mode="union",
         on_error=config.on_error,
         multi_threading=config.multi_threading,

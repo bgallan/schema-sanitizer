@@ -12,12 +12,13 @@ CsvStreamingScanner::CsvStreamingScanner(ChunkSourcePtr source,
                                          int64_t chunk_bytes,
                                          std::size_t max_record_bytes,
                                          std::size_t max_record_segments,
-                                         void *pool_handle)
+                                         void *pool_handle, char escape_char)
     : segment_resource_(pool_handle), segments_(&segment_resource_),
       source_(std::move(source)),
       chunk_bytes_(chunk_bytes > 0 ? chunk_bytes : kDefaultCsvChunkBytes),
       max_record_bytes_(std::max<std::size_t>(1, max_record_bytes)),
-      max_record_segments_(std::max<std::size_t>(1, max_record_segments)) {
+      max_record_segments_(std::max<std::size_t>(1, max_record_segments)),
+      escape_char_(escape_char) {
   segments_.reserve(4);
 }
 

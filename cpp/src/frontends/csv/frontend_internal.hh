@@ -38,6 +38,7 @@ private:
   sanitize::Result<bool> consume_header_record(const TextSlice &record);
   sanitize::Status process_header_record(const TextSlice &record);
   static char resolved_delimiter(const Options &options) noexcept;
+  static char resolved_escape_char(const Options &options) noexcept;
 
   ChunkSourcePtr source_;
   int64_t chunk_bytes_ = int64_t{1} << 20;
@@ -47,6 +48,7 @@ private:
   std::size_t max_record_segments_ = kMaxCsvRecordSegments;
   sanitize::Status reset_status_ = sanitize::Status::OK();
   char delimiter_ = ',';
+  char escape_char_ = '\0';
   CsvColumnProjection projection_;
   std::size_t last_header_source_index_ = 0;
   bool last_header_source_ready_ = false;

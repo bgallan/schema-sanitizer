@@ -29,7 +29,7 @@ public:
   CsvStreamingScanner(ChunkSourcePtr source, int64_t chunk_bytes,
                       std::size_t max_record_bytes = kMaxCsvRecordBytes,
                       std::size_t max_record_segments = kMaxCsvRecordSegments,
-                      void *pool_handle = nullptr);
+                      void *pool_handle = nullptr, char escape_char = '\0');
 
   sanitize::Status Reset();
   sanitize::Result<TextSlice> next_record(BumpArena *arena);
@@ -62,6 +62,7 @@ private:
   std::size_t eof_offset_ = 0;
   std::size_t max_record_bytes_ = kMaxCsvRecordBytes;
   std::size_t max_record_segments_ = kMaxCsvRecordSegments;
+  char escape_char_ = '\0';
 };
 
 sanitize::Result<TextSlice> scan_csv_record_span(CsvStreamingScanner &scanner,

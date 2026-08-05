@@ -93,14 +93,33 @@ struct QuotedCsvCellScan {
 };
 
 // Returns the decoded size and the first byte after a required closing quote.
-inline sanitize::Result<QuotedCsvCellScan>
-scan_quoted_csv_cell(std::string_view row, std::size_t start,
-                     std::size_t base_offset = 0,
-                     std::size_t max_field_bytes = kMaxCsvFieldBytes) {
+inline sanitize::Result<QuotedCsvCellScan> scan_quoted_csv_cell(
+    std::string_view row, std::size_t start, std::size_t base_offset = 0,
+    std::size_t max_field_bytes = kMaxCsvFieldBytes, char escape_char = '\0') {
   QuotedCsvCellScan out;
   std::size_t position = start + 1U;
   while (position < row.size()) {
     const char character = row[position];
+    if (escape_char != '\0' && character == escape_char) {
+      if (position + 1U >= row.size()) {
+        return sanitize::Status::Invalid(
+            "CSV parse error at byte ", base_offset + position,
+            ": dangling escape at end of quoted field");
+      }
+      if (out.decoded_size == std::numeric_limits<std::size_t>::max()) {
+        return sanitize::Status::OutOfMemory(
+            "CSV decoded field size overflow at byte ", base_offset + position);
+      }
+      ++out.decoded_size;
+      if (out.decoded_size > max_field_bytes) {
+        return sanitize::Status::OutOfMemory(
+            "CSV decoded field size exceeds effective limit at byte ",
+            base_offset + position, ": ", out.decoded_size, " > ",
+            max_field_bytes);
+      }
+      position += 2U;
+      continue;
+    }
     if (character == '\r') {
       if (out.decoded_size == std::numeric_limits<std::size_t>::max()) {
         return sanitize::Status::OutOfMemory(
@@ -159,14 +178,15 @@ scan_quoted_csv_cell(std::string_view row, std::size_t start,
 inline sanitize::Result<std::string_view>
 parse_quoted_csv_cell(std::string_view row, std::size_t *position,
                       BumpArena *arena, std::size_t base_offset = 0,
-                      std::size_t max_field_bytes = kMaxCsvFieldBytes) {
+                      std::size_t max_field_bytes = kMaxCsvFieldBytes,
+                      char escape_char = '\0') {
   if (!position) {
     return sanitize::Status::Invalid("CSV quoted field position is null");
   }
   const std::size_t start = *position;
-  SAN_ASSIGN_OR_RAISE(
-      const auto scan,
-      scan_quoted_csv_cell(row, start, base_offset, max_field_bytes));
+  SAN_ASSIGN_OR_RAISE(const auto scan,
+                      scan_quoted_csv_cell(row, start, base_offset,
+                                           max_field_bytes, escape_char));
   *position = scan.end_position;
   const std::size_t decoded_size = scan.decoded_size;
   if (decoded_size == 0U) {
@@ -183,6 +203,12 @@ parse_quoted_csv_cell(std::string_view row, std::size_t *position,
   std::size_t written = 0;
   while (source < scan.end_position - 1U) {
     const char character = row[source];
+    if (escape_char != '\0' && character == escape_char &&
+        source + 1U < scan.end_position - 1U) {
+      destination[written++] = row[source + 1U];
+      source += 2U;
+      continue;
+    }
     if (character == '\r') {
       destination[written++] = '\n';
       source +=
@@ -236,13 +262,14 @@ inline sanitize::Status append_csv_cell(CellVector *out,
 }
 
 // Parses one strict CSV record. Quoted fields must close, doubled quotes are
-// decoded, and only whitespace, a delimiter, or record end may follow a quote.
+// decoded, and an optional explicit escape dialect can decode escaped bytes.
 template <typename CellVector>
 inline sanitize::Status parse_csv_cells(
     std::string_view row, char delimiter, CellVector *out, BumpArena *arena,
     std::size_t base_offset = 0,
     std::size_t max_field_bytes = kMaxCsvFieldBytes,
-    std::size_t max_decoded_record_bytes = kMaxCsvDecodedRecordBytes) {
+    std::size_t max_decoded_record_bytes = kMaxCsvDecodedRecordBytes,
+    char escape_char = '\0') {
   if (!out) {
     return sanitize::Status::Invalid("CSV cell output vector is null");
   }
@@ -280,8 +307,8 @@ inline sanitize::Status parse_csv_cells(
         const std::size_t start = position;
         SAN_ASSIGN_OR_RAISE(const auto value,
                             parse_quoted_csv_cell(row, &position, arena,
-                                                  base_offset,
-                                                  max_field_bytes));
+                                                  base_offset, max_field_bytes,
+                                                  escape_char));
         SAN_RETURN_NOT_OK(charge_decoded(value.size(), start));
         SAN_RETURN_NOT_OK(append_csv_cell(out, value));
         SAN_RETURN_NOT_OK(

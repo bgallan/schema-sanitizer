@@ -37,7 +37,10 @@ csv_header_from_path_source(const PathSourceSpec &source,
   sanitize::internal::CsvStreamingScanner scanner(
       std::move(chunk_source), sanitize::internal::kDefaultCsvChunkBytes,
       sanitize::internal::kMaxCsvRecordBytes,
-      sanitize::internal::kMaxCsvRecordSegments, pmr_pool.pool());
+      sanitize::internal::kMaxCsvRecordSegments, pmr_pool.pool(),
+      prepared->spec.csv_escape_char.empty()
+          ? '\0'
+          : prepared->spec.csv_escape_char[0]);
   SAN_RETURN_NOT_OK(scanner.Reset());
 
   sanitize::internal::BumpArena arena(pmr_pool.pool());
@@ -56,7 +59,12 @@ csv_header_from_path_source(const PathSourceSpec &source,
         record.view,
         prepared->spec.csv_delimiter.empty() ? ','
                                              : prepared->spec.csv_delimiter[0],
-        &views, &arena, record.base_offset));
+        &views, &arena, record.base_offset,
+        sanitize::internal::kMaxCsvFieldBytes,
+        sanitize::internal::kMaxCsvDecodedRecordBytes,
+        prepared->spec.csv_escape_char.empty()
+            ? '\0'
+            : prepared->spec.csv_escape_char[0]));
     std::vector<std::string> header;
     header.reserve(views.size());
     for (std::string_view value : views) {

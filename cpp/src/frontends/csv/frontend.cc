@@ -91,6 +91,7 @@ struct CsvBatchStorage {
 CsvFrontend::CsvFrontend(ChunkSourcePtr src, const Options &options,
                          CsvSourceProjectionSetPtr source_projections)
     : source_(std::move(src)), delimiter_(resolved_delimiter(options)),
+      escape_char_(resolved_escape_char(options)),
       projection_(options, delimiter_, std::move(source_projections)) {
   const auto budget =
       internal::memory_budget_from_limit(options.memory_limit_bytes);
@@ -106,7 +107,8 @@ CsvFrontend::CsvFrontend(ChunkSourcePtr src, const Options &options,
   max_record_segments_ = std::min<std::size_t>(kMaxCsvRecordSegments,
                                                max_record_bytes_ / chunk + 2U);
   scanner_ = std::make_unique<CsvStreamingScanner>(
-      source_, chunk_bytes_, max_record_bytes_, max_record_segments_);
+      source_, chunk_bytes_, max_record_bytes_, max_record_segments_, nullptr,
+      escape_char_);
   reset_status_ = scanner_->Reset();
 }
 
@@ -119,7 +121,7 @@ void CsvFrontend::set_memory_pool(std::shared_ptr<void> pool) noexcept {
   try {
     scanner_ = std::make_unique<CsvStreamingScanner>(
         source_, chunk_bytes_, max_record_bytes_, max_record_segments_,
-        memory_pool_ ? memory_pool_.get() : nullptr);
+        memory_pool_ ? memory_pool_.get() : nullptr, escape_char_);
     reset_status_ = scanner_->Reset();
   } catch (const std::bad_alloc &) {
     scanner_.reset();
@@ -220,9 +222,9 @@ sanitize::Status CsvFrontend::append_record(CsvBatchStorage *storage,
 
   storage->batch.start_row(record.view, record.base_offset, 0, nullptr,
                            record.source_file);
-  SAN_RETURN_NOT_OK(parse_csv_cells(record.view, delimiter_, &storage->cells,
-                                    &storage->parse_arena, record.base_offset,
-                                    max_field_bytes_, max_record_bytes_));
+  SAN_RETURN_NOT_OK(parse_csv_cells(
+      record.view, delimiter_, &storage->cells, &storage->parse_arena,
+      record.base_offset, max_field_bytes_, max_record_bytes_, escape_char_));
   SAN_RETURN_NOT_OK(projection_.append_parsed_cells(
       &storage->batch, storage->cells, record.source_index,
       record.has_source_index));
@@ -249,7 +251,7 @@ CsvFrontend::append_records_parallel(CsvBatchStorage *storage,
 
   const auto cell_hint = projection_.column_count_hint();
   auto worker = [pool = memory_pool_, delimiter = delimiter_, cell_hint,
-                 max_field_bytes = max_field_bytes_,
+                 escape_char = escape_char_, max_field_bytes = max_field_bytes_,
                  max_record_bytes = max_record_bytes_,
                  records](CsvParseRange &&range, std::size_t,
                           sanitize::internal::StopToken stop)
@@ -270,9 +272,10 @@ CsvFrontend::append_records_parallel(CsvBatchStorage *storage,
       std::pmr::vector<std::string_view> row_cells(&parsed->pmr_pool);
       row_cells.reserve(cell_hint);
       for (std::size_t index = range.begin; index < range.end; ++index) {
-        SAN_RETURN_NOT_OK(parse_csv_cells(
-            records[index].view, delimiter, &row_cells, &parsed->arena,
-            records[index].base_offset, max_field_bytes, max_record_bytes));
+        SAN_RETURN_NOT_OK(
+            parse_csv_cells(records[index].view, delimiter, &row_cells,
+                            &parsed->arena, records[index].base_offset,
+                            max_field_bytes, max_record_bytes, escape_char));
         const auto begin = parsed->cells.size();
         parsed->cells.insert(parsed->cells.end(), row_cells.begin(),
                              row_cells.end());
@@ -370,7 +373,7 @@ sanitize::Status CsvFrontend::process_header_record(const TextSlice &record) {
   cells.reserve(projection_.column_count_hint());
   SAN_RETURN_NOT_OK(parse_csv_cells(record.view, delimiter_, &cells, &arena,
                                     record.base_offset, max_field_bytes_,
-                                    max_record_bytes_));
+                                    max_record_bytes_, escape_char_));
   SAN_RETURN_NOT_OK(projection_.validate_header_cells(cells));
   if (record.has_source_index) {
     SAN_RETURN_NOT_OK(
@@ -396,6 +399,10 @@ char CsvFrontend::resolved_delimiter(const Options &options) noexcept {
     return ',';
   }
   return options.csv_delimiter[0];
+}
+
+char CsvFrontend::resolved_escape_char(const Options &options) noexcept {
+  return options.csv_escape_char.empty() ? '\0' : options.csv_escape_char[0];
 }
 
 } // namespace sanitize::internal::csv_frontend_detail

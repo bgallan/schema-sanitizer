@@ -72,6 +72,10 @@ header mismatches. Existing local paths, directories, URIs, partition plans,
 and file converters keep their previous behavior unless `SourceManifest` or
 `union` is selected explicitly.
 
+Example 8 also sets `csv_escape_char="\\"` because its source exports encode
+quotes inside quoted values as `\"`. This dialect support is opt-in: leaving
+the option as `None` retains strict doubled-quote CSV parsing.
+
 ## Analytical memory versus file-output memory
 
 `to_polars`, `to_pyarrow`, `to_pandas`, and `to_duckdb` bound parsing,

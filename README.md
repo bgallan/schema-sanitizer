@@ -326,6 +326,7 @@ prices = ss.to_pyarrow(
 |---|---:|---|
 | `csv_has_header` | `True` | Treat the first CSV row as names; directory mode removes matching repeated headers. |
 | `csv_delimiter` | `","` | One-character delimiter. |
+| `csv_escape_char` | `None` | Optional one-byte escape inside quoted fields. For exports that encode quotes as `\"`, pass `"\\"`. The strict default continues to accept RFC doubled quotes (`""`) only. |
 | `csv_header_mode` | `"exact"` | Multi-source header policy. `exact` preserves current behavior; `union` builds immutable per-source projections, accepts reordered/additive headers, and null-fills missing fields. See `docs/csv-header-modes.md`. |
 | `input_text_encoding` | `"utf-8"` | `utf-8`, `utf-16`, `utf-16-le`, `utf-16-be`, or `iso8859-1`. Not used for Parquet. |
 | `xml_row_tag` | `None` | Stream each matching direct XML element as a row; `None` treats the document as one row. |
