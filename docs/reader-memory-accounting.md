@@ -67,8 +67,8 @@ charged to the resident ledger.
 - Stage-specific sublimits may reject earlier, but they never enlarge the
   operation-wide ceiling.
 
-Regression coverage in `tests/test_operation_memory_ledger.py` and
-`tests/test_concurrency_memory_hardening_pass*.py` exercises atomic concurrency,
+Regression coverage in `tests/memory/test_operation_memory_ledger.py` and
+`tests/concurrency/test_concurrency_memory_hardening_pass*.py` exercises atomic concurrency,
 Python/native coexistence, cross-operation admission, finalizer cleanup,
 temporary-storage contention, retained HTTP bodies, multipart buffers, remote
 deadlines, and staged-result ownership. The shared native resident pool is also

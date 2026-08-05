@@ -54,7 +54,7 @@
     "counting_note": "The critical and maintenance matrices overlap and must not be summed.",
     "final_local_smoke": {
       "passed": 337,
-      "selection": "tests/test_operation_memory_ledger.py plus all tests/test_maintenance_layout_*.py",
+      "selection": "tests/memory/test_operation_memory_ledger.py plus all tests/quality/test_maintenance_layout_*.py",
       "result": "passed"
     }
   },

@@ -145,14 +145,14 @@ if [[ -n "${test_target}" ]]; then
   tests=("${test_target}")
 else
   tests=(
-    tests/test_threading_native_executor.py
-    tests/test_threading_inference.py
-    tests/test_threading_materialization.py
-    tests/test_threading_output.py
-    tests/test_threading_parquet_output.py
-    tests/test_threading_golden_matrix.py
-    tests/test_partition_lookahead.py
-    tests/test_modified_time_csv_phase5.py
+    tests/concurrency/test_threading_native_executor.py
+    tests/concurrency/test_threading_inference.py
+    tests/concurrency/test_threading_materialization.py
+    tests/concurrency/test_threading_output.py
+    tests/concurrency/test_threading_parquet_output.py
+    tests/concurrency/test_threading_golden_matrix.py
+    tests/pipeline/test_partition_lookahead.py
+    tests/pipeline/test_modified_time_csv_phase5.py
   )
 fi
 for ((round = 1; round <= rounds; ++round)); do

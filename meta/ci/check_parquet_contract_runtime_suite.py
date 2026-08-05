@@ -32,27 +32,27 @@ from schema_sanitizer.adapters.parquet.status import (
 # runtime suite.
 PARQUET_CONTRACT_RUNTIME_TEST_GROUPS: dict[str, tuple[str, ...]] = {
     "schema_sanitizer_native_reader": (
-        "tests/test_parquet_native_scalar_runtime_part01.py::test_native_parquet_stream_materializes_plain_fixed_width_rows",
-        "tests/test_parquet_native_scalar_runtime_part02.py::test_native_parquet_stream_materializes_plain_boolean_rows",
+        "tests/parquet/test_parquet_native_scalar_runtime_part01.py::test_native_parquet_stream_materializes_plain_fixed_width_rows",
+        "tests/parquet/test_parquet_native_scalar_runtime_part02.py::test_native_parquet_stream_materializes_plain_boolean_rows",
     ),
     "safe_pyarrow_fallback": (
-        "tests/test_parquet_native_scalar_runtime_part02.py::test_native_parquet_stream_respects_small_batch_size_with_pyarrow_fallback",
-        "tests/test_parquet_external_fallbacks.py::test_spark_flavored_nested_parquet_uses_pyarrow_fallback",
-        "tests/test_parquet_external_fallbacks.py::test_pyarrow_legacy_nested_list_map_encoding_uses_pyarrow_fallback",
+        "tests/parquet/test_parquet_native_scalar_runtime_part02.py::test_native_parquet_stream_respects_small_batch_size_with_pyarrow_fallback",
+        "tests/parquet/test_parquet_external_fallbacks.py::test_spark_flavored_nested_parquet_uses_pyarrow_fallback",
+        "tests/parquet/test_parquet_external_fallbacks.py::test_pyarrow_legacy_nested_list_map_encoding_uses_pyarrow_fallback",
     ),
     "nested_recursive_grammar": (
-        "tests/test_parquet_native_recursive_grammar_runtime.py::test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus",
-        "tests/test_parquet_native_recursive_grammar_runtime.py::test_native_parquet_stream_materializes_seeded_recursive_fuzzer_corpus",
+        "tests/parquet/test_parquet_native_recursive_grammar_runtime.py::test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus",
+        "tests/parquet/test_parquet_native_recursive_grammar_runtime.py::test_native_parquet_stream_materializes_seeded_recursive_fuzzer_corpus",
     ),
     "nested_null_empty_row_group_phases": (
-        "tests/test_parquet_native_recursive_phase_runtime.py::test_native_parquet_stream_materializes_recursive_null_empty_matrix_corpus",
-        "tests/test_parquet_native_recursive_phase_runtime.py::test_native_parquet_stream_materializes_recursive_row_group_phase_matrix_corpus",
+        "tests/parquet/test_parquet_native_recursive_phase_runtime.py::test_native_parquet_stream_materializes_recursive_null_empty_matrix_corpus",
+        "tests/parquet/test_parquet_native_recursive_phase_runtime.py::test_native_parquet_stream_materializes_recursive_row_group_phase_matrix_corpus",
     ),
     "nested_levels_repetition_topology": (
-        "tests/test_parquet_direct_io_runtime_part03.py::test_native_parquet_stream_materializes_deep_requiredness_level_matrix",
+        "tests/parquet/test_parquet_direct_io_runtime_part03.py::test_native_parquet_stream_materializes_deep_requiredness_level_matrix",
     ),
     "nested_projection_contracts": (
-        "tests/test_parquet_native_recursive_projection_runtime_part02.py::test_native_parquet_stream_preserves_recursive_root_fingerprints_under_projection_permutations",
+        "tests/parquet/test_parquet_native_recursive_projection_runtime_part02.py::test_native_parquet_stream_preserves_recursive_root_fingerprints_under_projection_permutations",
     ),
 }
 PARQUET_CONTRACT_RUNTIME_REQUIRED_GROUPS: tuple[str, ...] = tuple(

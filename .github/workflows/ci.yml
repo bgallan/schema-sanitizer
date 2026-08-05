@@ -125,9 +125,9 @@ jobs:
           python -m pip install wheelhouse/*.whl
           python -c "import schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(s.__version__, c.__file__)"
           pytest --collect-only -q \
-            tests/test_parquet_contract_gates_part01.py \
-            tests/test_parquet_contract_gates_part02.py \
-            tests/test_parquet_contract_gates_part03.py
+            tests/parquet/test_parquet_contract_gates_part01.py \
+            tests/parquet/test_parquet_contract_gates_part02.py \
+            tests/parquet/test_parquet_contract_gates_part03.py
       - name: Verify the extension does not link Arrow C++
         if: runner.os != 'Windows'
         shell: bash
@@ -267,34 +267,34 @@ jobs:
         run: |
           coverage erase
           coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=regular -m pytest -q \
-            tests/test_api.py \
-            tests/test_input_python_and_local.py \
-            tests/test_input_xml_and_public_api.py \
-            tests/test_sinks_csv_jsonl.py \
-            tests/test_modified_time_csv_phase1.py \
-            tests/test_modified_time_csv_phase2.py \
-            tests/test_modified_time_csv_phase3.py \
-            tests/test_modified_time_csv_phase4.py \
-            tests/test_modified_time_csv_phase5.py \
-            tests/test_modified_time_csv_phase6.py \
-            tests/test_modified_time_csv_phase8.py
+            tests/io/test_api.py \
+            tests/io/test_input_python_and_local.py \
+            tests/io/test_input_xml_and_public_api.py \
+            tests/sinks/test_sinks_csv_jsonl.py \
+            tests/pipeline/test_modified_time_csv_phase1.py \
+            tests/pipeline/test_modified_time_csv_phase2.py \
+            tests/pipeline/test_modified_time_csv_phase3.py \
+            tests/pipeline/test_modified_time_csv_phase4.py \
+            tests/pipeline/test_modified_time_csv_phase5.py \
+            tests/pipeline/test_modified_time_csv_phase6.py \
+            tests/pipeline/test_modified_time_csv_phase8.py
           coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=adversarial -m pytest -q \
-            tests/test_contracts.py \
-            tests/test_runtime_lifecycle_part01.py \
-            tests/test_runtime_lifecycle_part02.py \
-            tests/test_runtime_lifecycle_part03.py \
-            tests/test_streaming_writer_lifecycle.py \
-            tests/test_async_remote_scheduler.py \
-            tests/test_high_risk_coverage_gaps.py \
-            tests/test_parquet_native_recursive_fuzz_runtime.py
+            tests/io/test_contracts.py \
+            tests/concurrency/test_runtime_lifecycle_part01.py \
+            tests/concurrency/test_runtime_lifecycle_part02.py \
+            tests/concurrency/test_runtime_lifecycle_part03.py \
+            tests/sinks/test_streaming_writer_lifecycle.py \
+            tests/remote/test_async_remote_scheduler.py \
+            tests/quality/test_high_risk_coverage_gaps.py \
+            tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
           coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=integration -m pytest -q \
-            tests/test_input_remote_staging_part01.py \
-            tests/test_input_remote_staging_part02.py \
-            tests/test_input_remote_staging_part03.py \
-            tests/test_cloud_emulator_configuration.py \
-            tests/test_bigquery_integration.py \
-            tests/test_modified_time_csv_phase7.py \
-            tests/test_modified_time_csv_phase7_integration.py
+            tests/io/test_input_remote_staging_part01.py \
+            tests/io/test_input_remote_staging_part02.py \
+            tests/io/test_input_remote_staging_part03.py \
+            tests/remote/test_cloud_emulator_configuration.py \
+            tests/remote/test_bigquery_integration.py \
+            tests/pipeline/test_modified_time_csv_phase7.py \
+            tests/pipeline/test_modified_time_csv_phase7_integration.py
           coverage combine
           coverage report
           coverage html --show-contexts -d coverage-python-html
@@ -347,39 +347,39 @@ jobs:
         run: |
           mkdir -p coverage-native/raw/regular
           pytest -q \
-            tests/test_api.py \
-            tests/test_input_xml_and_public_api.py \
-            tests/test_sinks_csv_jsonl.py \
-            tests/test_modified_time_csv_phase4.py \
-            tests/test_modified_time_csv_phase5.py
+            tests/io/test_api.py \
+            tests/io/test_input_xml_and_public_api.py \
+            tests/sinks/test_sinks_csv_jsonl.py \
+            tests/pipeline/test_modified_time_csv_phase4.py \
+            tests/pipeline/test_modified_time_csv_phase5.py
           mv coverage-native/raw/schema-sanitizer-*.profraw \
             coverage-native/raw/regular/
           mkdir -p coverage-native/raw/adversarial
           pytest -q \
-            tests/test_contracts.py \
-            tests/test_runtime_lifecycle_part01.py \
-            tests/test_runtime_lifecycle_part02.py \
-            tests/test_runtime_lifecycle_part03.py \
-            tests/test_streaming_writer_lifecycle.py \
-            tests/test_async_remote_scheduler.py \
-            tests/test_high_risk_coverage_gaps.py \
-            tests/test_parquet_native_recursive_fuzz_runtime.py
+            tests/io/test_contracts.py \
+            tests/concurrency/test_runtime_lifecycle_part01.py \
+            tests/concurrency/test_runtime_lifecycle_part02.py \
+            tests/concurrency/test_runtime_lifecycle_part03.py \
+            tests/sinks/test_streaming_writer_lifecycle.py \
+            tests/remote/test_async_remote_scheduler.py \
+            tests/quality/test_high_risk_coverage_gaps.py \
+            tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
           mv coverage-native/raw/schema-sanitizer-*.profraw \
             coverage-native/raw/adversarial/
           mkdir -p coverage-native/raw/integration
           pytest -q \
-            tests/test_input_remote_staging_part01.py \
-            tests/test_input_remote_staging_part02.py \
-            tests/test_input_remote_staging_part03.py \
-            tests/test_cloud_emulator_configuration.py \
-            tests/test_bigquery_integration.py \
-            tests/test_modified_time_csv_phase1.py \
-            tests/test_modified_time_csv_phase2.py \
-            tests/test_modified_time_csv_phase3.py \
-            tests/test_modified_time_csv_phase6.py \
-            tests/test_modified_time_csv_phase7.py \
-            tests/test_modified_time_csv_phase7_integration.py \
-            tests/test_modified_time_csv_phase8.py
+            tests/io/test_input_remote_staging_part01.py \
+            tests/io/test_input_remote_staging_part02.py \
+            tests/io/test_input_remote_staging_part03.py \
+            tests/remote/test_cloud_emulator_configuration.py \
+            tests/remote/test_bigquery_integration.py \
+            tests/pipeline/test_modified_time_csv_phase1.py \
+            tests/pipeline/test_modified_time_csv_phase2.py \
+            tests/pipeline/test_modified_time_csv_phase3.py \
+            tests/pipeline/test_modified_time_csv_phase6.py \
+            tests/pipeline/test_modified_time_csv_phase7.py \
+            tests/pipeline/test_modified_time_csv_phase7_integration.py \
+            tests/pipeline/test_modified_time_csv_phase8.py
           mv coverage-native/raw/schema-sanitizer-*.profraw \
             coverage-native/raw/integration/
       - name: Render LLVM reports
@@ -446,16 +446,16 @@ jobs:
       - name: Exercise malformed input, lifecycle, and nested Parquet
         run: >-
           ./python-asan -m pytest -q
-          tests/test_input_python_and_local.py
-          tests/test_options_bytes.py
-          tests/test_runtime_lifecycle_part01.py
-          tests/test_runtime_lifecycle_part02.py
-          tests/test_runtime_lifecycle_part03.py
-          tests/test_parquet_direct_io_runtime_part01.py
-          tests/test_parquet_native_nested_list_map_combinators.py
-          tests/test_parquet_native_recursive_shapes_part04.py
-          tests/test_parquet_native_recursive_extreme_runtime.py
-          tests/test_modified_time_csv_phase5.py
+          tests/io/test_input_python_and_local.py
+          tests/schema/test_options_bytes.py
+          tests/concurrency/test_runtime_lifecycle_part01.py
+          tests/concurrency/test_runtime_lifecycle_part02.py
+          tests/concurrency/test_runtime_lifecycle_part03.py
+          tests/parquet/test_parquet_direct_io_runtime_part01.py
+          tests/parquet/test_parquet_native_nested_list_map_combinators.py
+          tests/parquet/test_parquet_native_recursive_shapes_part04.py
+          tests/parquet/test_parquet_native_recursive_extreme_runtime.py
+          tests/pipeline/test_modified_time_csv_phase5.py
       - name: Configure and build ASan/UBSan libFuzzer targets
         run: |
           cmake -S . -B build/asan-fuzz -G Ninja \

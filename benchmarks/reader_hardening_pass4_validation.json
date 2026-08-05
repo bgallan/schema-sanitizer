@@ -50,7 +50,7 @@
   ],
   "pytest": {
     "full_suite_maxfail_1": {
-      "failing_test": "tests/test_bigquery_integration.py::test_bigquery_integration_builds_external_table_ddl",
+      "failing_test": "tests/remote/test_bigquery_integration.py::test_bigquery_integration_builds_external_table_ddl",
       "failure": "pyarrow is not installed",
       "passed_before_failure": 19,
       "result": "blocked_by_optional_dependency",

@@ -110,7 +110,7 @@ no_implicit_optional = true
 show_error_codes = true
 
 [tool.pytest.ini_options]
-pythonpath = [".", "src"]
+pythonpath = [".", "src", "tests"]
 
 [tool.ruff]
 line-length = 100
@@ -121,7 +121,7 @@ select = ["F", "E", "I"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*.py" = ["E402"]
+"tests/**/*.py" = ["E402"]
 
 [tool.scikit-build]
 # Keep builds predictable and fast.
