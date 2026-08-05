@@ -1,10 +1,16 @@
 # Source manifest inputs
 
+## Index
+
+- [Overview](#overview)
+
+## [Overview](#index)
+
 `schema_sanitizer.sources.discover` returns a `SourceManifest` that freezes the
 exact remote objects selected by one discovery step. It can be supplied
 directly to `iter_batches` and every analytical or file-output converter.
 
-Version one supports GCS manifests. Every entry must:
+Source manifests currently support GCS. Every entry must:
 
 - belong to the declared `source_uri` bucket and prefix;
 - use a supported GCS URI;

@@ -62,7 +62,8 @@ This folder contains end-to-end tutorial notebooks and scripts for
    the same reconciliation and question normalization locally, without cloud
    infrastructure or a target-table schema.
 
-The examples use the public API surface documented in the main README:
+The examples use the public API surface described in the
+[documentation guide](../docs/README.md):
 
 - Inputs are local files, `file://` URIs, or supported async cloud/object URIs
   for `.json`, `.jsonl`, `.ndjson`, `.xml`, `.csv`, and `.parquet`/`.pq`

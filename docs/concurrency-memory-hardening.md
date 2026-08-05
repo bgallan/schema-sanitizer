@@ -5,7 +5,26 @@ operation and process boundaries. The goal is to prevent two individually safe
 calls from oversubscribing the same process, filesystem, remote session, or
 shutdown path when they overlap.
 
-## Resident-memory hierarchy
+## Index
+
+- [Resident-memory hierarchy](#resident-memory-hierarchy)
+- [Temporary-storage hierarchy](#temporary-storage-hierarchy)
+- [Telemetry-tuned safety margins](#telemetry-tuned-safety-margins)
+- [Remote concurrency and ownership](#remote-concurrency-and-ownership)
+- [Concurrency invariants](#concurrency-invariants)
+- [Validation](#validation)
+- [Streaming disk admission and cleanup quarantine](#streaming-disk-admission-and-cleanup-quarantine)
+- [Process threads, descriptors, and cross-process memory](#process-threads-descriptors-and-cross-process-memory)
+- [Cancellation, deadlines, and fork safety](#cancellation-deadlines-and-fork-safety)
+- [Pressure feedback and provider throttling](#pressure-feedback-and-provider-throttling)
+- [Per-operation observability](#per-operation-observability)
+- [Bounded remote backlog and fail-closed shared state](#bounded-remote-backlog-and-fail-closed-shared-state)
+- [Retryable teardown and fixed coordination lifetimes](#retryable-teardown-and-fixed-coordination-lifetimes)
+- [Linearizable retries and crash recovery](#linearizable-retries-and-crash-recovery)
+- [Capability ledgers and terminal runtime quiescence](#capability-ledgers-and-terminal-runtime-quiescence)
+- [Retirement visibility and exactly-once teardown](#retirement-visibility-and-exactly-once-teardown)
+
+## [Resident-memory hierarchy](#index)
 
 Each public conversion owns an `OperationMemoryLedger`. Python staging objects
 and native allocators reserve from that same atomic operation ledger. A second,
@@ -35,7 +54,7 @@ those RSS observations without exposing payload contents. Operation diagnostics
 also retain live-at-close and over-release counters instead of silently hiding
 cleanup underflow.
 
-## Temporary-storage hierarchy
+## [Temporary-storage hierarchy](#index)
 
 Temporary files are governed separately because on-disk bytes are not resident
 memory. Every operation retains its own spool limit, while a process-wide
@@ -59,7 +78,7 @@ reservations. `SCHEMA_SANITIZER_COORDINATION_DIR` selects the shared host-local
 registry directory. Unsupported platforms retain the existing process-local
 protection and filesystem failure handling.
 
-## Telemetry-tuned safety margins
+## [Telemetry-tuned safety margins](#index)
 
 Safety-margin tuning is deliberately opt-in. Setting
 `SCHEMA_SANITIZER_TELEMETRY_TUNING=1` records a bounded host-local profile in the
@@ -76,7 +95,7 @@ effect and the historical deterministic policy is unchanged. Production and
 fuzzing harnesses may also call the internal `record_resource_telemetry` helper
 to feed validated observations into the same bounded profile.
 
-## Remote concurrency and ownership
+## [Remote concurrency and ownership](#index)
 
 Multi-mode remote work uses one operation-owned event-loop thread and one shared
 provider-session pool. A weighted process-wide governor admits work across
@@ -112,7 +131,7 @@ indefinitely for a cancellation-resistant executor worker.
 current and peak weighted usage, queue depth, bounded bypasses, cancellations,
 and cleanup underflow diagnostics.
 
-## Concurrency invariants
+## [Concurrency invariants](#index)
 
 - All operation-local work shares one worker arena and one memory ledger.
 - Concurrent calls share process CPU admission, exact resident-byte admission,
@@ -124,17 +143,17 @@ and cleanup underflow diagnostics.
 - Process and operation counters return to their baseline after successful,
   failed, cancelled, and abandoned paths.
 
-## Validation
+## [Validation](#index)
 
 The hardening is covered by deterministic Python race tests, historical
 concurrency-scaling suites, remote fault-injection tests, and the native repeated
 concurrency probe. The native probe mixes external resident reservations with
 allocator-backed native buffers under ThreadSanitizer and ASan/UBSan.
 
-The completed hardening checklist and its validation evidence are tracked in
-`CONCURRENCY_MEMORY_HARDENING_TODO.md`.
+New resource owners must cover normal completion, construction failure,
+cancellation, explicit close, and abandoned finalization.
 
-## Streaming disk admission and cleanup quarantine
+## [Streaming disk admission and cleanup quarantine](#index)
 
 Remote downloads no longer reconcile temporary storage only after the response
 has completed. HTTP, GCS, S3, and Azure writers grow their shared
@@ -155,7 +174,7 @@ Temporary admission accounts for both bytes and artifact/inode counts, so a
 workload of many tiny files cannot exhaust the filesystem while remaining under
 the byte limit.
 
-## Process threads, descriptors, and cross-process memory
+## [Process threads, descriptors, and cross-process memory](#index)
 
 Project-owned worker slots, remote event-loop hosts, bridge threads, janitor
 threads, open files, sockets, and persistent provider sessions are admitted by
@@ -183,7 +202,7 @@ dead owners, and complements rather than replaces the exact in-process
 native/Python ledger. The corresponding temporary-storage option remains
 `SCHEMA_SANITIZER_CROSS_PROCESS_TEMP_RESERVATIONS=1`.
 
-## Cancellation, deadlines, and fork safety
+## [Cancellation, deadlines, and fork safety](#index)
 
 A public cancellation scope applies one event and monotonic deadline to nested
 work:
@@ -208,7 +227,7 @@ fails fast instead of inheriting possibly locked mutexes, thread pools, provider
 clients, or event loops. Multiprocessing integrations must use `spawn`,
 `forkserver`, or execute a fresh process image.
 
-## Pressure feedback and provider throttling
+## [Pressure feedback and provider throttling](#index)
 
 Adaptive concurrency consumes Linux cgroup and PSI signals when available. The
 runtime samples `memory.current`, finite `memory.high`/`memory.max`, cumulative
@@ -234,7 +253,7 @@ On glibc Linux hosts, `SCHEMA_SANITIZER_MALLOC_TRIM=auto` may return retained
 allocator pages after a large operation only when system pressure and RSS
 signals justify it. It has a cooldown and can be explicitly enabled or disabled.
 
-## Per-operation observability
+## [Per-operation observability](#index)
 
 `schema_sanitizer.process_operation_diagnostics()` returns immutable copies of
 live and recently completed operation records. An optional operation ID filters
@@ -245,7 +264,7 @@ present. Provider-throttle diagnostics include tracked and active endpoint keys,
 open circuits, registry capacity, evictions, and saturation rejections.
 Snapshotters are weakly held, so diagnostics do not prolong resource lifetimes.
 
-## Bounded remote backlog and fail-closed shared state
+## [Bounded remote backlog and fail-closed shared state](#index)
 
 Weighted remote admission now has two independent ceilings. The waiter ceiling
 bounds loop-affine futures already requesting permits, while the submission
@@ -271,7 +290,7 @@ only after that shared update succeeds, so an I/O failure leaves ownership
 intact and retryable instead of silently desynchronizing process-local and
 host-wide accounting.
 
-## Retryable teardown and fixed coordination lifetimes
+## [Retryable teardown and fixed coordination lifetimes](#index)
 
 Operation teardown is now a serialized, retryable state transition. The final
 resource-domain reference enters `closing` before cleanup, blocks new forks and
@@ -304,7 +323,7 @@ accounting have committed. Constructor failures, cancellation, and shared
 admission errors therefore cannot leave an unowned reservation or trigger a
 phantom finalizer release.
 
-## Pass38: linearizable retries, crash recovery, and fail-closed teardown
+## [Linearizable retries and crash recovery](#index)
 
 Keyed retries now have an explicit execution boundary. A worker claims an item,
 then commits `CLAIMED -> RUNNING` under the scheduler condition lock immediately
@@ -346,13 +365,13 @@ retry scheduler, temporary janitor, cleanup dispatcher, and finally the release
 guardian. Resources that cannot be released by the deadline remain reachable in
 bounded fail-closed ownership structures.
 
-## Pass40: capability ledgers and terminal runtime quiescence
+## [Capability ledgers and terminal runtime quiescence](#index)
 
 Process thread and FD accounting now uses capability-bearing ledger entries.
 Returning capacity requires the exact lease identity, lease ID, process
-generation, and private capability accepted at admission. The amount-only
-compatibility helper is non-mutating, and finalizer releases authenticate without
-retaining the lease object or depending on weak-reference lifetime ordering.
+generation, and private capability accepted at admission. Amount-only releases
+are non-mutating, and finalizer releases authenticate without retaining the
+lease object or depending on weak-reference lifetime ordering.
 Capacity wakeups are bounded, one-shot notifications executed by a separately
 governed notifier worker.
 
@@ -375,10 +394,10 @@ mistaken for successful draining.
 The temporary janitor fixes quarantine roots by descriptor identity and retains
 FD close plus lease return as one transaction. The native arena reserves cleanup
 capacity during admission and uses a lazy bounded joinable reaper with a timed
-ABI shutdown hook. The integral runtime snapshot advances to version 3 and uses
-a process-wide diagnostic epoch; the original v1 snapshot remains unchanged.
+ABI shutdown hook. The integral runtime snapshot uses a process-wide diagnostic
+epoch. Its schema is additive so monitoring code can ignore newer fields.
 
-## Pass43: retirement visibility and exactly-once teardown
+## [Retirement visibility and exactly-once teardown](#index)
 
 Worker termination is now a transaction rather than an early registry removal.
 Scheduler, dispatcher, guardian, notifier, and janitor workers remain in a
@@ -395,7 +414,7 @@ subsystem code afterward.
 A descriptor whose close result is uncertain is removed from use but not from
 accounting. Its ledger-backed FD lease becomes bounded process-lifetime debt;
 the potentially recycled descriptor number is never retried. Integral runtime
-diagnostics version 6 exposes that debt and all retiring workers.
+diagnostics expose that debt and all retiring workers.
 
 Native arena shutdown now quiesces producers before stopping reaper consumers.
 Parking is promoted autonomously and terminal ownership is explicit, bounded,

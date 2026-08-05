@@ -14,7 +14,11 @@ The **final schema** describes the normalized analytical result that will be
 published. It includes nested fields and the generated provenance columns, but
 must not contain any raw dynamic question header.
 
-## Public helpers
+## Index
+
+- [Public helpers](#public-helpers)
+
+## [Public helpers](#index)
 
 ```python
 import schema_sanitizer as ss

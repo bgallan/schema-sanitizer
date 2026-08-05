@@ -34,7 +34,7 @@ def test_example_08_is_linked_from_both_documentation_indexes() -> None:
 
     assert path in readme
     assert "example_08/08_gcs_csv_modified_window_to_polars_parquet.py" in examples
-    assert "Flat-prefix modified-time CSV ingestion" in readme
+    assert "flat GCS prefix" in readme
     assert "Example 08: flat GCS CSV prefix by modification time" in examples
 
 
@@ -60,6 +60,7 @@ def test_memory_guidance_distinguishes_analytical_and_file_outputs() -> None:
     """Users must not mistake the native ledger for a dataframe-size limit."""
     guide = _read("docs/flat-prefix-modified-time-csv.md")
     readme = _read("README.md")
+    readme_words = " ".join(readme.split())
     examples = _read("examples/README.md")
 
     for document in (guide, readme, examples):
@@ -67,19 +68,19 @@ def test_memory_guidance_distinguishes_analytical_and_file_outputs() -> None:
     assert "final analytical object returned to Python is outside" in guide
     assert "Direct file converters such as `to_parquet`" in guide
     assert "returned dataframe is caller-owned" in examples
-    assert "Use direct file outputs for bounded-memory completion" in readme
+    assert "direct file output is the safe choice" in readme_words
 
 
 def test_exact_mode_and_existing_inputs_remain_default_compatible() -> None:
     """Every public converter keeps exact CSV reconciliation as its default."""
-    compatibility = _read("COMPATIBILITY.md")
+    compatibility = _read("docs/compatibility.md")
 
     for converter in CONVERTERS:
         parameter = inspect.signature(converter).parameters["csv_header_mode"]
         assert parameter.default == "exact"
     assert 'csv_header_mode="exact"' in compatibility
-    assert "local-file, directory, URI, and partition-plan inputs" in compatibility
-    assert "Passing a `SourceManifest` explicitly" in compatibility
+    assert '`input_mode="directory"` is non-recursive' in compatibility
+    assert "GCS manifests freeze every `(uri, generation)` identity" in compatibility
 
 
 def test_docs_do_not_introduce_version_numbered_design_files() -> None:

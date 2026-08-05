@@ -13,7 +13,13 @@ counter: interpreter/runtime overhead, thread stacks, allocator bookkeeping,
 third-party client internals, and filesystem page cache remain outside it and
 are covered by the automatic-sizing safety reserve.
 
-## Charged domains
+## Index
+
+- [Charged domains](#charged-domains)
+- [Deliberately outside the ledger](#deliberately-outside-the-ledger)
+- [Invariants](#invariants)
+
+## [Charged domains](#index)
 
 | Domain | Ledger behavior |
 |---|---|
@@ -36,7 +42,7 @@ share a process-wide reservation governor for the target filesystem, including a
 fixed emergency free-space margin. Their in-memory transfer windows remain
 charged to the resident ledger.
 
-## Deliberately outside the ledger
+## [Deliberately outside the ledger](#index)
 
 - Python interpreter/import machinery, extension-loader state, thread stacks,
   garbage-collector metadata, and opaque standard-library or third-party SDK
@@ -51,7 +57,7 @@ charged to the resident ledger.
   Polars, DuckDB, or another Arrow consumer. Retaining yielded batches is also
   caller-owned memory after transfer.
 
-## Invariants
+## [Invariants](#index)
 
 - No charged domain may reserve beyond `memory_limit_bytes`, even when Python
   tasks and native workers race.

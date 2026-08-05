@@ -1,5 +1,11 @@
 # Reader complexity contract
 
+## Index
+
+- [Overview](#overview)
+
+## [Overview](#index)
+
 Reader hardening uses bounded, iterative scanners. For a fixed projection and
 fixed configured safety limits, accepted and rejected inputs must require
 `O(input bytes + decoded output bytes)` work.

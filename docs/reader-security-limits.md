@@ -5,7 +5,17 @@ settings derived from `memory_limit_bytes`. Hard ceilings cannot be raised by a
 caller. The effective limit is always the lower of the hard ceiling and the
 operation-derived budget.
 
-## Coordinated operation budgets
+## Index
+
+- [Coordinated operation budgets](#coordinated-operation-budgets)
+- [XML hard ceilings](#xml-hard-ceilings)
+- [CSV hard ceilings](#csv-hard-ceilings)
+- [JSON hard ceilings](#json-hard-ceilings)
+- [Parquet hard ceilings](#parquet-hard-ceilings)
+- [Privacy-safe failures](#privacy-safe-failures)
+- [Performance defaults are not security ceilings](#performance-defaults-are-not-security-ceilings)
+
+## [Coordinated operation budgets](#index)
 
 `memory_limit_bytes` is the only public memory/resource control. Native parsing,
 inference, materialization, writers, concurrent workers, retained in-memory
@@ -17,9 +27,9 @@ are translated to stable public exceptions.
 The exact charged domains, fixed 64 KiB directory-metadata sublimit allowance,
 disk-permit separation, and deliberately untracked runtime/output ownership are
 documented in [Reader memory accounting](reader-memory-accounting.md) and
-[SECURITY.md](../SECURITY.md).
+[Reader complexity](reader-complexity.md).
 
-## XML hard ceilings
+## [XML hard ceilings](#index)
 
 | Resource | Ceiling |
 |---|---:|
@@ -34,7 +44,7 @@ external entities, XInclude, network access, or filesystem resolution. The five
 predefined entities and valid numeric character references are supported.
 Document mode and `xml_row_tag` mode use the same syntax and Unicode checks.
 
-## CSV hard ceilings
+## [CSV hard ceilings](#index)
 
 | Resource | Ceiling |
 |---|---:|
@@ -49,7 +59,7 @@ unquoted field, invalid UTF-8, and non-whitespace bytes after a closing quote
 are rejected. There is no implicit repair or lenient mode. Distinct source
 headers that become equal after name reconciliation are rejected.
 
-## JSON hard ceilings
+## [JSON hard ceilings](#index)
 
 | Resource | Ceiling |
 |---|---:|
@@ -63,7 +73,7 @@ Projected-out and schema-filtered values still receive full lexical validation.
 Parser security ceilings are operation-fatal and are not converted into
 `skip_row` or `emit_null_row` recoveries.
 
-## Parquet hard ceilings
+## [Parquet hard ceilings](#index)
 
 | Resource | Ceiling |
 |---|---:|
@@ -89,7 +99,7 @@ shared coordinator. Negative, overflowing, backward, out-of-file, and
 footer-overlapping ranges are rejected before seeking or allocation. Page CRC32
 checksums are validated when present.
 
-## Privacy-safe failures
+## [Privacy-safe failures](#index)
 
 Reader exceptions and operation telemetry identify the format, failure category,
 byte offset, counts, and applicable limit where available. Public Python reader
@@ -103,7 +113,7 @@ Diagnostics do not include raw records, field values, XML element names, JSON
 strings, CSV cells, or Parquet payload bytes by default. This keeps failures
 actionable without copying potentially sensitive input into logs.
 
-## Performance defaults are not security ceilings
+## [Performance defaults are not security ceilings](#index)
 
 Chunk sizes, batch sizes, worker counts, grouping thresholds, and coalescing
 windows are performance choices derived from the same operation budget. They

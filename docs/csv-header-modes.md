@@ -3,14 +3,19 @@
 `csv_header_mode` controls how a conversion reconciles headers when one logical
 input contains several CSV sources.
 
-## Exact mode
+## Index
+
+- [Exact mode](#exact-mode)
+- [Union mode contract](#union-mode-contract)
+
+## [Exact mode](#index)
 
 `csv_header_mode="exact"` is the default and preserves the historical reader
 behavior. Every source must remain compatible with the canonical header chosen
 by the existing CSV implementation. No source projection or column union is
 introduced by this option.
 
-## Union mode contract
+## [Union mode contract](#index)
 
 `csv_header_mode="union"` pre-reads every physical CSV header, builds an
 immutable projection for each source index, infers the canonical schema from

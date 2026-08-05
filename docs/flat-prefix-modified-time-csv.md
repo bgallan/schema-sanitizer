@@ -35,7 +35,16 @@ job = ParquetPipeline(
 result = job.run()
 ```
 
-## Window semantics
+## Index
+
+- [Window semantics](#window-semantics)
+- [Immutable GCS generations](#immutable-gcs-generations)
+- [Late arrivals and reruns](#late-arrivals-and-reruns)
+- [CSV header reconciliation](#csv-header-reconciliation)
+- [Analytical memory versus file-output memory](#analytical-memory-versus-file-output-memory)
+- [Minimal invocation](#minimal-invocation)
+
+## [Window semantics](#index)
 
 Command-line `--start-date` and `--end-date` are inclusive UTC calendar dates.
 Internally each date becomes a half-open window:
@@ -54,7 +63,7 @@ Selection is based on object modification time, not a timestamp inside the CSV
 and not the object name. Rewriting an object creates a new GCS generation and
 may also move it into a different modification-time window.
 
-## Immutable GCS generations
+## [Immutable GCS generations](#index)
 
 Every selected GCS object must have a non-empty `generation`. A
 `SourceManifest` stores `(uri, generation)` identities in deterministic order.
@@ -66,7 +75,7 @@ If the listed generation is deleted before download, the operation fails. It
 does not fall back to the newest generation. Reusing the same manifest for
 inference and materialization therefore preserves the same source snapshot.
 
-## Late arrivals and reruns
+## [Late arrivals and reruns](#index)
 
 The listing is a point-in-time snapshot. Objects created or rewritten after the
 single listing are not visible to that run, even when their `updated` timestamp
@@ -85,7 +94,7 @@ Production scheduling should use an explicit late-arrival policy, for example:
 A rerun performs a new listing and may intentionally select newer generations.
 A previously persisted manifest instead reproduces its original generations.
 
-## CSV header reconciliation
+## [CSV header reconciliation](#index)
 
 Use `csv_header_mode="union"` when files for one day can reorder columns, omit
 question columns, or introduce new ones. The engine pre-reads each header,
@@ -102,7 +111,7 @@ Example 8 also sets `csv_escape_char="\\"` because its source exports encode
 quotes inside quoted values as `\"`. This dialect support is opt-in: leaving
 the option as `None` retains strict doubled-quote CSV parsing.
 
-## Analytical memory versus file-output memory
+## [Analytical memory versus file-output memory](#index)
 
 `to_polars`, `to_pyarrow`, `to_pandas`, and `to_duckdb` bound parsing,
 inference, staging, and native materialization with `memory_limit_bytes`, but
@@ -123,7 +132,7 @@ object. The BigQuery external table is replaced only after all requested days
 have published successfully, so validation failures do not expose a partial
 run.
 
-## Minimal invocation
+## [Minimal invocation](#index)
 
 ```bash
 pip install "schema-sanitizer[polars,gcs,bigquery]"

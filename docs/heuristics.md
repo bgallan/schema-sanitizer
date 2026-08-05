@@ -1,11 +1,50 @@
-# Sanitization and schema heuristics
+# Schema and execution heuristics
 
 This document describes how `schema-sanitizer` turns observations into a
 stable schema, how that schema changes across runs, and how the embedded
-registry and BigQuery sidecar participate in an incremental pipeline. For the
-public API and option reference, start with [README.md](README.md).
+registry and BigQuery sidecar participate in an incremental pipeline. It also
+documents adaptive execution rules that affect performance without changing the
+logical result. For the public API and option reference, start with the
+[Python API guide](python-api.md).
 
-## Processing model
+## Index
+
+- [Processing model](#processing-model)
+- [Field-name sanitization](#field-name-sanitization)
+  - [`lower_alpha`](#lower_alpha)
+  - [`lower_snake`](#lower_snake)
+  - [`preserve`](#preserve)
+  - [Sibling collisions](#sibling-collisions)
+- [Scalar inference](#scalar-inference)
+  - [Mixed scalar types](#mixed-scalar-types)
+  - [Temporal values](#temporal-values)
+- [Nulls, empty containers, and missing fields](#nulls-empty-containers-and-missing-fields)
+  - [Scalar and list reconciliation](#scalar-and-list-reconciliation)
+  - [Scalar and struct reconciliation](#scalar-and-struct-reconciliation)
+- [Depth limits and flattening](#depth-limits-and-flattening)
+- [Schema merging](#schema-merging)
+  - [Version families](#version-families)
+  - [Schema modes](#schema-modes)
+- [Column order](#column-order)
+- [The schema registry](#the-schema-registry)
+- [Drift events](#drift-events)
+- [Generated ETL fields](#generated-etl-fields)
+- [Registry probing and warm-up](#registry-probing-and-warm-up)
+- [BigQuery external-table schema](#bigquery-external-table-schema)
+- [BigQuery registry sidecar](#bigquery-registry-sidecar)
+- [Operation-wide native task arena](#operation-wide-native-task-arena)
+- [Parallel-inference packet heuristics](#parallel-inference-packet-heuristics)
+- [Text-output packet heuristics](#text-output-packet-heuristics)
+- [Parquet route and storage heuristics](#parquet-route-and-storage-heuristics)
+- [Remote staging heuristics](#remote-staging-heuristics)
+  - [Partition source lookahead](#partition-source-lookahead)
+- [Flat JSONL inference parsing](#flat-jsonl-inference-parsing)
+- [Bounded output-lane progress](#bounded-output-lane-progress)
+- [Validation-certified positional JSONL materialization](#validation-certified-positional-jsonl-materialization)
+- [Direct lexical positional JSONL materialization](#direct-lexical-positional-jsonl-materialization)
+- [Scalable arena packet metadata](#scalable-arena-packet-metadata)
+
+## [Processing model](#index)
 
 A conversion follows the same logical stages for analytical and file outputs:
 
@@ -22,12 +61,12 @@ The inference pass considers all selected input rows; it is not a sampling
 algorithm. Directory and partition workflows keep memory bounded by streaming
 or staging sources incrementally rather than by reducing the inference set.
 
-## Field-name sanitization
+## [Field-name sanitization](#index)
 
 Field names are sanitized at the root and inside every struct, including
 structs nested in lists.
 
-### `lower_alpha`
+### [`lower_alpha`](#index)
 
 This is the default policy. ASCII letters are lowercased and every other byte
 is removed:
@@ -40,7 +79,7 @@ price_$      -> price
 
 If nothing remains, the base name is `field`.
 
-### `lower_snake`
+### [`lower_snake`](#index)
 
 ASCII letters are lowercased. Digits and underscores are retained. Other
 characters become underscores, adjacent/trailing underscores are collapsed or
@@ -52,13 +91,13 @@ price-USD    -> price_usd
 123_code     -> field_123_code
 ```
 
-### `preserve`
+### [`preserve`](#index)
 
 The source spelling is retained. This is useful when an external schema owns
 the names, but it also leaves responsibility for downstream naming constraints
 with the caller.
 
-### Sibling collisions
+### [Sibling collisions](#index)
 
 Two source names can sanitize to the same base. Under `lower_alpha` and
 `lower_snake`, colliding siblings receive a deterministic hash-derived suffix.
@@ -74,7 +113,7 @@ The names `schema_registry`, `schema_drifts`, `source_file`, and
 of those names cannot also receive generated metadata and the conversion is
 rejected with a generated-column collision error.
 
-## Scalar inference
+## [Scalar inference](#index)
 
 The native logical scalar types are null, Boolean, signed 64-bit integer,
 64-bit float, UTF-8 string, timestamp, date, and time.
@@ -96,7 +135,7 @@ surrounding ASCII spaces, tabs, line breaks, form feeds, and vertical tabs. A
 failed parse leaves the original value unchanged. Exact configured tokens or
 patterns therefore take precedence over the trimmed retry.
 
-### Mixed scalar types
+### [Mixed scalar types](#index)
 
 Inference combines evidence within one field as follows:
 
@@ -118,7 +157,7 @@ overlap. Float grouping is strict: after the first group, every grouped section
 must contain exactly three digits, and decimal and grouping separators must be
 different ASCII punctuation characters.
 
-### Temporal values
+### [Temporal values](#index)
 
 Built-in ISO timestamp, date, and time recognition is disabled by default.
 Custom patterns operate independently from the corresponding `parse_iso_*`
@@ -129,7 +168,7 @@ with BigQuery.
 Invalid calendar or clock values do not become temporal values. If no other
 enabled scalar parser accepts them, they remain strings.
 
-## Nulls, empty containers, and missing fields
+## [Nulls, empty containers, and missing fields](#index)
 
 Objects infer as structs and arrays infer as lists. Struct fields are nullable
 because a field may be absent from another row.
@@ -176,7 +215,7 @@ from guessing `string`, `list<string>`, or an empty struct. A later partition
 with real evidence receives the original sanitized field name rather than an
 unnecessary versioned name.
 
-### Scalar and list reconciliation
+### [Scalar and list reconciliation](#index)
 
 If a path is observed as a list, a scalar at that same path is treated as one
 list element. This keeps a repeated field repeated while accepting a singleton
@@ -187,7 +226,7 @@ contain their own repeated fields. A direct `list<list<T>>` shape falls back to
 `list<string>`; this boundary avoids an unsupported repeated-list contract
 while preserving nested lists that are fields of a struct element.
 
-### Scalar and struct reconciliation
+### [Scalar and struct reconciliation](#index)
 
 If a path is observed as a struct and another row supplies a scalar, the scalar
 is placed below `scalar_object_key`, whose default is `default_key`:
@@ -204,7 +243,7 @@ The reverse case is deliberately conservative: an existing scalar does not
 absorb an incoming struct. If no compatible historical member exists, the
 struct becomes a new version in the field family.
 
-## Depth limits and flattening
+## [Depth limits and flattening](#index)
 
 Arrow depth counts both structs and list wrappers. Parquet/BigQuery RECORD
 depth counts structs but not list wrappers. Before expanding a nested value,
@@ -217,7 +256,7 @@ remains so under `lower_snake` and becomes `aflattened` under `lower_alpha`.
 The `flattened_fields` diagnostic records the event. This is deterministic for
 a given value shape and pair of limits.
 
-## Schema merging
+## [Schema merging](#index)
 
 Registry merging works recursively through root fields, struct children, and
 list element types.
@@ -236,7 +275,7 @@ Other scalar changes, scalar-to-struct changes, and incompatible element
 changes are not silently cast. They are represented by another member of the
 same version family.
 
-### Version families
+### [Version families](#index)
 
 The original sanitized name is the family base. Incompatible shapes receive a
 monotonic suffix:
@@ -260,7 +299,7 @@ member is compatible is the next version number created.
 Each versioned output field is nullable: rows for other family members carry a
 null in that column.
 
-### Schema modes
+### [Schema modes](#index)
 
 `schema_mode="additive"` is the normal incremental mode. It preserves the
 registered contract, recursively adds compatible fields, promotes numeric
@@ -276,7 +315,7 @@ and retry a partition additively when that partition reveals genuine drift.
 That orchestration policy lives above the converter; the converter itself
 honors the requested mode for each call.
 
-## Column order
+## [Column order](#index)
 
 Ordering is applied recursively after schema reconciliation.
 
@@ -291,7 +330,7 @@ ordering and always remain at the root tail in their canonical order. This
 same root order is used in Arrow tables, CSV/JSONL/Parquet materialization, and
 BigQuery external-table DDL.
 
-## The schema registry
+## [The schema registry](#index)
 
 The registry is durable JSON returned in both parsed and serialized form. Its
 top-level document contains:
@@ -318,7 +357,7 @@ the durable interchange format; the optional native compiled state held by
 pipeline helpers is a process-local optimization and is not a replacement for
 the JSON document.
 
-## Drift events
+## [Drift events](#index)
 
 `schema_drifts` is a JSON list for the current conversion. Each event contains:
 
@@ -335,7 +374,7 @@ Nested drift is reported at the narrowest affected path. The registry remains
 the canonical state; drift records are the per-run audit trail explaining how
 that state changed.
 
-## Generated ETL fields
+## [Generated ETL fields](#index)
 
 All converters append exactly these top-level fields, in this order:
 
@@ -355,7 +394,7 @@ finalization, physical Parquet output, and BigQuery schema translation. Hive
 partition fields are declared separately by BigQuery and do not interrupt this
 physical field order.
 
-## Registry probing and warm-up
+## [Registry probing and warm-up](#index)
 
 A registry probe runs inference and reconciliation without producing the final
 clean dataset. Pipeline warm-up combines all selected source plans into one
@@ -373,7 +412,7 @@ Warm-up dates or hours need not overlap the write range. This makes it possible
 to establish a broad contract first and then materialize a smaller production
 interval with stable schemas.
 
-## BigQuery external-table schema
+## [BigQuery external-table schema](#index)
 
 The BigQuery integration converts the final Arrow schema to Standard SQL types
 and emits explicit `CREATE OR REPLACE EXTERNAL TABLE` DDL. Hive partition field
@@ -394,7 +433,7 @@ Arrow dictionaries are translated by their value type. Structs become
 structs, Arrow null becomes `STRING`, and unsupported types fail soft to
 `STRING` with a warning.
 
-## BigQuery registry sidecar
+## [BigQuery registry sidecar](#index)
 
 The registry embedded in the Parquet/external table remains authoritative.
 Without a sidecar, finding the latest registry means querying non-null
@@ -428,7 +467,7 @@ the chronologically greatest date.
 The sidecar is an optimization, never a second schema registry. Losing it only
 causes a slower fallback lookup.
 
-## Operation-wide native task arena
+## [Operation-wide native task arena](#index)
 
 One `multi` operation owns one native task arena for CPU work. Inference,
 materialization, CSV/JSONL packet encoding, and native Parquet column preparation
@@ -470,7 +509,7 @@ returned; the completion counter is intentionally the callback's final
 synchronized action so condition variables cannot be destroyed while a worker
 still notifies them.
 
-## Parallel-inference packet heuristics
+## [Parallel-inference packet heuristics](#index)
 
 Inference keeps the existing two-pass semantics for every row: first discover
 container shapes, then apply scalar and nested statistics using the shapes known
@@ -515,7 +554,7 @@ pass and statistics pass in order, and preserves `flattened_fields`,
 source-order failure. Benchmarks therefore compare the exact logical-schema
 payload and diagnostic JSON, not only decoded Arrow types.
 
-## Text-output packet heuristics
+## [Text-output packet heuristics](#index)
 
 Native CSV and JSONL output share the ordinal executor used by materialization.
 The coordinator validates each Arrow batch before dispatch, assigns contiguous
@@ -573,7 +612,7 @@ commit point; failures remove the staging file rather than truncating the valid
 output. This is atomic publication on the destination filesystem, not a promise
 of crash-durable `fsync` semantics.
 
-## Parquet route and storage heuristics
+## [Parquet route and storage heuristics](#index)
 
 Local Parquet input prefers the native Arrow C Stream reader when the file
 satisfies its contract. PyArrow Dataset is the compatibility fallback;
@@ -608,7 +647,7 @@ and uncompressed output also supported.
 Detailed native-reader contract diagnostics and certification helpers are
 implementation-facing adapter concerns rather than public contracts.
 
-## Remote staging heuristics
+## [Remote staging heuristics](#index)
 
 Remote conversion uses provider-native asynchronous clients rather than
 `pyarrow.fs`. Single files stream into replayable local spools. Directory
@@ -638,7 +677,7 @@ across the configured lookahead. A file larger than the target is isolated as a
 single packet. Unknown sizes use a deterministic fair-share estimate and remain
 file-count bounded; actual transfer-size checks still apply.
 
-### Partition source lookahead
+### [Partition source lookahead](#index)
 
 Static partition pipelines in `multi` may prepare exactly one immutable
 source for partition `N + 1` while `N` is converting or publishing. This is
@@ -665,7 +704,7 @@ clients and `DefaultAzureCredential`, and HTTP(S) supports single files but not
 portable directory listing. File outputs are staged locally and uploaded only
 after successful conversion.
 
-## Flat JSONL inference parsing
+## [Flat JSONL inference parsing](#index)
 
 Flat JSONL inference uses a worker-private single-pass root-object visitor when
 one packet remains eligible for the bounded scalar aggregate. The visitor does
@@ -677,7 +716,7 @@ evidence, while non-empty nested values force the canonical generic fallback.
 This is an internal execution heuristic and does not change public parsing or
 resource options.
 
-## Bounded output-lane progress
+## [Bounded output-lane progress](#index)
 
 The shared operation arena treats output as a bounded scheduling hint, not a
 separate unbounded priority pool. Above eight workers the established high-core
@@ -689,7 +728,7 @@ front of the already-selected victim queue. This keeps scheduling memory fixed,
 avoids global queue scans, and prevents output progress from starving upstream
 materialization.
 
-## Validation-certified positional JSONL materialization
+## [Validation-certified positional JSONL materialization](#index)
 
 For flat JSONL direct-scalar plans, parallel validation may certify that one
 row's unescaped root keys exactly match the compiled plan in name, count, and
@@ -700,7 +739,7 @@ reordered, duplicate, nested, or variant-bearing rows use the canonical lookup
 path. This optimization does not change error policy, ordering, memory limits,
 or public options.
 
-## Direct lexical positional JSONL materialization
+## [Direct lexical positional JSONL materialization](#index)
 
 After validation certifies that a flat JSONL row exactly matches a direct-scalar
 compiled plan, materialization may convert lexical tokens directly when their
@@ -711,12 +750,11 @@ error condition returns to the canonical parser and conversion policy. The fast
 path borrows only from the packet-owned validated row for the duration of one
 append and does not add cross-row state or public tuning options.
 
-## Compact bounded arena packet metadata
+## [Scalable arena packet metadata](#index)
 
-The operation arena accepts at most 32 physical workers. Queue packets therefore
-store their already validated lane begin/end bounds as unsigned bytes rather
-than machine-sized integers. Submission plans and public arithmetic remain
-`size_t`; narrowing occurs only after the plan has been clamped to the arena
-ceiling. Workers widen the bytes before compatibility and relative-index
-calculations. This reduces queue-packet footprint without changing lane
-eligibility, output preference, stealing order, telemetry, or public options.
+The operation arena has no fixed worker-count ceiling. Effective width is
+derived from available CPUs, process pressure, and the operation memory budget.
+Queue membership uses a scalable bitmap and lane bounds retain machine-sized
+arithmetic, so machines wider than 32 workers neither truncate eligible workers
+nor enter a compatibility path. Queue memory grows with admitted workers and
+remains charged to the operation policy.
