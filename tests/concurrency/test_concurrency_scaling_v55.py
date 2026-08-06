@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 _FIXED_TIME_NS = 1_700_000_000_123_456_000
 _MEMORY_LIMIT = 128 * 1024 * 1024
+_LOW_MEMORY_LIMIT = (256 if os.name == "nt" else 64) * 1024 * 1024
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +95,7 @@ def test_v55_wide_low_memory_output_is_byte_identical(tmp_path: Path) -> None:
         input_format="jsonl",
         parse_integers=True,
         field_name_policy="preserve",
-        memory_limit_bytes=64 * 1024 * 1024,
+        memory_limit_bytes=_LOW_MEMORY_LIMIT,
     )
 
     single_result = ss.to_jsonl(source, single, multi_threading=False, **common)

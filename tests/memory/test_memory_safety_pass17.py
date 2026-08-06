@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -15,6 +16,10 @@ from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
 ROOT = Path(__file__).resolve().parents[2]
+_REQUIRES_POSIX_COORDINATION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="optional cross-process coordination requires POSIX advisory locks",
+)
 
 
 def _set_env(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
@@ -140,6 +145,7 @@ def test_native_memory_governor_has_removable_bounded_waiters() -> None:
     assert "process memory admission wait queue exhausted" in source
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_memory_overflow_preserves_previous_json(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -162,6 +168,7 @@ def test_cross_process_memory_overflow_preserves_previous_json(
     lease.release()
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_storage_overflow_preserves_previous_json(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -182,6 +189,7 @@ def test_cross_process_storage_overflow_preserves_previous_json(
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_telemetry_overflow_preserves_previous_json(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -215,6 +223,7 @@ def test_provider_pool_close_uses_constant_reference_storage() -> None:
     assert "tuple(reversed(tuple(self._entries.values())))" not in source
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_memory_release_remains_retryable_after_persist_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -282,6 +291,7 @@ def test_temporary_release_commits_local_state_after_shared_persist(
         (b'{"version":1,"leases":[]}', "leases must be an object"),
     ],
 )
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_memory_invalid_state_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -301,6 +311,7 @@ def test_cross_process_memory_invalid_state_fails_closed(
     assert path.read_bytes() == payload
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_memory_invalid_lease_entry_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -331,6 +342,7 @@ def test_cross_process_memory_invalid_lease_entry_fails_closed(
         (b'{"version":1,"processes":[]}', "processes must be an object"),
     ],
 )
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_storage_invalid_state_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -351,6 +363,7 @@ def test_cross_process_storage_invalid_state_fails_closed(
     assert path.read_bytes() == payload
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_storage_invalid_process_entry_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory_resource>
 #include <string_view>
+#include <vector>
 
 #include "internal/memory/pool_resource.hh"
 

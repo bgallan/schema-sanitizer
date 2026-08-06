@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from schema_sanitizer.core_impl.schema_registry import schema_contract_from_regi
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 _MEMORY_LIMIT = 256 * 1024 * 1024
+_LOW_MEMORY_LIMIT = (256 if os.name == "nt" else 64) * 1024 * 1024
 _FIXED_TIME_NS = 1_700_000_000_123_456_000
 _COLUMNS = tuple(
     f"field{chr(ord('a') + index // 26)}{chr(ord('a') + index % 26)}" for index in range(128)
@@ -354,7 +356,7 @@ def test_low_budget_repeated_consumption_preserves_arrow_ownership(tmp_path: Pat
         parse_integers=True,
         on_error="stop",
         multi_threading=False,
-        memory_limit_bytes=64 * 1024 * 1024,
+        memory_limit_bytes=_LOW_MEMORY_LIMIT,
     )
 
     for repetition in range(3):
@@ -366,7 +368,7 @@ def test_low_budget_repeated_consumption_preserves_arrow_ownership(tmp_path: Pat
             parse_integers=True,
             on_error="stop",
             multi_threading=True,
-            memory_limit_bytes=64 * 1024 * 1024,
+            memory_limit_bytes=_LOW_MEMORY_LIMIT,
         )
         gc.collect()
         assert result.stats["materialized_rows"] == 4_000

@@ -212,7 +212,7 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if any(token in text for token in _ENV_ACCESS_TOKENS):
-            offenders.append(str(path.relative_to(root)))
+            offenders.append(path.relative_to(root).as_posix())
     allowed_environment_files = {
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",

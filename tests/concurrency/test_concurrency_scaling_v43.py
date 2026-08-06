@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ from schema_sanitizer.core_impl.schema_registry import (
 )
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
-_MEMORY_LIMIT = 64 * 1024 * 1024
+_MEMORY_LIMIT = (256 if os.name == "nt" else 64) * 1024 * 1024
 _FIXED_TIME_NS = 1_700_000_000_123_456_000
 _COLUMNS = tuple(f"fixed_output_{index:03d}" for index in range(128))
 

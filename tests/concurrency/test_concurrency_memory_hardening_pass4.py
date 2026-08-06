@@ -25,6 +25,11 @@ from schema_sanitizer.core_impl.safety_margins import (
     tuned_temporary_free_bytes,
 )
 
+_REQUIRES_POSIX_COORDINATION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="optional cross-process coordination requires POSIX advisory locks",
+)
+
 
 def _reserve_in_child(
     directory: str,
@@ -49,6 +54,7 @@ def _reserve_in_child(
         ready.set()
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_reservations_reject_combined_overcommit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -75,6 +81,7 @@ def test_cross_process_reservations_reject_combined_overcommit(
     assert cross_process_reserved_bytes(99123) == 0
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_registry_reclaims_dead_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -99,6 +106,7 @@ def test_cross_process_registry_reclaims_dead_owner(
     assert cross_process_reserved_bytes(77) == 0
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_telemetry_tuning_uses_bounded_high_percentiles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -141,6 +149,7 @@ def test_telemetry_is_opt_in_and_preserves_static_defaults(
     assert tuned_temporary_free_bytes(64 << 20) == 64 << 20
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_telemetry_profile_remains_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Long-running workers retain only the newest bounded sample window."""
     monkeypatch.setenv("SCHEMA_SANITIZER_TELEMETRY_TUNING", "1")
@@ -152,6 +161,7 @@ def test_telemetry_profile_remains_bounded(tmp_path: Path, monkeypatch: pytest.M
     assert profile["samples"][0]["untracked_rss_bytes"] == 44
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_adaptive_concurrency_consumes_tuned_memory_reserve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -11,6 +11,11 @@ from typing import Any
 
 import pytest
 
+_REQUIRES_POSIX_COORDINATION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="optional cross-process coordination requires POSIX advisory locks",
+)
+
 
 def _set_env(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
     """Configure one test-only environment value without broad policy changes."""
@@ -39,6 +44,7 @@ def _partial_write_then_fail(handle: Any, payload: bytes) -> None:
     raise OSError("injected partial coordination write")
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_live_owner_prepared_storage_transaction_rolls_back_before_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -63,6 +69,7 @@ def test_live_owner_prepared_storage_transaction_rolls_back_before_retry(
     assert not path.with_name(f"{path.name}.journal").exists()
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_live_owner_prepared_memory_transaction_rolls_back_before_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -87,6 +94,7 @@ def test_live_owner_prepared_memory_transaction_rolls_back_before_retry(
 
 
 @pytest.mark.parametrize("partial", [b"", b"{}"])
+@_REQUIRES_POSIX_COORDINATION
 def test_empty_or_canonical_prefix_never_discards_prepared_journal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -118,6 +126,7 @@ def test_empty_or_canonical_prefix_never_discards_prepared_journal(
     assert storage.cross_process_reserved_bytes(device) == 18
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_dead_owner_prepared_transaction_is_completed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -161,6 +170,7 @@ def test_dead_owner_prepared_transaction_is_completed(
     assert not path.with_name(f"{path.name}.journal").exists()
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_committed_journal_makes_success_safe_when_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -185,6 +195,7 @@ def test_committed_journal_makes_success_safe_when_cleanup_fails(
     assert storage.reserve_cross_process(device, 9, 1024) == 100
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_valid_divergent_main_state_from_legacy_writer_wins(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -213,6 +224,7 @@ def test_valid_divergent_main_state_from_legacy_writer_wins(
     assert json.loads(path.read_text(encoding="utf-8")) == current
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_corrupt_journal_fails_closed_without_touching_main_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -232,6 +244,7 @@ def test_corrupt_journal_fails_closed_without_touching_main_state(
     assert path.read_bytes() == original
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_journal_staging_file_is_reused_without_uuid_orphans(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -253,6 +266,7 @@ def test_journal_staging_file_is_reused_without_uuid_orphans(
     assert not staging.exists()
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_journal_staging_hardlink_is_rejected_before_truncate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -277,6 +291,7 @@ def test_journal_staging_hardlink_is_rejected_before_truncate(
     assert victim.read_bytes() == original
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_journal_publication_does_not_duplicate_bounded_payloads(
     tmp_path: Path,
 ) -> None:
@@ -297,6 +312,7 @@ def test_journal_publication_does_not_duplicate_bounded_payloads(
     assert journal._journal_path(path).stat().st_size > 2 << 20
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_coordination_main_file_symlink_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -319,6 +335,7 @@ def test_coordination_main_file_symlink_is_rejected(
     assert victim.read_bytes() == original
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_read_only_coordination_query_does_not_publish_a_journal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -339,6 +356,7 @@ def test_read_only_coordination_query_does_not_publish_a_journal(
     assert not called
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_committed_marker_publication_failure_rolls_back_incremental_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

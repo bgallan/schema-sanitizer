@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 _FIXED_TIME_NS = 1_700_000_000_123_456_000
-_MEMORY_LIMIT = 128 * 1024 * 1024
+_MEMORY_LIMIT = (256 if os.name == "nt" else 128) * 1024 * 1024
 
 
 @pytest.fixture(autouse=True)

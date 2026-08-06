@@ -35,6 +35,11 @@ from schema_sanitizer.errors import (
 from schema_sanitizer.remote_impl.file_streams import write_sync_reader_to_file
 from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
+_REQUIRES_POSIX_COORDINATION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="optional cross-process coordination requires POSIX advisory locks",
+)
+
 
 def _hold_cross_process_memory(
     directory: str,
@@ -197,6 +202,7 @@ def test_cancelled_governor_ticket_does_not_block_followers() -> None:
     assert governor.snapshot().in_use == 0
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_memory_rejects_combined_overcommit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -223,6 +229,7 @@ def test_cross_process_memory_rejects_combined_overcommit(
     assert cross_process_memory_reserved_bytes() == 0
 
 
+@_REQUIRES_POSIX_COORDINATION
 def test_cross_process_memory_reclaims_dead_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

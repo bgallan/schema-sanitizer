@@ -48,11 +48,11 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if any(token in text for token in forbidden):
-            offenders.append(str(path.relative_to(ROOT)))
+            offenders.append(path.relative_to(ROOT).as_posix())
         if path.suffix in {".yml", ".yaml"} and any(
             line.strip() == "env:" for line in text.splitlines()
         ):
-            yaml_env_blocks.append(str(path.relative_to(ROOT)))
+            yaml_env_blocks.append(path.relative_to(ROOT).as_posix())
     allowed_environment_files = {
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",

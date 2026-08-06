@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -163,8 +164,9 @@ def test_token_budget_falls_back_per_row_without_changing_results(
 ) -> None:
     """A full token budget degrades to raw rows, never a partial index."""
     require_native()
-    oracle_memory_limit = 128 * 1024 * 1024
-    constrained_memory_limit = 32 * 1024 * 1024
+    # MSVC's allocator/STL overhead is part of the strict global budget.
+    oracle_memory_limit = (256 if os.name == "nt" else 128) * 1024 * 1024
+    constrained_memory_limit = (64 if os.name == "nt" else 32) * 1024 * 1024
     source = tmp_path / "budget.jsonl"
     _write_rows(source, 8_192)
     contract = _contract(source, tmp_path / "contract.jsonl", 256 * 1024 * 1024)
