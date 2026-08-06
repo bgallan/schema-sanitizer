@@ -141,8 +141,8 @@ Complete programs live in [`examples/`](examples/).
 [Example 7](examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py)
 covers a Hive pipeline to Parquet and BigQuery.
 [Example 8](examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py)
-covers CSV under a flat GCS prefix, modification-time windows, and a custom
-Polars transformation.
+covers CSV under a flat GCS prefix, modification-time windows, a custom Polars
+transformation, and UTC `year/month/day` Hive output from a chosen timestamp.
 
 ## [Development](#index)
 

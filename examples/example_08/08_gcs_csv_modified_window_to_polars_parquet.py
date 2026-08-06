@@ -1,4 +1,4 @@
-"""Run example 08: flat GCS CSV prefix to daily analytical Parquet."""
+"""Run example 08: flat GCS CSV prefix to Hive analytical Parquet."""
 
 from __future__ import annotations
 
@@ -42,6 +42,8 @@ def main() -> int:
         start_date=args.start_date,
         end_date=args.end_date,
         target_table=args.target_table,
+        partition_timestamp_column=args.partition_timestamp_column,
+        parquet_file_prefix=args.parquet_file_prefix,
         event_separator=args.event_separator,
         event_column=args.event_column,
         omit_null_payloads=args.omit_null_payloads,
@@ -50,7 +52,6 @@ def main() -> int:
         on_error=args.on_error,
         memory_limit_bytes=args.memory_limit_bytes,
         multi_threading=args.multi_threading,
-        parquet_compression=args.parquet_compression,
         field_name_policy=args.field_name_policy,
     )
     result = run_modified_time_csv_workflow(
@@ -60,7 +61,12 @@ def main() -> int:
     )
     print(f"Published {len(result.completed_days)} UTC day(s)")
     for day in result.completed_days:
-        print(f"{day.logical_date.isoformat()} rows={day.row_count} uri={day.output_uri}")
+        print(
+            f"{day.logical_date.isoformat()} rows={day.row_count} "
+            f"partitions={day.partition_count} files={len(day.output_uris)}"
+        )
+        for output_uri in day.output_uris:
+            print(f"  {output_uri}")
     print(f"BigQuery external source: {result.external_source_uri}")
     return 0
 

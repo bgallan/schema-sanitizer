@@ -17,6 +17,7 @@ must not contain any raw dynamic event header.
 ## Index
 
 - [Public helpers](#public-helpers)
+- [Hive path fields](#hive-path-fields)
 
 ## [Public helpers](#index)
 
@@ -45,3 +46,15 @@ For BigQuery external tables, use the existing embedded-registry reader first.
 `resolve_bigquery_arrow_schema` accepts that registry and falls back to the
 table's declared schema through a duck-typed BigQuery client only when no
 canonical schema-sanitizer registry is available.
+
+## [Hive path fields](#index)
+
+Example 8 treats `year`, `month`, and `day` as path metadata. They may appear as
+`INT64` fields in the BigQuery target schema, but are removed from both the
+physical Parquet schema and the embedded registry. BigQuery reconstructs them
+from paths shaped as `year=<Y>/month=<M>/day=<D>/...`.
+
+The column selected by `--partition-timestamp-column` remains in Parquet and
+must have a PyArrow timestamp type. The writer converts its values to UTC for
+partition selection, rejects nulls, and verifies every written file against
+its path before publication.

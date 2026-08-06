@@ -11,11 +11,12 @@ from typing import Any
 import pytest
 
 import schema_sanitizer as ss
+from examples.example_08.hive_output import prepare_hive_parquet_schema
 from examples.example_08.runtime_support import (
     Example08Config,
     run_modified_time_csv_workflow,
 )
-from schema_sanitizer.remote_impl import sync_backend
+from schema_sanitizer.remote_impl import directory_downloads, sync_backend
 from schema_sanitizer.sources import RemoteFile
 
 
@@ -42,8 +43,11 @@ class FakeGcsClient:
 
     @contextmanager
     def schema_sanitizer_download_scope(self):
-        """Route schema-sanitizer's synchronous staging into this fake store."""
-        original = sync_backend.download_files_to_directory
+        """Route both supported staging modes into this fake object store."""
+        original_sync = sync_backend.download_files_to_directory
+        original_open = directory_downloads.provider_client_for_downloads
+        original_close = directory_downloads.close_provider_client
+        original_download = directory_downloads.download_file_to_path
 
         def download(
             files: list[RemoteFile],
@@ -57,11 +61,42 @@ class FakeGcsClient:
             for remote in files:
                 (root / remote.name).write_bytes(self._objects[remote.content_identity])
 
+        async def open_async(
+            _files: Any,
+            *,
+            memory_limit_bytes: int | None,
+            threading_mode: str,
+        ) -> object:
+            """Return one inert shared client for multi-threaded staging."""
+            del memory_limit_bytes
+            assert threading_mode == "multi"
+            return object()
+
+        async def close_async(_client: object) -> None:
+            """Close the inert fake client."""
+
+        async def download_async(
+            _client: object,
+            remote: RemoteFile,
+            local_path: str,
+            *,
+            storage_reservation: Any = None,
+        ) -> None:
+            """Materialize one exact generation for multi-threaded staging."""
+            del storage_reservation
+            Path(local_path).write_bytes(self._objects[remote.content_identity])
+
         sync_backend.download_files_to_directory = download
+        directory_downloads.provider_client_for_downloads = open_async
+        directory_downloads.close_provider_client = close_async
+        directory_downloads.download_file_to_path = download_async
         try:
             yield
         finally:
-            sync_backend.download_files_to_directory = original
+            sync_backend.download_files_to_directory = original_sync
+            directory_downloads.provider_client_for_downloads = original_open
+            directory_downloads.close_provider_client = original_close
+            directory_downloads.download_file_to_path = original_download
 
     def publish_file_atomic(
         self,
@@ -118,16 +153,20 @@ def _final_schema(pa: Any) -> Any:
         [
             pa.field("record_id", pa.string()),
             pa.field("country", pa.string()),
+            pa.field("event_timestamp", pa.timestamp("us", tz="UTC")),
             pa.field("event", pa.list_(event)),
             pa.field("source_file", pa.string()),
             pa.field("ingestion_timestamp", pa.timestamp("us", tz="UTC")),
             pa.field("schema_registry", pa.string()),
             pa.field("schema_drifts", pa.string()),
+            pa.field("year", pa.int64()),
+            pa.field("month", pa.int64()),
+            pa.field("day", pa.int64()),
         ]
     )
 
 
-def _config() -> Example08Config:
+def _config(*, multi_threading: bool = False) -> Example08Config:
     """Return the fake-cloud two-day workflow configuration."""
     return Example08Config(
         source_csv_prefix="gs://source/csv",
@@ -135,20 +174,32 @@ def _config() -> Example08Config:
         start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 2),
         target_table="project.dataset.records",
+        partition_timestamp_column="event_timestamp",
+        parquet_file_prefix="records",
         omit_null_payloads=True,
-        parquet_compression="none",
+        multi_threading=multi_threading,
     )
 
 
-def test_example_08_fake_cloud_end_to_end() -> None:
-    """Three heterogeneous CSVs become two validated nested Parquet objects."""
+@pytest.mark.parametrize("multi_threading", [False, True])
+def test_example_08_fake_cloud_end_to_end(multi_threading: bool) -> None:
+    """Three heterogeneous CSVs become validated timestamp-partitioned Parquet."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     pytest.importorskip("polars")
 
-    a = ('record_id,country,1/Created,2/Path/with/slash\nr1,ES,active,"A/B"\n').encode()
-    b = ("3/Estado Δ,record_id,country,1/Created\nlisto,r2,MX,\n").encode()
-    c = ('record_id,country,1/Updated\nr3,FR,"revision, complete"\n').encode()
+    a = (
+        "record_id,country,event_timestamp,1/Created,2/Path/with/slash\n"
+        'r1,ES,2026-06-30T23:30:00Z,active,"A/B"\n'
+    ).encode()
+    b = (
+        "3/Estado Δ,record_id,country,event_timestamp,1/Created\n"
+        "listo,r2,MX,2026-07-01T01:00:00Z,\n"
+    ).encode()
+    c = (
+        "record_id,country,event_timestamp,1/Updated\n"
+        'r3,FR,2026-07-02T01:30:00+02:00,"revision, complete"\n'
+    ).encode()
     gcs = FakeGcsClient(
         [
             (_remote("a.csv", datetime(2026, 7, 1, 1, tzinfo=UTC), "11", a), a),
@@ -165,7 +216,7 @@ def test_example_08_fake_cloud_end_to_end() -> None:
         return ss.to_polars(manifest, **kwargs)
 
     result = run_modified_time_csv_workflow(
-        _config(),
+        _config(multi_threading=multi_threading),
         gcs_client=gcs,
         bigquery_client=bigquery,
         to_polars=convert,
@@ -176,43 +227,63 @@ def test_example_08_fake_cloud_end_to_end() -> None:
     assert all(kwargs["csv_header_mode"] == "union" for _manifest, kwargs in calls)
     assert all(kwargs["schema_mode"] == "additive" for _manifest, kwargs in calls)
     assert all(kwargs["field_name_policy"] == "preserve" for _manifest, kwargs in calls)
+    assert all(kwargs["multi_threading"] is multi_threading for _manifest, kwargs in calls)
     assert [day.row_count for day in result.completed_days] == [2, 1]
+    assert [day.partition_count for day in result.completed_days] == [2, 1]
     assert set(gcs.published) == {
-        "gs://silver/output/2026-07-01.parquet",
-        "gs://silver/output/2026-07-02.parquet",
+        "gs://silver/output/year=2026/month=6/day=30/records_20260630_20260701.gz.parquet",
+        "gs://silver/output/year=2026/month=7/day=1/records_20260701_20260701.gz.parquet",
+        "gs://silver/output/year=2026/month=7/day=1/records_20260701_20260702.gz.parquet",
     }
+    july_first_outputs = sorted(uri for uri in gcs.published if "/year=2026/month=7/day=1/" in uri)
+    assert [uri.rsplit("/", 1)[-1] for uri in july_first_outputs] == [
+        "records_20260701_20260701.gz.parquet",
+        "records_20260701_20260702.gz.parquet",
+    ]
 
-    first = pq.read_table(pa.BufferReader(gcs.published[result.completed_days[0].output_uri]))
-    second = pq.read_table(pa.BufferReader(gcs.published[result.completed_days[1].output_uri]))
-    assert first.schema.equals(bigquery.schema, check_metadata=False)
-    assert second.schema.equals(bigquery.schema, check_metadata=False)
-    assert first.column_names == bigquery.schema.names
-    assert all("/" not in name for name in first.column_names)
-    first_event = first["event"].to_pylist()
-    assert first_event[0] == [
+    parquet_schema = prepare_hive_parquet_schema(bigquery.schema, "event_timestamp")
+    parquet_files = [
+        pq.ParquetFile(pa.BufferReader(payload)) for _uri, payload in sorted(gcs.published.items())
+    ]
+    assert {
+        parquet_file.metadata.row_group(row_group).column(column).compression
+        for parquet_file in parquet_files
+        for row_group in range(parquet_file.metadata.num_row_groups)
+        for column in range(parquet_file.metadata.num_columns)
+    } == {"GZIP"}
+    tables = [parquet_file.read() for parquet_file in parquet_files]
+    assert all(table.schema.equals(parquet_schema, check_metadata=False) for table in tables)
+    assert all(table.column_names == parquet_schema.names for table in tables)
+    combined = pa.concat_tables(tables)
+    rows = {row["record_id"]: row for row in combined.to_pylist()}
+    assert rows["r1"]["event"] == [
         {"event_id": 1, "event_text": "Created", "payload": "active"},
         {"event_id": 2, "event_text": "Path/with/slash", "payload": "A/B"},
     ]
-    assert first_event[1] == [{"event_id": 3, "event_text": "Estado Δ", "payload": "listo"}]
-    assert second["event"].to_pylist()[0] == [
+    assert rows["r2"]["event"] == [{"event_id": 3, "event_text": "Estado Δ", "payload": "listo"}]
+    assert rows["r3"]["event"] == [
         {
             "event_id": 1,
             "event_text": "Updated",
             "payload": "revision, complete",
         }
     ]
-    assert first["source_file"].to_pylist() == [
+    assert {row["source_file"] for row in rows.values()} == {
         "gs://source/csv/a.csv",
         "gs://source/csv/b.csv",
-    ]
-    registry = json.loads(first["schema_registry"][0].as_py())
+        "gs://source/csv/c.csv",
+    }
+    registry = json.loads(combined["schema_registry"][0].as_py())
     registry_names = [field["name"] for field in registry["canonical_schema"]["fields"]]
     assert "event" in registry_names
+    assert not {"year", "month", "day"} & set(registry_names)
     assert all("/" not in name for name in registry_names)
     assert len(bigquery.replace_calls) == 1
     assert bigquery.replace_calls[0]["reference_file_schema_uri"] == (
-        "gs://silver/output/2026-07-02.parquet"
+        "gs://silver/output/year=2026/month=7/day=1/records_20260701_20260702.gz.parquet"
     )
+    assert bigquery.replace_calls[0]["hive_uri_prefix"] == "gs://silver/output"
+    assert bigquery.replace_calls[0]["source_uri_pattern"] == "gs://silver/output/*"
 
 
 def test_example_08_validation_failure_publishes_nothing() -> None:

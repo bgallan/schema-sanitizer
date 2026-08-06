@@ -51,8 +51,11 @@ This folder contains end-to-end tutorial notebooks and scripts for
      library-wide CSV default remains strict
    - Normalizes `<event id>/<event text>` columns into a final Polars
      `list<struct>` field while preserving source provenance
-   - Validates a local daily Parquet before atomic upload and replaces a
-     non-Hive BigQuery external table only after all publications succeed
+   - Partitions rows by a configurable timestamp into UTC
+     `year=<Y>/month=<M>/day=<D>` paths and validates every local Parquet before
+     upload
+   - Replaces the Hive-partitioned BigQuery external table only after all
+     requested publications succeed
    - See
      [`docs/flat-prefix-modified-time-csv.md`](../docs/flat-prefix-modified-time-csv.md)
      for generation consistency, late-arrival limitations, reruns, and
@@ -303,6 +306,8 @@ python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
   --start-date 2026-07-01 \
   --end-date 2026-07-07 \
   --target-table project_id.dataset_id.external_records \
+  --partition-timestamp-column event_timestamp \
+  --parquet-file-prefix records \
   --omit-null-payloads \
   --memory-limit-bytes 268435456
 ```
@@ -317,3 +322,13 @@ The example uses `to_polars` for its custom vectorized transformation. The
 returned dataframe is caller-owned and can exceed `memory_limit_bytes`; reduce
 the daily window size when necessary. Direct `to_parquet` is the bounded-memory
 choice for workflows that do not need a dataframe transformation.
+
+Modification time controls which source objects enter each run. The configured
+data timestamp controls the output Hive partition, so one source day can emit
+several Parquet files. Timestamp values are interpreted in UTC and null values
+are rejected before publication.
+
+Each GZIP Parquet is named
+`<prefix>_<partition YYYYMMDD>_<source window YYYYMMDD>.gz.parquet`. This lets
+several incremental source windows coexist in one daily Hive partition; a
+rerun only replaces the file for the same source window and partition.

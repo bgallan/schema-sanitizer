@@ -4,7 +4,9 @@ This workflow is for a GCS prefix whose CSV objects are not partitioned into
 Hive-style date directories. It lists the prefix once, freezes the exact object
 versions in immutable manifests, assigns each object to one UTC day from its
 GCS `updated` timestamp, reconciles heterogeneous CSV headers, and publishes
-one validated Parquet object per non-empty day.
+validated Parquet files under Hive `year/month/day` paths. The source window
+and the output partition are separate concepts: object modification time
+selects files, while a configurable data timestamp assigns output rows.
 
 The complete executable reference is
 `examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py`.
@@ -41,6 +43,7 @@ result = job.run()
 - [Immutable GCS generations](#immutable-gcs-generations)
 - [Late arrivals and reruns](#late-arrivals-and-reruns)
 - [CSV header reconciliation](#csv-header-reconciliation)
+- [Hive output by data timestamp](#hive-output-by-data-timestamp)
 - [Analytical memory versus file-output memory](#analytical-memory-versus-file-output-memory)
 - [Minimal invocation](#minimal-invocation)
 
@@ -86,8 +89,8 @@ date.
 Production scheduling should use an explicit late-arrival policy, for example:
 
 - rerun a bounded lookback of recent UTC days;
-- publish deterministic daily object names so a successful rerun replaces the
-  complete day rather than appending a partial result;
+- publish deterministic object names for each source window and output
+  partition so a rerun replaces those objects instead of appending duplicates;
 - persist the listing/run watermark and operational metrics outside the data;
 - choose the lookback from the source system's observed delivery delay.
 
@@ -111,6 +114,35 @@ Example 8 also sets `csv_escape_char="\\"` because its source exports encode
 quotes inside quoted values as `\"`. This dialect support is opt-in: leaving
 the option as `None` retains strict doubled-quote CSV parsing.
 
+## [Hive output by data timestamp](#index)
+
+`--partition-timestamp-column` names the column used for output partitioning.
+It must exist in the target PyArrow schema with a timestamp type, and every
+result row must contain a non-null value. Aware timestamps are converted to UTC;
+naive timestamps are interpreted as UTC.
+
+The workflow derives integer `year`, `month`, and `day` values and writes paths
+with the shape `year=<Y>/month=<M>/day=<D>`, such as:
+
+```text
+gs://silver-bucket/records/year=2026/month=7/day=1/records_20260701_20260703.gz.parquet
+```
+
+`--parquet-file-prefix records` supplies the first token. `20260701` is the
+output partition derived from each row's configured timestamp. `20260703` is
+the source object's UTC modification-time window. Files always use GZIP Parquet
+compression, matching the `.gz.parquet` suffix.
+
+One source window can produce one file in each affected output partition.
+Several source windows can therefore coexist in the same daily partition
+without overwriting one another. Rerunning the same source window uses the same
+name and replaces only that window's contribution to that partition.
+
+The path fields are not serialized into Parquet and are not included in the
+embedded schema registry. BigQuery obtains them from the Hive path as `INT64`
+partition columns. Before upload, every file is reopened and checked for exact
+schema, row count, and agreement between every timestamp and its path.
+
 ## [Analytical memory versus file-output memory](#index)
 
 `to_polars`, `to_pyarrow`, `to_pandas`, and `to_duckdb` bound parsing,
@@ -126,11 +158,16 @@ table and are the bounded-memory choice when no custom dataframe transform is
 required. `iter_batches` avoids building one complete table, but retained
 batches become caller-owned memory and can still accumulate.
 
-Example 8 writes the transformed dataframe to a local temporary Parquet,
-reopens it, validates schema and row count, and only then uploads the complete
-object. The BigQuery external table is replaced only after all requested days
-have published successfully, so validation failures do not expose a partial
-run.
+Example 8 partitions the transformed dataframe with Polars, writes each group
+to local temporary Parquet, and validates it before upload. This partitioning
+step and the resulting dataframe are caller-owned memory, so they are not
+bounded by the native operation ledger.
+
+Each GCS object becomes visible atomically only after its upload completes. The
+BigQuery DDL runs after every requested source window has published. This avoids
+installing a new table definition for an incomplete first run, but publication
+of multiple objects is not one atomic transaction: an existing wildcard table
+can observe objects that completed before a later upload failed.
 
 ## [Minimal invocation](#index)
 
@@ -143,13 +180,17 @@ python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
   --start-date 2026-07-01 \
   --end-date 2026-07-07 \
   --target-table project_id.dataset_id.external_records \
+  --partition-timestamp-column event_timestamp \
+  --parquet-file-prefix records \
   --omit-null-payloads \
   --memory-limit-bytes 268435456 \
   --multi-threading
 ```
 
-The target table schema is the final analytical contract. The example derives
-an ingress scalar schema for the wide CSVs, normalizes headers matching
-`<integer>/<event text>` into one `list<struct>` column, replaces the
-intermediate registry metadata, validates the final schema, and publishes
-`YYYY-MM-DD.parquet` for every non-empty UTC day.
+The target table schema is the final analytical contract. It may expose
+`year`, `month`, and `day` as `INT64` Hive partition fields; those fields are
+removed from the physical Parquet schema. The example derives an ingress scalar
+schema for the wide CSVs, normalizes headers matching `<integer>/<event text>`
+into one `list<struct>` column, regenerates metadata, validates the final
+Parquet schema, and publishes one file per affected Hive partition and source
+window.

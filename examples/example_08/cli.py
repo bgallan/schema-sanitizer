@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Read a flat GCS CSV prefix once, group exact object generations by "
             "UTC modification day, normalize event columns with Polars, and "
-            "publish one validated Parquet object per non-empty day."
+            "publish validated year/month/day Hive Parquet partitions."
         )
     )
     source = parser.add_argument_group("source and windows")
@@ -48,9 +48,17 @@ def build_parser() -> argparse.ArgumentParser:
     output = parser.add_argument_group("silver output")
     output.add_argument("--silver-parquet-prefix", required=True)
     output.add_argument(
-        "--parquet-compression",
-        default="zstd",
-        choices=("none", "snappy", "gzip", "brotli", "zstd", "lz4"),
+        "--partition-timestamp-column",
+        required=True,
+        help="Timestamp column used to derive UTC year/month/day Hive partitions.",
+    )
+    output.add_argument(
+        "--parquet-file-prefix",
+        required=True,
+        help=(
+            "Filename prefix used in "
+            "<prefix>_<partition YYYYMMDD>_<source window YYYYMMDD>.gz.parquet."
+        ),
     )
 
     target = parser.add_argument_group("BigQuery target")

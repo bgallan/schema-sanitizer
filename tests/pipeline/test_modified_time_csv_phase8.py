@@ -71,6 +71,25 @@ def test_memory_guidance_distinguishes_analytical_and_file_outputs() -> None:
     assert "direct file output is the safe choice" in readme_words
 
 
+def test_example_08_documents_parameterized_hive_output() -> None:
+    """Source selection and row partitioning remain distinct and discoverable."""
+    guide = _read("docs/flat-prefix-modified-time-csv.md")
+    examples = _read("examples/README.md")
+    guide_words = " ".join(guide.split())
+
+    for document in (guide, examples):
+        assert "--partition-timestamp-column event_timestamp" in document
+        assert "--parquet-file-prefix records" in document
+        assert "year=<Y>/month=<M>/day=<D>" in document
+    assert "records_20260701_20260703.gz.parquet" in guide
+    assert "object modification time" in guide
+    assert "configurable data timestamp" in guide
+    assert "Aware timestamps are converted to UTC" in guide
+    assert "path fields are not serialized into Parquet" in guide
+    assert "Several source windows can therefore coexist" in guide
+    assert "publication of multiple objects is not one atomic transaction" in guide_words
+
+
 def test_exact_mode_and_existing_inputs_remain_default_compatible() -> None:
     """Every public converter keeps exact CSV reconciliation as its default."""
     compatibility = _read("docs/compatibility.md")

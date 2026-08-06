@@ -14,13 +14,6 @@ from time import perf_counter
 from typing import Any, Protocol
 
 import schema_sanitizer as ss
-from schema_sanitizer.integrations.bigquery.advanced import (
-    bigquery_db_kwargs_from_namespace,
-    execute_bigquery_sql,
-    import_bigquery_adbc,
-    parse_table_ref,
-    quote_bq_string,
-)
 from schema_sanitizer.pipeline.advanced import (
     ModifiedTimeWindowPlan,
     build_utc_daily_windows,
@@ -29,9 +22,25 @@ from schema_sanitizer.pipeline.advanced import (
 from schema_sanitizer.sources import RemoteFile
 
 try:
+    from examples.example_08.bigquery_client import AdbcBigQueryWorkflowClient
     from examples.example_08.event_normalization import normalize_event_columns
+    from examples.example_08.hive_output import (
+        HIVE_PARTITION_COLUMNS,
+        partitioned_output_uri,
+        prepare_hive_parquet_schema,
+        validate_parquet_file_prefix,
+        write_hive_parquet_dataset,
+    )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
+    from bigquery_client import AdbcBigQueryWorkflowClient
     from event_normalization import normalize_event_columns
+    from hive_output import (
+        HIVE_PARTITION_COLUMNS,
+        partitioned_output_uri,
+        prepare_hive_parquet_schema,
+        validate_parquet_file_prefix,
+        write_hive_parquet_dataset,
+    )
 
 LOGGER = logging.getLogger("gcs_csv_modified_window_to_polars_parquet")
 _METADATA_COLUMNS = frozenset({"schema_registry", "schema_drifts"})
@@ -62,7 +71,7 @@ class GcsWorkflowClient(Protocol):
 
 
 class BigQueryWorkflowClient(Protocol):
-    """Target-schema and non-Hive external-table operations used by the example."""
+    """Target-schema and Hive external-table operations used by the example."""
 
     def read_target_schema(self, target_table: str) -> Any:
         """Return the existing target table as a PyArrow schema."""
@@ -72,6 +81,8 @@ class BigQueryWorkflowClient(Protocol):
         target_table: str,
         *,
         source_uri_pattern: str,
+        hive_uri_prefix: str,
+        partition_columns: tuple[tuple[str, str], ...],
         reference_file_schema_uri: str,
         final_schema: Any,
     ) -> None:
@@ -87,6 +98,8 @@ class Example08Config:
     start_date: date
     end_date: date
     target_table: str
+    partition_timestamp_column: str
+    parquet_file_prefix: str
     event_separator: str = "/"
     event_column: str = "event"
     omit_null_payloads: bool = False
@@ -95,7 +108,6 @@ class Example08Config:
     on_error: str = "stop"
     memory_limit_bytes: int | None = None
     multi_threading: bool = False
-    parquet_compression: str = "zstd"
     field_name_policy: str = "preserve"
 
     def __post_init__(self) -> None:
@@ -108,6 +120,11 @@ class Example08Config:
             raise ValueError("start_date must be on or before end_date")
         if not self.target_table.strip():
             raise ValueError("target_table must not be empty")
+        if not self.partition_timestamp_column.strip():
+            raise ValueError("partition_timestamp_column must not be empty")
+        if self.partition_timestamp_column in {name for name, _ in HIVE_PARTITION_COLUMNS}:
+            raise ValueError("partition_timestamp_column must not be year, month, or day")
+        validate_parquet_file_prefix(self.parquet_file_prefix)
         if not self.event_separator:
             raise ValueError("event_separator must not be empty")
         if not self.event_column:
@@ -118,22 +135,21 @@ class Example08Config:
             raise ValueError("example 08 requires field_name_policy='preserve'")
         if self.on_error not in {"stop", "skip_row", "emit_null_row"}:
             raise ValueError("on_error must be stop, skip_row, or emit_null_row")
-        if self.parquet_compression not in {"none", "snappy", "gzip", "brotli", "zstd", "lz4"}:
-            raise ValueError("unsupported parquet_compression")
         if self.memory_limit_bytes is not None and self.memory_limit_bytes <= 0:
             raise ValueError("memory_limit_bytes must be greater than zero")
 
 
 @dataclass(frozen=True, slots=True)
 class DayRunResult:
-    """Published output and telemetry for one non-empty UTC day."""
+    """Published Hive outputs and telemetry for one non-empty source day."""
 
     logical_date: date
-    output_uri: str
+    output_uris: tuple[str, ...]
     source_object_count: int
     input_bytes: int | None
     row_count: int
     event_column_count: int
+    partition_count: int
     output_bytes: int
     conversion_seconds: float
     normalization_seconds: float
@@ -186,79 +202,6 @@ class NativeGcsWorkflowClient:
         )
 
 
-class AdbcBigQueryWorkflowClient:
-    """ADBC adapter for target-schema lookup and non-Hive external-table DDL."""
-
-    def __init__(self, args: Any) -> None:
-        """Resolve the target reference and ADBC connection options once."""
-        self._args = args
-        self._table_ref = parse_table_ref(
-            args.target_table,
-            default_project=getattr(args, "bigquery_project", None),
-        )
-        self._dbapi, _database_options = import_bigquery_adbc()
-        self._db_kwargs = bigquery_db_kwargs_from_namespace(args, self._table_ref)
-
-    def read_target_schema(self, target_table: str) -> Any:
-        """Read the existing target schema through a zero-row ADBC query."""
-        table_ref = self._resolved_table_ref(target_table)
-        query = f"SELECT * FROM {table_ref.sql_identifier} LIMIT 0"
-        with self._dbapi.connect(db_kwargs=self._db_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(query)
-                if hasattr(cursor, "fetch_arrow_table"):
-                    return cursor.fetch_arrow_table().schema
-                if hasattr(cursor, "fetch_record_batch"):
-                    reader = cursor.fetch_record_batch()
-                    try:
-                        return reader.schema
-                    finally:
-                        close = getattr(reader, "close", None)
-                        if callable(close):
-                            close()
-        raise RuntimeError("ADBC BigQuery cursor did not expose an Arrow schema")
-
-    def replace_external_table(
-        self,
-        target_table: str,
-        *,
-        source_uri_pattern: str,
-        reference_file_schema_uri: str,
-        final_schema: Any,
-    ) -> None:
-        """Replace one non-Hive Parquet external table after publication."""
-        del final_schema
-        table_ref = self._resolved_table_ref(target_table)
-        ddl = "\n".join(
-            [
-                f"CREATE OR REPLACE EXTERNAL TABLE {table_ref.sql_identifier}",
-                "OPTIONS (",
-                "  format = 'PARQUET',",
-                f"  uris = [{quote_bq_string(source_uri_pattern)}],",
-                "  enable_list_inference = TRUE,",
-                f"  reference_file_schema_uri = {quote_bq_string(reference_file_schema_uri)}",
-                ")",
-            ]
-        )
-        execute_bigquery_sql(
-            dbapi=self._dbapi,
-            db_kwargs=self._db_kwargs,
-            query=ddl,
-        )
-
-    def _resolved_table_ref(self, target_table: str) -> Any:
-        """Resolve one table against the configured default project."""
-        return parse_table_ref(
-            target_table,
-            default_project=getattr(self._args, "bigquery_project", None),
-        )
-
-
-def output_uri_for_day(prefix: str, logical_date: date) -> str:
-    """Return the deterministic one-object output path for one UTC day."""
-    return f"{prefix.rstrip('/')}/{logical_date.isoformat()}.parquet"
-
-
 def run_modified_time_csv_workflow(
     config: Example08Config,
     *,
@@ -287,9 +230,14 @@ def run_modified_time_csv_workflow(
     if not plans:
         raise FileNotFoundError("no CSV objects matched the requested UTC date range")
 
-    final_schema = bigquery_client.read_target_schema(config.target_table)
+    target_schema = bigquery_client.read_target_schema(config.target_table)
+    final_schema = prepare_hive_parquet_schema(
+        target_schema,
+        config.partition_timestamp_column,
+    )
     required_final_names = {
         config.event_column,
+        config.partition_timestamp_column,
         "source_file",
         "ingestion_timestamp",
         "schema_registry",
@@ -319,11 +267,13 @@ def run_modified_time_csv_workflow(
                 )
             )
 
-    external_source_uri = f"{config.silver_parquet_prefix.rstrip('/')}/*.parquet"
+    external_source_uri = f"{config.silver_parquet_prefix.rstrip('/')}/*"
     bigquery_client.replace_external_table(
         config.target_table,
         source_uri_pattern=external_source_uri,
-        reference_file_schema_uri=completed[-1].output_uri,
+        hive_uri_prefix=config.silver_parquet_prefix.rstrip("/"),
+        partition_columns=HIVE_PARTITION_COLUMNS,
+        reference_file_schema_uri=completed[-1].output_uris[-1],
         final_schema=final_schema,
     )
     return Example08RunResult(
@@ -357,6 +307,7 @@ def _run_one_day(
         csv_delimiter=config.csv_delimiter,
         csv_escape_char=config.csv_escape_char,
         csv_header_mode="union",
+        parse_iso_timestamps=True,
         on_error=config.on_error,
         multi_threading=config.multi_threading,
         memory_limit_bytes=config.memory_limit_bytes,
@@ -382,42 +333,49 @@ def _run_one_day(
     validation = ss.validate_analytical_result(finalized.clean_data, final_schema)
     normalization_seconds = max(perf_counter() - normalization_started, 0.0)
 
-    output_uri = output_uri_for_day(
-        config.silver_parquet_prefix,
-        plan.source_window.logical_date,
-    )
     with TemporaryDirectory(prefix="schema-sanitizer-example08-") as directory:
-        local_path = Path(directory) / f"{plan.source_window.logical_date.isoformat()}.parquet"
+        local_root = Path(directory) / "hive"
         parquet_started = perf_counter()
-        output_bytes = _write_and_validate_parquet(
+        parquet_files = write_hive_parquet_dataset(
             finalized.clean_data,
             final_schema,
-            local_path,
-            expected_rows=validation.row_count,
-            compression=config.parquet_compression,
+            local_root,
+            file_prefix=config.parquet_file_prefix,
+            timestamp_column=config.partition_timestamp_column,
+            source_window_date=plan.source_window.logical_date,
         )
         parquet_seconds = max(perf_counter() - parquet_started, 0.0)
 
         upload_started = perf_counter()
-        remote_bytes = gcs_client.publish_file_atomic(
-            str(local_path),
-            output_uri,
-            memory_limit_bytes=config.memory_limit_bytes,
-        )
+        output_uris: list[str] = []
+        output_bytes = 0
+        for parquet_file in parquet_files:
+            output_uri = partitioned_output_uri(
+                config.silver_parquet_prefix,
+                parquet_file.relative_path,
+            )
+            remote_bytes = gcs_client.publish_file_atomic(
+                str(parquet_file.local_path),
+                output_uri,
+                memory_limit_bytes=config.memory_limit_bytes,
+            )
+            if remote_bytes != parquet_file.size_bytes:
+                raise IOError(
+                    f"published byte count mismatch for {output_uri!r}: "
+                    f"local={parquet_file.size_bytes}, remote={remote_bytes}"
+                )
+            output_uris.append(output_uri)
+            output_bytes += parquet_file.size_bytes
         upload_seconds = max(perf_counter() - upload_started, 0.0)
-    if remote_bytes != output_bytes:
-        raise IOError(
-            f"published byte count mismatch for {output_uri!r}: "
-            f"local={output_bytes}, remote={remote_bytes}"
-        )
 
     result = DayRunResult(
         logical_date=plan.source_window.logical_date,
-        output_uri=output_uri,
+        output_uris=tuple(output_uris),
         source_object_count=plan.selected_object_count,
         input_bytes=plan.total_bytes,
         row_count=validation.row_count,
         event_column_count=len(normalized.event_columns),
+        partition_count=len(parquet_files),
         output_bytes=output_bytes,
         conversion_seconds=conversion_seconds,
         normalization_seconds=normalization_seconds,
@@ -443,31 +401,10 @@ def _cast_polars_to_final_data_schema(frame: Any, final_schema: Any) -> Any:
     return table.select(expected.names).cast(expected, safe=True)
 
 
-def _write_and_validate_parquet(
-    table: Any,
-    final_schema: Any,
-    path: Path,
-    *,
-    expected_rows: int,
-    compression: str,
-) -> int:
-    """Write one local Parquet and validate schema and row count before upload."""
-    parquet = import_module("pyarrow.parquet")
-    codec = None if compression == "none" else compression
-    parquet.write_table(table, path, compression=codec)
-    validated = parquet.read_table(path)
-    ss.validate_analytical_result(validated, final_schema)
-    if validated.num_rows != expected_rows:
-        raise ValueError(
-            f"Parquet row-count mismatch: expected={expected_rows}, actual={validated.num_rows}"
-        )
-    return path.stat().st_size
-
-
 def _log_day_result(logger: logging.Logger, result: DayRunResult) -> None:
     """Emit all required per-day volume and timing metrics."""
     logger.info(
-        "day=%s source_objects=%d input_bytes=%s rows=%d event_columns=%d "
+        "day=%s source_objects=%d input_bytes=%s rows=%d event_columns=%d partitions=%d "
         "output_bytes=%d conversion_seconds=%.6f normalization_seconds=%.6f "
         "parquet_seconds=%.6f upload_seconds=%.6f",
         result.logical_date.isoformat(),
@@ -475,6 +412,7 @@ def _log_day_result(logger: logging.Logger, result: DayRunResult) -> None:
         result.input_bytes,
         result.row_count,
         result.event_column_count,
+        result.partition_count,
         result.output_bytes,
         result.conversion_seconds,
         result.normalization_seconds,
@@ -491,6 +429,5 @@ __all__ = [
     "Example08RunResult",
     "GcsWorkflowClient",
     "NativeGcsWorkflowClient",
-    "output_uri_for_day",
     "run_modified_time_csv_workflow",
 ]
