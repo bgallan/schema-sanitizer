@@ -12,6 +12,9 @@
 #include <functional>
 #include <memory>
 #include <memory_resource>
+#if defined(__APPLE__)
+#include <mutex>
+#endif
 
 namespace sanitize::internal {
 
@@ -56,9 +59,10 @@ struct TaskMemoryCharge final {
 };
 
 // libc++ versions shipped by supported macOS runners do not provide the
-// C++20 std::atomic<std::shared_ptr<T>> specialization.  The shared_ptr atomic
-// free functions have been portable since C++11 and provide the same lifetime
-// and memory-order guarantees without requiring that specialization.
+// C++20 std::atomic<std::shared_ptr<T>> specialization. Keep its small API
+// behind a mutex there. Other platforms use the native specialization; the
+// C++11 shared_ptr atomic free functions are deprecated in C++20.
+#if defined(__APPLE__)
 template <typename T> class AtomicSharedPtr final {
 public:
   AtomicSharedPtr() noexcept = default;
@@ -70,18 +74,28 @@ public:
 
   [[nodiscard]] std::shared_ptr<T>
   load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
-    return std::atomic_load_explicit(&value_, order);
+    static_cast<void>(order);
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return value_;
   }
 
   std::shared_ptr<T>
   exchange(std::shared_ptr<T> desired,
            std::memory_order order = std::memory_order_seq_cst) noexcept {
-    return std::atomic_exchange_explicit(&value_, std::move(desired), order);
+    static_cast<void>(order);
+    const std::lock_guard<std::mutex> lock(mutex_);
+    auto previous = std::move(value_);
+    value_ = std::move(desired);
+    return previous;
   }
 
 private:
+  mutable std::mutex mutex_;
   std::shared_ptr<T> value_;
 };
+#else
+template <typename T> using AtomicSharedPtr = std::atomic<std::shared_ptr<T>>;
+#endif
 
 class TaskMemoryLease final {
 public:

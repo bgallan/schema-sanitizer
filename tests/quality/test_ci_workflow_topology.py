@@ -249,11 +249,16 @@ def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
     options = (ROOT / "cmake/SchemaSanitizerTargetOptions.cmake").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     threads = (ROOT / "cpp/src/internal/runtime/thread_compat.hh").read_text(encoding="utf-8")
+    arena = (ROOT / "cpp/src/internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
     telemetry = (ROOT / "cpp/src/internal/runtime/performance_telemetry.cc").read_text(
         encoding="utf-8"
     )
+    tokens = (ROOT / "cpp/src/internal/json_encoding/token_writer.cc").read_text(encoding="utf-8")
     formatter = telemetry.split("void append_double_field", 1)[1].split(
         "std::int64_t nonnegative", 1
+    )[0]
+    token_formatter = tokens.split("void append_double_field", 1)[1].split(
+        "} // namespace sanitize::internal::json_encoding", 1
     )[0]
 
     assert "$<$<CXX_COMPILER_ID:MSVC>:/wd4324>" in options
@@ -266,8 +271,15 @@ def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
     assert "SCHEMA_SANITIZER_FORCE_ATOMIC_WAIT_POLLING" in threads
     assert "SCHEMA_SANITIZER_PORTABLE_THREAD_COMPAT_ACTIVE" in threads
     assert "std::this_thread::sleep_for(std::chrono::microseconds(100))" in threads
+    assert "std::atomic_load_explicit" not in arena
+    assert "std::atomic_exchange_explicit" not in arena
+    assert "using AtomicSharedPtr = std::atomic<std::shared_ptr<T>>" in arena
+    assert "mutable std::mutex mutex_" in arena
     assert "std::to_chars" not in formatter
     assert "std::locale::classic()" in formatter
+    assert "#if defined(__APPLE__)" in token_formatter
+    assert "std::locale::classic()" in token_formatter
+    assert "std::numeric_limits<double>::max_digits10" in token_formatter
 
 
 def test_benchmark_matrix_runs_on_supported_platforms() -> None:
