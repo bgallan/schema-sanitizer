@@ -9,6 +9,9 @@ from typing import Any
 import pytest
 from conftest import require_native
 
+_MEMORY_LIMIT_BYTES = 1 << 20
+_METADATA_LIMIT_BYTES = _MEMORY_LIMIT_BYTES // 8
+
 
 @pytest.mark.parametrize("source_kind", ["path", "stream", "text"])
 def test_registry_metadata_wrapper_preserves_explicit_memory_limit(
@@ -29,7 +32,7 @@ def test_registry_metadata_wrapper_preserves_explicit_memory_limit(
         "text": '{"a":1}\n',
     }
     options = normalize_call_options(
-        memory_limit_bytes=8192,
+        memory_limit_bytes=_MEMORY_LIMIT_BYTES,
         multi_threading=False,
     ).raw
     raw = ExecutionContext()._raw.to_registry_sink_from_source(
@@ -42,7 +45,7 @@ def test_registry_metadata_wrapper_preserves_explicit_memory_limit(
         field_name_policy="lower_alpha",
         schema_mode="additive",
         first_row_columns={},
-        all_row_columns={},
+        all_row_columns={"oversized_metadata": "x" * (_METADATA_LIMIT_BYTES * 2)},
         row_span_columns={},
         timestamp_columns=("ingestion_timestamp",),
     )
@@ -62,8 +65,8 @@ def test_registry_metadata_wrapper_preserves_explicit_memory_limit(
 
     message = str(caught.value)
     assert "generated metadata batch exceeds byte safety limit" in message
-    assert "configured_memory_limit_bytes=8192" in message
-    assert "limit_bytes=1024" in message
+    assert f"configured_memory_limit_bytes={_MEMORY_LIMIT_BYTES}" in message
+    assert f"limit_bytes={_METADATA_LIMIT_BYTES}" in message
 
 
 def test_public_parquet_conversion_keeps_metadata_budget_and_atomicity(
@@ -73,21 +76,21 @@ def test_public_parquet_conversion_keeps_metadata_budget_and_atomicity(
     require_native()
     import schema_sanitizer as ss
 
-    source = tmp_path / "one-row.jsonl"
+    source = tmp_path / ("source-" + "x" * 120 + ".jsonl")
     destination = tmp_path / "output.parquet"
-    source.write_text('{"a":1}\n', encoding="utf-8")
+    source.write_text("{}\n" * 5_000, encoding="utf-8")
 
     with pytest.raises(ss.SchemaSanitizerOutOfMemoryError) as caught:
         ss.to_parquet(
             source,
             destination,
             input_format="jsonl",
-            memory_limit_bytes=8192,
+            memory_limit_bytes=_MEMORY_LIMIT_BYTES,
             multi_threading=False,
         )
 
     message = str(caught.value)
     assert "generated metadata batch exceeds byte safety limit" in message
-    assert "configured_memory_limit_bytes=8192" in message
-    assert "limit_bytes=1024" in message
+    assert f"configured_memory_limit_bytes={_MEMORY_LIMIT_BYTES}" in message
+    assert f"limit_bytes={_METADATA_LIMIT_BYTES}" in message
     assert not destination.exists()

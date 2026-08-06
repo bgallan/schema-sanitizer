@@ -211,7 +211,8 @@ def test_xml_node_expansion_obeys_shared_operation_budget(
     """Document trees stay bounded while streamed row trees release early."""
     require_native()
 
-    payload = ("<rows>" + ("<row><a/><b/><c/></row>" * 500) + "</rows>").encode()
+    row_count = 1_000
+    payload = ("<rows>" + ("<row><a/><b/><c/><d/></row>" * row_count) + "</rows>").encode()
     source = tmp_path / f"expanded-{xml_row_tag}-{multi_threading}.xml"
     output = tmp_path / f"expanded-{xml_row_tag}-{multi_threading}.jsonl"
     source.write_bytes(payload)
@@ -227,15 +228,14 @@ def test_xml_node_expansion_obeys_shared_operation_budget(
                 multi_threading=multi_threading,
             )
     else:
-        ss.to_jsonl(
+        result = ss.to_polars(
             source,
-            output,
             input_format="xml",
             xml_row_tag=xml_row_tag,
             memory_limit_bytes=1024 * 1024,
             multi_threading=multi_threading,
         )
-        assert len(output.read_text(encoding="utf-8").splitlines()) == 500
+        assert result.clean_data.height == row_count
 
 
 @pytest.mark.parametrize(

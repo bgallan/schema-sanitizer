@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -141,7 +142,7 @@ def test_claim_publication_fsyncs_alias_removal(
 
     def count_fsync(descriptor: int) -> None:
         nonlocal directory_syncs
-        if os.path.isdir(f"/proc/self/fd/{descriptor}"):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
             directory_syncs += 1
         real_fsync(descriptor)
 

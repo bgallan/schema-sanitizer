@@ -16,7 +16,10 @@ namespace {
 
 using sanitize::internal::OperationTaskArena;
 using sanitize::internal::TaskArenaLane;
+using sanitize::internal::TaskMemoryCharge;
 using sanitize::internal::TaskTelemetryKind;
+
+constexpr TaskMemoryCharge kProbeTaskCharge{256U};
 
 void release_gate(std::atomic<bool> *gate) noexcept {
   gate->store(true, std::memory_order_release);
@@ -98,14 +101,14 @@ PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
           }
           for (std::size_t task_index = 0; task_index < per_producer;
                ++task_index) {
-            auto status = arena->Submit(
+            auto status = arena->SubmitCharged(
                 [&tasks_finished](std::size_t,
                                   sanitize::internal::StopToken task_stop) {
                   if (!task_stop.stop_requested()) {
                     tasks_finished.fetch_add(1, std::memory_order_release);
                   }
                 },
-                plan, TaskTelemetryKind::kOther);
+                plan, kProbeTaskCharge, TaskTelemetryKind::kOther);
             if (!status.ok()) {
               submit_failed.store(true, std::memory_order_release);
               return;
@@ -205,9 +208,11 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
     blockers_finished.fetch_add(1, std::memory_order_release);
   };
   for (std::size_t index = 0; index < blockers_per_lane; ++index) {
-    auto status = arena->Submit(blocker, half, TaskArenaLane::kUpstream);
+    auto status = arena->SubmitCharged(blocker, half, TaskArenaLane::kUpstream,
+                                       kProbeTaskCharge);
     if (status.ok()) {
-      status = arena->Submit(blocker, half, TaskArenaLane::kOutput);
+      status = arena->SubmitCharged(blocker, half, TaskArenaLane::kOutput,
+                                    kProbeTaskCharge);
     }
     if (!status.ok()) {
       release_gate(&release_blockers);
@@ -232,12 +237,15 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
   };
   const auto started_at = std::chrono::steady_clock::now();
   for (int round = 0; round < rounds; ++round) {
-    auto status = arena->Submit(work, half, TaskArenaLane::kUpstream);
+    auto status = arena->SubmitCharged(work, half, TaskArenaLane::kUpstream,
+                                       kProbeTaskCharge);
     if (status.ok()) {
-      status = arena->Submit(work, half, TaskArenaLane::kOutput);
+      status = arena->SubmitCharged(work, half, TaskArenaLane::kOutput,
+                                    kProbeTaskCharge);
     }
     if (status.ok()) {
-      status = arena->Submit(work, workers, TaskArenaLane::kAll);
+      status = arena->SubmitCharged(work, workers, TaskArenaLane::kAll,
+                                    kProbeTaskCharge);
     }
     if (!status.ok()) {
       release_gate(&release_blockers);

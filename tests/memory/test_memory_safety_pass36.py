@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import os
+import stat
 import sys
 import threading
 import time
@@ -351,7 +352,7 @@ def test_published_claim_is_rolled_back_if_parent_fsync_fails(
     real_fsync = module.os.fsync
 
     def fail_directory_fsync(descriptor: int) -> None:
-        if os.path.isdir(f"/proc/self/fd/{descriptor}"):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
             raise OSError("directory persistence failed")
         real_fsync(descriptor)
 
