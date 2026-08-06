@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -132,8 +133,7 @@ def test_sync_control_response_is_bounded_before_full_materialization(
     assert excinfo.value.detail["stage"] == "remote_control_response"
 
 
-@pytest.mark.asyncio
-async def test_async_control_response_is_bounded_before_full_materialization() -> None:
+def test_async_control_response_is_bounded_before_full_materialization() -> None:
     """Verify aiohttp control bodies read at most limit plus one byte."""
 
     class Content:
@@ -151,14 +151,17 @@ async def test_async_control_response_is_bounded_before_full_materialization() -
 
         content = Content()
 
-    response = Response()
-    with pytest.raises(SchemaSanitizerResourceError) as excinfo:
-        await read_bounded_response_bytes(
-            response,
-            maximum_bytes=32,
-            stage="remote_control_response",
-        )
+    async def exercise() -> None:
+        response = Response()
+        with pytest.raises(SchemaSanitizerResourceError) as excinfo:
+            await read_bounded_response_bytes(
+                response,
+                maximum_bytes=32,
+                stage="remote_control_response",
+            )
 
-    assert response.content.requested == 33
-    assert excinfo.value.detail is not None
-    assert excinfo.value.detail["limit_bytes"] == 32
+        assert response.content.requested == 33
+        assert excinfo.value.detail is not None
+        assert excinfo.value.detail["limit_bytes"] == 32
+
+    asyncio.run(exercise())

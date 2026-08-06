@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
 import sys
 import threading
 import time
@@ -10,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
 
 _NATIVE_STUB_MODULES = (
     "schema_sanitizer.core_impl.native_options",

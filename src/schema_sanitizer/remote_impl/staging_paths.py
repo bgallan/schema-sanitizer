@@ -30,6 +30,8 @@ from ..core_impl.temporary_storage import TemporaryStorageLease, TemporaryStorag
 if TYPE_CHECKING:
     from ..api_impl.operation_context import OperationExecutionContext
 
+_HAS_DESCRIPTOR_RELATIVE_TRAVERSAL = os.name != "nt"
+
 
 def _close_descriptor(fd: int, primary: BaseException | None) -> None:
     """Close one descriptor without masking an active traversal error."""
@@ -132,6 +134,8 @@ class StagedPath:
         if before.file_type != stat.S_IFDIR:
             metadata = os.lstat(root)
             return int(metadata.st_size), 1
+        if not _HAS_DESCRIPTOR_RELATIVE_TRAVERSAL:
+            return self._measure_owned_tree_by_path(root, expected)
 
         max_entries = 1_000_000
         max_depth = 128
@@ -199,6 +203,53 @@ class StagedPath:
                 _close_descriptor(root_fd, primary)
         after = lstat_identity(root)
         if after != expected:
+            raise OSError(f"temporary path ownership changed during accounting: {root}")
+        return total_size, total_count
+
+    @staticmethod
+    def _measure_owned_tree_by_path(root: Path, expected: PathIdentity) -> tuple[int, int]:
+        """Measure a Windows tree without following reparse-point entries.
+
+        Windows does not expose POSIX ``dir_fd`` traversal and rejects opening
+        directories through ``os.open``.  Fingerprint every directory before
+        and after its bounded scan instead, while treating symlinks and other
+        non-regular entries as leaf metadata.
+        """
+        max_entries = 1_000_000
+        max_depth = 128
+        total_size = 0
+        total_count = 1
+        pending: list[tuple[Path, PathIdentity, int]] = [(root, expected, 0)]
+        while pending:
+            directory, directory_identity, depth = pending.pop()
+            if depth > max_depth:
+                raise OSError("temporary directory accounting exceeded its depth limit")
+            if lstat_identity(directory) != directory_identity:
+                raise OSError(f"temporary directory changed before accounting: {directory}")
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    total_count += 1
+                    if total_count > max_entries:
+                        raise OSError("temporary directory accounting exceeded its entry limit")
+                    metadata = entry.stat(follow_symlinks=False)
+                    reparse_point = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+                    file_attributes = int(getattr(metadata, "st_file_attributes", 0))
+                    if reparse_point and file_attributes & reparse_point:
+                        continue
+                    entry_type = stat.S_IFMT(metadata.st_mode)
+                    if entry_type == stat.S_IFREG:
+                        total_size += int(metadata.st_size)
+                    elif entry_type == stat.S_IFDIR:
+                        child = Path(entry.path)
+                        child_identity = lstat_identity(child)
+                        if child_identity is None or child_identity.file_type != stat.S_IFDIR:
+                            raise OSError(
+                                f"temporary directory component changed during accounting: {child}"
+                            )
+                        pending.append((child, child_identity, depth + 1))
+            if lstat_identity(directory) != directory_identity:
+                raise OSError(f"temporary directory changed during accounting: {directory}")
+        if lstat_identity(root) != expected:
             raise OSError(f"temporary path ownership changed during accounting: {root}")
         return total_size, total_count
 

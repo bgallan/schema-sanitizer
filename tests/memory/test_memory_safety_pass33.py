@@ -12,6 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
+
 
 def test_identity_descriptor_finalizer_closes_real_and_governed_fd(
     tmp_path: Path,

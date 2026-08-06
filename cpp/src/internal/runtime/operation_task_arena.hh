@@ -55,6 +55,34 @@ struct TaskMemoryCharge final {
   bool explicit_charge = false;
 };
 
+// libc++ versions shipped by supported macOS runners do not provide the
+// C++20 std::atomic<std::shared_ptr<T>> specialization.  The shared_ptr atomic
+// free functions have been portable since C++11 and provide the same lifetime
+// and memory-order guarantees without requiring that specialization.
+template <typename T> class AtomicSharedPtr final {
+public:
+  AtomicSharedPtr() noexcept = default;
+  explicit AtomicSharedPtr(std::shared_ptr<T> value) noexcept
+      : value_(std::move(value)) {}
+
+  AtomicSharedPtr(const AtomicSharedPtr &) = delete;
+  AtomicSharedPtr &operator=(const AtomicSharedPtr &) = delete;
+
+  [[nodiscard]] std::shared_ptr<T>
+  load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+    return std::atomic_load_explicit(&value_, order);
+  }
+
+  std::shared_ptr<T>
+  exchange(std::shared_ptr<T> desired,
+           std::memory_order order = std::memory_order_seq_cst) noexcept {
+    return std::atomic_exchange_explicit(&value_, std::move(desired), order);
+  }
+
+private:
+  std::shared_ptr<T> value_;
+};
+
 class TaskMemoryLease final {
 public:
   TaskMemoryLease() noexcept = default;
@@ -225,7 +253,7 @@ private:
   [[nodiscard]] static bool
   ValidPlan(const State &state, const TaskArenaSubmissionPlan &plan) noexcept;
 
-  std::atomic<std::shared_ptr<State>> state_;
+  AtomicSharedPtr<State> state_;
   std::shared_ptr<DetachedMetrics> detached_metrics_;
   std::atomic<std::size_t> shutdown_timeouts_{0};
   std::atomic<std::size_t> abandoned_queued_tasks_{0};

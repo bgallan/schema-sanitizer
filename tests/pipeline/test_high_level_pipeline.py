@@ -5,12 +5,12 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import unquote, urlparse
 
 import pytest
 from conftest import require_native
 
 import schema_sanitizer as ss
+from schema_sanitizer.core_impl.uris import local_path_from_file_uri
 from schema_sanitizer.pipeline import (
     HivePartitions,
     ModifiedTimePartitions,
@@ -47,7 +47,7 @@ def test_hive_pipeline_executes_local_end_to_end(tmp_path: Path) -> None:
     result = job.run()
 
     assert len(result.completed_runs) == 1
-    output_path = Path(unquote(urlparse(result.completed_runs[0].plan.output_uri).path))
+    output_path = Path(local_path_from_file_uri(result.completed_runs[0].plan.output_uri))
     assert output_path.is_file()
 
 

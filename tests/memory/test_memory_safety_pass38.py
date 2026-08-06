@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
+
 
 def _move_pending_to_ready(scheduler) -> None:
     with scheduler._condition:

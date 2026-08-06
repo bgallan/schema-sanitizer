@@ -26,7 +26,7 @@ def test_reader_errors_expose_structural_context_without_payloads(tmp_path: Path
 
     import schema_sanitizer as ss
 
-    secret = "private_value_91e8"
+    secret = "private_value_91e8"  # pragma: allowlist secret
     cases = (
         (
             "xml",

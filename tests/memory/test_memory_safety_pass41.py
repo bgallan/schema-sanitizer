@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
+
 
 def test_external_admission_closes_before_internal_teardown_reserve() -> None:
     from schema_sanitizer.core_impl.process_resources import _Governor

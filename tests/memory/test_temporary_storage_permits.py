@@ -9,6 +9,51 @@ import pytest
 from conftest import require_native
 
 
+def test_path_identity_fallback_avoids_posix_directory_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-POSIX platforms retain a releasable fingerprint without dir FDs."""
+    import schema_sanitizer.core_impl.path_identity as identity_module
+
+    path = tmp_path / "owned-directory"
+    path.mkdir()
+    monkeypatch.setattr(identity_module, "_HAS_POSIX_PATH_AUTHORITY", False)
+
+    identity = identity_module.claim_path_identity(path)
+
+    assert identity is not None
+    assert identity.owns_claim
+    assert identity.external_claim_path is None
+    assert identity.descriptor_owner is None
+    assert identity_module.lstat_identity(path) == identity
+    identity_module.release_path_identity(identity)
+
+
+def test_path_based_tree_measurement_is_bounded_and_does_not_follow_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Windows-compatible traversal counts regular files without link descent."""
+    import schema_sanitizer.remote_impl.staging_paths as staging_module
+
+    root = tmp_path / "staged-directory"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "payload.bin").write_bytes(b"12345")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "ignored.bin").write_bytes(b"x" * 100)
+    try:
+        (root / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pass
+    monkeypatch.setattr(staging_module, "_HAS_DESCRIPTOR_RELATIVE_TRAVERSAL", False)
+    staged = staging_module.StagedPath(str(root), is_dir=True)
+    try:
+        assert staged._measure_owned_tree() == (5, 4 if (root / "linked").exists() else 3)
+    finally:
+        staged.close()
+
+
 def test_temporary_storage_pool_bounds_and_reuses_released_capacity() -> None:
     """Reservations are aggregate, resizable, and returned exactly once."""
     require_native()

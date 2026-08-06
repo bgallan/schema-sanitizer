@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
 
 
 def _move_pending_to_ready(scheduler):

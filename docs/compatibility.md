@@ -39,6 +39,12 @@ The published matrix covers:
 Linux ARM64 and musllinux are not commitments until release CI publishes those
 wheels regularly.
 
+Temporary-path cleanup uses descriptor-relative, no-follow filesystem
+operations on POSIX. Windows does not expose the same `dir_fd` primitives, so
+it uses bounded `scandir` traversal with before/after fingerprints and never
+descends into link entries. The Windows wheel tests this fallback directly;
+POSIX race, FIFO, hard-link, and `fork` attack contracts run on Linux and macOS.
+
 ## [Optional dependencies](#index)
 
 The core has no mandatory Python dependency. Current minimums are declared in

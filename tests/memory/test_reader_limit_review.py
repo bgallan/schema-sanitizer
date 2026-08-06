@@ -41,7 +41,7 @@ def test_review_aggregates_only_privacy_safe_resource_counters() -> None:
                 "parser_max_depth": 12,
                 "decompression_ratio": 4.0,
                 "cancellation_reason": "consumer_close",
-                "secret": "must-not-propagate",
+                "secret": "must-not-propagate",  # pragma: allowlist secret
             },
             {
                 "peak_charged_memory_bytes": 20,

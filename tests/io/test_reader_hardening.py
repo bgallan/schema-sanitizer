@@ -1252,7 +1252,7 @@ def test_reader_errors_do_not_echo_sensitive_input_contents(
     """Malformed payload values and XML names stay out of public exceptions."""
     require_native()
 
-    secret = "private_customer_token_7f45c0"
+    secret = "private_customer_token_7f45c0"  # pragma: allowlist secret
     cases = (
         (
             f"<{secret}><child></{secret}_other>".encode(),

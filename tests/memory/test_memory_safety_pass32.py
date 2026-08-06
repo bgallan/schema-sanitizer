@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from concurrent.futures import Future
@@ -13,6 +14,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
 
 _NATIVE_STUB_MODULES = (
     "schema_sanitizer.core_impl.native_options",

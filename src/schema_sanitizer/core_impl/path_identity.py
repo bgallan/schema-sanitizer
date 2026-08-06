@@ -50,6 +50,7 @@ _FORKED_PATH_GENERATIONS = 0
 _CLAIM_STABILIZATION_NS = 2_000_000_000
 _CLAIM_TEMP_STABILIZATION_NS = 300_000_000_000
 _RESOURCE_OPEN_ERRNOS = {errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.EACCES, errno.EPERM}
+_HAS_POSIX_PATH_AUTHORITY = os.name != "nt"
 
 
 def _close_identity_descriptor(descriptor: int) -> None:
@@ -1101,6 +1102,9 @@ def _open_identity_fd(path: str | Path) -> tuple[int | None, Any | None]:
     lease = acquire_file_descriptors(1)
     descriptor: int | None = None
     try:
+        if not _HAS_POSIX_PATH_AUTHORITY:
+            lease.release()
+            return None, None
         common = int(getattr(os, "O_CLOEXEC", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
         file_type = stat.S_IFMT(metadata.st_mode)
         path_flag = getattr(os, "O_PATH", None)
@@ -1196,6 +1200,19 @@ def _claim_from_metadata(
     """Claim the fstat identity without mutating a raced pathname."""
     admission = _acquire_path_claim_admission()
     try:
+        if not _HAS_POSIX_PATH_AUTHORITY:
+            identity = PathIdentity.from_stat(
+                metadata,
+                descriptor_owner=(
+                    _IdentityDescriptorOwner(descriptor, fd_lease)
+                    if descriptor is not None
+                    else None
+                ),
+                claim_admission=admission,
+                owns_claim=True,
+            )
+            admission.transfer()
+            return identity
         candidate = secrets.token_bytes(16)
         installed = descriptor is not None and _set_new_owner_marker(descriptor, candidate)
         marker = (
@@ -1285,7 +1302,7 @@ def lstat_identity(path: str | Path) -> PathIdentity | None:
         return None
     marker = _read_owner_marker(path)
     claim_path: str | None = None
-    if marker is None:
+    if marker is None and _HAS_POSIX_PATH_AUTHORITY:
         marker, claim_path = _read_external_claim(metadata)
     return PathIdentity.from_stat(metadata, owner_marker=marker, external_claim_path=claim_path)
 

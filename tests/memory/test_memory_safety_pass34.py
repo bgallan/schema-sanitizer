@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
+
 
 def test_observation_cannot_release_another_path_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

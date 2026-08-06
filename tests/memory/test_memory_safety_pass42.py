@@ -9,6 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
+
 
 def _delivery(module: object, governor: object, event: object) -> object:
     generation = governor._availability_events[event]

@@ -15,6 +15,10 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
+)
+
 _NATIVE_STUB_MODULES = (
     "schema_sanitizer.core_impl.native_options",
     "schema_sanitizer.core_impl.execution_policy",
