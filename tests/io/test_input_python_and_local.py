@@ -144,9 +144,12 @@ def test_native_python_rows_batch_encoder_checks_pending_signals() -> None:
 
     rows = [{"value": "x" * 256}] * 2_000_000
     signal.signal(signal.SIGALRM, raise_keyboard_interrupt)
-    signal.setitimer(signal.ITIMER_REAL, 0.01)
     try:
         with pytest.raises(KeyboardInterrupt):
+            # Arm the timer only after pytest owns the BaseException boundary.
+            # Coverage tracing can otherwise consume the entire short delay
+            # between setitimer() and entering the context manager.
+            signal.setitimer(signal.ITIMER_REAL, 0.01)
             _native.python_rows_jsonl_bytes(rows, 0, 1 << 30)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
