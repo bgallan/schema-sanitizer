@@ -8,6 +8,7 @@ from typing import Any
 from .memory_budget import memory_budget, normalize_memory_limit
 from .native_options import ThreadingMode, coerce_enum_member
 from .native_runtime import native_core as _native
+from .system_pressure import pressure_adjusted_target
 
 _FALLBACK_REASONS = {
     0: None,
@@ -81,6 +82,11 @@ def execution_policy(
             raise ValueError("available_cpus must be > 0")
         args += (available_cpus,)
     values = _native.execution_policy(*args)
+    if available_cpus is None and isinstance(values, tuple) and len(values) == 14:
+        detected = max(1, int(values[1]))
+        pressured = pressure_adjusted_target(detected)
+        if pressured < detected:
+            values = _native.execution_policy(int(mode.value), requested_memory, pressured)
     if not isinstance(values, tuple) or len(values) != 14:
         raise RuntimeError("native execution policy returned an invalid contract")
     (

@@ -8,16 +8,14 @@ from time import perf_counter, process_time
 from typing import Any
 
 from ..api_impl.input.preparation import prepare_public_input
-from ..api_impl.operation_context import (
-    OperationExecutionContext,
-    capture_operation_timestamps,
-)
+from ..api_impl.operation_context import OperationExecutionContext
 from ..api_impl.source_plan.preparation import source_plan_from_prepared_inputs
 from ..api_impl.source_plan.probing import probe_prepared_source_plan_registry
 from ..core_impl.execution import default_execution_context
 from ..core_impl.execution_policy import threading_mode_from_multi_threading
 from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.probes import options_for_schema_probe
+from ..core_impl.resource_lifecycle import _cleanup_with_note
 from ..core_impl.schema_registry import _normalize_registry_json
 from ..input_impl.directory_inputs import discovered_directory_input_context
 from ..input_impl.prepared import PreparedPublicInput
@@ -45,12 +43,6 @@ def last_warm_up_route() -> str:
     return _LAST_WARM_UP_ROUTE
 
 
-def _close_prepared_inputs(prepared_inputs: list[PreparedPublicInput]) -> None:
-    """Close prepared inputs in reverse ownership order."""
-    for prepared in reversed(prepared_inputs):
-        prepared.close()
-
-
 def prepare_schema_warm_up_input(
     plans: list[PartitionRunPlan],
     *,
@@ -64,6 +56,7 @@ def prepare_schema_warm_up_input(
     threading_mode: str = "single",
     _enable_parquet_native: bool = True,
     after_source_prepared: WarmUpProgressCallback | None = None,
+    operation_context: OperationExecutionContext | None = None,
 ) -> PreparedPublicInput:
     """Prepare warm-up sources as one native source plan."""
     if input_format not in SUPPORTED_WARM_UP_INPUT_FORMATS:
@@ -76,10 +69,16 @@ def prepare_schema_warm_up_input(
         raise ValueError("Schema warm-up requires at least one source partition")
 
     prepared_inputs: list[PreparedPublicInput] = []
-    operation_context = OperationExecutionContext(
-        threading_mode=threading_mode,
-        memory_limit_bytes=memory_limit_bytes,
+    source_plan: Any | None = None
+    operation_context = (
+        operation_context.fork()
+        if operation_context is not None
+        else OperationExecutionContext(
+            threading_mode=threading_mode,
+            memory_limit_bytes=memory_limit_bytes,
+        )
     )
+    owners_attached = False
     try:
         total = len(plans)
         for index, plan in enumerate(plans, start=1):
@@ -111,51 +110,66 @@ def prepare_schema_warm_up_input(
                     0.0,
                     wall_seconds,
                 )
-    except Exception:
-        _close_prepared_inputs(prepared_inputs)
-        operation_context.close()
-        raise
 
-    source_plan = None
-    if input_format != "parquet" or _enable_parquet_native:
-        source_plan = source_plan_from_prepared_inputs(
-            prepared_inputs,
-            input_format=input_format,
-            input_mode=input_mode,
-            xml_row_tag=xml_row_tag,
-            csv_delimiter=csv_delimiter,
-            csv_has_header=csv_has_header,
-            memory_limit_bytes=memory_limit_bytes,
-        )
-    if source_plan is None:
-        prepared_formats = sorted({prepared.format for prepared in prepared_inputs})
-        _close_prepared_inputs(prepared_inputs)
-        operation_context.close()
-        if input_format == "parquet":
-            raise ValueError(
-                "Parquet schema warm-up requires native Arrow-source probing; "
-                "ensure PyArrow is available and all Parquet sources have compatible schemas."
+        if input_format != "parquet" or _enable_parquet_native:
+            source_plan = source_plan_from_prepared_inputs(
+                prepared_inputs,
+                input_format=input_format,
+                input_mode=input_mode,
+                xml_row_tag=xml_row_tag,
+                csv_delimiter=csv_delimiter,
+                csv_has_header=csv_has_header,
+                memory_limit_bytes=memory_limit_bytes,
             )
-        raise ValueError(
-            "Schema warm-up sources must be native path-source compatible; "
-            "use UTF-8 text input and native-supported formats "
-            f"(got prepared formats {prepared_formats})."
+        if source_plan is None:
+            prepared_formats = sorted({prepared.format for prepared in prepared_inputs})
+            if input_format == "parquet":
+                raise ValueError(
+                    "Parquet schema warm-up requires native Arrow-source probing; "
+                    "ensure PyArrow is available and all Parquet sources have "
+                    "compatible schemas."
+                )
+            raise ValueError(
+                "Schema warm-up sources must be native path-source compatible; "
+                "use UTF-8 text input and native-supported formats "
+                f"(got prepared formats {prepared_formats})."
+            )
+        source_plan.close_items.append(operation_context)
+        source_plan.close_items.extend(prepared_inputs)
+        owners_attached = True
+        return PreparedPublicInput(
+            source_plan,
+            source_plan.input_format,
+            "source_plan",
+            keepalive=source_plan,
+            xml_row_tag=source_plan.xml_row_tag,
         )
-    source_plan.close_items.append(operation_context)
-    source_plan.close_items.extend(prepared_inputs)
-    return PreparedPublicInput(
-        source_plan,
-        source_plan.input_format,
-        "source_plan",
-        keepalive=source_plan,
-        xml_row_tag=source_plan.xml_row_tag,
-    )
+    except BaseException as exc:
+        if source_plan is not None:
+            _cleanup_with_note(
+                exc,
+                source_plan,
+                label="schema warm-up source-plan cleanup also failed",
+            )
+        if not owners_attached:
+            for prepared in reversed(prepared_inputs):
+                _cleanup_with_note(
+                    exc,
+                    prepared,
+                    label="schema warm-up prepared-input cleanup also failed",
+                )
+            _cleanup_with_note(
+                exc,
+                operation_context,
+                label="schema warm-up operation-context cleanup also failed",
+            )
+        raise
 
 
 def _warm_up_call_options(
     options: Mapping[str, Any],
     *,
-    detected_at: str,
+    operation_context: OperationExecutionContext,
 ) -> tuple[dict[str, Any], Any]:
     """Build additive probe options once for the warm-up workflow."""
     call_options_input = dict(options)
@@ -168,7 +182,8 @@ def _warm_up_call_options(
         call_options_input,
         attach_operation_detected_at(
             normalize_call_options_or_none(**options_for_schema_probe(call_options_input)),
-            detected_at,
+            operation_context.detected_at,
+            operation_context.memory_ledger,
         ),
     )
 
@@ -181,7 +196,7 @@ def _probe_prepared_warm_up_input(
     registry_json: str,
     native_registry_state: Any = None,
     field_name_policy: str,
-    detected_at: str,
+    operation_context: OperationExecutionContext,
 ) -> Any:
     """Probe one prepared warm-up input while carrying registry state forward."""
     effective_call_options = call_options
@@ -194,7 +209,8 @@ def _probe_prepared_warm_up_input(
         )
         effective_call_options = attach_operation_detected_at(
             effective_call_options,
-            detected_at,
+            operation_context.detected_at,
+            operation_context.memory_ledger,
         )
     if prepared_input.source != "source_plan":
         raise ValueError(f"Unsupported prepared schema warm-up source: {prepared_input.source!r}")
@@ -225,7 +241,7 @@ def _infer_partitioned_warm_up_state(
     after_source_prepared: WarmUpProgressCallback | None,
     after_partition_warmed: WarmUpProgressCallback | None,
     after_schema_drifts: WarmUpSchemaDriftCallback | None,
-    detected_at: str,
+    operation_context: OperationExecutionContext,
 ) -> SchemaRegistryState:
     """Probe partitions sequentially so each progress event has real CPU/I/O timing."""
     global _LAST_WARM_UP_ROUTE
@@ -248,23 +264,25 @@ def _infer_partitioned_warm_up_state(
             threading_mode=threading_mode_from_multi_threading(
                 options.get("multi_threading", False)
             ),
+            operation_context=operation_context,
         )
         preparation_seconds = plan.discovery_seconds + max(
             perf_counter() - preparation_started_at,
             0.0,
         )
-        if after_source_prepared is not None:
-            after_source_prepared(
-                index,
-                total,
-                plan,
-                preparation_seconds,
-                0.0,
-                preparation_seconds,
-            )
-
         probe_cpu_started_at = process_time()
+        primary_error: BaseException | None = None
         try:
+            if after_source_prepared is not None:
+                after_source_prepared(
+                    index,
+                    total,
+                    plan,
+                    preparation_seconds,
+                    0.0,
+                    preparation_seconds,
+                )
+
             probe = _probe_prepared_warm_up_input(
                 prepared_input,
                 call_options_input=call_options_input,
@@ -272,7 +290,7 @@ def _infer_partitioned_warm_up_state(
                 registry_json=current_registry_json,
                 native_registry_state=current_native_registry_state,
                 field_name_policy=field_name_policy,
-                detected_at=detected_at,
+                operation_context=operation_context,
             )
             raw = probe.raw
             current_registry_json = raw.schema_registry_json or current_registry_json
@@ -285,9 +303,19 @@ def _infer_partitioned_warm_up_state(
                     plan,
                     raw.schema_drifts_json or "[]",
                 )
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
             probe_cpu_seconds = max(process_time() - probe_cpu_started_at, 0.0)
-            prepared_input.close()
+            if primary_error is None:
+                prepared_input.close()
+            else:
+                _cleanup_with_note(
+                    primary_error,
+                    prepared_input,
+                    label="schema warm-up partition cleanup also failed",
+                )
 
         wall_seconds = plan.discovery_seconds + max(
             perf_counter() - partition_started_at,
@@ -332,56 +360,86 @@ def infer_warm_up_schema_registry_state(
         raise ValueError("Schema warm-up requires at least one source partition")
     options = dict(options)
     options["memory_limit_bytes"] = normalize_memory_limit(options.get("memory_limit_bytes"))
-    detected_at = capture_operation_timestamps().detected_at
-    call_options_input, call_options = _warm_up_call_options(
-        options,
-        detected_at=detected_at,
+    threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
+    operation_context = OperationExecutionContext(
+        threading_mode=threading_mode,
+        memory_limit_bytes=options["memory_limit_bytes"],
     )
-    registry_json = _normalize_registry_json(schema_registry)
-    if after_partition_warmed is not None or after_schema_drifts is not None:
-        return _infer_partitioned_warm_up_state(
+    operation_error: BaseException | None = None
+    try:
+        call_options_input, call_options = _warm_up_call_options(
+            options,
+            operation_context=operation_context,
+        )
+        registry_json = _normalize_registry_json(schema_registry)
+        if after_partition_warmed is not None or after_schema_drifts is not None:
+            return _infer_partitioned_warm_up_state(
+                plans,
+                input_format=input_format,
+                input_mode=input_mode,
+                options=options,
+                registry_json=registry_json,
+                field_name_policy=field_name_policy,
+                call_options_input=call_options_input,
+                call_options=call_options,
+                after_source_prepared=after_source_prepared,
+                after_partition_warmed=after_partition_warmed,
+                after_schema_drifts=after_schema_drifts,
+                operation_context=operation_context,
+            )
+        prepared_input = prepare_schema_warm_up_input(
             plans,
             input_format=input_format,
             input_mode=input_mode,
-            options=options,
-            registry_json=registry_json,
-            field_name_policy=field_name_policy,
-            call_options_input=call_options_input,
-            call_options=call_options,
+            input_text_encoding=str(options.get("input_text_encoding", "utf-8")),
+            xml_row_tag=options.get("xml_row_tag"),
+            csv_delimiter=str(options.get("csv_delimiter", ",")),
+            csv_has_header=bool(options.get("csv_has_header", True)),
+            memory_limit_bytes=options.get("memory_limit_bytes"),
+            threading_mode=threading_mode,
             after_source_prepared=after_source_prepared,
-            after_partition_warmed=after_partition_warmed,
-            after_schema_drifts=after_schema_drifts,
-            detected_at=detected_at,
+            operation_context=operation_context,
         )
-    prepared_input = prepare_schema_warm_up_input(
-        plans,
-        input_format=input_format,
-        input_mode=input_mode,
-        input_text_encoding=str(options.get("input_text_encoding", "utf-8")),
-        xml_row_tag=options.get("xml_row_tag"),
-        csv_delimiter=str(options.get("csv_delimiter", ",")),
-        csv_has_header=bool(options.get("csv_has_header", True)),
-        memory_limit_bytes=options.get("memory_limit_bytes"),
-        threading_mode=threading_mode_from_multi_threading(options.get("multi_threading", False)),
-        after_source_prepared=after_source_prepared,
-    )
-    try:
-        probe = _probe_prepared_warm_up_input(
-            prepared_input,
-            call_options_input=call_options_input,
-            call_options=call_options,
-            registry_json=registry_json,
-            field_name_policy=field_name_policy,
-            detected_at=detected_at,
-        )
-        raw = probe.raw
-        _LAST_WARM_UP_ROUTE = probe.route_name
-        return SchemaRegistryState(
-            schema_registry_json=raw.schema_registry_json or "{}",
-            native_registry_state=raw.native_registry_state,
-        )
+        prepared_error: BaseException | None = None
+        try:
+            probe = _probe_prepared_warm_up_input(
+                prepared_input,
+                call_options_input=call_options_input,
+                call_options=call_options,
+                registry_json=registry_json,
+                field_name_policy=field_name_policy,
+                operation_context=operation_context,
+            )
+            raw = probe.raw
+            _LAST_WARM_UP_ROUTE = probe.route_name
+            return SchemaRegistryState(
+                schema_registry_json=raw.schema_registry_json or "{}",
+                native_registry_state=raw.native_registry_state,
+            )
+        except BaseException as exc:
+            prepared_error = exc
+            raise
+        finally:
+            if prepared_error is None:
+                prepared_input.close()
+            else:
+                _cleanup_with_note(
+                    prepared_error,
+                    prepared_input,
+                    label="schema warm-up prepared-input cleanup also failed",
+                )
+    except BaseException as exc:
+        operation_error = exc
+        raise
     finally:
-        prepared_input.close()
+        if operation_error is None:
+            operation_context.close()
+        else:
+            _cleanup_with_note(
+                operation_error,
+                operation_context,
+                label="schema warm-up operation-context cleanup also failed",
+            )
 
 
 def infer_warm_up_schema_registry_json(

@@ -1,6 +1,7 @@
 // Provides bounded parallel preparation and ordered commit for text outputs.
 #pragma once
 
+#include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/memory/memory_pool.hh"
 #include "internal/memory/pool_resource.hh"
@@ -463,11 +464,9 @@ write_stream(ArrowArrayStream *stream, Output &output,
     const int next_rc = stream->get_next(stream, batch->get());
     if (next_rc != 0) {
       cancel_executor();
-      const char *detail =
-          stream->get_last_error ? stream->get_last_error(stream) : nullptr;
-      return sanitize::Status::IOError(
-          writer_name, ": get_next failed",
-          detail && *detail ? std::string(": ") + detail : std::string{});
+      return sanitize::internal::cdata_stream::status_from_stream_error(
+          next_rc, stream,
+          (std::string(writer_name) + ": get_next failed").c_str());
     }
     if (!batch->value().release) {
       break;

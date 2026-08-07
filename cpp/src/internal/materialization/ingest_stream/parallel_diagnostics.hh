@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 namespace sanitize::internal {
@@ -22,6 +23,10 @@ public:
   void record_direct(const ArrowArray *out, std::int64_t max_rows,
                      std::int64_t max_bytes, std::int64_t bytes) noexcept;
   void record_finished(const ArrowArray *out) noexcept;
+  void record_skipped_rows(std::int64_t rows) noexcept;
+  void merge_reader(const ReaderResourceDiagnostics &delta) const noexcept;
+  void record_cancellation(std::string_view reason) const noexcept;
+  void capture_operation_memory() const noexcept;
 
 private:
   std::shared_ptr<IngestDiagnostics> target_;

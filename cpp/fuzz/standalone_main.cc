@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -18,6 +19,12 @@
 #include <system_error>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <sys/resource.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
+
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size);
 
@@ -26,6 +33,8 @@ namespace {
 struct Options {
   std::size_t runs{1};
   std::size_t max_length{1U << 20U};
+  std::uint64_t max_input_ms{5000U};
+  std::uint64_t max_rss_mb{2048U};
   std::uint64_t seed{0x5A17'2026ULL};
   std::vector<std::filesystem::path> corpus_paths;
 };
@@ -68,8 +77,19 @@ struct Options {
     } else if (parse_option("-seed=", parsed) ||
                parse_option("--seed=", parsed)) {
       options.seed = parsed;
+    } else if (parse_option("-max_input_ms=", parsed) ||
+               parse_option("--max-input-ms=", parsed)) {
+      if (parsed == 0U) {
+        throw std::invalid_argument("fuzzer max input time must be positive");
+      }
+      options.max_input_ms = parsed;
+    } else if (parse_option("-max_rss_mb=", parsed) ||
+               parse_option("--max-rss-mb=", parsed)) {
+      options.max_rss_mb = parsed;
     } else if (argument == "--help" || argument == "-help=1") {
-      std::cout << "usage: fuzzer [-runs=N] [-seed=N] [-max_len=N] corpus...\n";
+      std::cout
+          << "usage: fuzzer [-runs=N] [-seed=N] [-max_len=N] "
+             "[-max_input_ms=N] [-max_rss_mb=N] corpus...\n";
       std::exit(0);
     } else if (!argument.empty() && argument.front() == '-') {
       throw std::invalid_argument("unsupported standalone fuzzer option: " +
@@ -79,6 +99,32 @@ struct Options {
     }
   }
   return options;
+}
+
+[[nodiscard]] std::uint64_t resident_bytes() noexcept {
+#if defined(__linux__)
+  std::ifstream statm("/proc/self/statm");
+  std::uint64_t total_pages = 0;
+  std::uint64_t resident_pages = 0;
+  if (!(statm >> total_pages >> resident_pages)) {
+    return 0;
+  }
+  const auto page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0 ||
+      resident_pages > std::numeric_limits<std::uint64_t>::max() /
+                           static_cast<std::uint64_t>(page_size)) {
+    return 0;
+  }
+  return resident_pages * static_cast<std::uint64_t>(page_size);
+#elif defined(__APPLE__)
+  rusage usage{};
+  if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss < 0) {
+    return 0;
+  }
+  return static_cast<std::uint64_t>(usage.ru_maxrss);
+#else
+  return 0;
+#endif
 }
 
 [[nodiscard]] std::vector<std::uint8_t>
@@ -240,7 +286,28 @@ int main(int argc, char **argv) {
       }
       const std::uint8_t empty_input = 0;
       const auto *data = input.empty() ? &empty_input : input.data();
+      const auto started = std::chrono::steady_clock::now();
       (void)LLVMFuzzerTestOneInput(data, input.size());
+      const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - started);
+      if (static_cast<std::uint64_t>(elapsed.count()) >
+          options.max_input_ms) {
+        std::cerr << "standalone fuzzer input time guard exceeded: run=" << run
+                  << " size=" << input.size()
+                  << " elapsed_ms=" << elapsed.count()
+                  << " limit_ms=" << options.max_input_ms << '\n';
+        return 3;
+      }
+      if (options.max_rss_mb > 0U) {
+        constexpr std::uint64_t kMiB = 1024U * 1024U;
+        const auto rss = resident_bytes();
+        if (rss > options.max_rss_mb * kMiB) {
+          std::cerr << "standalone fuzzer RSS guard exceeded: run=" << run
+                    << " size=" << input.size() << " rss_bytes=" << rss
+                    << " limit_bytes=" << options.max_rss_mb * kMiB << '\n';
+          return 4;
+        }
+      }
     }
     std::cout << "standalone fuzz runs completed: " << options.runs << '\n';
     return 0;

@@ -113,6 +113,98 @@ scale_window_value_bytes(std::int64_t full_bytes, std::int64_t selected_values,
   return estimated;
 }
 
+sanitize::Result<std::int64_t> native_reader_flat_column_window_buffer_bytes(
+    const ColumnChunkInfo &column, std::int64_t row_group_rows,
+    std::int64_t first_row, std::int64_t row_count) {
+  if (row_group_rows < 0 || first_row < 0 || row_count < 0 ||
+      first_row > row_group_rows || row_count > row_group_rows - first_row) {
+    return sanitize::Status::Invalid(
+        "Parquet native read plan: invalid column row window");
+  }
+  if (!column.native_read_plan_decoded) {
+    return std::int64_t{0};
+  }
+
+  std::int64_t total = 0;
+  auto value_first = first_row;
+  auto value_count = row_count;
+  for (const auto &layout : column.repeated_level_layouts) {
+    if (!layout.decoded || value_first < 0 || value_count < 0 ||
+        value_first > layout.row_count ||
+        value_count > layout.row_count - value_first ||
+        layout.offsets.size() !=
+            static_cast<std::size_t>(layout.row_count + 1)) {
+      return sanitize::Status::Invalid(
+          "Parquet native read plan: invalid repeated row window");
+    }
+    SAN_RETURN_NOT_OK(
+        add_i64_checked(&total, (value_count + 1) * 4,
+                        "row-window repeated offset buffer bytes"));
+    if (layout.null_count > 0) {
+      SAN_RETURN_NOT_OK(
+          add_i64_checked(&total, (value_count + 7) / 8,
+                          "row-window repeated validity buffer bytes"));
+    }
+    const auto first = layout.offsets[static_cast<std::size_t>(value_first)];
+    const auto last =
+        layout.offsets[static_cast<std::size_t>(value_first + value_count)];
+    if (first < 0 || last < first || last > layout.element_count) {
+      return sanitize::Status::Invalid(
+          "Parquet native read plan: invalid repeated window offsets");
+    }
+    value_first = first;
+    value_count = static_cast<std::int64_t>(last) - first;
+  }
+
+  const auto total_values = column.native_read_arrow_length;
+  if (total_values < 0 || value_first < 0 || value_count < 0 ||
+      value_first > total_values || value_count > total_values - value_first) {
+    return sanitize::Status::Invalid(
+        "Parquet native read plan: invalid leaf value window");
+  }
+  if (column.native_read_total_nulls > 0) {
+    SAN_RETURN_NOT_OK(add_i64_checked(&total, (value_count + 7) / 8,
+                                      "row-window validity bytes"));
+  }
+  switch (column.native_read_value_buffer_kind) {
+  case NativeValueBufferKind::bit_packed_boolean:
+    SAN_RETURN_NOT_OK(add_i64_checked(&total, (value_count + 7) / 8,
+                                      "row-window boolean bytes"));
+    break;
+  case NativeValueBufferKind::plain_byte_array:
+  case NativeValueBufferKind::dictionary_byte_array:
+  case NativeValueBufferKind::delta_length_byte_array: {
+    SAN_RETURN_NOT_OK(add_i64_checked(&total, (value_count + 1) * 4,
+                                      "row-window offset bytes"));
+    SAN_ASSIGN_OR_RAISE(
+        const auto estimated,
+        scale_window_value_bytes(column.native_read_materialized_value_bytes,
+                                 value_count, total_values));
+    SAN_RETURN_NOT_OK(
+        add_i64_checked(&total, estimated, "row-window value bytes"));
+    break;
+  }
+  case NativeValueBufferKind::fixed_width:
+  case NativeValueBufferKind::dictionary_fixed_width:
+  case NativeValueBufferKind::delta_binary_packed:
+  case NativeValueBufferKind::byte_stream_split: {
+    const auto width = column.native_read_value_width_bytes;
+    if (width < 0 ||
+        (width > 0 &&
+         value_count > std::numeric_limits<std::int64_t>::max() / width)) {
+      return sanitize::Status::Invalid(
+          "Parquet native read plan: row-window fixed-width overflow");
+    }
+    SAN_RETURN_NOT_OK(add_i64_checked(&total, value_count * width,
+                                      "row-window fixed-width bytes"));
+    break;
+  }
+  case NativeValueBufferKind::none:
+    break;
+  }
+  return total;
+}
+
 sanitize::Result<std::int64_t>
 native_reader_flat_window_buffer_bytes(const RowGroupInfo &row_group,
                                        std::int64_t first_row,
@@ -125,87 +217,11 @@ native_reader_flat_window_buffer_bytes(const RowGroupInfo &row_group,
   }
   std::int64_t total = 0;
   for (const auto &column : row_group.columns) {
-    if (!column.native_read_plan_decoded) {
-      continue;
-    }
-
-    auto value_first = first_row;
-    auto value_count = row_count;
-    for (const auto &layout : column.repeated_level_layouts) {
-      if (!layout.decoded || value_first < 0 || value_count < 0 ||
-          value_first > layout.row_count ||
-          value_count > layout.row_count - value_first ||
-          layout.offsets.size() !=
-              static_cast<std::size_t>(layout.row_count + 1)) {
-        return sanitize::Status::Invalid(
-            "Parquet native read plan: invalid repeated row window");
-      }
-      SAN_RETURN_NOT_OK(
-          add_i64_checked(&total, (value_count + 1) * 4,
-                          "row-window repeated offset buffer bytes"));
-      if (layout.null_count > 0) {
-        SAN_RETURN_NOT_OK(
-            add_i64_checked(&total, (value_count + 7) / 8,
-                            "row-window repeated validity buffer bytes"));
-      }
-      const auto first = layout.offsets[static_cast<std::size_t>(value_first)];
-      const auto last =
-          layout.offsets[static_cast<std::size_t>(value_first + value_count)];
-      if (first < 0 || last < first || last > layout.element_count) {
-        return sanitize::Status::Invalid(
-            "Parquet native read plan: invalid repeated window offsets");
-      }
-      value_first = first;
-      value_count = static_cast<std::int64_t>(last) - first;
-    }
-
-    const auto total_values = column.native_read_arrow_length;
-    if (total_values < 0 || value_first < 0 || value_count < 0 ||
-        value_first > total_values ||
-        value_count > total_values - value_first) {
-      return sanitize::Status::Invalid(
-          "Parquet native read plan: invalid leaf value window");
-    }
-    if (column.native_read_total_nulls > 0) {
-      SAN_RETURN_NOT_OK(add_i64_checked(&total, (value_count + 7) / 8,
-                                        "row-window validity bytes"));
-    }
-    switch (column.native_read_value_buffer_kind) {
-    case NativeValueBufferKind::bit_packed_boolean:
-      SAN_RETURN_NOT_OK(add_i64_checked(&total, (value_count + 7) / 8,
-                                        "row-window boolean bytes"));
-      break;
-    case NativeValueBufferKind::plain_byte_array:
-    case NativeValueBufferKind::dictionary_byte_array:
-    case NativeValueBufferKind::delta_length_byte_array: {
-      SAN_RETURN_NOT_OK(add_i64_checked(&total, (value_count + 1) * 4,
-                                        "row-window offset bytes"));
-      SAN_ASSIGN_OR_RAISE(
-          const auto estimated,
-          scale_window_value_bytes(column.native_read_materialized_value_bytes,
-                                   value_count, total_values));
-      SAN_RETURN_NOT_OK(
-          add_i64_checked(&total, estimated, "row-window value bytes"));
-      break;
-    }
-    case NativeValueBufferKind::fixed_width:
-    case NativeValueBufferKind::dictionary_fixed_width:
-    case NativeValueBufferKind::delta_binary_packed:
-    case NativeValueBufferKind::byte_stream_split: {
-      const auto width = column.native_read_value_width_bytes;
-      if (width < 0 ||
-          (width > 0 &&
-           value_count > std::numeric_limits<std::int64_t>::max() / width)) {
-        return sanitize::Status::Invalid(
-            "Parquet native read plan: row-window fixed-width overflow");
-      }
-      SAN_RETURN_NOT_OK(add_i64_checked(&total, value_count * width,
-                                        "row-window fixed-width bytes"));
-      break;
-    }
-    case NativeValueBufferKind::none:
-      break;
-    }
+    SAN_ASSIGN_OR_RAISE(const auto column_bytes,
+                        native_reader_flat_column_window_buffer_bytes(
+                            column, row_group.num_rows, first_row, row_count));
+    SAN_RETURN_NOT_OK(
+        add_i64_checked(&total, column_bytes, "row-window column bytes"));
   }
   return total;
 }

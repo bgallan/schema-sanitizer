@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -16,7 +17,50 @@ namespace {
 
 using sanitize::internal::OperationTaskArena;
 using sanitize::internal::TaskArenaLane;
+using sanitize::internal::TaskMemoryCharge;
 using sanitize::internal::TaskTelemetryKind;
+
+constexpr TaskMemoryCharge kProbeTaskCharge{256U};
+
+[[nodiscard]] bool
+retryable_probe_backpressure(const sanitize::Status &status) noexcept {
+  return status.code() == sanitize::StatusCode::kOutOfMemory &&
+         status.message().find("capacity exhausted") != std::string::npos;
+}
+
+template <typename Callable>
+sanitize::Status
+submit_probe_task_until(OperationTaskArena &arena, const Callable &task,
+                        const sanitize::internal::TaskArenaSubmissionPlan &plan,
+                        TaskTelemetryKind telemetry_kind,
+                        std::chrono::steady_clock::time_point deadline) {
+  for (;;) {
+    auto status = arena.SubmitCharged(OperationTaskArena::Task(task), plan,
+                                      kProbeTaskCharge, telemetry_kind);
+    if (status.ok() || !retryable_probe_backpressure(status) ||
+        std::chrono::steady_clock::now() >= deadline) {
+      return status;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+}
+
+template <typename Callable>
+sanitize::Status submit_probe_task_until(
+    OperationTaskArena &arena, const Callable &task, std::size_t lane_width,
+    TaskArenaLane lane, std::chrono::steady_clock::time_point deadline,
+    TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther) {
+  for (;;) {
+    auto status =
+        arena.SubmitCharged(OperationTaskArena::Task(task), lane_width, lane,
+                            kProbeTaskCharge, telemetry_kind);
+    if (status.ok() || !retryable_probe_backpressure(status) ||
+        std::chrono::steady_clock::now() >= deadline) {
+      return status;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+}
 
 void release_gate(std::atomic<bool> *gate) noexcept {
   gate->store(true, std::memory_order_release);
@@ -96,16 +140,20 @@ PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
           if (!wait_gate_or_stop(&release_producers, stop)) {
             return;
           }
+          const auto admission_deadline =
+              std::chrono::steady_clock::now() + std::chrono::seconds(15);
           for (std::size_t task_index = 0; task_index < per_producer;
                ++task_index) {
-            auto status = arena->Submit(
+            const auto task =
                 [&tasks_finished](std::size_t,
                                   sanitize::internal::StopToken task_stop) {
                   if (!task_stop.stop_requested()) {
                     tasks_finished.fetch_add(1, std::memory_order_release);
                   }
-                },
-                plan, TaskTelemetryKind::kOther);
+                };
+            auto status = submit_probe_task_until(*arena, task, plan,
+                                                  TaskTelemetryKind::kOther,
+                                                  admission_deadline);
             if (!status.ok()) {
               submit_failed.store(true, std::memory_order_release);
               return;
@@ -204,10 +252,16 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
     (void)wait_gate_or_stop(&release_blockers, stop);
     blockers_finished.fetch_add(1, std::memory_order_release);
   };
+  const auto blocker_admission_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(15);
   for (std::size_t index = 0; index < blockers_per_lane; ++index) {
-    auto status = arena->Submit(blocker, half, TaskArenaLane::kUpstream);
+    auto status =
+        submit_probe_task_until(*arena, blocker, half, TaskArenaLane::kUpstream,
+                                blocker_admission_deadline);
     if (status.ok()) {
-      status = arena->Submit(blocker, half, TaskArenaLane::kOutput);
+      status =
+          submit_probe_task_until(*arena, blocker, half, TaskArenaLane::kOutput,
+                                  blocker_admission_deadline);
     }
     if (!status.ok()) {
       release_gate(&release_blockers);
@@ -231,13 +285,17 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
     }
   };
   const auto started_at = std::chrono::steady_clock::now();
+  const auto work_admission_deadline = started_at + std::chrono::seconds(15);
   for (int round = 0; round < rounds; ++round) {
-    auto status = arena->Submit(work, half, TaskArenaLane::kUpstream);
+    auto status = submit_probe_task_until(
+        *arena, work, half, TaskArenaLane::kUpstream, work_admission_deadline);
     if (status.ok()) {
-      status = arena->Submit(work, half, TaskArenaLane::kOutput);
+      status = submit_probe_task_until(
+          *arena, work, half, TaskArenaLane::kOutput, work_admission_deadline);
     }
     if (status.ok()) {
-      status = arena->Submit(work, workers, TaskArenaLane::kAll);
+      status = submit_probe_task_until(
+          *arena, work, workers, TaskArenaLane::kAll, work_admission_deadline);
     }
     if (!status.ok()) {
       release_gate(&release_blockers);

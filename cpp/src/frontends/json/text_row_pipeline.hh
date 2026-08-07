@@ -23,6 +23,12 @@ class JsonOnDemandDoc;
 [[nodiscard]] bool
 parallel_json_row_frontend_enabled(const sanitize::Options &options) noexcept;
 
+// Safety ceilings are operation-fatal even when row-level recovery is enabled.
+// This prevents skip_row/emit_null_row from turning resource-amplification
+// attacks into silently accepted input.
+[[nodiscard]] bool
+json_error_exceeds_hard_safety_limit(const sanitize::Status &status) noexcept;
+
 // Derives the operation-wide top-level JSON token allowance from the single
 // public memory limit. The returned count is shared across validation packets.
 [[nodiscard]] std::size_t

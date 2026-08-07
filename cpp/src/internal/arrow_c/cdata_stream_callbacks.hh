@@ -15,6 +15,9 @@ namespace sanitize::internal::cdata_stream {
 sanitize::Status status_from_current_exception(const char *where);
 // Maps a status to the errno convention used by Arrow C Stream callbacks.
 int errno_for_status(const sanitize::Status &st) noexcept;
+// Preserves an inner Arrow C Stream error code and diagnostic as a Status.
+sanitize::Status status_from_stream_error(int error, ArrowArrayStream *stream,
+                                          const char *where);
 // Releases an ArrowSchema while suppressing callback exceptions.
 void release_schema_nothrow(ArrowSchema *schema) noexcept;
 // Releases an ArrowArray while suppressing callback exceptions.

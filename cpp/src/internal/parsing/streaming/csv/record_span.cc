@@ -51,7 +51,10 @@ CsvRecordSpanScanner::CsvRecordSpanScanner(CsvStreamingScanner &scanner,
 sanitize::Result<TextSlice> CsvRecordSpanScanner::scan() {
   const char *line_break_data = nullptr;
   std::size_t next_line_break = std::string_view::npos;
-  bool vector_scan = scanner_.prefer_vector_scan_;
+  // Escaped quotes require state across chunk boundaries. Keep that opt-in
+  // dialect on the scalar path; the strict default retains vector scanning.
+  bool vector_scan =
+      scanner_.escape_char_ == '\0' && scanner_.prefer_vector_scan_;
   unsigned short_quote_run = 0;
   for (;;) {
     TextSlice eof_record;
@@ -68,6 +71,18 @@ sanitize::Result<TextSlice> CsvRecordSpanScanner::scan() {
       const char *const data_ptr = scanner_.chunk_.data.data();
       while (scanner_.pos_ < scanner_.chunk_.data.size()) {
         const char current = scanner_.chunk_.data[scanner_.pos_];
+        if (in_quotes_ && scanner_.escape_char_ != '\0') {
+          if (escape_pending_) {
+            escape_pending_ = false;
+            ++scanner_.pos_;
+            continue;
+          }
+          if (current == scanner_.escape_char_) {
+            escape_pending_ = true;
+            ++scanner_.pos_;
+            continue;
+          }
+        }
         if (current == '"') {
           SAN_RETURN_NOT_OK(handle_quote());
           if (scanner_.chunk_.data.data() != data_ptr) {
@@ -137,6 +152,11 @@ CsvRecordSpanScanner::finish_newline_record(char current) {
     if (!record.empty() && record.back() == '\r') {
       record.remove_suffix(1);
     }
+    if (record.size() > scanner_.max_record_bytes_) {
+      return sanitize::Status::OutOfMemory(
+          "CSV raw record size exceeds effective operation limit: ",
+          record.size(), " > ", scanner_.max_record_bytes_);
+    }
     scanner_.prefer_vector_scan_ = record.size() >= kCsvVectorScanMinimum;
     consume_newline(current);
     return make_text_slice(record, record_start_abs_, record_owner_,
@@ -153,10 +173,22 @@ CsvRecordSpanScanner::finish_newline_record(char current) {
 }
 
 sanitize::Result<TextSlice> CsvRecordSpanScanner::finish_eof_record() {
+  if (in_quotes_) {
+    return sanitize::Status::Invalid(
+        "CSV parse error at byte ",
+        opening_quote_abs_ == std::string_view::npos ? record_start_abs_
+                                                     : opening_quote_abs_,
+        ": unterminated quoted field at end of file");
+  }
   if (!multi_) {
     std::string_view record = scanner_.chunk_.data.substr(record_start_pos_);
     if (!record.empty() && record.back() == '\r') {
       record.remove_suffix(1);
+    }
+    if (record.size() > scanner_.max_record_bytes_) {
+      return sanitize::Status::OutOfMemory(
+          "CSV raw record size exceeds effective operation limit: ",
+          record.size(), " > ", scanner_.max_record_bytes_);
     }
     scanner_.prefer_vector_scan_ = record.size() >= kCsvVectorScanMinimum;
     scanner_.pos_ = scanner_.chunk_.data.size();
@@ -189,6 +221,7 @@ sanitize::Status CsvRecordSpanScanner::handle_chunk_end(TextSlice *out,
 
 sanitize::Status CsvRecordSpanScanner::handle_quote() {
   if (!in_quotes_) {
+    opening_quote_abs_ = scanner_.chunk_.base_offset + scanner_.pos_;
     in_quotes_ = true;
     ++scanner_.pos_;
     return sanitize::Status::OK();
@@ -209,10 +242,13 @@ sanitize::Status CsvRecordSpanScanner::handle_quote() {
     if (!scanner_.chunk_.data.empty() && scanner_.chunk_.data[0] == '"') {
       in_quotes_ = true;
       scanner_.pos_ = 1;
+    } else {
+      opening_quote_abs_ = std::string_view::npos;
     }
     return sanitize::Status::OK();
   }
   in_quotes_ = false;
+  opening_quote_abs_ = std::string_view::npos;
   ++scanner_.pos_;
   return sanitize::Status::OK();
 }

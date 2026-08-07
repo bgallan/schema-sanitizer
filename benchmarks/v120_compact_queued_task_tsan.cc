@@ -68,15 +68,19 @@ namespace {
     return false;
   }
 
-  constexpr std::size_t kTasksPerPlan = 512U;
   const std::array<const sanitize::internal::TaskArenaSubmissionPlan *, 4>
       plans{&upstream, &compact, &output, &all};
+  // Keep the saturation probe inside the arena's explicit admission bound.
+  // All blockers are already active, so the entire queue budget is available
+  // to these four producers without relying on rejected submissions.
+  const auto tasks_per_plan = std::max<std::size_t>(
+      16U, arena->queue_capacity() / plans.size());
   const std::array<std::size_t, 4> widths{
       upstream_width, compact_width, output_width, workers};
   std::array<std::jthread, 4> producers;
   for (std::size_t producer = 0; producer < producers.size(); ++producer) {
     producers[producer] = std::jthread([&, producer] {
-      for (std::size_t ordinal = 0; ordinal < kTasksPerPlan; ++ordinal) {
+      for (std::size_t ordinal = 0; ordinal < tasks_per_plan; ++ordinal) {
         const auto status = arena->Submit(
             [&, producer](std::size_t relative, std::stop_token) {
               if (relative >= widths[producer]) {
@@ -99,8 +103,8 @@ namespace {
   }
 
   release.store(true, std::memory_order_release);
-  constexpr auto kQueuedTasks = kTasksPerPlan * 4U;
-  const auto expected = workers + kQueuedTasks;
+  const auto queued_tasks = tasks_per_plan * plans.size();
+  const auto expected = workers + queued_tasks;
   if (!WaitFor([&] {
         return completed.load(std::memory_order_acquire) == expected &&
                arena->active_tasks() == 0U && arena->queued_tasks() == 0U;

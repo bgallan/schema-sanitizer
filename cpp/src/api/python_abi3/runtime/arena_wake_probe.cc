@@ -4,6 +4,7 @@
 #include "internal/runtime/operation_task_arena.hh"
 
 #include "internal/runtime/thread_compat.hh"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -100,7 +101,13 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
       work_finished.fetch_add(1, std::memory_order_release);
     }
   };
-  for (int index = 0; index < rounds; ++index) {
+  // Keep the deliberately blocked preload inside the production queue bound.
+  // The probe predates bounded admission and must not require an unbounded
+  // queue merely to observe wake coalescing.
+  const auto preload_batch = std::max<std::size_t>(
+      1U, std::min<std::size_t>(static_cast<std::size_t>(rounds),
+                                arena->queue_capacity() / 2U));
+  for (std::size_t index = 0; index < preload_batch; ++index) {
     const auto status = arena->Submit(work, workers, TaskArenaLane::kAll);
     if (!status.ok()) {
       release_blockers.store(true, std::memory_order_release);
@@ -111,14 +118,35 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
   const auto wake_after_preload = arena->wake_epoch_publishes();
   release_blockers.store(true, std::memory_order_release);
 
-  const auto preload_target = static_cast<std::size_t>(rounds);
   const auto preload_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(20);
-  if (!wait_for_count(work_finished, preload_target, preload_deadline) ||
+  if (!wait_for_count(work_finished, preload_batch, preload_deadline) ||
       !wait_for_count(blockers_finished, workers, preload_deadline) ||
       !wait_for_arena_idle(arena, preload_deadline)) {
     PyErr_SetString(PyExc_RuntimeError, "wake probe preload did not drain");
     return nullptr;
+  }
+
+  // Feed the rest in bounded batches after workers are available. This keeps
+  // the original workload and telemetry assertions without bypassing the
+  // queue's global memory/admission contract.
+  const auto preload_target = static_cast<std::size_t>(rounds);
+  for (std::size_t submitted = preload_batch; submitted < preload_target;) {
+    const auto batch = std::min(preload_batch, preload_target - submitted);
+    for (std::size_t index = 0; index < batch; ++index) {
+      const auto status = arena->Submit(work, workers, TaskArenaLane::kAll);
+      if (!status.ok()) {
+        PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
+        return nullptr;
+      }
+    }
+    submitted += batch;
+    if (!wait_for_count(work_finished, submitted, preload_deadline) ||
+        !wait_for_arena_idle(arena, preload_deadline)) {
+      PyErr_SetString(PyExc_RuntimeError,
+                      "wake probe bounded preload did not drain");
+      return nullptr;
+    }
   }
 
   const auto tasks_per_wave = workers * 2U;

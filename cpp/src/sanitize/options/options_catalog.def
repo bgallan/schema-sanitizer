@@ -113,6 +113,13 @@ SCHEMA_SANITIZER_OPTION(bool, csv_has_header, true, "csv",
                         "If true, treat the first CSV row as a header.")
 SCHEMA_SANITIZER_OPTION(std::string, csv_delimiter, std::string(","), "csv",
                         "CSV delimiter string (usually a single character).")
+SCHEMA_SANITIZER_OPTION(
+    std::string, csv_escape_char, std::string(""), "csv",
+    "Optional one-byte escape character inside quoted CSV fields. Empty "
+    "keeps strict RFC-style doubled-quote escaping only.")
+SCHEMA_SANITIZER_OPTION(
+    std::string, csv_header_mode, std::string("exact"), "csv",
+    "CSV multi-source header reconciliation mode: exact or union.")
 
 // --- Errors
 SCHEMA_SANITIZER_OPTION(sanitize::OnErrorPolicy, on_error,

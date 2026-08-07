@@ -20,8 +20,10 @@ struct TransparentStringHash {
   }
 
   // Hashes an owned string identically to a borrowed string.
-  [[nodiscard]] std::size_t
-  operator()(const std::string &value) const noexcept {
+  template <class Allocator>
+  [[nodiscard]] std::size_t operator()(
+      const std::basic_string<char, std::char_traits<char>, Allocator> &value)
+      const noexcept {
     return (*this)(std::string_view(value));
   }
 

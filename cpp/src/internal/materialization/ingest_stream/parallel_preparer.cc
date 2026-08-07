@@ -31,16 +31,9 @@ namespace {
 
 void merge_packet_diagnostics(IngestDiagnostics *target,
                               const IngestDiagnostics &delta) noexcept {
-  target->inferred_rows += delta.inferred_rows;
-  target->inferred_bytes += delta.inferred_bytes;
-  target->arrow_schema_depth += delta.arrow_schema_depth;
-  target->parquet_schema_depth += delta.parquet_schema_depth;
-  target->materialized_rows += delta.materialized_rows;
-  target->batches += delta.batches;
-  target->flattened_fields += delta.flattened_fields;
-  target->scalar_wrappings += delta.scalar_wrappings;
-  target->direct_arrow_input += delta.direct_arrow_input;
-  target->skipped_rows += delta.skipped_rows;
+  if (target) {
+    target->merge(delta);
+  }
 }
 
 } // namespace

@@ -79,11 +79,13 @@ class TranscodingPathByteReader(BufferedGeneratedBytesReader):
         self.seek(0)
 
     def _close_stream(self) -> None:
-        """Close the current binary source stream."""
+        """Close the current binary source stream without losing failed ownership."""
         stream = self._stream
-        self._stream = None
-        if stream is not None:
-            stream.close()
+        if stream is None:
+            return
+        stream.close()
+        if self._stream is stream:
+            self._stream = None
 
     def _open_stream(self) -> None:
         """Open the binary path source and reset decoder state."""

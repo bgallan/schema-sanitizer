@@ -10,6 +10,7 @@
 #include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/planning/plan_compile.hh"
 #include "internal/planning/schema_evolution.hh"
+#include "internal/runtime/process_identity.hh"
 #include "schema_registry/schema_registry_internal.hh"
 
 namespace core_abi3_internal {
@@ -23,6 +24,9 @@ struct NativeRegistryStateCapsule {
 };
 
 void native_registry_state_capsule_destructor(PyObject *capsule) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   auto *state = static_cast<NativeRegistryStateCapsule *>(
       PyCapsule_GetPointer(capsule, kNativeRegistryStateCapsuleName));
   if (!state) {

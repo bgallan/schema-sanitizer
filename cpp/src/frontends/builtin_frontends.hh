@@ -7,6 +7,8 @@
 #include "sanitize/options/options.hh"
 
 #include <memory>
+
+#include "frontends/csv/source_projection.hh"
 #include <string>
 #include <vector>
 
@@ -15,7 +17,9 @@ namespace sanitize::internal {
 class OperationTaskArena;
 
 // Creates the built-in CSV frontend.
-FrontendHandle make_csv_frontend(ChunkSourcePtr csv, const Options &options);
+FrontendHandle
+make_csv_frontend(ChunkSourcePtr csv, const Options &options,
+                  CsvSourceProjectionSetPtr source_projections = nullptr);
 
 // Creates the built-in JSON frontend.
 FrontendHandle make_json_frontend(ChunkSourcePtr json, const Options &options);

@@ -6,6 +6,7 @@
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/options_schema_serialization.hh"
+#include "internal/runtime/process_identity.hh"
 
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,9 @@ namespace {
 constexpr const char *kArrowSchemaCapsuleName = "arrow_schema";
 
 void arrow_schema_capsule_destructor(PyObject *capsule) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   auto *schema = static_cast<ArrowSchema *>(
       PyCapsule_GetPointer(capsule, kArrowSchemaCapsuleName));
   if (!schema) {

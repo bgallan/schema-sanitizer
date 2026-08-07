@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from schema_sanitizer.core_impl.error_translation import call_core
+from schema_sanitizer.core_impl.error_translation import call_core, reader_error_context
 from schema_sanitizer.core_impl.execution_policy import normalize_threading_mode
 from schema_sanitizer.core_impl.generated_metadata import (
     SCHEMA_DRIFTS_COLUMN,
@@ -292,6 +292,7 @@ def _write_registry_file(
             all_row_columns=all_row_columns or {},
             row_span_columns=row_span_columns or {},
             timestamp_columns=timestamp_columns,
+            error_context=reader_error_context(plan.format, plan.source, plan.data),
         )
         return write_registry_raw_stream_to_file(
             raw,

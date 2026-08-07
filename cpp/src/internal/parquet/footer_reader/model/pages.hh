@@ -53,6 +53,8 @@ struct PageHeaderInfo {
   std::int32_t uncompressed_page_size = 0;
   bool has_compressed_page_size = false;
   std::int32_t compressed_page_size = 0;
+  bool has_crc = false;
+  std::uint32_t crc = 0;
   bool has_num_values = false;
   std::int32_t num_values = 0;
   bool has_value_encoding = false;

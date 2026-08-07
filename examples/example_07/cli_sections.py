@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from schema_sanitizer.integrations.bigquery import (
+from schema_sanitizer.integrations.bigquery.advanced import (
     parse_hive_partition_column as _parse_hive_partition_column_value,
 )
 

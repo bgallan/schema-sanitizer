@@ -3,9 +3,11 @@
 class TrackingMemoryPool final : public MemoryPool {
 public:
   TrackingMemoryPool(std::shared_ptr<MemoryPool> parent, int64_t limit,
-                     std::string backend_name, bool thread_safe_registry)
+                     std::string backend_name, bool thread_safe_registry,
+                     std::shared_ptr<OperationMemoryLedger> operation_ledger)
       : parent_(std::move(parent)), limit_(limit),
         backend_name_(std::move(backend_name)),
+        operation_ledger_(std::move(operation_ledger)),
         live_allocations_(thread_safe_registry) {}
 
   sanitize::Status Allocate(int64_t size, int64_t alignment,
@@ -41,15 +43,28 @@ public:
       return sanitize::Status::OutOfMemory("Allocate: size overflow");
     }
     const auto quota_charge = static_cast<int64_t>(total_size);
+    if (operation_ledger_) {
+      auto ledger_status =
+          operation_ledger_->ReserveNative(quota_charge, "native_reader");
+      if (!ledger_status.ok()) {
+        return ledger_status;
+      }
+    }
     auto charged = charged_bytes_.load(std::memory_order_relaxed);
     for (;;) {
       if (charged > std::numeric_limits<int64_t>::max() - quota_charge) {
+        if (operation_ledger_) {
+          operation_ledger_->ReleaseNative(quota_charge);
+        }
         return sanitize::Status::OutOfMemory(
             "memory quota accounting overflow");
       }
       const auto next = charged + quota_charge;
       const auto limit = limit_.load(std::memory_order_relaxed);
       if (limit > 0 && next > limit) {
+        if (operation_ledger_) {
+          operation_ledger_->ReleaseNative(quota_charge);
+        }
         return sanitize::Status::OutOfMemory(
             "memory_limit_bytes limit exceeded including allocator overhead: ",
             next, " bytes > ", limit, " bytes");
@@ -57,6 +72,7 @@ public:
       if (charged_bytes_.compare_exchange_weak(charged, next,
                                                std::memory_order_relaxed,
                                                std::memory_order_relaxed)) {
+        update_peak(&max_charged_bytes_, next);
         break;
       }
     }
@@ -65,6 +81,9 @@ public:
     for (;;) {
       if (current > std::numeric_limits<int64_t>::max() - size) {
         charged_bytes_.fetch_sub(quota_charge, std::memory_order_relaxed);
+        if (operation_ledger_) {
+          operation_ledger_->ReleaseNative(quota_charge);
+        }
         return sanitize::Status::OutOfMemory("memory accounting overflow");
       }
       const auto next = current + size;
@@ -84,6 +103,9 @@ public:
     if (!status.ok()) {
       bytes_allocated_.fetch_sub(size, std::memory_order_relaxed);
       charged_bytes_.fetch_sub(quota_charge, std::memory_order_relaxed);
+      if (operation_ledger_) {
+        operation_ledger_->ReleaseNative(quota_charge);
+      }
       return status;
     }
     const auto base = reinterpret_cast<std::uintptr_t>(upstream) +
@@ -111,6 +133,9 @@ public:
                     upstream_alignment);
       bytes_allocated_.fetch_sub(size, std::memory_order_relaxed);
       charged_bytes_.fetch_sub(quota_charge, std::memory_order_relaxed);
+      if (operation_ledger_) {
+        operation_ledger_->ReleaseNative(quota_charge);
+      }
       *out = nullptr;
       return sanitize::Status::OutOfMemory(
           "Allocate: unable to register hardened allocation ownership");
@@ -178,15 +203,20 @@ public:
     header->upstream = nullptr;
     bytes_allocated_.fetch_sub(requested_size, std::memory_order_relaxed);
     charged_bytes_.fetch_sub(upstream_size, std::memory_order_relaxed);
+    if (operation_ledger_) {
+      operation_ledger_->ReleaseNative(upstream_size);
+    }
     allocation_count_.fetch_sub(1, std::memory_order_relaxed);
     parent_->Free(upstream, upstream_size, upstream_alignment);
   }
 
   [[nodiscard]] int64_t bytes_allocated() const override {
-    return bytes_allocated_.load(std::memory_order_relaxed);
+    return operation_ledger_ ? operation_ledger_->bytes_reserved()
+                             : bytes_allocated_.load(std::memory_order_relaxed);
   }
   [[nodiscard]] int64_t max_memory() const override {
-    return max_memory_.load(std::memory_order_relaxed);
+    return operation_ledger_ ? operation_ledger_->peak_bytes_reserved()
+                             : max_memory_.load(std::memory_order_relaxed);
   }
   [[nodiscard]] int64_t allocation_count() const override {
     return allocation_count_.load(std::memory_order_relaxed);
@@ -203,6 +233,61 @@ public:
   [[nodiscard]] int64_t limit_bytes() const override {
     return limit_.load(std::memory_order_relaxed);
   }
+  sanitize::Status ReserveExternal(int64_t bytes,
+                                   std::string_view stage) override {
+    if (bytes < 0) {
+      return sanitize::Status::Invalid(
+          "process resident memory reservation is negative");
+    }
+    if (bytes == 0) {
+      return sanitize::Status::OK();
+    }
+    auto charged = charged_bytes_.load(std::memory_order_relaxed);
+    for (;;) {
+      if (charged > std::numeric_limits<int64_t>::max() - bytes) {
+        return sanitize::Status::OutOfMemory(
+            "process resident memory accounting overflow");
+      }
+      const auto next = charged + bytes;
+      const auto limit = limit_.load(std::memory_order_relaxed);
+      if (limit > 0 && next > limit) {
+        if (stage.empty()) {
+          return sanitize::Status::OutOfMemory(
+              "process resident memory limit exceeded: ", next, " bytes > ",
+              limit, " bytes");
+        }
+        return sanitize::Status::OutOfMemory(
+            "process resident memory limit exceeded during ", stage, ": ", next,
+            " bytes > ", limit, " bytes");
+      }
+      if (charged_bytes_.compare_exchange_weak(charged, next,
+                                               std::memory_order_relaxed,
+                                               std::memory_order_relaxed)) {
+        update_peak(&max_charged_bytes_, next);
+        return sanitize::Status::OK();
+      }
+    }
+  }
+  void ReleaseExternal(int64_t bytes) noexcept override {
+    if (bytes <= 0) {
+      return;
+    }
+    auto charged = charged_bytes_.load(std::memory_order_relaxed);
+    for (;;) {
+      const auto next = std::max<int64_t>(0, charged - bytes);
+      if (charged_bytes_.compare_exchange_weak(charged, next,
+                                               std::memory_order_relaxed,
+                                               std::memory_order_relaxed)) {
+        return;
+      }
+    }
+  }
+  [[nodiscard]] int64_t resident_bytes() const override {
+    return charged_bytes_.load(std::memory_order_relaxed);
+  }
+  [[nodiscard]] int64_t peak_resident_bytes() const override {
+    return max_charged_bytes_.load(std::memory_order_relaxed);
+  }
   void SetLimit(int64_t limit) noexcept override {
     limit_.store(std::max<int64_t>(1, limit), std::memory_order_relaxed);
   }
@@ -217,9 +302,11 @@ private:
   std::shared_ptr<MemoryPool> parent_;
   std::atomic<int64_t> limit_{-1};
   std::string backend_name_;
+  std::shared_ptr<OperationMemoryLedger> operation_ledger_;
   std::atomic<int64_t> bytes_allocated_{0};
   std::atomic<int64_t> charged_bytes_{0};
   std::atomic<int64_t> max_memory_{0};
+  std::atomic<int64_t> max_charged_bytes_{0};
   std::atomic<int64_t> allocation_count_{0};
   std::atomic<int64_t> invalid_free_count_{0};
   std::atomic<int64_t> size_mismatch_count_{0};

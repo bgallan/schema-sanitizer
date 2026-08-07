@@ -2,9 +2,14 @@
 
 class CompactReader {
 public:
-  explicit CompactReader(std::string_view data)
+  explicit CompactReader(std::string_view data,
+                         std::size_t materialized_limit = 0)
       : data_(data),
-        materialized_limit_(metadata_materialization_limit(data.size())) {}
+        materialized_limit_(
+            materialized_limit == 0
+                ? metadata_materialization_limit(data.size())
+                : std::min(metadata_materialization_limit(data.size()),
+                           materialized_limit)) {}
 
   sanitize::Result<std::uint8_t> read_byte();
   sanitize::Result<std::uint64_t> read_varint();

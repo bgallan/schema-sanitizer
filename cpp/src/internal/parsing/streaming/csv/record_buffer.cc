@@ -12,11 +12,13 @@ sanitize::Status CsvRecordSpanScanner::push_segment(std::size_t end_pos) {
   }
   std::string_view part = scanner_.chunk_.data.substr(
       segment_start_pos_, end_pos - segment_start_pos_);
-  if (part.size() > kMaxCsvRecordBytes ||
-      total_bytes_ > kMaxCsvRecordBytes - part.size()) {
-    return sanitize::Status::Invalid("CSV record exceeds max buffered size");
+  if (part.size() > scanner_.max_record_bytes_ ||
+      total_bytes_ > scanner_.max_record_bytes_ - part.size()) {
+    return sanitize::Status::OutOfMemory(
+        "CSV raw record size exceeds effective operation limit: ",
+        scanner_.max_record_bytes_);
   }
-  if (scanner_.segments_.size() >= kMaxCsvRecordSegments) {
+  if (scanner_.segments_.size() >= scanner_.max_record_segments_) {
     return sanitize::Status::Invalid("CSV record spans too many input chunks");
   }
   total_bytes_ += part.size();

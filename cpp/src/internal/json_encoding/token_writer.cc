@@ -4,8 +4,14 @@
 
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#if defined(__APPLE__)
+#include <limits>
+#include <locale>
+#include <sstream>
+#endif
 #include <string>
 #include <string_view>
 
@@ -106,6 +112,36 @@ void append_int_field(std::string &out, bool &first, std::string_view key,
     return;
   }
   out += std::to_string(value);
+}
+
+void append_double_field(std::string &out, bool &first, std::string_view key,
+                         double value) {
+  append_key(out, first, key);
+  if (!std::isfinite(value)) {
+    out += "0";
+    return;
+  }
+#if defined(__APPLE__)
+  // Floating-point to_chars is unavailable before macOS 13.3. The project
+  // supports macOS 11, so use a locale-independent round-trip representation.
+  std::ostringstream stream;
+  stream.imbue(std::locale::classic());
+  stream.precision(std::numeric_limits<double>::max_digits10);
+  stream << value;
+  if (stream) {
+    out += stream.str();
+    return;
+  }
+#else
+  std::array<char, 64> buffer{};
+  auto [ptr, ec] = std::to_chars(buffer.data(), buffer.data() + buffer.size(),
+                                 value, std::chars_format::general);
+  if (ec == std::errc()) {
+    out.append(buffer.data(), static_cast<std::size_t>(ptr - buffer.data()));
+    return;
+  }
+#endif
+  out += "0";
 }
 
 } // namespace sanitize::internal::json_encoding

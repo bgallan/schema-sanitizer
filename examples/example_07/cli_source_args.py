@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 
-from schema_sanitizer.pipeline import parse_hour as _parse_hour
-from schema_sanitizer.pipeline import parse_iso_date as _parse_iso_date
+from schema_sanitizer.pipeline.advanced import parse_hour as _parse_hour
+from schema_sanitizer.pipeline.advanced import parse_iso_date as _parse_iso_date
 
 
 def add_source_args(parser: argparse.ArgumentParser) -> None:

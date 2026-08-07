@@ -6,7 +6,7 @@ import os
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from schema_sanitizer.core_impl.error_translation import call_core
+from schema_sanitizer.core_impl.error_translation import call_core, reader_error_context
 from schema_sanitizer.core_impl.execution_policy import (
     threading_mode_from_multi_threading,
 )
@@ -17,6 +17,7 @@ from schema_sanitizer.core_impl.generated_metadata import (
 from schema_sanitizer.core_impl.memory_budget import normalize_memory_limit
 from schema_sanitizer.input_impl.selection import _Source
 from schema_sanitizer.input_impl.source_plan import PARQUET_ARROW_SOURCES
+from schema_sanitizer.sources.models import PublicInput
 
 from ..core_impl.probes import options_for_registry_operation
 from ..core_impl.schema_registry import _normalize_registry_json
@@ -29,7 +30,11 @@ from ..options_impl.call_options import (
     normalize_call_options_or_none,
     unwrap_options,
 )
-from ..options_impl.options import memory_limit_bytes_or_none
+from ..options_impl.options import (
+    CsvHeaderMode,
+    memory_limit_bytes_or_none,
+    require_implemented_csv_header_mode,
+)
 from .batch_streaming import lazy_stream_from_opened
 from .execution_context import default_pool
 from .input.directory_preparation import prepare_single_parquet_file
@@ -38,6 +43,7 @@ from .operation_context import OperationExecutionContext
 from .parquet.direct_routes import parquet_direct_registry_sink_raw_or_none
 from .parquet.errors import unsupported_direct_parquet_ingestion
 from .results import Result
+from .source_manifest_diagnostics import patch_source_manifest_diagnostics
 from .source_plan.attached import source_plan_from_data
 from .source_plan.registry import (
     OpenedSourcePlanRegistryStream,
@@ -154,6 +160,9 @@ def _open_single_source_registry_stream(
         all_row_columns=all_row_columns,
         row_span_columns=row_span_columns,
         timestamp_columns={INGESTION_TIMESTAMP_COLUMN: ingestion_timestamp_micros},
+        error_context=reader_error_context(
+            prepared_input.format, prepared_input.source, prepared_input.data
+        ),
     )
     return OpenedSourcePlanRegistryStream(
         stream=None,
@@ -167,7 +176,7 @@ def _open_single_source_registry_stream(
 
 
 def convert_analytical_with_options(
-    input_path: Any,
+    input_path: PublicInput,
     *,
     target: str,
     input_format: str | None,
@@ -176,6 +185,7 @@ def convert_analytical_with_options(
     schema_registry: Mapping[str, Any] | str | None,
 ) -> Result | Stream:
     """Sanitize one public input into an in-memory analytical object."""
+    require_implemented_csv_header_mode(options.get("csv_header_mode", "exact"))
     registry_json = _normalize_registry_json(schema_registry)
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
     threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
@@ -219,6 +229,7 @@ def convert_analytical_with_options(
         call_options = attach_operation_detected_at(
             call_options,
             operation_context.detected_at,
+            operation_context.memory_ledger,
         )
         raw_ctx = default_pool().get()._raw
         field_name_policy = str(options.get("field_name_policy", "lower_alpha"))
@@ -239,12 +250,14 @@ def convert_analytical_with_options(
             if opened is not None:
                 if target == "pyarrow_reader":
                     stream = lazy_stream_from_opened(opened, prepared_input, operation_context)
+                    patch_source_manifest_diagnostics(stream, prepared_input.source_manifest)
                     resources_transferred = True
                     return stream
                 result = materialize_opened_registry_stream(
                     opened, target=target, threading_mode=threading_mode
                 )
                 result.execution_policy = operation_context.policy.to_dict()
+                patch_source_manifest_diagnostics(result, prepared_input.source_manifest)
                 return result
             if source_plan.kind == PARQUET_ARROW_SOURCES:
                 raise unsupported_direct_parquet_ingestion()
@@ -260,12 +273,14 @@ def convert_analytical_with_options(
         )
         if target == "pyarrow_reader":
             stream = lazy_stream_from_opened(opened, prepared_input, operation_context)
+            patch_source_manifest_diagnostics(stream, prepared_input.source_manifest)
             resources_transferred = True
             return stream
         result = materialize_opened_registry_stream(
             opened, target=target, threading_mode=threading_mode
         )
         result.execution_policy = operation_context.policy.to_dict()
+        patch_source_manifest_diagnostics(result, prepared_input.source_manifest)
         return result
     finally:
         if not resources_transferred:
@@ -274,7 +289,7 @@ def convert_analytical_with_options(
 
 
 def to_duckdb(
-    input_path: Any,
+    input_path: PublicInput,
     *,
     input_format: str | None = None,
     input_mode: str = "single_file",
@@ -299,6 +314,8 @@ def to_duckdb(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_escape_char: str | None = None,
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
@@ -322,7 +339,7 @@ def to_duckdb(
 
 
 def to_pandas(
-    input_path: Any,
+    input_path: PublicInput,
     *,
     input_format: str | None = None,
     input_mode: str = "single_file",
@@ -347,6 +364,8 @@ def to_pandas(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_escape_char: str | None = None,
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
@@ -370,7 +389,7 @@ def to_pandas(
 
 
 def to_polars(
-    input_path: Any,
+    input_path: PublicInput,
     *,
     input_format: str | None = None,
     input_mode: str = "single_file",
@@ -395,6 +414,8 @@ def to_polars(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_escape_char: str | None = None,
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",
@@ -418,7 +439,7 @@ def to_polars(
 
 
 def to_pyarrow(
-    input_path: Any,
+    input_path: PublicInput,
     *,
     input_format: str | None = None,
     input_mode: str = "single_file",
@@ -443,6 +464,8 @@ def to_pyarrow(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_escape_char: str | None = None,
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",

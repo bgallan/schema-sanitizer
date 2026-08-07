@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from schema_sanitizer.input_impl.source_plan import PreparedSourceBatch
+from schema_sanitizer.sources.models import SourceManifest
 
 
 @dataclass(slots=True)
@@ -19,6 +20,7 @@ class PreparedPublicInput:
     xml_row_tag: str | None = None
     source_file: str | None = None
     source_file_spans: Any = None
+    source_manifest: SourceManifest | None = None
 
     def close(self) -> None:
         """Close any generated reader."""
@@ -44,10 +46,13 @@ class StagedNativeDirectoryManifest:
         self.keepalive = keepalive
 
     def close(self) -> None:
-        """Remove the staged files for this chunk."""
-        close = getattr(self.keepalive, "close", None)
+        """Remove staged files and clear ownership only after success."""
+        keepalive = self.keepalive
+        close = getattr(keepalive, "close", None)
         if callable(close):
             close()
+        if self.keepalive is keepalive:
+            self.keepalive = None
 
 
 class ChainedKeepalive:
@@ -60,10 +65,12 @@ class ChainedKeepalive:
     def close(self) -> None:
         """Close every retained resource."""
         while self._items:
-            item = self._items.pop()
+            item = self._items[-1]
             close = getattr(item, "close", None)
             if callable(close):
                 close()
+            if self._items and self._items[-1] is item:
+                self._items.pop()
 
 
 class NativeDirectoryManifestCarrier:

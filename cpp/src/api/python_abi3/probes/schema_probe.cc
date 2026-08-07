@@ -238,7 +238,6 @@ struct ProviderCloseGuard {
     PyErr_Restore(type, value, traceback);
   }
 };
-
 PyObject *registry_probe_path_sources_or_raise(
     schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
     sanitize::PreparedOptionsPtr prepared_options, const char *registry_json,
@@ -256,15 +255,16 @@ PyObject *registry_probe_path_sources_or_raise(
     return nullptr;
   }
   auto probe =
-      merge_path_source_schemas(ctx, sources, prepared_options, registry_json,
-                                field_name_policy, skip_invalid_json_sources);
+      merge_path_source_schemas(
+          ctx, sources, prepared_options, registry_json, field_name_policy,
+          skip_invalid_json_sources, nullptr,
+          registry_schema_evolution_mode(schema_mode));
   if (!probe.ok()) {
     return raise_status(probe.status(), where);
   }
   auto value = std::move(probe).ValueOrDie();
   return pack_registry_probe(std::move(value.merged), value.diagnostics);
 }
-
 PyObject *registry_probe_path_sources_state_or_raise(
     schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
     sanitize::PreparedOptionsPtr prepared_options,
@@ -290,14 +290,14 @@ PyObject *registry_probe_path_sources_state_or_raise(
   auto probe = merge_path_source_schemas(
       ctx, sources, prepared_options, base_registry_plan->registry_json.c_str(),
       field_name_policy, skip_invalid_json_sources,
-      &base_registry_plan->schema);
+      &base_registry_plan->schema,
+      registry_schema_evolution_mode(schema_mode));
   if (!probe.ok()) {
     return raise_status(probe.status(), where);
   }
   auto value = std::move(probe).ValueOrDie();
   return pack_registry_probe(std::move(value.merged), value.diagnostics);
 }
-
 PyObject *registry_probe_path_source_provider_or_raise(
     schema_sanitizer_context *ctx, PyObject *provider,
     sanitize::PreparedOptionsPtr prepared_options, const char *registry_json,
@@ -323,7 +323,6 @@ PyObject *registry_probe_path_source_provider_or_raise(
     raise_status_error(valid, err);
     return nullptr;
   }
-
   ProviderCloseGuard close_provider(provider);
   std::string current_registry = base_registry_json ? base_registry_json : "{}";
   std::optional<sanitize::LogicalSchema> current_schema;
@@ -357,7 +356,8 @@ PyObject *registry_probe_path_source_provider_or_raise(
     auto probe = merge_path_source_schemas(
         ctx, parsed_sources.get(), prepared_options, current_registry.c_str(),
         field_name_policy, skip_invalid_json_sources,
-        current_schema ? &*current_schema : nullptr);
+        current_schema ? &*current_schema : nullptr,
+        registry_schema_evolution_mode(schema_mode));
     Py_DECREF(chunk_sources);
     if (!probe.ok()) {
       return raise_status(probe.status(), where);

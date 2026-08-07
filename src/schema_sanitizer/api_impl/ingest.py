@@ -48,9 +48,10 @@ class NativeIngestPlan:
 
     def close_keepalive(self) -> None:
         """Close any input stream opened while preparing the plan."""
-        if self.keepalive is not None:
-            _close_suppressing_errors(self.keepalive)
-            self.keepalive = None
+        keepalive = self.keepalive
+        if keepalive is not None and _close_suppressing_errors(keepalive):
+            if self.keepalive is keepalive:
+                self.keepalive = None
 
 
 def normalize_options(options: Options | dict[str, Any] | None) -> Options | None:

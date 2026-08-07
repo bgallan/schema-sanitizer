@@ -24,12 +24,16 @@ from ..input_impl.directory_inputs import (
     DirectoryDiscoveryBuilder,
     DiscoveredDirectoryInput,
     FolderFile,
-    RemoteFile,
     folder_files,
 )
 from ..input_impl.selection import input_format_extensions
 from ..remote_impl import routing
 from ..remote_impl.providers import azure, gcs, s3
+from ..sources.models import RemoteFile
+from .source_discovery_budget import (
+    run_async_discovery_with_budget,
+    run_public_source_discovery,
+)
 from .types import PartitionRunPlan, SourcePlanDiscovery
 
 
@@ -76,13 +80,19 @@ def _local_directory_matching_files(
     suffixes: tuple[str, ...],
     *,
     kind: LocationKind | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> list[FolderFile]:
     """Return direct local directory children matching accepted suffixes."""
     path = _local_path(uri, kind)
     if not path.is_dir():
         return []
     try:
-        return folder_files(path, suffix=suffixes, reader_name="source discovery")
+        return folder_files(
+            path,
+            suffix=suffixes,
+            reader_name="source discovery",
+            memory_limit_bytes=memory_limit_bytes,
+        )
     except (OSError, ValueError):
         return []
 
@@ -90,10 +100,17 @@ def _local_directory_matching_files(
 def _local_directories_containing_files(
     locations: dict[str, LocationKind],
     extensions: tuple[str, ...],
+    *,
+    memory_limit_bytes: int | None = None,
 ) -> DirectoryDiscovery[FolderFile]:
     """List matching children while scanning each parent directory only once."""
     suffixes = normalize_extensions(extensions)
-    discovery = DirectoryDiscoveryBuilder[FolderFile].from_uris(locations)
+    from ..input_impl.directory_inputs import current_directory_metadata_budget
+
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
+    discovery = DirectoryDiscoveryBuilder[FolderFile].from_uris(
+        locations, metadata_budget=metadata_budget
+    )
     groups: dict[Path, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for uri, kind in locations.items():
         path = _local_path(uri, kind)
@@ -101,14 +118,20 @@ def _local_directories_containing_files(
 
     for parent, children in groups.items():
         try:
-            entries = {entry.name: entry for entry in parent.iterdir()}
+            # Retain only requested child names rather than every entry in a
+            # potentially hostile parent directory.
+            entries = {entry.name: entry for entry in parent.iterdir() if entry.name in children}
         except OSError:
             continue
         for child_name, child_uris in children.items():
             child_path = entries.get(child_name)
             if child_path is None or not child_path.is_dir():
                 continue
-            files = _local_directory_matching_files(str(child_path), suffixes)
+            files = _local_directory_matching_files(
+                str(child_path),
+                suffixes,
+                memory_limit_bytes=memory_limit_bytes,
+            )
             if not files:
                 continue
             discovery.extend(child_uris, files)
@@ -233,7 +256,10 @@ async def _discover_source(
 
     if input_mode == "directory":
         local_files = _local_directory_matching_files(
-            uri, normalize_extensions(extensions), kind=kind
+            uri,
+            normalize_extensions(extensions),
+            kind=kind,
+            memory_limit_bytes=memory_limit_bytes,
         )
         discovered = (
             DiscoveredDirectoryInput(input_format=input_format, local_files=tuple(local_files))
@@ -319,7 +345,7 @@ def _partition_plans(
     return SourcePlanDiscovery(existing_plans=existing, skipped_plans=skipped)
 
 
-async def discover_existing_source_plans_async(
+async def _discover_existing_source_plans_async_impl(
     plans: list[PartitionRunPlan],
     *,
     input_mode: str = "single_file",
@@ -427,6 +453,27 @@ async def discover_existing_source_plans_async(
     )
 
 
+async def discover_existing_source_plans_async(
+    plans: list[PartitionRunPlan],
+    *,
+    input_mode: str = "single_file",
+    input_format: str = "json_array",
+    source_file_extension: str | None = None,
+    memory_limit_bytes: int | None = None,
+    threading_mode: str = "single",
+) -> SourcePlanDiscovery:
+    """Discover sources under one shared directory-metadata budget."""
+    return await run_async_discovery_with_budget(
+        _discover_existing_source_plans_async_impl,
+        plans,
+        input_mode=input_mode,
+        input_format=input_format,
+        source_file_extension=source_file_extension,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
+    )
+
+
 def discover_existing_source_plans(
     plans: list[PartitionRunPlan],
     *,
@@ -437,28 +484,12 @@ def discover_existing_source_plans(
     threading_mode: str = "single",
 ) -> SourcePlanDiscovery:
     """Synchronously discover existing source plans."""
-    memory_limit_bytes = normalize_memory_limit(memory_limit_bytes)
-    mode = normalize_threading_mode(threading_mode)
-    if mode == "single":
-        from .source_discovery_sync import discover_existing_source_plans_sync
-
-        return discover_existing_source_plans_sync(
-            plans,
-            input_mode=input_mode,
-            input_format=input_format,
-            source_file_extension=source_file_extension,
-            memory_limit_bytes=memory_limit_bytes,
-        )
-    from ..remote_impl.transport import run_sync
-
-    return run_sync(
-        discover_existing_source_plans_async(
-            plans,
-            input_mode=input_mode,
-            input_format=input_format,
-            source_file_extension=source_file_extension,
-            memory_limit_bytes=memory_limit_bytes,
-            threading_mode=mode,
-        ),
-        threading_mode=mode,
+    return run_public_source_discovery(
+        discover_existing_source_plans_async,
+        plans,
+        input_mode=input_mode,
+        input_format=input_format,
+        source_file_extension=source_file_extension,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )

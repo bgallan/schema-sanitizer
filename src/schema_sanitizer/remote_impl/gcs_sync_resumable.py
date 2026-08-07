@@ -15,7 +15,11 @@ from .sync_http import (
     request_json_url,
     retryable_http_error,
 )
-from .upload_policy import read_upload_range, remote_upload_policy
+from .upload_policy import (
+    read_upload_range,
+    release_upload_payload,
+    remote_upload_policy,
+)
 
 
 class TransientGcsUploadError(RuntimeError):
@@ -142,6 +146,7 @@ def _send_with_reconciliation(
                 ),
                 retries=retries - attempt,
                 should_retry=_retryable,
+                throttle_key="gcs",
             )
             if next_offset > start:
                 return next_offset
@@ -210,6 +215,7 @@ def upload_gcs_resumable_file(
         initiate,
         retries=budget.async_retries,
         should_retry=_retryable,
+        throttle_key="gcs",
     )
     try:
         offset = 0
@@ -222,19 +228,22 @@ def upload_gcs_resumable_file(
                 raise OSError("remote upload spool changed before GCS resumable commit")
             size = min(tuning.part_bytes, tuning.file_size - offset)
             payload = read_upload_range(local_path, offset, size, tuning.file_size)
-            next_offset = _send_with_reconciliation(
-                upload_url,
-                payload,
-                auth_headers=auth_headers,
-                start=offset,
-                total_bytes=tuning.file_size,
-                content_type=content_type,
-                retries=budget.async_retries,
-                timeout=budget.async_timeout_seconds,
-            )
-            if next_offset <= offset:
-                raise RuntimeError("GCS resumable upload made no forward progress")
-            offset = next_offset
+            try:
+                next_offset = _send_with_reconciliation(
+                    upload_url,
+                    payload,
+                    auth_headers=auth_headers,
+                    start=offset,
+                    total_bytes=tuning.file_size,
+                    content_type=content_type,
+                    retries=budget.async_retries,
+                    timeout=budget.async_timeout_seconds,
+                )
+                if next_offset <= offset:
+                    raise RuntimeError("GCS resumable upload made no forward progress")
+                offset = next_offset
+            finally:
+                release_upload_payload(payload)
     except BaseException:
         try:
             request_bytes(

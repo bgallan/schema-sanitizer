@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 from ...core_impl.execution_policy import normalize_threading_mode
 from ...core_impl.uris import local_path_from_file_uri, looks_like_file_uri, looks_like_remote_uri
-from ...input_impl.directory_inputs import discovered_directory_input_for
+from ...input_impl.directory_inputs import (
+    directory_metadata_budget_scope,
+    discovered_directory_input_for,
+)
 from ...input_impl.prepared import ChainedKeepalive, PreparedPublicInput
 from ...input_impl.selection import (
     FORMAT_SUFFIXES,
@@ -24,6 +27,7 @@ from ...input_impl.selection import (
 from ...remote_impl import routing, sync_backend
 from ...remote_impl import staging as remote_staging
 from ...remote_impl.transport import run_sync
+from ...sources.models import SourceManifest
 
 if TYPE_CHECKING:
     from ..operation_context import OperationExecutionContext
@@ -32,6 +36,7 @@ from .directory_preparation import (
     prepare_directory_from_files,
     prepare_single_parquet_file,
 )
+from .manifest_preparation import prepare_source_manifest_input
 from .memory_limits import enforce_materialized_input_limit
 from .remote_directory_preparation import (
     remote_native_directory_prepared_from_files,
@@ -188,7 +193,10 @@ def _prepare_input_target(
                 files = list(
                     run_sync(list_operation(), threading_mode=threading_mode)
                     if operation_context is None
-                    else operation_context.run_remote(list_operation)
+                    else operation_context.run_remote(
+                        list_operation,
+                        permit_label="remote_directory_list",
+                    )
                 )
             if not files:
                 expected = " or ".join(FORMAT_SUFFIXES[input_format])
@@ -268,7 +276,7 @@ def _prepare_input_target(
     )
 
 
-def prepare_public_input(
+def _prepare_public_input_impl(
     path: Any,
     *,
     input_format: str | None,
@@ -283,6 +291,19 @@ def prepare_public_input(
 ) -> PreparedPublicInput:
     """Validate a public input target and prepare its native payload."""
     mode = normalize_public_input_mode(input_mode)
+    if isinstance(path, SourceManifest):
+        return prepare_source_manifest_input(
+            path,
+            input_format=input_format,
+            input_mode=mode,
+            input_text_encoding=input_text_encoding,
+            xml_row_tag=xml_row_tag,
+            csv_delimiter=csv_delimiter,
+            csv_has_header=csv_has_header,
+            memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
+            operation_context=operation_context,
+        )
     if is_python_row_iterable(path):
         fmt = "python" if input_format is None else normalize_public_input_format(input_format)
         if fmt != "python":
@@ -340,3 +361,33 @@ def prepare_public_input(
         original_source_file=original_source_file,
         operation_context=operation_context,
     )
+
+
+def prepare_public_input(
+    path: Any,
+    *,
+    input_format: str | None,
+    input_mode: str,
+    input_text_encoding: str,
+    xml_row_tag: str | None,
+    csv_delimiter: str,
+    csv_has_header: bool,
+    memory_limit_bytes: int | None,
+    threading_mode: str = "single",
+    operation_context: OperationExecutionContext | None = None,
+) -> PreparedPublicInput:
+    """Prepare one input under the operation-wide directory metadata budget."""
+    shared_budget = None if operation_context is None else operation_context.directory_metadata
+    with directory_metadata_budget_scope(memory_limit_bytes, budget=shared_budget):
+        return _prepare_public_input_impl(
+            path,
+            input_format=input_format,
+            input_mode=input_mode,
+            input_text_encoding=input_text_encoding,
+            xml_row_tag=xml_row_tag,
+            csv_delimiter=csv_delimiter,
+            csv_has_header=csv_has_header,
+            memory_limit_bytes=memory_limit_bytes,
+            threading_mode=threading_mode,
+            operation_context=operation_context,
+        )

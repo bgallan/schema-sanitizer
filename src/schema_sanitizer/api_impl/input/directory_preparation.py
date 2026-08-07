@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 from ...core_impl.native_options import optional_memory_limit_arg
 from ...core_impl.native_symbols import XML_FOLDER_EFFECTIVE_ROW_TAG
-from ...input_impl.directory_inputs import FolderFile, RemoteFile, check_document_size, folder_files
+from ...core_impl.resource_lifecycle import _close_sequence_with_error
+from ...core_impl.safe_errors import add_bounded_note
+from ...input_impl.directory_inputs import FolderFile, check_document_size, folder_files
 from ...input_impl.prepared import (
     ChainedKeepalive,
     NativeDirectoryManifestCarrier,
@@ -36,6 +38,7 @@ from ...remote_impl.packetization import (
     remote_file_packet,
     remote_file_packet_estimated_bytes,
 )
+from ...sources.models import RemoteFile
 
 if TYPE_CHECKING:
     from ..operation_context import OperationExecutionContext
@@ -65,12 +68,15 @@ def _native_directory_supported(
 def _directory_files_for_format(
     path: str | os.PathLike[str],
     input_format: str,
+    *,
+    memory_limit_bytes: int | None,
 ) -> list[FolderFile]:
     """Return deterministic direct children accepted for one public format."""
     return folder_files(
         path,
         suffix=FORMAT_SUFFIXES[input_format],
         reader_name=f"{input_format} directory input",
+        memory_limit_bytes=memory_limit_bytes,
     )
 
 
@@ -238,7 +244,7 @@ def prepare_parquet_directory(
 ) -> PreparedPublicInput:
     """Prepare one deterministic local Parquet directory."""
     return prepare_parquet_directory_from_files(
-        _directory_files_for_format(path, "parquet"),
+        _directory_files_for_format(path, "parquet", memory_limit_bytes=memory_limit_bytes),
         memory_limit_bytes=memory_limit_bytes,
         source_file_by_name=source_file_by_name,
     )
@@ -316,7 +322,7 @@ def prepare_directory(
             memory_limit_bytes=memory_limit_bytes,
             source_file_by_name=source_file_by_name,
         )
-    files = _directory_files_for_format(path, input_format)
+    files = _directory_files_for_format(path, input_format, memory_limit_bytes=memory_limit_bytes)
     native_prepared = native_directory_prepared_from_files_or_none(
         files,
         input_format,
@@ -353,9 +359,16 @@ class RemoteNativeDirectorySourceManifest:
     )
     _prefetched_file_count: int = field(default=0, init=False, repr=False)
     _prefetch_lock: Any = field(default_factory=Lock, init=False, repr=False)
+    _pid: int = field(default_factory=os.getpid, init=False, repr=False)
+
+    def _ensure_owner_process(self) -> None:
+        """Reject inherited manifest state before touching its locks or pools."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            raise RuntimeError("remote directory manifest cannot be reused after fork")
 
     def prefetch_first_chunk(self) -> bool:
         """Stage and retain one immutable prefix for later ordered consumption."""
+        self._ensure_owner_process()
         with self._prefetch_lock:
             if self._prefetched_chunks:
                 return False
@@ -368,6 +381,7 @@ class RemoteNativeDirectorySourceManifest:
 
     def take_prefetched_chunks(self) -> tuple[list[StagedNativeDirectoryManifest], int]:
         """Transfer ownership of a retained lookahead prefix to one provider."""
+        self._ensure_owner_process()
         with self._prefetch_lock:
             chunks, file_count = self._prefetched_chunks, self._prefetched_file_count
             self._prefetched_chunks = []
@@ -376,6 +390,7 @@ class RemoteNativeDirectorySourceManifest:
 
     def stage_chunk(self, start: int) -> StagedNativeDirectoryManifest | None:
         """Synchronously stage one bounded remote chunk."""
+        self._ensure_owner_process()
         chunk = self._chunk_at(start)
         if not chunk:
             return None
@@ -402,6 +417,7 @@ class RemoteNativeDirectorySourceManifest:
         storage_lease: Any | None = None,
     ) -> StagedNativeDirectoryManifest | None:
         """Stage one chunk on the operation-owned remote event loop."""
+        self._ensure_owner_process()
         chunk = self._chunk_at(start)
         if not chunk:
             return None
@@ -424,6 +440,7 @@ class RemoteNativeDirectorySourceManifest:
 
     def open_staging_session(self) -> remote_downloads.RemoteDirectoryDownloadSession:
         """Return the shared provider session for this manifest operation."""
+        self._ensure_owner_process()
         return remote_downloads.RemoteDirectoryDownloadSession(
             self.files,
             memory_limit_bytes=self.memory_limit_bytes,
@@ -448,6 +465,7 @@ class RemoteNativeDirectorySourceManifest:
 
     def _storage_pool(self) -> Any:
         """Return the operation-owned temporary storage pool."""
+        self._ensure_owner_process()
         if self.operation_context is not None:
             return self.operation_context.temporary_storage
         if self._temporary_storage_pool is None:
@@ -467,7 +485,11 @@ class RemoteNativeDirectorySourceManifest:
     ) -> StagedNativeDirectoryManifest:
         """Build the native manifest for one fully downloaded local chunk."""
         try:
-            local_files = _directory_files_for_format(staged.path, self.input_format)
+            local_files = _directory_files_for_format(
+                staged.path,
+                self.input_format,
+                memory_limit_bytes=self.memory_limit_bytes,
+            )
             effective_xml_row_tag = _effective_native_xml_row_tag(
                 local_files,
                 input_format=self.input_format,
@@ -495,10 +517,27 @@ class RemoteNativeDirectorySourceManifest:
 
     def close(self) -> None:
         """Close retained lookahead chunks and any manifest-local permit pool."""
+        self._ensure_owner_process()
         chunks, _file_count = self.take_prefetched_chunks()
-        while chunks:
-            chunks.pop().close()
+        first_error = _close_sequence_with_error(chunks)
+        if chunks:
+            with self._prefetch_lock:
+                existing_ids = {id(chunk) for chunk in self._prefetched_chunks}
+                self._prefetched_chunks[:0] = [
+                    chunk for chunk in chunks if id(chunk) not in existing_ids
+                ]
+                self._prefetched_file_count = sum(
+                    len(chunk.manifest.source_batch.sources) for chunk in self._prefetched_chunks
+                )
+
         pool = self._temporary_storage_pool
-        self._temporary_storage_pool = None
-        if pool is not None:
-            pool.close()
+        pools = [] if pool is None else [pool]
+        pool_error = _close_sequence_with_error(pools)
+        if not pools and self._temporary_storage_pool is pool:
+            self._temporary_storage_pool = None
+        if first_error is None:
+            first_error = pool_error
+        elif pool_error is not None:
+            add_bounded_note(first_error, "temporary pool cleanup failure", pool_error)
+        if first_error is not None:
+            raise first_error

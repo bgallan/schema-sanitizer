@@ -167,6 +167,22 @@ PyObject *py_process_memory_governor_stats(PyObject *, PyObject *) {
   return out;
 }
 
+PyObject *py_process_resident_memory_stats(PyObject *, PyObject *) {
+  const auto stats = sanitize::internal::process_resident_memory_stats();
+  PyObject *out = PyTuple_New(3);
+  if (!out ||
+      !tuple_set_item_steal(out, 0,
+                            PyLong_FromLongLong(stats.capacity_bytes)) ||
+      !tuple_set_item_steal(out, 1,
+                            PyLong_FromLongLong(stats.reserved_bytes)) ||
+      !tuple_set_item_steal(out, 2,
+                            PyLong_FromLongLong(stats.peak_reserved_bytes))) {
+    Py_XDECREF(out);
+    return nullptr;
+  }
+  return out;
+}
+
 PyObject *py_execution_policy(PyObject *, PyObject *args) {
   int mode_value = 0;
   long long requested = -1;

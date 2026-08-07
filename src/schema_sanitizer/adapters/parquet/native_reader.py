@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ...errors import SchemaSanitizerResourceError
 from .contract_gates.native import (
     _NATIVE_PARQUET_WRITER_CREATED_BY,
     _native_nested_contract_diagnostics,
@@ -31,6 +32,31 @@ def native_writer_diagnostics(info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def parquet_resource_diagnostics(info: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded compression counters derived from footer metadata."""
+    compressed = 0
+    decompressed = 0
+    for row_group in list(info.get("row_groups") or []):
+        if not isinstance(row_group, dict):
+            continue
+        for column in list(row_group.get("columns") or []):
+            if not isinstance(column, dict):
+                continue
+            try:
+                compressed += max(0, int(column.get("total_compressed_size") or 0))
+            except Exception:
+                pass
+            try:
+                decompressed += max(0, int(column.get("total_uncompressed_size") or 0))
+            except Exception:
+                pass
+    return {
+        "compressed_bytes": compressed,
+        "decompressed_bytes": decompressed,
+        "decompression_ratio": (float(decompressed) / float(compressed) if compressed > 0 else 0.0),
+    }
+
+
 def native_nested_contract_blockers(info: dict[str, Any]) -> list[str]:
     """Return blockers when a native-writer nested contract is unsafe."""
     if not native_writer_detected(info):
@@ -51,6 +77,46 @@ def native_nested_contract_blockers(info: dict[str, Any]) -> list[str]:
     if not issues:
         issues = ["native nested contract was not satisfied"]
     return [f"native nested contract: {issue}" for issue in issues]
+
+
+def _raise_explicit_memory_limit(
+    factory: Any, blockers: list[str], *, cause: BaseException | None = None
+) -> None:
+    """Fail closed when a configured budget made the native route unsafe.
+
+    The PyArrow fallback does not participate in the native operation ledger,
+    so using it after a memory-related preflight rejection would silently
+    bypass ``memory_limit_bytes``.
+    """
+    if factory._memory_limit_bytes is None:
+        return
+    joined = "; ".join(blockers) or "native Parquet memory preflight failed"
+    lowered = joined.lower()
+    memory_related = any(
+        marker in lowered
+        for marker in (
+            "memory",
+            "configured limit",
+            "metadata capacity",
+            "buffer estimate",
+            "footer length",
+            "retained arrow capacity",
+            "operation budget",
+        )
+    )
+    if not memory_related:
+        return
+    error = SchemaSanitizerResourceError(
+        f"memory_limit_bytes limit exceeded during Parquet input preflight: {joined}",
+        detail={
+            "stage": "parquet_read",
+            "limit_name": "memory_limit_bytes",
+            "limit_bytes": factory._memory_limit_bytes,
+        },
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
 
 
 @dataclass(frozen=True)
@@ -97,6 +163,7 @@ def prepare_native_parquet_read(
             memory_limit_bytes=factory._memory_limit_bytes,
         )
     except Exception as exc:
+        _raise_explicit_memory_limit(factory, [f"{type(exc).__name__}: {exc}"], cause=exc)
         set_parquet_native_reader_diagnostics(
             attempted=True,
             ready=False,
@@ -134,6 +201,7 @@ def prepare_native_parquet_read(
         return None
     nested_blockers = native_nested_contract_blockers(info)
     if nested_blockers:
+        _raise_explicit_memory_limit(factory, nested_blockers)
         set_parquet_native_reader_diagnostics(
             attempted=True,
             ready=False,
@@ -144,6 +212,7 @@ def prepare_native_parquet_read(
             row_group_count=info.get("row_group_count"),
             num_rows=info.get("num_rows"),
             **native_writer_diagnostics(info),
+            **parquet_resource_diagnostics(info),
             native_writer_contract_satisfied=False,
             **_native_nested_contract_diagnostics(info),
             source=factory._source,
@@ -158,6 +227,7 @@ def prepare_native_parquet_read(
     blockers = list(info.get("native_reader_blockers") or [])
     bounded_preflight = info.get("bounded_preflight") == 1
     if info.get("native_reader_ready") != 1 and (bounded_preflight or factory._columns is None):
+        _raise_explicit_memory_limit(factory, [str(item) for item in blockers])
         _record_not_ready(factory, info, blockers)
         logger.debug(
             "Native Parquet reader skipped; retrying input with PyArrow: %s",
@@ -185,6 +255,7 @@ def _record_not_ready(factory: Any, info: dict[str, Any], blockers: list[str]) -
         row_group_count=info.get("row_group_count"),
         num_rows=info.get("num_rows"),
         **native_writer_diagnostics(info),
+        **parquet_resource_diagnostics(info),
         source=factory._source,
         native_source_kind=factory._native_source_kind,
     )
@@ -214,6 +285,7 @@ def try_native_parquet_stream(
             -1 if factory._memory_limit_bytes is None else factory._memory_limit_bytes,
         )
     except Exception as exc:
+        _raise_explicit_memory_limit(factory, [f"{type(exc).__name__}: {exc}"], cause=exc)
         _record_native_open_error(factory, info, exc, logger)
         return None
     set_parquet_native_reader_diagnostics(
@@ -232,6 +304,7 @@ def try_native_parquet_stream(
         row_group_count=info.get("row_group_count"),
         num_rows=info.get("num_rows"),
         **native_writer_diagnostics(info),
+        **parquet_resource_diagnostics(info),
         native_writer_contract_satisfied=native_writer_detected(info),
         **_native_nested_contract_diagnostics(info),
         source=factory._source,
@@ -262,6 +335,7 @@ def _record_native_open_error(
         row_group_count=info.get("row_group_count"),
         num_rows=info.get("num_rows"),
         **native_writer_diagnostics(info),
+        **parquet_resource_diagnostics(info),
         source=factory._source,
         native_source_kind=factory._native_source_kind,
     )

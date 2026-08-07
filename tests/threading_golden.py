@@ -68,6 +68,15 @@ def normalized_rows(table: Any) -> list[dict[str, Any]]:
     return [normalize_row(row) for row in table.to_pylist()]
 
 
+def semantic_stats(stats: Mapping[str, Any]) -> dict[str, Any]:
+    """Return diagnostics whose values are independent of execution planning."""
+    result = dict(stats)
+    result.pop("peak_charged_memory_bytes", None)
+    result.pop("current_charged_memory_bytes", None)
+    result.pop("operation_memory_limit_bytes", None)
+    return result
+
+
 @dataclass(frozen=True)
 class ResultGolden:
     """Stable logical result state shared by single and multi execution."""
@@ -89,7 +98,7 @@ def result_golden(result: Any) -> ResultGolden:
         rows=rows,
         registry_json=canonical_json(result.schema_registry_json, empty={}),
         drifts_json=canonical_json(result.schema_drifts_json, empty=[]),
-        diagnostics=dict(result.stats),
+        diagnostics=semantic_stats(result.stats),
     )
 
 

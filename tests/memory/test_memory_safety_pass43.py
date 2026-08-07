@@ -1,0 +1,279 @@
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+def test_guardian_close_never_requeues_active_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import retry_scheduler as module
+
+    class Permit:
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "acquire_release_guardian_thread", lambda: Permit())
+    guardian = module._ReleaseGuardian()
+    entered = threading.Event()
+    resume = threading.Event()
+    calls = 0
+    concurrent = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class BlockingOwner:
+        def release(self) -> None:
+            nonlocal calls, concurrent, peak
+            with lock:
+                calls += 1
+                concurrent += 1
+                peak = max(peak, concurrent)
+            entered.set()
+            assert resume.wait(2)
+            with lock:
+                concurrent -= 1
+
+    class QuickOwner:
+        def release(self) -> None:
+            return None
+
+    owner = BlockingOwner()
+    assert guardian.adopt(owner)
+    assert guardian.adopt(QuickOwner())
+    assert entered.wait(1)
+    result: list[bool] = []
+    closer = threading.Thread(target=lambda: result.append(guardian.close(deadline_seconds=1.0)))
+    closer.start()
+    time.sleep(0.05)
+    assert calls == 1
+    assert peak == 1
+    resume.set()
+    closer.join(2)
+    assert result == [True]
+    assert calls == 1
+
+
+def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
+    from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
+
+    scheduler = _RetryScheduler()
+    release_entered = threading.Event()
+    release_resume = threading.Event()
+    registered = threading.Event()
+
+    class Lease:
+        def release(self) -> None:
+            release_entered.set()
+            assert release_resume.wait(2)
+
+    lease = Lease()
+
+    def retire() -> None:
+        current = threading.current_thread()
+        with scheduler._condition:
+            scheduler._execution_workers.add(current)
+            scheduler._worker_leases[current] = lease
+            registered.set()
+        scheduler._finish_worker(current, lease, timer=False)
+
+    worker = threading.Thread(target=retire)
+    worker.start()
+    assert registered.wait(1)
+    assert release_entered.wait(1)
+    assert not scheduler.close(deadline_seconds=0.03)
+    assert scheduler.snapshot().retiring_workers == 1
+    release_resume.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert scheduler.snapshot().retiring_workers == 0
+
+
+def test_notifier_hard_deadline_is_dispatch_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    notifier = module._AvailabilityNotifier()
+    governor = module._Governor(1, "pass43-notifier-deadline")
+    local_threads = module._Governor(1, "pass43-notifier-thread")
+    monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
+    called = threading.Event()
+    monkeypatch.setattr(module, "_dispatch_availability_event", lambda _event: called.set())
+    event = module.AvailabilityEvent.RETRY_SCHEDULER
+    assert governor.register_availability_event(event)
+    generation = governor._availability_events[event]
+    delivery = module._AvailabilityDelivery(governor, event, generation)
+    delivery.next_attempt_ns = time.monotonic_ns() + 150_000_000
+    assert notifier.publish((delivery,)) == ()
+    assert not notifier.close(deadline_seconds=0.01)
+    time.sleep(0.25)
+    assert not called.is_set()
+    assert notifier.snapshot().parked_callbacks == 1
+
+
+def test_level_triggered_availability_closes_release_before_register_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    notifier = module._AvailabilityNotifier()
+    local_threads = module._Governor(1, "pass43-level-notifier-thread")
+    monkeypatch.setattr(module, "_AVAILABILITY_NOTIFIER", notifier)
+    monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
+    observed = threading.Event()
+    monkeypatch.setattr(module, "_dispatch_availability_event", lambda _event: observed.set())
+    governor = module._Governor(1, "pass43-level", level_triggered_availability=True)
+    lease = governor.acquire(1, timeout_seconds=0)
+    lease.release()
+    assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
+    assert observed.wait(1)
+    assert notifier.close(deadline_seconds=1.0)
+
+
+def test_notifier_rearm_during_execution_is_not_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    notifier = module._AvailabilityNotifier()
+    governor = module._Governor(1, "pass43-rearm")
+    local_threads = module._Governor(1, "pass43-rearm-thread")
+    monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
+    event = module.AvailabilityEvent.RETRY_SCHEDULER
+    assert governor.register_availability_event(event)
+    delivery = module._AvailabilityDelivery(governor, event, governor._availability_events[event])
+    attempts = 0
+    completed = threading.Event()
+
+    def dispatch(_event: module.AvailabilityEvent) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            assert notifier.publish((delivery,)) == ()
+        else:
+            completed.set()
+
+    monkeypatch.setattr(module, "_dispatch_availability_event", dispatch)
+    assert notifier.publish((delivery,)) == ()
+    assert completed.wait(1)
+    deadline = time.monotonic() + 1
+    while governor.snapshot().availability_callbacks and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert attempts == 2
+    assert governor.snapshot().availability_callbacks == 0
+    assert notifier.close(deadline_seconds=1.0)
+
+
+def test_uncertain_fd_close_retains_capacity_debt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import path_identity, process_resources
+
+    monkeypatch.setattr(process_resources, "_UNCERTAIN_FD_CLOSE_DEBTS", {})
+    monkeypatch.setattr(process_resources, "_UNCERTAIN_FD_CLOSE_REJECTED", 0)
+
+    governor = process_resources._FD_GOVERNOR
+    baseline = governor.snapshot().in_use
+    lease = process_resources.acquire_file_descriptors(1, timeout_seconds=0.1)
+    owner = path_identity._IdentityDescriptorOwner(123, lease)
+    monkeypatch.setattr(
+        path_identity.os, "close", lambda _fd: (_ for _ in ()).throw(OSError("uncertain"))
+    )
+    with pytest.raises(OSError, match="uncertain"):
+        owner.release()
+    assert governor.snapshot().in_use == baseline + 1
+    snapshot = process_resources.uncertain_fd_close_snapshot()
+    assert snapshot.debts == 1
+    assert snapshot.oldest_debt_ns > 0
+
+
+def test_runtime_registry_cancels_reserved_thread_before_start() -> None:
+    from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
+
+    class Service:
+        def close(self, *, deadline_seconds: float = 0.0) -> bool:
+            return True
+
+    registry = _RuntimeServiceRegistry()
+    registration = registry.reserve(Service(), kind="pass43", close_name="close")
+    ran = threading.Event()
+    thread = threading.Thread(target=ran.set)
+    registry.close_admission()
+    with pytest.raises(RuntimeError, match="admission closed"):
+        registration.start_thread(thread)
+    assert not thread.is_alive()
+    assert not ran.is_set()
+
+
+def test_dispatcher_watchdog_tracks_real_active_call_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import cleanup_dispatcher as module
+
+    class Lease:
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "acquire_project_threads", lambda *_a, **_k: Lease())
+    dispatcher = module._CleanupDispatcher()
+    entered = threading.Event()
+    resume = threading.Event()
+
+    def blocked() -> None:
+        entered.set()
+        assert resume.wait(2)
+
+    assert dispatcher.submit(blocked)
+    assert entered.wait(1)
+    snapshot = dispatcher.snapshot()
+    assert snapshot.active_calls == 1
+    assert snapshot.oldest_active_ns > 0
+    resume.set()
+    assert dispatcher.close(deadline_seconds=1.0)
+    assert dispatcher.snapshot().oldest_active_ns == 0
+
+
+def test_runtime_snapshot_v6_includes_fd_debt_and_retirement() -> None:
+    source = Path("src/schema_sanitizer/core_impl/runtime_diagnostics.py").read_text()
+    shutdown = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
+    assert '"version": 6' in source
+    assert '"uncertain_fd_closes"' in source
+    assert 'field(retry_snapshot, "retiring_workers")' in shutdown
+    assert 'field(guardian_snapshot, "retiring_workers")' in shutdown
+
+
+def test_native_reaper_shutdown_is_biphasic_and_terminal_states_are_visible() -> None:
+    source = Path("cpp/src/internal/runtime/operation_task_arena.cc").read_text()
+    header = Path("cpp/src/internal/runtime/operation_task_arena.hh").read_text()
+    abi = Path("cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
+    assert "DrainAndShutdownFor" in source
+    drain = source[source.index("DrainAndShutdownFor") : source.index("void Shutdown() noexcept")]
+    assert "producers_quiescent" in drain
+    assert "Keep consumers alive after a timed-out attempt" in drain
+    assert "Terminalize" in source
+    assert "reaper_terminal_states" in header
+    assert "PyTuple_New(20)" in abi
+    assert (
+        "SaturatingAtomicSubtract(state_->active, 1U)"
+        in Path("cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
+    )
+
+
+def test_native_snapshot_parser_accepts_twenty_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    from schema_sanitizer.core_impl import runtime_diagnostics as module
+
+    native = SimpleNamespace(operation_task_arena_runtime_snapshot=lambda: tuple(range(20)))
+    monkeypatch.setitem(sys.modules, "schema_sanitizer._core_abi3", native)
+    snapshot = module._native_arena_snapshot()
+    assert snapshot["available"] is True
+    assert snapshot["reaper_terminal_states"] == 16
+    assert snapshot["reaper_stopping_lanes"] == 19

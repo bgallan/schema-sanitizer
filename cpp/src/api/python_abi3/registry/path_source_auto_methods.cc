@@ -64,7 +64,8 @@ py_context_to_registry_sink_from_path_source_chunk_provider_auto_registry(
   auto merged = merge_path_source_provider_schemas(
       ctx, probe_provider_obj, prepared_options, registry_json,
       field_name_policy ? field_name_policy : "",
-      skip_invalid_json_sources != 0);
+      skip_invalid_json_sources != 0, nullptr,
+      registry_schema_evolution_mode(schema_mode));
   if (!merged.ok()) {
     raise_status_error(code_for_status(merged.status()),
                        dup_cstr(merged.status().ToString()));
@@ -136,7 +137,8 @@ py_context_to_registry_sink_from_path_source_chunk_provider_auto_registry_state(
       ctx, probe_provider_obj, prepared_options,
       base_registry_plan->registry_json.c_str(),
       field_name_policy ? field_name_policy : "",
-      skip_invalid_json_sources != 0, &base_registry_plan->schema);
+      skip_invalid_json_sources != 0, &base_registry_plan->schema,
+      registry_schema_evolution_mode(schema_mode));
   if (!merged.ok()) {
     raise_status_error(code_for_status(merged.status()),
                        dup_cstr(merged.status().ToString()));
@@ -209,7 +211,8 @@ py_context_to_registry_sink_from_path_sources_auto_registry(PyObject *,
   }
   auto merged_r = merge_path_source_schemas(
       ctx, state->sources, state->prepared, state->registry_json.c_str(),
-      state->field_name_policy.c_str(), skip_invalid_json_sources != 0);
+      state->field_name_policy.c_str(), skip_invalid_json_sources != 0, nullptr,
+      registry_schema_evolution_mode(state->schema_mode.c_str()));
   if (!merged_r.ok()) {
     raise_status_error(code_for_status(merged_r.status()),
                        dup_cstr(merged_r.status().ToString()));
@@ -334,7 +337,8 @@ PyObject *py_context_to_registry_sink_from_path_sources_auto_registry_state(
   auto merged_r = merge_path_source_schemas(
       ctx, state->sources, state->prepared, state->registry_json.c_str(),
       state->field_name_policy.c_str(), skip_invalid_json_sources != 0,
-      &base_registry_plan->schema);
+      &base_registry_plan->schema,
+      registry_schema_evolution_mode(state->schema_mode.c_str()));
   if (!merged_r.ok()) {
     raise_status_error(code_for_status(merged_r.status()),
                        dup_cstr(merged_r.status().ToString()));

@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from schema_sanitizer.core_impl.fork_safety import quarantine_inherited_state
+
 if TYPE_CHECKING:
     from ..input_impl.prepared import PreparedPublicInput
     from .operation_context import OperationExecutionContext
@@ -77,6 +79,7 @@ _CURRENT_PARTITION_RESOURCES: ContextVar[BorrowedPartitionResources | None] = Co
     "schema_sanitizer_partition_resources",
     default=None,
 )
+_FORKED_PARTITION_RESOURCES_KEEPALIVE: list[BorrowedPartitionResources] = []
 
 
 @contextmanager
@@ -84,11 +87,27 @@ def borrowed_partition_resources(
     resources: BorrowedPartitionResources,
 ) -> Iterator[BorrowedPartitionResources]:
     """Expose one internal prepared-input handoff to a public converter."""
+    owner_pid = os.getpid()
     token = _CURRENT_PARTITION_RESOURCES.set(resources)
     try:
         yield resources
     finally:
-        _CURRENT_PARTITION_RESOURCES.reset(token)
+        if os.getpid() == owner_pid:
+            _CURRENT_PARTITION_RESOURCES.reset(token)
+        else:
+            _reset_partition_resources_after_fork()
+
+
+def _reset_partition_resources_after_fork() -> None:
+    """Detach inherited ownership without running parent-resource finalizers."""
+    inherited = _CURRENT_PARTITION_RESOURCES.get()
+    if inherited is not None:
+        quarantine_inherited_state("partition-resources", inherited)
+    _CURRENT_PARTITION_RESOURCES.set(None)
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_partition_resources_after_fork)
 
 
 def take_borrowed_partition_resources(

@@ -20,10 +20,6 @@
 #include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "frontends/builtin_frontends.hh"
 #include "internal/abi/schema_sanitizer_c_internal.hh"
-#include "internal/memory/arena.hh"
-#include "internal/memory/pool_resource.hh"
-#include "internal/parsing/csv_parse.hh"
-#include "internal/parsing/streaming/csv/scanner.hh"
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/registry/registry.hh"
 
@@ -49,48 +45,6 @@ input_size_hint_from_paths(const std::vector<std::string> &paths) noexcept {
     total += size;
   }
   return static_cast<std::int64_t>(total);
-}
-
-sanitize::Result<std::optional<std::vector<std::string>>>
-csv_header_from_path_source(const PathSourceSpec &source,
-                            const sanitize::PreparedOptionsPtr &prepared) {
-  SAN_ASSIGN_OR_RAISE(auto chunk_source,
-                      sanitize::chunk_source_from_path_with_encoding(
-                          source.path, prepared->spec.input_text_encoding,
-                          prepared->spec.memory_limit_bytes));
-  sanitize::internal::CsvStreamingScanner scanner(
-      std::move(chunk_source), sanitize::internal::kDefaultCsvChunkBytes);
-  SAN_RETURN_NOT_OK(scanner.Reset());
-
-  sanitize::internal::PoolResource pmr_pool;
-  sanitize::internal::BumpArena arena(pmr_pool.pool());
-  for (;;) {
-    arena.reset();
-    auto next = scanner.next_record(&arena);
-    if (!next.ok()) {
-      return next.status();
-    }
-    const sanitize::internal::TextSlice record = *next;
-    if (record.view.empty() && scanner.done()) {
-      return std::optional<std::vector<std::string>>{};
-    }
-    if (record.view.empty()) {
-      continue;
-    }
-
-    std::vector<std::string_view> views;
-    SAN_RETURN_NOT_OK(sanitize::internal::parse_csv_cells(
-        record.view,
-        prepared->spec.csv_delimiter.empty() ? ','
-                                             : prepared->spec.csv_delimiter[0],
-        &views, &arena));
-    std::vector<std::string> header;
-    header.reserve(views.size());
-    for (std::string_view value : views) {
-      header.emplace_back(value);
-    }
-    return std::optional<std::vector<std::string>>(std::move(header));
-  }
 }
 
 bool is_json_path_source(const PathSourceSpec &source) {
@@ -240,8 +194,7 @@ json_array_path_source_group_end(const std::vector<PathSourceSpec> &sources,
 sanitize::Result<PathSourceInput>
 make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
                              const PathSourceGroupPlan &group,
-                             std::string_view input_text_encoding,
-                             std::int64_t memory_limit_bytes) {
+                             const sanitize::PreparedOptionsPtr &prepared) {
   const std::size_t start = group.start;
   const std::size_t end = group.end;
   if (start >= end || end > sources.size()) {
@@ -266,6 +219,13 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
   PathSourceInput input;
   input.frontend = frontend_name;
   input.input_size_hint_bytes = input_size_hint_from_paths(paths);
+  if (frontend_name == "csv") {
+    SAN_ASSIGN_OR_RAISE(input.csv_source_projections,
+                        csv_source_projections_from_path_sources(
+                            std::span<const PathSourceSpec>(sources).subspan(
+                                start, end - start),
+                            prepared));
+  }
   if (frontend_name == "jsonl") {
     input.paths = std::move(paths);
     input.source_names = std::move(source_names);
@@ -280,8 +240,9 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
   SAN_ASSIGN_OR_RAISE(
       input.chunk_source,
       sanitize::chunk_source_from_paths_with_source_names_encoding(
-          std::move(paths), std::move(source_names), "\n", input_text_encoding,
-          memory_limit_bytes));
+          std::move(paths), std::move(source_names), "\n",
+          prepared->spec.input_text_encoding,
+          prepared->spec.memory_limit_bytes));
   return input;
 }
 
@@ -314,6 +275,16 @@ sanitize::Result<sanitize::FrontendHandle> path_source_frontend(
     return frontend;
   }
 
+  if (input.frontend == "csv") {
+    auto frontend = sanitize::internal::make_csv_frontend(
+        std::move(input.chunk_source), options,
+        std::move(input.csv_source_projections));
+    if (!frontend) {
+      return sanitize::Status::Invalid("frontend not registered: csv");
+    }
+    return frontend;
+  }
+
   auto frontend = sanitize::make_builtin_frontend(
       input.frontend.c_str(), std::move(input.chunk_source), options);
   if (!frontend) {
@@ -328,34 +299,6 @@ std::string_view path_source_materializer_frontend(std::string_view frontend) {
     return "json";
   }
   return frontend;
-}
-
-sanitize::Status
-validate_csv_path_source_headers(const std::vector<PathSourceSpec> &sources,
-                                 const sanitize::PreparedOptionsPtr &prepared) {
-  if (!prepared || !prepared->spec.csv_has_header) {
-    return sanitize::Status::OK();
-  }
-  std::optional<std::vector<std::string>> expected;
-  for (const PathSourceSpec &source : sources) {
-    if (source.frontend != "csv") {
-      continue;
-    }
-    SAN_ASSIGN_OR_RAISE(auto header,
-                        csv_header_from_path_source(source, prepared));
-    if (!header) {
-      continue;
-    }
-    if (!expected) {
-      expected = std::move(header);
-      continue;
-    }
-    if (*header != *expected) {
-      return sanitize::Status::Invalid("CSV directory header mismatch in ",
-                                       source.path);
-    }
-  }
-  return sanitize::Status::OK();
 }
 
 bool path_source_failure_is_skippable_json(const PathSourceSpec &source,
@@ -385,7 +328,6 @@ void merge_path_source_diagnostics(sanitize::IngestDiagnostics &out,
 sanitize::Result<PathSourceInput>
 path_source_input(const sanitize::PreparedOptionsPtr &prepared,
                   const PathSourceSpec &source) {
-  (void)prepared;
   if (std::find(kDirectPathSourceFrontends.cbegin(),
                 kDirectPathSourceFrontends.cend(),
                 std::string_view(source.frontend)) !=
@@ -400,6 +342,12 @@ path_source_input(const sanitize::PreparedOptionsPtr &prepared,
     input.input_size_hint_bytes =
         input_size_hint_from_paths(std::vector<std::string>{source.path});
     input.chunk_source = std::move(chunk_source);
+    if (source.frontend == "csv") {
+      const std::array<PathSourceSpec, 1> one_source{source};
+      SAN_ASSIGN_OR_RAISE(
+          input.csv_source_projections,
+          csv_source_projections_from_path_sources(one_source, prepared));
+    }
     return input;
   }
   return sanitize::Status::Invalid("unsupported native path source frontend: ",
@@ -476,13 +424,11 @@ next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
 sanitize::Result<PathSourceInput>
 path_source_group_input(const std::vector<PathSourceSpec> &sources,
                         const PathSourceGroupPlan &group,
-                        std::string_view input_text_encoding,
-                        std::int64_t memory_limit_bytes) {
+                        const sanitize::PreparedOptionsPtr &prepared) {
   if (!group.grouped) {
     return sanitize::Status::Invalid("path-source group is not grouped");
   }
-  return make_path_source_group_input(sources, group, input_text_encoding,
-                                      memory_limit_bytes);
+  return make_path_source_group_input(sources, group, prepared);
 }
 
 } // namespace core_abi3_internal

@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ...core_impl.dependencies import ensure_optional_dependency, ensure_pyarrow
+from ...core_impl.finalization import runtime_is_finalizing
 from ...core_impl.native_symbols import PARQUET_STREAM_READ
+from ...core_impl.resource_lifecycle import (
+    _close_and_clear_attrs,
+    _close_sequence_retryably,
+)
 from ...core_impl.uris import local_path_or_reject_remote
 from ..pyarrow.streams import record_batch_reader_from_iterable
 from .memory import DEFAULT_PARQUET_BATCH_ROWS, _native_parquet_batch_size_contract_issue
@@ -176,15 +181,15 @@ def prepare_parquet_factory_source(
 
 
 def close_factory(factory: Any) -> None:
-    """Close pending Parquet resources and remove staged native files."""
-    pending = (factory._pending_parquet_file, factory._pending_opened_file)
-    factory._pending_parquet_file = None
-    factory._pending_opened_file = None
-    for obj in pending:
-        if obj is not None:
-            with suppress(Exception):
-                obj.close()
-    if remove_staged_parquet(factory._staged_path):
+    """Close owned resources while retaining failures for a later retry."""
+    if os.getpid() != getattr(factory, "_pid", os.getpid()):
+        return
+    _close_and_clear_attrs(factory, "_pending_parquet_file", "_pending_opened_file")
+    keepalive = list(getattr(factory, "_keepalive", ()))
+    _close_sequence_retryably(keepalive)
+    factory._keepalive = tuple(keepalive)
+    staged_path = getattr(factory, "_staged_path", None)
+    if remove_staged_parquet(staged_path):
         factory._staged_path = None
 
 
@@ -330,6 +335,7 @@ class ParquetRecordBatchStreamFactory:
         memory_limit_bytes: int | None = None,
     ) -> None:
         """Store the Parquet source and read its schema once."""
+        self._pid = os.getpid()
         self._data = data
         self._source = source
         self._feature = feature
@@ -394,6 +400,7 @@ class ParquetRecordBatchStreamFactory:
 
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
         """Return a fresh Arrow C Stream capsule for native ingestion."""
+        self._ensure_owner_process()
         del requested_schema
         native_capsule = self._try_native_stream()
         if native_capsule is not None:
@@ -404,12 +411,19 @@ class ParquetRecordBatchStreamFactory:
             logger=_LOGGER,
         )
 
+    def _ensure_owner_process(self) -> None:
+        """Reject use of PyArrow/native state inherited by a forked child."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            raise RuntimeError("Parquet stream factory cannot be reused after fork")
+
     def close(self) -> None:
-        """Close pending Parquet resources and remove staged native files."""
+        """Close pending Parquet resources in the owning process only."""
         close_factory(self)
 
     def __del__(self) -> None:
         """Best-effort cleanup for pending files and staged buffers."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         with suppress(Exception):
             self.close()
 

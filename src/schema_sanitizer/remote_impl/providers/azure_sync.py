@@ -7,13 +7,17 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Iterator
 
+from ...core_impl.memory_budget import current_operation_memory_ledger
+from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.uris import name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
+    current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
+from ..file_streams import write_sync_reader_to_file
 from .azure import AzureRef, parse_uri, render_uri
 
 
@@ -91,13 +95,33 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
     return RemoteFile(uri, Path(ref.blob).name, size)
 
 
-def download_file_with_service(service: Any, file: RemoteFile, local_path: str) -> None:
-    """Download one Azure object through an already-open blocking service."""
+def download_file_with_service(
+    service: Any,
+    file: RemoteFile,
+    local_path: str,
+    *,
+    storage_reservation: StreamingStorageReservation | None = None,
+) -> None:
+    """Download one Azure object while reserving disk before local writes."""
     ref = parse_uri(file.uri)
     stream = service.get_blob_client(ref.container, ref.blob).download_blob(max_concurrency=1)
-    with Path(local_path).open("wb") as file_handle:
-        for chunk in stream.chunks():
-            file_handle.write(chunk)
+    ledger = current_operation_memory_ledger()
+    reservation = 4 * 1024 * 1024 if ledger is None else min(4 * 1024 * 1024, ledger.limit_bytes)
+    iterator = iter(stream.chunks())
+
+    def read(_size: int) -> bytes:
+        """Provide a deterministic test or worker helper."""
+        try:
+            return next(iterator)
+        except StopIteration:
+            return b""
+
+    write_sync_reader_to_file(
+        read,
+        local_path,
+        chunk_bytes=reservation,
+        storage_reservation=storage_reservation,
+    )
 
 
 def download_file(
@@ -105,12 +129,18 @@ def download_file(
     local_path: str,
     *,
     memory_limit_bytes: int | None = None,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one Azure Blob without an asynchronous transport."""
     del memory_limit_bytes
     ref = parse_uri(uri)
     with open_service(ref) as service:
-        download_file_with_service(service, RemoteFile(uri, Path(ref.blob).name), local_path)
+        download_file_with_service(
+            service,
+            RemoteFile(uri, Path(ref.blob).name),
+            local_path,
+            storage_reservation=storage_reservation,
+        )
 
 
 def upload_file(
@@ -141,10 +171,10 @@ def list_files(
     memory_limit_bytes: int | None = None,
 ) -> list[RemoteFile]:
     """List direct Azure Blob children serially."""
-    del memory_limit_bytes
     ref = parse_uri(uri)
     prefix = ref.blob.rstrip("/") + "/"
     files: list[RemoteFile] = []
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     with open_service(ref) as service:
         container = service.get_container_client(ref.container)
         for blob in container.walk_blobs(name_starts_with=prefix, delimiter="/"):
@@ -155,9 +185,13 @@ def list_files(
             if not relative or "/" in relative or not name_matches(relative, suffixes):
                 continue
             size = getattr(blob, "size", None)
-            files.append(
-                RemoteFile(render_uri(ref, name), relative, size if isinstance(size, int) else None)
+            remote_file = RemoteFile(
+                render_uri(ref, name),
+                relative,
+                size if isinstance(size, int) else None,
             )
+            metadata_budget.charge_file(remote_file)
+            files.append(remote_file)
     files.sort(key=lambda file: file.name)
     return files
 
@@ -169,9 +203,11 @@ def directories_containing_files(
     memory_limit_bytes: int | None = None,
 ) -> DirectoryDiscovery[RemoteFile]:
     """Discover requested Azure directories serially in canonical order."""
-    del memory_limit_bytes
     accepted = normalize_extensions(suffixes)
-    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(uris)
+    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
+        uris,
+        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+    )
     groups: dict[tuple[str, str, str], dict[str, list[str]]] = {}
     for uri in uris:
         ref = parse_uri(uri)

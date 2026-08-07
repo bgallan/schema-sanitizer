@@ -47,7 +47,9 @@ std::size_t normalize_alignment(std::size_t align) {
 BumpArena::BumpArena(void *pool_handle, std::size_t block_size)
     : pool_handle_(pool_handle ? pool_handle
                                : static_cast<void *>(default_memory_pool())),
-      block_size_(std::max<std::size_t>(4096, block_size)) {}
+      metadata_resource_(pool_handle_),
+      block_size_(std::max<std::size_t>(4096, block_size)),
+      blocks_(&metadata_resource_) {}
 
 BumpArena::~BumpArena() {
   auto *pool = memory_pool_from_handle(pool_handle_);

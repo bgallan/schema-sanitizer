@@ -2,6 +2,7 @@
 #include "frontends/builtin_frontends.hh"
 
 #include "internal/memory/memory_budget.hh"
+#include "internal/memory/pool_resource.hh"
 #include "internal/runtime/ordered_executor.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/ingest/chunk_source.hh"
@@ -11,6 +12,8 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <memory_resource>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -20,7 +23,15 @@ namespace sanitize::internal {
 namespace {
 
 struct GroupBatchStorage {
-  std::vector<RowBatch> batches;
+  GroupBatchStorage(std::shared_ptr<void> pool,
+                    std::shared_ptr<PoolResource> resource)
+      : pool_keepalive(std::move(pool)),
+        resource_keepalive(std::move(resource)),
+        batches(resource_keepalive.get()) {}
+
+  std::shared_ptr<void> pool_keepalive;
+  std::shared_ptr<PoolResource> resource_keepalive;
+  std::pmr::vector<RowBatch> batches;
 };
 
 struct FetchedBatch {
@@ -52,9 +63,12 @@ public:
   JsonlPathGroupFrontend(std::vector<std::string> paths,
                          std::vector<std::string> source_names, Options options,
                          std::shared_ptr<OperationTaskArena> task_arena)
-      : options_(std::move(options)), task_arena_(std::move(task_arena)) {
+      : options_(std::move(options)), task_arena_(std::move(task_arena)),
+        coordination_resource_(std::make_shared<PoolResource>()),
+        pending_(
+            std::make_unique<PendingVector>(coordination_resource_.get())) {
     children_.reserve(paths.size());
-    pending_.resize(paths.size());
+    pending_->resize(paths.size());
     for (std::size_t index = 0; index < paths.size(); ++index) {
       children_.push_back(
           JsonlPathChild{.path = std::move(paths[index]),
@@ -67,13 +81,14 @@ public:
 
   void reset() noexcept {
     active_executor_.reset();
+    active_coordination_charge_.reset();
     active_start_ = 0;
     active_size_ = 0;
     active_taken_ = 0;
     index_ = 0;
     prefetch_end_ = 0;
     done_ = children_.empty();
-    for (auto &pending : pending_) {
+    for (auto &pending : *pending_) {
       pending.reset();
     }
     for (auto &child : children_) {
@@ -103,7 +118,22 @@ public:
   }
 
   void set_memory_pool(std::shared_ptr<void> pool) noexcept {
-    memory_pool_ = std::move(pool);
+    active_executor_.reset();
+    active_coordination_charge_.reset();
+    try {
+      auto resource = std::make_shared<PoolResource>(pool);
+      auto pending = std::make_unique<PendingVector>(resource.get());
+      pending->resize(children_.size());
+      pending_.reset();
+      coordination_resource_ = std::move(resource);
+      pending_ = std::move(pending);
+      memory_pool_ = std::move(pool);
+      pool_status_ = sanitize::Status::OK();
+    } catch (const std::bad_alloc &) {
+      pool_status_ = sanitize::Status::OutOfMemory(
+          "grouped JSONL coordination allocation failed");
+      return;
+    }
     for (auto &child : children_) {
       if (child.frontend) {
         child.frontend.set_memory_pool(memory_pool_);
@@ -120,13 +150,27 @@ public:
     }
   }
 
-  sanitize::Result<RowBatch> next_batch(std::int64_t capacity) {
+  sanitize::Result<RowBatch> next_batch(std::int64_t capacity) try {
     RowBatch out;
     if (capacity <= 0 || done_) {
       return out;
     }
+    if (!pool_status_.ok()) {
+      return pool_status_;
+    }
 
-    auto storage = std::make_shared<GroupBatchStorage>();
+    std::shared_ptr<GroupBatchStorage> storage;
+    try {
+      storage = std::make_shared<GroupBatchStorage>(memory_pool_,
+                                                    coordination_resource_);
+    } catch (const std::bad_alloc &) {
+      return sanitize::Status::OutOfMemory(
+          "grouped JSONL batch-owner allocation failed");
+    }
+    const auto group_budget =
+        memory_budget_from_limit(options_.memory_limit_bytes);
+    const auto max_retained_child_batches = static_cast<std::size_t>(
+        std::max<std::int64_t>(1, group_budget.async_prefetch_files));
     std::int64_t produced = 0;
     while (produced < capacity && !done_) {
       SAN_RETURN_NOT_OK(ensure_prefetched(capacity));
@@ -134,8 +178,8 @@ public:
         break;
       }
 
-      if (pending_[index_]) {
-        auto &pending = *pending_[index_];
+      if ((*pending_)[index_]) {
+        auto &pending = *(*pending_)[index_];
         if (!pending.status.ok()) {
           if (produced == 0) {
             return pending.status;
@@ -143,7 +187,7 @@ public:
           break;
         }
         FetchedBatch fetched = std::move(*pending.value);
-        pending_[index_].reset();
+        (*pending_)[index_].reset();
         children_[index_].first_fetch_consumed = true;
         const bool can_return_direct =
             produced == 0 && !fetched.exhausted && storage->batches.empty();
@@ -153,6 +197,9 @@ public:
         append_batch(&out, storage.get(), std::move(fetched.batch), &produced);
         if (fetched.exhausted) {
           advance_child();
+          if (storage->batches.size() >= max_retained_child_batches) {
+            break;
+          }
           continue;
         }
         break;
@@ -166,7 +213,7 @@ public:
         }
         PendingFetch deferred;
         deferred.status = next.status();
-        pending_[index_] = std::move(deferred);
+        (*pending_)[index_] = std::move(deferred);
         break;
       }
       RowBatch batch = std::move(next).ValueOrDie();
@@ -175,6 +222,9 @@ public:
       append_batch(&out, storage.get(), std::move(batch), &produced);
       if (exhausted) {
         advance_child();
+        if (storage->batches.size() >= max_retained_child_batches) {
+          break;
+        }
         continue;
       }
       break;
@@ -184,6 +234,9 @@ public:
       out.owner = std::move(storage);
     }
     return out;
+  } catch (const std::bad_alloc &) {
+    return sanitize::Status::OutOfMemory(
+        "grouped JSONL coordination exceeds memory_limit_bytes");
   }
 
 private:
@@ -230,7 +283,7 @@ private:
     if (index_ >= prefetch_end_) {
       SAN_RETURN_NOT_OK(start_prefetch(capacity));
     }
-    if (pending_[index_] || children_[index_].first_fetch_consumed) {
+    if ((*pending_)[index_] || children_[index_].first_fetch_consumed) {
       return sanitize::Status::OK();
     }
     if (!active_executor_) {
@@ -246,6 +299,7 @@ private:
 
   sanitize::Status start_prefetch(std::int64_t capacity) {
     active_executor_.reset();
+    active_coordination_charge_.reset();
     active_start_ = index_;
     active_size_ = 0;
     active_taken_ = 0;
@@ -257,6 +311,26 @@ private:
         std::max<std::int64_t>(1, budget.async_concurrency));
     const std::size_t cohort_size = std::min<std::size_t>(
         children_.size() - index_, std::min(arena_workers, budget_workers));
+    try {
+      // OrderedExecutor deliberately uses bounded standard-library queues.
+      // Reserve their conservative coordination footprint against the same
+      // operation pool so that path prefetch cannot grow outside the public
+      // memory budget even though those implementation containers are not PMR.
+      constexpr std::size_t kCoordinationBytesPerChild = 1024U;
+      if (cohort_size > std::numeric_limits<std::size_t>::max() /
+                            kCoordinationBytesPerChild) {
+        return sanitize::Status::OutOfMemory(
+            "grouped JSONL coordination size overflow");
+      }
+      active_coordination_charge_ =
+          std::make_unique<std::pmr::vector<std::byte>>(
+              coordination_resource_.get());
+      active_coordination_charge_->resize(cohort_size *
+                                          kCoordinationBytesPerChild);
+    } catch (const std::bad_alloc &) {
+      return sanitize::Status::OutOfMemory(
+          "grouped JSONL prefetch coordination exceeds memory_limit_bytes");
+    }
     const std::int64_t total_prefetch_rows =
         capacity > (std::numeric_limits<std::int64_t>::max() / 2)
             ? capacity
@@ -283,7 +357,7 @@ private:
         };
     prefetch_end_ = index_ + cohort_size;
     for (std::size_t child = index_; child < prefetch_end_; ++child) {
-      pending_[child].reset();
+      (*pending_)[child].reset();
       children_[child].first_fetch_consumed = false;
     }
 
@@ -322,7 +396,7 @@ private:
     } else {
       pending.status = result.status();
     }
-    pending_[child] = std::move(pending);
+    (*pending_)[child] = std::move(pending);
   }
 
   static void append_batch(RowBatch *out, GroupBatchStorage *storage,
@@ -331,14 +405,24 @@ private:
       return;
     }
     *produced += static_cast<std::int64_t>(batch.rows.size());
+    out->reader_diagnostics.merge(batch.reader_diagnostics);
     out->rows.insert(out->rows.end(), batch.rows.begin(), batch.rows.end());
     storage->batches.push_back(std::move(batch));
   }
 
   void advance_child() noexcept {
+    if (index_ < children_.size()) {
+      // An exhausted child will never be revisited until reset(). Drop its
+      // scanner, caches, and retained batch owner immediately instead of
+      // multiplying operation-pool retention by the number of input paths.
+      (*pending_)[index_].reset();
+      children_[index_].frontend = FrontendHandle{};
+      children_[index_].first_fetch_consumed = false;
+    }
     ++index_;
     if (index_ >= prefetch_end_ && active_taken_ >= active_size_) {
       active_executor_.reset();
+      active_coordination_charge_.reset();
       active_start_ = 0;
       active_size_ = 0;
       active_taken_ = 0;
@@ -348,11 +432,18 @@ private:
     }
   }
 
+  using PendingVector = std::pmr::vector<std::optional<PendingFetch>>;
+
   Options options_;
   std::shared_ptr<OperationTaskArena> task_arena_;
-  std::vector<JsonlPathChild> children_;
-  std::vector<std::optional<PendingFetch>> pending_;
+  // Allocator owners precede every PMR-backed coordination object so reverse
+  // destruction releases containers before their operation pool.
   std::shared_ptr<void> memory_pool_;
+  std::shared_ptr<PoolResource> coordination_resource_;
+  std::unique_ptr<PendingVector> pending_;
+  std::unique_ptr<std::pmr::vector<std::byte>> active_coordination_charge_;
+  std::vector<JsonlPathChild> children_;
+  sanitize::Status pool_status_ = sanitize::Status::OK();
   const CompiledPlan *plan_ = nullptr;
   FrontendMaterializationMode materialization_mode_ =
       FrontendMaterializationMode::kDefault;
@@ -414,10 +505,16 @@ sanitize::Result<FrontendHandle> make_jsonl_path_group_frontend(
   if (paths.empty() || paths.size() != source_names.size()) {
     return sanitize::Status::Invalid("invalid grouped JSONL path source");
   }
-  auto frontend = std::unique_ptr<JsonlPathGroupFrontend>(
-      new (std::nothrow)
-          JsonlPathGroupFrontend(std::move(paths), std::move(source_names),
-                                 options, std::move(task_arena)));
+  std::unique_ptr<JsonlPathGroupFrontend> frontend;
+  try {
+    frontend = std::unique_ptr<JsonlPathGroupFrontend>(
+        new (std::nothrow)
+            JsonlPathGroupFrontend(std::move(paths), std::move(source_names),
+                                   options, std::move(task_arena)));
+  } catch (const std::bad_alloc &) {
+    return sanitize::Status::OutOfMemory(
+        "grouped JSONL coordination allocation failed");
+  }
   if (!frontend) {
     return sanitize::Status::OutOfMemory(
         "grouped JSONL frontend allocation failed");

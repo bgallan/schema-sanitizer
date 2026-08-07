@@ -74,6 +74,9 @@ struct PreparedOptions {
   // Internal run metadata captured by the Python operation owner. This is not
   // part of the public option catalog or serialized SZOPT contract.
   std::string operation_detected_at;
+  // Shared resident-byte ledger owned by the public Python operation. Native
+  // pools cast this opaque handle back to internal::OperationMemoryLedger.
+  std::shared_ptr<void> operation_memory_ledger;
 
   // Case-folded token hashes.
   std::unordered_set<uint64_t> true_hashes;

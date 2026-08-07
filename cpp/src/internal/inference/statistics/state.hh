@@ -148,6 +148,9 @@ struct InferenceContext {
   // Creates an inference context using the supplied PMR upstream.
   explicit InferenceContext(
       std::pmr::memory_resource *upstream = std::pmr::get_default_resource());
+  [[nodiscard]] std::pmr::memory_resource *memory_resource() const noexcept {
+    return const_cast<std::pmr::monotonic_buffer_resource *>(&arena);
+  }
   // Stores the per-run default key in the interner.
   void set_default_key(std::string_view key);
 

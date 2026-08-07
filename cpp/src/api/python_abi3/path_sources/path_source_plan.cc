@@ -23,6 +23,7 @@
 #include "internal/memory/pool_resource.hh"
 #include "internal/parsing/csv_parse.hh"
 #include "internal/parsing/streaming/csv/scanner.hh"
+#include "internal/runtime/process_identity.hh"
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/registry/registry.hh"
 
@@ -36,6 +37,9 @@ struct PathSourcePlanCapsule {
 };
 
 void path_source_plan_capsule_destructor(PyObject *capsule) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   auto *plan = static_cast<PathSourcePlanCapsule *>(
       PyCapsule_GetPointer(capsule, kPathSourcePlanCapsuleName));
   if (!plan) {

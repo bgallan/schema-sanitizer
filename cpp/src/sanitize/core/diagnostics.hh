@@ -3,11 +3,17 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <string_view>
 
 #include "sanitize/abi/cdata_types.hh"
 
 namespace sanitize {
+
+namespace internal {
+class MemoryPool;
+}
 
 // Codes for sampled diagnostic events.
 enum class DiagnosticCode : std::uint8_t {
@@ -37,6 +43,17 @@ inline const char *DiagnosticCodeToString(DiagnosticCode c) {
   }
 }
 
+struct ReaderResourceDiagnostics {
+  int64_t parser_max_depth = 0;
+  int64_t decoded_bytes = 0;
+  int64_t records = 0;
+  int64_t nodes = 0;
+  int64_t compressed_bytes = 0;
+  int64_t decompressed_bytes = 0;
+
+  void merge(const ReaderResourceDiagnostics &other) noexcept;
+};
+
 struct IngestDiagnostics {
   // Inference pass
   int64_t inferred_rows = 0;
@@ -56,8 +73,27 @@ struct IngestDiagnostics {
   // Error handling
   int64_t skipped_rows = 0;
 
+  // Reader hardening/resource diagnostics.
+  mutable int64_t current_charged_memory_bytes = 0;
+  mutable int64_t peak_charged_memory_bytes = 0;
+  mutable int64_t operation_memory_limit_bytes = -1;
+  ReaderResourceDiagnostics reader;
+  int64_t cancellations = 0;
+  std::string cancellation_reason;
+
+  // Binds and snapshots the exact operation-scoped tracked pool. The weak
+  // reference avoids extending operation leases after stream ownership ends.
+  void bind_operation_memory_pool(std::shared_ptr<void> pool) noexcept;
+  void capture_operation_memory() const noexcept;
+  void merge_reader(const ReaderResourceDiagnostics &delta) noexcept;
+  void merge(const IngestDiagnostics &other) noexcept;
+  void record_cancellation(std::string_view reason) noexcept;
+
   // Canonical JSON payload for diagnostics.
   [[nodiscard]] std::string to_json() const;
+
+private:
+  std::weak_ptr<internal::MemoryPool> operation_memory_pool_;
 };
 
 } // namespace sanitize

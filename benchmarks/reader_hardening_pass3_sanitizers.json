@@ -1,0 +1,71 @@
+{
+  "asan_ubsan": {
+    "build_type": "Debug",
+    "canonical_regression_inputs": 10,
+    "compiler": "clang version 17.0.0 (https://github.com/swiftlang/llvm-project.git 10999b6d034fe318f3d56c83bddb6572593a8bb0)",
+    "detect_leaks": true,
+    "max_input_bytes": 262144,
+    "max_input_ms": 5000,
+    "max_rss_mb": 2048,
+    "mutation_runs_per_reader": 1000,
+    "result": "passed_without_sanitizer_findings",
+    "targets": [
+      "csv",
+      "json",
+      "xml",
+      "parquet"
+    ],
+    "total_mutation_runs": 4000
+  },
+  "date": "2026-08-01",
+  "environment_limitations": {
+    "pre_commit": "not installed and unavailable from the configured package index",
+    "pyarrow": "not installed; optional pyarrow integration tests not executed"
+  },
+  "pytest": {
+    "public_api_registry_streams_sinks": {
+      "passed": 30,
+      "skipped_optional": 18
+    },
+    "reader_hardening_memory_ci": {
+      "deselected_optional_pyarrow": 1,
+      "passed": 167
+    },
+    "result": "passed",
+    "total_passed_across_final_targeted_runs": 197
+  },
+  "release_ab": {
+    "comparisons": {
+      "csv_multi": 1.4360363936298317,
+      "csv_single": 1.384818420496627,
+      "jsonl_multi": 1.1728371207546902,
+      "jsonl_single": 1.3269018573250542,
+      "parquet_preflight": 0.9614610196856949,
+      "xml_multi": 1.028428820936934,
+      "xml_single": 1.111772397619871
+    },
+    "repeats": 7,
+    "result": "performance_regression_remains_open",
+    "rows": 2000,
+    "width": 8
+  },
+  "schema_version": 1,
+  "tsan": {
+    "build_type": "Debug",
+    "compiler": "g++ (Debian 14.2.0-19) 14.2.0",
+    "result": "passed_without_sanitizer_findings",
+    "rounds": 100,
+    "target": "schema_sanitizer_sanitized_ordered_executor"
+  },
+  "xml_early_release": {
+    "charged_bytes_after_close": 0,
+    "memory_limit_bytes": 67108864,
+    "modes": [
+      "single_threaded",
+      "multi_threaded"
+    ],
+    "payload_bytes_per_row": 512,
+    "result": "passed",
+    "rows": 10000
+  }
+}

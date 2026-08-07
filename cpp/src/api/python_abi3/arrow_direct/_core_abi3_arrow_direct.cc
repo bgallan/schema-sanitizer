@@ -257,7 +257,7 @@ sanitize::Result<sanitize::IngestStream> ingest_direct_arrow_stream(
   }
   prepared.operation_memory_pool =
       prepared.ctx->make_operation_memory_pool_handle(
-          opts->spec.memory_limit_bytes);
+          opts->spec.memory_limit_bytes, opts->operation_memory_ledger);
   if (!prepared.operation_memory_pool) {
     return sanitize::Status::OutOfMemory(
         "operation memory pool allocation failed");

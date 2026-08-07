@@ -18,6 +18,7 @@ struct SchemaRegistryMergeInput {
   std::string detected_at;
   std::string default_key_name = "default_key";
   FieldOrderPolicy field_order = FieldOrderPolicy::kAlphabetically;
+  SchemaEvolutionMode schema_evolution = SchemaEvolutionMode::kAdditive;
 };
 
 struct SchemaRegistryMergeResult {

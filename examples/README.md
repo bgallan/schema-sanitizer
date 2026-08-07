@@ -4,19 +4,32 @@ This folder contains end-to-end tutorial notebooks and scripts for
 `schema_sanitizer`:
 
 1. `01_ingestion_and_core_api.ipynb`
+
    - Supported inputs, analytical `to_*` functions, per-call options, and result stats
+
 1. `02_options_and_stats.ipynb`
+
    - Per-call options, result stats, and repeatable business-data reads with
      intentionally dynamic ETL metadata
+
 1. `03_adapters_and_converters.ipynb`
+
    - Pandas/Polars/DuckDB adapters, `Result` stats, and CSV/JSONL/Parquet converters
+
 1. `04_streaming_large_csv_to_parquet.ipynb`
+
    - Large local CSV generation and Parquet writing with an explicit memory budget
+
 1. `05_full_options_catalog_sweep.ipynb`
+
    - Representative public option sweep through analytical and file converters
+
 1. `06_xml_reading_and_memory.ipynb`
+
    - XML document rows, XML folders, `xml_row_tag` streaming rows, XML converters, and memory-limit behavior
+
 1. `example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py`
+
    - CLI pipeline example that reads daily or hourly Hive-partitioned GCS
      inputs, fetches the latest embedded `schema_registry` through ADBC, and writes
      BigQuery-compatible Parquet to GCS before creating or replacing the
@@ -28,7 +41,32 @@ This folder contains end-to-end tutorial notebooks and scripts for
      missing partitions
    - Enables integer, float, ISO timestamp, ISO date, and ISO time parsing
 
-The examples use the public API surface documented in the main README:
+1. `example_08/08_gcs_csv_modified_window_to_polars_parquet.py`
+
+   - Lists one flat GCS CSV prefix once and assigns exact object generations to
+     inclusive UTC calendar dates using half-open daily windows
+   - Reconciles heterogeneous headers with `csv_header_mode="union"` and one
+     `SourceManifest` conversion per non-empty day
+   - Opts into backslash-escaped quotes used by the source exports while the
+     library-wide CSV default remains strict
+   - Normalizes `<event id>/<event text>` columns into a final Polars
+     `list<struct>` field while preserving source provenance
+   - Partitions rows by a configurable timestamp into UTC
+     `year=<Y>/month=<M>/day=<D>` paths and validates every local Parquet before
+     upload
+   - Replaces the Hive-partitioned BigQuery external table only after all
+     requested publications succeed
+   - See
+     [`docs/flat-prefix-modified-time-csv.md`](../docs/flat-prefix-modified-time-csv.md)
+     for generation consistency, late-arrival limitations, reruns, and
+     analytical memory risk
+
+   Run `example_08/08_local_csv_directory_to_polars.py debug/csv` to validate
+   the same reconciliation and event normalization locally, without cloud
+   infrastructure or a target-table schema.
+
+The examples use the public API surface described in the
+[documentation guide](../docs/README.md):
 
 - Inputs are local files, `file://` URIs, or supported async cloud/object URIs
   for `.json`, `.jsonl`, `.ndjson`, `.xml`, `.csv`, and `.parquet`/`.pq`
@@ -254,3 +292,43 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --target-table project_id.dataset_id.external_events \
   --bigquery-registry-sidecar-table project_id.dataset_id.external_events_registry_state
 ```
+
+## Example 08: flat GCS CSV prefix by modification time
+
+Run with Google ADC configured for GCS and BigQuery ADBC:
+
+```bash
+pip install "schema-sanitizer[polars,pyarrow,cloud]" adbc-driver-bigquery[dbapi]
+
+python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
+  --source-csv-prefix gs://raw-bucket/records \
+  --silver-parquet-prefix gs://silver-bucket/records \
+  --start-date 2026-07-01 \
+  --end-date 2026-07-07 \
+  --target-table project_id.dataset_id.external_records \
+  --partition-timestamp-column event_timestamp \
+  --parquet-file-prefix records \
+  --omit-null-payloads \
+  --memory-limit-bytes 268435456
+```
+
+Both dates are inclusive UTC calendar dates; each internal day is
+`[00:00:00Z, next 00:00:00Z)`. The listing is a point-in-time snapshot, so
+objects arriving after it require a later rerun/lookback. The exact listed GCS
+generation is downloaded, and deletion of that generation fails rather than
+falling forward to newer bytes.
+
+The example uses `to_polars` for its custom vectorized transformation. The
+returned dataframe is caller-owned and can exceed `memory_limit_bytes`; reduce
+the daily window size when necessary. Direct `to_parquet` is the bounded-memory
+choice for workflows that do not need a dataframe transformation.
+
+Modification time controls which source objects enter each run. The configured
+data timestamp controls the output Hive partition, so one source day can emit
+several Parquet files. Timestamp values are interpreted in UTC and null values
+are rejected before publication.
+
+Each GZIP Parquet is named
+`<prefix>_<partition YYYYMMDD>_<source window YYYYMMDD>.gz.parquet`. This lets
+several incremental source windows coexist in one daily Hive partition; a
+rerun only replaces the file for the same source window and partition.

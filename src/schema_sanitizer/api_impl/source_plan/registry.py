@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -20,8 +21,12 @@ from schema_sanitizer.input_impl.source_plan import (
 
 from ...adapters.pyarrow import streams as _pyarrow_streams
 from ...core_impl.execution_policy import execution_policy, normalize_threading_mode
+from ...core_impl.finalization import runtime_is_finalizing
 from ...core_impl.generated_metadata import TimestampColumns
-from ...core_impl.resource_lifecycle import _close_suppressing_errors
+from ...core_impl.resource_lifecycle import (
+    _cleanup_with_note,
+    _close_suppressing_errors,
+)
 from ...options_impl.call_options import unwrap_options
 from ...options_impl.options import Options, memory_limit_bytes_or_none
 from ..output_diagnostics import patch_file_output_diagnostics, patch_table_diagnostics
@@ -47,6 +52,7 @@ class OpenedSourcePlanRegistryStream:
     diagnostics: Any = None
     raw_stream: Any | None = None
     close_items: list[Any] = field(default_factory=list)
+    _pid: int = field(default_factory=os.getpid, init=False, repr=False)
 
     def output_stream(self) -> Any:
         """Return a Python stream wrapper for file writers."""
@@ -70,19 +76,62 @@ class OpenedSourcePlanRegistryStream:
         return raw
 
     def close(self) -> None:
-        """Close opened stream resources exactly once."""
-        closed_raw: Any | None = None
-        if self.stream is not None:
-            _close_suppressing_errors(self.stream)
-            self.stream = None
-        elif self.raw_stream is not None:
-            closed_raw = self.raw_stream
-            _close_suppressing_errors(closed_raw)
-            self.raw_stream = None
+        """Close owned stream resources and retain failures for a later retry."""
+        if os.getpid() != self._pid:
+            return
+        closed_ids: set[int] = set()
+        blocked_ids: set[int] = set()
+        stream = self.stream
+        raw = self.raw_stream
+        if stream is not None:
+            wrapped_raw = stream._raw if hasattr(stream, "_raw") else None
+            succeeded = _close_suppressing_errors(stream)
+            if succeeded:
+                if self.stream is stream:
+                    self.stream = None
+                if raw is not None and wrapped_raw is raw:
+                    if self.raw_stream is raw:
+                        self.raw_stream = None
+                    closed_ids.add(id(raw))
+            elif raw is not None and wrapped_raw is raw:
+                blocked_ids.add(id(raw))
+        elif raw is not None:
+            if _close_suppressing_errors(raw):
+                if self.raw_stream is raw:
+                    self.raw_stream = None
+                closed_ids.add(id(raw))
+            else:
+                blocked_ids.add(id(raw))
+
+        failed: list[Any] = []
+        failed_ids: set[int] = set()
+        outcomes: dict[int, bool] = {}
         while self.close_items:
             item = self.close_items.pop()
-            if item is not closed_raw:
-                _close_suppressing_errors(item)
+            ident = id(item)
+            if ident in closed_ids:
+                continue
+            if ident in blocked_ids:
+                item_succeeded = False
+            else:
+                cached_succeeded = outcomes.get(ident)
+                if cached_succeeded is None:
+                    cached_succeeded = _close_suppressing_errors(item)
+                    outcomes[ident] = cached_succeeded
+                item_succeeded = cached_succeeded
+            if not item_succeeded and ident not in failed_ids:
+                failed.append(item)
+                failed_ids.add(ident)
+        self.close_items.extend(reversed(failed))
+
+    def __del__(self) -> None:
+        """Retry abandoned cleanup outside shutdown and post-fork children."""
+        try:
+            if runtime_is_finalizing():
+                return
+            self.close()
+        except BaseException:
+            pass
 
 
 def append_schema_drifts(target: list[Any], raw_json: str | None) -> None:
@@ -151,9 +200,14 @@ def _open_remote_registry_stream(
             skip_invalid_json_sources=True,
         )
         _mark_native_path_sources_route()
-    except Exception:
-        probe_provider.close_all()
-        stream_provider.close_all()
+    except BaseException as exc:
+        for label, provider in (("probe", probe_provider), ("stream", stream_provider)):
+            _cleanup_with_note(
+                exc,
+                provider,
+                label=f"remote registry {label} provider cleanup also failed",
+                method="close_all",
+            )
         raise
     return _opened_raw_registry_stream(raw)
 

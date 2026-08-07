@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import sys
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -11,22 +10,95 @@ from urllib.parse import urlparse
 
 from ..core_impl.async_scheduler import retry_async
 from ..core_impl.execution_policy import execution_policy, normalize_threading_mode
-from ..core_impl.memory_budget import memory_budget
+from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.memory_budget import (
+    acquire_operation_memory,
+    current_operation_memory_ledger,
+    memory_budget,
+)
+from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
+from .async_bridge import run_sync as run_sync
+from .file_streams import write_async_reader_to_file
 from .provider_session_pool import current_provider_session_pool
 
 TRANSFER_CHUNK_BYTES = 1024 * 1024
+MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
+MAX_ERROR_RESPONSE_BYTES = 64 * 1024
+
+
+class _BudgetedBytes(bytes):
+    """Bytes retaining an operation-memory lease for their Python lifetime."""
+
+    def __new__(cls, value: bytes | bytearray | memoryview, lease: Any):
+        """Create bytes that retain an operation-memory lease."""
+        obj = super().__new__(cls, value)
+        obj._operation_memory_lease = lease
+        return obj
+
+    def release_memory(self) -> Any:
+        """Detach and return the retained lease for ownership transfer."""
+        lease = getattr(self, "_operation_memory_lease", None)
+        self._operation_memory_lease = None
+        return lease
+
+    def close(self) -> None:
+        """Release the retained charge before committing ownership transfer."""
+        lease = getattr(self, "_operation_memory_lease", None)
+        if lease is None:
+            return
+        lease.close()
+        if getattr(self, "_operation_memory_lease", None) is lease:
+            self._operation_memory_lease = None
+
+    def __del__(self) -> None:
+        """Release retained memory unless interpreter teardown has begun."""
+        try:
+            if runtime_is_finalizing():
+                return
+            self.close()
+        except BaseException:
+            pass
+
+
+class _BudgetedText(str):
+    """Decoded text retaining the source response's operation-memory lease."""
+
+    def __new__(cls, value: str, lease: Any):
+        """Create text that retains an operation-memory lease."""
+        obj = super().__new__(cls, value)
+        obj._operation_memory_lease = lease
+        return obj
+
+    def close(self) -> None:
+        """Release the retained charge before clearing local ownership."""
+        lease = getattr(self, "_operation_memory_lease", None)
+        if lease is None:
+            return
+        lease.close()
+        if getattr(self, "_operation_memory_lease", None) is lease:
+            self._operation_memory_lease = None
+
+    def __del__(self) -> None:
+        """Release retained memory unless interpreter teardown has begun."""
+        try:
+            if runtime_is_finalizing():
+                return
+            self.close()
+        except BaseException:
+            pass
 
 
 class _HttpStatusError(RuntimeError):
     """Carry one HTTP status while preserving the public RuntimeError surface."""
 
-    def __init__(self, status: int, message: str) -> None:
-        """Store the response status used by retry classification."""
+    def __init__(self, status: int, message: str, *, headers: Any = None) -> None:
+        """Store retry-relevant response status and headers."""
         super().__init__(message)
         self.status = status
+        self.headers = headers
 
 
 def _retryable_http_error(exc: Exception) -> bool:
@@ -52,27 +124,6 @@ def _disable_implicit_connection_retries(session: Any) -> None:
         session._retry_connection = False
 
 
-def run_sync(coro: Any, *, threading_mode: str = "single") -> Any:
-    """Run a coroutine without creating a helper thread in single mode."""
-    mode = normalize_threading_mode(threading_mode)
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    if mode == "single":
-        close = getattr(coro, "close", None)
-        if callable(close):
-            close()
-        raise RuntimeError(
-            "A synchronous schema-sanitizer API cannot run inside an active "
-            "asyncio loop with threading_mode='single' because doing so would "
-            "require a helper host thread. Call it outside the loop or use "
-            "threading_mode='multi'."
-        )
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="schema-sanitizer-async") as pool:
-        return pool.submit(lambda: asyncio.run(coro)).result()
-
-
 def check_download_size(uri: str, size: int | None, memory_limit_bytes: int | None) -> None:
     """Reject one downloaded object if it crosses the configured limit."""
     if memory_limit_bytes is None or memory_limit_bytes <= 0:
@@ -92,25 +143,143 @@ def check_download_size(uri: str, size: int | None, memory_limit_bytes: int | No
     )
 
 
+async def read_bounded_response_bytes(
+    response: Any,
+    *,
+    maximum_bytes: int,
+    stage: str,
+) -> bytes:
+    """Read one aiohttp control body without crossing its memory ceiling."""
+    limit = max(1, int(maximum_bytes))
+    # A bytes subclass is created to retain the lease after returning. Reserve
+    # both the provider payload and that immutable retained copy up front.
+    lease = acquire_operation_memory((limit + 1) * 2 + 256, stage=stage)
+    try:
+        content = getattr(response, "content", None)
+        reader = getattr(content, "read", None)
+        if callable(reader):
+            payload = await reader(limit + 1)
+        else:
+            # Compatibility fallbacks for minimal test doubles. Real aiohttp
+            # responses always expose ``content.read`` and therefore remain bounded
+            # before materialization.
+            response_reader = getattr(response, "read", None)
+            if callable(response_reader):
+                payload = await response_reader()
+            else:
+                text_reader = getattr(response, "text", None)
+                if not callable(text_reader):
+                    raise TypeError("response does not expose a readable body")
+                payload = (await text_reader()).encode("utf-8")
+        if len(payload) <= limit:
+            if lease is None:
+                return bytes(payload)
+            retained = _BudgetedBytes(payload, lease)
+            lease.resize(sys.getsizeof(retained))
+            lease = None
+            return retained
+    except BaseException:
+        if lease is not None:
+            lease.close()
+        raise
+    if lease is not None:
+        lease.close()
+    raise SchemaSanitizerResourceError(
+        f"memory_limit_bytes limit exceeded during {stage}: response body exceeds {limit} bytes",
+        detail={
+            "stage": stage,
+            "limit_name": "control_response_bytes",
+            "limit_bytes": limit,
+            "actual_bytes": len(payload),
+        },
+    )
+
+
+async def read_bounded_response_text(
+    response: Any,
+    *,
+    maximum_bytes: int,
+    stage: str,
+) -> str:
+    """Read and decode one bounded response body for diagnostics or JSON."""
+    payload = await read_bounded_response_bytes(
+        response,
+        maximum_bytes=maximum_bytes,
+        stage=stage,
+    )
+    charset = getattr(response, "charset", None) or "utf-8"
+    if not isinstance(payload, _BudgetedBytes):
+        return payload.decode(charset, errors="replace")
+
+    lease = payload.release_memory()
+    if lease is None:
+        return payload.decode(charset, errors="replace")
+    # Decoding and constructing the retained str subclass can temporarily hold
+    # two Unicode objects alongside the source bytes. Charge the worst-case
+    # four-byte representation before either allocation occurs.
+    current_bytes = lease.reserved_bytes
+    transient_text_bytes = 2 * (len(payload) * 4 + 256)
+    try:
+        lease.resize(current_bytes + transient_text_bytes)
+        text = payload.decode(charset, errors="replace")
+        retained = _BudgetedText(text, lease)
+        del text
+        del payload
+        lease.resize(sys.getsizeof(retained))
+        lease = None
+        return retained
+    finally:
+        if lease is not None:
+            lease.close()
+
+
 async def read_response_bytes(response: Any, *, uri: str) -> bytes:
     """Read a successful aiohttp response or raise with request context."""
     if response.status in {200, 201}:
-        return await response.read()
-    body = await response.text()
+        ledger = current_operation_memory_ledger()
+        if ledger is None:
+            return await response.read()
+        snapshot = ledger.snapshot()
+        available = max(1, snapshot.limit_bytes - snapshot.reserved_bytes)
+        safe_payload_bytes = max(1, (available - 256) // 2)
+        return await read_bounded_response_bytes(
+            response,
+            maximum_bytes=safe_payload_bytes,
+            stage="remote_response",
+        )
+    body = await read_bounded_response_text(
+        response,
+        maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
+        stage="remote_error_response",
+    )
     raise RuntimeError(f"HTTP {response.status} for {uri}: {body[:1000]!r}")
 
 
-async def write_response_to_file(response: Any, *, uri: str, local_path: str) -> None:
-    """Stream a successful HTTP response body to a local file."""
+async def write_response_to_file(
+    response: Any,
+    *,
+    uri: str,
+    local_path: str,
+    storage_reservation: StreamingStorageReservation | None = None,
+) -> None:
+    """Stream a successful HTTP body while reserving disk before each write."""
     if response.status != 200:
-        body = await response.text()
+        body = await read_bounded_response_text(
+            response,
+            maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
+            stage="remote_error_response",
+        )
         raise _HttpStatusError(
             response.status,
             f"HTTP download failed for {uri!r}: {response.status} {body[:1000]!r}",
+            headers=getattr(response, "headers", None),
         )
-    with Path(local_path).open("wb") as file_handle:
-        async for chunk in response.content.iter_chunked(TRANSFER_CHUNK_BYTES):
-            file_handle.write(chunk)
+    await write_async_reader_to_file(
+        response.content.read,
+        local_path,
+        chunk_bytes=TRANSFER_CHUNK_BYTES,
+        storage_reservation=storage_reservation,
+    )
 
 
 async def _open_aiohttp_session_unpooled(
@@ -163,7 +332,12 @@ async def open_aiohttp_session(
             threading_mode=threading_mode,
         )
 
-    return await pool.borrow_client(key, create)
+    policy = execution_policy(threading_mode, memory_limit_bytes)
+    return await pool.borrow_client(
+        key,
+        create,
+        descriptor_weight=max(1, policy.async_concurrency + 1),
+    )
 
 
 async def download_http_file(
@@ -172,6 +346,7 @@ async def download_http_file(
     *,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one HTTP(S) object with bounded transport retries."""
     retries = memory_budget(memory_limit_bytes).async_retries
@@ -182,9 +357,19 @@ async def download_http_file(
         async def request() -> None:
             """Open a fresh response and truncate the local file per attempt."""
             async with session.get(uri) as response:
-                await write_response_to_file(response, uri=uri, local_path=local_path)
+                await write_response_to_file(
+                    response,
+                    uri=uri,
+                    local_path=local_path,
+                    storage_reservation=storage_reservation,
+                )
 
-        await retry_async(request, retries=retries, should_retry=_retryable_http_error)
+        await retry_async(
+            request,
+            retries=retries,
+            should_retry=_retryable_http_error,
+            throttle_key=f"http:{urlparse(uri).netloc}",
+        )
 
 
 async def http_file_exists(
@@ -228,9 +413,15 @@ async def http_file_metadata(
                     response.status,
                     f"Unexpected HTTP response while checking source object: "
                     f"status={response.status}, uri={uri!r}",
+                    headers=getattr(response, "headers", None),
                 )
 
-        return await retry_async(request, retries=retries, should_retry=_retryable_http_error)
+        return await retry_async(
+            request,
+            retries=retries,
+            should_retry=_retryable_http_error,
+            throttle_key=f"http:{urlparse(uri).netloc}",
+        )
 
 
 async def upload_http_file(
@@ -262,11 +453,25 @@ async def upload_http_file(
                     allow_redirects=False,
                 ) as response:
                     if response.status not in {200, 201, 202, 204}:
-                        body = await response.text()
+                        body = await read_bounded_response_text(
+                            response,
+                            maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
+                            stage="remote_error_response",
+                        )
                         raise _HttpStatusError(
                             response.status,
                             f"HTTP upload failed for {uri!r}: {response.status} {body[:1000]!r}",
+                            headers=getattr(response, "headers", None),
                         )
-                    await response.read()
+                    await read_bounded_response_bytes(
+                        response,
+                        maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                        stage="remote_control_response",
+                    )
 
-        await retry_async(request, retries=retries, should_retry=_retryable_http_error)
+        await retry_async(
+            request,
+            retries=retries,
+            should_retry=_retryable_http_error,
+            throttle_key=f"http:{urlparse(uri).netloc}",
+        )

@@ -52,6 +52,41 @@ int errno_for_status(const sanitize::Status &st) noexcept {
   }
 }
 
+sanitize::Status status_from_stream_error(int error, ArrowArrayStream *stream,
+                                          const char *where) {
+  const char *detail = nullptr;
+  try {
+    if (stream && stream->get_last_error) {
+      detail = stream->get_last_error(stream);
+    }
+  } catch (...) {
+    detail = nullptr;
+  }
+  const char *context = where ? where : "Arrow C stream operation failed";
+  const char *message = detail && detail[0] != '\0' ? detail : nullptr;
+  switch (error) {
+  case ENOMEM:
+    return message ? sanitize::Status::OutOfMemory(context, ": ", message)
+                   : sanitize::Status::OutOfMemory(context);
+  case EINVAL:
+    return message ? sanitize::Status::Invalid(context, ": ", message)
+                   : sanitize::Status::Invalid(context);
+#ifdef ECANCELED
+  case ECANCELED:
+    return message ? sanitize::Status::Cancelled(context, ": ", message)
+                   : sanitize::Status::Cancelled(context);
+#endif
+#ifdef ENOTSUP
+  case ENOTSUP:
+    return message ? sanitize::Status::NotImplemented(context, ": ", message)
+                   : sanitize::Status::NotImplemented(context);
+#endif
+  default:
+    return message ? sanitize::Status::IOError(context, ": ", message)
+                   : sanitize::Status::IOError(context, " (errno ", error, ")");
+  }
+}
+
 void release_schema_nothrow(ArrowSchema *schema) noexcept {
   if (!schema || !schema->release) {
     return;

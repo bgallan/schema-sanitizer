@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import import_module
 from typing import Any
 
@@ -167,3 +168,79 @@ def remove_embedded_metadata_fields(schema: Any) -> Any:
         [field for field in schema if field.name not in metadata_names],
         metadata=schema.metadata,
     )
+
+
+def read_external_table_arrow_schema(client: Any, table: Any) -> Any:
+    """Read a BigQuery table schema through a duck-typed client as PyArrow.
+
+    This is the fallback for external tables that do not yet contain an embedded
+    schema-sanitizer registry. ``client`` must expose ``get_table`` and the
+    returned table must expose an iterable ``schema`` of BigQuery SchemaField-
+    compatible objects.
+    """
+    pa = import_module("pyarrow")
+    resolved = client.get_table(table)
+    fields = [_bigquery_schema_field_to_arrow(pa, field) for field in resolved.schema]
+    return pa.schema(fields)
+
+
+def _bigquery_schema_field_to_arrow(pa: Any, field: Any) -> Any:
+    """Convert one BigQuery SchemaField-compatible object to an Arrow field."""
+    name = str(field.name)
+    field_type = str(getattr(field, "field_type", getattr(field, "type", "STRING"))).upper()
+    mode = str(getattr(field, "mode", "NULLABLE") or "NULLABLE").upper()
+    children = tuple(getattr(field, "fields", ()) or ())
+    data_type = _bigquery_scalar_type_to_arrow(pa, field_type, children)
+    nullable = mode != "REQUIRED"
+    if mode == "REPEATED":
+        data_type = pa.list_(pa.field("item", data_type, nullable=True))
+        nullable = False
+    return pa.field(name, data_type, nullable=nullable)
+
+
+def _bigquery_scalar_type_to_arrow(pa: Any, field_type: str, children: tuple[Any, ...]) -> Any:
+    """Map one non-repeated BigQuery type to Arrow."""
+    if field_type in {"RECORD", "STRUCT"}:
+        return pa.struct([_bigquery_schema_field_to_arrow(pa, child) for child in children])
+    mapping = {
+        "STRING": pa.string(),
+        "BYTES": pa.binary(),
+        "INTEGER": pa.int64(),
+        "INT64": pa.int64(),
+        "FLOAT": pa.float64(),
+        "FLOAT64": pa.float64(),
+        "BOOLEAN": pa.bool_(),
+        "BOOL": pa.bool_(),
+        "TIMESTAMP": pa.timestamp("us", tz="UTC"),
+        "DATE": pa.date32(),
+        "TIME": pa.time64("us"),
+        "DATETIME": pa.timestamp("us"),
+        "NUMERIC": pa.decimal128(38, 9),
+        "BIGNUMERIC": pa.decimal256(76, 38),
+        "GEOGRAPHY": pa.string(),
+        "JSON": pa.string(),
+        "INTERVAL": pa.string(),
+    }
+    return mapping.get(field_type, pa.string())
+
+
+def resolve_bigquery_arrow_schema(
+    *,
+    schema_registry: Mapping[str, Any] | str | None,
+    client: Any,
+    table: Any,
+) -> Any:
+    """Resolve a target Arrow schema from registry metadata or table metadata.
+
+    Callers should pass the value obtained from the existing BigQuery registry
+    reader. A canonical embedded registry wins; the external-table schema is a
+    fallback for tables created before schema-sanitizer metadata existed.
+    """
+    if schema_registry:
+        from ...analytical_schema import arrow_schema_from_schema_registry
+
+        try:
+            return arrow_schema_from_schema_registry(schema_registry)
+        except ValueError:
+            pass
+    return read_external_table_arrow_schema(client, table)

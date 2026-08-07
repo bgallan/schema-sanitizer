@@ -8,12 +8,14 @@
 #include "internal/memory/memory_budget.hh"
 #include "internal/memory/memory_pool.hh"
 #include "internal/runtime/ordered_executor.hh"
+#include "internal/runtime/process_identity.hh"
 #include "internal/string_lookup.hh"
 
 #include "nanoarrow/nanoarrow.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -59,6 +61,7 @@ namespace {
 #include "pages/footer_reader_dictionary_indices.cc.inc"
 #include "pages/footer_reader_dictionary_page.cc.inc"
 #include "pages/footer_reader_page_decode_values.cc.inc"
+#include "pages/footer_reader_page_scratch.cc.inc"
 #include "pages/footer_reader_page_read.cc.inc"
 #include "pages/footer_reader_page_indexes.cc.inc"
 #include "runtime/native_buffer_limits.cc.inc"

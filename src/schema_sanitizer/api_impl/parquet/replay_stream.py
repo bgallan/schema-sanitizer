@@ -8,6 +8,11 @@ from contextlib import suppress
 from typing import Any
 
 from ...core_impl.dependencies import ensure_pyarrow
+from ...core_impl.finalization import runtime_is_finalizing
+from ...core_impl.resource_lifecycle import (
+    _close_sequence_retryably,
+    _close_suppressing_errors,
+)
 
 
 class _ReplayReader:
@@ -15,6 +20,7 @@ class _ReplayReader:
 
     def __init__(self, reader: Any, keepalive: tuple[Any, ...] = ()):
         """Initialize the replay reader wrapper."""
+        self._pid = os.getpid()
         self._reader = reader
         self._keepalive = keepalive
         self.schema = reader.schema
@@ -40,12 +46,24 @@ class _ReplayReader:
         return export()
 
     def close(self) -> None:
-        """Close the wrapped reader and release keepalive references."""
-        close = getattr(self._reader, "close", None)
-        if callable(close):
-            with suppress(Exception):
-                close()
-        self._keepalive = ()
+        """Close reader resources while retaining any cleanup failures."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        reader = self._reader
+        if reader is not None and not _close_suppressing_errors(reader):
+            return
+        if self._reader is reader:
+            self._reader = None
+        keepalive = list(self._keepalive)
+        _close_sequence_retryably(keepalive)
+        self._keepalive = tuple(keepalive)
+
+    def __del__(self) -> None:
+        """Best-effort cleanup outside shutdown and fork children."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        with suppress(Exception):
+            self.close()
 
 
 class ReplayableArrowStream:
@@ -53,6 +71,7 @@ class ReplayableArrowStream:
 
     def __init__(self, stream: Any, *, feature: str):
         """Initialize a temporary Arrow IPC spool from a stream-like object."""
+        self._pid = os.getpid()
         self._pa = ensure_pyarrow(feature=feature)
         self._path: str | None = None
         self.schema: Any
@@ -117,11 +136,27 @@ class ReplayableArrowStream:
         return _ReplayReader(reader, keepalive=(source,))
 
     def close(self) -> None:
-        """Delete the temporary Arrow IPC replay file."""
-        if self._path is not None:
-            with suppress(OSError):
-                os.unlink(self._path)
+        """Delete the replay file without losing a failed cleanup path."""
+        if os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        path = self._path
+        if path is None:
+            return
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return
+        if self._path == path:
             self._path = None
+
+    def __del__(self) -> None:
+        """Best-effort cleanup outside shutdown and fork children."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        with suppress(Exception):
+            self.close()
 
 
 def make_replayable_parquet_stream(stream: Any, *, feature: str) -> ReplayableArrowStream:

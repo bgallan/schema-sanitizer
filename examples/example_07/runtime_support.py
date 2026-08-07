@@ -8,12 +8,12 @@ from collections.abc import Callable
 from typing import Any
 
 import schema_sanitizer as ss
-from schema_sanitizer.integrations.bigquery import (
+from schema_sanitizer.integrations.bigquery.advanced import (
     log_schema_drift_from_namespace,
     new_schema_registry_from_namespace,
     registry_has_canonical_schema,
 )
-from schema_sanitizer.pipeline import (
+from schema_sanitizer.pipeline.advanced import (
     discover_existing_source_plans,
     infer_warm_up_schema_registry,
     infer_warm_up_schema_registry_json,

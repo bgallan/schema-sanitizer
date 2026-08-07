@@ -9,13 +9,15 @@ from urllib.parse import quote
 
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.sync_retry import retry_sync
+from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
+    current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
 from ..gcs_sync_resumable import upload_gcs_resumable_file
 from ..sync_http import (
     SyncHttpStatusError,
@@ -26,7 +28,18 @@ from ..sync_http import (
     upload_file_request,
 )
 from ..upload_policy import remote_upload_policy
-from .gcs import access_token, api_base, media_url, object_uri, parse_uri
+from .gcs import (
+    _GCS_OBJECT_FIELDS,
+    access_token,
+    api_base,
+    media_url,
+)
+from .gcs_objects import (
+    directory_prefix,
+    parse_uri,
+    remote_file_from_metadata,
+    remote_file_sort_key,
+)
 
 
 def request_headers(
@@ -58,7 +71,7 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
         f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o/"
         f"{quote(ref.object_name, safe='')}"
     )
-    url = request_json_url(url, {"fields": "name,size"})
+    url = request_json_url(url, {"fields": _GCS_OBJECT_FIELDS})
     headers = request_headers(accept_json=True)
     budget = memory_budget(memory_limit_bytes)
 
@@ -69,13 +82,17 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
             url,
             headers=headers,
             timeout=budget.async_timeout_seconds,
+            max_response_bytes=budget.metadata_bytes,
         )
         if result.status == 404:
             return None
         payload = _json_result(result, context=f"GCS metadata failed for {uri!r}")
-        raw_size = payload.get("size")
-        size = int(raw_size) if raw_size is not None else None
-        return RemoteFile(uri, Path(ref.object_name).name, size)
+        return remote_file_from_metadata(
+            ref.bucket,
+            payload,
+            display_name=Path(ref.object_name).name,
+            uri=uri,
+        )
 
     return retry_sync(
         request,
@@ -85,21 +102,28 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
 
 
 def download_file(
-    uri: str,
+    uri: str | RemoteFile,
     local_path: str,
     *,
     memory_limit_bytes: int | None = None,
     headers: dict[str, str] | None = None,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one GCS object through blocking JSON API media I/O."""
+    selected = (
+        uri
+        if isinstance(uri, RemoteFile)
+        else RemoteFile(uri, Path(parse_uri(uri).object_name).name)
+    )
     budget = memory_budget(memory_limit_bytes)
     auth_headers = headers or request_headers()
     retry_sync(
         lambda: download_to_file(
-            media_url(uri),
+            media_url(selected.uri, generation=selected.generation),
             local_path,
             headers=auth_headers,
             timeout=budget.async_timeout_seconds,
+            storage_reservation=storage_reservation,
         ),
         retries=budget.async_retries,
         should_retry=retryable_http_error,
@@ -167,6 +191,7 @@ def _list_page(
     headers: dict[str, str],
     timeout: float,
     context: str,
+    maximum_bytes: int,
 ) -> dict[str, Any]:
     """Fetch and decode one GCS listing page."""
     result = request_bytes(
@@ -174,6 +199,7 @@ def _list_page(
         request_json_url(url, params),
         headers=headers,
         timeout=timeout,
+        max_response_bytes=maximum_bytes,
     )
     return _json_result(result, context=context)
 
@@ -187,16 +213,17 @@ def list_directory(
     """List direct GCS child objects serially."""
     ref = parse_uri(uri)
     url = f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o"
-    prefix = ref.object_name.rstrip("/") + "/"
+    prefix = directory_prefix(ref.object_name)
     headers = request_headers(accept_json=True)
     budget = memory_budget(memory_limit_bytes)
     files: list[RemoteFile] = []
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     page_token: str | None = None
     while True:
         params = {
             "prefix": prefix,
             "delimiter": "/",
-            "fields": "nextPageToken,items(name,size)",
+            "fields": f"nextPageToken,items({_GCS_OBJECT_FIELDS})",
             "maxResults": "1000",
         }
         if page_token:
@@ -208,6 +235,7 @@ def list_directory(
                 headers=headers,
                 timeout=budget.async_timeout_seconds,
                 context=f"GCS list failed for {uri!r}",
+                maximum_bytes=budget.metadata_bytes,
             ),
             retries=budget.async_retries,
             should_retry=retryable_http_error,
@@ -219,13 +247,17 @@ def list_directory(
             relative = name[len(prefix) :] if name.startswith(prefix) else name
             if not relative or "/" in relative or not name_matches(relative, suffixes):
                 continue
-            raw_size = item.get("size")
-            size = int(raw_size) if isinstance(raw_size, str) and raw_size.isdigit() else None
-            files.append(RemoteFile(object_uri(ref.bucket, name), relative, size))
+            remote_file = remote_file_from_metadata(
+                ref.bucket,
+                item,
+                display_name=relative,
+            )
+            metadata_budget.charge_file(remote_file)
+            files.append(remote_file)
         page_token = payload.get("nextPageToken")
         if not isinstance(page_token, str) or not page_token:
             break
-    files.sort(key=lambda file: file.name)
+    files.sort(key=remote_file_sort_key)
     return files
 
 
@@ -237,7 +269,10 @@ def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Discover requested GCS directories serially in stable group order."""
     accepted = normalize_extensions(suffixes)
-    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(uris)
+    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
+        uris,
+        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+    )
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
     for uri in uris:
         ref = parse_uri(uri)
@@ -255,7 +290,7 @@ def directories_containing_files(
         while True:
             params = {
                 "prefix": prefix,
-                "fields": "nextPageToken,items(name,size)",
+                "fields": f"nextPageToken,items({_GCS_OBJECT_FIELDS})",
                 "maxResults": "1000",
             }
             if page_token:
@@ -267,6 +302,7 @@ def directories_containing_files(
                     headers=headers,
                     timeout=budget.async_timeout_seconds,
                     context=f"GCS bulk discovery failed for prefix={prefix!r}",
+                    maximum_bytes=budget.metadata_bytes,
                 ),
                 retries=budget.async_retries,
                 should_retry=retryable_http_error,
@@ -280,9 +316,14 @@ def directories_containing_files(
                 child_uris = children.get(child) if separator else None
                 if not child_uris or "/" in filename or not name_matches(filename, accepted):
                     continue
-                raw_size = item.get("size")
-                size = int(raw_size) if isinstance(raw_size, str) and raw_size.isdigit() else None
-                discovery.add(child_uris, RemoteFile(object_uri(bucket, name), filename, size))
+                discovery.add(
+                    child_uris,
+                    remote_file_from_metadata(
+                        bucket,
+                        item,
+                        display_name=filename,
+                    ),
+                )
             page_token = payload.get("nextPageToken")
             if not isinstance(page_token, str) or not page_token:
                 break

@@ -71,10 +71,8 @@ prepare_path_source_group_ingest(schema_sanitizer_context *ctx,
       .grouped = true,
       .source_file_in_inner = true,
   };
-  SAN_ASSIGN_OR_RAISE(
-      auto input, path_source_group_input(sources, group,
-                                          prepared->spec.input_text_encoding,
-                                          prepared->spec.memory_limit_bytes));
+  SAN_ASSIGN_OR_RAISE(auto input,
+                      path_source_group_input(sources, group, prepared));
   const std::string frontend_name(
       path_source_materializer_frontend(input.frontend));
   SAN_ASSIGN_OR_RAISE(auto frontend,
@@ -89,7 +87,8 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
     schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources,
-    const sanitize::LogicalSchema *previous_schema) {
+    const sanitize::LogicalSchema *previous_schema,
+    sanitize::SchemaEvolutionMode schema_evolution) try {
   if (!ctx) {
     return sanitize::Status::Invalid("context is null");
   }
@@ -198,7 +197,7 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
   auto merge_input = make_registry_merge_input(
       std::move(combined_schema), registry_json, field_name_policy,
       prepared->spec.default_key_name, prepared->spec.field_order,
-      prepared->operation_detected_at);
+      prepared->operation_detected_at, schema_evolution);
   sanitize::Result<sanitize::SchemaRegistryMergeResult> final_merged_r =
       previous_schema ? sanitize::merge_schema_registry_with_previous_schema(
                             merge_input, *previous_schema)
@@ -208,5 +207,8 @@ sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
   }
   auto final_merged = std::move(final_merged_r).ValueOrDie();
   return PathSourceRegistryProbeResult{std::move(final_merged), diagnostics};
+} catch (const std::bad_alloc &) {
+  return sanitize::Status::OutOfMemory(
+      "path-source schema inference allocation failed");
 }
 } // namespace core_abi3_internal

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "internal/memory/memory_budget.hh"
+#include "internal/memory/memory_pool.hh"
 #include "internal/runtime/cpu_capacity.hh"
 #include "sanitize/options/options.hh"
 
@@ -123,13 +124,6 @@ execution_policy_from(sanitize::ThreadingMode mode,
   return out;
 }
 
-[[nodiscard]] inline ExecutionPolicy
-execution_policy_from(sanitize::ThreadingMode mode,
-                      std::int64_t requested_memory_limit) noexcept {
-  return execution_policy_from(mode, requested_memory_limit,
-                               available_cpu_count());
-}
-
 // Narrows one stage without changing its aggregate worker-arena budget. This
 // keeps stage-specific worker ceilings from accidentally increasing memory
 // while allowing fewer workers to retain the per-worker headroom that was
@@ -162,7 +156,44 @@ execution_policy_from(sanitize::ThreadingMode mode,
           : policy.worker_arena_bytes * policy.effective_workers;
   out.worker_arena_bytes =
       std::max<std::int64_t>(1, worker_pool_bytes / out.effective_workers);
+  out.async_concurrency = std::min<std::int64_t>(
+      policy.async_concurrency,
+      std::max<std::int64_t>(1, out.effective_workers * 2));
+  out.async_prefetch_files = std::min<std::int64_t>(
+      policy.async_prefetch_files,
+      std::max<std::int64_t>(1, out.task_queue_capacity * 2));
+  out.remote_chunk_prefetch = std::min<std::int64_t>(
+      policy.remote_chunk_prefetch, out.task_queue_capacity);
+  out.source_discovery_concurrency = std::min<std::int64_t>(
+      policy.source_discovery_concurrency,
+      std::max<std::int64_t>(1, out.task_queue_capacity * 2));
+  if (out.effective_workers == 1 && policy.effective_workers > 1) {
+    out.task_queue_capacity = 1;
+    out.reorder_capacity = 1;
+    out.async_concurrency = 1;
+    out.async_prefetch_files = 1;
+    out.remote_chunk_prefetch = 1;
+    out.source_discovery_concurrency = 1;
+    out.pyarrow_use_threads = false;
+    out.fallback_reason = ExecutionFallbackReason::kMemoryLimited;
+  }
   return out;
+}
+
+[[nodiscard]] inline ExecutionPolicy
+execution_policy_from(sanitize::ThreadingMode mode,
+                      std::int64_t requested_memory_limit) noexcept {
+  auto policy = execution_policy_from(mode, requested_memory_limit,
+                                      available_cpu_count());
+  if (policy.effective_workers <= 1) {
+    return policy;
+  }
+  const auto process = process_resident_memory_stats();
+  const auto headroom = std::max<std::int64_t>(1, process.capacity_bytes -
+                                                      process.reserved_bytes);
+  const auto headroom_workers =
+      std::max<std::int64_t>(1, headroom / kMinimumWorkerMemoryBytes);
+  return execution_policy_with_worker_ceiling(policy, headroom_workers);
 }
 
 // Narrows a stage to the amount of independent work currently available. A

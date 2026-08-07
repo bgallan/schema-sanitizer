@@ -26,14 +26,21 @@ void *ExecutionContext::memory_pool_handle() const noexcept {
   return static_cast<void *>(memory_pool_.get());
 }
 
-std::shared_ptr<void>
-ExecutionContext::make_operation_memory_pool_handle(int64_t limit_bytes) const {
+std::shared_ptr<void> ExecutionContext::make_operation_memory_pool_handle(
+    int64_t limit_bytes, std::shared_ptr<void> operation_memory_ledger) const {
   const auto budget = sanitize::internal::memory_budget_from_limit(limit_bytes);
   const auto process_capacity =
       sanitize::internal::memory_budget_from_limit(-1).total_bytes;
+  auto ledger =
+      std::static_pointer_cast<sanitize::internal::OperationMemoryLedger>(
+          std::move(operation_memory_ledger));
+  if (!ledger) {
+    ledger =
+        sanitize::internal::make_operation_memory_ledger(budget.total_bytes);
+  }
   auto pool = sanitize::internal::make_governed_operation_memory_pool(
       memory_pool_, budget.total_bytes, process_capacity,
-      "schema_sanitizer::OperationMemoryPool");
+      "schema_sanitizer::OperationMemoryPool", std::move(ledger));
   return std::static_pointer_cast<void>(std::move(pool));
 }
 

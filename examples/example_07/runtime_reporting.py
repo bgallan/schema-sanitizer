@@ -8,9 +8,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
-from schema_sanitizer.core_impl.uris import local_path_from_file_uri, location_kind
-from schema_sanitizer.pipeline import (
+from schema_sanitizer.pipeline.advanced import (
     compact_uri,
     cpu_io_wall_percentages,
     format_duration,
@@ -184,10 +185,17 @@ def _source_metrics(plan: DateRunPlan) -> tuple[int | None, int | None]:
     """Return discovered source count and bytes, with a local-file fallback."""
     if plan.source_file_count is not None or plan.source_bytes is not None:
         return plan.source_file_count, plan.source_bytes
-    kind = location_kind(plan.source_uri)
-    if kind not in {"path", "file"}:
+    is_windows_path = (
+        len(plan.source_uri) >= 2 and plan.source_uri[1] == ":" and plan.source_uri[0].isalpha()
+    )
+    parsed = urlparse(plan.source_uri)
+    if not is_windows_path and parsed.scheme and parsed.scheme.lower() != "file":
         return None, None
-    path = Path(local_path_from_file_uri(plan.source_uri) if kind == "file" else plan.source_uri)
+    path = Path(
+        url2pathname(unquote(parsed.path))
+        if not is_windows_path and parsed.scheme.lower() == "file"
+        else plan.source_uri
+    )
     try:
         if path.is_file():
             return 1, path.stat().st_size

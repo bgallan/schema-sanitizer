@@ -6,6 +6,7 @@
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/memory/memory_budget.hh"
+#include "internal/runtime/process_identity.hh"
 
 #include <algorithm>
 #include <cstddef>
@@ -44,8 +45,8 @@ sanitize::Status ensure_pending_batch(CoalesceStreamState *state) {
     sanitize::CArrayGuard batch;
     const int rc = state->inner->get_next(state->inner, batch.get());
     if (rc != 0) {
-      return sanitize::Status::IOError(
-          "coalescing stream inner get_next failed");
+      return sanitize::internal::cdata_stream::status_from_stream_error(
+          rc, state->inner, "coalescing stream inner get_next failed");
     }
     if (!batch.value().release) {
       state->inner_eof = true;
@@ -89,6 +90,9 @@ const char *coalesce_last_error(ArrowArrayStream *stream) {
 }
 
 void coalesce_release(ArrowArrayStream *stream) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!stream || !stream->release) {
     return;
   }

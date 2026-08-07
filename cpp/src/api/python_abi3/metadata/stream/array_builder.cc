@@ -50,23 +50,19 @@ struct MetadataArrayState {
 void clear_schema(ArrowSchema *schema) noexcept {
   sanitize::internal::cdata_stream::clear_schema(schema);
 }
-
 void clear_array(ArrowArray *array) noexcept {
   sanitize::internal::cdata_stream::clear_array(array);
 }
-
 void metadata_schema_child_release(ArrowSchema *schema) noexcept {
   if (schema && schema->release) {
     clear_schema(schema);
   }
 }
-
 void metadata_array_child_release(ArrowArray *array) noexcept {
   if (array && array->release) {
     clear_array(array);
   }
 }
-
 void metadata_schema_release(ArrowSchema *schema) noexcept {
   if (!schema || !schema->release) {
     return;
@@ -74,7 +70,6 @@ void metadata_schema_release(ArrowSchema *schema) noexcept {
   delete static_cast<MetadataSchemaState *>(schema->private_data);
   clear_schema(schema);
 }
-
 void metadata_array_release(ArrowArray *array) noexcept {
   if (!array || !array->release) {
     return;
@@ -82,12 +77,10 @@ void metadata_array_release(ArrowArray *array) noexcept {
   delete static_cast<MetadataArrayState *>(array->private_data);
   clear_array(array);
 }
-
 void set_validity_bit(std::vector<std::uint8_t> *validity, std::int64_t index) {
   (*validity)[static_cast<std::size_t>(index >> 3)] |=
       static_cast<std::uint8_t>(1u << (index & 7));
 }
-
 void set_validity_range(std::vector<std::uint8_t> *validity, std::int64_t start,
                         std::int64_t count) {
   if (count <= 0) {
@@ -125,7 +118,6 @@ sanitize::Status ensure_utf8_capacity(std::string_view value,
   }
   return sanitize::Status::OK();
 }
-
 sanitize::Status add_utf8_data_bytes(std::uint64_t *total,
                                      std::string_view value,
                                      std::int64_t count) {
@@ -388,9 +380,12 @@ sanitize::Status build_metadata_schema(MetadataStreamState *stream_state,
                 : "u",
     });
   }
-  if (stream_state->inner->get_schema(stream_state->inner, state->base.get()) !=
-      0) {
-    return sanitize::Status::IOError("metadata stream inner get_schema failed");
+  const int schema_rc =
+      stream_state->inner->get_schema(stream_state->inner, state->base.get());
+  if (schema_rc != 0) {
+    return sanitize::internal::cdata_stream::status_from_stream_error(
+        schema_rc, stream_state->inner,
+        "metadata stream inner get_schema failed");
   }
   ArrowSchema &base = state->base.value();
   SAN_RETURN_NOT_OK(prepare_metadata_child_layout(stream_state, base));
@@ -415,9 +410,11 @@ sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
   }
   if (!stream_state->child_layout_ready) {
     sanitize::CSchemaGuard base_schema;
-    if (stream_state->inner->get_schema(stream_state->inner,
-                                        base_schema.get()) != 0) {
-      return sanitize::Status::IOError(
+    const int schema_rc =
+        stream_state->inner->get_schema(stream_state->inner, base_schema.get());
+    if (schema_rc != 0) {
+      return sanitize::internal::cdata_stream::status_from_stream_error(
+          schema_rc, stream_state->inner,
           "metadata stream inner get_schema failed");
     }
     SAN_RETURN_NOT_OK(
@@ -428,9 +425,11 @@ sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
   if (!state) {
     return sanitize::Status::OutOfMemory("metadata stream array OOM");
   }
-  if (stream_state->inner->get_next(stream_state->inner, state->base.get()) !=
-      0) {
-    return sanitize::Status::IOError("metadata stream inner get_next failed");
+  const int next_rc =
+      stream_state->inner->get_next(stream_state->inner, state->base.get());
+  if (next_rc != 0) {
+    return sanitize::internal::cdata_stream::status_from_stream_error(
+        next_rc, stream_state->inner, "metadata stream inner get_next failed");
   }
   ArrowArray &base = state->base.value();
   if (!base.release) {

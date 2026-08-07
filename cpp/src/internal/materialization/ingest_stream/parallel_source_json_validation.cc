@@ -122,9 +122,14 @@ ParallelIngestStreamSource::validate_current_jsonl_batch(const BatchLimits &) {
       if (!outcome.result.ok()) {
         return abort_jsonl_validation(outcome.result.status());
       }
+      auto packet = std::move(outcome.result).ValueOrDie();
+      diagnostics_.record_skipped_rows(
+          static_cast<std::int64_t>(packet.json_skipped_rows));
+      if (packet.rows.empty()) {
+        continue;
+      }
       try {
-        validated_jsonl_packets_.push_back(
-            std::move(outcome.result).ValueOrDie());
+        validated_jsonl_packets_.push_back(std::move(packet));
       } catch (const std::bad_alloc &) {
         return abort_jsonl_validation(sanitize::Status::OutOfMemory(
             "ParallelIngestStreamSource: validated JSON packet queue "

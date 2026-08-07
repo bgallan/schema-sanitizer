@@ -363,12 +363,57 @@ materialization_packet_limits(const ExecutionPolicy &policy,
   };
 }
 
+OwnedRowPacket::OwnedRowPacket(OwnedRowPacket &&other) noexcept
+    : rows(other.rows), owner(std::move(other.owner)),
+      releaser(std::move(other.releaser)), release_begin(other.release_begin),
+      release_count(other.release_count),
+      estimated_source_bytes(other.estimated_source_bytes),
+      json_tokenized_rows(other.json_tokenized_rows),
+      json_tokenized_fields(other.json_tokenized_fields),
+      json_plan_ordered_rows(other.json_plan_ordered_rows),
+      json_token_fallback_rows(other.json_token_fallback_rows),
+      json_skipped_rows(other.json_skipped_rows) {
+  other.rows = {};
+  other.release_count = 0;
+}
+
+OwnedRowPacket &OwnedRowPacket::operator=(OwnedRowPacket &&other) noexcept {
+  if (this != &other) {
+    if (releaser && release_count != 0) {
+      releaser->ReleaseRows(release_begin, release_count);
+    }
+    rows = other.rows;
+    owner = std::move(other.owner);
+    releaser = std::move(other.releaser);
+    release_begin = other.release_begin;
+    release_count = other.release_count;
+    estimated_source_bytes = other.estimated_source_bytes;
+    json_tokenized_rows = other.json_tokenized_rows;
+    json_tokenized_fields = other.json_tokenized_fields;
+    json_plan_ordered_rows = other.json_plan_ordered_rows;
+    json_token_fallback_rows = other.json_token_fallback_rows;
+    json_skipped_rows = other.json_skipped_rows;
+    other.rows = {};
+    other.release_count = 0;
+  }
+  return *this;
+}
+
+OwnedRowPacket::~OwnedRowPacket() {
+  if (releaser && release_count != 0) {
+    releaser->ReleaseRows(release_begin, release_count);
+  }
+}
+
 sanitize::Result<std::shared_ptr<OwnedRowBatch>>
 make_owned_row_batch(std::vector<RowRef> rows,
-                     std::shared_ptr<const void> source_owner) {
+                     std::shared_ptr<const void> source_owner,
+                     std::shared_ptr<sanitize::RowBatchReleaser> releaser) {
   try {
-    return std::make_shared<OwnedRowBatch>(OwnedRowBatch{
-        .rows = std::move(rows), .source_owner = std::move(source_owner)});
+    return std::make_shared<OwnedRowBatch>(
+        OwnedRowBatch{.rows = std::move(rows),
+                      .source_owner = std::move(source_owner),
+                      .releaser = std::move(releaser)});
   } catch (const std::bad_alloc &) {
     return sanitize::Status::OutOfMemory(
         "make_owned_row_batch: allocation failed");
@@ -387,6 +432,8 @@ build_owned_row_packet(const std::shared_ptr<OwnedRowBatch> &batch_owner,
 
   OwnedRowPacket packet;
   packet.owner = batch_owner;
+  packet.releaser = batch_owner->releaser;
+  packet.release_begin = start;
   auto &rows = batch_owner->rows;
   const auto remaining = rows.size() - start;
   const auto row_limit = std::min(remaining, limits.max_rows);
@@ -421,6 +468,7 @@ build_owned_row_packet(const std::shared_ptr<OwnedRowBatch> &batch_owner,
         "build_owned_row_packet: failed to retain the first row");
   }
   packet.rows = std::span<RowRef>(rows.data() + start, row_count);
+  packet.release_count = row_count;
   return packet;
 }
 

@@ -25,8 +25,9 @@ struct JsonTextBatchStorage {
   JsonTextBatchStorage(std::shared_ptr<void> pool,
                        std::size_t arena_block_bytes)
       : pmr_pool(std::move(pool)), arena(pmr_pool.pool(), arena_block_bytes),
-        doc(&pmr_pool), plan_ordered_scratch(&pmr_pool),
-        validated_tokens(&pmr_pool), validated_rows(&pmr_pool) {}
+        doc(&pmr_pool), batch(&pmr_pool), plan_ordered_scratch(&pmr_pool),
+        validated_tokens(&pmr_pool), validated_rows(&pmr_pool),
+        keepalive(&pmr_pool) {}
 
   void configure_token_index(std::int64_t capacity,
                              std::size_t max_tokens) noexcept {
@@ -127,7 +128,7 @@ struct JsonTextBatchStorage {
   PlanOrderedRowScratch plan_ordered_scratch;
   std::pmr::vector<JsonValidatedFieldToken> validated_tokens;
   std::pmr::vector<JsonValidatedRowTokens> validated_rows;
-  std::vector<std::shared_ptr<const void>> keepalive;
+  std::pmr::vector<std::shared_ptr<const void>> keepalive;
   std::size_t max_validated_tokens = 0;
   const void *last_data_owner_ptr = nullptr;
   const void *last_source_name_owner_ptr = nullptr;

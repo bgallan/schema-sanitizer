@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <string>
+#include <memory_resource>
 
 #include "internal/memory/memory_pool.hh"
 
@@ -29,7 +29,7 @@ XmlRowTagScanner::enforce_buffer_limit(std::size_t incoming) const {
 }
 
 std::size_t XmlRowTagScanner::retained_buffer_limit() const noexcept {
-  constexpr std::size_t kMinimumRetainedBytes = 8U << 20;
+  constexpr std::size_t kMinimumRetainedBytes = 8U << 20U;
   const auto chunk = static_cast<std::uint64_t>(
       chunk_bytes_ > 0 ? chunk_bytes_ : (int64_t{1} << 20));
   if (chunk > std::numeric_limits<std::size_t>::max() / 2U) {
@@ -44,7 +44,7 @@ void XmlRowTagScanner::discard_buffer() {
   }
   buffer_.clear();
   if (buffer_.capacity() > retained_buffer_limit()) {
-    std::string empty;
+    std::pmr::string empty(resource_);
     buffer_.swap(empty);
   }
 }
@@ -52,7 +52,7 @@ void XmlRowTagScanner::discard_buffer() {
 bool XmlRowTagScanner::should_compact_before_refill() const noexcept {
   const std::size_t keep_from =
       (row_start_pos_ == npos) ? scan_pos_ : row_start_pos_;
-  if (keep_from == 0) {
+  if (keep_from == 0U) {
     return false;
   }
   if (row_start_pos_ == npos) {
@@ -71,7 +71,7 @@ bool XmlRowTagScanner::should_compact_before_refill() const noexcept {
 void XmlRowTagScanner::compact_buffer() {
   const std::size_t keep_from =
       (row_start_pos_ == npos) ? scan_pos_ : row_start_pos_;
-  if (keep_from == 0) {
+  if (keep_from == 0U) {
     return;
   }
   if (keep_from >= buffer_.size()) {
@@ -81,6 +81,7 @@ void XmlRowTagScanner::compact_buffer() {
     if (row_start_pos_ != npos) {
       row_start_pos_ = 0;
     }
+    reset_pending_markup();
     return;
   }
   if (secure_memory_cleanup_enabled()) {
@@ -95,6 +96,10 @@ void XmlRowTagScanner::compact_buffer() {
   scan_pos_ -= std::min(scan_pos_, keep_from);
   if (row_start_pos_ != npos) {
     row_start_pos_ -= keep_from;
+  }
+  if (pending_markup_lt_ != npos) {
+    pending_markup_lt_ -= std::min(pending_markup_lt_, keep_from);
+    pending_markup_resume_ -= std::min(pending_markup_resume_, keep_from);
   }
 }
 
@@ -116,7 +121,7 @@ sanitize::Status XmlRowTagScanner::refill() {
   int64_t request_bytes = chunk_bytes_;
   if (memory_limit_bytes_ > 0) {
     if (buffer_.size() >= static_cast<std::size_t>(memory_limit_bytes_)) {
-      SAN_RETURN_NOT_OK(enforce_buffer_limit(1));
+      SAN_RETURN_NOT_OK(enforce_buffer_limit(1U));
     }
     const auto remaining = static_cast<int64_t>(
         static_cast<std::size_t>(memory_limit_bytes_) - buffer_.size());
@@ -128,6 +133,7 @@ sanitize::Status XmlRowTagScanner::refill() {
     return sanitize::Status::OK();
   }
   SAN_RETURN_NOT_OK(enforce_buffer_limit(chunk.data.size()));
+  SAN_RETURN_NOT_OK(utf8_validator_.Consume(chunk.data, chunk.base_offset));
   if (buffer_.empty()) {
     buffer_start_offset_ = chunk.base_offset;
   }

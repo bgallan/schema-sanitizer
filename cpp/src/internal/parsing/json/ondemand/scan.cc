@@ -25,7 +25,7 @@ sanitize::Status skip_value_at_depth(Cursor &c, std::size_t depth);
 
 sanitize::Status nesting_error(const Cursor &c) {
   return parse_error_at(
-      c, "JSON parse error: nesting exceeds safety limit at byte ");
+      c, "JSON parse error: nesting exceeds safety limit 512 at byte ");
 }
 
 sanitize::Status skip_object_member(Cursor &c, std::size_t depth) {
@@ -64,7 +64,15 @@ sanitize::Status skip_object_at_depth(Cursor &c, std::size_t depth) {
     ++c.p;
     return sanitize::Status::OK();
   }
+  std::size_t fields = 0;
   while (true) {
+    if (fields >= kMaxJsonObjectFields) {
+      return sanitize::Status::Invalid(
+          "JSON object field count exceeds safety limit: ",
+          std::to_string(fields + 1U), " > ",
+          std::to_string(kMaxJsonObjectFields));
+    }
+    ++fields;
     SAN_RETURN_NOT_OK(skip_object_member(c, depth));
     SAN_ASSIGN_OR_RAISE(ContainerSeparator separator,
                         consume_object_separator(c));

@@ -1,8 +1,10 @@
 // Exercises the bounded ordinal executor under ThreadSanitizer.
 
+#include "internal/memory/memory_pool.hh"
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/ordered_executor.hh"
 #include "internal/runtime/performance_telemetry.hh"
+#include "frontends/csv/source_projection.hh"
 
 #include <array>
 #include <atomic>
@@ -527,7 +529,247 @@ bool run_arena_stage_cancellation_round() {
   return valid;
 }
 
+
+bool run_arena_queue_capacity_round() {
+  auto limited_telemetry =
+      std::make_shared<sanitize::internal::PerformanceTelemetry>(
+          3U, nullptr, 1024, 2, true);
+  auto limited_result = sanitize::internal::OperationTaskArena::Make(
+      2, limited_telemetry);
+  if (!limited_result.ok()) {
+    return false;
+  }
+  auto limited_arena = std::move(limited_result).ValueOrDie();
+  if (limited_arena->queue_capacity() != 4U) {
+    return false;
+  }
+  limited_arena->Shutdown();
+
+  auto arena_result = sanitize::internal::OperationTaskArena::Make(2);
+  if (!arena_result.ok()) {
+    return false;
+  }
+  auto arena = std::move(arena_result).ValueOrDie();
+  const auto capacity = arena->queue_capacity();
+  std::atomic<bool> release{false};
+  std::size_t accepted = 0;
+  for (std::size_t ordinal = 0; ordinal < capacity + 32U; ++ordinal) {
+    auto status = arena->Submit(
+        [&release](std::size_t, sanitize::internal::StopToken stop) {
+          while (!release.load(std::memory_order_acquire) &&
+                 !stop.stop_requested()) {
+            std::this_thread::yield();
+          }
+        },
+        2U, sanitize::internal::TaskArenaLane::kAll);
+    if (!status.ok()) {
+      break;
+    }
+    ++accepted;
+  }
+  const auto queued = arena->queued_tasks();
+  const auto rejected = arena->rejected_submissions();
+  release.store(true, std::memory_order_release);
+  arena->Shutdown();
+  return queued <= capacity && accepted <= capacity + 2U && rejected > 0U;
+}
+
+bool run_noncooperative_external_shutdown_round() {
+  auto arena_result = sanitize::internal::OperationTaskArena::Make(2);
+  if (!arena_result.ok()) {
+    return false;
+  }
+  auto arena = std::move(arena_result).ValueOrDie();
+  std::atomic<bool> started{false};
+  std::atomic<bool> release{false};
+  auto made = Executor::Make(
+      2, 4, 4,
+      [&started, &release](std::uint64_t &&value, std::size_t,
+                           sanitize::internal::StopToken)
+          -> sanitize::Result<std::uint64_t> {
+        started.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        return value;
+      },
+      arena);
+  if (!made.ok()) {
+    return false;
+  }
+  auto executor = std::move(made).ValueOrDie();
+  if (!executor->Submit({0U, 7U}).ok()) {
+    return false;
+  }
+  const auto startup_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!started.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < startup_deadline) {
+    std::this_thread::yield();
+  }
+  if (!started.load(std::memory_order_acquire)) {
+    release.store(true, std::memory_order_release);
+    executor->Cancel();
+    return false;
+  }
+  const auto shutdown_started = std::chrono::steady_clock::now();
+  executor.reset();
+  const auto shutdown_elapsed =
+      std::chrono::steady_clock::now() - shutdown_started;
+  release.store(true, std::memory_order_release);
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  arena->Shutdown();
+  return shutdown_elapsed >= std::chrono::milliseconds(1500) &&
+         shutdown_elapsed < std::chrono::seconds(3);
+}
+
+
+bool run_arena_concurrent_shutdown_round() {
+  auto made = sanitize::internal::OperationTaskArena::Make(8U);
+  if (!made.ok()) {
+    return false;
+  }
+  auto arena = std::move(made).ValueOrDie();
+  const auto plan = arena->PrepareSubmissionPlan(8U, sanitize::internal::TaskArenaLane::kAll);
+  std::atomic<bool> start{false};
+  std::atomic<bool> valid{true};
+  std::atomic<std::size_t> executed{0U};
+  std::array<std::thread, 5U> threads;
+  for (std::size_t index = 0; index < 4U; ++index) {
+    threads[index] = std::thread([arena, plan, &start, &valid, &executed] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (std::size_t ordinal = 0; ordinal < 1024U; ++ordinal) {
+        const auto status = arena->Submit(
+            [&executed](std::size_t, sanitize::internal::StopToken stop) {
+              if (!stop.stop_requested()) {
+                executed.fetch_add(1U, std::memory_order_relaxed);
+              }
+            },
+            plan, ordinal, sanitize::internal::TaskTelemetryKind::kOther);
+        if (!status.ok() && status.code() != sanitize::StatusCode::kCancelled &&
+            status.code() != sanitize::StatusCode::kOutOfMemory) {
+          valid.store(false, std::memory_order_relaxed);
+          return;
+        }
+      }
+    });
+  }
+  threads[4] = std::thread([arena, &start] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (std::size_t sample = 0; sample < 4096U; ++sample) {
+      (void)arena->worker_count();
+      (void)arena->active_tasks();
+      (void)arena->queued_tasks();
+      (void)arena->submitted_tasks();
+      (void)arena->telemetry();
+    }
+  });
+  start.store(true, std::memory_order_release);
+  std::this_thread::sleep_for(std::chrono::microseconds(100));
+  arena->Shutdown();
+  for (auto &thread : threads) {
+    thread.join();
+  }
+  const auto stale = arena->Submit(
+      [](std::size_t, sanitize::internal::StopToken) {}, plan, 0U,
+      sanitize::internal::TaskTelemetryKind::kOther);
+  return valid.load(std::memory_order_relaxed) && !stale.ok() &&
+         arena->ReserveSubmissionTicket(plan) == 0U;
+}
+
+bool run_arena_noncooperative_shutdown_round() {
+  auto made = sanitize::internal::OperationTaskArena::Make(2U);
+  if (!made.ok()) {
+    return false;
+  }
+  auto arena = std::move(made).ValueOrDie();
+  std::atomic<bool> started{false};
+  std::atomic<bool> release{false};
+  const auto status = arena->Submit(
+      [&started, &release](std::size_t, sanitize::internal::StopToken) {
+        started.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+      },
+      2U, sanitize::internal::TaskArenaLane::kAll);
+  if (!status.ok()) {
+    return false;
+  }
+  const auto startup_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!started.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < startup_deadline) {
+    std::this_thread::yield();
+  }
+  if (!started.load(std::memory_order_acquire)) {
+    release.store(true, std::memory_order_release);
+    return false;
+  }
+  const auto before = std::chrono::steady_clock::now();
+  arena->Shutdown();
+  const auto elapsed = std::chrono::steady_clock::now() - before;
+  const bool bounded = elapsed >= std::chrono::milliseconds(1500) &&
+                       elapsed < std::chrono::seconds(3);
+  const bool detached = arena->detached_workers() >= 1U &&
+                        arena->shutdown_timeouts() >= 1U;
+  release.store(true, std::memory_order_release);
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  return bounded && detached;
+}
+
 #include "ordered_executor_tsan_telemetry.cc.inc"
+#include "ordered_executor_tsan_csv_projection.cc.inc"
+
+bool run_process_resident_pool_round() {
+  constexpr std::int64_t capacity = 1 << 20;
+  constexpr std::int64_t charge = 4096;
+  constexpr std::size_t worker_count = 8;
+  constexpr std::size_t iterations = 16;
+  auto pool = sanitize::internal::shared_process_memory_pool(capacity);
+  if (pool->resident_bytes() != 0) {
+    return false;
+  }
+  std::atomic<bool> valid{true};
+  std::array<std::thread, worker_count> workers;
+  for (std::size_t worker = 0; worker < worker_count; ++worker) {
+    workers[worker] = std::thread([pool, worker, &valid] {
+      for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+        if (((worker + iteration) & 1U) == 0U) {
+          auto status = pool->ReserveExternal(charge, "sanitizer_probe");
+          if (!status.ok()) {
+            valid.store(false, std::memory_order_relaxed);
+            return;
+          }
+          std::this_thread::yield();
+          pool->ReleaseExternal(charge);
+          continue;
+        }
+        std::uint8_t *buffer = nullptr;
+        auto status = pool->Allocate(charge, &buffer);
+        if (!status.ok() || buffer == nullptr) {
+          valid.store(false, std::memory_order_relaxed);
+          return;
+        }
+        std::this_thread::yield();
+        pool->Free(buffer, charge);
+      }
+    });
+  }
+  for (auto &worker : workers) {
+    worker.join();
+  }
+  const auto stats = sanitize::internal::process_resident_memory_stats();
+  if (!valid.load(std::memory_order_relaxed) || stats.reserved_bytes != 0 ||
+      stats.peak_reserved_bytes > capacity) {
+    return false;
+  }
+  return !pool->ReserveExternal(capacity + 1, "limit_probe").ok();
+}
 
 bool run_cancellation_round() {
   std::atomic<std::size_t> active{0};
@@ -602,7 +844,14 @@ int main(int argc, char **argv) {
   if (!run_round(run_high_core_telemetry_batch_round, "high_core_telemetry",
                  0U) ||
       !run_round(run_worker_submission_telemetry_round, "worker_telemetry",
-                 0U)) {
+                 0U) ||
+      !run_round(run_arena_queue_capacity_round, "arena_queue_capacity", 0U) ||
+      !run_round(run_noncooperative_external_shutdown_round,
+                 "noncooperative_external_shutdown", 0U) ||
+      !run_round(run_arena_concurrent_shutdown_round,
+                 "arena_concurrent_shutdown", 0U) ||
+      !run_round(run_arena_noncooperative_shutdown_round,
+                 "arena_noncooperative_shutdown", 0U)) {
     return 1;
   }
   for (std::size_t round = 0; round < rounds; ++round) {
@@ -615,6 +864,10 @@ int main(int argc, char **argv) {
                    round) ||
         !run_round(run_lane_work_stealing_round, "lane_stealing", round) ||
         !run_round(run_arena_stage_cancellation_round, "stage_cancellation",
+                   round) ||
+        !run_round(run_csv_projection_switch_round, "csv_projection_switch",
+                   round) ||
+        !run_round(run_process_resident_pool_round, "process_resident_pool",
                    round) ||
         !run_round(run_cancellation_round, "cancellation", round)) {
       return 1;

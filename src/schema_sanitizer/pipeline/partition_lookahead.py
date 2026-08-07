@@ -2,24 +2,51 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import dataclass
+from threading import Condition, Lock
+from time import monotonic
 from typing import Any
 
 from ..api_impl.input.preparation import prepare_public_input
 from ..api_impl.operation_context import OperationExecutionContext
 from ..api_impl.partition_resources import BorrowedPartitionResources
 from ..api_impl.source_plan.attached import remote_native_multisource_manifest_from_data
+from ..core_impl.durations import normalize_duration
 from ..core_impl.execution_policy import (
     execution_policy,
     threading_mode_from_multi_threading,
 )
-from ..core_impl.memory_budget import normalize_memory_limit
+from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.memory_budget import (
+    adaptive_concurrency_target,
+    normalize_memory_limit,
+)
+from ..core_impl.process_resources import acquire_project_threads
+from ..core_impl.resource_lifecycle import _cleanup_with_note
+from ..core_impl.runtime_registry import RuntimeServiceRegistration, register_runtime_service
+from ..core_impl.safe_errors import add_bounded_note
 from ..errors import SchemaSanitizerResourceError
 from ..input_impl.directory_inputs import discovered_directory_input_context
 from ..input_impl.prepared import PreparedPublicInput
+from .partition_lookahead_worker import ThreadPoolExecutor as _DaemonThreadPoolExecutor
 from .types import PartitionRunPlan
+
+_LOOKAHEAD_COMPAT_INIT_LOCK = Lock()
+
+
+class ThreadPoolExecutor(_DaemonThreadPoolExecutor):
+    """Compatibility wrapper that preserves thread-governor fault injection."""
+
+    def __init__(self, *, max_workers: int, thread_name_prefix: str) -> None:
+        """Create the daemon worker using the live module-level permit hook."""
+        super().__init__(
+            max_workers=max_workers,
+            thread_name_prefix=thread_name_prefix,
+            permit_factory=acquire_project_threads,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +106,24 @@ class _PreparedPartition:
 
     def close(self) -> None:
         """Close an unconsumed prepared partition."""
-        self.prepared_input.close()
-        self.operation_context.close()
+        primary: BaseException | None = None
+        try:
+            self.prepared_input.close()
+        except BaseException as exc:
+            primary = exc
+        try:
+            self.operation_context.close()
+        except BaseException as exc:
+            if primary is None:
+                primary = exc
+            else:
+                add_bounded_note(
+                    primary,
+                    "partition operation-context cleanup also failed",
+                    exc,
+                )
+        if primary is not None:
+            raise primary
 
 
 @dataclass(slots=True)
@@ -110,6 +153,7 @@ class PartitionSourceLookahead:
     ) -> None:
         """Create a lazy one-slot worker when the static pipeline policy allows it."""
         self._kwargs = kwargs
+        self._pid = os.getpid()
         self._memory_limit_bytes = (
             normalize_memory_limit(kwargs.get("memory_limit_bytes"))
             if memory_limit_bytes is None
@@ -121,77 +165,251 @@ class PartitionSourceLookahead:
             initial_options.memory_limit_bytes,
         )
         self.enabled = not policy.is_single and policy.effective_workers > 1
-        self._executor = (
-            ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="schema-sanitizer-partition-lookahead",
-            )
-            if self.enabled
-            else None
-        )
+        self._executor = None
+        if self.enabled:
+            try:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="schema-sanitizer-partition-lookahead",
+                )
+            except SchemaSanitizerResourceError:
+                # Lookahead is an optimization. When the process-wide thread
+                # window is already committed to conversion or remote I/O,
+                # preserve correctness by preparing partitions synchronously.
+                self.enabled = False
         self._armed: tuple[PartitionRunPlan, OperationExecutionContext] | None = None
         self._future: Future[PreparedOrDeferred] | None = None
+        self._future_context: OperationExecutionContext | None = None
+        self._close_lock = Lock()
+        self._close_condition = Condition(self._close_lock)
+        self._close_in_progress = False
+        self._submissions_inflight = 0
+        self._consumer_inflight = False
+        self._close_started = False
+        self._late_close_registered = False
         self._closed = False
+        self._runtime_registration: RuntimeServiceRegistration | None = register_runtime_service(
+            self, kind="partition_lookahead", close_name="_runtime_shutdown"
+        )
+
+    def _lifecycle_condition(self) -> Condition:
+        """Return a compatibility-safe lifecycle condition."""
+        condition = getattr(self, "_close_condition", None)
+        if condition is not None:
+            return condition
+        with _LOOKAHEAD_COMPAT_INIT_LOCK:
+            close_lock = getattr(self, "_close_lock", None)
+            if close_lock is None:
+                close_lock = Lock()
+                self._close_lock = close_lock
+            condition = getattr(self, "_close_condition", None)
+            if condition is None:
+                condition = Condition(close_lock)
+                self._close_condition = condition
+                self._close_in_progress = False
+                self._submissions_inflight = 0
+                self._consumer_inflight = False
+        return condition
+
+    def _resume_close_if_quiescent(self) -> None:
+        """Resume a timed-out close after the last claimed admission exits."""
+        condition = self._lifecycle_condition()
+        with condition:
+            retry = (
+                getattr(self, "_close_started", False)
+                and not getattr(self, "_close_in_progress", False)
+                and not getattr(self, "_closed", False)
+                and getattr(self, "_submissions_inflight", 0) == 0
+            )
+        if retry:
+            try:
+                self.close()
+            except BaseException:
+                # Every owner remains reachable on failure. A later explicit
+                # close or finalizer can retry without masking the admission's
+                # own primary result.
+                pass
 
     def prepare_first(self, plan: PartitionRunPlan) -> _PreparedPartition:
-        """Prepare the first partition synchronously before any lookahead exists."""
-        if not self.enabled:
-            raise RuntimeError("partition source lookahead is disabled")
-        options = self._current_options()
-        prepared = self._prepare_with_new_context(plan, options)
-        return self._materialize_deferred(prepared, options)
+        """Prepare the first partition inside the same close admission barrier."""
+        condition = self._lifecycle_condition()
+        with condition:
+            if not self.enabled:
+                raise RuntimeError("partition source lookahead is disabled")
+            if getattr(self, "_close_started", False):
+                raise RuntimeError("partition source lookahead is closing")
+            self._submissions_inflight += 1
+        try:
+            options = self._current_options()
+            prepared = self._prepare_with_new_context(plan, options)
+            return self._materialize_deferred(prepared, options)
+        finally:
+            with condition:
+                self._submissions_inflight = max(0, self._submissions_inflight - 1)
+                condition.notify_all()
+            self._resume_close_if_quiescent()
 
     def arm(
         self,
         plan: PartitionRunPlan | None,
         parent_context: OperationExecutionContext,
     ) -> None:
-        """Record the only next partition and its resource-sharing parent."""
-        if not self.enabled or self._closed or plan is None:
-            return
-        if self._future is not None or self._armed is not None:
-            raise RuntimeError("partition lookahead window already contains work")
-        self._armed = (plan, parent_context)
+        """Record the next partition under the lifecycle transaction."""
+        condition = self._lifecycle_condition()
+        with condition:
+            if not self.enabled or self._close_started or plan is None:
+                return
+            if self._future is not None or self._armed is not None:
+                raise RuntimeError("partition lookahead window already contains work")
+            self._armed = (plan, parent_context)
 
     def trigger(self) -> None:
-        """Submit the armed partition once a conversion reaches a safe boundary."""
-        if not self.enabled or self._closed or self._armed is None:
-            return
-        executor = self._executor
-        if executor is None:
-            raise RuntimeError("partition lookahead worker is unavailable")
-        plan, parent_context = self._armed
-        self._armed = None
-        options = self._current_options()
+        """Submit one claimed partition and publish it before close can commit."""
+        condition = self._lifecycle_condition()
+        with condition:
+            if not self.enabled or self._close_started or self._armed is None:
+                return
+            executor = self._executor
+            if executor is None:
+                raise RuntimeError("partition lookahead worker is unavailable")
+            plan, parent_context = self._armed
+            self._armed = None
+            self._submissions_inflight += 1
+
+        child_context: OperationExecutionContext | None = None
+        future: Future[PreparedOrDeferred] | None = None
+        primary: BaseException | None = None
+        disable = False
         try:
+            options = self._current_options()
+            if (
+                adaptive_concurrency_target(
+                    2,
+                    per_slot_bytes=max(8 << 20, self._memory_limit_bytes // 8),
+                )
+                < 2
+            ):
+                return
             child_context = parent_context.fork()
-            self._future = executor.submit(self._prepare, plan, child_context, options)
-        except Exception:
-            child = locals().get("child_context")
-            if child is not None:
-                child.close()
-            self.enabled = False
-            self._executor = None
-            executor.shutdown(wait=False, cancel_futures=True)
+            future = executor.submit(self._prepare, plan, child_context, options)
+        except Exception as exc:
+            primary = exc
+            disable = True
+        except BaseException as exc:
+            primary = exc
+            disable = True
+        finally:
+            if future is None and child_context is not None:
+                try:
+                    child_context.close()
+                except BaseException as cleanup_error:
+                    if primary is None:
+                        primary = cleanup_error
+                    else:
+                        add_bounded_note(
+                            primary,
+                            "partition lookahead child-context rollback also failed",
+                            cleanup_error,
+                        )
+                    with condition:
+                        self._future_context = child_context
+            with condition:
+                if future is not None:
+                    # Publish even after close starts: close is waiting for this
+                    # admission claim and will own the just-created resources.
+                    self._future = future
+                    self._future_context = child_context
+                if disable:
+                    self.enabled = False
+                self._submissions_inflight = max(0, self._submissions_inflight - 1)
+                condition.notify_all()
+
+        if primary is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except BaseException as cleanup_error:
+                add_bounded_note(
+                    primary,
+                    "partition lookahead executor rollback also failed",
+                    cleanup_error,
+                )
+            else:
+                with condition:
+                    if self._executor is executor and self._future is None:
+                        self._executor = None
+            if isinstance(primary, Exception):
+                self._resume_close_if_quiescent()
+                return
+            self._resume_close_if_quiescent()
+            raise primary
+        self._resume_close_if_quiescent()
 
     def take_next(self, plan: PartitionRunPlan) -> _PreparedPartition:
-        """Consume the retained next result, raising its error only at this ordinal."""
-        if not self.enabled:
-            raise RuntimeError("partition source lookahead is disabled")
-        future = self._future
-        self._future = None
-        options = self._current_options()
-        if future is None:
-            prepared = self._prepare_with_new_context(plan, options)
-        else:
-            prepared = future.result()
+        """Consume one result through an exclusive lifecycle claim."""
+        condition = self._lifecycle_condition()
+        with condition:
+            if not self.enabled:
+                raise RuntimeError("partition source lookahead is disabled")
+            if getattr(self, "_close_started", False):
+                raise RuntimeError("partition source lookahead is closing")
+            if getattr(self, "_consumer_inflight", False):
+                raise RuntimeError("partition lookahead result is already being consumed")
+            self._consumer_inflight = True
+            self._submissions_inflight += 1
+            future = self._future
+            future_context = self._future_context
+            if future is not None:
+                # Transfer ownership to this consumer. close() waits for the
+                # admission claim and therefore cannot clean these resources in
+                # parallel. A failed cleanup republishes them before the claim
+                # is released.
+                self._future = None
+                self._future_context = None
+
+        restore_claim = future is not None
+        try:
+            options = self._current_options()
+            if future is None:
+                prepared = self._prepare_with_new_context(plan, options)
+                return self._materialize_deferred(prepared, options)
+            try:
+                prepared = future.result()
+            except BaseException as exc:
+                cleanup_failed = False
+                if future_context is not None:
+                    try:
+                        future_context.close()
+                    except BaseException as cleanup_error:
+                        cleanup_failed = True
+                        add_bounded_note(
+                            exc,
+                            "partition lookahead context cleanup also failed",
+                            cleanup_error,
+                        )
+                if not cleanup_failed:
+                    restore_claim = False
+                raise
             if prepared.plan != plan:
                 prepared.close()
+                restore_claim = False
                 raise RuntimeError("partition lookahead returned a different source ordinal")
             if prepared.options != options:
                 prepared.close()
+                restore_claim = False
                 prepared = self._prepare_with_new_context(plan, options)
-        return self._materialize_deferred(prepared, options)
+                return self._materialize_deferred(prepared, options)
+            materialized = self._materialize_deferred(prepared, options)
+            restore_claim = False
+            return materialized
+        finally:
+            with condition:
+                if restore_claim and self._future is None:
+                    self._future = future
+                    self._future_context = future_context
+                self._consumer_inflight = False
+                self._submissions_inflight = max(0, self._submissions_inflight - 1)
+                condition.notify_all()
+            self._resume_close_if_quiescent()
 
     def _current_options(self) -> _PreparationOptions:
         """Capture the live static mapping at one preparation boundary."""
@@ -253,10 +471,18 @@ class PartitionSourceLookahead:
                 return _DeferredPartition(plan, options, context)
             context.close()
             raise
-        except BaseException:
+        except BaseException as exc:
             if prepared is not None:
-                prepared.close()
-            context.close()
+                _cleanup_with_note(
+                    exc,
+                    prepared,
+                    label="partition prepared-input cleanup also failed",
+                )
+            _cleanup_with_note(
+                exc,
+                context,
+                label="partition operation-context cleanup also failed",
+            )
             raise
 
     def _materialize_deferred(
@@ -301,25 +527,177 @@ class PartitionSourceLookahead:
             and context.temporary_storage.snapshot().reserved_bytes > 0
         )
 
+    def _late_future_completed(self, _future: Future[Any]) -> None:
+        """Resume a deferred close without reentering a live close transaction."""
+        condition = self._lifecycle_condition()
+        with condition:
+            self._late_close_registered = False
+            if self._close_in_progress:
+                condition.notify_all()
+                return
+        try:
+            self.close()
+        except BaseException:
+            # Cleanup ownership remains published for an explicit/finalizer
+            # retry; Future callbacks must not raise into executor internals.
+            pass
+
     def close(self) -> None:
-        """Cancel or drain speculative work and release every retained resource."""
-        if self._closed:
+        """Stop admission and clean owners outside the lifecycle lock."""
+        if os.getpid() != self._pid:
             return
-        self._closed = True
-        self._armed = None
-        future = self._future
-        self._future = None
-        if future is not None:
-            future.cancel()
-            if not future.cancelled():
+        condition = self._lifecycle_condition()
+        deadline = monotonic() + float(getattr(self, "_close_timeout_seconds", 30.0))
+        with condition:
+            while self._close_in_progress:
+                remaining = deadline - monotonic()
+                if remaining <= 0 or not condition.wait(timeout=remaining):
+                    raise RuntimeError("partition lookahead concurrent close exceeded its deadline")
+            if self._closed:
+                return
+            self._close_in_progress = True
+            self._close_started = True
+            self.enabled = False
+            self._armed = None
+            while self._submissions_inflight:
+                remaining = deadline - monotonic()
+                if remaining <= 0 or not condition.wait(timeout=remaining):
+                    self._close_in_progress = False
+                    condition.notify_all()
+                    raise RuntimeError(
+                        "partition lookahead admissions exceeded their close deadline"
+                    )
+            future = self._future
+            future_context = self._future_context
+            executor = self._executor
+
+        cleanup_committed = False
+        executor_committed = executor is None
+        deferred = False
+        cleanup_failed = False
+        try:
+            if future is None and future_context is not None:
+                future_context.close()
+                cleanup_committed = True
+            elif future is not None:
+                if future.cancel():
+                    if future_context is not None:
+                        future_context.close()
+                    cleanup_committed = True
+                elif future.done():
+                    try:
+                        prepared = future.result()
+                    except BaseException as exc:
+                        if future_context is not None:
+                            try:
+                                future_context.close()
+                            except BaseException as cleanup_error:
+                                add_bounded_note(
+                                    exc,
+                                    "partition lookahead context cleanup also failed",
+                                    cleanup_error,
+                                )
+                                raise exc
+                    else:
+                        prepared.close()
+                    cleanup_committed = True
+                else:
+                    register = False
+                    with condition:
+                        if not self._late_close_registered:
+                            self._late_close_registered = True
+                            register = True
+                    if register:
+                        # Registration is outside the lock because an already
+                        # completed Future invokes callbacks synchronously.
+                        try:
+                            future.add_done_callback(self._late_future_completed)
+                        except BaseException:
+                            with condition:
+                                self._late_close_registered = False
+                                condition.notify_all()
+                            # A non-standard Future may invoke the callback and
+                            # then raise. A terminal result can still be drained
+                            # by this generation; otherwise retain it for retry.
+                            if not future.done():
+                                raise
+                    deferred = not future.done()
+
+            if not deferred and executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+                executor_committed = True
+
+            # A no-op/custom shutdown may leave a running Future. Keep every
+            # owner reachable and let its callback start the next generation.
+            if future is not None and not cleanup_committed and future.done():
                 try:
-                    future.result().close()
-                except BaseException:
-                    pass
-        executor = self._executor
-        self._executor = None
-        if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+                    prepared = future.result()
+                except BaseException as exc:
+                    if future_context is not None:
+                        try:
+                            future_context.close()
+                        except BaseException as cleanup_error:
+                            add_bounded_note(
+                                exc,
+                                "partition lookahead context cleanup also failed",
+                                cleanup_error,
+                            )
+                            raise exc
+                else:
+                    prepared.close()
+                cleanup_committed = True
+                deferred = False
+
+            with condition:
+                if cleanup_committed:
+                    if self._future is future:
+                        self._future = None
+                    if self._future_context is future_context:
+                        self._future_context = None
+                    self._late_close_registered = False
+                if executor_committed and self._executor is executor:
+                    self._executor = None
+                if self._future is None and self._future_context is None:
+                    self._closed = True
+        except BaseException:
+            cleanup_failed = True
+            raise
+        finally:
+            with condition:
+                self._close_in_progress = False
+                retry_now = (
+                    not self._closed
+                    and self._future is not None
+                    and self._future.done()
+                    and not self._late_close_registered
+                    and not cleanup_failed
+                )
+                condition.notify_all()
+        if retry_now:
+            self.close()
+
+    def _runtime_shutdown(self, *, deadline_seconds: float) -> bool:
+        normalized = normalize_duration(
+            deadline_seconds,
+            name="partition lookahead shutdown deadline",
+            allow_zero=True,
+        )
+        assert normalized is not None
+        previous = getattr(self, "_close_timeout_seconds", 30.0)
+        self._close_timeout_seconds = min(previous, normalized)
+        try:
+            self.close()
+        except BaseException:
+            return False
+        finally:
+            self._close_timeout_seconds = previous
+        stopped = bool(self._closed)
+        if stopped:
+            registration = self._runtime_registration
+            self._runtime_registration = None
+            if registration is not None:
+                registration.close()
+        return stopped
 
     def __enter__(self) -> PartitionSourceLookahead:
         """Return the active lookahead controller."""
@@ -328,6 +706,15 @@ class PartitionSourceLookahead:
     def __exit__(self, *_exc: object) -> None:
         """Close speculative work."""
         self.close()
+
+    def __del__(self) -> None:
+        """Stop an abandoned lookahead host outside interpreter teardown."""
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            self.close()
+        except BaseException:
+            pass
 
 
 __all__ = ["PartitionSourceLookahead"]

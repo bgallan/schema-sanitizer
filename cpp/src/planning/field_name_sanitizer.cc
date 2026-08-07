@@ -10,9 +10,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -218,8 +222,10 @@ unflattened_output_name(std::string_view output_name) noexcept {
 }
 
 std::vector<std::string>
-clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
-                          const sanitize::PreparedOptions &opts) {
+clean_sibling_field_names(std::span<const std::string_view> dirty_names,
+                          const sanitize::PreparedOptions &opts,
+                          std::pmr::memory_resource *scratch) {
+  auto *resource = scratch ? scratch : std::pmr::get_default_resource();
   if (prepared_uses_preserve_policy(opts)) {
     std::vector<std::string> preserved;
     preserved.reserve(dirty_names.size());
@@ -230,7 +236,9 @@ clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
 
   std::vector<std::string> bases;
   bases.reserve(dirty_names.size());
-  BorrowedStringLookupMap<std::size_t> base_counts;
+  std::pmr::unordered_map<std::string_view, std::size_t, TransparentStringHash,
+                          std::equal_to<>>
+      base_counts(resource);
   base_counts.reserve(dirty_names.size());
   for (std::string_view dirty : dirty_names) {
     bases.push_back(clean_field_name_base(dirty, opts));
@@ -242,7 +250,8 @@ clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
     return bases;
 
   std::vector<std::string> out(dirty_names.size());
-  std::vector<std::size_t> order(dirty_names.size());
+  std::pmr::vector<std::size_t> order(resource);
+  order.resize(dirty_names.size());
   for (std::size_t i = 0; i < order.size(); ++i)
     order[i] = i;
   std::ranges::sort(order, [&](std::size_t lhs, std::size_t rhs) {
@@ -251,7 +260,9 @@ clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
     return dirty_names[lhs] < dirty_names[rhs];
   });
 
-  BorrowedStringLookupSet used;
+  std::pmr::unordered_set<std::string_view, TransparentStringHash,
+                          std::equal_to<>>
+      used(resource);
   used.reserve(dirty_names.size());
   for (std::size_t idx : order) {
     const std::string &base = bases[idx];

@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
+import os
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlparse
 
+from ..core_impl.finalization import runtime_is_finalizing
 from ..core_impl.memory_budget import memory_budget
 from ..core_impl.sync_retry import retry_sync
+from ..core_impl.temporary_storage import (
+    StreamingStorageReservation,
+    TemporaryStorageLease,
+)
 from ..core_impl.uris import RemoteProvider, normalize_extensions, remote_provider
-from ..input_impl.directory_inputs import DirectoryDiscovery, RemoteFile
+from ..input_impl.directory_inputs import DirectoryDiscovery
+from ..sources.models import RemoteFile
 from .providers import azure_sync, gcs_sync, s3_sync
 from .sync_http import (
     download_http_file,
@@ -41,19 +48,27 @@ class SyncDirectoryDownloadSession:
         memory_limit_bytes: int | None,
     ) -> None:
         """Store the homogeneous file set and operation budget."""
-        self._files = tuple(files)
+        iterator = iter(files)
+        first = next(iterator, None)
+        self._first_uri = first.uri if first is not None else None
+        self._provider = remote_provider(self._first_uri) if self._first_uri is not None else None
+        self._homogeneous_provider = self._provider is not None and all(
+            remote_provider(file.uri) == self._provider for file in iterator
+        )
         self._memory_limit_bytes = memory_limit_bytes
+        self._pid = os.getpid()
         self._stack: ExitStack | None = None
         self._context: SyncDownloadContext | None = None
 
     def __enter__(self) -> SyncDirectoryDownloadSession:
         """Open one provider handle on the caller thread."""
-        if not self._files:
+        if os.getpid() != self._pid:
+            raise RuntimeError("synchronous remote session cannot be reused after fork")
+        first_uri = self._first_uri
+        if first_uri is None:
             raise ValueError("remote directory input found no matching files")
-        provider = remote_provider(self._files[0].uri)
-        if provider is None or any(
-            remote_provider(file.uri) != provider for file in self._files[1:]
-        ):
+        provider = self._provider
+        if provider is None or not self._homogeneous_provider:
             raise ValueError("one remote staging packet must use exactly one provider")
         stack = ExitStack()
         self._stack = stack
@@ -62,7 +77,7 @@ class SyncDirectoryDownloadSession:
                 provider, stack.enter_context(s3_sync.open_client())
             )
         elif provider == "azure":
-            ref = azure_sync.parse_uri(self._files[0].uri)
+            ref = azure_sync.parse_uri(first_uri)
             self._context = SyncDownloadContext(
                 provider,
                 stack.enter_context(azure_sync.open_service(ref)),
@@ -73,15 +88,37 @@ class SyncDirectoryDownloadSession:
             self._context = SyncDownloadContext(provider)
         return self
 
+    def close(self) -> None:
+        """Close provider resources while retaining ownership after failure."""
+        if os.getpid() != self._pid:
+            return
+        stack = self._stack
+        if stack is None:
+            self._context = None
+            return
+        stack.close()
+        if self._stack is stack:
+            self._stack = None
+            self._context = None
+
     def __exit__(self, *_exc: object) -> None:
         """Close provider resources deterministically on the caller thread."""
-        stack = self._stack
-        self._stack = None
-        self._context = None
-        if stack is not None:
-            stack.close()
+        self.close()
 
-    def download_files(self, files: Sequence[RemoteFile], directory: str) -> None:
+    def __del__(self) -> None:
+        """Best-effort close outside interpreter teardown and post-fork children."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
+        with suppress(BaseException):
+            self.close()
+
+    def download_files(
+        self,
+        files: Sequence[RemoteFile],
+        directory: str,
+        *,
+        storage_lease: TemporaryStorageLease | None = None,
+    ) -> None:
         """Download a packet serially and preserve canonical file order."""
         context = self._context
         if context is None:
@@ -91,6 +128,18 @@ class SyncDirectoryDownloadSession:
         for file in files:
             target = target_root / file.name
             check_download_size(file.uri, file.size, self._memory_limit_bytes)
+            budget = memory_budget(self._memory_limit_bytes)
+            initial_credit = (
+                file.size
+                if isinstance(file.size, int) and file.size >= 0
+                else budget.io_chunk_bytes
+            )
+            storage_reservation = StreamingStorageReservation(
+                storage_lease,
+                initial_credit_bytes=initial_credit,
+                path=target,
+                quantum_bytes=budget.io_chunk_bytes,
+            )
 
             def operation() -> None:
                 """Download one file and truncate its destination per retry."""
@@ -100,6 +149,7 @@ class SyncDirectoryDownloadSession:
                     file,
                     str(target),
                     memory_limit_bytes=self._memory_limit_bytes,
+                    storage_reservation=storage_reservation,
                 )
 
             try:
@@ -136,23 +186,40 @@ def _download_with_context(
     local_path: str,
     *,
     memory_limit_bytes: int | None,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one file through a classified blocking provider handle."""
     if context.provider == "s3":
-        s3_sync.download_file_with_client(context.client, file, local_path)
+        s3_sync.download_file_with_client(
+            context.client,
+            file,
+            local_path,
+            storage_reservation=storage_reservation,
+        )
         return
     if context.provider == "azure":
-        azure_sync.download_file_with_service(context.client, file, local_path)
+        azure_sync.download_file_with_service(
+            context.client,
+            file,
+            local_path,
+            storage_reservation=storage_reservation,
+        )
         return
     if context.provider == "gcs":
         gcs_sync.download_file(
-            file.uri,
+            file,
             local_path,
             memory_limit_bytes=memory_limit_bytes,
             headers=context.headers,
+            storage_reservation=storage_reservation,
         )
         return
-    download_http_file(file.uri, local_path, memory_limit_bytes=memory_limit_bytes)
+    download_http_file(
+        file.uri,
+        local_path,
+        memory_limit_bytes=memory_limit_bytes,
+        storage_reservation=storage_reservation,
+    )
 
 
 def remote_file_metadata(
@@ -224,26 +291,48 @@ def directories_containing_files(
 
 
 def download_single_file(
-    uri: str,
+    uri: str | RemoteFile,
     local_path: str,
     *,
     memory_limit_bytes: int | None = None,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one object using only blocking provider APIs."""
-    provider = remote_provider(uri)
+    source_uri = uri.uri if isinstance(uri, RemoteFile) else uri
+    provider = remote_provider(source_uri)
     if provider == "gcs":
-        gcs_sync.download_file(uri, local_path, memory_limit_bytes=memory_limit_bytes)
+        gcs_sync.download_file(
+            uri,
+            local_path,
+            memory_limit_bytes=memory_limit_bytes,
+            storage_reservation=storage_reservation,
+        )
         return
     if provider == "s3":
-        s3_sync.download_file(uri, local_path, memory_limit_bytes=memory_limit_bytes)
+        s3_sync.download_file(
+            source_uri,
+            local_path,
+            memory_limit_bytes=memory_limit_bytes,
+            storage_reservation=storage_reservation,
+        )
         return
     if provider == "azure":
-        azure_sync.download_file(uri, local_path, memory_limit_bytes=memory_limit_bytes)
+        azure_sync.download_file(
+            source_uri,
+            local_path,
+            memory_limit_bytes=memory_limit_bytes,
+            storage_reservation=storage_reservation,
+        )
         return
     if provider == "http":
-        download_http_file(uri, local_path, memory_limit_bytes=memory_limit_bytes)
+        download_http_file(
+            source_uri,
+            local_path,
+            memory_limit_bytes=memory_limit_bytes,
+            storage_reservation=storage_reservation,
+        )
         return
-    scheme = urlparse(uri).scheme.lower()
+    scheme = urlparse(source_uri).scheme.lower()
     raise ValueError(f"Unsupported remote URI scheme: {scheme!r}")
 
 
@@ -276,13 +365,14 @@ def download_files_to_directory(
     directory: str,
     *,
     memory_limit_bytes: int | None,
+    storage_lease: TemporaryStorageLease | None = None,
 ) -> None:
     """Download one homogeneous packet through a reused blocking client."""
     with SyncDirectoryDownloadSession(
         files,
         memory_limit_bytes=memory_limit_bytes,
     ) as session:
-        session.download_files(files, directory)
+        session.download_files(files, directory, storage_lease=storage_lease)
 
 
 __all__ = [

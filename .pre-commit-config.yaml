@@ -12,9 +12,10 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-json
-        exclude: ^fuzz/(corpus|regressions)/json/truncated\.json$
+        # Fuzz inputs intentionally include malformed encodings and syntax.
+        exclude: ^fuzz/(corpus|regressions)/json/
       - id: pretty-format-json
-        exclude: ^fuzz/(corpus|regressions)/json/truncated\.json$
+        exclude: ^fuzz/(corpus|regressions)/json/
         args: [--autofix, --indent=2, --no-sort-keys]
 
   # C/C++ formatting + style-lint
@@ -73,6 +74,12 @@ repos:
         entry: mypy
         language: python
         additional_dependencies: [mypy==1.19.1]
+        pass_filenames: false
+        always_run: true
+      - id: primary-cleanup-safety
+        name: primary cleanup safety
+        entry: python meta/ci/check_primary_cleanup.py
+        language: system
         pass_filenames: false
         always_run: true
       - id: cmake-format

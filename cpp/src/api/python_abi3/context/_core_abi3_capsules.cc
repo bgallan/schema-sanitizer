@@ -4,6 +4,7 @@
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
 #include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/runtime/process_identity.hh"
 
 #include <cstdlib>
 #include <utility>
@@ -27,6 +28,9 @@ constexpr const char *kArrowStreamCapsuleName = "arrow_array_stream";
 
 // Releases the execution context owned by a Python capsule.
 void context_capsule_destructor(PyObject *capsule) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   auto *ctx = static_cast<schema_sanitizer_context *>(
       PyCapsule_GetPointer(capsule, kContextCapsuleName));
   if (!ctx) {
@@ -38,6 +42,9 @@ void context_capsule_destructor(PyObject *capsule) {
 
 // Releases diagnostics owned by a Python capsule.
 void diagnostics_capsule_destructor(PyObject *capsule) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   auto *diagnostics = static_cast<schema_sanitizer_diagnostics *>(
       PyCapsule_GetPointer(capsule, kDiagnosticsCapsuleName));
   if (!diagnostics) {
@@ -49,6 +56,9 @@ void diagnostics_capsule_destructor(PyObject *capsule) {
 
 // Releases prepared options owned by a Python capsule.
 void prepared_options_capsule_destructor(PyObject *capsule) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!capsule) {
     return;
   }
@@ -67,6 +77,9 @@ struct StreamKeepAlive {
 
 // Releases an Arrow stream capsule and its Python keepalive reference.
 void stream_capsule_destructor(PyObject *capsule) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   auto *stream = static_cast<ArrowArrayStream *>(
       PyCapsule_GetPointer(capsule, kArrowStreamCapsuleName));
   if (!stream) {

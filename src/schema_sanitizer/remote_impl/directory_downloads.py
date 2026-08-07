@@ -12,8 +12,12 @@ from urllib.parse import urlparse
 from ..core_impl.async_scheduler import drain_ordered_indexed_results, retry_async
 from ..core_impl.execution_policy import execution_policy
 from ..core_impl.memory_budget import memory_budget
+from ..core_impl.temporary_storage import (
+    StreamingStorageReservation,
+    TemporaryStorageLease,
+)
 from ..core_impl.uris import RemoteProvider, remote_provider
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from .providers import azure, gcs, s3
 from .transport import (
     check_download_size,
@@ -65,7 +69,7 @@ class RemoteDirectoryDownloadSession:
         threading_mode: str,
     ) -> None:
         """Store operation inputs until the async context is entered."""
-        self._files = tuple(files)
+        self._first_file = files[0] if files else None
         self._memory_limit_bytes = memory_limit_bytes
         self._threading_mode = threading_mode
         self._tuning = directory_download_tuning(memory_limit_bytes, threading_mode)
@@ -79,8 +83,9 @@ class RemoteDirectoryDownloadSession:
 
     async def __aenter__(self) -> RemoteDirectoryDownloadSession:
         """Open one reusable provider client and global request semaphore."""
+        files = () if self._first_file is None else (self._first_file,)
         self._context = await provider_client_for_downloads(
-            self._files,
+            files,
             memory_limit_bytes=self._memory_limit_bytes,
             threading_mode=self._threading_mode,
         )
@@ -96,20 +101,27 @@ class RemoteDirectoryDownloadSession:
         self._semaphore = None
         await close_provider_client(context)
 
-    async def download_files(self, files: Sequence[RemoteFile], directory: str) -> None:
+    async def download_files(
+        self,
+        files: Sequence[RemoteFile],
+        directory: str,
+        *,
+        storage_lease: TemporaryStorageLease | None = None,
+    ) -> None:
         """Download one chunk under the operation-wide transfer limit."""
         context = self._context
         semaphore = self._semaphore
         if context is None or semaphore is None:
             raise RuntimeError("remote directory download session is not open")
         await _download_files_with_context(
-            list(files),
+            files,
             directory,
             context=context,
             semaphore=semaphore,
             retries=self._tuning.retries,
             window=self._request_window,
             memory_limit_bytes=self._memory_limit_bytes,
+            storage_lease=storage_lease,
         )
 
 
@@ -171,23 +183,36 @@ async def download_file_to_path(
     context: DownloadContext,
     file: RemoteFile,
     local_path: str,
+    *,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one file through an already-classified provider context."""
     if context.provider == "gcs":
-        await gcs.download_file_with_session(context.client, file, local_path)
+        await gcs.download_file_with_session(
+            context.client, file, local_path, storage_reservation=storage_reservation
+        )
         return
     if context.provider == "s3":
-        await s3.download_file_with_client(context.client, file, local_path)
+        await s3.download_file_with_client(
+            context.client, file, local_path, storage_reservation=storage_reservation
+        )
         return
     if context.provider == "azure":
-        await azure.download_file_with_service(context.client, file, local_path)
+        await azure.download_file_with_service(
+            context.client, file, local_path, storage_reservation=storage_reservation
+        )
         return
     async with context.client.get(file.uri) as response:
-        await write_response_to_file(response, uri=file.uri, local_path=local_path)
+        await write_response_to_file(
+            response,
+            uri=file.uri,
+            local_path=local_path,
+            storage_reservation=storage_reservation,
+        )
 
 
 async def _download_files_with_context(
-    files: list[RemoteFile],
+    files: Sequence[RemoteFile],
     directory: str,
     *,
     context: DownloadContext,
@@ -195,6 +220,7 @@ async def _download_files_with_context(
     retries: int,
     window: int,
     memory_limit_bytes: int | None,
+    storage_lease: TemporaryStorageLease | None = None,
 ) -> None:
     """Download one file packet through a shared provider context."""
     target_root = Path(directory)
@@ -204,11 +230,29 @@ async def _download_files_with_context(
         file = files[index]
         target = target_root / file.name
         check_download_size(file.uri, file.size, memory_limit_bytes)
+        budget = memory_budget(memory_limit_bytes)
+        initial_credit = (
+            file.size if isinstance(file.size, int) and file.size >= 0 else budget.io_chunk_bytes
+        )
+        storage_reservation = StreamingStorageReservation(
+            storage_lease,
+            initial_credit_bytes=initial_credit,
+            path=target,
+            quantum_bytes=budget.io_chunk_bytes,
+        )
 
         async def operation() -> None:
             """Download one file while holding the global transfer slot."""
             async with semaphore:
-                await download_file_to_path(context, file, str(target))
+                if storage_lease is None:
+                    await download_file_to_path(context, file, str(target))
+                else:
+                    await download_file_to_path(
+                        context,
+                        file,
+                        str(target),
+                        storage_reservation=storage_reservation,
+                    )
 
         try:
             await retry_async(operation, retries=retries)
@@ -226,6 +270,7 @@ async def download_files_to_directory(
     *,
     memory_limit_bytes: int | None,
     threading_mode: str = "single",
+    storage_lease: TemporaryStorageLease | None = None,
 ) -> None:
     """Download files with policy-bounded ordered concurrency."""
     if not files:
@@ -235,4 +280,4 @@ async def download_files_to_directory(
         memory_limit_bytes=memory_limit_bytes,
         threading_mode=threading_mode,
     ) as session:
-        await session.download_files(files, directory)
+        await session.download_files(files, directory, storage_lease=storage_lease)

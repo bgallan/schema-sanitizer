@@ -6,8 +6,11 @@
 
 #include <cstring>
 #include <memory>
+#include <memory_resource>
 #include <string_view>
 #include <vector>
+
+#include "internal/memory/pool_resource.hh"
 
 namespace sanitize::internal {
 namespace {
@@ -76,7 +79,8 @@ JsonStreamingScanner::scan_line_value(BumpArena *arena) {
   const std::string_view source_file = chunk_.source_name;
   const std::size_t source_index = chunk_.source_index;
   const bool has_source_index = chunk_.has_source_index;
-  std::vector<LineSegment> segments;
+  PoolResource segment_resource(arena->pool());
+  std::pmr::vector<LineSegment> segments(&segment_resource);
   std::size_t segment_start = start_pos;
   std::size_t total_bytes = 0;
 

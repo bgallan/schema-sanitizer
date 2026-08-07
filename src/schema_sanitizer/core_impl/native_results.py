@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import suppress
+from threading import Lock
 from typing import Any
 
+from .finalization import runtime_is_finalizing
 from .json_payloads import json_object_loads
 from .logical_schema import pyarrow_schema_from_payload
 from .native_runtime import native_core as _native
+from .resource_lifecycle import _close_sequence_retryably, _close_suppressing_errors
 
 
 class IngestDiagnostics:
@@ -18,6 +22,8 @@ class IngestDiagnostics:
         self._diagnostics_capsule = diagnostics_capsule
         self._diag_json = diag_json or "{}"
         self._obj: dict[str, Any] | None = None
+        self._pid = os.getpid()
+        self._lock = Lock()
 
     def _ensure_obj(self) -> dict[str, Any]:
         """Parse and return the cached diagnostics payload."""
@@ -32,13 +38,40 @@ class IngestDiagnostics:
 
     def to_json(self) -> str:
         """Return the current diagnostics JSON."""
-        if self._diagnostics_capsule is not None:
+        if os.getpid() != self._pid:
+            return self._diag_json
+        with self._lock:
+            if self._diagnostics_capsule is not None:
+                try:
+                    self._diag_json = str(_native.diagnostics_json(self._diagnostics_capsule))
+                    self._obj = None
+                except Exception:
+                    pass
+            return self._diag_json
+
+    def close(self) -> None:
+        """Freeze current JSON and release the live native diagnostics capsule."""
+        if os.getpid() != self._pid:
+            return
+        with self._lock:
+            capsule = self._diagnostics_capsule
+            if capsule is None:
+                return
             try:
-                self._diag_json = str(_native.diagnostics_json(self._diagnostics_capsule))
+                self._diag_json = str(_native.diagnostics_json(capsule))
                 self._obj = None
             except Exception:
                 pass
-        return self._diag_json
+            self._diagnostics_capsule = None
+
+    def __del__(self) -> None:
+        """Release native diagnostics outside interpreter teardown only."""
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            self.close()
+        except BaseException:
+            pass
 
 
 def _logical_schema_payload_field_names(payload: bytes) -> tuple[str, ...]:
@@ -148,6 +181,8 @@ class _ArrowStream:
     def __init__(self, capsule: Any):
         """Wrap an Arrow C Stream capsule."""
         self._capsule = capsule
+        self._pid = os.getpid()
+        self._lock = Lock()
 
     def __arrow_c_stream__(self, requested_schema: Any = None):
         """Export the wrapped Arrow C Stream capsule."""
@@ -157,10 +192,15 @@ class _ArrowStream:
 
     def close(self) -> None:
         """Release the wrapped capsule reference."""
-        self._capsule = None
+        if os.getpid() != self._pid:
+            return
+        with self._lock:
+            self._capsule = None
 
     def __del__(self) -> None:
         """Best-effort release the wrapped capsule."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         with suppress(Exception):
             self.close()
 
@@ -182,6 +222,7 @@ class SinkOutput:
     ):
         """Create a sink output from native stream capsules and diagnostics."""
         self._sink = sink
+        self._pid = os.getpid()
         self._main = main_stream_capsule
         self.schema_registry_json = schema_registry_json
         self.schema_drifts_json = schema_drifts_json
@@ -217,26 +258,29 @@ class SinkOutput:
         return self._main
 
     def close_main_stream(self) -> None:
-        """Release only the primary output stream, leaving diagnostics readable."""
-        if self._table_backend is not None:
-            self._table_backend.close()
+        """Release the primary output without losing failed backend ownership."""
+        backend = self._table_backend
+        if backend is not None and not _close_suppressing_errors(backend):
+            return
+        if self._table_backend is backend:
             self._table_backend = None
         self._main = None
 
     def close(self) -> None:
-        """Close primary stream and diagnostics resources."""
+        """Close primary stream, keepalives, and diagnostics transactionally."""
+        if os.getpid() != self._pid:
+            return
         self.close_main_stream()
-        keepalive = getattr(self, "_keepalive", None)
-        if keepalive is not None:
-            with suppress(Exception):
-                while keepalive:
-                    item = keepalive.pop()
-                    close = getattr(item, "close", None)
-                    if callable(close):
-                        close()
+        if self._table_backend is None and self._main is None:
+            keepalive = list(getattr(self, "_keepalive", ()) or ())
+            _close_sequence_retryably(keepalive)
+            self._keepalive = keepalive
+        self._diagnostics.close()
 
     def __del__(self) -> None:
         """Best-effort close sink resources."""
+        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+            return
         with suppress(Exception):
             self.close()
 

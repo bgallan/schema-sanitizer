@@ -3,6 +3,8 @@
 #pragma once
 
 #include <cstddef>
+#include <memory_resource>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,9 +48,10 @@ bool field_name_matches_output(std::string_view dirty, std::string_view clean,
 std::string_view unflattened_output_name(std::string_view output_name) noexcept;
 
 // Returns final sanitized names for one sibling field scope.
-std::vector<std::string>
-clean_sibling_field_names(const std::vector<std::string_view> &dirty_names,
-                          const sanitize::PreparedOptions &opts);
+std::vector<std::string> clean_sibling_field_names(
+    std::span<const std::string_view> dirty_names,
+    const sanitize::PreparedOptions &opts,
+    std::pmr::memory_resource *scratch = std::pmr::get_default_resource());
 
 // Sanitizes all logical schema field names recursively.
 sanitize::LogicalSchema

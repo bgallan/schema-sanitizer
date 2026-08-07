@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,6 +12,7 @@ from typing import Any
 
 from .dependencies import ensure_pyarrow
 from .error_translation import call_core
+from .fork_safety import quarantine_inherited_state
 from .logical_schema import (
     LogicalSchemaPayload,
     encode_arrow_schema_payload,
@@ -194,16 +196,33 @@ _NATIVE_REGISTRY_STATE: ContextVar[Any | None] = ContextVar(
     "schema_sanitizer_schema_registry_native_state",
     default=None,
 )
+_FORKED_NATIVE_REGISTRY_KEEPALIVE: list[Any] = []
 
 
 @contextmanager
 def native_registry_state_context(native_state: Any) -> Iterator[None]:
     """Temporarily seed file conversion with a compiled registry-state capsule."""
+    owner_pid = os.getpid()
     token = _NATIVE_REGISTRY_STATE.set(native_state)
     try:
         yield
     finally:
-        _NATIVE_REGISTRY_STATE.reset(token)
+        if os.getpid() == owner_pid:
+            _NATIVE_REGISTRY_STATE.reset(token)
+        else:
+            _reset_native_registry_state_after_fork()
+
+
+def _reset_native_registry_state_after_fork() -> None:
+    """Detach inherited ABI3 capsules without invoking child-side finalizers."""
+    inherited = _NATIVE_REGISTRY_STATE.get()
+    if inherited is not None:
+        quarantine_inherited_state("native-schema-registry", inherited)
+    _NATIVE_REGISTRY_STATE.set(None)
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_native_registry_state_after_fork)
 
 
 def current_native_registry_state() -> Any | None:

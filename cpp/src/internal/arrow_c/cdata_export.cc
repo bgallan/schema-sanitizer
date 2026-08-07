@@ -3,6 +3,7 @@
 #include "internal/arrow_c/cdata_export_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
+#include "internal/runtime/process_identity.hh"
 
 #include "nanoarrow/nanoarrow.h"
 
@@ -85,6 +86,9 @@ static int stream_get_next(ArrowArrayStream *stream, ArrowArray *out) {
 
 // Closes the source and releases exported stream state.
 static void stream_release(ArrowArrayStream *stream) {
+  if (!sanitize::internal::runtime_owner_process()) {
+    return;
+  }
   if (!stream || !stream->release) {
     return;
   }

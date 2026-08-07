@@ -13,7 +13,7 @@ from ..core_impl.logical_schema import LogicalSchemaPayload
 from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.native_options import Options as NativeOptions
 from ..core_impl.native_options import normalize_field_name_policy_option, set_operation_detected_at
-from .options import Options
+from .options import Options, normalize_csv_escape_char, normalize_csv_header_mode
 
 FILE_CONVERSION_HELPER_KEYS = frozenset(
     {
@@ -177,6 +177,8 @@ class _CallOptions:
 
     csv_has_header: bool = True
     csv_delimiter: str = ","
+    csv_escape_char: str | None = None
+    csv_header_mode: str = "exact"
     input_text_encoding: str = "utf-8"
     xml_row_tag: str | None = None
 
@@ -224,6 +226,8 @@ class _CallOptions:
             csv={
                 "csv_has_header": self.csv_has_header,
                 "csv_delimiter": self.csv_delimiter,
+                "csv_escape_char": self.csv_escape_char,
+                "csv_header_mode": self.csv_header_mode,
             },
             xml={"xml_row_tag": self.xml_row_tag},
             errors={"on_error": self.on_error},
@@ -296,6 +300,13 @@ def _normalize_call_option_values(options: _CallOptions) -> None:
         "on_error",
         _normalize_choice("on_error", options.on_error, _ERROR_MODES),
     )
+    object.__setattr__(
+        options,
+        "csv_header_mode",
+        normalize_csv_header_mode(options.csv_header_mode),
+    )
+    escape = normalize_csv_escape_char(options.csv_escape_char, options.csv_delimiter)
+    object.__setattr__(options, "csv_escape_char", escape)
     object.__setattr__(
         options,
         "input_text_encoding",
@@ -463,10 +474,14 @@ def normalize_call_options_or_none(**kwargs: Any) -> Options | None:
     return normalize_call_options(**kwargs)
 
 
-def attach_operation_detected_at(options: Options | None, detected_at: str) -> Options:
-    """Attach internal fixed-clock metadata to prepared per-call options."""
+def attach_operation_detected_at(
+    options: Options | None,
+    detected_at: str,
+    operation_memory_ledger: Any = None,
+) -> Options:
+    """Attach internal fixed-clock metadata and shared operation resources."""
     resolved = normalize_call_options() if options is None else options
-    set_operation_detected_at(resolved.raw, detected_at)
+    set_operation_detected_at(resolved.raw, detected_at, operation_memory_ledger)
     return resolved
 
 

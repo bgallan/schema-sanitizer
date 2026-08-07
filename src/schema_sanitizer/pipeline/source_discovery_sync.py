@@ -5,8 +5,12 @@ from __future__ import annotations
 from collections import defaultdict
 from time import perf_counter
 
+from ..core_impl.memory_budget import normalize_memory_limit
 from ..core_impl.uris import LocationKind, RemoteProvider, normalize_extensions
-from ..input_impl.directory_inputs import DiscoveredDirectoryInput
+from ..input_impl.directory_inputs import (
+    DiscoveredDirectoryInput,
+    directory_metadata_budget_scope,
+)
 from ..remote_impl import sync_backend
 from .source_discovery import (
     _LOCAL_LOCATION_KINDS,
@@ -117,6 +121,7 @@ def _discover_source_sync(
             uri,
             normalize_extensions(extensions),
             kind=kind,
+            memory_limit_bytes=memory_limit_bytes,
         )
         discovered = (
             DiscoveredDirectoryInput(
@@ -137,7 +142,7 @@ def _discover_source_sync(
     return True, None, 1, size
 
 
-def discover_existing_source_plans_sync(
+def _discover_existing_source_plans_sync_impl(
     plans: list[PartitionRunPlan],
     *,
     input_mode: str = "single_file",
@@ -199,6 +204,26 @@ def discover_existing_source_plans_sync(
         source_file_count_by_uri=source_file_count_by_uri,
         source_bytes_by_uri=source_bytes_by_uri,
     )
+
+
+def discover_existing_source_plans_sync(
+    plans: list[PartitionRunPlan],
+    *,
+    input_mode: str = "single_file",
+    input_format: str = "json_array",
+    source_file_extension: str | None = None,
+    memory_limit_bytes: int | None = None,
+) -> SourcePlanDiscovery:
+    """Discover sources under one shared directory-metadata budget."""
+    normalized_limit = normalize_memory_limit(memory_limit_bytes)
+    with directory_metadata_budget_scope(normalized_limit):
+        return _discover_existing_source_plans_sync_impl(
+            plans,
+            input_mode=input_mode,
+            input_format=input_format,
+            source_file_extension=source_file_extension,
+            memory_limit_bytes=normalized_limit,
+        )
 
 
 __all__ = ["discover_existing_source_plans_sync"]

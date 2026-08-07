@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import os
-import shutil
-import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from inspect import signature
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..core_impl.execution_policy import normalize_threading_mode
+from ..core_impl.memory_budget import memory_budget
+from ..core_impl.resource_lifecycle import _cleanup_with_note
 from ..core_impl.temporary_storage import (
+    StreamingStorageReservation,
     TemporaryStorageLease,
     TemporaryStoragePermitPool,
 )
@@ -22,7 +23,7 @@ from ..core_impl.uris import (
     normalize_extensions,
     suffix_from_uri,
 )
-from ..input_impl.directory_inputs import RemoteFile
+from ..sources.models import RemoteFile
 from . import routing, sync_backend
 from .directory_downloads import RemoteDirectoryDownloadSession, download_files_to_directory
 from .transfer_dispatch import download_single_file, upload_file
@@ -32,94 +33,12 @@ if TYPE_CHECKING:
     from ..api_impl.operation_context import OperationExecutionContext
 
 
-class StagedPath:
-    """Own a local temporary path that mirrors a remote input or output."""
-
-    def __init__(
-        self,
-        path: str,
-        *,
-        is_dir: bool = False,
-        source_file_by_name: dict[str, str] | None = None,
-        storage_lease: TemporaryStorageLease | None = None,
-    ) -> None:
-        """Store the temporary path and deletion mode."""
-        self.path = path
-        self.is_dir = is_dir
-        self.source_file_by_name = source_file_by_name
-        self.storage_lease = storage_lease
-        self._closed = False
-
-    def reserve_actual_size(self, pool: TemporaryStoragePermitPool, *, label: str) -> None:
-        """Acquire or resize the permit to the exact staged filesystem size."""
-        size = self._actual_size()
-        if self.storage_lease is None:
-            self.storage_lease = pool.acquire(size, label=label, path=self.path)
-            return
-        self.storage_lease.resize(size, path=self.path)
-
-    def _actual_size(self) -> int:
-        """Return the current file or recursive directory byte size."""
-        path = Path(self.path)
-        if not self.is_dir:
-            return path.stat().st_size
-        total = 0
-        for child in path.rglob("*"):
-            if child.is_file():
-                total += child.stat().st_size
-        return total
-
-    def close(self) -> None:
-        """Delete the temporary path."""
-        if self._closed:
-            return
-        self._closed = True
-        if self.is_dir:
-            shutil.rmtree(self.path, ignore_errors=True)
-        else:
-            try:
-                Path(self.path).unlink(missing_ok=True)
-            except OSError:
-                pass
-        if self.storage_lease is not None:
-            self.storage_lease.release()
-            self.storage_lease = None
-
-
-@dataclass(slots=True)
-class RemoteOutputTarget:
-    """Local output target plus optional remote upload destination."""
-
-    local_path: str
-    remote_uri: str | None = None
-    temp: StagedPath | None = None
-    memory_limit_bytes: int | None = None
-    threading_mode: str = "single"
-    operation_context: OperationExecutionContext | None = None
-
-    def close(self) -> None:
-        """Release the temporary output path."""
-        if self.temp is not None:
-            self.temp.close()
-            self.temp = None
-
-
-def create_temp_file_path(
-    *, suffix: str, storage_lease: TemporaryStorageLease | None = None
-) -> StagedPath:
-    """Create an owned temporary file path."""
-    fd, path = tempfile.mkstemp(
-        prefix="schema-sanitizer-",
-        suffix=suffix,
-    )
-    os.close(fd)
-    return StagedPath(path, storage_lease=storage_lease)
-
-
-def create_temp_directory_path(*, storage_lease: TemporaryStorageLease | None = None) -> StagedPath:
-    """Create an owned temporary directory path."""
-    path = tempfile.mkdtemp(prefix="schema-sanitizer-")
-    return StagedPath(path, is_dir=True, storage_lease=storage_lease)
+from .staging_paths import (
+    RemoteOutputTarget,
+    StagedPath,
+    create_temp_directory_path,
+    create_temp_file_path,
+)
 
 
 def stage_remote_single_file(
@@ -135,8 +54,6 @@ def stage_remote_single_file(
         if operation_context is not None
         else TemporaryStoragePermitPool(memory_limit_bytes)
     )
-    from ..core_impl.memory_budget import memory_budget
-
     single = normalize_threading_mode(threading_mode) == "single"
     if single:
 
@@ -165,7 +82,10 @@ def stage_remote_single_file(
         metadata = (
             run_sync(metadata_operation(), threading_mode=threading_mode)
             if operation_context is None
-            else operation_context.run_remote(metadata_operation)
+            else operation_context.run_remote(
+                metadata_operation,
+                permit_label="remote_file_metadata",
+            )
         )
     known_size = getattr(metadata, "size", None)
     estimate = (
@@ -176,15 +96,22 @@ def stage_remote_single_file(
     check_download_size(uri, known_size, memory_limit_bytes)
     lease = pool.acquire(estimate, label=f"remote input {uri!r}")
     temp = create_temp_file_path(suffix=suffix_from_uri(uri), storage_lease=lease)
+    storage_reservation = StreamingStorageReservation(
+        lease,
+        initial_credit_bytes=estimate,
+        path=temp.path,
+        quantum_bytes=memory_budget(memory_limit_bytes).io_chunk_bytes,
+    )
     try:
         if single:
 
             def operation_sync() -> None:
                 """Download the file through the strict blocking provider backend."""
                 sync_backend.download_single_file(
-                    uri,
+                    metadata or uri,
                     temp.path,
                     memory_limit_bytes=memory_limit_bytes,
+                    storage_reservation=storage_reservation,
                 )
 
             if operation_context is None:
@@ -196,20 +123,25 @@ def stage_remote_single_file(
             def operation():
                 """Download the file on the operation-owned event loop."""
                 return download_single_file(
-                    uri,
+                    metadata or uri,
                     temp.path,
                     memory_limit_bytes=memory_limit_bytes,
                     threading_mode=threading_mode,
+                    storage_reservation=storage_reservation,
                 )
 
             if operation_context is None:
                 run_sync(operation(), threading_mode=threading_mode)
             else:
-                operation_context.run_remote(operation)
+                operation_context.run_remote_transfer(
+                    operation,
+                    estimated_bytes=estimate,
+                    permit_label="remote_single_file_download",
+                )
         check_download_size(uri, Path(temp.path).stat().st_size, memory_limit_bytes)
         temp.reserve_actual_size(pool, label=f"remote input {uri!r}")
-    except BaseException:
-        temp.close()
+    except BaseException as exc:
+        _cleanup_with_note(exc, temp, label="remote single-file staging cleanup also failed")
         raise
     return temp
 
@@ -230,15 +162,15 @@ def stage_remote_files_to_directory_sync(
         else create_temp_directory_path(storage_lease=storage_lease)
     )
     try:
-        sync_backend.download_files_to_directory(
-            selected,
-            temp_dir.path,
-            memory_limit_bytes=memory_limit_bytes,
-        )
+        downloader = sync_backend.download_files_to_directory
+        kwargs: dict[str, object] = {"memory_limit_bytes": memory_limit_bytes}
+        if "storage_lease" in signature(downloader).parameters:
+            kwargs["storage_lease"] = storage_lease
+        cast(Callable[..., None], downloader)(selected, temp_dir.path, **kwargs)
         if storage_lease is not None:
             storage_lease.resize(temp_dir._actual_size(), path=temp_dir.path)
-    except BaseException:
-        temp_dir.close()
+    except BaseException as exc:
+        _cleanup_with_note(exc, temp_dir, label="remote directory staging cleanup also failed")
         raise
     temp_dir.source_file_by_name = {file.name: file.uri for file in selected}
     return temp_dir
@@ -268,13 +200,21 @@ async def stage_remote_files_to_directory_async(
                 temp_dir.path,
                 memory_limit_bytes=memory_limit_bytes,
                 threading_mode=threading_mode,
+                storage_lease=storage_lease,
             )
         else:
-            await download_session.download_files(selected, temp_dir.path)
+            if storage_lease is None:
+                await download_session.download_files(selected, temp_dir.path)
+            else:
+                await download_session.download_files(
+                    selected, temp_dir.path, storage_lease=storage_lease
+                )
         if storage_lease is not None:
             storage_lease.resize(temp_dir._actual_size(), path=temp_dir.path)
-    except BaseException:
-        temp_dir.close()
+    except BaseException as exc:
+        _cleanup_with_note(
+            exc, temp_dir, label="remote async directory staging cleanup also failed"
+        )
         raise
     temp_dir.source_file_by_name = {file.name: file.uri for file in selected}
     return temp_dir
@@ -290,15 +230,13 @@ def stage_remote_files_to_directory(
 ) -> StagedPath:
     """Synchronously stage selected remote files into one temporary directory."""
     selected = list(files)
+    budget = memory_budget(memory_limit_bytes)
+    estimated_bytes = sum(
+        file.size if isinstance(file.size, int) and file.size >= 0 else budget.io_chunk_bytes
+        for file in selected
+    )
     lease = storage_lease
     if lease is None:
-        from ..core_impl.memory_budget import memory_budget
-
-        budget = memory_budget(memory_limit_bytes)
-        estimated_bytes = sum(
-            file.size if isinstance(file.size, int) and file.size >= 0 else budget.io_chunk_bytes
-            for file in selected
-        )
         pool = (
             operation_context.temporary_storage
             if operation_context is not None
@@ -307,6 +245,7 @@ def stage_remote_files_to_directory(
         lease = pool.acquire(
             estimated_bytes,
             label="remote source directory packet",
+            artifact_count=len(selected) + 1,
         )
 
     single = normalize_threading_mode(threading_mode) == "single"
@@ -336,9 +275,15 @@ def stage_remote_files_to_directory(
 
         if operation_context is None:
             return run_sync(operation(), threading_mode=threading_mode)
-        return operation_context.run_remote(operation)
-    except BaseException:
-        lease.release()
+        return operation_context.run_remote_transfer(
+            operation,
+            estimated_bytes=estimated_bytes,
+            permit_label="remote_directory_download",
+        )
+    except BaseException as exc:
+        _cleanup_with_note(
+            exc, lease, label="remote directory lease rollback also failed", method="release"
+        )
         raise
 
 
@@ -382,7 +327,10 @@ def stage_remote_parquet_directory(
         files = (
             run_sync(list_operation(), threading_mode=threading_mode)
             if operation_context is None
-            else operation_context.run_remote(list_operation)
+            else operation_context.run_remote(
+                list_operation,
+                permit_label="remote_directory_list",
+            )
         )
     if not files:
         expected = " or ".join(normalize_extensions(suffixes))
@@ -480,8 +428,16 @@ def finalize_output_target(
                 if target.operation_context is None:
                     run_sync(operation(), threading_mode=target.threading_mode)
                 else:
-                    target.operation_context.run_remote(operation)
-    finally:
+                    output_size = Path(target.local_path).stat().st_size
+                    target.operation_context.run_remote_transfer(
+                        operation,
+                        estimated_bytes=output_size,
+                        permit_label="remote_output_upload",
+                    )
+    except BaseException as exc:
+        _cleanup_with_note(exc, target, label="remote output cleanup also failed")
+        raise
+    else:
         target.close()
 
 

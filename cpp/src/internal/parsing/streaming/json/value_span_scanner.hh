@@ -8,9 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "internal/memory/pool_resource.hh"
 
 namespace sanitize::internal {
 
@@ -53,7 +56,8 @@ private:
 
   JsonStreamingScanner &scanner_;
   BumpArena *arena_ = nullptr;
-  std::vector<Segment> segments_;
+  PoolResource pmr_pool_;
+  std::pmr::vector<Segment> segments_;
   std::size_t start_abs_ = 0;
   std::size_t start_pos_ = 0;
   std::shared_ptr<const void> start_owner_;
@@ -66,7 +70,7 @@ private:
   std::shared_ptr<const void> seg_owner_;
   std::size_t total_bytes_ = 0;
   Mode mode_ = Mode::kPrimitive;
-  std::vector<char> stack_;
+  std::pmr::vector<char> stack_;
   bool in_string_ = false;
   bool escape_ = false;
 };

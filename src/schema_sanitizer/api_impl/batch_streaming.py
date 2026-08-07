@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from ..core_impl.resource_lifecycle import _close_and_clear_attrs
+from ..options_impl.options import CsvHeaderMode
+from ..sources.models import PublicInput
 from .streams import Stream
 
 if TYPE_CHECKING:
@@ -29,16 +32,8 @@ class _AnalyticalStreamResources:
         self._operation_context: OperationExecutionContext | None = operation_context
 
     def close(self) -> None:
-        """Release all resources exactly once."""
-        opened, self._opened = self._opened, None
-        prepared_input, self._prepared_input = self._prepared_input, None
-        operation_context, self._operation_context = self._operation_context, None
-        if opened is not None:
-            opened.close()
-        if prepared_input is not None:
-            prepared_input.close()
-        if operation_context is not None:
-            operation_context.close()
+        """Release resources while retaining any cleanup failures for retry."""
+        _close_and_clear_attrs(self, "_opened", "_prepared_input", "_operation_context")
 
 
 def lazy_stream_from_opened(
@@ -62,7 +57,7 @@ def lazy_stream_from_opened(
 
 
 def iter_batches(
-    input_path: Any,
+    input_path: PublicInput,
     *,
     input_format: str | None = None,
     input_mode: str = "single_file",
@@ -87,6 +82,8 @@ def iter_batches(
     scalar_object_key: str = "default_key",
     csv_has_header: bool = True,
     csv_delimiter: str = ",",
+    csv_escape_char: str | None = None,
+    csv_header_mode: CsvHeaderMode = "exact",
     input_text_encoding: str = "utf-8",
     xml_row_tag: str | None = None,
     on_error: str = "emit_null_row",

@@ -246,6 +246,7 @@ struct NativeParquetArrayState {
 struct NativeParquetPageScratch {
   std::string compressed_payload;
   std::string decompressed_payload;
+  std::size_t max_page_bytes = kMaxPayloadVerificationBytes;
   std::vector<std::uint32_t> dictionary_indices;
   std::vector<std::int64_t> delta_i64_values;
   std::vector<std::int32_t> delta_i32_lengths;
@@ -261,6 +262,8 @@ struct NativeParquetStreamState {
   std::ifstream file;
   std::int64_t max_buffer_bytes = 0;
   std::int64_t max_batch_rows = 0;
+  std::int64_t max_page_bytes = 0;
+  std::int64_t max_row_group_bytes = 0;
   NativeParquetPageScratch page_scratch;
   // Keep one private input handle and decode scratch per arena worker for the
   // lifetime of this stream. Reusing them across bounded row windows avoids

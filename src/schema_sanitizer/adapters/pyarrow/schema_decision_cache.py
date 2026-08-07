@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from threading import Lock
 from typing import Any
+
+from ...core_impl.bounded_text import utf8_size_bounded
 
 
 class SchemaDecisionCache:
@@ -12,50 +16,85 @@ class SchemaDecisionCache:
         """Create an empty bounded schema decision cache."""
         self._max_size = max(0, int(max_size))
         self._max_key_bytes = max(0, int(max_key_bytes))
+        self._pid = os.getpid()
+        self._lock = Lock()
         self._by_object_id: dict[int, tuple[Any, bool]] = {}
         self._by_fingerprint: dict[bytes, bool] = {}
         self._by_schema_text: dict[str, bool] = {}
         self._fingerprint_bytes = 0
         self._schema_text_bytes = 0
 
+    def _ensure_process(self) -> None:
+        """Discard inherited schemas and locks before child-process access."""
+        pid = os.getpid()
+        if pid == self._pid:
+            return
+        self._pid = pid
+        self._lock = Lock()
+        self._by_object_id = {}
+        self._by_fingerprint = {}
+        self._by_schema_text = {}
+        self._fingerprint_bytes = 0
+        self._schema_text_bytes = 0
+
+    def clear(self) -> None:
+        """Release every retained schema decision in the current process."""
+        self._ensure_process()
+        with self._lock:
+            self._by_object_id.clear()
+            self._by_fingerprint.clear()
+            self._by_schema_text.clear()
+            self._fingerprint_bytes = 0
+            self._schema_text_bytes = 0
+
     def get_by_object(self, schema: Any) -> bool | None:
         """Return a cached decision for the exact schema object, if present."""
-        cached = self._by_object_id.get(id(schema))
-        if cached is None:
-            return None
-        cached_schema, supported = cached
-        if cached_schema is not schema:
-            self._by_object_id.pop(id(schema), None)
-            return None
-        return supported
+        self._ensure_process()
+        with self._lock:
+            cached = self._by_object_id.get(id(schema))
+            if cached is None:
+                return None
+            cached_schema, supported = cached
+            if cached_schema is not schema:
+                self._by_object_id.pop(id(schema), None)
+                return None
+            return supported
 
     def get_by_text(self, schema: Any) -> bool | None:
         """Return a cached decision for an equivalent schema string, if present."""
+        self._ensure_process()
         key = schema_cache_key(schema)
-        if len(key) > self._max_key_bytes:
+        if utf8_size_bounded(key, self._max_key_bytes) > self._max_key_bytes:
             return None
-        return self._by_schema_text.get(key)
+        with self._lock:
+            return self._by_schema_text.get(key)
 
     def get_by_fingerprint(self, fingerprint: bytes) -> bool | None:
         """Return a cached decision for a stable schema fingerprint, if present."""
-        return self._by_fingerprint.get(fingerprint)
+        self._ensure_process()
+        with self._lock:
+            return self._by_fingerprint.get(fingerprint)
 
     def set_fingerprint(self, schema: Any, fingerprint: bytes, supported: bool) -> bool:
         """Store one fingerprint compatibility decision and return it."""
+        self._ensure_process()
         if len(fingerprint) > self._max_key_bytes:
             return supported
-        self._record_object(schema, supported)
-        self._record_fingerprint(fingerprint, supported)
+        with self._lock:
+            self._record_object(schema, supported)
+            self._record_fingerprint(fingerprint, supported)
         return supported
 
     def set(self, schema: Any, supported: bool, *, include_text: bool) -> bool:
         """Store one compatibility decision and return it."""
+        self._ensure_process()
         key = schema_cache_key(schema) if include_text else None
-        if key is not None and len(key) > self._max_key_bytes:
+        if key is not None and utf8_size_bounded(key, self._max_key_bytes) > self._max_key_bytes:
             return supported
-        self._record_object(schema, supported)
-        if key is not None:
-            self._record_text(key, supported)
+        with self._lock:
+            self._record_object(schema, supported)
+            if key is not None:
+                self._record_text(key, supported)
         return supported
 
     def _record_object(self, schema: Any, supported: bool) -> None:
@@ -84,7 +123,7 @@ class SchemaDecisionCache:
 
     def _record_text(self, key: str, supported: bool) -> None:
         """Store one schema-text compatibility decision."""
-        key_bytes = len(key)
+        key_bytes = utf8_size_bounded(key, self._max_key_bytes)
         if self._max_size == 0 or key_bytes > self._max_key_bytes or self._max_key_bytes == 0:
             return
         existing = key in self._by_schema_text

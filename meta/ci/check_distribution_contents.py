@@ -31,13 +31,16 @@ _SCRATCH_SUFFIXES = {
 }
 _SDIST_REQUIRED = {
     "CMakeLists.txt",
-    "COMPATIBILITY.md",
-    "HEURISTICS.md",
     "LICENSE",
     "README.md",
     "cmake/SchemaSanitizerCompression.cmake",
     "cmake/SchemaSanitizerSources.cmake",
     "cmake/SchemaSanitizerTargetOptions.cmake",
+    "docs/README.md",
+    "docs/ci-cd.md",
+    "docs/compatibility.md",
+    "docs/heuristics.md",
+    "docs/python-api.md",
     "fuzz/regressions/README.md",
     "fuzz/regressions/csv/unterminated.csv",
     "fuzz/regressions/json/truncated.json",

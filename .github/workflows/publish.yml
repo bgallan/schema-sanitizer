@@ -38,13 +38,13 @@ jobs:
             exit 1
           fi
           python meta/ci/validate_release_version.py --github-event "${GITHUB_EVENT_PATH}"
-  general-sanity:
-    name: full PR/main validation
+  validation:
+    name: canonical release validation
     needs: [validate-request]
     uses: ./.github/workflows/ci.yml
   publish:
     name: publish
-    needs: [general-sanity]
+    needs: [validation]
     if: inputs.repository != 'check-only'
     runs-on: ubuntu-latest
     permissions:

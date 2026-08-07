@@ -12,6 +12,7 @@
 #include <string>
 
 #include "internal/abi/schema_sanitizer_c_bridge.hh"
+#include "internal/runtime/process_identity.hh"
 #include "sanitize/runtime/execution_context.hh"
 
 int schema_sanitizer_context_new(schema_sanitizer_context **out_ctx,
@@ -45,5 +46,7 @@ int ctx_check(schema_sanitizer_context *ctx, const char *where,
   return SCHEMA_SANITIZER_STATUS_OK;
 }
 void schema_sanitizer_context_free(schema_sanitizer_context *ctx) {
+  if (!sanitize::internal::runtime_owner_process())
+    return;
   delete ctx;
 }

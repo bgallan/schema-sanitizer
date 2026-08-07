@@ -1,0 +1,260 @@
+{
+  "baseline": {
+    "cases": [
+      {
+        "median_ns": 14247533,
+        "name": "jsonl_single",
+        "p95_ns": 14519636,
+        "samples_ns": [
+          14519636,
+          14247533,
+          13577759,
+          14329335,
+          14278019,
+          13423580,
+          13404992
+        ]
+      },
+      {
+        "median_ns": 12211180,
+        "name": "csv_single",
+        "p95_ns": 14879632,
+        "samples_ns": [
+          12263969,
+          12072624,
+          12239933,
+          11927949,
+          14879632,
+          12211180,
+          12064802
+        ]
+      },
+      {
+        "median_ns": 179118865,
+        "name": "xml_single",
+        "p95_ns": 191574369,
+        "samples_ns": [
+          178763699,
+          191574369,
+          177712208,
+          180555098,
+          186000433,
+          179118865,
+          174992489
+        ]
+      },
+      {
+        "median_ns": 8446380,
+        "name": "jsonl_multi",
+        "p95_ns": 9767952,
+        "samples_ns": [
+          8446380,
+          9767952,
+          9388429,
+          7506885,
+          8803200,
+          7485063,
+          7694103
+        ]
+      },
+      {
+        "median_ns": 7170046,
+        "name": "csv_multi",
+        "p95_ns": 10489624,
+        "samples_ns": [
+          7118439,
+          7068524,
+          7265858,
+          7390513,
+          7072370,
+          10489624,
+          7170046
+        ]
+      },
+      {
+        "median_ns": 173903132,
+        "name": "xml_multi",
+        "p95_ns": 185173706,
+        "samples_ns": [
+          173903132,
+          172832753,
+          173320077,
+          173742404,
+          177008843,
+          185173706,
+          176310015
+        ]
+      },
+      {
+        "median_ns": 318353,
+        "name": "parquet_preflight",
+        "p95_ns": 348167,
+        "samples_ns": [
+          339775,
+          321848,
+          312664,
+          313636,
+          348167,
+          318353,
+          309209
+        ]
+      }
+    ],
+    "label": "baseline"
+  },
+  "baseline_root": "schema-sanitizer-baseline-work",
+  "candidate": {
+    "cases": [
+      {
+        "median_ns": 18905078,
+        "name": "jsonl_single",
+        "p95_ns": 21675140,
+        "samples_ns": [
+          18156316,
+          17928639,
+          17917042,
+          21675140,
+          18905078,
+          18925353,
+          18942073
+        ]
+      },
+      {
+        "median_ns": 16910267,
+        "name": "csv_single",
+        "p95_ns": 17547317,
+        "samples_ns": [
+          16738191,
+          16621588,
+          16910267,
+          16741496,
+          17113969,
+          17287336,
+          17547317
+        ]
+      },
+      {
+        "median_ns": 199139410,
+        "name": "xml_single",
+        "p95_ns": 212914623,
+        "samples_ns": [
+          196192635,
+          198020659,
+          199139410,
+          212914623,
+          207882091,
+          205104958,
+          194300135
+        ]
+      },
+      {
+        "median_ns": 9906228,
+        "name": "jsonl_multi",
+        "p95_ns": 10316697,
+        "samples_ns": [
+          10298770,
+          10316697,
+          9860210,
+          9721163,
+          9906228,
+          9731789,
+          10243478
+        ]
+      },
+      {
+        "median_ns": 10296447,
+        "name": "csv_multi",
+        "p95_ns": 10531626,
+        "samples_ns": [
+          10209498,
+          10233143,
+          10296447,
+          10531626,
+          10289517,
+          10521401,
+          10334394
+        ]
+      },
+      {
+        "median_ns": 178846993,
+        "name": "xml_multi",
+        "p95_ns": 190549517,
+        "samples_ns": [
+          179377680,
+          190549517,
+          173666074,
+          171825327,
+          178846993,
+          171923332,
+          183747714
+        ]
+      },
+      {
+        "median_ns": 306084,
+        "name": "parquet_preflight",
+        "p95_ns": 346965,
+        "samples_ns": [
+          335268,
+          346965,
+          327116,
+          306084,
+          296780,
+          295729,
+          293206
+        ]
+      }
+    ],
+    "label": "candidate"
+  },
+  "candidate_root": "schema-sanitizer-reader-hardening-pass2",
+  "comparisons": [
+    {
+      "baseline_median_ns": 7170046,
+      "candidate_median_ns": 10296447,
+      "candidate_to_baseline_ratio": 1.4360363936298317,
+      "name": "csv_multi"
+    },
+    {
+      "baseline_median_ns": 12211180,
+      "candidate_median_ns": 16910267,
+      "candidate_to_baseline_ratio": 1.384818420496627,
+      "name": "csv_single"
+    },
+    {
+      "baseline_median_ns": 8446380,
+      "candidate_median_ns": 9906228,
+      "candidate_to_baseline_ratio": 1.1728371207546902,
+      "name": "jsonl_multi"
+    },
+    {
+      "baseline_median_ns": 14247533,
+      "candidate_median_ns": 18905078,
+      "candidate_to_baseline_ratio": 1.3269018573250542,
+      "name": "jsonl_single"
+    },
+    {
+      "baseline_median_ns": 318353,
+      "candidate_median_ns": 306084,
+      "candidate_to_baseline_ratio": 0.9614610196856949,
+      "name": "parquet_preflight"
+    },
+    {
+      "baseline_median_ns": 173903132,
+      "candidate_median_ns": 178846993,
+      "candidate_to_baseline_ratio": 1.028428820936934,
+      "name": "xml_multi"
+    },
+    {
+      "baseline_median_ns": 179118865,
+      "candidate_median_ns": 199139410,
+      "candidate_to_baseline_ratio": 1.111772397619871,
+      "name": "xml_single"
+    }
+  ],
+  "fixture": {
+    "repeats": 7,
+    "rows": 2000,
+    "width": 8
+  },
+  "schema_version": 1
+}

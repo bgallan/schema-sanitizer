@@ -39,19 +39,9 @@ projected_capacity_bytes(std::int64_t rows,
 } // namespace
 
 void ParallelBatchDiagnostics::merge(const IngestDiagnostics &delta) noexcept {
-  if (!target_) {
-    return;
+  if (target_) {
+    target_->merge(delta);
   }
-  target_->inferred_rows += delta.inferred_rows;
-  target_->inferred_bytes += delta.inferred_bytes;
-  target_->arrow_schema_depth += delta.arrow_schema_depth;
-  target_->parquet_schema_depth += delta.parquet_schema_depth;
-  target_->materialized_rows += delta.materialized_rows;
-  target_->batches += delta.batches;
-  target_->flattened_fields += delta.flattened_fields;
-  target_->scalar_wrappings += delta.scalar_wrappings;
-  target_->direct_arrow_input += delta.direct_arrow_input;
-  target_->skipped_rows += delta.skipped_rows;
 }
 
 void ParallelBatchDiagnostics::flush_direct() noexcept {
@@ -106,12 +96,38 @@ void ParallelBatchDiagnostics::record_direct(const ArrowArray *out,
   }
 }
 
+void ParallelBatchDiagnostics::record_skipped_rows(std::int64_t rows) noexcept {
+  if (target_ && rows > 0) {
+    target_->skipped_rows = saturating_add(target_->skipped_rows, rows);
+  }
+}
+
 void ParallelBatchDiagnostics::record_finished(const ArrowArray *out) noexcept {
   if (!target_ || !out) {
     return;
   }
   target_->batches += 1;
   target_->materialized_rows += out->length;
+}
+
+void ParallelBatchDiagnostics::merge_reader(
+    const ReaderResourceDiagnostics &delta) const noexcept {
+  if (target_) {
+    target_->merge_reader(delta);
+  }
+}
+
+void ParallelBatchDiagnostics::record_cancellation(
+    std::string_view reason) const noexcept {
+  if (target_) {
+    target_->record_cancellation(reason);
+  }
+}
+
+void ParallelBatchDiagnostics::capture_operation_memory() const noexcept {
+  if (target_) {
+    target_->capture_operation_memory();
+  }
 }
 
 } // namespace sanitize::internal

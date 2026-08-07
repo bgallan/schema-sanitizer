@@ -91,7 +91,8 @@ PyObject *pack_registry_or_raise_with_metadata(int status, PyObject *keepalive,
                                                PyObject *first_row_columns,
                                                PyObject *all_row_columns,
                                                PyObject *row_span_columns,
-                                               PyObject *timestamp_columns);
+                                               PyObject *timestamp_columns,
+                                               std::int64_t memory_limit_bytes);
 
 bool provider_has_next_sources(PyObject *provider_obj);
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
@@ -99,7 +100,9 @@ merge_path_source_provider_schemas(
     schema_sanitizer_context *ctx, PyObject *provider_obj,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources,
-    const sanitize::LogicalSchema *previous_schema = nullptr);
+    const sanitize::LogicalSchema *previous_schema = nullptr,
+    sanitize::SchemaEvolutionMode schema_evolution =
+        sanitize::SchemaEvolutionMode::kAdditive);
 
 const char *path_sources_last_error(ArrowArrayStream *stream);
 void path_sources_release(ArrowArrayStream *stream);

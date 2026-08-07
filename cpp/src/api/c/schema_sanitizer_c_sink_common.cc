@@ -39,6 +39,11 @@ int ingest_stream_to_streams(sanitize::IngestStream output, SinkOutputs outputs,
           std::make_shared<sanitize::IngestDiagnostics>();
     diagnostics->inference_snapshot = *diagnostics->diagnostics;
     diagnostics->has_inference_snapshot = true;
+    // Reader metrics describe the active pass. Preserve inference in the
+    // snapshot, then let materialization populate the live counters so
+    // diagnostics remain independent of how many preparatory passes a route
+    // required.
+    diagnostics->diagnostics->reader = sanitize::ReaderResourceDiagnostics{};
     if (!diagnostics)
       return set_oom_error(out_error, where);
   }

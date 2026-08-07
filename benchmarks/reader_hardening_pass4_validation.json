@@ -1,0 +1,92 @@
+{
+  "asan_ubsan": {
+    "canonical_regression_inputs": 10,
+    "compiler": "clang 17",
+    "mutation_runs_per_reader": 1000,
+    "mutation_runs_total": 4000,
+    "post_final_initialization_regression_inputs": 10,
+    "result": "passed",
+    "sanitizer_findings": 0,
+    "targets": [
+      "csv",
+      "json",
+      "xml",
+      "parquet"
+    ]
+  },
+  "budget_propagation_fix": {
+    "concurrent_conversions_total": 144,
+    "conversions_per_campaign": 48,
+    "derived_metadata_limit_bytes": 1024,
+    "low_budget_bytes": 8192,
+    "pressure_campaigns": 3,
+    "pressure_memory_limit_bytes": 67108864,
+    "public_atomic_destination_cleanup": "passed",
+    "regression_tests": 4,
+    "result": "passed",
+    "source_kinds": [
+      "path",
+      "stream",
+      "text"
+    ],
+    "summary": "Explicit memory_limit_bytes is forwarded to registry metadata wrappers for path, Python stream, and in-memory text sources."
+  },
+  "date": "2026-08-01",
+  "environment_limitations": {
+    "pre_commit": "not installed; hook dependencies are also unavailable in this environment",
+    "production_telemetry": "not available; periodic production-based limit review remains open",
+    "pyarrow": "not installed; optional analytical and integration tests were not executed",
+    "remote_ci": "workflow topology is tested locally, but hosted CI was not executed from this environment"
+  },
+  "linear_scaling": {
+    "contract": "docs/reader-complexity.md",
+    "report": "benchmarks/reader_linear_scaling.json",
+    "result": "passed"
+  },
+  "open_items": [
+    "one atomic cross-language resident ledger for every Python and native stage",
+    "periodic limit review using real production telemetry",
+    "pre-commit run -a and the hosted consolidated CI workflow"
+  ],
+  "pytest": {
+    "full_suite_maxfail_1": {
+      "failing_test": "tests/remote/test_bigquery_integration.py::test_bigquery_integration_builds_external_table_ddl",
+      "failure": "pyarrow is not installed",
+      "passed_before_failure": 19,
+      "result": "blocked_by_optional_dependency",
+      "skipped_before_failure": 12
+    },
+    "targeted_reader_remote_ci_matrix": {
+      "deselected_optional": 1,
+      "passed": 344,
+      "result": "passed",
+      "skipped_optional": 52
+    }
+  },
+  "release_ab": {
+    "comparisons": {
+      "csv_multi": 1.2131662745657186,
+      "csv_single": 1.3023604385734846,
+      "jsonl_multi": 1.3675900820775668,
+      "jsonl_single": 1.4545809777434975,
+      "parquet_preflight": 0.9797648482143382,
+      "xml_multi": 0.9602039608910146,
+      "xml_single": 1.024709240211649
+    },
+    "performance_budget": "benchmarks/reader_hardening_performance_budget.json",
+    "report": "benchmarks/reader_hardening_pass4_ab.json",
+    "result": "within_reviewed_performance_envelope"
+  },
+  "schema_version": 1,
+  "todo": {
+    "completed": 110,
+    "open": 3
+  },
+  "tsan": {
+    "compiler": "gcc 14",
+    "result": "passed",
+    "rounds": 100,
+    "sanitizer_findings": 0,
+    "target": "schema_sanitizer_sanitized_ordered_executor"
+  }
+}

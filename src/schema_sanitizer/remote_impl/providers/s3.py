@@ -16,16 +16,24 @@ from ...core_impl.async_scheduler import (
 )
 from ...core_impl.execution_policy import execution_policy
 from ...core_impl.memory_budget import memory_budget
+from ...core_impl.safe_errors import add_bounded_note
+from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
+    current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
+from ..file_streams import write_async_reader_to_file
 from ..provider_session_pool import current_provider_session_pool
 from ..transport import TRANSFER_CHUNK_BYTES
-from ..upload_policy import read_upload_part, remote_upload_policy
+from ..upload_policy import (
+    read_upload_part,
+    release_upload_payload,
+    remote_upload_policy,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +133,7 @@ async def download_file(
     *,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one S3 object to a local file."""
     async with await open_client() as client:
@@ -132,18 +141,28 @@ async def download_file(
             client,
             RemoteFile(uri, Path(urlparse(uri).path).name),
             local_path,
+            storage_reservation=storage_reservation,
         )
 
 
-async def download_file_with_client(client: Any, file: RemoteFile, local_path: str) -> None:
-    """Download one S3 object to a local file using a shared client."""
+async def download_file_with_client(
+    client: Any,
+    file: RemoteFile,
+    local_path: str,
+    *,
+    storage_reservation: StreamingStorageReservation | None = None,
+) -> None:
+    """Download one S3 object while reserving local storage before writes."""
     ref = parse_uri(file.uri)
     response = await client.get_object(Bucket=ref.bucket, Key=ref.key)
     body = response["Body"]
     async with body:
-        with Path(local_path).open("wb") as file_handle:
-            while chunk := await body.read(TRANSFER_CHUNK_BYTES):
-                file_handle.write(chunk)
+        await write_async_reader_to_file(
+            body.read,
+            local_path,
+            chunk_bytes=TRANSFER_CHUNK_BYTES,
+            storage_reservation=storage_reservation,
+        )
 
 
 def _should_retry_s3_part(exc: Exception) -> bool:
@@ -217,15 +236,19 @@ async def _upload_file_multipart(
                 Body=payload,
             )
 
-        response = await retry_async(
-            operation,
-            retries=retries,
-            should_retry=_should_retry_s3_part,
-        )
-        etag = response.get("ETag") if isinstance(response, dict) else None
-        if not isinstance(etag, str) or not etag:
-            raise RuntimeError(f"S3 multipart part {part_number} did not return an ETag")
-        return {"ETag": etag, "PartNumber": part_number}
+        try:
+            response = await retry_async(
+                operation,
+                retries=retries,
+                should_retry=_should_retry_s3_part,
+                throttle_key="s3",
+            )
+            etag = response.get("ETag") if isinstance(response, dict) else None
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(f"S3 multipart part {part_number} did not return an ETag")
+            return {"ETag": etag, "PartNumber": part_number}
+        finally:
+            release_upload_payload(payload)
 
     try:
         async for _index, completed in ordered_indexed_results(
@@ -254,7 +277,7 @@ async def _upload_file_multipart(
                 UploadId=upload_id,
             )
         except BaseException as abort_exc:
-            exc.add_note(f"S3 multipart abort also failed: {abort_exc!r}")
+            add_bounded_note(exc, "S3 multipart abort also failed", abort_exc)
         raise
 
 
@@ -298,6 +321,7 @@ async def list_files(
     ref = parse_uri(uri)
     prefix = ref.key.rstrip("/") + "/"
     files: list[RemoteFile] = []
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     async with await open_client() as client:
         token: str | None = None
         while True:
@@ -318,7 +342,9 @@ async def list_files(
                 if not relative or "/" in relative or not name_matches(relative, suffixes):
                     continue
                 size = item.get("Size") if isinstance(item.get("Size"), int) else None
-                files.append(RemoteFile(f"s3://{ref.bucket}/{key}", relative, size))
+                remote_file = RemoteFile(f"s3://{ref.bucket}/{key}", relative, size)
+                metadata_budget.charge_file(remote_file)
+                files.append(remote_file)
             if not payload.get("IsTruncated"):
                 break
             token = payload.get("NextContinuationToken")
@@ -339,7 +365,10 @@ async def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether S3 directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
-    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(uris)
+    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
+        uris,
+        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+    )
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
     for uri in uris:
         ref = parse_uri(uri)
@@ -377,7 +406,7 @@ async def directories_containing_files(
                     async with semaphore:
                         return await client.list_objects_v2(**kwargs)
 
-                payload = await retry_async(request_page, retries=retries)
+                payload = await retry_async(request_page, retries=retries, throttle_key="s3")
                 for item in payload.get("Contents", ()):
                     key = item.get("Key")
                     if not isinstance(key, str) or not key.startswith(prefix):

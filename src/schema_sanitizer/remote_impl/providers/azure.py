@@ -12,13 +12,17 @@ from urllib.parse import urlparse
 
 from ...core_impl.async_scheduler import drain_ordered_indexed_results
 from ...core_impl.execution_policy import execution_policy
+from ...core_impl.memory_budget import current_operation_memory_ledger
+from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.uris import name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
-    RemoteFile,
+    current_directory_metadata_budget,
     split_parent_child,
 )
+from ...sources.models import RemoteFile
+from ..file_streams import write_async_iterator_to_file
 from ..provider_session_pool import current_provider_session_pool
 from ..upload_policy import remote_upload_policy
 
@@ -138,18 +142,39 @@ def render_uri(ref: AzureRef, blob: str) -> str:
     return f"{ref.account_url}/{ref.container}/{blob}"
 
 
+def _azure_transfer_reservation_bytes() -> int:
+    """Return a conservative single-SDK-chunk reservation."""
+    ledger = current_operation_memory_ledger()
+    return 4 * 1024 * 1024 if ledger is None else min(4 * 1024 * 1024, ledger.limit_bytes)
+
+
+async def _write_azure_stream(
+    stream: Any,
+    local_path: str,
+    *,
+    storage_reservation: StreamingStorageReservation | None = None,
+) -> None:
+    """Write Azure chunks while reserving disk before each local write."""
+    await write_async_iterator_to_file(
+        stream.chunks().__aiter__(),
+        local_path,
+        reservation_bytes=_azure_transfer_reservation_bytes(),
+        storage_reservation=storage_reservation,
+    )
+
+
 async def download_file_with_service(
     service: Any,
     file: RemoteFile,
     local_path: str,
+    *,
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one Azure Blob using a shared service client."""
     ref = parse_uri(file.uri)
     blob = service.get_blob_client(ref.container, ref.blob)
     stream = await blob.download_blob()
-    with Path(local_path).open("wb") as file_handle:
-        async for chunk in stream.chunks():
-            file_handle.write(chunk)
+    await _write_azure_stream(stream, local_path, storage_reservation=storage_reservation)
 
 
 async def download_file(
@@ -158,6 +183,7 @@ async def download_file(
     *,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
+    storage_reservation: StreamingStorageReservation | None = None,
 ) -> None:
     """Download one Azure Blob to a local file."""
     ref = parse_uri(uri)
@@ -166,9 +192,7 @@ async def download_file(
         policy = execution_policy(threading_mode, memory_limit_bytes)
         blob = service.get_blob_client(ref.container, ref.blob)
         stream = await blob.download_blob(max_concurrency=policy.async_concurrency)
-        with Path(local_path).open("wb") as file_handle:
-            async for chunk in stream.chunks():
-                file_handle.write(chunk)
+        await _write_azure_stream(stream, local_path, storage_reservation=storage_reservation)
     finally:
         await service.close()
 
@@ -266,6 +290,7 @@ async def list_files(
     ref = parse_uri(uri)
     prefix = ref.blob.rstrip("/") + "/"
     files: list[RemoteFile] = []
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     service = await open_service(ref)
     try:
         container = service.get_container_client(ref.container)
@@ -277,9 +302,11 @@ async def list_files(
             if not relative or "/" in relative or not name_matches(relative, suffixes):
                 continue
             size = getattr(blob, "size", None)
-            files.append(
-                RemoteFile(render_uri(ref, name), relative, size if isinstance(size, int) else None)
+            remote_file = RemoteFile(
+                render_uri(ref, name), relative, size if isinstance(size, int) else None
             )
+            metadata_budget.charge_file(remote_file)
+            files.append(remote_file)
     finally:
         await service.close()
     files.sort(key=lambda file: file.name)
@@ -295,7 +322,10 @@ async def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether Azure directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
-    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(uris)
+    discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
+        uris,
+        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+    )
     groups: dict[tuple[str, str, str], dict[str, list[str]]] = {}
     for uri in uris:
         ref = parse_uri(uri)

@@ -7,6 +7,18 @@ from pathlib import Path
 from typing import Any
 
 
+def _csv_column_name(index: int) -> str:
+    """Return a stable alphabetic name accepted by the default name policy."""
+    suffix = ""
+    value = index
+    while True:
+        value, remainder = divmod(value, 26)
+        suffix = chr(ord("a") + remainder) + suffix
+        if value == 0:
+            return f"value_{suffix}"
+        value -= 1
+
+
 def write_jsonl(path: Path, rows: int, width: int) -> None:
     """Write a flat JSONL fixture with stable field names and mixed values."""
     with path.open("w", encoding="utf-8") as f:
@@ -86,7 +98,7 @@ def write_xml_folder(path: Path, rows: int, width: int) -> None:
 
 def write_csv(path: Path, rows: int, width: int) -> None:
     """Write a flat CSV fixture with a header and numeric values."""
-    headers = ["id", "source", *(f"value_{col}" for col in range(width))]
+    headers = ["id", "source", *(_csv_column_name(col) for col in range(width))]
     with path.open("w", encoding="utf-8", newline="") as f:
         f.write(",".join(headers))
         f.write("\n")
