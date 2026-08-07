@@ -166,7 +166,7 @@ def test_token_budget_falls_back_per_row_without_changing_results(
     require_native()
     # MSVC's allocator/STL overhead is part of the strict global budget.
     oracle_memory_limit = (256 if os.name == "nt" else 128) * 1024 * 1024
-    constrained_memory_limit = (64 if os.name == "nt" else 32) * 1024 * 1024
+    constrained_memory_limit = (63 if os.name == "nt" else 32) * 1024 * 1024
     source = tmp_path / "budget.jsonl"
     _write_rows(source, 8_192)
     contract = _contract(source, tmp_path / "contract.jsonl", 256 * 1024 * 1024)

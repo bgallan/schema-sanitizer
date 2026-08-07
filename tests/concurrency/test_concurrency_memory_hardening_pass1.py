@@ -154,7 +154,8 @@ def test_remote_close_deadline_includes_cancelled_future_drain() -> None:
     """A cancellation-resistant coroutine cannot block close before shutdown."""
     started = threading.Event()
     release = threading.Event()
-    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=0.05)
+    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=1.0)
+    coordinator._shutdown_timeout_seconds = 0.05  # noqa: SLF001
 
     async def stubborn(_context: object) -> None:
         """Ignore cancellation until the test permits final thread cleanup."""

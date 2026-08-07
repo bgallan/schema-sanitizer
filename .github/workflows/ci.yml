@@ -219,8 +219,8 @@ jobs:
       - name: Cross-platform reader linear-scaling smoke
         run: >-
           python benchmarks/bench_reader_linear_scaling.py
-          --sizes 128,256
-          --repeats 1
+          --sizes 1024,2048
+          --repeats 3
           --maximum-normalized-growth 8
           --output artifacts/reader-linear-scaling-${{ matrix.artifact }}.json
       - name: Set up the newest supported Python
