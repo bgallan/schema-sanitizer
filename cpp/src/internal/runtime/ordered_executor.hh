@@ -14,15 +14,156 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 namespace sanitize::internal {
+
+// Estimate queue-retained ownership without touching the operation memory
+// ledger.  These bytes are a backpressure signal only: buffers may already be
+// physically charged by an OperationMemoryLedger/PMR resource and charging
+// them again here would double-account resident memory.
+template <class Value>
+[[nodiscard]] constexpr std::size_t
+KnownRetainedByteValue(const Value &value) noexcept {
+  using T = std::remove_cvref_t<Value>;
+  if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+    if constexpr (std::is_signed_v<T>) {
+      if (value <= 0) {
+        return 0U;
+      }
+    }
+    return static_cast<std::size_t>(value);
+  }
+  return 0U;
+}
+
+template <class Value>
+[[nodiscard]] std::size_t
+EstimateQueueRetainedBytes(const Value &value) noexcept;
+
+[[nodiscard]] constexpr std::size_t
+SaturatingRetainedAdd(std::size_t left, std::size_t right) noexcept {
+  return right > std::numeric_limits<std::size_t>::max() - left
+             ? std::numeric_limits<std::size_t>::max()
+             : left + right;
+}
+
+template <class Value>
+[[nodiscard]] std::size_t
+AdditionalInlineOwnedBytes(const Value &value) noexcept {
+  const auto total = EstimateQueueRetainedBytes(value);
+  return total > sizeof(Value) ? total - sizeof(Value) : 0U;
+}
+
+template <class Value>
+[[nodiscard]] std::size_t
+EstimateQueueRetainedBytes(const Value &value) noexcept {
+  // ``estimated_retained_bytes`` is an optional whole-graph estimate. Source
+  // and output hints represent simultaneously-owned regions, so combine those
+  // additively (with reserved/estimated output treated as alternatives). This
+  // reserves output headroom before worker execution rather than waiting until
+  // a completion has already materialized.
+  std::size_t whole_graph_hint = sizeof(Value);
+  if constexpr (requires { value.estimated_retained_bytes; }) {
+    whole_graph_hint =
+        std::max(whole_graph_hint,
+                 KnownRetainedByteValue(value.estimated_retained_bytes));
+  }
+  std::size_t source_hint = 0U;
+  if constexpr (requires { value.estimated_source_bytes; }) {
+    source_hint = KnownRetainedByteValue(value.estimated_source_bytes);
+  }
+  std::size_t output_hint = 0U;
+  if constexpr (requires { value.estimated_output_bytes; }) {
+    output_hint = KnownRetainedByteValue(value.estimated_output_bytes);
+  }
+  if constexpr (requires { value.reserved_output_bytes; }) {
+    output_hint = std::max(output_hint,
+                           KnownRetainedByteValue(value.reserved_output_bytes));
+  }
+  const auto hinted = std::max(whole_graph_hint,
+                               SaturatingRetainedAdd(source_hint, output_hint));
+
+  std::size_t structural = sizeof(Value);
+  if constexpr (requires { value.owned; }) {
+    structural = SaturatingRetainedAdd(structural,
+                                       AdditionalInlineOwnedBytes(value.owned));
+  }
+  if constexpr (requires { value.payload; }) {
+    structural = SaturatingRetainedAdd(
+        structural, AdditionalInlineOwnedBytes(value.payload));
+  }
+  if constexpr (requires {
+                  value.result.ok();
+                  *value.result;
+                }) {
+    if (value.result.ok()) {
+      structural = SaturatingRetainedAdd(
+          structural, EstimateQueueRetainedBytes(*value.result));
+    }
+  }
+  if constexpr (requires {
+                  value.get();
+                  *value;
+                }) {
+    if (value) {
+      // A pointer-like owner keeps the pointed object outside its own inline
+      // representation, so add the complete pointee estimate.
+      structural =
+          SaturatingRetainedAdd(structural, EstimateQueueRetainedBytes(*value));
+    }
+  }
+  if constexpr (requires {
+                  value.capacity();
+                  value.size();
+                  typename std::remove_cvref_t<Value>::value_type;
+                }) {
+    using Element = typename std::remove_cvref_t<Value>::value_type;
+    const auto capacity = static_cast<std::size_t>(value.capacity());
+    const auto element_size = std::max<std::size_t>(1U, sizeof(Element));
+    const auto storage =
+        capacity > std::numeric_limits<std::size_t>::max() / element_size
+            ? std::numeric_limits<std::size_t>::max()
+            : capacity * element_size;
+    structural = SaturatingRetainedAdd(structural, storage);
+    if constexpr (!std::is_trivially_destructible_v<Element>) {
+      for (const auto &element : value) {
+        structural = SaturatingRetainedAdd(structural,
+                                           AdditionalInlineOwnedBytes(element));
+      }
+    }
+  }
+  if constexpr (requires { value.cells; }) {
+    structural = SaturatingRetainedAdd(structural,
+                                       AdditionalInlineOwnedBytes(value.cells));
+  }
+  if constexpr (requires { value.rows; }) {
+    structural = SaturatingRetainedAdd(structural,
+                                       AdditionalInlineOwnedBytes(value.rows));
+  }
+  if constexpr (requires { value.nodes; }) {
+    structural = SaturatingRetainedAdd(structural,
+                                       AdditionalInlineOwnedBytes(value.nodes));
+  }
+  if constexpr (requires {
+                  static_cast<bool>(value.partitioned);
+                  *value.partitioned;
+                }) {
+    if (value.partitioned) {
+      structural = SaturatingRetainedAdd(
+          structural, EstimateQueueRetainedBytes(*value.partitioned));
+    }
+  }
+  return std::max<std::size_t>(256U, std::max(hinted, structural));
+}
 
 // Owns one immutable work item and its canonical source-order ordinal.
 template <class Payload> struct OrdinalPacket {
@@ -63,17 +204,21 @@ private:
   struct ArenaOutcomeSlot final {
     std::atomic<ArenaSlotState> state{ArenaSlotState::kEmpty};
     std::optional<Outcome> outcome;
+    CompletionMemoryLease retained_lease;
   };
 
   struct ArenaSharedState final {
     explicit ArenaSharedState(std::size_t capacity, std::size_t shards,
-                              Worker worker_fn)
+                              Worker worker_fn,
+                              std::shared_ptr<OperationTaskArena> arena_owner)
         : slots(capacity), worker(std::move(worker_fn)),
+          arena(std::move(arena_owner)),
           shard_count(std::max<std::size_t>(1U, shards)) {}
 
     std::vector<ArenaOutcomeSlot> slots;
     std::mutex slots_mutex;
     Worker worker;
+    std::shared_ptr<OperationTaskArena> arena;
     sanitize::internal::StopSource stop_source;
     std::atomic<std::uint8_t> terminal_flags{0};
     const std::size_t shard_count;
@@ -92,6 +237,14 @@ private:
 
     void Finish(std::size_t shard) noexcept {
       completed[shard].fetch_add(1U, std::memory_order_release);
+      // Shutdown is rare. Keep the normal completion path lock-free unless a
+      // bounded drain waiter has explicitly armed itself. Taking the mutex only
+      // in that state closes the condition-variable lost-wakeup window without
+      // adding shared-lock contention to steady-state publication.
+      if (completion_waiter.load(std::memory_order_acquire)) {
+        std::lock_guard lock(completion_mutex);
+        completion_ready.notify_all();
+      }
     }
 
     [[nodiscard]] bool AllScheduledFinished() const noexcept {
@@ -109,15 +262,20 @@ private:
 
     [[nodiscard]] bool
     WaitUntil(std::chrono::steady_clock::time_point deadline) noexcept {
-      // Completion counters are deliberately sharded and lock-free on the hot
-      // path. A condition variable would require every completion to take one
-      // shared mutex to prevent a lost wake-up. Poll only on bounded shutdown
-      // instead, keeping normal worker publication contention-free.
-      while (!AllScheduledFinished() &&
-             std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+      if (AllScheduledFinished()) {
+        return true;
+      }
+      std::unique_lock lock(completion_mutex);
+      completion_waiter.store(true, std::memory_order_release);
+      while (!AllScheduledFinished()) {
+        if (completion_ready.wait_until(lock, deadline) ==
+            std::cv_status::timeout) {
+          break;
+        }
       }
       const auto finished = AllScheduledFinished();
+      completion_waiter.store(false, std::memory_order_release);
+      lock.unlock();
       if (!finished) {
         drain_timed_out.store(true, std::memory_order_release);
       }
@@ -163,6 +321,7 @@ private:
           }
           if (state == ArenaSlotState::kReady) {
             slot.outcome.reset();
+            slot.retained_lease.reset();
             slot.state.store(terminal, std::memory_order_release);
             slot.state.notify_all();
             break;
@@ -190,7 +349,8 @@ private:
       Terminalize(ArenaSlotState::kCancelled);
     }
 
-    void Publish(Outcome outcome, std::size_t completion_slot) noexcept {
+    void Publish(Outcome outcome, std::size_t completion_slot,
+                 std::size_t input_retained_bytes) noexcept {
       auto &slot = slots[completion_slot];
       auto expected = ArenaSlotState::kEmpty;
       if (!slot.state.compare_exchange_strong(
@@ -205,12 +365,23 @@ private:
         return;
       }
 
+      const auto retained = EstimateQueueRetainedBytes(outcome.result);
+      CompletionMemoryLease completion_lease;
+      if (arena && retained != 0U &&
+          !arena->TryTransferActiveToCompletion(input_retained_bytes, retained,
+                                                &completion_lease)) {
+        slot.state.store(ArenaSlotState::kFatal, std::memory_order_release);
+        slot.state.notify_all();
+        Fail();
+        return;
+      }
       auto published_state = ArenaSlotState::kReady;
       bool publication_failed = false;
       {
         std::lock_guard outcomes_lock(slots_mutex);
         try {
           slot.outcome.emplace(std::move(outcome));
+          slot.retained_lease = std::move(completion_lease);
         } catch (...) {
           publication_failed = true;
         }
@@ -218,9 +389,11 @@ private:
           const auto flags = terminal_flags.load(std::memory_order_acquire);
           if ((flags & kArenaTerminalCancelledBit) != 0U) {
             slot.outcome.reset();
+            slot.retained_lease.reset();
             published_state = ArenaSlotState::kCancelled;
           } else if ((flags & kArenaTerminalFatalBit) != 0U) {
             slot.outcome.reset();
+            slot.retained_lease.reset();
             published_state = ArenaSlotState::kFatal;
           }
         }
@@ -248,7 +421,8 @@ private:
         outcome = ExecutePacket(std::move(scheduled_packet.packet),
                                 worker_index, stop_source.get_token());
       }
-      Publish(std::move(outcome), scheduled_packet.completion_slot);
+      Publish(std::move(outcome), scheduled_packet.completion_slot,
+              scheduled_packet.retained_bytes);
     }
   };
 
@@ -284,7 +458,8 @@ public:
        std::size_t reorder_capacity, Worker worker,
        std::shared_ptr<OperationTaskArena> arena = nullptr,
        TaskArenaLane lane = TaskArenaLane::kAll,
-       TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther) {
+       TaskTelemetryKind telemetry_kind = TaskTelemetryKind::kOther,
+       std::size_t retained_byte_capacity = 0U) {
     if (!worker) {
       return sanitize::Status::Invalid(
           "OrderedExecutor::Make: worker is empty");
@@ -293,7 +468,8 @@ public:
     auto executor =
         std::unique_ptr<OrderedExecutor>(new (std::nothrow) OrderedExecutor(
             normalized_workers, task_queue_capacity, reorder_capacity,
-            std::move(worker), std::move(arena), lane, telemetry_kind));
+            std::move(worker), std::move(arena), lane, telemetry_kind,
+            retained_byte_capacity));
     if (!executor) {
       return sanitize::Status::OutOfMemory(
           "OrderedExecutor::Make: allocation failed");
@@ -311,8 +487,8 @@ public:
   ~OrderedExecutor() { shutdown(); }
   // Submit contiguous ordinals; consume once the dispatch window is full.
   sanitize::Status Submit(Packet packet) {
-    return SubmitCharged(std::move(packet),
-                         std::max<std::size_t>(256U, sizeof(Packet)));
+    const auto retained_bytes = EstimateQueueRetainedBytes(packet.payload);
+    return SubmitCharged(std::move(packet), retained_bytes);
   }
 
   sanitize::Status SubmitCharged(Packet packet, std::size_t retained_bytes) {
@@ -368,12 +544,14 @@ public:
         in_flight_.fetch_add(1, std::memory_order_release);
       }
       auto outcome = execute_packet(std::move(packet), 0, {});
+      const auto outcome_retained = EstimateQueueRetainedBytes(outcome.result);
       std::lock_guard lock(mutex_);
       if (cancelled_) {
         return sanitize::Status::Cancelled(
             "OrderedExecutor::Submit: executor was cancelled");
       }
-      if (!store_outcome_locked(std::move(outcome), completion_slot)) {
+      if (!store_outcome_locked(std::move(outcome), completion_slot,
+                                outcome_retained)) {
         fatal_ = true;
         accepting_ = false;
         return sanitize::Status::OutOfMemory(
@@ -408,18 +586,40 @@ public:
         arena_shared_->Schedule(completion_shard);
       }
       auto shared = arena_shared_;
-      const auto submit_status = arena_->SubmitCharged(
-          [shared,
-           scheduled = ScheduledPacket{.packet = std::move(packet),
-                                       .completion_slot = completion_slot},
-           lease = ExternalLease(shared, completion_shard)](
-              std::size_t worker_index,
-              sanitize::internal::StopToken stop) mutable {
-            shared->ExecuteExternal(std::move(scheduled), worker_index, stop);
-            lease.Complete();
-          },
-          arena_submission_plan_, TaskMemoryCharge{retained_bytes},
-          telemetry_kind_);
+      // Schedule() was already published under mutex_.  Construct the lease
+      // before any throwing packet/callback construction so every exceptional
+      // path also retires the external completion shard.
+      ExternalLease external_lease(shared, completion_shard);
+      sanitize::Status submit_status = sanitize::Status::OK();
+      try {
+        ScheduledPacket scheduled{.packet = std::move(packet),
+                                  .completion_slot = completion_slot,
+                                  .retained_bytes = retained_bytes};
+        submit_status = arena_->SubmitCharged(
+            [shared, scheduled = std::move(scheduled),
+             lease = std::move(external_lease)](
+                std::size_t worker_index,
+                sanitize::internal::StopToken stop) mutable {
+              shared->ExecuteExternal(std::move(scheduled), worker_index, stop);
+              lease.Complete();
+            },
+            arena_submission_plan_, TaskMemoryCharge{retained_bytes},
+            telemetry_kind_);
+      } catch (const std::bad_alloc &) {
+        std::lock_guard lock(mutex_);
+        --next_submit_ordinal_;
+        completion_ring_.RollbackSubmit();
+        in_flight_.fetch_sub(1, std::memory_order_release);
+        return sanitize::Status::OutOfMemory(
+            "OrderedExecutor::Submit: arena publication allocation failed");
+      } catch (...) {
+        std::lock_guard lock(mutex_);
+        --next_submit_ordinal_;
+        completion_ring_.RollbackSubmit();
+        in_flight_.fetch_sub(1, std::memory_order_release);
+        return sanitize::Status::Invalid(
+            "OrderedExecutor::Submit: arena publication failed");
+      }
       if (!submit_status.ok()) {
         std::lock_guard lock(mutex_);
         --next_submit_ordinal_;
@@ -430,6 +630,11 @@ public:
       return sanitize::Status::OK();
     }
 
+    if (retained_bytes > retained_byte_capacity_) {
+      return sanitize::Status::OutOfMemory(
+          "OrderedExecutor::Submit: retained-byte charge exceeds private "
+          "executor capacity");
+    }
     std::unique_lock lock(mutex_);
     task_space_.wait(lock, [&] {
       return cancelled_ || fatal_ || !accepting_ ||
@@ -448,15 +653,32 @@ public:
           "OrderedExecutor::Submit: expected ordinal ", next_submit_ordinal_,
           ", received ", packet.ordinal);
     }
-    ScheduledPacket scheduled{.packet = std::move(packet),
-                              .completion_slot =
-                                  completion_ring_.ReserveSubmit()};
+    if (private_retained_bytes_ > retained_byte_capacity_ - retained_bytes) {
+      return sanitize::Status::Invalid(
+          "OrderedExecutor::Submit: retained-byte window is full; consume the "
+          "next ordinal before submitting more work");
+    }
+    const auto completion_slot = completion_ring_.ReserveSubmit();
     try {
+      // Construction itself can allocate or invoke a throwing move. Keep the
+      // completion cursor transactional across both packet construction and
+      // deque growth, not just push_back().
+      ScheduledPacket scheduled{.packet = std::move(packet),
+                                .completion_slot = completion_slot,
+                                .retained_bytes = retained_bytes};
       tasks_.push_back(std::move(scheduled));
     } catch (const std::bad_alloc &) {
+      completion_ring_.RollbackSubmit();
       return sanitize::Status::OutOfMemory(
           "OrderedExecutor::Submit: task queue allocation failed");
+    } catch (...) {
+      completion_ring_.RollbackSubmit();
+      return sanitize::Status::Invalid(
+          "OrderedExecutor::Submit: task queue publication failed");
     }
+    private_retained_bytes_ += retained_bytes;
+    peak_private_retained_bytes_ =
+        std::max(peak_private_retained_bytes_, private_retained_bytes_);
     ++next_submit_ordinal_;
     in_flight_.fetch_add(1, std::memory_order_release);
     lock.unlock();
@@ -517,13 +739,20 @@ public:
           "OrderedExecutor::TakeNext: no completed packets remain");
     }
 
-    auto &slot = completed_[completion_ring_.NextTake()];
+    const auto completion_slot = completion_ring_.NextTake();
+    auto &slot = completed_[completion_slot];
     Outcome outcome = std::move(*slot);
     slot.reset();
+    const auto retained =
+        std::exchange(completed_retained_bytes_[completion_slot], 0U);
+    private_retained_bytes_ = retained >= private_retained_bytes_
+                                  ? 0U
+                                  : private_retained_bytes_ - retained;
     ++next_take_ordinal_;
     completion_ring_.AdvanceTake();
     in_flight_.fetch_sub(1, std::memory_order_release);
     lock.unlock();
+    task_space_.notify_all();
     return outcome;
   }
   // Cancels queued/later work and requests cooperative stop from active
@@ -543,10 +772,28 @@ public:
         arena_shared_->terminal_flags.fetch_or(kArenaTerminalCancelledBit,
                                                std::memory_order_release);
       }
-      tasks_.clear();
-      for (auto &slot : completed_) {
-        slot.reset();
+      std::size_t dropped_retained = 0U;
+      const auto add_dropped_retained = [&dropped_retained](std::size_t bytes) {
+        if (bytes >
+            std::numeric_limits<std::size_t>::max() - dropped_retained) {
+          dropped_retained = std::numeric_limits<std::size_t>::max();
+        } else {
+          dropped_retained += bytes;
+        }
+      };
+      for (const auto &task : tasks_) {
+        add_dropped_retained(task.retained_bytes);
       }
+      tasks_.clear();
+      for (std::size_t index = 0; index < completed_.size(); ++index) {
+        completed_[index].reset();
+        add_dropped_retained(completed_retained_bytes_[index]);
+        completed_retained_bytes_[index] = 0U;
+      }
+      private_retained_bytes_ =
+          dropped_retained >= private_retained_bytes_
+              ? 0U
+              : private_retained_bytes_ - dropped_retained;
       cancel_arena_slots_locked();
       in_flight_.store(0, std::memory_order_release);
     }
@@ -610,12 +857,26 @@ private:
   OrderedExecutor(std::size_t worker_count, std::size_t task_queue_capacity,
                   std::size_t reorder_capacity, Worker worker,
                   std::shared_ptr<OperationTaskArena> arena, TaskArenaLane lane,
-                  TaskTelemetryKind telemetry_kind)
+                  TaskTelemetryKind telemetry_kind,
+                  std::size_t retained_byte_capacity)
       : worker_count_(worker_count),
         task_queue_capacity_(std::max<std::size_t>(1, task_queue_capacity)),
         reorder_capacity_(std::max<std::size_t>(1, reorder_capacity)),
+        retained_byte_capacity_(
+            retained_byte_capacity != 0U
+                ? retained_byte_capacity
+                : (arena && arena->queue_byte_capacity() != 0U
+                       ? arena->queue_byte_capacity()
+                       : std::max<std::size_t>(
+                             16U * 1024U * 1024U,
+                             std::min<std::size_t>(
+                                 std::numeric_limits<std::size_t>::max() / 2U,
+                                 std::max<std::size_t>(1U, reorder_capacity_) *
+                                     (16U * 1024U * 1024U))))),
         completion_ring_(reorder_capacity_), worker_(std::move(worker)),
         completed_((!arena || arena->inline_mode()) ? reorder_capacity_ : 0U),
+        completed_retained_bytes_(
+            (!arena || arena->inline_mode()) ? reorder_capacity_ : 0U, 0U),
         arena_(std::move(arena)),
         external_completion_shard_count_(
             uses_arena_completion_slots() && worker_count_ >= 4U
@@ -630,7 +891,8 @@ private:
       // arena-global cursor for every high-core packet.
       if (!arena_->inline_mode()) {
         arena_shared_ = std::make_shared<ArenaSharedState>(
-            reorder_capacity_, external_completion_shard_count_, worker_);
+            reorder_capacity_, external_completion_shard_count_, worker_,
+            arena_);
       }
       if (!arena_->inline_mode() && worker_count_ > 8U) {
         next_high_core_arena_ticket_ =
@@ -679,15 +941,48 @@ private:
 
         auto outcome =
             execute_packet(std::move(scheduled->packet), worker_index, stop);
+        const auto outcome_retained =
+            EstimateQueueRetainedBytes(outcome.result);
         std::unique_lock lock(mutex_);
         if (stop.stop_requested() || cancelled_ || fatal_) {
+          private_retained_bytes_ =
+              scheduled->retained_bytes >= private_retained_bytes_
+                  ? 0U
+                  : private_retained_bytes_ - scheduled->retained_bytes;
+          lock.unlock();
+          task_space_.notify_all();
           return;
         }
         if (!store_outcome_locked(std::move(outcome),
-                                  scheduled->completion_slot)) {
+                                  scheduled->completion_slot, outcome_retained,
+                                  scheduled->retained_bytes)) {
           fatal_ = true;
           accepting_ = false;
+          // The failed active packet still owns its input charge because the
+          // completion transfer did not commit. Drop it and every queued/result
+          // owner exactly; no future admission is allowed after fatality.
+          private_retained_bytes_ =
+              scheduled->retained_bytes >= private_retained_bytes_
+                  ? 0U
+                  : private_retained_bytes_ - scheduled->retained_bytes;
+          for (const auto &pending : tasks_) {
+            private_retained_bytes_ =
+                pending.retained_bytes >= private_retained_bytes_
+                    ? 0U
+                    : private_retained_bytes_ - pending.retained_bytes;
+          }
           tasks_.clear();
+          for (std::size_t index = 0; index < completed_retained_bytes_.size();
+               ++index) {
+            const auto bytes = completed_retained_bytes_[index];
+            private_retained_bytes_ = bytes >= private_retained_bytes_
+                                          ? 0U
+                                          : private_retained_bytes_ - bytes;
+            completed_retained_bytes_[index] = 0U;
+            if (index < completed_.size()) {
+              completed_[index].reset();
+            }
+          }
           lock.unlock();
           notify_all();
           return;
@@ -704,6 +999,12 @@ private:
         fatal_ = true;
         accepting_ = false;
         tasks_.clear();
+        for (std::size_t index = 0; index < completed_.size(); ++index) {
+          completed_[index].reset();
+          completed_retained_bytes_[index] = 0U;
+        }
+        private_retained_bytes_ = 0U;
+        in_flight_.store(0, std::memory_order_release);
       }
       notify_all();
     }
@@ -718,18 +1019,41 @@ private:
     const auto &slot = completed_[completion_ring_.NextTake()];
     return slot && slot->ordinal == next_take_ordinal_;
   }
-  bool store_outcome_locked(Outcome outcome,
-                            std::size_t completion_slot) noexcept {
+  bool store_outcome_locked(Outcome outcome, std::size_t completion_slot,
+                            std::size_t output_retained,
+                            std::size_t input_retained_bytes = 0U) noexcept {
     auto &slot = completed_[completion_slot];
     if (slot) {
       return false;
     }
+    const auto retained_after_input =
+        input_retained_bytes >= private_retained_bytes_
+            ? 0U
+            : private_retained_bytes_ - input_retained_bytes;
+    if (output_retained > retained_byte_capacity_ ||
+        retained_after_input > retained_byte_capacity_ - output_retained) {
+      return false;
+    }
     try {
       slot.emplace(std::move(outcome));
-      return true;
     } catch (...) {
       return false;
     }
+    if (input_retained_bytes >= private_retained_bytes_) {
+      private_retained_bytes_ = 0U;
+    } else {
+      private_retained_bytes_ -= input_retained_bytes;
+    }
+    if (output_retained >
+        std::numeric_limits<std::size_t>::max() - private_retained_bytes_) {
+      private_retained_bytes_ = std::numeric_limits<std::size_t>::max();
+    } else {
+      private_retained_bytes_ += output_retained;
+    }
+    completed_retained_bytes_[completion_slot] = output_retained;
+    peak_private_retained_bytes_ =
+        std::max(peak_private_retained_bytes_, private_retained_bytes_);
+    return true;
   }
   void notify_all() noexcept {
     task_ready_.notify_all();
@@ -750,6 +1074,7 @@ private:
   const std::size_t worker_count_;
   const std::size_t task_queue_capacity_;
   const std::size_t reorder_capacity_;
+  const std::size_t retained_byte_capacity_;
   CompletionRingCursor completion_ring_;
   Worker worker_;
   mutable std::mutex mutex_;
@@ -759,6 +1084,9 @@ private:
   std::mutex take_mutex_;
   std::deque<ScheduledPacket> tasks_;
   std::vector<std::optional<Outcome>> completed_;
+  std::vector<std::size_t> completed_retained_bytes_;
+  std::size_t private_retained_bytes_ = 0U;
+  std::size_t peak_private_retained_bytes_ = 0U;
   std::vector<sanitize::internal::JThread> workers_;
   std::shared_ptr<OperationTaskArena> arena_;
   std::shared_ptr<ArenaSharedState> arena_shared_;

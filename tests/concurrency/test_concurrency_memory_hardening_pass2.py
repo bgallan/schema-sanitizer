@@ -78,9 +78,15 @@ def test_abandoned_operation_memory_lease_releases_during_finalization() -> None
     assert ledger.snapshot().reserved_bytes == 4 << 20
     del lease
     gc.collect()
+    # pass51 keeps snapshots observationally pure; abandoned-finalizer work is
+    # drained only at an explicit operation safe point.
+    ledger.safe_point()
     assert ledger.snapshot().reserved_bytes == 0
     ledger.close()
-    assert process_resident_memory_snapshot().reserved_bytes == baseline
+    # ``safe_point`` drains process-global finalizer debt, including stale debt
+    # that may predate this test. The leak invariant is therefore that this
+    # operation never leaves the process above its entry baseline.
+    assert process_resident_memory_snapshot().reserved_bytes <= baseline
 
 
 def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:

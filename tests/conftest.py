@@ -7,6 +7,30 @@ from functools import lru_cache
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _bound_test_duckdb_default_pool():
+    """Keep optional DuckDB's eager global pool inside the test envelope.
+
+    Importing DuckDB eagerly creates a process-wide worker pool independently
+    of schema-sanitizer. The full adapter suite also loads PyArrow and Polars;
+    pinning that unrelated default connection to one worker makes the test
+    process's external-runtime budget explicit. Production code uses a private
+    connection and is separately tested not to mutate this setting.
+    """
+    try:
+        import duckdb
+    except (ImportError, OSError):
+        yield
+        return
+    connection = duckdb.connect(database=":default:")
+    previous = int(connection.execute("SELECT current_setting('threads')").fetchone()[0])
+    connection.execute("SET threads=1")
+    try:
+        yield
+    finally:
+        connection.execute(f"SET threads={previous}")
+
+
 @lru_cache(maxsize=1)
 def native_available() -> bool:
     """Return native available for the test."""

@@ -82,24 +82,34 @@ class RemoteDirectoryDownloadSession:
         self._semaphore: asyncio.Semaphore | None = None
 
     async def __aenter__(self) -> RemoteDirectoryDownloadSession:
-        """Open one reusable provider client and global request semaphore."""
+        """Open one reusable provider client transactionally."""
+        if self._context is not None or self._semaphore is not None:
+            raise RuntimeError("remote directory download session is already open")
+        # Allocate all local control-plane objects before acquiring a provider.
+        # A MemoryError here therefore cannot strand a live SDK client.
+        semaphore = asyncio.Semaphore(self._tuning.concurrency)
         files = () if self._first_file is None else (self._first_file,)
-        self._context = await provider_client_for_downloads(
+        context = await provider_client_for_downloads(
             files,
             memory_limit_bytes=self._memory_limit_bytes,
             threading_mode=self._threading_mode,
         )
-        if self._context is None:
+        if context is None:
             raise RuntimeError("remote download context was not created")
-        self._semaphore = asyncio.Semaphore(self._tuning.concurrency)
+        self._context = context
+        self._semaphore = semaphore
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        """Close the shared provider client after all transfers are drained."""
+        """Clear ownership only after the provider close has committed."""
         context = self._context
-        self._context = None
-        self._semaphore = None
+        if context is None:
+            self._semaphore = None
+            return
         await close_provider_client(context)
+        if self._context is context:
+            self._context = None
+            self._semaphore = None
 
     async def download_files(
         self,
@@ -261,11 +271,16 @@ async def _download_files_with_context(
             raise
         check_download_size(file.uri, target.stat().st_size, memory_limit_bytes)
 
-    await drain_ordered_indexed_results(len(files), fetch, window=max(1, window))
+    await drain_ordered_indexed_results(
+        len(files),
+        fetch,
+        window=max(1, window),
+        expected_retained_bytes=64,
+    )
 
 
 async def download_files_to_directory(
-    files: list[RemoteFile],
+    files: Sequence[RemoteFile],
     directory: str,
     *,
     memory_limit_bytes: int | None,

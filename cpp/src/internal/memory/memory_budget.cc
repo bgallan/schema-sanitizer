@@ -1,5 +1,6 @@
 // Detects the memory safely available to one automatic-budget operation.
 #include "internal/memory/memory_budget.hh"
+#include "internal/runtime/cgroup_view.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -23,38 +24,6 @@ namespace sanitize::internal {
 namespace {
 
 #if defined(__linux__)
-[[nodiscard]] std::optional<std::uint64_t>
-read_unsigned_file(const char *path) noexcept {
-  try {
-    std::ifstream input(path);
-    std::string value;
-    if (!(input >> value) || value == "max") {
-      return std::nullopt;
-    }
-    std::size_t consumed = 0;
-    const auto parsed = std::stoull(value, &consumed);
-    if (consumed != value.size()) {
-      return std::nullopt;
-    }
-    return parsed;
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-[[nodiscard]] std::optional<std::uint64_t>
-remaining_limit(const char *limit_path, const char *usage_path) noexcept {
-  const auto limit = read_unsigned_file(limit_path);
-  const auto usage = read_unsigned_file(usage_path);
-  if (!limit || !usage) {
-    return std::nullopt;
-  }
-  if (*limit <= *usage) {
-    return std::uint64_t{1};
-  }
-  return *limit - *usage;
-}
-
 [[nodiscard]] std::optional<std::uint64_t> linux_mem_available() noexcept {
   try {
     std::ifstream input("/proc/meminfo");
@@ -133,12 +102,26 @@ platform_available_memory() noexcept {
 [[nodiscard]] std::optional<std::uint64_t>
 container_available_memory() noexcept {
 #if defined(__linux__)
-  if (const auto v2 = remaining_limit("/sys/fs/cgroup/memory.max",
-                                      "/sys/fs/cgroup/memory.current")) {
-    return v2;
+  using cgroup_view_detail::ValueState;
+  cgroup_view_detail::UnsignedSample sample{};
+  const auto version = cgroup_view_detail::current_version("memory");
+  if (version == 2) {
+    sample = cgroup_view_detail::effective_headroom("memory", "memory.max",
+                                                    "memory.current");
+  } else if (version == 1) {
+    sample = cgroup_view_detail::effective_headroom(
+        "memory", "memory.limit_in_bytes", "memory.usage_in_bytes");
+  } else {
+    // An unresolved Linux cgroup view is not equivalent to an unlimited host.
+    return std::uint64_t{1U};
   }
-  return remaining_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes",
-                         "/sys/fs/cgroup/memory/memory.usage_in_bytes");
+  if (sample.state == ValueState::kUnknown) {
+    return std::uint64_t{1U};
+  }
+  if (sample.state == ValueState::kUnbounded) {
+    return std::nullopt;
+  }
+  return sample.value;
 #else
   return std::nullopt;
 #endif

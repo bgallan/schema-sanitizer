@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import weakref
 from collections import deque
 from copy import deepcopy
@@ -294,8 +293,9 @@ def _reset_after_fork() -> None:
     _LIVE_REGISTRATION_REJECTIONS = 0
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler("operation-diagnostics", mode="quarantine_only")
 
 
 __all__ = [

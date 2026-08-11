@@ -1,4 +1,4 @@
-Outcome execute_packet(Packet packet, std::size_t worker_index,
+Outcome execute_packet(Packet &&packet, std::size_t worker_index,
                        sanitize::internal::StopToken stop) noexcept {
   const auto ordinal = packet.ordinal;
   try {

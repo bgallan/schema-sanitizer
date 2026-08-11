@@ -211,6 +211,52 @@ def test_terminal_callback_drain_never_runs_callback_inline(
     assert not called.is_set()
 
 
+def test_cleanup_dispatcher_uses_teardown_reserve_when_public_envelope_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal cleanup progresses off-thread behind a saturated operation."""
+    import schema_sanitizer.core_impl.cleanup_dispatcher as module
+
+    callback_thread: list[int] = []
+    callback_done = threading.Event()
+    lease_released = threading.Event()
+    teardown_acquired = threading.Event()
+
+    class Lease:
+        def release(self) -> None:
+            lease_released.set()
+
+    def public_full(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("public thread envelope is full")
+
+    def acquire_teardown(*_args: object, **_kwargs: object) -> Lease:
+        teardown_acquired.set()
+        return Lease()
+
+    monkeypatch.setattr(module, "acquire_project_threads", public_full)
+    monkeypatch.setattr(module, "acquire_teardown_project_threads", acquire_teardown)
+    monkeypatch.setattr(module, "start_governed_thread", lambda worker: worker.start())
+
+    def retire(_worker: threading.Thread, release: object) -> bool:
+        assert callable(release)
+        release()
+        return True
+
+    monkeypatch.setattr(module, "defer_governed_thread_retirement", retire)
+    dispatcher = module._CleanupDispatcher()
+    caller_thread = threading.get_ident()
+
+    def cleanup() -> None:
+        callback_thread.append(threading.get_ident())
+        callback_done.set()
+
+    assert dispatcher.submit(cleanup, retained_bytes=1)
+    assert callback_done.wait(1)
+    assert teardown_acquired.is_set()
+    assert callback_thread != [caller_thread]
+    assert lease_released.wait(1)
+
+
 def test_terminal_callback_diagnostics_are_bounded() -> None:
     from schema_sanitizer.remote_impl.io_coordinator import _RemoteIoSubmission
 

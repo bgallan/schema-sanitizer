@@ -8,6 +8,26 @@ from types import SimpleNamespace
 import pytest
 
 
+class _BoundedContent:
+    """Minimal aiohttp-style response body that only permits sized reads."""
+
+    def __init__(self, body: str) -> None:
+        """Encode one deterministic response body."""
+        self._body = body.encode()
+        self._offset = 0
+
+    async def read(self, size: int) -> bytes:
+        """Return no more than the caller's explicit byte ceiling."""
+        end = min(len(self._body), self._offset + size)
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
+
+    def at_eof(self) -> bool:
+        """Report whether the full fake body has been consumed."""
+        return self._offset == len(self._body)
+
+
 def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
     """Sized reads must target aiobotocore's wrapper, not its context value."""
     from schema_sanitizer.remote_impl.providers import s3
@@ -158,7 +178,7 @@ def test_gcs_list_directory_retries_and_paginates(monkeypatch: pytest.MonkeyPatc
         def __init__(self, status: int, body: str) -> None:
             """Implement the test-double protocol method."""
             self.status = status
-            self._body = body
+            self.content = _BoundedContent(body)
 
         async def __aenter__(self):
             """Implement the test-double protocol method."""
@@ -167,10 +187,6 @@ def test_gcs_list_directory_retries_and_paginates(monkeypatch: pytest.MonkeyPatc
         async def __aexit__(self, _exc_type, _exc, _tb):
             """Implement the test-double protocol method."""
             return False
-
-        async def text(self) -> str:
-            """Provide a test helper implementation."""
-            return self._body
 
     class FakeSession:
         """Provide a lightweight test double."""
@@ -222,6 +238,10 @@ def test_gcs_permission_errors_do_not_retry(monkeypatch: pytest.MonkeyPatch) -> 
 
         status = 403
 
+        def __init__(self) -> None:
+            """Expose the permission response through a sized body reader."""
+            self.content = _BoundedContent("forbidden")
+
         async def __aenter__(self):
             """Implement the test-double protocol method."""
             return self
@@ -229,10 +249,6 @@ def test_gcs_permission_errors_do_not_retry(monkeypatch: pytest.MonkeyPatch) -> 
         async def __aexit__(self, _exc_type, _exc, _tb):
             """Implement the test-double protocol method."""
             return False
-
-        async def text(self) -> str:
-            """Provide a test helper implementation."""
-            return "forbidden"
 
     class FakeSession:
         """Provide a lightweight test double."""

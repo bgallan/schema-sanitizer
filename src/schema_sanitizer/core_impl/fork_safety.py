@@ -1,4 +1,10 @@
-"""Fail-fast protection against reusing the initialized runtime after fork."""
+"""Fail-fast protection against reusing the initialized runtime after fork.
+
+The child-side quarantine is deliberately preallocated.  ``after_in_child``
+callbacks can therefore root inherited graphs without growing dicts/lists or
+creating replacement locks while the child contains locks formerly owned by
+threads that no longer exist.
+"""
 
 from __future__ import annotations
 
@@ -9,17 +15,60 @@ _INITIAL_PID = os.getpid()
 _FORKED_CHILD = False
 _FORK_GENERATION = 0
 _LOCK = Lock()
-_FORK_INHERITED_CAPSULE: dict[str, tuple[object, ...]] = {}
+_CHILD_LOCK_BANK = (Lock(), Lock())
+_CHILD_LOCK_BANK_INDEX = 0
+_PREPARED_CHILD_LOCK: Lock | None = None
 _MAX_FORK_CAPSULE_ENTRIES = 64
+_MAX_FORK_QUARANTINE_GENERATIONS = 2
+# Legacy monkeypatch/testing facade. Production keeps this as None so child-side
+# quarantine never grows a dict.
+_FORK_INHERITED_CAPSULE: dict[str, tuple[object, ...]] | None = None
+_MAX_INLINE_OWNERS = 8
+_FORK_LABELS: list[str | None] = [None] * (
+    _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS
+)
+_FORK_OWNERS: list[object | None] = [None] * (
+    _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS * _MAX_INLINE_OWNERS
+)
+_FORK_EXTRA: list[tuple[object, ...] | None] = [None] * (
+    _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS
+)
+# Each nested child gets a one-shot slab. Generation-2 quarantine can therefore
+# root generation-1 banks before swapping to B without deduplicating by label.
+_FORK_CAPSULE_COUNTS = [0, 0]
+_FORK_CAPSULE_COUNT = 0
 _REJECTED_FORK_CAPSULE_ENTRIES = 0
+_REJECTED_FORK_CAPSULE_OVERFLOWED = False
+
+
+def _prepare_fork_child_state() -> None:
+    """Select one unused replacement lock preallocated during normal runtime."""
+    global _PREPARED_CHILD_LOCK
+    if _FORK_GENERATION > 1:
+        # A/B are the only preallocated generations. A third nested fork would
+        # recycle an ancestor-active bank; keep the bootstrap inert instead.
+        _PREPARED_CHILD_LOCK = None
+        return
+    _PREPARED_CHILD_LOCK = _CHILD_LOCK_BANK[_CHILD_LOCK_BANK_INDEX]
+
+
+def _clear_parent_fork_preparation() -> None:
+    global _PREPARED_CHILD_LOCK
+    _PREPARED_CHILD_LOCK = None
 
 
 def _mark_forked_child() -> None:
-    """Implement the internal _mark_forked_child helper."""
-    global _FORKED_CHILD, _FORK_GENERATION, _LOCK
+    """Poison inherited runtime state using only preallocated child objects."""
+    global _FORKED_CHILD, _FORK_GENERATION, _LOCK, _PREPARED_CHILD_LOCK
+    global _CHILD_LOCK_BANK_INDEX
     _FORKED_CHILD = True
-    _FORK_GENERATION += 1
-    _LOCK = Lock()
+    # More than one unsupported fork generation is intentionally collapsed.
+    _FORK_GENERATION = 1 if _FORK_GENERATION == 0 else 2
+    prepared = _PREPARED_CHILD_LOCK
+    if prepared is not None:
+        _LOCK = prepared
+        _CHILD_LOCK_BANK_INDEX = 1 - _CHILD_LOCK_BANK_INDEX
+    _PREPARED_CHILD_LOCK = None
 
 
 def fork_quarantine_generation() -> int:
@@ -32,28 +81,99 @@ def runtime_fork_poisoned() -> bool:
     return bool(_FORKED_CHILD or os.getpid() != _INITIAL_PID)
 
 
-def quarantine_inherited_state(label: str, *owners: object) -> bool:
-    """Retain one opaque inherited graph in the single bounded child capsule."""
-    global _REJECTED_FORK_CAPSULE_ENTRIES
-    if _FORK_GENERATION > 1:
+def quarantine_inherited_state(
+    label: str,
+    owner1: object | None = None,
+    owner2: object | None = None,
+    owner3: object | None = None,
+    owner4: object | None = None,
+    owner5: object | None = None,
+    owner6: object | None = None,
+    owner7: object | None = None,
+    owner8: object | None = None,
+    *extra: object,
+) -> bool:
+    """Root inherited graphs in a bounded preallocated child quarantine.
+
+    The common path stores up to eight references directly into arrays that
+    were allocated at import time.  ``extra`` exists only for compatibility;
+    production at-fork callsites are kept within the inline bound so they do
+    not construct an additional retained tuple in the child.
+    """
+    global _FORK_CAPSULE_COUNT, _REJECTED_FORK_CAPSULE_ENTRIES
+    global _REJECTED_FORK_CAPSULE_OVERFLOWED
+    legacy = _FORK_INHERITED_CAPSULE
+    if isinstance(legacy, dict):
+        if _FORK_GENERATION > 1 or type(label) is not str or not label:
+            return False
+        if label in legacy:
+            return True
+        if len(legacy) >= _MAX_FORK_CAPSULE_ENTRIES:
+            _REJECTED_FORK_CAPSULE_OVERFLOWED = True
+            try:
+                _REJECTED_FORK_CAPSULE_ENTRIES += 1
+            except MemoryError:
+                pass
+            return False
+        legacy[label] = (owner1, owner2, owner3, owner4, owner5, owner6, owner7, owner8) + extra
+        return True
+    if _FORK_GENERATION < 1 or _FORK_GENERATION > _MAX_FORK_QUARANTINE_GENERATIONS:
         return False
     if type(label) is not str or not label:
         return False
-    if label in _FORK_INHERITED_CAPSULE:
-        return True
-    if len(_FORK_INHERITED_CAPSULE) >= _MAX_FORK_CAPSULE_ENTRIES:
-        _REJECTED_FORK_CAPSULE_ENTRIES += 1
+    generation_index = _FORK_GENERATION - 1
+    generation_count = _FORK_CAPSULE_COUNTS[generation_index]
+    generation_base = generation_index * _MAX_FORK_CAPSULE_ENTRIES
+    for offset in range(generation_count):
+        if _FORK_LABELS[generation_base + offset] == label:
+            return True
+    if generation_count >= _MAX_FORK_CAPSULE_ENTRIES:
+        _REJECTED_FORK_CAPSULE_OVERFLOWED = True
+        try:
+            _REJECTED_FORK_CAPSULE_ENTRIES += 1
+        except MemoryError:
+            pass
         return False
-    _FORK_INHERITED_CAPSULE[label] = tuple(owners)
+
+    index = generation_base + generation_count
+    base = index * _MAX_INLINE_OWNERS
+    # Assign into the generation's preallocated slab; generation-2 uses a
+    # physically distinct range even when handler labels repeat.
+    _FORK_LABELS[index] = label
+    _FORK_OWNERS[base] = owner1
+    _FORK_OWNERS[base + 1] = owner2
+    _FORK_OWNERS[base + 2] = owner3
+    _FORK_OWNERS[base + 3] = owner4
+    _FORK_OWNERS[base + 4] = owner5
+    _FORK_OWNERS[base + 5] = owner6
+    _FORK_OWNERS[base + 6] = owner7
+    _FORK_OWNERS[base + 7] = owner8
+    if extra:
+        _FORK_EXTRA[index] = extra
+    _FORK_CAPSULE_COUNTS[generation_index] = generation_count + 1
+    _FORK_CAPSULE_COUNT += 1
     return True
 
 
 def fork_inherited_capsule_snapshot() -> dict[str, int]:
     """Return bounded diagnostics for state quarantined after a fork."""
+    rejected = (
+        max(1, _REJECTED_FORK_CAPSULE_ENTRIES)
+        if _REJECTED_FORK_CAPSULE_OVERFLOWED
+        else _REJECTED_FORK_CAPSULE_ENTRIES
+    )
+    legacy = _FORK_INHERITED_CAPSULE
+    if isinstance(legacy, dict):
+        return {
+            "entries": len(legacy),
+            "capacity": _MAX_FORK_CAPSULE_ENTRIES,
+            "rejected": rejected,
+            "generation": _FORK_GENERATION,
+        }
     return {
-        "entries": len(_FORK_INHERITED_CAPSULE),
-        "capacity": _MAX_FORK_CAPSULE_ENTRIES,
-        "rejected": _REJECTED_FORK_CAPSULE_ENTRIES,
+        "entries": _FORK_CAPSULE_COUNT,
+        "capacity": _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS,
+        "rejected": rejected,
         "generation": _FORK_GENERATION,
     }
 
@@ -69,7 +189,11 @@ def ensure_runtime_fork_safe() -> None:
 
 
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_mark_forked_child)
+    os.register_at_fork(
+        before=_prepare_fork_child_state,
+        after_in_parent=_clear_parent_fork_preparation,
+        after_in_child=_mark_forked_child,
+    )
 
 
 __all__ = [

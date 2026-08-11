@@ -31,18 +31,37 @@ sanitize::Status submit_high_core_arena(Packet packet,
     arena_shared_->Schedule(completion_shard);
   }
   auto shared = arena_shared_;
-  const auto submit_status = arena_->SubmitCharged(
-      [shared,
-       scheduled = ScheduledPacket{.packet = std::move(packet),
-                                   .completion_slot = completion_slot},
-       lease = ExternalLease(shared, completion_shard)](
-          std::size_t worker_index,
-          sanitize::internal::StopToken stop) mutable {
-        shared->ExecuteExternal(std::move(scheduled), worker_index, stop);
-        lease.Complete();
-      },
-      arena_submission_plan_, arena_submission_ticket,
-      TaskMemoryCharge{retained_bytes}, telemetry_kind_);
+  ExternalLease external_lease(shared, completion_shard);
+  sanitize::Status submit_status = sanitize::Status::OK();
+  try {
+    ScheduledPacket scheduled{.packet = std::move(packet),
+                              .completion_slot = completion_slot,
+                              .retained_bytes = retained_bytes};
+    submit_status = arena_->SubmitCharged(
+        [shared, scheduled = std::move(scheduled),
+         lease = std::move(external_lease)](
+            std::size_t worker_index,
+            sanitize::internal::StopToken stop) mutable {
+          shared->ExecuteExternal(std::move(scheduled), worker_index, stop);
+          lease.Complete();
+        },
+        arena_submission_plan_, arena_submission_ticket,
+        TaskMemoryCharge{retained_bytes}, telemetry_kind_);
+  } catch (const std::bad_alloc &) {
+    std::lock_guard lock(mutex_);
+    --next_submit_ordinal_;
+    completion_ring_.RollbackSubmit();
+    decrement_high_core_in_flight_locked();
+    return sanitize::Status::OutOfMemory("OrderedExecutor::Submit: high-core "
+                                         "arena publication allocation failed");
+  } catch (...) {
+    std::lock_guard lock(mutex_);
+    --next_submit_ordinal_;
+    completion_ring_.RollbackSubmit();
+    decrement_high_core_in_flight_locked();
+    return sanitize::Status::Invalid(
+        "OrderedExecutor::Submit: high-core arena publication failed");
+  }
   if (!submit_status.ok()) {
     std::lock_guard lock(mutex_);
     --next_submit_ordinal_;

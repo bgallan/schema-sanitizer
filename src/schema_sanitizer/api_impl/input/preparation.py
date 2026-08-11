@@ -61,7 +61,7 @@ def _prepare_discovered_directory(
     if discovered is None:
         return None
     if discovered.remote_files:
-        files = list(discovered.remote_files)
+        files = discovered.remote_files
         if input_format != "parquet":
             return remote_native_directory_prepared_from_files(
                 files,
@@ -377,12 +377,18 @@ def prepare_public_input(
     operation_context: OperationExecutionContext | None = None,
 ) -> PreparedPublicInput:
     """Prepare one input under the operation-wide directory metadata budget."""
+    normalized_mode = normalize_public_input_mode(input_mode)
+    public_format = (
+        "python"
+        if input_format is None and is_python_row_iterable(path)
+        else normalize_public_input_format(input_format)
+    )
     shared_budget = None if operation_context is None else operation_context.directory_metadata
     with directory_metadata_budget_scope(memory_limit_bytes, budget=shared_budget):
-        return _prepare_public_input_impl(
+        prepared = _prepare_public_input_impl(
             path,
-            input_format=input_format,
-            input_mode=input_mode,
+            input_format=public_format,
+            input_mode=normalized_mode,
             input_text_encoding=input_text_encoding,
             xml_row_tag=xml_row_tag,
             csv_delimiter=csv_delimiter,
@@ -391,3 +397,5 @@ def prepare_public_input(
             threading_mode=threading_mode,
             operation_context=operation_context,
         )
+    prepared.public_format = public_format
+    return prepared

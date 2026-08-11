@@ -32,6 +32,56 @@ def test_none_input_format_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("input_format", "failure"),
+    [("jsonl", MemoryError), (" NDJSON ", KeyboardInterrupt)],
+)
+def test_format_normalization_fault_cannot_abandon_prepared_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    input_format: str,
+    failure: type[BaseException],
+) -> None:
+    """Verify format normalization completes before preparation can acquire ownership."""
+    from schema_sanitizer.api_impl.input import preparation as public_input
+    from schema_sanitizer.input_impl.prepared import PreparedPublicInput
+
+    acquired: list[object] = []
+
+    class Keepalive:
+        """Track whether an acquired preparation owner is closed."""
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    def materialize(*_args: object, **_kwargs: object) -> PreparedPublicInput:
+        owner = Keepalive()
+        acquired.append(owner)
+        return PreparedPublicInput(b"{}\n", "jsonl", "stream", owner)
+
+    def fail_normalization(_input_format: str | None) -> str:
+        raise failure("injected format-normalization fault")
+
+    monkeypatch.setattr(public_input, "_prepare_public_input_impl", materialize)
+    monkeypatch.setattr(public_input, "normalize_public_input_format", fail_normalization)
+
+    with pytest.raises(failure, match="format-normalization fault"):
+        public_input.prepare_public_input(
+            "unused.ndjson",
+            input_format=input_format,
+            input_mode="single_file",
+            input_text_encoding="utf-8",
+            xml_row_tag=None,
+            csv_delimiter=",",
+            csv_has_header=True,
+            memory_limit_bytes=None,
+        )
+
+    assert not acquired or all(getattr(owner, "closed") for owner in acquired)
+
+
+@pytest.mark.parametrize(
     ("input_format", "filename"),
     [
         ("csv", "rows.jsonl"),

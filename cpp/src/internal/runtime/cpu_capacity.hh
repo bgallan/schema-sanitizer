@@ -4,12 +4,15 @@
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <thread>
+
+#include "internal/runtime/cgroup_view.hh"
 
 #if defined(__linux__)
 #include <sched.h>
@@ -44,18 +47,31 @@ namespace cpu_capacity_detail {
 }
 
 [[nodiscard]] inline bool read_line(const char *path, char *buffer,
-                                    std::size_t capacity) noexcept {
-  if (path == nullptr || buffer == nullptr || capacity < 2U) {
+                                    std::size_t capacity,
+                                    bool *missing = nullptr) noexcept {
+  if (missing != nullptr) {
+    *missing = false;
+  }
+  if (path == nullptr || buffer == nullptr || capacity < 2U ||
+      capacity > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return false;
   }
+  errno = 0;
   std::FILE *file = std::fopen(path, "r");
   if (file == nullptr) {
+    if (missing != nullptr) {
+      *missing = errno == ENOENT;
+    }
     return false;
   }
   const bool read =
       std::fgets(buffer, static_cast<int>(capacity), file) != nullptr;
+  const bool complete =
+      read && (std::strchr(buffer, '\n') != nullptr ||
+               (std::strlen(buffer) + 1U < capacity && std::feof(file) != 0));
+  const bool input_error = std::ferror(file) != 0;
   const int close_status = std::fclose(file);
-  return read && close_status == 0;
+  return read && complete && !input_error && close_status == 0;
 }
 
 [[nodiscard]] inline bool parse_positive(std::string_view text,
@@ -63,10 +79,14 @@ namespace cpu_capacity_detail {
   while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
     text.remove_prefix(1U);
   }
+  while (!text.empty() && (text.back() == ' ' || text.back() == '\t' ||
+                           text.back() == '\r' || text.back() == '\n')) {
+    text.remove_suffix(1U);
+  }
   const auto *first = text.data();
   const auto *last = first + text.size();
   const auto parsed = std::from_chars(first, last, value);
-  return parsed.ec == std::errc{} && value > 0;
+  return parsed.ec == std::errc{} && parsed.ptr == last && value > 0;
 }
 
 [[nodiscard]] inline std::int64_t quota_capacity(std::int64_t quota,
@@ -78,26 +98,58 @@ namespace cpu_capacity_detail {
 }
 
 [[nodiscard]] inline std::int64_t cgroup_v2_capacity() noexcept {
+  if (cgroup_view_detail::current_version("cpu") != 2) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  char current[4096]{};
+  char mountpoint[4096]{};
+  if (!cgroup_view_detail::resolve_directory("cpu", current, sizeof(current),
+                                             mountpoint, sizeof(mountpoint))) {
+    return 1;
+  }
+  auto effective = std::numeric_limits<std::int64_t>::max();
   char line[256]{};
-  if (!read_line("/sys/fs/cgroup/cpu.max", line, sizeof(line))) {
-    return std::numeric_limits<std::int64_t>::max();
+  for (;;) {
+    char path[4096]{};
+    const auto written =
+        std::snprintf(path, sizeof(path), "%s/cpu.max", current);
+    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(path)) {
+      return 1;
+    }
+    bool missing = false;
+    if (!read_line(path, line, sizeof(line), &missing)) {
+      if (std::strcmp(current, mountpoint) == 0 && missing) {
+        // cgroup2 exempts its root from resource control, so cpu.max normally
+        // does not exist there. Other open/read/parse failures remain closed.
+        break;
+      }
+      return 1;
+    }
+    std::string_view text(line);
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+      text.remove_suffix(1U);
+    }
+    const auto separator = text.find_first_of(" \t");
+    if (separator == std::string_view::npos) {
+      return 1;
+    }
+    if (text.substr(0U, separator) != "max") {
+      std::int64_t quota = 0;
+      std::int64_t period = 0;
+      if (!parse_positive(text.substr(0U, separator), quota) ||
+          !parse_positive(text.substr(separator + 1U), period)) {
+        return 1;
+      }
+      effective = std::min(effective, quota_capacity(quota, period));
+    }
+    if (std::strcmp(current, mountpoint) == 0) {
+      break;
+    }
+    if (!cgroup_view_detail::parent_directory_in_place(current, mountpoint)) {
+      return 1;
+    }
   }
-  std::string_view text(line);
-  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
-    text.remove_suffix(1U);
-  }
-  const auto separator = text.find_first_of(" \t");
-  if (separator == std::string_view::npos ||
-      text.substr(0U, separator) == "max") {
-    return std::numeric_limits<std::int64_t>::max();
-  }
-  std::int64_t quota = 0;
-  std::int64_t period = 0;
-  if (!parse_positive(text.substr(0U, separator), quota) ||
-      !parse_positive(text.substr(separator + 1U), period)) {
-    return std::numeric_limits<std::int64_t>::max();
-  }
-  return quota_capacity(quota, period);
+  return effective;
 }
 
 [[nodiscard]] inline bool read_integer(const char *path,
@@ -110,27 +162,50 @@ namespace cpu_capacity_detail {
 }
 
 [[nodiscard]] inline std::int64_t cgroup_v1_capacity() noexcept {
-  constexpr const char *roots[] = {"/sys/fs/cgroup/cpu",
-                                   "/sys/fs/cgroup/cpu,cpuacct"};
-  for (const auto *root : roots) {
-    char quota_path[160]{};
-    char period_path[160]{};
-    const int quota_length = std::snprintf(quota_path, sizeof(quota_path),
-                                           "%s/cpu.cfs_quota_us", root);
-    const int period_length = std::snprintf(period_path, sizeof(period_path),
-                                            "%s/cpu.cfs_period_us", root);
-    if (quota_length <= 0 || period_length <= 0 ||
-        static_cast<std::size_t>(quota_length) >= sizeof(quota_path) ||
-        static_cast<std::size_t>(period_length) >= sizeof(period_path)) {
-      continue;
+  if (cgroup_view_detail::current_version("cpu") != 1) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  char current[4096]{};
+  char mountpoint[4096]{};
+  if (!cgroup_view_detail::resolve_directory("cpu", current, sizeof(current),
+                                             mountpoint, sizeof(mountpoint))) {
+    return 1;
+  }
+  auto effective = std::numeric_limits<std::int64_t>::max();
+  for (;;) {
+    char quota_path[4096]{};
+    char period_path[4096]{};
+    char quota_line[128]{};
+    char period_line[128]{};
+    if (std::snprintf(quota_path, sizeof(quota_path), "%s/cpu.cfs_quota_us",
+                      current) <= 0 ||
+        std::snprintf(period_path, sizeof(period_path), "%s/cpu.cfs_period_us",
+                      current) <= 0 ||
+        !read_line(quota_path, quota_line, sizeof(quota_line)) ||
+        !read_line(period_path, period_line, sizeof(period_line))) {
+      return 1;
     }
-    std::int64_t quota = 0;
-    std::int64_t period = 0;
-    if (read_integer(quota_path, quota) && read_integer(period_path, period)) {
-      return quota_capacity(quota, period);
+    char *quota_end = nullptr;
+    char *period_end = nullptr;
+    const auto quota = std::strtoll(quota_line, &quota_end, 10);
+    const auto period = std::strtoll(period_line, &period_end, 10);
+    if (quota_end == quota_line || period_end == period_line || period <= 0) {
+      return 1;
+    }
+    if (quota >= 0) {
+      if (quota == 0) {
+        return 1;
+      }
+      effective = std::min(effective, quota_capacity(quota, period));
+    }
+    if (std::strcmp(current, mountpoint) == 0) {
+      break;
+    }
+    if (!cgroup_view_detail::parent_directory_in_place(current, mountpoint)) {
+      return 1;
     }
   }
-  return std::numeric_limits<std::int64_t>::max();
+  return effective;
 }
 
 [[nodiscard]] inline std::int64_t platform_count() noexcept {

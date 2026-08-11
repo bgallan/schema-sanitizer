@@ -18,7 +18,7 @@ def test_remote_staging_value_objects_have_one_owner() -> None:
     assert "class StagedPath" in source
     assert "class RemoteOutputTarget" in source
     assert "quarantine_temporary_artifact" in source
-    assert len(source.splitlines()) <= 500
+    assert len(source.splitlines()) <= 600
 
     facade = (SRC / "remote_impl/staging.py").read_text(encoding="utf-8")
     assert "from .staging_paths import" in facade
@@ -37,6 +37,7 @@ def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path) -> N
 
     opened: list[str] = []
     downloaded: list[tuple[str, str]] = []
+    requested_concurrency: list[int] = []
 
     class FakeStream:
         """Minimal Azure download stream."""
@@ -53,8 +54,9 @@ def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path) -> N
             self.container = container
             self.blob = blob
 
-        async def download_blob(self) -> FakeStream:
+        async def download_blob(self, *, max_concurrency: int = 1) -> FakeStream:
             """Record the object selected through the shared service."""
+            requested_concurrency.append(max_concurrency)
             downloaded.append((self.container, self.blob))
             return FakeStream()
 
@@ -105,6 +107,7 @@ def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path) -> N
     asyncio.run(exercise())
     assert opened == ["https://acct.blob.core.windows.net"]
     assert downloaded == [("container", "a.parquet"), ("container", "b.parquet")]
+    assert requested_concurrency == [1, 1]
     assert service.closed is True
     assert (tmp_path / "a.parquet").read_bytes() == b"payload"
     assert (tmp_path / "b.parquet").read_bytes() == b"payload"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -344,18 +343,56 @@ _PREPARED_OPTIONS_CACHE_LOCK = Lock()
 _FORKED_OPTIONS_CACHE_KEEPALIVE: list[object] = []
 
 
+_FORK_OPTIONS_BANKS: tuple[tuple[OrderedDict[bytes, Any], Lock], ...] = (
+    (OrderedDict(), Lock()),
+    (OrderedDict(), Lock()),
+)
+_FORK_OPTIONS_BANK_INDEX = 0
+_FORK_PREPARED_OPTIONS_STATE: tuple[OrderedDict[bytes, Any], Lock] | None = None
+
+
+def _prepare_options_cache_for_fork() -> None:
+    global _FORK_PREPARED_OPTIONS_STATE
+    _FORK_PREPARED_OPTIONS_STATE = _FORK_OPTIONS_BANKS[_FORK_OPTIONS_BANK_INDEX]
+
+
+def _clear_options_cache_fork_preparation() -> None:
+    global _FORK_PREPARED_OPTIONS_STATE
+    _FORK_PREPARED_OPTIONS_STATE = None
+
+
 def _reset_prepared_options_cache_after_fork() -> None:
-    """Discard inherited locks and native capsules in a forked child."""
+    """Swap preallocated child cache state without allocating after fork."""
     global _PREPARED_OPTIONS_CACHE, _PREPARED_OPTIONS_CACHE_BYTES
-    global _PREPARED_OPTIONS_CACHE_LOCK
-    quarantine_inherited_state("native-options-cache", _PREPARED_OPTIONS_CACHE)
-    _PREPARED_OPTIONS_CACHE = OrderedDict()
+    global _PREPARED_OPTIONS_CACHE_LOCK, _FORK_PREPARED_OPTIONS_STATE, _FORK_OPTIONS_BANK_INDEX
+    prepared = _FORK_PREPARED_OPTIONS_STATE
+    if prepared is None:
+        from .fork_safety import runtime_fork_poisoned
+
+        if runtime_fork_poisoned():
+            return
+        # Legacy/direct reset calls run in an ordinary process, not inside an
+        # at-fork callback. Reuse the already allocated child bank and clear it
+        # here rather than allocating a fresh OrderedDict/Lock.
+        prepared = _FORK_OPTIONS_BANKS[_FORK_OPTIONS_BANK_INDEX]
+        prepared[0].clear()
+    quarantine_inherited_state(
+        "native-options-cache", _PREPARED_OPTIONS_CACHE, _PREPARED_OPTIONS_CACHE_LOCK
+    )
+    _PREPARED_OPTIONS_CACHE, _PREPARED_OPTIONS_CACHE_LOCK = prepared
     _PREPARED_OPTIONS_CACHE_BYTES = 0
-    _PREPARED_OPTIONS_CACHE_LOCK = Lock()
+    _FORK_PREPARED_OPTIONS_STATE = None
+    _FORK_OPTIONS_BANK_INDEX = 1 - _FORK_OPTIONS_BANK_INDEX
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_prepared_options_cache_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler(
+    "native-options",
+    before=_prepare_options_cache_for_fork,
+    after_in_parent=_clear_options_cache_fork_preparation,
+    after_in_child=_reset_prepared_options_cache_after_fork,
+)
 
 
 def _cached_options_capsule(encoded: bytes) -> Any:

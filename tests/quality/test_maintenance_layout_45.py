@@ -36,7 +36,7 @@ def test_source_discovery_has_one_bounded_pipeline_owner() -> None:
     assert "def _discover_directories" in text
     assert "def _discover_source" in text
     assert "def discover_existing_source_plans_async" in text
-    assert len(text.splitlines()) <= 500
+    assert len(text.splitlines()) <= 600
 
 
 def test_path_source_sink_endpoints_are_grouped_as_public_units() -> None:

@@ -19,8 +19,15 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from .control_plane_budget import (
+    ControlPlaneTicket,
+    release_control_plane,
+    reserve_control_plane,
+)
 from .durations import deadline_ns_from_timeout, remaining_seconds
+from .fork_manager import register_fork_handler
 from .fork_safety import ensure_runtime_fork_safe, quarantine_inherited_state
+from .governed_thread import defer_governed_thread_retirement, start_governed_thread
 from .path_identity import (
     PathIdentity,
     claim_path_identity,
@@ -30,9 +37,12 @@ from .path_identity import (
 )
 from .process_resources import (
     AvailabilityEvent,
+    acquire_file_descriptor_capability,
     acquire_project_threads,
     acquire_teardown_file_descriptors,
     acquire_teardown_project_threads,
+    record_physical_file_descriptors_closed,
+    record_physical_file_descriptors_opened,
     register_project_thread_availability,
     retain_uncertain_fd_close,
     unregister_project_thread_availability,
@@ -50,6 +60,23 @@ _MAX_FAILED_THREAD_LEASES = 1
 _MAX_PENDING_ARTIFACTS = 4096
 _MAX_PENDING_METADATA_BYTES = 8 * 1024 * 1024
 _PENDING_METADATA_BASE = 512
+_MAX_JANITOR_RETRY_OWNERS = 1024
+_JANITOR_RETRY_OWNERS_LOCK = threading.Lock()
+_JANITOR_RETRY_OWNERS: dict[int, object] = {}
+_JANITOR_RETRY_FORK_BANKS: tuple[tuple[threading.Lock, dict[int, object]], ...] = (
+    (threading.Lock(), {}),
+    (threading.Lock(), {}),
+)
+_JANITOR_RETRY_FORK_BANK_INDEX = 0
+_JANITOR_RETRY_FORK_PREPARED: tuple[threading.Lock, dict[int, object]] | None = None
+
+
+def _retry_janitor_owner(token: int) -> None:
+    with _JANITOR_RETRY_OWNERS_LOCK:
+        owner = _JANITOR_RETRY_OWNERS.pop(token, None)
+    if owner is None:
+        return
+    owner._retry_worker_start()  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +102,7 @@ class TemporaryJanitorSnapshot:
     worker_starting: bool = False
     root_fd_active: bool = False
     worker_retiring: bool = False
+    protocol_violations: int = 0
 
 
 def _replace_into_root(source: Path, target_name: str, handle: _QuarantineRootHandle) -> None:
@@ -94,16 +122,22 @@ def _replace_from_root(source_name: str, target: Path, handle: _QuarantineRootHa
         os.replace(handle.path / source_name, target)
 
 
+class _StorageLeaseOwner(Protocol):
+    def release(self) -> None:
+        """Release storage ownership."""
+
+
 @dataclass(slots=True)
 class _PendingArtifact:
     """Internal _PendingArtifact helper."""
 
     path: Path
     is_dir: bool
-    lease: "TemporaryStorageLease"
+    lease: _StorageLeaseOwner
     identity: PathIdentity | None = None
     enqueued_at: float = 0.0
     metadata_bytes: int = 0
+    control_ticket: ControlPlaneTicket | None = None
 
 
 class _StaleArtifactLease:
@@ -206,19 +240,24 @@ def _root_handle() -> _QuarantineRootHandle:
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0)
         )
-        base_lease = acquire_teardown_file_descriptors(1, timeout_seconds=0)
+        # Reserve the parent/root pair atomically.  Acquiring the root lease only
+        # after opening the parent creates a hold-and-wait cycle when teardown FD
+        # capacity is one; one exact two-credit capability removes that cycle.
+        descriptor_lease = acquire_teardown_file_descriptors(2, timeout_seconds=0)
         base_fd = -1
-        root_lease: object | None = None
         root_fd = -1
+        published = False
+        uncertain_close = False
         try:
             base_fd = os.open(base, flags)
+            record_physical_file_descriptors_opened(1)
             try:
                 os.mkdir(directory_name, 0o700, dir_fd=base_fd)
             except FileExistsError:
                 pass
-            root_lease = acquire_teardown_file_descriptors(1, timeout_seconds=0)
             try:
                 root_fd = os.open(directory_name, flags, dir_fd=base_fd)
+                record_physical_file_descriptors_opened(1)
             except OSError as exc:
                 if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise OSError("temporary quarantine must be a real directory") from exc
@@ -233,16 +272,37 @@ def _root_handle() -> _QuarantineRootHandle:
             if uid is not None and metadata.st_uid != uid:
                 raise OSError("temporary quarantine must be owned by the current user")
             os.fchmod(root_fd, 0o700)
+
+            # The parent authority is no longer needed.  Prove its physical close
+            # before shrinking the exact two-credit lease to the one persistent
+            # root descriptor transferred into the process root handle.
+            try:
+                os.close(base_fd)
+            except BaseException:
+                # A failed close leaves the numeric descriptor authority
+                # ambiguous.  Never retry that number: it may already have been
+                # closed/reused.  Keep its physical count and the exact bundle
+                # as terminal debt instead.
+                uncertain_close = True
+                base_fd = -1
+                raise
+            else:
+                record_physical_file_descriptors_closed(1)
+                base_fd = -1
+            descriptor_lease.shrink(1)
+
             handle = _QuarantineRootHandle(
-                root, root_fd, root_lease, metadata.st_dev, metadata.st_ino, os.getpid()
+                root, root_fd, descriptor_lease, metadata.st_dev, metadata.st_ino, os.getpid()
             )
             _ROOT_HANDLE = handle
             root_fd = -1
-            root_lease = None
+            published = True
             return handle
         finally:
-            _close_or_retain_descriptor(root_fd, root_lease)
-            _close_or_retain_descriptor(base_fd, base_lease)
+            if not published:
+                _close_descriptor_bundle_or_retain(
+                    (root_fd, base_fd), descriptor_lease, force_debt=uncertain_close
+                )
 
 
 def _close_root_handle() -> bool:
@@ -356,6 +416,8 @@ class _JanitorDescriptorOwner:
                 os.close(descriptor)
             except BaseException as exc:
                 close_error = exc
+            else:
+                record_physical_file_descriptors_closed(1)
         lease_error: BaseException | None = None
         if close_error is not None and lease is not None:
             retained_as_debt = retain_uncertain_fd_close(lease, label="temporary-janitor")
@@ -376,6 +438,38 @@ class _JanitorDescriptorOwner:
             raise close_error
         if lease_error is not None:
             raise lease_error
+
+
+def _close_descriptor_bundle_or_retain(
+    descriptors: tuple[int, ...], lease: object | None, *, force_debt: bool = False
+) -> None:
+    """Best-effort-close a bundle without ever losing its exact reservation."""
+    uncertain = bool(force_debt)
+    for descriptor in descriptors:
+        if descriptor < 0:
+            continue
+        try:
+            os.close(descriptor)
+        except BaseException as exc:
+            # Do not retry an ambiguously closed numeric descriptor.  Preserve
+            # the physical count and exact lease as conservative terminal debt.
+            clear_exception_traceback(exc)
+            uncertain = True
+        else:
+            record_physical_file_descriptors_closed(1)
+    if lease is None:
+        return
+    if uncertain:
+        try:
+            retain_uncertain_fd_close(lease, label="temporary-janitor-bundle")
+        except BaseException as exc:
+            clear_exception_traceback(exc)
+            try:
+                adopt_failed_release(lease, retained_bytes=256)
+            except BaseException as adopt_error:
+                clear_exception_traceback(adopt_error)
+        return
+    _release_scan_fd_lease(lease)
 
 
 def _close_or_retain_descriptor(descriptor: int, lease: object | None) -> None:
@@ -417,6 +511,11 @@ class _TemporaryArtifactJanitor:
         self._failed_thread_leases: deque[_Releasable] = deque()
         self._terminal_failed_thread_lease: _Releasable | None = None
         self._closed = False
+        # Child synchronization/container banks are constructed during normal
+        # runtime, not in the at-fork prepare callback.
+        self._fork_banks = (self._new_fork_bank(), self._new_fork_bank())
+        self._fork_bank_index = 0
+        self._fork_prepared: tuple[object, ...] | None = None
         self._scanned = False
         self._scan_entries: Iterator[Path] | None = None
         self._quarantined = 0
@@ -425,11 +524,27 @@ class _TemporaryArtifactJanitor:
         self._identity_mismatches = 0
         self._worker_start_failures = 0
         self._quarantine_inflight = 0
+        self._protocol_violations = 0
         self._worker_starting = False
         self._stale_private_artifacts = 0
         self._pending_metadata_bytes = 0
         self._quarantine_reserved_metadata_bytes = 0
         self._rejected_artifacts = 0
+
+    @staticmethod
+    def _new_fork_bank() -> tuple[object, ...]:
+        lock = threading.RLock()
+        return (
+            lock,
+            threading.Condition(lock),
+            threading.Lock(),
+            threading.Event(),
+            {},
+            deque(),
+            deque(),
+            threading.Lock(),
+            deque(),
+        )
 
     @staticmethod
     def root() -> Path:
@@ -573,22 +688,53 @@ class _TemporaryArtifactJanitor:
         used = self._pending_metadata_bytes + self._quarantine_reserved_metadata_bytes
         return charge <= _MAX_PENDING_METADATA_BYTES - used
 
+    def _publish_pending_locked(self, key: str, artifact: _PendingArtifact) -> None:
+        """Publish dict+FIFO membership transactionally under the janitor lock."""
+        try:
+            self._pending[key] = artifact
+            try:
+                self._pending_order.append(key)
+            except BaseException:
+                self._pending.pop(key, None)
+                raise
+        except BaseException:
+            raise
+        self._pending_metadata_bytes += artifact.metadata_bytes
+
+    @staticmethod
+    def _retire_pending_control_noexcept(artifact: _PendingArtifact) -> None:
+        """Retire a janitor control charge without risking worker liveness."""
+        ticket = artifact.control_ticket
+        try:
+            if ticket is not None and release_control_plane(ticket):
+                artifact.control_ticket = None
+        except BaseException as exc:
+            # Keep the exact capability attached if authentication failed; a
+            # later safe point can retry without losing the only owner token.
+            clear_exception_traceback(exc)
+
     @staticmethod
     def _iter_directory(path: Path) -> Iterator[Path]:
         """Stream one directory while charging its live scandir descriptor."""
         _drain_failed_scan_fd_leases()
-        lease = acquire_teardown_file_descriptors(1, timeout_seconds=0)
-        scan_target: str | int | Path = path
         handle = _pinned_handle_for_path(path)
-        if handle is not None:
-            scan_target = handle.descriptor
-        try:
-            with os.scandir(scan_target) as entries:
+        with acquire_file_descriptor_capability(
+            1, timeout_seconds=0, teardown=True, label="temporary_janitor_scandir"
+        ) as capability:
+            if handle is not None:
+                # POSIX scandir(fd) duplicates the supplied directory descriptor;
+                # the duplicate owns its own physical slot for the iterator life.
+                entries_owner = capability.scandir(
+                    handle.descriptor, label="temporary_janitor_scandir_pinned"
+                )
+            else:
+                entries_owner = capability.scandir_path(
+                    path, label="temporary_janitor_scandir_path"
+                )
+            with entries_owner as entries:
                 for entry in entries:
                     entry_path = Path(entry.path)
                     yield entry_path if entry_path.is_absolute() else path / entry_path
-        finally:
-            _release_scan_fd_lease(lease)
 
     def _stale_scan_candidates(self) -> Iterator[Path]:
         """Yield crash leftovers while every live directory FD is governed."""
@@ -654,6 +800,17 @@ class _TemporaryArtifactJanitor:
                         continue
                     if identity is None:
                         continue
+                    try:
+                        control_ticket = reserve_control_plane("temporary_janitor_artifact", 384)
+                    except BaseException:
+                        try:
+                            release_path_identity(identity)
+                        except BaseException as exc:
+                            clear_exception_traceback(exc)
+                        with self._lock:
+                            self._rejected_artifacts += 1
+                        return
+                    transferred_ticket = False
                     if self._delete(child, stat.S_ISDIR(metadata.st_mode), identity):
                         try:
                             release_path_identity(identity)
@@ -661,41 +818,66 @@ class _TemporaryArtifactJanitor:
                             # The inode is gone; retain the claim/FD cleanup as a
                             # normal pending owner instead of silently dropping it.
                             key = f"stale-release:{child}:{id(identity)}"
-                            with self._lock:
-                                self._pending[key] = _PendingArtifact(
-                                    child,
-                                    stat.S_ISDIR(metadata.st_mode),
-                                    _STALE_ARTIFACT_LEASE,  # type: ignore[arg-type]
-                                    identity,
-                                    time.monotonic(),
-                                    child_charge,
-                                )
-                                self._pending_metadata_bytes += child_charge
-                                self._pending_order.append(key)
-                                self._stale_private_artifacts += 1
+                            artifact = _PendingArtifact(
+                                child,
+                                stat.S_ISDIR(metadata.st_mode),
+                                _STALE_ARTIFACT_LEASE,
+                                identity,
+                                time.monotonic(),
+                                child_charge,
+                                control_ticket,
+                            )
+                            try:
+                                with self._lock:
+                                    self._publish_pending_locked(key, artifact)
+                                    self._stale_private_artifacts += 1
+                                transferred_ticket = True
+                            except BaseException as exc:
+                                clear_exception_traceback(exc)
+                                with self._lock:
+                                    self._rejected_artifacts += 1
+                        # A fully deleted+released stale artifact needs no queue charge.
                     else:
                         key = str(child)
+                        artifact = _PendingArtifact(
+                            child,
+                            stat.S_ISDIR(metadata.st_mode),
+                            _STALE_ARTIFACT_LEASE,
+                            identity,
+                            time.monotonic(),
+                            child_charge,
+                            control_ticket,
+                        )
                         with self._lock:
                             if key not in self._pending:
-                                self._pending[key] = _PendingArtifact(
-                                    child,
-                                    stat.S_ISDIR(metadata.st_mode),
-                                    _STALE_ARTIFACT_LEASE,  # type: ignore[arg-type]
-                                    identity,
-                                    time.monotonic(),
-                                    child_charge,
-                                )
-                                self._pending_metadata_bytes += child_charge
-                                self._pending_order.append(key)
+                                try:
+                                    self._publish_pending_locked(key, artifact)
+                                except BaseException as exc:
+                                    clear_exception_traceback(exc)
+                                    self._rejected_artifacts += 1
+                                else:
+                                    transferred_ticket = True
                             else:
                                 try:
                                     release_path_identity(identity)
-                                except BaseException:
-                                    pass
+                                except BaseException as exc:
+                                    clear_exception_traceback(exc)
                             self._stale_private_artifacts += 1
                         self._wake.set()
+                    if not transferred_ticket:
+                        try:
+                            release_control_plane(control_ticket)
+                        except BaseException as exc:
+                            clear_exception_traceback(exc)
             except OSError:
                 self._scan_entries = None
+
+    def _finish_quarantine_inflight_locked(self) -> None:
+        """Retire one quarantine operation without masking protocol underflow."""
+        if self._quarantine_inflight <= 0:
+            self._protocol_violations += 1
+            return
+        self._quarantine_inflight -= 1
 
     def quarantine(
         self,
@@ -717,6 +899,18 @@ class _TemporaryArtifactJanitor:
                 return False
             self._quarantine_inflight += 1
             self._quarantine_reserved_metadata_bytes += metadata_charge
+
+        try:
+            control_ticket = reserve_control_plane("temporary_janitor_artifact", 384)
+        except BaseException:
+            with self._condition:
+                self._finish_quarantine_inflight_locked()
+                self._quarantine_reserved_metadata_bytes = max(
+                    0, self._quarantine_reserved_metadata_bytes - metadata_charge
+                )
+                self._rejected_artifacts += 1
+                self._condition.notify_all()
+            return False
 
         retained_path = source
         retained_identity: PathIdentity | None = None
@@ -808,25 +1002,30 @@ class _TemporaryArtifactJanitor:
                     if key in self._pending:
                         release_duplicate = True
                     else:
-                        self._pending_order.append(key)
-                        self._pending[key] = _PendingArtifact(
+                        artifact = _PendingArtifact(
                             retained_path,
                             is_dir,
                             lease,
                             retained_identity,
                             time.monotonic(),
                             metadata_charge,
+                            control_ticket,
                         )
-                        self._pending_metadata_bytes += metadata_charge
+                        self._publish_pending_locked(key, artifact)
                         self._quarantined += 1
                         accepted = True
         finally:
             with self._condition:
-                self._quarantine_inflight = max(0, self._quarantine_inflight - 1)
+                self._finish_quarantine_inflight_locked()
                 self._quarantine_reserved_metadata_bytes = max(
                     0, self._quarantine_reserved_metadata_bytes - metadata_charge
                 )
                 self._condition.notify_all()
+            if not accepted:
+                try:
+                    release_control_plane(control_ticket)
+                except BaseException as exc:
+                    clear_exception_traceback(exc)
 
         if mismatch:
             if claimed_here:
@@ -959,7 +1158,7 @@ class _TemporaryArtifactJanitor:
             self._release_thread_lease_owner(lease)
             return
         try:
-            thread.start()
+            start_governed_thread(thread)
         except BaseException as exc:
             with self._condition:
                 if self._thread is thread:
@@ -1005,13 +1204,28 @@ class _TemporaryArtifactJanitor:
             not self._pending and not self._has_failed_thread_leases_locked()
         ):
             return
-        self._retry_scheduled = schedule_retry(
-            ("temporary-janitor", id(self)),
-            self._retry_worker_start,
-            delay_seconds=_RETRY_SECONDS,
-            retained_bytes=1024,
-            jitter_fraction=0.2,
-        )
+        retry_token = id(self)
+        with _JANITOR_RETRY_OWNERS_LOCK:
+            if (
+                retry_token not in _JANITOR_RETRY_OWNERS
+                and len(_JANITOR_RETRY_OWNERS) >= _MAX_JANITOR_RETRY_OWNERS
+            ):
+                self._retry_scheduled = False
+            else:
+                _JANITOR_RETRY_OWNERS[retry_token] = self
+
+                def retry_owner(token: int = retry_token) -> None:
+                    _retry_janitor_owner(token)
+
+                self._retry_scheduled = schedule_retry(
+                    ("temporary-janitor", retry_token),
+                    retry_owner,
+                    delay_seconds=_RETRY_SECONDS,
+                    retained_bytes=1024,
+                    jitter_fraction=0.2,
+                )
+                if not self._retry_scheduled:
+                    _JANITOR_RETRY_OWNERS.pop(retry_token, None)
         if not self._retry_scheduled and not self._availability_registered:
             self._availability_registered = bool(
                 register_project_thread_availability(AvailabilityEvent.TEMPORARY_JANITOR)
@@ -1116,6 +1330,7 @@ class _TemporaryArtifactJanitor:
                                 self._pending_metadata_bytes = max(
                                     0, self._pending_metadata_bytes - artifact.metadata_bytes
                                 )
+                                self._retire_pending_control_noexcept(artifact)
                                 self._deleted += 1
                 else:
                     current_identity = lstat_identity(artifact.path)
@@ -1168,6 +1383,26 @@ class _TemporaryArtifactJanitor:
         self._condition.notify_all()
 
     def _release_thread_lease_owner(self, lease: _Releasable | None) -> None:
+        current = threading.current_thread()
+        thread = self._thread
+        if lease is not None and thread is current and thread.is_alive():
+            try:
+                retired = defer_governed_thread_retirement(thread, lease.release)
+            except BaseException:
+                retired = False
+            with self._condition:
+                if retired:
+                    if self._thread_lease is lease:
+                        self._thread_lease = None
+                    if self._thread is current:
+                        self._thread = None
+                # If bounded retirement publication failed, retain both fields.
+                # The next governed path observes a dead stale thread and can
+                # release safely; no permit is returned before physical exit.
+                if self._retiring_thread is current:
+                    self._retiring_thread = None
+                self._condition.notify_all()
+            return
         try:
             if lease is not None:
                 try:
@@ -1183,15 +1418,14 @@ class _TemporaryArtifactJanitor:
                             self._schedule_retry_locked()
                             self._condition.notify_all()
         finally:
-            current = threading.current_thread()
             with self._condition:
                 if self._retiring_thread is current:
                     self._retiring_thread = None
-                    if self._thread is current:
-                        self._thread = None
-                    if self._thread_lease is lease:
-                        self._thread_lease = None
-                    self._condition.notify_all()
+                if thread is current and not current.is_alive():
+                    self._thread = None
+                if self._thread_lease is lease and (thread is None or not thread.is_alive()):
+                    self._thread_lease = None
+                self._condition.notify_all()
 
     def _run(self) -> None:
         """Retry bounded batches while retaining failed-artifact leases."""
@@ -1263,6 +1497,7 @@ class _TemporaryArtifactJanitor:
                 self._worker_starting,
                 _ROOT_HANDLE is not None,
                 self._retiring_thread is not None,
+                self._protocol_violations,
             )
 
     def close(self, *, deadline_seconds: float = 5.0) -> bool:
@@ -1282,6 +1517,7 @@ class _TemporaryArtifactJanitor:
                     or self._has_failed_thread_leases_locked()
                     or bool(_FAILED_SCAN_FD_LEASES)
                     or (thread is not None and thread.is_alive())
+                    or self._protocol_violations
                 )
         with self._condition:
             self._closed = True
@@ -1343,36 +1579,62 @@ class _TemporaryArtifactJanitor:
                 or self._has_failed_thread_leases_locked()
                 or bool(_FAILED_SCAN_FD_LEASES)
                 or (thread is not None and thread.is_alive())
+                or self._protocol_violations
             )
         return bool(quiescent and _close_root_handle())
 
+    def prepare_for_fork(self) -> None:
+        """Select a complete child bank allocated during normal runtime."""
+        self._fork_prepared = self._fork_banks[self._fork_bank_index]
+
+    def clear_fork_preparation(self) -> None:
+        self._fork_prepared = None
+
     def reset_after_fork(self) -> None:
-        """Quarantine inherited state without touching parent-owned locks."""
+        """Install only preallocated child state; never allocate after fork."""
         from .fork_safety import fork_quarantine_generation
 
         if fork_quarantine_generation() > 1:
             return
+        prepared = self._fork_prepared
+        if prepared is None:
+            # fork_safety poisons the child; do not touch inherited locks if the
+            # prepare phase could not produce a safe bank.
+            return
         global _ROOT_HANDLE, _ROOT_HANDLE_LOCK, _CLOSING_ROOT_OWNERS
+        (
+            lock,
+            condition,
+            scan_lock,
+            wake,
+            pending,
+            pending_order,
+            failed_thread_leases,
+            root_lock,
+            closing_roots,
+        ) = prepared
+        self._fork_prepared = None
+        self._fork_bank_index = 1 - self._fork_bank_index
         if _ROOT_HANDLE is not None:
-            _FORKED_ROOT_HANDLES.append(_ROOT_HANDLE)
+            quarantine_inherited_state("janitor-root-handle", _ROOT_HANDLE)
         if _CLOSING_ROOT_OWNERS:
-            quarantine_inherited_state("janitor-closing-roots", *tuple(_CLOSING_ROOT_OWNERS))
-        _CLOSING_ROOT_OWNERS = deque()
+            quarantine_inherited_state("janitor-closing-roots", _CLOSING_ROOT_OWNERS)
+        quarantine_inherited_state("temporary-janitor", self.__dict__)
+        _CLOSING_ROOT_OWNERS = closing_roots  # type: ignore[assignment]
         _ROOT_HANDLE = None
-        _ROOT_HANDLE_LOCK = threading.Lock()
-        quarantine_inherited_state("temporary-janitor", *tuple(self.__dict__.values()))
-        self._lock = threading.RLock()
-        self._condition = threading.Condition(self._lock)
-        self._scan_lock = threading.Lock()
-        self._wake = threading.Event()
-        self._pending = {}
-        self._pending_order = deque()
+        _ROOT_HANDLE_LOCK = root_lock  # type: ignore[assignment]
+        self._lock = lock  # type: ignore[assignment]
+        self._condition = condition  # type: ignore[assignment]
+        self._scan_lock = scan_lock  # type: ignore[assignment]
+        self._wake = wake  # type: ignore[assignment]
+        self._pending = pending  # type: ignore[assignment]
+        self._pending_order = pending_order  # type: ignore[assignment]
         self._thread = None
         self._thread_lease = None
         self._retiring_thread = None
         self._retry_scheduled = False
         self._availability_registered = False
-        self._failed_thread_leases = deque()
+        self._failed_thread_leases = failed_thread_leases  # type: ignore[assignment]
         self._terminal_failed_thread_lease = None
         self._closed = False
         self._scanned = False
@@ -1380,6 +1642,7 @@ class _TemporaryArtifactJanitor:
         self._identity_mismatches = 0
         self._worker_start_failures = 0
         self._quarantine_inflight = 0
+        self._protocol_violations = 0
         self._worker_starting = False
         self._stale_private_artifacts = 0
         self._pending_metadata_bytes = 0
@@ -1417,8 +1680,41 @@ def sweep_temporary_quarantine() -> None:
     _JANITOR.sweep()
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_JANITOR.reset_after_fork)
+def _prepare_janitor_retry_owners_for_fork() -> None:
+    global _JANITOR_RETRY_FORK_PREPARED
+    _JANITOR_RETRY_FORK_PREPARED = _JANITOR_RETRY_FORK_BANKS[_JANITOR_RETRY_FORK_BANK_INDEX]
+
+
+def _clear_janitor_retry_fork_preparation() -> None:
+    global _JANITOR_RETRY_FORK_PREPARED
+    _JANITOR_RETRY_FORK_PREPARED = None
+
+
+def _reset_janitor_retry_owners_after_fork() -> None:
+    global _JANITOR_RETRY_OWNERS_LOCK, _JANITOR_RETRY_OWNERS, _JANITOR_RETRY_FORK_PREPARED
+    global _JANITOR_RETRY_FORK_BANK_INDEX
+    prepared = _JANITOR_RETRY_FORK_PREPARED
+    _JANITOR_RETRY_FORK_PREPARED = None
+    if prepared is None:
+        return
+    quarantine_inherited_state("janitor-retry-owners", _JANITOR_RETRY_OWNERS)
+    _JANITOR_RETRY_OWNERS_LOCK, _JANITOR_RETRY_OWNERS = prepared
+    _JANITOR_RETRY_FORK_BANK_INDEX = 1 - _JANITOR_RETRY_FORK_BANK_INDEX
+
+
+register_fork_handler(
+    "temporary-janitor",
+    before=_JANITOR.prepare_for_fork,
+    after_in_parent=_JANITOR.clear_fork_preparation,
+    after_in_child=_JANITOR.reset_after_fork,
+)
+register_fork_handler(
+    "temporary-janitor-retry-owners",
+    before=_prepare_janitor_retry_owners_for_fork,
+    after_in_parent=_clear_janitor_retry_fork_preparation,
+    after_in_child=_reset_janitor_retry_owners_after_fork,
+)
+
 atexit.register(_JANITOR.close)
 
 

@@ -14,7 +14,9 @@ class FakeResponse:
 
     def __init__(self, payload: dict[str, object]):
         """Store one JSON response payload."""
-        self._payload = payload
+        self._body = json.dumps(payload).encode()
+        self._offset = 0
+        self.content = self
 
     async def __aenter__(self):
         """Return this fake response."""
@@ -24,9 +26,16 @@ class FakeResponse:
         """Close this fake response."""
         return None
 
-    async def text(self) -> str:
-        """Return the JSON response body."""
-        return json.dumps(self._payload)
+    async def read(self, size: int) -> bytes:
+        """Return at most ``size`` bytes through the bounded reader API."""
+        end = min(len(self._body), self._offset + size)
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
+
+    def at_eof(self) -> bool:
+        """Report whether the bounded fake body has been consumed."""
+        return self._offset == len(self._body)
 
 
 # Split from test_input_remote_staging.py: test_remote_gcs_directory_listing_reads_all_pages, test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes, test_remote_s3_bulk_directory_discovery_groups_parent_prefixes, ...

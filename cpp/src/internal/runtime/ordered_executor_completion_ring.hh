@@ -10,6 +10,8 @@ namespace sanitize::internal {
 template <class Packet> struct ScheduledOrdinalPacket final {
   Packet packet;
   std::size_t completion_slot = 0;
+  // Queue-retention charge owned by the packet until its result replaces it.
+  std::size_t retained_bytes = 0;
 };
 
 // Submission and consumption are each single-coordinator operations protected

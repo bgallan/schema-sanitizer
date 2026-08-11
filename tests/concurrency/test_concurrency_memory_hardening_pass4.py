@@ -11,9 +11,9 @@ import pytest
 
 from schema_sanitizer.core_impl import memory_budget as memory_budget_module
 from schema_sanitizer.core_impl.cross_process_storage import (
+    _release_cross_process_raw,
+    _reserve_cross_process_raw,
     cross_process_reserved_bytes,
-    release_cross_process,
-    reserve_cross_process,
 )
 from schema_sanitizer.core_impl.memory_budget import (
     ProcessResidentMemorySnapshot,
@@ -44,11 +44,11 @@ def _reserve_in_child(
     os.environ["SCHEMA_SANITIZER_CROSS_PROCESS_TEMP_RESERVATIONS"] = "1"
     os.environ["SCHEMA_SANITIZER_COORDINATION_DIR"] = directory
     try:
-        total = reserve_cross_process(device, requested, capacity)
+        total = _reserve_cross_process_raw(device, requested, capacity)
         result.put(("reserved", total))
         ready.set()
         release.wait(timeout=5)
-        release_cross_process(device, requested)
+        _release_cross_process_raw(device, requested)
     except BaseException as exc:  # pragma: no cover - returned to parent
         result.put(("error", type(exc).__name__, str(exc)))
         ready.set()
@@ -73,7 +73,7 @@ def test_cross_process_reservations_reject_combined_overcommit(
     assert ready.wait(timeout=5)
     assert result.get(timeout=2) == ("reserved", 70)
     with pytest.raises(OSError, match="cross-process"):
-        reserve_cross_process(99123, 40, 100)
+        _reserve_cross_process_raw(99123, 40, 100)
     assert cross_process_reserved_bytes(99123) == 70
     release.set()
     child.join(timeout=5)
@@ -101,8 +101,8 @@ def test_cross_process_registry_reclaims_dead_owner(
     }
     path = tmp_path / "schema-sanitizer-temp-77.json"
     path.write_text(json.dumps(state), encoding="utf-8")
-    assert reserve_cross_process(77, 80, 100) == 80
-    release_cross_process(77, 80)
+    assert _reserve_cross_process_raw(77, 80, 100) == 80
+    _release_cross_process_raw(77, 80)
     assert cross_process_reserved_bytes(77) == 0
 
 

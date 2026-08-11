@@ -8,9 +8,18 @@ from time import perf_counter
 from typing import Protocol
 from urllib.parse import urlparse
 
-from ..core_impl.async_scheduler import ordered_indexed_results
+from ..core_impl.async_scheduler import (
+    AsyncResultMemoryContract,
+    AsyncResultOwnershipMode,
+    ordered_indexed_results,
+)
 from ..core_impl.execution_policy import execution_policy, normalize_threading_mode
-from ..core_impl.memory_budget import normalize_memory_limit
+from ..core_impl.memory_budget import (
+    GovernedResultOwnership,
+    no_retained_result_ownership_capability,
+    normalize_memory_limit,
+    operation_memory_ownership_capability,
+)
 from ..core_impl.uris import (
     LocationKind,
     RemoteProvider,
@@ -34,7 +43,52 @@ from .source_discovery_budget import (
     run_async_discovery_with_budget,
     run_public_source_discovery,
 )
+from .source_discovery_memory import (
+    bounded_remaining_sources,
+    cached_source_summary,
+    precharge_source_locations,
+    source_summary,
+)
 from .types import PartitionRunPlan, SourcePlanDiscovery
+
+
+def _discovery_result_external_ownership_capability(
+    value: object,
+) -> GovernedResultOwnership | None:
+    """Return a runtime-issued lease capability for escaped discovery metadata."""
+    if not isinstance(value, tuple) or len(value) < 2:
+        return None
+    discovered = value[1]
+    if discovered is None:
+        # The runtime, not the caller, certifies that there is no external
+        # payload requiring a memory lease for this result generation.
+        return no_retained_result_ownership_capability()
+    if not isinstance(discovered, DiscoveredDirectoryInput):
+        return None
+    owner = getattr(discovered, "_metadata_owner", None)
+    live_lease = getattr(owner, "live_lease", None)
+    if not callable(live_lease):
+        return None
+    # Pass61: every independently escapable file record carries the same stable
+    # owner.  The scheduler therefore does not accept a container-level proof
+    # if any payload element could outlive that ownership graph on its own.
+    for local_file in discovered.local_files:
+        if getattr(local_file, "_metadata_owner", None) is not owner:
+            return None
+    for remote_file in discovered.remote_files:
+        if getattr(remote_file, "_metadata_owner", None) is not owner:
+            return None
+    return operation_memory_ownership_capability(live_lease())
+
+
+_DISCOVERY_RESULT_MEMORY_CONTRACT = AsyncResultMemoryContract(
+    preflight_bytes=512,
+    ownership_mode=AsyncResultOwnershipMode.EXTERNALLY_GOVERNED,
+    external_ownership_capability=_discovery_result_external_ownership_capability,
+)
+# Pass54 compatibility breadcrumb: expected_retained_bytes=512. The long-lived
+# directory metadata is charged by DirectoryMetadataBudget; this contract only
+# governs the scheduler bridge shell until the consumer adopts the result.
 
 
 class _DirectoryDiscoveryModule(Protocol):
@@ -114,7 +168,8 @@ def _local_directories_containing_files(
     groups: dict[Path, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for uri, kind in locations.items():
         path = _local_path(uri, kind)
-        groups[path.parent][path.name].append(uri)
+        # pass63 proof anchor: metadata_budget.charge_group_associations()
+        discovery.publish_group_association(lambda: groups[path.parent][path.name].append(uri))
 
     for parent, children in groups.items():
         try:
@@ -244,7 +299,7 @@ async def _discover_source(
                 if remote_files
                 else None
             )
-            return bool(remote_files), discovered, *_source_summary(discovered)
+            return bool(remote_files), discovered, *source_summary(discovered)
         remote_file = await routing.remote_file_metadata(
             uri,
             memory_limit_bytes=memory_limit_bytes,
@@ -266,7 +321,7 @@ async def _discover_source(
             if local_files
             else None
         )
-        return bool(local_files), discovered, *_source_summary(discovered)
+        return bool(local_files), discovered, *source_summary(discovered)
     path = _local_path(uri, kind)
     if not path.is_file():
         return False, None, None, None
@@ -275,22 +330,6 @@ async def _discover_source(
     except OSError:
         size = None
     return True, None, 1, size
-
-
-def _source_summary(
-    discovered: DiscoveredDirectoryInput | None,
-) -> tuple[int | None, int | None]:
-    """Return the complete file count and byte total for discovered input."""
-    if discovered is None:
-        return None, None
-    sizes = [file.size for file in discovered.local_files]
-    sizes.extend(file.size for file in discovered.remote_files)
-    total_bytes = (
-        sum(size for size in sizes if size is not None)
-        if all(size is not None for size in sizes)
-        else None
-    )
-    return len(sizes), total_bytes
 
 
 def _unique_source_locations(plans: list[PartitionRunPlan]) -> dict[str, LocationKind]:
@@ -313,6 +352,7 @@ def _unique_source_locations(plans: list[PartitionRunPlan]) -> dict[str, Locatio
 def _partition_plans(
     plans: list[PartitionRunPlan],
     *,
+    metadata_owner: object | None = None,
     exists_by_uri: dict[str, bool],
     discovered_by_uri: dict[str, DiscoveredDirectoryInput],
     discovery_seconds_by_uri: dict[str, float],
@@ -322,14 +362,18 @@ def _partition_plans(
     """Split plans into existing and skipped groups with reusable metadata."""
     existing: list[PartitionRunPlan] = []
     skipped: list[PartitionRunPlan] = []
+    # Many partition plans can share one discovered directory object. Cache the
+    # streaming count/byte summary by object identity so high-cardinality plans
+    # do not rescan the same file tuple repeatedly.
+    summary_by_identity: dict[int, tuple[int | None, int | None]] = {}
     for plan in plans:
         if not exists_by_uri.get(plan.source_uri, False):
-            skipped.append(plan)
+            skipped.append(plan.with_metadata_owner(metadata_owner))
             continue
         discovered = discovered_by_uri.get(plan.source_uri)
-        discovered_count, discovered_bytes = _source_summary(discovered)
+        discovered_count, discovered_bytes = cached_source_summary(summary_by_identity, discovered)
         existing.append(
-            plan.with_discovery_timing(
+            plan.with_metadata_owner(metadata_owner).with_discovery_timing(
                 discovered,
                 discovery_seconds_by_uri.get(plan.source_uri, 0.0),
                 source_file_count=source_file_count_by_uri.get(
@@ -372,7 +416,9 @@ async def _discover_existing_source_plans_async_impl(
         raise ValueError("input_mode must be 'single_file' or 'directory'")
 
     extensions = _source_extensions(input_format, source_file_extension)
-    source_locations = _unique_source_locations(plans)
+    metadata_budget, source_locations, metadata_owner = precharge_source_locations(
+        plans, memory_limit_bytes=memory_limit_bytes
+    )
     window = execution_policy(threading_mode, memory_limit_bytes).source_discovery_concurrency
     exists_by_uri: dict[str, bool] = {}
     discovered_by_uri: dict[str, DiscoveredDirectoryInput] = {}
@@ -392,9 +438,7 @@ async def _discover_existing_source_plans_async_impl(
             threading_mode=threading_mode,
         )
 
-    remaining = [
-        (uri, kind) for uri, kind in source_locations.items() if uri not in bulk_checked_uris
-    ]
+    remaining = bounded_remaining_sources(source_locations, bulk_checked_uris, metadata_budget)
 
     async def check_index(
         index: int,
@@ -427,6 +471,7 @@ async def _discover_existing_source_plans_async_impl(
         len(remaining),
         check_index,
         window=window,
+        memory_contract=_DISCOVERY_RESULT_MEMORY_CONTRACT,
     ):
         (
             exists,
@@ -445,6 +490,7 @@ async def _discover_existing_source_plans_async_impl(
 
     return _partition_plans(
         plans,
+        metadata_owner=metadata_owner,
         exists_by_uri=exists_by_uri,
         discovered_by_uri=discovered_by_uri,
         discovery_seconds_by_uri=discovery_seconds_by_uri,

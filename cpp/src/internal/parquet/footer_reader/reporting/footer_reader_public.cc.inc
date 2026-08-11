@@ -7,10 +7,18 @@ sanitize::Result<FooterInfo>
 read_footer_metadata_impl(const std::string &path,
                           const std::vector<std::string> &projected_columns,
                           std::int64_t memory_limit_bytes = -1) {
+  sanitize::internal::ProcessFdPermitLease fd_lease(1U);
+  if (!fd_lease) {
+    return sanitize::Status::IOError(
+        "Parquet footer: file-descriptor admission exhausted");
+  }
   std::ifstream file(path, std::ios::binary);
   if (!file) {
     return sanitize::Status::IOError("Parquet footer: failed opening input");
   }
+  fd_lease.mark_opened();
+  sanitize::internal::ProcessFdStreamCloseGuard<std::ifstream> close_guard(
+      file, fd_lease);
   file.seekg(0, std::ios::end);
   const auto end_pos = file.tellg();
   if (end_pos < static_cast<std::streampos>(8)) {
@@ -67,10 +75,18 @@ read_footer_info_impl(const std::string &path,
                       const std::vector<std::string> &projected_columns) {
   SAN_ASSIGN_OR_RAISE(auto info,
                       read_footer_metadata_impl(path, projected_columns));
+  sanitize::internal::ProcessFdPermitLease fd_lease(1U);
+  if (!fd_lease) {
+    return sanitize::Status::IOError(
+        "Parquet footer: file-descriptor admission exhausted");
+  }
   std::ifstream file(path, std::ios::binary);
   if (!file) {
     return sanitize::Status::IOError("Parquet footer: failed opening input");
   }
+  fd_lease.mark_opened();
+  sanitize::internal::ProcessFdStreamCloseGuard<std::ifstream> close_guard(
+      file, fd_lease);
   SAN_RETURN_NOT_OK(read_page_headers(file, &info));
   SAN_RETURN_NOT_OK(read_page_indexes(file, &info));
   SAN_RETURN_NOT_OK(assign_native_read_page_spans(&info));
@@ -183,11 +199,18 @@ make_arrow_stream(const std::string &path,
   state->max_row_group_bytes = operation_budget.parquet_row_group_bytes;
   state->page_scratch.max_page_bytes = static_cast<std::size_t>(
       std::max<std::int64_t>(1, state->max_page_bytes));
+  sanitize::internal::ProcessFdPermitLease stream_fd_lease(1U);
+  if (!stream_fd_lease) {
+    return sanitize::Status::IOError(
+        "native Parquet reader: file-descriptor admission exhausted");
+  }
   state->file.open(path, std::ios::binary);
   if (!state->file) {
     return sanitize::Status::IOError(
         "native Parquet reader: failed opening input");
   }
+  stream_fd_lease.mark_opened();
+  state->file_fd_lease = std::move(stream_fd_lease);
   state->footer = std::move(info);
   // Output layout depends on schema/path metadata, not decoded page payloads.
   // Build it now while page headers, dictionaries and levels remain unloaded.
@@ -331,11 +354,18 @@ read_stream_preflight_json(const std::string &path,
   state.max_row_group_bytes = operation_budget.parquet_row_group_bytes;
   state.page_scratch.max_page_bytes =
       static_cast<std::size_t>(std::max<std::int64_t>(1, state.max_page_bytes));
+  sanitize::internal::ProcessFdPermitLease stream_fd_lease(1U);
+  if (!stream_fd_lease) {
+    return sanitize::Status::IOError(
+        "native Parquet reader: file-descriptor admission exhausted");
+  }
   state.file.open(path, std::ios::binary);
   if (!state.file) {
     return sanitize::Status::IOError(
         "native Parquet reader: failed opening input");
   }
+  stream_fd_lease.mark_opened();
+  state.file_fd_lease = std::move(stream_fd_lease);
   state.footer = std::move(info);
   const auto readiness = bounded_stream_preflight_readiness(&state);
 

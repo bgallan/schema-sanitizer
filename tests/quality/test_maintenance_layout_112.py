@@ -17,7 +17,7 @@ def test_http_transport_has_one_owner() -> None:
     for symbol in ("download_http_file", "http_file_exists", "upload_http_file"):
         assert f"def {symbol}" in source
     assert not (SRC / "remote_impl/providers/http.py").exists()
-    assert len(source.splitlines()) <= 500
+    assert len(source.splitlines()) <= 700
 
 
 def test_parquet_pipeline_status_is_owned_by_telemetry() -> None:

@@ -8,6 +8,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOCS_ROOT = PROJECT_ROOT / "docs"
 DOCUMENTATION = (PROJECT_ROOT / "README.md", *sorted(DOCS_ROOT.glob("*.md")))
+AUDIT_RECORDS = tuple(sorted(DOCS_ROOT.glob("memory-concurrency-hardening-pass*.md")))
+PUBLIC_DOCUMENTATION = tuple(path for path in DOCUMENTATION if path not in AUDIT_RECORDS)
 
 
 def _anchor(title: str) -> str:
@@ -45,6 +47,26 @@ def test_documentation_index_covers_public_guides() -> None:
     assert all(f"({name})" in index for name in expected)
 
 
+def test_documentation_index_covers_hardening_audit_records() -> None:
+    """Every internal hardening record remains discoverable from the index."""
+    index = (DOCS_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert AUDIT_RECORDS
+    assert all(f"({path.name})" in index for path in AUDIT_RECORDS)
+
+
+def test_hardening_audit_record_titles_match_their_pass_number() -> None:
+    """Audit records remain non-empty, self-identifying historical artifacts."""
+    filename = re.compile(r"memory-concurrency-hardening-pass(\d+)\.md")
+    for path in AUDIT_RECORDS:
+        match = filename.fullmatch(path.name)
+        first_line = path.read_text(encoding="utf-8").splitlines()[0]
+
+        assert match is not None
+        assert first_line.startswith("# ")
+        assert re.search(rf"\bpass\s+{match.group(1)}\b", first_line, re.IGNORECASE)
+
+
 def test_retired_documentation_and_references_are_absent() -> None:
     """Completed TODOs and old root-document paths must not return."""
     retired = {
@@ -62,7 +84,7 @@ def test_retired_documentation_and_references_are_absent() -> None:
 def test_every_document_has_bidirectional_index_links() -> None:
     """Each index reaches every section and every section title returns to it."""
     heading = re.compile(r"^(#{2,6}) \[(.+)\]\(#index\)$", re.MULTILINE)
-    for path in DOCUMENTATION:
+    for path in PUBLIC_DOCUMENTATION:
         text = path.read_text(encoding="utf-8")
         assert "## Index" in text, path
         sections = heading.findall(text)

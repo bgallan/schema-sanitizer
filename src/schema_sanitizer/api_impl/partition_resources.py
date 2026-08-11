@@ -98,16 +98,55 @@ def borrowed_partition_resources(
             _reset_partition_resources_after_fork()
 
 
+_FORK_CURRENT_PARTITION_RESOURCES_BANKS = (
+    ContextVar[BorrowedPartitionResources | None](
+        "schema_sanitizer_partition_resources_child_0", default=None
+    ),
+    ContextVar[BorrowedPartitionResources | None](
+        "schema_sanitizer_partition_resources_child_1", default=None
+    ),
+)
+_FORK_CURRENT_PARTITION_RESOURCES_BANK_INDEX = 0
+_FORK_PREPARED_CURRENT_PARTITION_RESOURCES: ContextVar[BorrowedPartitionResources | None] | None = (
+    None
+)
+
+
+def _prepare_partition_resources_for_fork() -> None:
+    global _FORK_PREPARED_CURRENT_PARTITION_RESOURCES
+    _FORK_PREPARED_CURRENT_PARTITION_RESOURCES = _FORK_CURRENT_PARTITION_RESOURCES_BANKS[
+        _FORK_CURRENT_PARTITION_RESOURCES_BANK_INDEX
+    ]
+
+
+def _clear_partition_resources_fork_preparation() -> None:
+    global _FORK_PREPARED_CURRENT_PARTITION_RESOURCES
+    _FORK_PREPARED_CURRENT_PARTITION_RESOURCES = None
+
+
 def _reset_partition_resources_after_fork() -> None:
-    """Detach inherited ownership without running parent-resource finalizers."""
+    """Swap to a preallocated empty child ContextVar without decrefing owners."""
+    global _CURRENT_PARTITION_RESOURCES, _FORK_PREPARED_CURRENT_PARTITION_RESOURCES
+    global _FORK_CURRENT_PARTITION_RESOURCES_BANK_INDEX
+    prepared = _FORK_PREPARED_CURRENT_PARTITION_RESOURCES
+    if prepared is None:
+        return
     inherited = _CURRENT_PARTITION_RESOURCES.get()
     if inherited is not None:
-        quarantine_inherited_state("partition-resources", inherited)
-    _CURRENT_PARTITION_RESOURCES.set(None)
+        quarantine_inherited_state("partition-resources", inherited, _CURRENT_PARTITION_RESOURCES)
+    _CURRENT_PARTITION_RESOURCES = prepared
+    _FORK_PREPARED_CURRENT_PARTITION_RESOURCES = None
+    _FORK_CURRENT_PARTITION_RESOURCES_BANK_INDEX = 1 - _FORK_CURRENT_PARTITION_RESOURCES_BANK_INDEX
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_partition_resources_after_fork)
+from ..core_impl.fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler(
+    "partition-resources",
+    before=_prepare_partition_resources_for_fork,
+    after_in_parent=_clear_partition_resources_fork_preparation,
+    after_in_child=_reset_partition_resources_after_fork,
+)
 
 
 def take_borrowed_partition_resources(

@@ -185,7 +185,7 @@ def test_cross_process_storage_overflow_preserves_previous_json(
     path.write_text(json.dumps(original, separators=(",", ":")), encoding="utf-8")
 
     with pytest.raises(OSError, match="exceeds its bounded file size"):
-        module.reserve_cross_process(device, 1, 1024)
+        module._reserve_cross_process_raw(device, 1, 1024)
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 
@@ -213,12 +213,12 @@ def test_telemetry_overflow_preserves_previous_json(
 
 
 def test_provider_pool_close_uses_constant_reference_storage() -> None:
-    """Pool shutdown pops retained clients in LIFO order without a full copy."""
+    """Pool shutdown walks the preallocated owner bank without copying clients."""
     source = (ROOT / "src/schema_sanitizer/remote_impl/provider_session_pool.py").read_text(
         encoding="utf-8"
     )
-    assert "while self._entries:" in source
-    assert "_key, entry = self._entries.popitem()" in source
+    assert "for entry in self._entry_escrow:" in source
+    assert "await entry.close_and_commit()" in source
     assert "entries = list(self._entries.values())" not in source
     assert "tuple(reversed(tuple(self._entries.values())))" not in source
 
@@ -228,7 +228,7 @@ def test_cross_process_memory_release_remains_retryable_after_persist_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A failed shared-state removal cannot mark the local lease as released."""
+    """A failed journal cleanup retains retry authority after local retirement."""
     from contextlib import contextmanager
 
     from schema_sanitizer.core_impl import cross_process_memory as module
@@ -247,7 +247,10 @@ def test_cross_process_memory_release_remains_retryable_after_persist_failure(
     monkeypatch.setattr(module, "_locked_state", fail_locked_state)
     with pytest.raises(OSError, match="persist failed"):
         lease.release()
-    assert lease.reserved_bytes == 1
+    # Local exact authority has committed, so a retry cannot debit a reused
+    # generation. Only conservative journal cleanup remains pending.
+    assert lease.reserved_bytes == 0
+    assert lease._journal_cleanup_pending
 
     monkeypatch.setattr(module, "_locked_state", real_locked_state)
     lease.release()
@@ -274,7 +277,7 @@ def test_temporary_release_commits_local_state_after_shared_persist(
     def fail_release(*_args: object, **_kwargs: object) -> int:
         raise OSError("persist failed")
 
-    monkeypatch.setattr(module, "release_cross_process", fail_release)
+    monkeypatch.setattr(module, "_release_cross_process_raw", fail_release)
     with pytest.raises(OSError, match="persist failed"):
         governor.release(17, 40, inode_count=1)
     assert state.reserved_bytes == 100
@@ -359,7 +362,7 @@ def test_cross_process_storage_invalid_state_fails_closed(
     path.write_bytes(payload)
 
     with pytest.raises(OSError, match=message):
-        module.reserve_cross_process(device, 1, 1024)
+        module._reserve_cross_process_raw(device, 1, 1024)
     assert path.read_bytes() == payload
 
 
@@ -382,5 +385,5 @@ def test_cross_process_storage_invalid_process_entry_fails_closed(
     path.write_text(json.dumps(original, separators=(",", ":")), encoding="utf-8")
 
     with pytest.raises(OSError, match="invalid temporary-storage process entry"):
-        module.reserve_cross_process(device, 1, 1024)
+        module._reserve_cross_process_raw(device, 1, 1024)
     assert json.loads(path.read_text(encoding="utf-8")) == original

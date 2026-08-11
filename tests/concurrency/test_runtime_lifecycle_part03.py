@@ -261,6 +261,9 @@ def test_result_drop_closes_private_resource_owner() -> None:
 
     del result
     gc.collect()
+    from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
+
+    drain_finalizer_cleanup()
 
     assert owner.closed == 1
 
@@ -292,6 +295,9 @@ def test_arrow_c_stream_drop_closes_main_stream_and_keepalive() -> None:
 
     del stream
     gc.collect()
+    from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
+
+    drain_finalizer_cleanup()
 
     assert raw.main_closed == 1
     assert raw.closed == 0
@@ -309,6 +315,9 @@ def test_result_drop_closes_private_keepalive() -> None:
 
     del result
     gc.collect()
+    from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
+
+    drain_finalizer_cleanup()
 
     assert keepalive.closed == 1
 

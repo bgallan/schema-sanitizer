@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -288,7 +289,7 @@ def test_temporary_governor_blocks_only_one_filesystem(
         device = 1 if str(path).endswith("a") else 2
         return device, tmp_path, 1 << 30
 
-    def reserve_cross_process(device: int, *_args: object, **_kwargs: object) -> None:
+    def _reserve_cross_process_raw(device: int, *_args: object, **_kwargs: object) -> None:
         """Reserve the synthetic resource."""
         if device == 1:
             entered.set()
@@ -297,8 +298,8 @@ def test_temporary_governor_blocks_only_one_filesystem(
     monkeypatch.setattr(governor, "filesystem", filesystem)
     monkeypatch.setattr(governor, "free_inodes", lambda _path: 1 << 20)
     monkeypatch.setattr(module, "cross_process_storage_enabled", lambda: False)
-    monkeypatch.setattr(module, "reserve_cross_process", reserve_cross_process)
-    monkeypatch.setattr(module, "release_cross_process", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "_reserve_cross_process_raw", _reserve_cross_process_raw)
+    monkeypatch.setattr(module, "_release_cross_process_raw", lambda *_a, **_k: None)
 
     worker = threading.Thread(
         target=lambda: completed.append(governor.reserve(1, path="a", label="blocked-device"))
@@ -333,8 +334,8 @@ def test_temporary_state_lifetime_prevents_orphan_race(
     )
     monkeypatch.setattr(governor, "free_inodes", lambda _path: 1 << 20)
     monkeypatch.setattr(module, "cross_process_storage_enabled", lambda: False)
-    monkeypatch.setattr(module, "reserve_cross_process", lambda *_a, **_k: None)
-    monkeypatch.setattr(module, "release_cross_process", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "_reserve_cross_process_raw", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "_release_cross_process_raw", lambda *_a, **_k: None)
 
     assert governor.reserve(1, path=tmp_path, label="first") == 7
     state = governor._borrow_state(7)
@@ -370,8 +371,8 @@ def test_temporary_existing_state_does_not_reread_dynamic_coordination(
         return False
 
     monkeypatch.setattr(module, "cross_process_storage_enabled", enabled)
-    monkeypatch.setattr(module, "reserve_cross_process", lambda *_a, **_k: None)
-    monkeypatch.setattr(module, "release_cross_process", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "_reserve_cross_process_raw", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "_release_cross_process_raw", lambda *_a, **_k: None)
 
     governor.reserve(1, path=tmp_path, label="first")
     governor.reserve(1, path=tmp_path, label="second")
@@ -924,6 +925,24 @@ def test_temporary_pool_admission_isolated_across_devices(
             """Release the synthetic resource."""
             return None
 
+        def reserve_capability(self, amount: int, **kwargs: object) -> object:
+            device = self.reserve(amount, **kwargs)
+            return SimpleNamespace(
+                device=device,
+                reserved_bytes=amount,
+                reserved_inodes=kwargs.get("inode_count", 0),
+                active=True,
+            )
+
+        def release_capability(self, capability: Any) -> bool:
+            self.release(
+                capability.device,
+                capability.reserved_bytes,
+                inode_count=capability.reserved_inodes,
+            )
+            capability.active = False
+            return True
+
     monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", Governor())
     pool = _temporary_pool_for_pass23()
     acquired: list[Any] = []
@@ -972,6 +991,24 @@ def test_temporary_pool_close_waits_for_started_admission(
         def release(*_args: object, **_kwargs: object) -> None:
             """Release the synthetic resource."""
             return None
+
+        def reserve_capability(self, amount: int, **kwargs: object) -> object:
+            device = self.reserve(amount, **kwargs)
+            return SimpleNamespace(
+                device=device,
+                reserved_bytes=amount,
+                reserved_inodes=kwargs.get("inode_count", 0),
+                active=True,
+            )
+
+        def release_capability(self, capability: Any) -> bool:
+            self.release(
+                capability.device,
+                capability.reserved_bytes,
+                inode_count=capability.reserved_inodes,
+            )
+            capability.active = False
+            return True
 
     monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", Governor())
     pool = _temporary_pool_for_pass23()

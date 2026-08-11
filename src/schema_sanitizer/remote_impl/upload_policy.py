@@ -10,8 +10,15 @@ from typing import Any
 
 from ..core_impl.execution_policy import execution_policy
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    acknowledge_prepared_finalizer_cleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_resource_finalizer_cleanup,
+)
 from ..core_impl.memory_budget import acquire_operation_memory, memory_budget
-from ..core_impl.process_resources import reserve_file_descriptors
+from .io_footprint import open_remote_local_file
 
 _MIB = 1024 * 1024
 _S3_MIN_PART_BYTES = 5 * _MIB
@@ -23,11 +30,21 @@ class _BudgetedUploadBytes(bytes):
     """Multipart bytes retaining their operation-memory reservation."""
 
     _operation_memory_lease: Any | None
+    _finalizer_ticket: int
+    _finalizer_capsule: PreparedFinalizerCleanup | None
 
     def __new__(cls, value: bytes, lease: object):
-        """Create immutable upload bytes with one attached lease."""
-        obj = super().__new__(cls, value)
+        """Create immutable bytes with a pre-reserved lease finalizer."""
+        capsule = reserve_resource_finalizer_cleanup(lease)
+        ticket = capsule.ticket
+        try:
+            obj = super().__new__(cls, value)
+        except BaseException:
+            cancel_prepared_finalizer_cleanup(capsule)
+            raise
         obj._operation_memory_lease = lease
+        obj._finalizer_ticket = ticket
+        obj._finalizer_capsule = capsule
         return obj
 
     def close(self) -> None:
@@ -38,13 +55,23 @@ class _BudgetedUploadBytes(bytes):
         lease.close()
         if getattr(self, "_operation_memory_lease", None) is lease:
             self._operation_memory_lease = None
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                acknowledge_prepared_finalizer_cleanup(capsule)
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
 
     def __del__(self) -> None:
         """Return the lease unless interpreter teardown has begun."""
         try:
             if runtime_is_finalizing():
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None and defer_prepared_finalizer_cleanup(capsule):
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -54,6 +81,57 @@ def release_upload_payload(payload: bytes) -> None:
     close = getattr(payload, "close", None)
     if callable(close):
         close()
+
+
+class S3MultipartManifestBudget:
+    """Retain operation-memory ownership for the multipart commit manifest."""
+
+    __slots__ = ("_lease", "_reserved", "_closed")
+
+    def __init__(self, part_count: int) -> None:
+        # Precharge list pointer growth conservatively for every possible part;
+        # each actual ETag/dict shell is charged before it is adopted by the list.
+        base = 512 + max(1, int(part_count)) * 16
+        self._lease = acquire_operation_memory(base, stage="s3_multipart_manifest")
+        self._reserved = base
+        self._closed = False
+
+    @property
+    def reserved_bytes(self) -> int:
+        return 0 if self._closed else self._reserved
+
+    def append_part(self, parts: list[dict[str, Any]], etag: str, part_number: int) -> None:
+        if self._closed:
+            raise RuntimeError("S3 multipart manifest budget is closed")
+        # The scheduler/SDK owns ``etag`` before this call. Grow the successor
+        # lease first, then publish the list reference, so ownership transfers
+        # without an uncharged retained interval.
+        entry_bytes = 1024 + sys.getsizeof(etag)
+        next_reserved = self._reserved + entry_bytes
+        lease = self._lease
+        if lease is not None:
+            resize = getattr(lease, "resize", None)
+            if callable(resize):
+                resize(next_reserved)
+        parts.append({"ETag": etag, "PartNumber": part_number})
+        self._reserved = next_reserved
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        lease = self._lease
+        if lease is not None:
+            close = getattr(lease, "close", None)
+            if callable(close):
+                close()
+        self._lease = None
+        self._reserved = 0
+        self._closed = True
+
+
+def acquire_s3_multipart_manifest(part_count: int) -> S3MultipartManifestBudget:
+    """Create the long-lived memory owner for one S3 multipart parts list."""
+    return S3MultipartManifestBudget(part_count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,10 +222,9 @@ def read_upload_range(local_path: str, offset: int, size: int, file_size: int) -
     # both immutable buffers before materializing either one.
     lease = acquire_operation_memory(size * 2 + 256, stage="remote_upload_part")
     try:
-        with reserve_file_descriptors(label="remote_upload_file"):
-            with Path(local_path).open("rb") as handle:
-                handle.seek(offset)
-                payload = handle.read(size)
+        with open_remote_local_file(local_path, "rb", label="remote_upload_file") as handle:
+            handle.seek(offset)
+            payload = handle.read(size)
         if len(payload) != size:
             raise OSError(
                 "remote upload source changed while reading: "

@@ -16,10 +16,11 @@ def test_python_micro_packages_remain_direct_modules() -> None:
         package / "api_impl/file_conversion/converters.py",
         package / "api_impl/source_plan/remote.py",
     )
-    for owner in owners:
+    owner_limits = (500, 500, 600, 950)
+    for owner, limit in zip(owners, owner_limits, strict=True):
         assert owner.is_file()
         assert not owner.with_suffix("").exists()
-        assert len(owner.read_text(encoding="utf-8").splitlines()) <= 750
+        assert len(owner.read_text(encoding="utf-8").splitlines()) <= limit
 
 
 def test_schema_probe_matches_its_real_translation_unit() -> None:

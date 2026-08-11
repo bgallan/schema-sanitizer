@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any
+from typing import Any, cast
 
 from ...adapters.parquet.memory import (
     parquet_batch_size_from_memory_limit,
@@ -19,6 +19,12 @@ from ...adapters.parquet.record_batch_factory import (
 from ...adapters.parquet.status import parquet_schema_is_direct_native_eligible
 from ...core_impl.dependencies import ensure_pyarrow
 from ...core_impl.finalization import runtime_is_finalizing
+from ...core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_finalizer_cleanup,
+)
 from ...core_impl.resource_lifecycle import _close_suppressing_errors
 from ...input_impl.selection import _Source
 from ...options_impl.options import Options, memory_limit_bytes_or_none
@@ -168,6 +174,19 @@ def parquet_arrow_sources_or_none(
         raise
 
 
+def _cleanup_parquet_source_chunk_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Close only detached active Parquet factories, preserving failures in place."""
+    current = cast(list[tuple[Any, str]] | None, capsule.arg0)
+    if current is None:
+        return
+    while current:
+        factory, _source_file = current[-1]
+        if not _close_suppressing_errors(factory):
+            raise RuntimeError("Parquet source chunk cleanup remains retryable")
+        current.pop()
+    capsule.arg0 = None
+
+
 class ParquetArrowSourceChunkProvider:
     """Provide bounded Parquet Arrow-source chunks to native streams."""
 
@@ -188,6 +207,10 @@ class ParquetArrowSourceChunkProvider:
         self._set_route = set_route
         self._current: list[tuple[Any, str]] = []
         self._closed = False
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = reserve_finalizer_cleanup(
+            _cleanup_parquet_source_chunk_capsule
+        )
+        self._finalizer_ticket: int | None = self._finalizer_capsule.ticket
 
     def next_sources(self) -> list[tuple[Any, str]] | None:
         """Return the next bounded Arrow-source chunk, or ``None`` when exhausted."""
@@ -219,14 +242,33 @@ class ParquetArrowSourceChunkProvider:
             return
         self._closed = True
         self._close_current()
+        if not self._current:
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is not None and cleanup is not None:
+                cancel_prepared_finalizer_cleanup(cleanup)
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
 
     def __del__(self) -> None:
-        """Best-effort cleanup for abandoned providers."""
+        """Detach only the active bounded factory chunk into a reserved capsule."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self.close()
-        except Exception:
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            current = getattr(self, "_current", None)
+            if ticket is None or cleanup is None:
+                return
+            cleanup.arg0 = current if current else None
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self._current = None  # type: ignore[assignment]
+                self._sources = None  # type: ignore[assignment]
+                self._call_options = None
+                self._set_route = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
+        except BaseException:
             pass
 
     def _close_current(self) -> None:

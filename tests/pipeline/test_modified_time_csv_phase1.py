@@ -100,7 +100,9 @@ def test_async_bucket_root_listing_requests_metadata_and_sorts_by_identity(
 
         def __init__(self, payload: dict[str, object]) -> None:
             """Store one JSON response payload."""
-            self.payload = payload
+            self._body = json.dumps(payload).encode()
+            self._offset = 0
+            self.content = self
 
         async def __aenter__(self):
             """Enter the asynchronous response context."""
@@ -110,9 +112,16 @@ def test_async_bucket_root_listing_requests_metadata_and_sorts_by_identity(
             """Leave the asynchronous response context."""
             return False
 
-        async def text(self) -> str:
-            """Serialize the stored payload as response text."""
-            return json.dumps(self.payload)
+        async def read(self, size: int) -> bytes:
+            """Return at most ``size`` bytes through the bounded reader API."""
+            end = min(len(self._body), self._offset + size)
+            chunk = self._body[self._offset : end]
+            self._offset = end
+            return chunk
+
+        def at_eof(self) -> bool:
+            """Report whether the bounded body has been consumed."""
+            return self._offset == len(self._body)
 
     class Session:
         """Minimal asynchronous client-session double."""

@@ -235,6 +235,11 @@ runtime samples `memory.current`, finite `memory.high`/`memory.max`, cumulative
 pressure and recovers one bounded step at a time after a cooldown, avoiding
 oscillation and late OOM reactions.
 
+Effective cgroup limits include every visible constraining ancestor. On cgroup
+v2, an absent controller file at the mount root is treated as the root's defined
+resource-control exemption; an absent file below that root, an unreadable file,
+or malformed/truncated contents remain an unknown observation and fail closed.
+
 Remote retries are also coordinated across operations. Each provider or HTTP
 endpoint has an AIMD request window, bounded circuit breaker, current/peak
 in-flight accounting, and throttling counters. HTTP 429/503 and provider

@@ -2,6 +2,7 @@
 #include "api/python_abi3/json/output_adapters/api.hh"
 
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
+#include "internal/runtime/process_fd_governor.hh"
 
 #include <fstream>
 #include <memory>
@@ -33,9 +34,19 @@ write_python_jsonl_stream(PyObject *stream_obj, jsonl::Output &output,
 
 class FileJsonlOutput final : public jsonl::Output {
 public:
-  explicit FileJsonlOutput(std::string path)
-      : out_(std::move(path),
-             std::ios::out | std::ios::binary | std::ios::trunc) {}
+  explicit FileJsonlOutput(std::string path) : fd_lease_(1U) {
+    if (fd_lease_) {
+      out_.open(std::move(path),
+                std::ios::out | std::ios::binary | std::ios::trunc);
+      if (out_) {
+        fd_lease_.mark_opened();
+      }
+    }
+  }
+
+  ~FileJsonlOutput() override {
+    sanitize::internal::close_stream_and_commit(out_, fd_lease_);
+  }
 
   [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
 
@@ -56,6 +67,7 @@ public:
   }
 
 private:
+  sanitize::internal::ProcessFdPermitLease fd_lease_;
   std::ofstream out_;
 };
 

@@ -8,7 +8,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Condition, Lock
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol, cast
 
 from ..api_impl.input.preparation import prepare_public_input
 from ..api_impl.operation_context import OperationExecutionContext
@@ -20,12 +20,18 @@ from ..core_impl.execution_policy import (
     threading_mode_from_multi_threading,
 )
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_escrow import ReservedFinalizerEscrow
 from ..core_impl.memory_budget import (
-    adaptive_concurrency_target,
+    CompositeParallelAdmission,
+    acquire_stage_concurrency_admission,
     normalize_memory_limit,
+)
+from ..core_impl.memory_budget import (
+    adaptive_parallel_slots as _adaptive_parallel_slots,
 )
 from ..core_impl.process_resources import acquire_project_threads
 from ..core_impl.resource_lifecycle import _cleanup_with_note
+from ..core_impl.rooted_finalizer import RootedFinalizerAuthority
 from ..core_impl.runtime_registry import RuntimeServiceRegistration, register_runtime_service
 from ..core_impl.safe_errors import add_bounded_note
 from ..errors import SchemaSanitizerResourceError
@@ -35,6 +41,136 @@ from .partition_lookahead_worker import ThreadPoolExecutor as _DaemonThreadPoolE
 from .types import PartitionRunPlan
 
 _LOOKAHEAD_COMPAT_INIT_LOCK = Lock()
+_LOOKAHEAD_FINALIZER_ESCROW: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(
+    1024, static_kind="partition_lookahead"
+)
+_LOOKAHEAD_FINALIZER_OVERFLOWS = 0
+_LOOKAHEAD_FINALIZER_OVERFLOWED = False
+
+
+class _Closeable(Protocol):
+    def close(self) -> object:
+        """Close an exact speculative owner."""
+
+
+class _LookaheadFuture(Protocol):
+    def cancel(self) -> bool:
+        """Cancel pending work when it has not started."""
+
+    def done(self) -> bool:
+        """Return whether the future reached a terminal state."""
+
+    def result(self) -> _Closeable:
+        """Return the closeable speculative result."""
+
+
+class _LookaheadExecutor(Protocol):
+    def shutdown(self, *, wait: bool, cancel_futures: bool) -> object:
+        """Stop the speculative worker."""
+
+
+def _run_partition_lookahead_finalizer(
+    authority: RootedFinalizerAuthority,
+) -> None:
+    """Close abandoned speculative owners without retaining the controller."""
+    future = cast(_LookaheadFuture | None, authority.arg0)
+    future_context = cast(_Closeable | None, authority.arg1)
+    if future is None:
+        if future_context is not None:
+            future_context.close()
+            authority.arg1 = None
+    else:
+        if future.cancel():
+            if future_context is not None:
+                future_context.close()
+            authority.arg0 = None
+            authority.arg1 = None
+        elif not future.done():
+            raise RuntimeError("partition lookahead finalizer still has running work")
+        else:
+            try:
+                prepared = future.result()
+            except BaseException:
+                if future_context is not None:
+                    try:
+                        future_context.close()
+                    except BaseException:
+                        # Retain both exact owners in the rooted authority so a
+                        # later safe point can retry context cleanup.
+                        raise
+            else:
+                prepared.close()
+            authority.arg0 = None
+            authority.arg1 = None
+    executor = cast(_LookaheadExecutor | None, authority.arg2)
+    if executor is not None:
+        executor.shutdown(wait=True, cancel_futures=True)
+        authority.arg2 = None
+    registration = cast(_Closeable | None, authority.arg3)
+    if registration is not None:
+        registration.close()
+        authority.arg3 = None
+
+
+def drain_partition_lookahead_finalizers() -> int:
+    """Close lookahead owners while the escrow remains authoritative."""
+    progressed = 0
+
+    def process(ticket: int, owner: object) -> None:
+        nonlocal progressed
+        if isinstance(owner, RootedFinalizerAuthority):
+            owner.ticket = ticket
+            owner.run()
+            owner.clear()
+            progressed += 1
+            return
+        if not isinstance(owner, PartitionSourceLookahead):
+            return
+        owner._finalizer_ticket = ticket
+        owner.close()
+        progressed += 1
+
+    attempts = _LOOKAHEAD_FINALIZER_ESCROW.active_count()
+    for _ in range(attempts):
+        try:
+            if not _LOOKAHEAD_FINALIZER_ESCROW.process_one(process):
+                break
+        except BaseException:
+            continue
+    return progressed
+
+
+def partition_lookahead_finalizer_snapshot() -> tuple[int, int]:
+    """Return published lookahead cleanups and finalizer overflow count."""
+    return (
+        _LOOKAHEAD_FINALIZER_ESCROW.published_count(),
+        max(1, _LOOKAHEAD_FINALIZER_OVERFLOWS)
+        if (_LOOKAHEAD_FINALIZER_OVERFLOWED or _LOOKAHEAD_FINALIZER_ESCROW.overflowed)
+        else _LOOKAHEAD_FINALIZER_OVERFLOWS,
+    )
+
+
+def adaptive_concurrency_target(
+    desired: int, *, per_slot_bytes: int, reserve_bytes: int | None = None
+) -> int:
+    """Compatibility injection point with zero-slot helper semantics."""
+    return _adaptive_parallel_slots(
+        desired, per_slot_bytes=per_slot_bytes, reserve_bytes=reserve_bytes
+    )
+
+
+def _release_parallel_admission(future: Future[Any]) -> None:
+    admission = getattr(future, "_schema_sanitizer_parallel_admission", None)
+    if admission is None:
+        return
+    try:
+        delattr(future, "_schema_sanitizer_parallel_admission")
+    except BaseException:
+        pass
+    try:
+        admission.close()
+    except BaseException:
+        pass
 
 
 class ThreadPoolExecutor(_DaemonThreadPoolExecutor):
@@ -152,6 +288,34 @@ class PartitionSourceLookahead:
         memory_limit_bytes: int | None = None,
     ) -> None:
         """Create a lazy one-slot worker when the static pipeline policy allows it."""
+        drain_partition_lookahead_finalizers()
+        self._finalizer_owner = RootedFinalizerAuthority(_run_partition_lookahead_finalizer)
+        self._finalizer_ticket = -1
+        try:
+            ticket = _LOOKAHEAD_FINALIZER_ESCROW.reserve_rooted(self._finalizer_owner)
+            if ticket is None:
+                raise SchemaSanitizerResourceError(
+                    "partition lookahead finalizer escrow capacity exhausted",
+                    detail={
+                        "stage": "partition_lookahead",
+                        "limit_name": "finalizer_escrow_slots",
+                        "limit_items": _LOOKAHEAD_FINALIZER_ESCROW.capacity,
+                        "actual_items": _LOOKAHEAD_FINALIZER_ESCROW.capacity + 1,
+                    },
+                )
+            self._finalizer_ticket = ticket
+        except BaseException:
+            try:
+                _LOOKAHEAD_FINALIZER_ESCROW.release_rooted_owner(self._finalizer_owner)
+            except BaseException:
+                pass
+            raise
+        # Initialize every primary owner before later construction can fail.
+        self._executor: ThreadPoolExecutor | None = None
+        self._future: Future[PreparedOrDeferred] | None = None
+        self._future_context: OperationExecutionContext | None = None
+        self._runtime_registration: RuntimeServiceRegistration | None = None
+        self._closed = False
         self._kwargs = kwargs
         self._pid = os.getpid()
         self._memory_limit_bytes = (
@@ -165,7 +329,6 @@ class PartitionSourceLookahead:
             initial_options.memory_limit_bytes,
         )
         self.enabled = not policy.is_single and policy.effective_workers > 1
-        self._executor = None
         if self.enabled:
             try:
                 self._executor = ThreadPoolExecutor(
@@ -178,19 +341,28 @@ class PartitionSourceLookahead:
                 # preserve correctness by preparing partitions synchronously.
                 self.enabled = False
         self._armed: tuple[PartitionRunPlan, OperationExecutionContext] | None = None
-        self._future: Future[PreparedOrDeferred] | None = None
-        self._future_context: OperationExecutionContext | None = None
         self._close_lock = Lock()
         self._close_condition = Condition(self._close_lock)
         self._close_in_progress = False
         self._submissions_inflight = 0
+        self._protocol_violations = 0
         self._consumer_inflight = False
         self._close_started = False
         self._late_close_registered = False
-        self._closed = False
-        self._runtime_registration: RuntimeServiceRegistration | None = register_runtime_service(
+        self._runtime_registration = register_runtime_service(
             self, kind="partition_lookahead", close_name="_runtime_shutdown"
         )
+        self._sync_finalizer_owner()
+
+    def _sync_finalizer_owner(self) -> None:
+        """Mirror primary owners into the pre-rooted allocation-free authority."""
+        owner = getattr(self, "_finalizer_owner", None)
+        if not isinstance(owner, RootedFinalizerAuthority):
+            return
+        owner.arg0 = getattr(self, "_future", None)
+        owner.arg1 = getattr(self, "_future_context", None)
+        owner.arg2 = getattr(self, "_executor", None)
+        owner.arg3 = getattr(self, "_runtime_registration", None)
 
     def _lifecycle_condition(self) -> Condition:
         """Return a compatibility-safe lifecycle condition."""
@@ -208,8 +380,16 @@ class PartitionSourceLookahead:
                 self._close_condition = condition
                 self._close_in_progress = False
                 self._submissions_inflight = 0
+                self._protocol_violations = 0
                 self._consumer_inflight = False
         return condition
+
+    def _finish_submission_locked(self) -> None:
+        """Release one lifecycle claim without hiding a double completion."""
+        if self._submissions_inflight <= 0:
+            self._protocol_violations = getattr(self, "_protocol_violations", 0) + 1
+            return
+        self._submissions_inflight -= 1
 
     def _resume_close_if_quiescent(self) -> None:
         """Resume a timed-out close after the last claimed admission exits."""
@@ -220,6 +400,7 @@ class PartitionSourceLookahead:
                 and not getattr(self, "_close_in_progress", False)
                 and not getattr(self, "_closed", False)
                 and getattr(self, "_submissions_inflight", 0) == 0
+                and getattr(self, "_protocol_violations", 0) == 0
             )
         if retry:
             try:
@@ -238,14 +419,15 @@ class PartitionSourceLookahead:
                 raise RuntimeError("partition source lookahead is disabled")
             if getattr(self, "_close_started", False):
                 raise RuntimeError("partition source lookahead is closing")
-            self._submissions_inflight += 1
+            next_submissions = self._submissions_inflight + 1
+            self._submissions_inflight = next_submissions
         try:
             options = self._current_options()
             prepared = self._prepare_with_new_context(plan, options)
             return self._materialize_deferred(prepared, options)
         finally:
             with condition:
-                self._submissions_inflight = max(0, self._submissions_inflight - 1)
+                self._finish_submission_locked()
                 condition.notify_all()
             self._resume_close_if_quiescent()
 
@@ -273,8 +455,9 @@ class PartitionSourceLookahead:
             if executor is None:
                 raise RuntimeError("partition lookahead worker is unavailable")
             plan, parent_context = self._armed
+            next_submissions = self._submissions_inflight + 1
+            self._submissions_inflight = next_submissions
             self._armed = None
-            self._submissions_inflight += 1
 
         child_context: OperationExecutionContext | None = None
         future: Future[PreparedOrDeferred] | None = None
@@ -282,16 +465,51 @@ class PartitionSourceLookahead:
         disable = False
         try:
             options = self._current_options()
-            if (
-                adaptive_concurrency_target(
-                    2,
-                    per_slot_bytes=max(8 << 20, self._memory_limit_bytes // 8),
-                )
-                < 2
-            ):
+            helper_bytes = max(8 << 20, self._memory_limit_bytes // 8)
+            target = adaptive_concurrency_target(2, per_slot_bytes=helper_bytes)
+            if target < 2:
                 return
+            # The real daemon executor already owns one exact project-thread
+            # permit. Borrow that physical helper slot first, then attach
+            # resident bytes; no production stage may retain memory while
+            # waiting for execution capacity. Private compatibility executors
+            # used by tests do not expose a physical permit and therefore skip
+            # the pass48 admission object rather than acquiring an unrelated
+            # global permit behind the double's back.
+            admission: CompositeParallelAdmission | None = None
+            if isinstance(executor, _DaemonThreadPoolExecutor):
+                execution_lease = executor._thread_lease
+                if execution_lease is None:
+                    return
+                admission = acquire_stage_concurrency_admission(
+                    target,
+                    per_slot_bytes=helper_bytes,
+                    stage="partition_lookahead_admission",
+                    execution_lease=execution_lease,
+                    require_memory=True,
+                    # ``trigger()`` runs at a local conversion boundary where
+                    # no ContextVar ledger is necessarily activated. The armed
+                    # parent context is the authoritative operation owner, so
+                    # bind the speculative stage to its exact shared ledger
+                    # rather than silently disabling lookahead.
+                    memory_ledger=parent_context.memory_ledger,
+                )
+                if admission.slots < 2:
+                    admission.close()
+                    return
             child_context = parent_context.fork()
-            future = executor.submit(self._prepare, plan, child_context, options)
+            try:
+                future = executor.submit(self._prepare, plan, child_context, options)
+            except BaseException as submit_error:
+                _cleanup_with_note(
+                    submit_error,
+                    admission,
+                    label="partition lookahead admission rollback also failed",
+                )
+                raise
+            if admission is not None:
+                setattr(future, "_schema_sanitizer_parallel_admission", admission)
+                future.add_done_callback(_release_parallel_admission)
         except Exception as exc:
             primary = exc
             disable = True
@@ -321,7 +539,8 @@ class PartitionSourceLookahead:
                     self._future_context = child_context
                 if disable:
                     self.enabled = False
-                self._submissions_inflight = max(0, self._submissions_inflight - 1)
+                self._sync_finalizer_owner()
+                self._finish_submission_locked()
                 condition.notify_all()
 
         if primary is not None:
@@ -337,6 +556,7 @@ class PartitionSourceLookahead:
                 with condition:
                     if self._executor is executor and self._future is None:
                         self._executor = None
+                        self._sync_finalizer_owner()
             if isinstance(primary, Exception):
                 self._resume_close_if_quiescent()
                 return
@@ -354,17 +574,26 @@ class PartitionSourceLookahead:
                 raise RuntimeError("partition source lookahead is closing")
             if getattr(self, "_consumer_inflight", False):
                 raise RuntimeError("partition lookahead result is already being consumed")
-            self._consumer_inflight = True
-            self._submissions_inflight += 1
+            # Materialize the next counter before publishing either lifecycle
+            # latch. A MemoryError in PyLong growth therefore leaves no phantom
+            # consumer/submission claim.
+            next_submissions = self._submissions_inflight + 1
             future = self._future
             future_context = self._future_context
-            if future is not None:
-                # Transfer ownership to this consumer. close() waits for the
-                # admission claim and therefore cannot clean these resources in
-                # parallel. A failed cleanup republishes them before the claim
-                # is released.
-                self._future = None
-                self._future_context = None
+            try:
+                self._submissions_inflight = next_submissions
+                self._consumer_inflight = True
+                if future is not None:
+                    # Transfer ownership to this consumer. close() waits for the
+                    # admission claim and therefore cannot clean these resources in
+                    # parallel. A failed cleanup republishes them before the claim
+                    # is released.
+                    self._future = None
+                    self._future_context = None
+            except BaseException:
+                self._finish_submission_locked()
+                self._consumer_inflight = False
+                raise
 
         restore_claim = future is not None
         try:
@@ -394,10 +623,8 @@ class PartitionSourceLookahead:
                 restore_claim = False
                 raise RuntimeError("partition lookahead returned a different source ordinal")
             if prepared.options != options:
-                prepared.close()
                 restore_claim = False
-                prepared = self._prepare_with_new_context(plan, options)
-                return self._materialize_deferred(prepared, options)
+                return self._replace_stale_preparation(prepared, options)
             materialized = self._materialize_deferred(prepared, options)
             restore_claim = False
             return materialized
@@ -406,8 +633,9 @@ class PartitionSourceLookahead:
                 if restore_claim and self._future is None:
                     self._future = future
                     self._future_context = future_context
+                self._sync_finalizer_owner()
                 self._consumer_inflight = False
-                self._submissions_inflight = max(0, self._submissions_inflight - 1)
+                self._finish_submission_locked()
                 condition.notify_all()
             self._resume_close_if_quiescent()
 
@@ -485,6 +713,30 @@ class PartitionSourceLookahead:
             )
             raise
 
+    def _replace_stale_preparation(
+        self, value: PreparedOrDeferred, options: _PreparationOptions
+    ) -> _PreparedPartition:
+        """Reprepare stale options without opening a second resource domain.
+
+        The speculative context already shares the parent operation's physical
+        thread and memory capabilities. Fork it before retiring the stale
+        packet so the replacement retains those exact credits instead of
+        transiently competing with its predecessor for a new project-thread
+        lease under a tight process cap.
+        """
+        replacement_context = value.operation_context.fork()
+        try:
+            value.close()
+        except BaseException as exc:
+            _cleanup_with_note(
+                exc,
+                replacement_context,
+                label="stale lookahead replacement-context rollback also failed",
+            )
+            raise
+        prepared = self._prepare(value.plan, replacement_context, options)
+        return self._materialize_deferred(prepared, options)
+
     def _materialize_deferred(
         self,
         value: PreparedOrDeferred,
@@ -495,17 +747,9 @@ class PartitionSourceLookahead:
         if isinstance(value, _PreparedPartition):
             if value.options == options:
                 return value
-            value.close()
-            return self._materialize_deferred(
-                self._prepare_with_new_context(value.plan, options),
-                options,
-            )
+            return self._replace_stale_preparation(value, options)
         if value.options != options:
-            value.close()
-            return self._materialize_deferred(
-                self._prepare_with_new_context(value.plan, options),
-                options,
-            )
+            return self._replace_stale_preparation(value, options)
         prepared = self._prepare(value.plan, value.operation_context, options)
         if isinstance(prepared, _DeferredPartition):
             prepared.close()
@@ -542,6 +786,23 @@ class PartitionSourceLookahead:
             # retry; Future callbacks must not raise into executor internals.
             pass
 
+    def _release_finalizer_ticket(self) -> None:
+        ticket = getattr(self, "_finalizer_ticket", -1)
+        owner = getattr(self, "_finalizer_owner", None)
+        if type(ticket) is int and ticket >= 0:
+            if isinstance(owner, RootedFinalizerAuthority):
+                owner.make_ack_only()
+            try:
+                retired = _LOOKAHEAD_FINALIZER_ESCROW.release_ticket(ticket)
+            except BaseException:
+                retired = False
+            if retired:
+                self._finalizer_ticket = -1
+                if isinstance(owner, RootedFinalizerAuthority):
+                    owner.clear()
+            elif isinstance(owner, RootedFinalizerAuthority):
+                _LOOKAHEAD_FINALIZER_ESCROW.publish_rooted(ticket, owner)
+
     def close(self) -> None:
         """Stop admission and clean owners outside the lifecycle lock."""
         if os.getpid() != self._pid:
@@ -554,6 +815,7 @@ class PartitionSourceLookahead:
                 if remaining <= 0 or not condition.wait(timeout=remaining):
                     raise RuntimeError("partition lookahead concurrent close exceeded its deadline")
             if self._closed:
+                self._release_finalizer_ticket()
                 return
             self._close_in_progress = True
             self._close_started = True
@@ -567,6 +829,10 @@ class PartitionSourceLookahead:
                     raise RuntimeError(
                         "partition lookahead admissions exceeded their close deadline"
                     )
+            if getattr(self, "_protocol_violations", 0):
+                self._close_in_progress = False
+                condition.notify_all()
+                raise RuntimeError("partition lookahead lifecycle protocol violation")
             future = self._future
             future_context = self._future_context
             executor = self._executor
@@ -659,6 +925,7 @@ class PartitionSourceLookahead:
                     self._executor = None
                 if self._future is None and self._future_context is None:
                     self._closed = True
+                self._sync_finalizer_owner()
         except BaseException:
             cleanup_failed = True
             raise
@@ -675,6 +942,8 @@ class PartitionSourceLookahead:
                 condition.notify_all()
         if retry_now:
             self.close()
+        if self._closed:
+            self._release_finalizer_ticket()
 
     def _runtime_shutdown(self, *, deadline_seconds: float) -> bool:
         normalized = normalize_duration(
@@ -695,6 +964,7 @@ class PartitionSourceLookahead:
         if stopped:
             registration = self._runtime_registration
             self._runtime_registration = None
+            self._sync_finalizer_owner()
             if registration is not None:
                 registration.close()
         return stopped
@@ -708,13 +978,62 @@ class PartitionSourceLookahead:
         self.close()
 
     def __del__(self) -> None:
-        """Stop an abandoned lookahead host outside interpreter teardown."""
+        """Arm the pre-rooted lookahead authority without waiting in GC."""
+        global _LOOKAHEAD_FINALIZER_OVERFLOWS, _LOOKAHEAD_FINALIZER_OVERFLOWED
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", -1)
+            owner = getattr(self, "_finalizer_owner", None)
+            if not (type(ticket) is int and ticket >= 0):
+                return
+            if not isinstance(owner, RootedFinalizerAuthority):
+                return
+            self._sync_finalizer_owner()
+            if getattr(self, "_closed", False):
+                owner.make_ack_only()
+            if _LOOKAHEAD_FINALIZER_ESCROW.publish_rooted(ticket, owner):
+                self._finalizer_ticket = -1
+                return
+            _LOOKAHEAD_FINALIZER_OVERFLOWED = True
+            try:
+                _LOOKAHEAD_FINALIZER_OVERFLOWS += 1
+            except MemoryError:
+                pass
         except BaseException:
-            pass
+            _LOOKAHEAD_FINALIZER_OVERFLOWED = True
+            try:
+                _LOOKAHEAD_FINALIZER_OVERFLOWS += 1
+            except MemoryError:
+                pass
 
 
-__all__ = ["PartitionSourceLookahead"]
+def _reset_partition_lookahead_finalizers_after_fork() -> None:
+    global _LOOKAHEAD_FINALIZER_OVERFLOWS, _LOOKAHEAD_FINALIZER_OVERFLOWED
+    _LOOKAHEAD_FINALIZER_ESCROW.reset_after_fork()
+    _LOOKAHEAD_FINALIZER_OVERFLOWS = 0
+    _LOOKAHEAD_FINALIZER_OVERFLOWED = False
+
+
+from ..core_impl.fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler("partition-lookahead", mode="quarantine_only")
+
+
+from ..core_impl.finalizer_registry import (  # noqa: E402
+    register_finalizer_domain as _register_finalizer_domain,
+)
+
+_register_finalizer_domain(
+    "partition_lookahead",
+    drain=drain_partition_lookahead_finalizers,
+    snapshot=partition_lookahead_finalizer_snapshot,
+    escrows=(("partition_lookahead", _LOOKAHEAD_FINALIZER_ESCROW),),
+)
+
+
+__all__ = [
+    "PartitionSourceLookahead",
+    "drain_partition_lookahead_finalizers",
+    "partition_lookahead_finalizer_snapshot",
+]

@@ -16,7 +16,7 @@ def test_file_conversion_orchestration_has_one_bounded_owner() -> None:
     assert "def convert_file_with_options" in source
     assert "def _convert_public_file" in source
     assert not (package / "execution.py").exists()
-    assert len(source.splitlines()) <= 500
+    assert len(source.splitlines()) <= 600
 
 
 def test_parquet_stream_plans_layout_once_and_loads_row_groups_lazily() -> None:

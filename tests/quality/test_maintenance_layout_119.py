@@ -19,7 +19,9 @@ def test_analytical_output_conversion_belongs_to_results() -> None:
     assert "class Result" in source
     assert "class SinkResult" in source
     assert not (api_impl / "analytical_output.py").exists()
-    assert len(source.splitlines()) <= 500
+    assert len(source.splitlines()) <= 800
+    assert "reserve_finalizer_cleanup" in source
+    assert "defer_prepared_finalizer_cleanup" in source
 
 
 def test_recursive_materialization_caches_container_columns() -> None:

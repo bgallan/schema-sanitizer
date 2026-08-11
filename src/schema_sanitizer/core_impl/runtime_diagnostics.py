@@ -27,7 +27,7 @@ def _native_arena_snapshot() -> dict[str, int | bool]:
         values = tuple(method())
     except Exception:
         return {"available": True, "snapshot_failed": True}
-    if len(values) not in (8, 16, 20):
+    if len(values) not in (8, 16, 20, 23, 25, 27, 29, 30):
         return {"available": True, "snapshot_failed": True}
     names = (
         "live_arenas",
@@ -50,9 +50,23 @@ def _native_arena_snapshot() -> dict[str, int | bool]:
         "reaper_terminal_bytes",
         "oldest_terminal_since_ns",
         "reaper_stopping_lanes",
+        "native_physical_threads",
+        "native_physical_thread_capacity",
+        "native_physical_thread_rejections",
+        "external_runtime_thread_permits",
+        "completion_memory_protocol_violations",
+        "total_physical_thread_permits",
+        "external_runtime_resident_threads",
+        "thread_permit_snapshot_stable",
+        "external_runtime_resident_protocol_violations",
+        "external_runtime_stack_debt_threads",
     )
     selected = names[: len(values)]
-    return {"available": True, **dict(zip(selected, map(int, values), strict=True))}
+    return {
+        "available": True,
+        "snapshot_schema_fields": len(values),
+        **dict(zip(selected, map(int, values), strict=True)),
+    }
 
 
 def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
@@ -64,6 +78,8 @@ def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
     from .process_resources import (
         availability_notifier_snapshot,
         availability_notifier_thread_snapshot,
+        external_runtime_pool_snapshot,
+        native_file_descriptor_snapshot,
         process_file_descriptor_snapshot,
         process_thread_snapshot,
         release_guardian_thread_snapshot,
@@ -88,7 +104,9 @@ def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
             cleanup_dispatcher_snapshot(),
             temporary_janitor_snapshot(),
             process_thread_snapshot(),
+            external_runtime_pool_snapshot(),
             process_file_descriptor_snapshot(),
+            native_file_descriptor_snapshot(),
             release_guardian_thread_snapshot(),
             availability_notifier_thread_snapshot(),
             availability_notifier_snapshot(),
@@ -118,7 +136,9 @@ def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
         cleanup,
         janitor,
         threads,
+        external_pools,
         descriptors,
+        native_descriptors,
         guardian_threads,
         notifier_threads,
         notifier,
@@ -140,7 +160,7 @@ def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
     }
 
     return {
-        "version": 6,
+        "version": 8,
         "captured_at_monotonic_ns": now,
         "fork_poisoned": runtime_fork_poisoned(),
         "fork_inherited_capsule": fork_capsule,
@@ -158,7 +178,9 @@ def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
         "cleanup_dispatcher": asdict(cleanup),
         "temporary_janitor": asdict(janitor),
         "process_threads": asdict(threads),
+        "external_runtime_pools": external_pools,
         "process_file_descriptors": asdict(descriptors),
+        "native_process_file_descriptors": native_descriptors,
         "uncertain_fd_closes": asdict(uncertain_fd_closes),
         "release_guardian_threads": asdict(guardian_threads),
         "availability_notifier_threads": asdict(notifier_threads),
@@ -214,6 +236,13 @@ def concurrency_debug_snapshot() -> dict[str, Any]:
             "progress_age_ns": _age(now, guardian.last_progress_ns),
         },
     }
+
+
+from .shutdown_observers import (  # noqa: E402
+    register_shutdown_observer as _register_shutdown_observer,
+)
+
+_register_shutdown_observer("native_arena", _native_arena_snapshot)
 
 
 __all__ = [

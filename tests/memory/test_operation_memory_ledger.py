@@ -218,6 +218,7 @@ def test_remote_transfer_reserves_chunk_before_blocking_read(
 ) -> None:
     """Synchronous staging reserves its chunk window before allocating bytes."""
     from schema_sanitizer.remote_impl import sync_http
+    from schema_sanitizer.remote_impl.io_footprint import RemoteIoFootprint
 
     operation = OperationExecutionContext(
         threading_mode="single",
@@ -259,7 +260,8 @@ def test_remote_transfer_reserves_chunk_before_blocking_read(
             str(tmp_path / "data.bin"),
             headers=None,
             timeout=1.0,
-        )
+        ),
+        footprint=RemoteIoFootprint(network_fds=0, local_file_fds=1),
     )
     operation.close()
 

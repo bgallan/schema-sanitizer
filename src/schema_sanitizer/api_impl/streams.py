@@ -11,6 +11,13 @@ from typing import Any, Literal
 from ..adapters.pyarrow import streams as _pyarrow_streams
 from ..core_impl.error_translation import translate_core_error
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_detached_resources_finalizer_cleanup,
+    reserve_finalizer_cleanup,
+)
 from ..core_impl.json_payloads import json_object_loads
 from ..core_impl.resource_lifecycle import (
     _close_and_clear_attrs,
@@ -192,11 +199,25 @@ class ClosableContextManagerMixin:
         return False
 
 
+def _close_arrow_c_stream_finalizer_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Close only the primary Arrow stream plus its detached keepalive."""
+    raw = capsule.arg0
+    keepalive = capsule.arg1
+    if raw is not None and not _close_suppressing_errors(raw, main_stream_only=True):
+        raise RuntimeError("deferred ArrowCStream main-stream cleanup failed")
+    if keepalive is not None and keepalive is not raw and not _close_suppressing_errors(keepalive):
+        raise RuntimeError("deferred ArrowCStream keepalive cleanup failed")
+
+
 class ArrowCStream(DiagnosticsAccessMixin, ClosableContextManagerMixin):
     """Lightweight wrapper exposing the Arrow C Stream protocol."""
 
     def __init__(self, raw: Any):
         """Wrap an Arrow C Stream-capable backend."""
+        capsule = reserve_finalizer_cleanup(_close_arrow_c_stream_finalizer_capsule)
+        ticket = capsule.ticket
+        self._finalizer_ticket = ticket
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
         self._pid = os.getpid()
         self._raw = raw
 
@@ -232,13 +253,29 @@ class ArrowCStream(DiagnosticsAccessMixin, ClosableContextManagerMixin):
         if self._raw is raw:
             self._raw = None
         _close_keepalive_attr(self)
+        if self._raw is None and getattr(self, "_keepalive", None) is None:
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                cancel_prepared_finalizer_cleanup(capsule)
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
 
     def __del__(self):
         """Best-effort close the wrapped stream."""
-        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
-            return
-        with suppress(Exception):
-            self.close()
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                capsule.arg0 = getattr(self, "_raw", None)
+                capsule.arg1 = getattr(self, "_keepalive", None)
+                if defer_prepared_finalizer_cleanup(capsule):
+                    self._finalizer_ticket = 0
+                    self._finalizer_capsule = None
+        except BaseException:
+            pass
 
     @property
     def schema(self):
@@ -255,6 +292,10 @@ class Stream(DiagnosticsAccessMixin, ClosableContextManagerMixin, Iterator):
 
     def __init__(self, raw: Any):
         """Create an iterator from an Arrow stream-capable backend."""
+        capsule = reserve_detached_resources_finalizer_cleanup()
+        ticket = capsule.ticket
+        self._finalizer_ticket = ticket
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
         self._pid = os.getpid()
         self._raw = raw
         self._keepalive: Any = None
@@ -355,13 +396,34 @@ class Stream(DiagnosticsAccessMixin, ClosableContextManagerMixin, Iterator):
         _close_and_clear_attrs(self, "_reader", "_raw")
         if getattr(self, "_reader", None) is None and getattr(self, "_raw", None) is None:
             _close_keepalive_attr(self)
+        if (
+            getattr(self, "_reader", None) is None
+            and getattr(self, "_raw", None) is None
+            and getattr(self, "_keepalive", None) is None
+        ):
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                cancel_prepared_finalizer_cleanup(capsule)
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
 
     def __del__(self):
         """Best-effort close the stream."""
-        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
-            return
-        with suppress(Exception):
-            self.close()
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                capsule.arg0 = getattr(self, "_reader", None)
+                capsule.arg1 = getattr(self, "_raw", None)
+                capsule.arg2 = getattr(self, "_keepalive", None)
+                if defer_prepared_finalizer_cleanup(capsule):
+                    self._finalizer_ticket = 0
+                    self._finalizer_capsule = None
+        except BaseException:
+            pass
 
     def to_table(self):
         """Materialize the stream as a PyArrow table."""

@@ -88,6 +88,24 @@ class _FakeDataset:
     """Chunk-preserving Arrow dataset double."""
 
 
+class _ConfigurableArrowRuntime:
+    """PyArrow double exposing a verifiable process-global CPU pool width."""
+
+    def __init__(self) -> None:
+        """Start serial and retain every admitted pool reconfiguration."""
+        self._workers = 1
+        self.configurations: list[int] = []
+
+    def cpu_count(self) -> int:
+        """Return the currently configured worker-pool width."""
+        return self._workers
+
+    def set_cpu_count(self, workers: int) -> None:
+        """Apply and record the exact width selected by shared admission."""
+        self._workers = int(workers)
+        self.configurations.append(self._workers)
+
+
 @pytest.fixture
 def reader_factory(monkeypatch: pytest.MonkeyPatch) -> list[_FakeReader]:
     """Replace PyArrow import with deterministic record-batch readers."""
@@ -136,10 +154,20 @@ def test_v78_pandas_consumes_reader_without_arrow_table(
     use_threads: bool,
 ) -> None:
     """Pandas receives the reader directly and preserves the threading policy."""
+    arrow_runtime = _ConfigurableArrowRuntime()
+
+    def dependency(name: str, **_kwargs: object) -> object:
+        """Provide pandas and a PyArrow pool whose width can be verified."""
+        if name == "pandas":
+            return SimpleNamespace()
+        if name == "pyarrow":
+            return arrow_runtime
+        raise AssertionError(name)
+
     monkeypatch.setattr(
         result_adapters,
         "ensure_optional_dependency",
-        lambda name, **_kwargs: SimpleNamespace() if name == "pandas" else None,
+        dependency,
     )
 
     conversion = result_adapters.convert_arrow_stream_output(
@@ -156,6 +184,12 @@ def test_v78_pandas_consumes_reader_without_arrow_table(
     assert reader.read_pandas_calls == [{"use_threads": use_threads}]
     assert reader.read_all_calls == 0
     assert reader.closed is True
+    if use_threads:
+        assert arrow_runtime.configurations
+        assert arrow_runtime.cpu_count() == arrow_runtime.configurations[-1]
+        assert arrow_runtime.cpu_count() >= 2
+    else:
+        assert arrow_runtime.configurations == []
 
 
 def test_v78_polars_consumes_reader_without_arrow_table(
@@ -195,43 +229,25 @@ def test_v78_polars_consumes_reader_without_arrow_table(
     assert reader.closed is True
 
 
-def test_v78_duckdb_uses_chunk_preserving_dataset_not_arrow_table(
+def test_v78_duckdb_binds_reader_directly_without_full_batch_list(
     monkeypatch: pytest.MonkeyPatch,
     reader_factory: list[_FakeReader],
 ) -> None:
-    """DuckDB binds an in-memory Arrow dataset built directly from the reader."""
-    dataset = _FakeDataset()
-    dataset_inputs: list[tuple[object, object]] = []
+    """DuckDB receives the lazy reader directly and retains its lifetime."""
     duckdb_inputs: list[object] = []
     relation = object()
 
-    class FakeDatasetModule:
-        """Minimal pyarrow.dataset module preserving construction inputs."""
-
-        @staticmethod
-        def dataset(value: object, *, schema: object) -> _FakeDataset:
-            """Build a fake dataset from ordered batches and one schema."""
-            dataset_inputs.append((value, schema))
-            return dataset
-
     class FakeDuckDB:
-        """Minimal DuckDB module binding one Arrow object."""
-
         @staticmethod
         def from_arrow(value: object) -> object:
-            """Record the Arrow source and return a relation double."""
             duckdb_inputs.append(value)
             return relation
 
-    def dependency(name: str, **_kwargs: object) -> object:
-        """Resolve only the optional modules used by this test."""
-        if name == "pyarrow.dataset":
-            return FakeDatasetModule
-        if name == "duckdb":
-            return FakeDuckDB
-        raise AssertionError(name)
-
-    monkeypatch.setattr(result_adapters, "ensure_optional_dependency", dependency)
+    monkeypatch.setattr(
+        result_adapters,
+        "ensure_optional_dependency",
+        lambda name, **_kwargs: FakeDuckDB if name == "duckdb" else None,
+    )
 
     conversion = result_adapters.convert_arrow_stream_output(
         "native-stream",
@@ -241,13 +257,14 @@ def test_v78_duckdb_uses_chunk_preserving_dataset_not_arrow_table(
     )
 
     reader = reader_factory[-1]
-    assert dataset_inputs == [(reader.batches, reader.schema)]
-    assert duckdb_inputs == [dataset]
+    assert duckdb_inputs == [reader]
     assert conversion.clean_data is relation
-    assert conversion.route == "record_batch_reader_to_arrow_dataset_to_duckdb"
-    assert conversion.diagnostics_shape.num_rows == 7
+    assert conversion.route == "record_batch_reader_to_duckdb"
+    assert conversion.diagnostics_shape.num_rows == 0
+    assert conversion.diagnostics_shape.batch_count == 3
     assert reader.read_all_calls == 0
-    assert reader.closed is True
+    # Ownership was transferred to the lazy DuckDB relation.
+    assert reader.closed is False
 
 
 def test_v78_materializer_records_route_and_closes_opened_stream(
@@ -298,6 +315,63 @@ def test_v78_materializer_records_route_and_closes_opened_stream(
     assert result.native_registry_state == "state"
     assert result.stats["materialized_rows"] == 7
     assert result.stats["batches"] == 3
+    assert opened.closed is True
+
+
+def test_v78_materializer_rolls_back_unpublished_adapter_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Result construction failure cannot orphan a private adapter connection."""
+
+    class Owner:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    owner = Owner()
+    opened = SimpleNamespace(
+        diagnostics=SimpleNamespace(),
+        schema_registry_json="{}",
+        schema_drifts_json="[]",
+        native_registry_state=None,
+        closed=False,
+        materialization_stream=lambda: "native-stream",
+    )
+
+    def close_opened() -> None:
+        opened.closed = True
+
+    opened.close = close_opened
+    monkeypatch.setattr(
+        registry_streams,
+        "convert_arrow_stream_output",
+        lambda *_args, **_kwargs: result_adapters.AnalyticalOutputConversion(
+            "relation",
+            result_adapters._AnalyticalShape(0),
+            "record_batch_reader_to_duckdb",
+            owner,
+        ),
+    )
+
+    class Injected(RuntimeError):
+        pass
+
+    def fail_result(*_args, **_kwargs):
+        raise Injected("result construction")
+
+    monkeypatch.setattr(
+        registry_streams,
+        "Result",
+        fail_result,
+    )
+    with pytest.raises(Injected, match="result construction"):
+        registry_streams.materialize_opened_registry_stream(
+            opened,
+            target="duckdb",
+            threading_mode="multi",
+        )
+    assert owner.closed is True
     assert opened.closed is True
 
 
@@ -371,6 +445,6 @@ def test_v78_every_pair_declares_its_terminal_handoff_and_table_barrier() -> Non
 
     assert "direct_stream_adapter_conversion" in pairs["python"]["pandas"]["output_parallel_stages"]
     assert (
-        "chunk_preserving_arrow_dataset_handoff"
+        "record_batch_reader_direct_duckdb_handoff"
         in pairs["parquet"]["duckdb"]["output_parallel_stages"]
     )

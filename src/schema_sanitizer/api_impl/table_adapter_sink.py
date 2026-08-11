@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core_impl.resource_lifecycle import _cleanup_with_note
 from ..options_impl.options import Options
 from .results import convert_arrow_stream_output
 
@@ -35,6 +36,21 @@ def materialize_table_adapter_sink(
             feature=f"sink={sink!r}",
             threading_mode=threading_mode,
         )
-        return conversion.clean_data
+        if conversion.resource_owner is None:
+            return conversion.clean_data
+        from .results import _OwnedDuckDBRelation
+
+        try:
+            return _OwnedDuckDBRelation(
+                conversion.clean_data,
+                conversion.resource_owner,
+            )
+        except BaseException as primary:
+            _cleanup_with_note(
+                primary,
+                conversion.resource_owner,
+                label="DuckDB adapter-owner rollback also failed",
+            )
+            raise
     finally:
         output.close()

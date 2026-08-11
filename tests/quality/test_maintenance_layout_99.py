@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from source_size_policy import oversized_product_sources
+
 ROOT = Path(__file__).resolve().parents[2]
-_PRODUCT_SOURCE_LINE_LIMIT = 2500
 
 
 def test_recursive_layout_reducer_has_one_bounded_owner() -> None:
@@ -83,9 +84,9 @@ def test_product_files_remain_bounded() -> None:
         *(ROOT / "cpp/src").rglob("*.hpp"),
         *(ROOT / "cpp/src").rglob("*.inc"),
     ]
-    oversized = {
-        str(path.relative_to(ROOT)): len(path.read_text(encoding="utf-8").splitlines())
+    lengths = {
+        path.relative_to(ROOT): len(path.read_text(encoding="utf-8").splitlines())
         for path in candidates
-        if len(path.read_text(encoding="utf-8").splitlines()) > _PRODUCT_SOURCE_LINE_LIMIT
     }
+    oversized = {str(path): size for path, size in oversized_product_sources(lengths).items()}
     assert oversized == {}

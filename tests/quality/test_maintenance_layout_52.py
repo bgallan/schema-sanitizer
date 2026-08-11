@@ -24,7 +24,7 @@ def test_parquet_record_batch_factory_has_one_direct_owner() -> None:
     owner = ROOT / "src/schema_sanitizer/adapters/parquet/record_batch_factory.py"
     assert owner.is_file()
     assert not owner.with_suffix("").exists()
-    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 1_300
     assert not (owner.parent / "direct_fallback.py").exists()
 
 

@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import os
-from contextlib import suppress
+from collections.abc import Iterable
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 
 from .finalization import runtime_is_finalizing
+from .finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_detached_resources_finalizer_cleanup,
+    reserve_reference_finalizer_cleanup,
+)
 from .json_payloads import json_object_loads
 from .logical_schema import pyarrow_schema_from_payload
 from .native_runtime import native_core as _native
@@ -24,6 +31,10 @@ class IngestDiagnostics:
         self._obj: dict[str, Any] | None = None
         self._pid = os.getpid()
         self._lock = Lock()
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = (
+            reserve_reference_finalizer_cleanup()
+        )
+        self._finalizer_ticket: int | None = self._finalizer_capsule.ticket
 
     def _ensure_obj(self) -> dict[str, Any]:
         """Parse and return the cached diagnostics payload."""
@@ -63,13 +74,28 @@ class IngestDiagnostics:
             except Exception:
                 pass
             self._diagnostics_capsule = None
+            ticket = getattr(self, "_finalizer_ticket", None)
+            capsule_owner = getattr(self, "_finalizer_capsule", None)
+            if ticket is not None and capsule_owner is not None:
+                cancel_prepared_finalizer_cleanup(capsule_owner)
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
 
     def __del__(self) -> None:
-        """Release native diagnostics outside interpreter teardown only."""
+        """Transfer only the native capsule to a preallocated safe-point slot."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self.close()
+            capsule = getattr(self, "_diagnostics_capsule", None)
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if capsule is None or ticket is None or cleanup is None:
+                return
+            cleanup.arg0 = capsule
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self._diagnostics_capsule = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -183,6 +209,10 @@ class _ArrowStream:
         self._capsule = capsule
         self._pid = os.getpid()
         self._lock = Lock()
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = (
+            reserve_reference_finalizer_cleanup()
+        )
+        self._finalizer_ticket: int | None = self._finalizer_capsule.ticket
 
     def __arrow_c_stream__(self, requested_schema: Any = None):
         """Export the wrapped Arrow C Stream capsule."""
@@ -196,17 +226,65 @@ class _ArrowStream:
             return
         with self._lock:
             self._capsule = None
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is not None and cleanup is not None:
+                cancel_prepared_finalizer_cleanup(cleanup)
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
 
     def __del__(self) -> None:
-        """Best-effort release the wrapped capsule."""
-        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
-            return
-        with suppress(Exception):
-            self.close()
+        """Transfer only the wrapped native capsule to a preallocated safe point."""
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            capsule = getattr(self, "_capsule", None)
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if capsule is None or ticket is None or cleanup is None:
+                return
+            cleanup.arg0 = capsule
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self._capsule = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
+        except BaseException:
+            pass
+
+
+def _cleanup_sink_output_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Close only detached sink resources while retaining failures for retry."""
+    backend = capsule.arg0
+    if backend is not None:
+        if not _close_suppressing_errors(backend):
+            raise RuntimeError("sink table backend cleanup remains retryable")
+        capsule.arg0 = None
+        # The primary native capsule aliases the backend stream when present.
+        capsule.arg3 = None
+    keepalive = capsule.arg1
+    if keepalive is not None:
+        retained = (
+            list(cast(Iterable[Any], keepalive)) if not isinstance(keepalive, list) else keepalive
+        )
+        _close_sequence_retryably(retained)
+        if retained:
+            capsule.arg1 = retained
+            raise RuntimeError("sink keepalive cleanup remains retryable")
+        capsule.arg1 = None
+    diagnostics = capsule.arg2
+    if diagnostics is not None:
+        cast(IngestDiagnostics, diagnostics).close()
+        capsule.arg2 = None
+    # arg3 (raw main capsule) and arg4 (native registry state) only need their
+    # references dropped at this governed safe point.
+    capsule.arg3 = None
+    capsule.arg4 = None
 
 
 class SinkOutput:
     """Output object returned by ABI3 sink helpers."""
+
+    _keepalive: list[Any] | tuple[Any, ...]
 
     def __init__(
         self,
@@ -228,13 +306,18 @@ class SinkOutput:
         self.schema_drifts_json = schema_drifts_json
         self.conversion_timestamp = conversion_timestamp
         self.native_registry_state = native_registry_state
-        self._diagnostics = IngestDiagnostics(
+        self._diagnostics: IngestDiagnostics | None = IngestDiagnostics(
             diagnostics_json,
             diagnostics_capsule=diagnostics_capsule,
         )
         self._table_backend = (
             _ArrowStream(self._main) if (self._sink != "stream" and self._main) else None
         )
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = (
+            reserve_detached_resources_finalizer_cleanup()
+        )
+        self._finalizer_ticket: int | None = self._finalizer_capsule.ticket
+        self._finalizer_capsule.callback = _cleanup_sink_output_capsule
 
     @property
     def table(self) -> Any:
@@ -249,7 +332,10 @@ class SinkOutput:
     @property
     def diagnostics(self) -> IngestDiagnostics:
         """Return sink diagnostics."""
-        return self._diagnostics
+        diagnostics = self._diagnostics
+        if diagnostics is None:
+            raise RuntimeError("sink diagnostics have already been detached")
+        return diagnostics
 
     def __arrow_c_stream__(self, requested_schema: Any = None):
         """Export the primary output stream capsule."""
@@ -275,14 +361,47 @@ class SinkOutput:
             keepalive = list(getattr(self, "_keepalive", ()) or ())
             _close_sequence_retryably(keepalive)
             self._keepalive = keepalive
-        self._diagnostics.close()
+        diagnostics = self._diagnostics
+        if diagnostics is not None:
+            diagnostics.close()
+        diagnostics_capsule = getattr(diagnostics, "_diagnostics_capsule", None)
+        if (
+            self._table_backend is None
+            and self._main is None
+            and not (getattr(self, "_keepalive", ()) or ())
+            and diagnostics_capsule is None
+        ):
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is not None and cleanup is not None:
+                cancel_prepared_finalizer_cleanup(cleanup)
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
 
     def __del__(self) -> None:
-        """Best-effort close sink resources."""
-        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
-            return
-        with suppress(Exception):
-            self.close()
+        """Detach only sink cleanup resources into a preallocated safe-point capsule."""
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is None or cleanup is None:
+                return
+            cleanup.arg0 = getattr(self, "_table_backend", None)
+            cleanup.arg1 = getattr(self, "_keepalive", ()) or None
+            cleanup.arg2 = getattr(self, "_diagnostics", None)
+            cleanup.arg3 = getattr(self, "_main", None)
+            cleanup.arg4 = getattr(self, "native_registry_state", None)
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self._table_backend = None
+                self._main = None
+                self._keepalive = ()
+                self._diagnostics = None
+                self.native_registry_state = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
+        except BaseException:
+            pass
 
 
 def _registry_sink_output(sink: str, native_result: tuple[Any, ...]) -> SinkOutput:

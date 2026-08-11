@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from time import monotonic
+
+from .cgroup_view import (
+    current_cgroup_view,
+    read_cgroup_hierarchy_texts,
+    read_effective_cgroup_usage_ratio,
+)
+from .fork_safety import quarantine_inherited_state
 
 _CACHE_SECONDS = 0.25
 
@@ -53,40 +59,62 @@ def _parse_psi(path: Path) -> tuple[float | None, float | None]:
 
 
 def _cgroup_events() -> tuple[int | None, int | None]:
-    """Return cumulative memory.high and OOM event counters when available."""
-    candidates = (Path("/sys/fs/cgroup/memory.events.local"), Path("/sys/fs/cgroup/memory.events"))
-    for path in candidates:
+    """Return cumulative high/OOM activity across every constraining ancestor."""
+    # Prefer local counters at each hierarchy level: summing those detects an
+    # event in any ancestor without relying on the leaf. Older kernels may lack
+    # memory.events.local, in which case hierarchical memory.events is still
+    # conservative (an event may be counted more than once, but deltas > 0 are
+    # all the admission policy needs).
+    for name in ("memory.events.local", "memory.events"):
+        raws = read_cgroup_hierarchy_texts(name, controller="memory", limit=4096)
+        if raws is None:
+            continue
+        if not raws:
+            return None, None
         try:
-            pairs = dict(
-                line.split(maxsplit=1) for line in path.read_text(encoding="ascii").splitlines()
-            )
-            return (
-                int(pairs.get("high", "0")),
-                int(pairs.get("oom", "0")) + int(pairs.get("oom_kill", "0")),
-            )
-        except (OSError, ValueError):
+            high_total = 0
+            oom_total = 0
+            for raw in raws:
+                high = 0
+                oom = 0
+                for line in raw.splitlines():
+                    key, separator, value = line.partition(" ")
+                    if not separator:
+                        continue
+                    parsed = int(value.strip())
+                    if key == "high":
+                        high = parsed
+                    elif key in ("oom", "oom_kill"):
+                        oom += parsed
+                high_total += high
+                oom_total += oom
+            return high_total, oom_total
+        except ValueError:
             continue
     return None, None
 
 
 def _cgroup_usage_ratio() -> float | None:
-    """Return memory.current divided by the nearest finite cgroup limit."""
-    root = Path("/sys/fs/cgroup")
-    try:
-        current = int((root / "memory.current").read_text(encoding="ascii").strip())
-    except (OSError, ValueError):
+    """Return the highest memory usage ratio across constraining ancestors."""
+    view = current_cgroup_view()
+    ratios: tuple[float | None, ...]
+    if view.version == 2:
+        ratios = (
+            read_effective_cgroup_usage_ratio("memory.high", "memory.current", controller="memory"),
+            read_effective_cgroup_usage_ratio("memory.max", "memory.current", controller="memory"),
+        )
+    elif view.version == 1:
+        ratios = (
+            read_effective_cgroup_usage_ratio(
+                "memory.limit_in_bytes",
+                "memory.usage_in_bytes",
+                controller="memory",
+            ),
+        )
+    else:
         return None
-    limits: list[int] = []
-    for name in ("memory.high", "memory.max"):
-        try:
-            raw = (root / name).read_text(encoding="ascii").strip()
-            if raw != "max":
-                value = int(raw)
-                if value > 0:
-                    limits.append(value)
-        except (OSError, ValueError):
-            continue
-    return None if not limits else max(0.0, current / min(limits))
+    bounded = [value for value in ratios if value is not None]
+    return max(bounded) if bounded else None
 
 
 def system_pressure_snapshot(*, refresh: bool = False) -> SystemPressureSnapshot:
@@ -175,20 +203,54 @@ def system_pressure_snapshot(*, refresh: bool = False) -> SystemPressureSnapshot
             _refreshing = False
 
 
+_FORK_PRESSURE_BANKS = (
+    (Lock(), SystemPressureSnapshot(1.0, None, None, None, None, None)),
+    (Lock(), SystemPressureSnapshot(1.0, None, None, None, None, None)),
+)
+_FORK_PRESSURE_BANK_INDEX = 0
+_FORK_PREPARED_PRESSURE_STATE: tuple[Lock, SystemPressureSnapshot] | None = None
+
+
+def _prepare_pressure_for_fork() -> None:
+    global _FORK_PREPARED_PRESSURE_STATE
+    _FORK_PREPARED_PRESSURE_STATE = _FORK_PRESSURE_BANKS[_FORK_PRESSURE_BANK_INDEX]
+
+
+def _clear_pressure_fork_preparation() -> None:
+    global _FORK_PREPARED_PRESSURE_STATE
+    _FORK_PREPARED_PRESSURE_STATE = None
+
+
 def _reset_after_fork() -> None:
-    """Replace inherited pressure synchronization and hysteresis in a child."""
+    """Swap preallocated pressure synchronization and hysteresis state."""
     global _lock, _cached_at, _cached, _last_high, _last_oom, _last_scale_change, _refreshing
-    _lock = Lock()
+    global _FORK_PREPARED_PRESSURE_STATE, _FORK_PRESSURE_BANK_INDEX
+    prepared = _FORK_PREPARED_PRESSURE_STATE
+    if prepared is None:
+        from .fork_safety import runtime_fork_poisoned
+
+        if runtime_fork_poisoned():
+            return
+        return
+    quarantine_inherited_state("system-pressure", _lock, _cached)
+    _lock, _cached = prepared
+    _FORK_PREPARED_PRESSURE_STATE = None
     _cached_at = 0.0
-    _cached = SystemPressureSnapshot(1.0, None, None, None, None, None)
     _last_high = 0
     _last_oom = 0
     _last_scale_change = 0.0
     _refreshing = False
+    _FORK_PRESSURE_BANK_INDEX = 1 - _FORK_PRESSURE_BANK_INDEX
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler(
+    "system-pressure",
+    before=_prepare_pressure_for_fork,
+    after_in_parent=_clear_pressure_fork_preparation,
+    after_in_child=_reset_after_fork,
+)
 
 
 def pressure_adjusted_target(desired: int) -> int:

@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
-from ...core_impl.async_scheduler import drain_ordered_indexed_results, retry_async
+from ...core_impl.async_scheduler import drain_ordered_iterable_results, retry_async
 from ...core_impl.execution_policy import execution_policy
+from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
@@ -22,9 +23,11 @@ from ...input_impl.directory_inputs import (
 )
 from ...sources.models import RemoteFile
 from ..gcs_resumable import upload_gcs_resumable_file
+from ..io_footprint import open_remote_local_file
 from ..transport import (
     MAX_ERROR_RESPONSE_BYTES,
     open_aiohttp_session,
+    read_bounded_response_bytes,
     read_bounded_response_text,
     read_response_bytes,
     write_response_to_file,
@@ -132,10 +135,14 @@ def media_url(uri: str, *, generation: str | None = None) -> str:
     return f"{base}?{urlencode(params)}"
 
 
-async def download_bytes(session: Any, file: RemoteFile) -> bytes:
-    """Download one GCS object into bytes."""
+async def download_bytes(session: Any, file: RemoteFile, *, maximum_bytes: int) -> bytes:
+    """Download one GCS object only under an explicit materialization ceiling."""
     async with session.get(media_url(file.uri, generation=file.generation)) as response:
-        return await read_response_bytes(response, uri=file.uri)
+        if response.status not in {200, 201}:
+            return await read_response_bytes(response, uri=file.uri)
+        return await read_bounded_response_bytes(
+            response, maximum_bytes=maximum_bytes, stage="gcs_download_bytes"
+        )
 
 
 async def file_exists(
@@ -275,7 +282,7 @@ async def upload_file(
             return
         params = {"uploadType": "media", "name": ref.object_name}
         request_headers_for_media = {"Content-Type": content_type_for_uri(uri)}
-        with Path(local_path).open("rb") as file_handle:
+        with open_remote_local_file(local_path, "rb", label="gcs_upload_source") as file_handle:
             async with session.post(
                 url,
                 params=params,
@@ -380,12 +387,12 @@ async def list_directory(
                     item,
                     display_name=relative,
                 )
-                metadata_budget.charge_file(remote_file)
+                metadata_budget.charge_file(remote_file, associations=4)
                 files.append(remote_file)
             page_token = payload.get("nextPageToken")
             if not isinstance(page_token, str) or not page_token:
                 break
-    files.sort(key=remote_file_sort_key)
+    governed_sort(files, key=remote_file_sort_key, stage="remote_discovery_sort")
     return files
 
 
@@ -398,9 +405,10 @@ async def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether GCS directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
         uris,
-        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+        metadata_budget=metadata_budget,
     )
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
     for uri in uris:
@@ -410,7 +418,10 @@ async def directories_containing_files(
             continue
         parent_prefix, child = parsed
         bucket = ref.bucket
-        groups.setdefault((bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+        # pass63 proof anchor: metadata_budget.charge_group_associations()
+        discovery.publish_group_association(
+            lambda: groups.setdefault((bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+        )
 
     if not groups:
         return discovery.finish()
@@ -484,17 +495,16 @@ async def directories_containing_files(
                 if not isinstance(page_token, str) or not page_token:
                     break
 
-        grouped = list(groups.items())
+        async def scan_key(key: tuple[str, str]) -> None:
+            """Scan one GCS parent group without materialising all group keys."""
+            bucket, parent = key
+            await scan_group(bucket, parent, groups[key])
 
-        async def scan_index(index: int) -> None:
-            """Scan one canonically ordered GCS parent group."""
-            (bucket, parent), children = grouped[index]
-            await scan_group(bucket, parent, children)
-
-        await drain_ordered_indexed_results(
-            len(grouped),
-            scan_index,
+        await drain_ordered_iterable_results(
+            groups,
+            scan_key,
             window=concurrency,
+            expected_retained_bytes=64,
         )
 
     return discovery.finish()

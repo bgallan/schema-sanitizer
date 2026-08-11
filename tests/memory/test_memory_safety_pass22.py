@@ -166,6 +166,15 @@ def _resource_domain_for_test(memory: Any) -> Any:
     value.temporary_storage = _CloseCounter()
     value.memory_ledger = memory
     value.thread_lease = _ReleaseCounter()
+    value._finalizer_ticket = None
+    value._finalizer_owner = SimpleNamespace(
+        arg0=None,
+        arg1=value.directory_metadata,
+        arg2=value.temporary_storage,
+        arg3=value.memory_ledger,
+        arg4=value.thread_lease,
+        arg5=value.operation_id,
+    )
     value.diagnostic_snapshot = lambda: {
         "operation_id": value.operation_id,
         "state": "closed",
@@ -225,6 +234,8 @@ def test_operation_context_close_can_retry_and_blocks_new_work() -> None:
     context._closing = False
     context._closed = False
     context._resources = Resources()
+    context._finalizer_ticket = None
+    context._finalizer_owner = SimpleNamespace(arg0=context._resources)
 
     with pytest.raises(OSError, match="journal"):
         context.close()
@@ -825,6 +836,8 @@ def test_failed_shared_storage_admission_leaves_inert_unpublished_lease(
         def reserve(*_args: object, **_kwargs: object) -> int:
             """Exercise one focused pass22 regression helper path."""
             raise OSError("shared admission failed")
+
+        reserve_capability = reserve
 
         @classmethod
         def release(cls, *_args: object, **_kwargs: object) -> None:

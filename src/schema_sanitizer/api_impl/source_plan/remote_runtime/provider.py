@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import os
 from collections import deque
-from typing import Any
+from typing import Any, cast
 
 from schema_sanitizer.core_impl.safe_errors import add_bounded_note
 
 from ....core_impl.finalization import runtime_is_finalizing
+from ....core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_finalizer_cleanup,
+)
 from ....input_impl.selection import unsupported_native_directory_ingestion
 from ...input.directory_preparation import RemoteNativeDirectorySourceManifest
 from ..attached import source_plan_from_native_manifest
@@ -19,6 +25,42 @@ from ..remote_cleanup import (
     combine_cleanup_error,
     staged_file_count,
 )
+
+
+def _cleanup_remote_path_provider_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Close detached staged-chunk owners without retaining the provider graph."""
+    current = capsule.arg0
+    if current is not None:
+        error = close_one_retryably(current)
+        if error is not None:
+            raise error
+        capsule.arg0 = None
+    retained = cast("deque[Any] | None", capsule.arg1)
+    if retained is not None:
+        while retained:
+            item = retained[-1]
+            error = close_one_retryably(item)
+            if error is not None:
+                raise error
+            retained.pop()
+        capsule.arg1 = None
+    context = cast(Any, capsule.arg2)
+    if context is not None:
+        context.__exit__(None, None, None)
+        capsule.arg2 = None
+    donor = cast("RemotePathSourceChunkProviderBase | None", capsule.arg3)
+    if donor is not None:
+        donor.close_all()
+        capsule.arg3 = None
+    preserved = cast("list[Any] | None", capsule.arg4)
+    if preserved is not None:
+        while preserved:
+            item = preserved[-1]
+            error = close_one_retryably(item)
+            if error is not None:
+                raise error
+            preserved.pop()
+        capsule.arg4 = None
 
 
 class RemotePathSourceChunkProviderBase:
@@ -48,6 +90,9 @@ class RemotePathSourceChunkProviderBase:
         self._preserved_chunks: list[Any] = []
         self._preserved_file_count = 0
         self._closed = False
+        finalizer_capsule = reserve_finalizer_cleanup(_cleanup_remote_path_provider_capsule)
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = finalizer_capsule
+        self._finalizer_ticket: int | None = finalizer_capsule.ticket
 
     def _ensure_owner_process(self) -> None:
         """Reject inherited iterators before touching parent-owned resources."""
@@ -107,15 +152,44 @@ class RemotePathSourceChunkProviderBase:
                 self._retained_chunk_donor = None
         if error is not None:
             raise error
+        self._retire_finalizer_if_clean()
 
     def __del__(self) -> None:
-        """Best-effort cleanup for abandoned providers."""
+        """Detach only staged cleanup owners into a reserved safe-point capsule."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self.close_all()
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is None or cleanup is None:
+                return
+            cleanup.arg0 = getattr(self, "_current_staged", None)
+            cleanup.arg1 = getattr(self, "_retained_chunks", None)
+            cleanup.arg2 = getattr(self, "_remaining_context", None)
+            cleanup.arg3 = getattr(self, "_retained_chunk_donor", None)
+            cleanup.arg4 = getattr(self, "_preserved_chunks", None)
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self._current_staged = None
+                self._retained_chunks = None  # type: ignore[assignment]
+                self._remaining_context = None
+                self._remaining_iter = None
+                self._remaining_manifest = None
+                self._retained_chunk_donor = None
+                self._preserved_chunks = None  # type: ignore[assignment]
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
         except BaseException:
             pass
+
+    def _retire_finalizer_if_clean(self) -> None:
+        if not self.is_closed or self._preserved_chunks:
+            return
+        ticket = getattr(self, "_finalizer_ticket", None)
+        cleanup = getattr(self, "_finalizer_capsule", None)
+        if ticket is not None and cleanup is not None:
+            cancel_prepared_finalizer_cleanup(cleanup)
+            self._finalizer_ticket = None
+            self._finalizer_capsule = None
 
     @property
     def is_closed(self) -> bool:
@@ -141,6 +215,7 @@ class RemotePathSourceChunkProviderBase:
         preserved = self._preserved_chunks
         self._preserved_chunks = []
         self._preserved_file_count = 0
+        self._retire_finalizer_if_clean()
         return preserved
 
     def close_all(self) -> None:
@@ -154,6 +229,7 @@ class RemotePathSourceChunkProviderBase:
         self._preserved_file_count = sum(staged_file_count(item) for item in self._preserved_chunks)
         if error is not None:
             raise error
+        self._retire_finalizer_if_clean()
 
     def _next_staged_chunk(self) -> Any | None:
         """Return the next retained or newly staged remote chunk."""

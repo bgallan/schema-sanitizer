@@ -73,10 +73,10 @@ def test_async_bridge_thread_start_failure_closes_coroutine_and_releases_lease(
     assert lease.releases == 1
 
 
-def test_provider_pool_closed_race_releases_descriptor_when_client_close_fails(
+def test_provider_pool_closed_race_retains_descriptor_until_client_close_commits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A late client that cannot close still returns its logical FD reservation."""
+    """A late client keeps its FD reservation until physical close succeeds."""
     from schema_sanitizer.remote_impl import provider_session_pool as module
 
     class Lease:
@@ -87,8 +87,11 @@ def test_provider_pool_closed_race_releases_descriptor_when_client_close_fails(
             self.releases += 1
 
     class Client:
+        fail_close = True
+
         async def close(self) -> None:
-            raise RuntimeError("injected client close failure")
+            if self.fail_close:
+                raise RuntimeError("injected client close failure")
 
     lease = Lease()
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda *_a, **_k: lease)
@@ -98,18 +101,24 @@ def test_provider_pool_closed_race_releases_descriptor_when_client_close_fails(
         await pool.__aenter__()
         entered = asyncio.Event()
         resume = asyncio.Event()
+        client = Client()
 
         async def factory() -> Client:
             entered.set()
             await resume.wait()
-            return Client()
+            return client
 
         borrower = asyncio.create_task(pool.borrow_client(("key",), factory))
         await entered.wait()
         await pool.__aexit__(None, None, None)
         resume.set()
-        with pytest.raises(RuntimeError, match="client close failure"):
+        with pytest.raises(RuntimeError, match="remote provider session pool is closed"):
             await borrower
+        assert lease.releases == 0
+        assert len(pool._entries) == 1
+        client.fail_close = False
+        await pool.__aexit__(None, None, None)
+        assert len(pool._entries) == 0
 
     asyncio.run(exercise())
     assert lease.releases == 1
@@ -291,19 +300,19 @@ def test_temporary_storage_release_remains_retryable_after_process_failure(
     )
     pool = module.TemporaryStoragePermitPool(None)
     lease = pool.acquire(100, label="retryable-release", path=tmp_path)
-    real_release = module._PROCESS_TEMPORARY_STORAGE.release
+    real_release = module._PROCESS_TEMPORARY_STORAGE.release_capability
 
     def fail_release(*_args: object, **_kwargs: object) -> None:
         raise OSError("injected process release failure")
 
-    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "release", fail_release)
+    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "release_capability", fail_release)
     with pytest.raises(OSError, match="process release failure"):
         lease.release()
     assert lease.reserved_bytes == 100
     assert pool.snapshot().reserved_bytes == 100
     assert pool.snapshot().active_leases == 1
 
-    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "release", real_release)
+    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "release_capability", real_release)
     lease.release()
     assert lease.reserved_bytes == 0
     assert pool.snapshot().reserved_bytes == 0
@@ -322,18 +331,18 @@ def test_temporary_storage_shrink_remains_retryable_after_process_failure(
     )
     pool = module.TemporaryStoragePermitPool(None)
     lease = pool.acquire(100, label="retryable-shrink", path=tmp_path)
-    real_release = module._PROCESS_TEMPORARY_STORAGE.release
+    real_resize = module._PROCESS_TEMPORARY_STORAGE.resize_capability
 
     def fail_release(*_args: object, **_kwargs: object) -> None:
         raise OSError("injected process shrink failure")
 
-    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "release", fail_release)
+    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "resize_capability", fail_release)
     with pytest.raises(OSError, match="process shrink failure"):
         lease.resize(40)
     assert lease.reserved_bytes == 100
     assert pool.snapshot().reserved_bytes == 100
 
-    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "release", real_release)
+    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "resize_capability", real_resize)
     lease.resize(40)
     assert lease.reserved_bytes == 40
     assert pool.snapshot().reserved_bytes == 40
@@ -403,6 +412,56 @@ def test_temporary_storage_move_rolls_back_target_when_old_release_fails(
             self.reserved[device] -= size_bytes
             self.inodes[device] -= inode_count
 
+        def reserve_capability(self, size_bytes: int, **kwargs: Any) -> Any:
+            device = self.reserve(size_bytes, **kwargs)
+            return SimpleNamespace(
+                governor=self,
+                device=device,
+                reserved_bytes=size_bytes,
+                reserved_inodes=kwargs.get("inode_count", 0),
+                active=True,
+            )
+
+        def release_capability(self, capability: Any) -> bool:
+            self.release(
+                capability.device,
+                capability.reserved_bytes,
+                inode_count=capability.reserved_inodes,
+            )
+            capability.active = False
+            return True
+
+        def resize_capability(
+            self,
+            capability: Any,
+            size_bytes: int,
+            *,
+            path: Any,
+            label: str,
+            inode_count: int,
+        ) -> Any:
+            target_device, _target, _free = self.filesystem(path)
+            if target_device == capability.device:
+                delta = size_bytes - capability.reserved_bytes
+                if delta > 0:
+                    self.reserve(delta, path=path, label=label)
+                elif delta < 0:
+                    self.release(capability.device, -delta)
+                capability.reserved_bytes = size_bytes
+                return capability
+            replacement = self.reserve_capability(
+                size_bytes,
+                path=path,
+                label=label,
+                inode_count=inode_count,
+            )
+            try:
+                self.release_capability(capability)
+            except BaseException:
+                self.release_capability(replacement)
+                raise
+            return replacement
+
     governor = Governor()
     monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", governor)
     monkeypatch.setattr(
@@ -428,10 +487,10 @@ def test_temporary_storage_move_rolls_back_target_when_old_release_fails(
     lease.release()
 
 
-def test_provider_pool_closed_race_releases_descriptor_when_manager_exit_fails(
+def test_provider_pool_closed_race_retains_descriptor_until_manager_exit_commits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A late async manager returns its FD slot even when __aexit__ fails."""
+    """A late manager keeps its FD reservation until __aexit__ succeeds."""
     from schema_sanitizer.remote_impl import provider_session_pool as module
 
     class Lease:
@@ -442,11 +501,14 @@ def test_provider_pool_closed_race_releases_descriptor_when_manager_exit_fails(
             self.releases += 1
 
     class Manager:
+        fail_exit = True
+
         async def __aenter__(self) -> object:
             return object()
 
         async def __aexit__(self, *_exc: object) -> None:
-            raise RuntimeError("injected manager exit failure")
+            if self.fail_exit:
+                raise RuntimeError("injected manager exit failure")
 
     lease = Lease()
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda *_a, **_k: lease)
@@ -456,18 +518,24 @@ def test_provider_pool_closed_race_releases_descriptor_when_manager_exit_fails(
         await pool.__aenter__()
         entered = asyncio.Event()
         resume = asyncio.Event()
+        manager = Manager()
 
         async def factory() -> Manager:
             entered.set()
             await resume.wait()
-            return Manager()
+            return manager
 
         borrower = asyncio.create_task(pool.borrow_manager(("manager",), factory))
         await entered.wait()
         await pool.__aexit__(None, None, None)
         resume.set()
-        with pytest.raises(RuntimeError, match="manager exit failure"):
+        with pytest.raises(RuntimeError, match="remote provider session pool is closed"):
             await borrower
+        assert lease.releases == 0
+        assert len(pool._entries) == 1
+        manager.fail_exit = False
+        await pool.__aexit__(None, None, None)
+        assert len(pool._entries) == 0
 
     asyncio.run(exercise())
     assert lease.releases == 1

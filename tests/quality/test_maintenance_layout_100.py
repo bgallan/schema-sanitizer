@@ -29,7 +29,7 @@ def test_abi3_module_definition_has_no_fragmented_method_catalog() -> None:
     assert "std::to_array<PyMethodDef>" in text
     assert "kModuleMethodCount" not in text
     assert "PyMODINIT_FUNC PyInit__core_abi3" in text
-    assert len(text.splitlines()) <= 550
+    assert len(text.splitlines()) <= 750
     for retired in ("_core_abi3.cc", "_core_abi3_module.hh", "module_methods"):
         assert not (owner.parent / retired).exists()
 

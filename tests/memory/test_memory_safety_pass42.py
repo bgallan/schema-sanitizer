@@ -52,7 +52,6 @@ def test_notifier_retries_failed_event_and_acks_only_after_success(
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
-    governor = module._Governor(1, "pass42-ack")
     local_threads = module._Governor(1, "pass42-notifier-thread")
     monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
     attempts = 0
@@ -66,7 +65,7 @@ def test_notifier_retries_failed_event_and_acks_only_after_success(
         assert event is module.AvailabilityEvent.RETRY_SCHEDULER
         completed.set()
 
-    monkeypatch.setattr(module, "_dispatch_availability_event", dispatch)
+    governor = module._Governor(1, "pass42-ack", availability_dispatcher=dispatch)
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
     delivery = _delivery(module, governor, module.AvailabilityEvent.RETRY_SCHEDULER)
     assert notifier.publish((delivery,)) == ()

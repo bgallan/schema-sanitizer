@@ -223,7 +223,9 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
     assert 'if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))' in cmake
     assert "set(_schema_sanitizer_sanitized_executor_rounds 100)" in cmake
     assert "schema_sanitizer_sanitized_ordered_executor --rounds" in cmake
-    assert 'std::string_view(argv[1]) != "--rounds"' in probe
+    assert 'argc == 3 && std::string_view(argv[1]) == "--rounds"' in probe
+    assert "std::from_chars" in probe
+    assert 'argc == 3 && std::string_view(argv[1]) == "--case"' in probe
     assert "shared arena startup timed out" in probe
     assert "stage cancellation startup timed out" in probe
     assert "cancellation startup timed out" in probe

@@ -204,14 +204,42 @@ class _RecordingArrowTable:
         return object()
 
 
+class _ConfigurableArrowRuntime:
+    """PyArrow double exposing a verifiable process-global CPU pool width."""
+
+    def __init__(self) -> None:
+        """Start serial and retain every admitted pool reconfiguration."""
+        self._workers = 1
+        self.configurations: list[int] = []
+
+    def cpu_count(self) -> int:
+        """Return the currently configured worker-pool width."""
+        return self._workers
+
+    def set_cpu_count(self, workers: int) -> None:
+        """Apply and record the exact width selected by shared admission."""
+        self._workers = int(workers)
+        self.configurations.append(self._workers)
+
+
 def test_v72_pandas_adapter_obeys_single_multi_threading_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The final pandas conversion explicitly disables/enables PyArrow threads."""
+    arrow_runtime = _ConfigurableArrowRuntime()
+
+    def dependency(name: str, **_kwargs: object) -> object:
+        """Provide pandas and a PyArrow pool whose width can be verified."""
+        if name == "pandas":
+            return object()
+        if name == "pyarrow":
+            return arrow_runtime
+        raise AssertionError(name)
+
     monkeypatch.setattr(
         result_adapters,
         "ensure_optional_dependency",
-        lambda *_args, **_kwargs: object(),
+        dependency,
     )
     table = _RecordingArrowTable()
 
@@ -223,6 +251,9 @@ def test_v72_pandas_adapter_obeys_single_multi_threading_policy(
     )
 
     assert table.calls == [{"use_threads": False}, {"use_threads": True}]
+    assert arrow_runtime.configurations
+    assert arrow_runtime.cpu_count() == arrow_runtime.configurations[-1]
+    assert arrow_runtime.cpu_count() >= 2
 
 
 def test_v72_all_public_outputs_keep_multi_threading() -> None:

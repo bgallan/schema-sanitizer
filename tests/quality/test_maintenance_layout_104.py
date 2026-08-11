@@ -15,7 +15,13 @@ def test_parquet_factory_owns_source_and_staging_lifecycle() -> None:
     source = owner.read_text(encoding="utf-8")
 
     assert owner.is_file()
-    assert len(source.splitlines()) <= 500
+    # The integral owner now includes prearmed finalizer, governed temporary
+    # storage, and external-runtime leases. Keep one explicit ceiling while
+    # also proving those authority boundaries remain colocated.
+    assert len(source.splitlines()) <= 1_300
+    assert "reserve_finalizer_cleanup" in source
+    assert "StreamingStorageReservation" in source
+    assert "acquire_external_runtime_threads" in source
     for name in (
         "local_parquet_path_or_none",
         "open_parquet_source",

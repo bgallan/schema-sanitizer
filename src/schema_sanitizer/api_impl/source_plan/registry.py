@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from schema_sanitizer.input_impl.source_plan import (
     PARQUET_ARROW_SOURCES,
@@ -20,8 +20,15 @@ from schema_sanitizer.input_impl.source_plan import (
 )
 
 from ...adapters.pyarrow import streams as _pyarrow_streams
+from ...core_impl.concurrency_stage_evidence import observe_successful_output_runtime_stage
 from ...core_impl.execution_policy import execution_policy, normalize_threading_mode
 from ...core_impl.finalization import runtime_is_finalizing
+from ...core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_finalizer_cleanup,
+)
 from ...core_impl.generated_metadata import TimestampColumns
 from ...core_impl.resource_lifecycle import (
     _cleanup_with_note,
@@ -41,6 +48,32 @@ from ..streams import Stream
 from .remote import RemotePathSourceChunkProvider, prefetched_remote_chunks
 
 
+def _cleanup_opened_registry_stream_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Close detached registry stream owners without retaining metadata caches."""
+    stream = capsule.arg0
+    raw = capsule.arg1
+    close_items = cast(list[Any] | None, capsule.arg2)
+    if stream is not None:
+        wrapped_raw = stream._raw if hasattr(stream, "_raw") else None
+        if not _close_suppressing_errors(stream):
+            raise RuntimeError("registry stream cleanup remains retryable")
+        capsule.arg0 = None
+        if raw is not None and wrapped_raw is raw:
+            capsule.arg1 = None
+            raw = None
+    if raw is not None:
+        if not _close_suppressing_errors(raw):
+            raise RuntimeError("raw registry stream cleanup remains retryable")
+        capsule.arg1 = None
+    if close_items is not None:
+        while close_items:
+            item = close_items[-1]
+            if item is not stream and item is not raw and not _close_suppressing_errors(item):
+                raise RuntimeError("registry close-item cleanup remains retryable")
+            close_items.pop()
+        capsule.arg2 = None
+
+
 @dataclass(slots=True)
 class OpenedSourcePlanRegistryStream:
     """Opened registry-backed stream plus registry metadata and ownership."""
@@ -53,6 +86,17 @@ class OpenedSourcePlanRegistryStream:
     raw_stream: Any | None = None
     close_items: list[Any] = field(default_factory=list)
     _pid: int = field(default_factory=os.getpid, init=False, repr=False)
+    _finalizer_ticket: int | None = field(default=None, init=False, repr=False)
+    _finalizer_capsule: PreparedFinalizerCleanup | None = field(
+        default=None, init=False, repr=False
+    )
+    # Preallocate the terminal public list so __del__ can detach ownership
+    # without allocating while preserving the stable post-cleanup object shape.
+    _terminal_close_items: list[Any] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._finalizer_capsule = reserve_finalizer_cleanup(_cleanup_opened_registry_stream_capsule)
+        self._finalizer_ticket = self._finalizer_capsule.ticket
 
     def output_stream(self) -> Any:
         """Return a Python stream wrapper for file writers."""
@@ -123,13 +167,34 @@ class OpenedSourcePlanRegistryStream:
                 failed.append(item)
                 failed_ids.add(ident)
         self.close_items.extend(reversed(failed))
+        if self.stream is None and self.raw_stream is None and not self.close_items:
+            ticket = self._finalizer_ticket
+            cleanup = self._finalizer_capsule
+            if ticket is not None and cleanup is not None:
+                cancel_prepared_finalizer_cleanup(cleanup)
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
 
     def __del__(self) -> None:
-        """Retry abandoned cleanup outside shutdown and post-fork children."""
+        """Detach only stream owners into a preallocated cleanup capsule."""
         try:
-            if runtime_is_finalizing():
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is None or cleanup is None:
+                return
+            cleanup.arg0 = getattr(self, "stream", None)
+            cleanup.arg1 = getattr(self, "raw_stream", None)
+            cleanup.arg2 = getattr(self, "close_items", None)
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self.stream = None
+                self.raw_stream = None
+                self.close_items = self._terminal_close_items
+                self.diagnostics = None
+                self.native_registry_state = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -277,12 +342,15 @@ def materialize_opened_registry_stream(
     threading_mode: str = "single",
 ) -> Result:
     """Materialize an opened registry stream into an analytical target."""
+    conversion: AnalyticalOutputConversion | None = None
+    resource_owner_transferred = False
     try:
         if target == "pyarrow":
             table = _pyarrow_streams.table_from_stream_like(
                 opened.materialization_stream(),
                 feature="to_pyarrow",
             )
+            observe_successful_output_runtime_stage("pyarrow")
             conversion = AnalyticalOutputConversion(
                 clean_data=table,
                 diagnostics_shape=table,
@@ -304,6 +372,7 @@ def materialize_opened_registry_stream(
             native_registry_state=opened.native_registry_state,
             conversion_route=conversion.route,
         )
+        resource_owner_transferred = conversion.transfer_resource_owner_to(result)
         patch_table_diagnostics(
             owner,
             result,
@@ -311,6 +380,10 @@ def materialize_opened_registry_stream(
             fill_inferred_rows_when_missing=True,
         )
         return result
+    except BaseException as primary:
+        if conversion is not None and not resource_owner_transferred:
+            conversion.rollback_resource_owner(primary)
+        raise
     finally:
         opened.close()
 

@@ -148,7 +148,7 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         assert plan.kind == source_plan_model.REMOTE_CHUNKS
         assert plan.route_name == "remote_native_manifest_chunks"
         assert manifest is not None
-        assert manifest.files == list(files)
+        assert manifest.files == tuple(files)
         assert manifest.chunk_size == remote_staging_packet_policy(None).max_files
     finally:
         prepared.close()

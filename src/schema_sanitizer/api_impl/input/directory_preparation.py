@@ -268,7 +268,13 @@ def prepare_single_parquet_file(
         ),
     )
     retained: Any = carrier if keepalive is None else ChainedKeepalive(carrier, keepalive)
-    return PreparedPublicInput(carrier, "parquet", "stream", retained)
+    return PreparedPublicInput(
+        carrier,
+        "parquet",
+        "stream",
+        retained,
+        source_file=source_file,
+    )
 
 
 def prepare_directory_from_files(

@@ -28,8 +28,12 @@ PyObject *py_process_cpu_governor_probe(PyObject *, PyObject *args) {
   }
 
   auto &governor = sanitize::internal::process_cpu_governor();
-  auto first = governor.MakeRegistration(true);
-  auto second = governor.MakeRegistration(true);
+  // Each probe registration represents a genuinely wide arena. Passing a
+  // boolean here used to collapse the width to 1 and silently bypass the
+  // governor after Registration gained width-aware single-arena semantics.
+  const auto arena_width = static_cast<std::size_t>(requested_tasks);
+  auto first = governor.MakeRegistration(arena_width);
+  auto second = governor.MakeRegistration(arena_width);
   std::atomic<std::int64_t> active{0};
   std::atomic<std::int64_t> peak{0};
   std::atomic<std::int64_t> waits{0};

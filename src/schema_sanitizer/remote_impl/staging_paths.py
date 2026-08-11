@@ -11,11 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Lock
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from schema_sanitizer.core_impl.safe_errors import add_bounded_note
 
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_finalizer_cleanup,
+)
 from ..core_impl.path_identity import (
     PathIdentity,
     claim_path_identity,
@@ -23,7 +29,7 @@ from ..core_impl.path_identity import (
     release_path_identity,
     transfer_identity_matches,
 )
-from ..core_impl.process_resources import reserve_file_descriptors
+from ..core_impl.process_resources import acquire_file_descriptor_capability
 from ..core_impl.temporary_janitor import quarantine_temporary_artifact
 from ..core_impl.temporary_storage import TemporaryStorageLease, TemporaryStoragePermitPool
 
@@ -31,6 +37,7 @@ if TYPE_CHECKING:
     from ..api_impl.operation_context import OperationExecutionContext
 
 _HAS_DESCRIPTOR_RELATIVE_TRAVERSAL = os.name != "nt"
+_MAX_PENDING_TREE_DIRECTORIES = 4096
 
 
 def _close_descriptor(fd: int, primary: BaseException | None) -> None:
@@ -45,6 +52,76 @@ def _close_descriptor(fd: int, primary: BaseException | None) -> None:
             "temporary directory descriptor cleanup also failed",
             cleanup_error,
         )
+
+
+def _cleanup_staged_path_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Delete a detached staged path while keeping retry ownership in the capsule."""
+    raw_path = capsule.arg0
+    if raw_path is None:
+        return
+    retry_path = Path(str(raw_path))
+    retry_identity = cast("PathIdentity | None", capsule.arg1)
+    lease = cast("TemporaryStorageLease | None", capsule.arg2)
+    current_identity = lstat_identity(retry_path)
+    if current_identity is not None and current_identity != retry_identity:
+        raise OSError(f"temporary path ownership changed before cleanup: {retry_path}")
+    if current_identity is not None:
+        private_path = StagedPath._private_delete_path(retry_path)
+        try:
+            if private_path != retry_path:
+                os.replace(retry_path, private_path)
+        except FileNotFoundError:
+            current_identity = None
+        except OSError as exc:
+            raise OSError(
+                f"temporary path could not be transferred privately: {retry_path}"
+            ) from exc
+        else:
+            private_identity = lstat_identity(private_path)
+            if not transfer_identity_matches(current_identity, private_identity):
+                StagedPath._restore_raced_transfer(retry_path, private_path)
+                raise OSError(f"temporary path was replaced during cleanup transfer: {retry_path}")
+            retry_path = private_path
+            retry_identity = retry_identity or private_identity
+            current_identity = private_identity
+            capsule.arg0 = str(retry_path)
+            capsule.arg1 = retry_identity
+
+    if current_identity is not None:
+        try:
+            if current_identity.file_type == stat.S_IFDIR:
+                shutil.rmtree(retry_path)
+            else:
+                retry_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    remaining_identity = lstat_identity(retry_path)
+    if remaining_identity is None:
+        release_path_identity(retry_identity)
+        if lease is not None:
+            lease.release()
+        capsule.arg0 = None
+        capsule.arg1 = None
+        capsule.arg2 = None
+        return
+    if remaining_identity != retry_identity:
+        raise OSError(f"temporary path was replaced during cleanup: {retry_path}")
+    if lease is None:
+        raise OSError(f"temporary path could not be deleted: {retry_path}")
+    accepted = quarantine_temporary_artifact(
+        retry_path,
+        is_dir=remaining_identity.file_type == stat.S_IFDIR,
+        lease=lease,
+        expected_identity=retry_identity,
+    )
+    if accepted is False:
+        raise RuntimeError("temporary-artifact janitor is closed; staged path cleanup is retryable")
+    capsule.arg0 = None
+    capsule.arg1 = None
+    capsule.arg2 = None
 
 
 class StagedPath:
@@ -70,6 +147,9 @@ class StagedPath:
         self._closing = False
         self._accounting_inflight = False
         self._closed = False
+        finalizer_capsule = reserve_finalizer_cleanup(_cleanup_staged_path_capsule)
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = finalizer_capsule
+        self._finalizer_ticket: int | None = finalizer_capsule.ticket
 
     def _wait_idle_locked(self, *, action: str) -> None:
         """Wait boundedly for lifecycle work owned by another thread."""
@@ -121,7 +201,7 @@ class StagedPath:
         return count
 
     def _measure_owned_tree(self) -> tuple[int, int]:
-        """Measure a tree with descriptor-relative, no-follow traversal."""
+        """Measure a tree with bounded, non-recursive descriptor authority."""
         root = Path(self.path)
         expected = self._identity
         before = lstat_identity(root)
@@ -147,62 +227,63 @@ class StagedPath:
             | int(getattr(os, "O_NOFOLLOW", 0))
             | int(getattr(os, "O_CLOEXEC", 0))
         )
-
-        def walk(directory_fd: int, depth: int) -> None:
-            nonlocal total_size, total_count
+        # Pass62: never retain an ancestor FD while acquiring a descendant.
+        # Each directory consumes exactly two credits atomically: the opened
+        # directory and the descriptor duplicated by os.scandir(fd).
+        pending: list[tuple[Path, PathIdentity, int]] = [(root, expected, 0)]
+        while pending:
+            directory, directory_identity, depth = pending.pop()
             if depth > max_depth:
                 raise OSError("temporary directory accounting exceeded its depth limit")
-            with os.scandir(directory_fd) as entries:
-                for entry in entries:
-                    total_count += 1
-                    if total_count > max_entries:
-                        raise OSError("temporary directory accounting exceeded its entry limit")
-                    metadata = entry.stat(follow_symlinks=False)
-                    entry_type = stat.S_IFMT(metadata.st_mode)
-                    if entry_type == stat.S_IFREG:
-                        total_size += int(metadata.st_size)
-                        continue
-                    if entry_type != stat.S_IFDIR:
-                        continue
-                    with reserve_file_descriptors(1, label="temporary_tree_accounting"):
-                        child_fd = os.open(entry.name, directory_flags, dir_fd=directory_fd)
-                        primary: BaseException | None = None
-                        try:
-                            opened = os.fstat(child_fd)
-                            if (
-                                int(opened.st_dev) != int(metadata.st_dev)
-                                or int(opened.st_ino) != int(metadata.st_ino)
-                                or not stat.S_ISDIR(opened.st_mode)
-                            ):
+            if lstat_identity(directory) != directory_identity:
+                raise OSError(f"temporary directory changed before accounting: {directory}")
+            with acquire_file_descriptor_capability(
+                2, label="temporary_tree_accounting"
+            ) as capability:
+                with capability.open_descriptor(
+                    lambda: os.open(directory, directory_flags),
+                    label="temporary_tree_directory",
+                ) as directory_fd:
+                    opened = os.fstat(directory_fd)
+                    if (
+                        int(opened.st_dev) != directory_identity.device
+                        or int(opened.st_ino) != directory_identity.inode
+                        or not stat.S_ISDIR(opened.st_mode)
+                    ):
+                        raise OSError(
+                            f"temporary directory component changed during accounting: {directory}"
+                        )
+                    with capability.scandir(
+                        directory_fd, label="temporary_tree_scandir"
+                    ) as entries:
+                        for entry in entries:
+                            total_count += 1
+                            if total_count > max_entries:
                                 raise OSError(
-                                    "temporary directory component changed during accounting"
+                                    "temporary directory accounting exceeded its entry limit"
                                 )
-                            walk(child_fd, depth + 1)
-                        except BaseException as exc:
-                            primary = exc
-                            raise
-                        finally:
-                            _close_descriptor(child_fd, primary)
-
-        with reserve_file_descriptors(1, label="temporary_tree_accounting"):
-            root_fd = os.open(root, directory_flags)
-            primary: BaseException | None = None
-            try:
-                opened_root = os.fstat(root_fd)
-                if (
-                    int(opened_root.st_dev) != expected.device
-                    or int(opened_root.st_ino) != expected.inode
-                    or not stat.S_ISDIR(opened_root.st_mode)
-                ):
-                    raise OSError(f"temporary path ownership changed during accounting: {root}")
-                walk(root_fd, 0)
-            except BaseException as exc:
-                primary = exc
-                raise
-            finally:
-                _close_descriptor(root_fd, primary)
-        after = lstat_identity(root)
-        if after != expected:
+                            metadata = entry.stat(follow_symlinks=False)
+                            entry_type = stat.S_IFMT(metadata.st_mode)
+                            if entry_type == stat.S_IFREG:
+                                total_size += int(metadata.st_size)
+                                continue
+                            if entry_type != stat.S_IFDIR:
+                                continue
+                            child = directory / entry.name
+                            child_identity = PathIdentity(
+                                device=int(metadata.st_dev),
+                                inode=int(metadata.st_ino),
+                                file_type=entry_type,
+                                change_time_ns=int(metadata.st_ctime_ns),
+                            )
+                            if len(pending) >= _MAX_PENDING_TREE_DIRECTORIES:
+                                raise OSError(
+                                    "temporary directory accounting exceeded its pending-directory metadata limit"
+                                )
+                            pending.append((child, child_identity, depth + 1))
+            if lstat_identity(directory) != directory_identity:
+                raise OSError(f"temporary directory changed during accounting: {directory}")
+        if lstat_identity(root) != expected:
             raise OSError(f"temporary path ownership changed during accounting: {root}")
         return total_size, total_count
 
@@ -226,27 +307,36 @@ class StagedPath:
                 raise OSError("temporary directory accounting exceeded its depth limit")
             if lstat_identity(directory) != directory_identity:
                 raise OSError(f"temporary directory changed before accounting: {directory}")
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    total_count += 1
-                    if total_count > max_entries:
-                        raise OSError("temporary directory accounting exceeded its entry limit")
-                    metadata = entry.stat(follow_symlinks=False)
-                    reparse_point = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-                    file_attributes = int(getattr(metadata, "st_file_attributes", 0))
-                    if reparse_point and file_attributes & reparse_point:
-                        continue
-                    entry_type = stat.S_IFMT(metadata.st_mode)
-                    if entry_type == stat.S_IFREG:
-                        total_size += int(metadata.st_size)
-                    elif entry_type == stat.S_IFDIR:
-                        child = Path(entry.path)
-                        child_identity = lstat_identity(child)
-                        if child_identity is None or child_identity.file_type != stat.S_IFDIR:
-                            raise OSError(
-                                f"temporary directory component changed during accounting: {child}"
-                            )
-                        pending.append((child, child_identity, depth + 1))
+            with acquire_file_descriptor_capability(
+                1, label="temporary_tree_accounting_path"
+            ) as capability:
+                with capability.scandir_path(
+                    directory, label="temporary_tree_scandir_path"
+                ) as entries:
+                    for entry in entries:
+                        total_count += 1
+                        if total_count > max_entries:
+                            raise OSError("temporary directory accounting exceeded its entry limit")
+                        metadata = entry.stat(follow_symlinks=False)
+                        reparse_point = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+                        file_attributes = int(getattr(metadata, "st_file_attributes", 0))
+                        if reparse_point and file_attributes & reparse_point:
+                            continue
+                        entry_type = stat.S_IFMT(metadata.st_mode)
+                        if entry_type == stat.S_IFREG:
+                            total_size += int(metadata.st_size)
+                        elif entry_type == stat.S_IFDIR:
+                            child = Path(entry.path)
+                            child_identity = lstat_identity(child)
+                            if child_identity is None or child_identity.file_type != stat.S_IFDIR:
+                                raise OSError(
+                                    f"temporary directory component changed during accounting: {child}"
+                                )
+                            if len(pending) >= _MAX_PENDING_TREE_DIRECTORIES:
+                                raise OSError(
+                                    "temporary directory accounting exceeded its pending-directory metadata limit"
+                                )
+                            pending.append((child, child_identity, depth + 1))
             if lstat_identity(directory) != directory_identity:
                 raise OSError(f"temporary directory changed during accounting: {directory}")
         if lstat_identity(root) != expected:
@@ -377,6 +467,12 @@ class StagedPath:
                     self.storage_lease = None
                     self._identity = None
                     self._closed = True
+                    ticket = getattr(self, "_finalizer_ticket", None)
+                    cleanup = getattr(self, "_finalizer_capsule", None)
+                    if ticket is not None and cleanup is not None:
+                        cancel_prepared_finalizer_cleanup(cleanup)
+                        self._finalizer_ticket = None
+                        self._finalizer_capsule = None
                 else:
                     self.path = str(retry_path)
                     self._identity = retry_identity
@@ -384,11 +480,23 @@ class StagedPath:
                 self._close_condition.notify_all()
 
     def __del__(self) -> None:
-        """Release an abandoned path unless interpreter teardown has begun."""
+        """Detach only path identity/accounting resources into a reserved safe-point slot."""
         try:
-            if runtime_is_finalizing():
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is None or cleanup is None or getattr(self, "_closed", False):
+                return
+            cleanup.arg0 = getattr(self, "path", None)
+            cleanup.arg1 = getattr(self, "_identity", None)
+            cleanup.arg2 = getattr(self, "storage_lease", None)
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self.storage_lease = None
+                self._identity = None
+                self.source_file_by_name = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -415,10 +523,17 @@ def create_temp_file_path(
     *, suffix: str, storage_lease: TemporaryStorageLease | None = None
 ) -> StagedPath:
     """Create an owned temporary file while respecting the FD governor."""
-    with reserve_file_descriptors(label="temporary_file_create"):
-        fd, path = tempfile.mkstemp(prefix="schema-sanitizer-", suffix=suffix)
-        os.close(fd)
-    return StagedPath(path, storage_lease=storage_lease)
+    created_path: list[str] = []
+    with acquire_file_descriptor_capability(1, label="temporary_file_create") as capability:
+
+        def create() -> int:
+            fd, path = tempfile.mkstemp(prefix="schema-sanitizer-", suffix=suffix)
+            created_path.append(path)
+            return fd
+
+        with capability.open_descriptor(create, label="temporary_file_create"):
+            pass
+    return StagedPath(created_path[0], storage_lease=storage_lease)
 
 
 def create_temp_directory_path(*, storage_lease: TemporaryStorageLease | None = None) -> StagedPath:

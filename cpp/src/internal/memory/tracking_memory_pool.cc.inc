@@ -4,11 +4,13 @@ class TrackingMemoryPool final : public MemoryPool {
 public:
   TrackingMemoryPool(std::shared_ptr<MemoryPool> parent, int64_t limit,
                      std::string backend_name, bool thread_safe_registry,
-                     std::shared_ptr<OperationMemoryLedger> operation_ledger)
+                     std::shared_ptr<OperationMemoryLedger> operation_ledger,
+                     bool process_resident_governor = false)
       : parent_(std::move(parent)), limit_(limit),
         backend_name_(std::move(backend_name)),
         operation_ledger_(std::move(operation_ledger)),
-        live_allocations_(thread_safe_registry) {}
+        process_resident_governor_(process_resident_governor),
+        live_allocations_(thread_safe_registry, limit) {}
 
   sanitize::Status Allocate(int64_t size, int64_t alignment,
                             uint8_t **out) override {
@@ -61,13 +63,25 @@ public:
       }
       const auto next = charged + quota_charge;
       const auto limit = limit_.load(std::memory_order_relaxed);
-      if (limit > 0 && next > limit) {
+      // Per-pool registry metadata is charged once through the process-wide
+      // fixed metadata bank. Do not subtract it again from an operation's
+      // user-visible payload limit.
+      const auto registry_bytes =
+          process_resident_governor_
+              ? live_allocation_registry_metadata_capacity_bytes()
+              : 0;
+      const auto effective_limit =
+          limit > 0 ? std::max<int64_t>(
+                          1, limit - std::max<int64_t>(0, registry_bytes))
+                    : limit;
+      if (effective_limit > 0 && next > effective_limit) {
         if (operation_ledger_) {
           operation_ledger_->ReleaseNative(quota_charge);
         }
         return sanitize::Status::OutOfMemory(
             "memory_limit_bytes limit exceeded including allocator overhead: ",
-            next, " bytes > ", limit, " bytes");
+            next + std::max<int64_t>(0, registry_bytes), " bytes > ", limit,
+            " bytes");
       }
       if (charged_bytes_.compare_exchange_weak(charged, next,
                                                std::memory_order_relaxed,
@@ -250,7 +264,18 @@ public:
       }
       const auto next = charged + bytes;
       const auto limit = limit_.load(std::memory_order_relaxed);
-      if (limit > 0 && next > limit) {
+      // Per-pool registry metadata is charged once through the process-wide
+      // fixed metadata bank. Do not subtract it again from an operation's
+      // user-visible payload limit.
+      const auto registry_bytes =
+          process_resident_governor_
+              ? live_allocation_registry_metadata_capacity_bytes()
+              : 0;
+      const auto effective_limit =
+          limit > 0 ? std::max<int64_t>(
+                          1, limit - std::max<int64_t>(0, registry_bytes))
+                    : limit;
+      if (effective_limit > 0 && next > effective_limit) {
         if (stage.empty()) {
           return sanitize::Status::OutOfMemory(
               "process resident memory limit exceeded: ", next, " bytes > ",
@@ -311,5 +336,6 @@ private:
   std::atomic<int64_t> invalid_free_count_{0};
   std::atomic<int64_t> size_mismatch_count_{0};
   std::atomic<int64_t> corruption_count_{0};
+  bool process_resident_governor_ = false;
   LiveAllocationRegistry live_allocations_;
 };

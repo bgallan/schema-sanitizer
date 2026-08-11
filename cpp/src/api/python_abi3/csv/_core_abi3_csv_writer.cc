@@ -13,6 +13,7 @@
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "internal/csv/csv_stream_writer.hh"
 #include "internal/output/ordered_text_output.hh"
+#include "internal/runtime/process_fd_governor.hh"
 
 #include <fstream>
 #include <memory>
@@ -53,9 +54,19 @@ PyObject *csv_stats_to_dict(const csv::WriteStats &stats) {
 class FileCsvOutput final : public csv::Output {
 public:
   // Opens a local output path.
-  explicit FileCsvOutput(std::string path)
-      : out_(std::move(path),
-             std::ios::out | std::ios::binary | std::ios::trunc) {}
+  explicit FileCsvOutput(std::string path) : fd_lease_(1U) {
+    if (fd_lease_) {
+      out_.open(std::move(path),
+                std::ios::out | std::ios::binary | std::ios::trunc);
+      if (out_) {
+        fd_lease_.mark_opened();
+      }
+    }
+  }
+
+  ~FileCsvOutput() override {
+    sanitize::internal::close_stream_and_commit(out_, fd_lease_);
+  }
 
   // Returns whether the file opened correctly.
   [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
@@ -79,6 +90,7 @@ public:
   }
 
 private:
+  sanitize::internal::ProcessFdPermitLease fd_lease_;
   std::ofstream out_;
 };
 

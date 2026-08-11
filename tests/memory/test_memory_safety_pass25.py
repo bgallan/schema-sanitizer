@@ -679,7 +679,8 @@ def test_sync_directory_session_retains_exit_stack_after_failure() -> None:
 
 
 def test_native_source_plan_finalizer_retries_abandoned_payload() -> None:
-    """An abandoned plan retains a best-effort path to retry failed cleanup."""
+    """An abandoned plan transfers cleanup to a governed safe point."""
+    from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
     from schema_sanitizer.input_impl.source_plan import REMOTE_CHUNKS, NativeSourcePlan
 
     payload = _FailOnceClose()
@@ -693,15 +694,17 @@ def test_native_source_plan_finalizer_retries_abandoned_payload() -> None:
     plan.close()
     assert plan.payload is payload
     plan.__del__()
+    drain_finalizer_cleanup()
     assert plan.payload is None
     assert payload.calls == 2
 
 
 def test_registry_stream_finalizer_retries_failed_raw_cleanup() -> None:
-    """An abandoned opened registry stream retries its retained backend."""
+    """An abandoned registry stream transfers cleanup to a safe point."""
     from schema_sanitizer.api_impl.source_plan.registry import (
         OpenedSourcePlanRegistryStream,
     )
+    from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
 
     raw = _FailOnceClose()
     opened = OpenedSourcePlanRegistryStream(
@@ -715,6 +718,7 @@ def test_registry_stream_finalizer_retries_failed_raw_cleanup() -> None:
     opened.close()
     assert opened.raw_stream is raw
     opened.__del__()
+    drain_finalizer_cleanup()
     assert opened.raw_stream is None
     assert opened.close_items == []
 

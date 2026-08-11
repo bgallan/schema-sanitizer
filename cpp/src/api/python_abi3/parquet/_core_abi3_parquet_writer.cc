@@ -12,6 +12,7 @@
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "internal/output/ordered_text_output.hh"
 #include "internal/parquet/parquet_stream_writer.hh"
+#include "internal/runtime/process_fd_governor.hh"
 
 #include <fstream>
 #include <memory>
@@ -27,9 +28,19 @@ namespace parquet = sanitize::internal::parquet_stream_writer;
 class FileParquetOutput final : public parquet::Output {
 public:
   // Opens a local output path.
-  explicit FileParquetOutput(std::string path)
-      : out_(std::move(path),
-             std::ios::out | std::ios::binary | std::ios::trunc) {}
+  explicit FileParquetOutput(std::string path) : fd_lease_(1U) {
+    if (fd_lease_) {
+      out_.open(std::move(path),
+                std::ios::out | std::ios::binary | std::ios::trunc);
+      if (out_) {
+        fd_lease_.mark_opened();
+      }
+    }
+  }
+
+  ~FileParquetOutput() override {
+    sanitize::internal::close_stream_and_commit(out_, fd_lease_);
+  }
 
   // Returns whether the file opened correctly.
   [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
@@ -55,6 +66,7 @@ public:
   }
 
 private:
+  sanitize::internal::ProcessFdPermitLease fd_lease_;
   std::ofstream out_;
 };
 

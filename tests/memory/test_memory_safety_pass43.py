@@ -99,11 +99,14 @@ def test_notifier_hard_deadline_is_dispatch_barrier(
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
-    governor = module._Governor(1, "pass43-notifier-deadline")
     local_threads = module._Governor(1, "pass43-notifier-thread")
     monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
     called = threading.Event()
-    monkeypatch.setattr(module, "_dispatch_availability_event", lambda _event: called.set())
+    governor = module._Governor(
+        1,
+        "pass43-notifier-deadline",
+        availability_dispatcher=lambda _event: called.set(),
+    )
     event = module.AvailabilityEvent.RETRY_SCHEDULER
     assert governor.register_availability_event(event)
     generation = governor._availability_events[event]
@@ -126,8 +129,12 @@ def test_level_triggered_availability_closes_release_before_register_gap(
     monkeypatch.setattr(module, "_AVAILABILITY_NOTIFIER", notifier)
     monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
     observed = threading.Event()
-    monkeypatch.setattr(module, "_dispatch_availability_event", lambda _event: observed.set())
-    governor = module._Governor(1, "pass43-level", level_triggered_availability=True)
+    governor = module._Governor(
+        1,
+        "pass43-level",
+        level_triggered_availability=True,
+        availability_dispatcher=lambda _event: observed.set(),
+    )
     lease = governor.acquire(1, timeout_seconds=0)
     lease.release()
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
@@ -141,14 +148,12 @@ def test_notifier_rearm_during_execution_is_not_lost(
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
-    governor = module._Governor(1, "pass43-rearm")
     local_threads = module._Governor(1, "pass43-rearm-thread")
     monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
     event = module.AvailabilityEvent.RETRY_SCHEDULER
-    assert governor.register_availability_event(event)
-    delivery = module._AvailabilityDelivery(governor, event, governor._availability_events[event])
     attempts = 0
     completed = threading.Event()
+    delivery: module._AvailabilityDelivery
 
     def dispatch(_event: module.AvailabilityEvent) -> None:
         nonlocal attempts
@@ -158,7 +163,9 @@ def test_notifier_rearm_during_execution_is_not_lost(
         else:
             completed.set()
 
-    monkeypatch.setattr(module, "_dispatch_availability_event", dispatch)
+    governor = module._Governor(1, "pass43-rearm", availability_dispatcher=dispatch)
+    assert governor.register_availability_event(event)
+    delivery = module._AvailabilityDelivery(governor, event, governor._availability_events[event])
     assert notifier.publish((delivery,)) == ()
     assert completed.wait(1)
     deadline = time.monotonic() + 1
@@ -238,10 +245,12 @@ def test_dispatcher_watchdog_tracks_real_active_call_age(
     assert dispatcher.snapshot().oldest_active_ns == 0
 
 
-def test_runtime_snapshot_v6_includes_fd_debt_and_retirement() -> None:
+def test_runtime_snapshot_includes_fd_debt_and_retirement() -> None:
     source = Path("src/schema_sanitizer/core_impl/runtime_diagnostics.py").read_text()
     shutdown = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
-    assert '"version": 6' in source
+    # Pass70 adds separately conserved external resident-stack debt and moves
+    # the integral diagnostic schema to v8.
+    assert '"version": 8' in source
     assert '"uncertain_fd_closes"' in source
     assert 'field(retry_snapshot, "retiring_workers")' in shutdown
     assert 'field(guardian_snapshot, "retiring_workers")' in shutdown
@@ -257,7 +266,10 @@ def test_native_reaper_shutdown_is_biphasic_and_terminal_states_are_visible() ->
     assert "Keep consumers alive after a timed-out attempt" in drain
     assert "Terminalize" in source
     assert "reaper_terminal_states" in header
-    assert "PyTuple_New(20)" in abi
+    # The current native snapshot publishes every terminal/reaper field plus
+    # the unified physical-thread and external resident-stack authorities.
+    assert "PyTuple_New(30)" in abi
+    assert "snapshot.external_runtime_stack_debt_threads" in abi
     assert (
         "SaturatingAtomicSubtract(state_->active, 1U)"
         in Path("cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()

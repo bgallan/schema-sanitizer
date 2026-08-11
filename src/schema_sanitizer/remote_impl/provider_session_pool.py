@@ -13,12 +13,16 @@ from dataclasses import dataclass
 from typing import Any, AsyncContextManager, TypeVar
 
 from ..core_impl.fork_safety import quarantine_inherited_state
+from ..core_impl.memory_budget import acquire_operation_memory
 from ..core_impl.process_resources import acquire_file_descriptors
 from ..core_impl.safe_errors import add_bounded_note
+from ..errors import SchemaSanitizerResourceError
 
 T = TypeVar("T")
 _KEY_CHUNK_CHARS = 4096
 _MAX_KEY_DEPTH = 32
+_MAX_POOL_ENTRIES = 1024
+_MAX_PENDING_KEY_GATES = 1024
 
 
 def _key_is_compactable(value: Any, depth: int = 0) -> bool:
@@ -118,19 +122,118 @@ _FORKED_PROVIDER_POOLS_KEEPALIVE: list[RemoteProviderSessionPool] = []
 
 @dataclass(slots=True)
 class _PoolEntry:
-    """One shared provider value plus its operation-final close callback."""
+    """Preallocated construction/cleanup escrow for one provider resource.
 
-    value: Any
-    close: Callable[[], Awaitable[Any]]
+    The slot is reserved *before* any SDK resource is created.  Until the
+    resource is successfully inserted into ``_entries`` the slot itself is the
+    authoritative owner, so dict insertion OOM, partial ``__aenter__`` failure,
+    and cleanup failure can never drop the only strong reference.
+    """
+
+    value: Any | None = None
+    resource: Any | None = None
+    kind: str = "free"
     descriptor_lease: Any | None = None
+    control_lease: Any | None = None
+    close_attempts: int = 0
+    physical_closed: bool = False
+    published: bool = False
+
+    def reserve(self) -> None:
+        if self.kind != "free":
+            raise RuntimeError("provider cleanup escrow slot is not free")
+        self.kind = "reserved"
+        self.value = None
+        self.resource = None
+        self.descriptor_lease = None
+        self.control_lease = None
+        self.close_attempts = 0
+        self.physical_closed = False
+        self.published = False
+
+    def bind_owners(self, *, descriptor_lease: Any, control_lease: Any | None) -> None:
+        if self.kind != "reserved":
+            raise RuntimeError("provider cleanup escrow slot is not reserved")
+        self.descriptor_lease = descriptor_lease
+        self.control_lease = control_lease
+
+    def bind_client(self, value: Any) -> None:
+        if self.kind != "reserved":
+            raise RuntimeError("provider cleanup escrow slot is not reserved")
+        self.resource = value
+        self.value = value
+        self.kind = "client"
+
+    def bind_manager(self, manager: AsyncContextManager[Any]) -> None:
+        if self.kind != "reserved":
+            raise RuntimeError("provider cleanup escrow slot is not reserved")
+        self.resource = manager
+        self.kind = "manager"
+
+    def publish_value(self, value: Any) -> None:
+        if self.kind != "manager":
+            raise RuntimeError("provider manager escrow is not bound")
+        self.value = value
+
+    async def _close_physical(self) -> None:
+        resource = self.resource
+        if resource is None:
+            return
+        self.close_attempts += 1
+        if self.kind == "manager":
+            await resource.__aexit__(None, None, None)
+        elif self.kind == "client":
+            await _close_client_value(resource)
+        else:
+            raise RuntimeError("provider cleanup escrow kind is invalid")
+
+    async def close_and_commit(self) -> None:
+        """Close physically once, then retire logical owners transactionally."""
+        if not self.physical_closed and self.resource is not None:
+            await self._close_physical()
+            self.physical_closed = True
+
+        first_error: BaseException | None = None
+        for attribute in ("descriptor_lease", "control_lease"):
+            owner = getattr(self, attribute)
+            if owner is None:
+                continue
+            try:
+                owner.release()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                else:
+                    add_bounded_note(
+                        first_error,
+                        f"provider pool {attribute} cleanup also failed",
+                        exc,
+                    )
+            else:
+                setattr(self, attribute, None)
+        if first_error is not None:
+            raise first_error
+
+    def recycle(self) -> None:
+        if not self.physical_closed and self.resource is not None:
+            raise RuntimeError("cannot recycle a physically live provider resource")
+        if self.descriptor_lease is not None or self.control_lease is not None:
+            raise RuntimeError("cannot recycle provider escrow with live logical owners")
+        self.value = None
+        self.resource = None
+        self.kind = "free"
+        self.close_attempts = 0
+        self.physical_closed = False
+        self.published = False
 
 
 @dataclass(slots=True)
 class _KeyGate:
-    """One active single-flight lock plus its current borrower count."""
+    """One active single-flight lock plus its bounded control-memory owner."""
 
     lock: asyncio.Lock
     users: int = 0
+    control_lease: Any | None = None
 
 
 async def _close_client_value(value: Any) -> None:
@@ -193,14 +296,26 @@ class _BorrowedManager:
 class RemoteProviderSessionPool:
     """Reuse demonstrably concurrent-safe provider sessions for one operation."""
 
-    def __init__(self) -> None:
-        """Initialize empty loop-affine provider storage."""
+    def __init__(self, *, default_descriptor_weight: int = 1) -> None:
+        """Initialize storage with one explicit SDK transport-capacity charge.
+
+        Each provider entry reserves its worst-case connection-pool width once.
+        Async operations therefore do not reserve the same network socket again;
+        their composite footprint only adds local-file descriptors.
+        """
+        self._default_descriptor_weight = _validate_descriptor_weight(default_descriptor_weight)
         self._entries: dict[tuple[Any, ...], _PoolEntry] = {}
+        # Construction escrow is physically allocated before any SDK resource.
+        # A resource that cannot be published remains rooted in one of these
+        # slots and is retried during pool shutdown.
+        self._entry_escrow: list[_PoolEntry] = [_PoolEntry() for _ in range(_MAX_POOL_ENTRIES)]
         self._pid = os.getpid()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock: asyncio.Lock | None = None
         self._key_locks: dict[tuple[Any, ...], _KeyGate] = {}
         self._closed = False
+        self._close_generation = 0
+        self._protocol_violations = 0
 
     async def __aenter__(self) -> RemoteProviderSessionPool:
         """Bind the pool to exactly one operation coordinator event loop."""
@@ -212,35 +327,138 @@ class RemoteProviderSessionPool:
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        """Close every shared client once in reverse creation order."""
+        """Close published and construction-escrow resources transactionally."""
         self._ensure_owner_loop()
-        if self._closed:
+        if (
+            self._closed
+            and not self._entries
+            and not any(slot.kind != "free" for slot in self._entry_escrow)
+        ):
             return
         self._closed = True
-        self._key_locks.clear()
+        self._close_generation += 1
         first_error: BaseException | None = None
-        while self._entries:
-            _key, entry = self._entries.popitem()
+
+        # Published entries and unpublished construction debt share the same
+        # preallocated slot type.  Iterate the bank directly so an insertion
+        # failure cannot make an owner invisible to shutdown.
+        for entry in self._entry_escrow:
+            if entry.kind == "free":
+                continue
+            # A RESERVED slot with no resource belongs to an in-flight factory.
+            # Do not recycle it from shutdown: the factory will bind its result
+            # into this exact slot and observe _closed before publication returns.
+            if entry.kind == "reserved" and entry.resource is None:
+                continue
             try:
-                await entry.close()
+                await entry.close_and_commit()
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
-            finally:
-                if entry.descriptor_lease is not None:
-                    entry.descriptor_lease.release()
+                if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                    break
+                continue
+            for key, candidate in tuple(self._entries.items()):
+                if candidate is entry:
+                    self._entries.pop(key, None)
+                    break
+            entry.recycle()
+
+        # Idle key gates own real control-memory leases. Retire the lease before
+        # removing the gate so shutdown cannot publish a false memory commit.
+        for key, gate in tuple(self._key_locks.items()):
+            if gate.users != 0:
+                # A suspended constructor still owns this gate and its control
+                # lease. Its finally block will retire the gate after it resumes.
+                continue
+            lease = gate.control_lease
+            if lease is not None:
+                try:
+                    lease.release()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                    else:
+                        add_bounded_note(first_error, "provider key-gate cleanup also failed", exc)
+                    continue
+                gate.control_lease = None
+            self._key_locks.pop(key, None)
+
+        # Azure constructor rollback uses preallocated terminal slots. Drive any
+        # slot whose retry Task could not be created before claiming pool quiescence.
+        try:
+            from .providers.azure import drain_azure_credential_rollbacks
+        except ImportError:
+            # Source-only test environments intentionally omit the native core.
+            # The static Azure escrow remains authoritative until its own task or
+            # a later provider safe point can drive it.
+            pass
+        else:
+            try:
+                await drain_azure_credential_rollbacks()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                else:
+                    add_bounded_note(first_error, "Azure rollback safe-point also failed", exc)
         if first_error is not None:
             raise first_error
+        if self._protocol_violations:
+            raise RuntimeError("provider key-gate protocol violation prevents clean close")
+
+    def _reserve_entry_escrow(self) -> _PoolEntry:
+        """Reserve one preallocated owner before creating a physical resource."""
+        for entry in self._entry_escrow:
+            if entry.kind == "free":
+                entry.reserve()
+                return entry
+        raise SchemaSanitizerResourceError(
+            "remote provider construction escrow exhausted",
+            detail={
+                "stage": "remote_provider_pool",
+                "limit_name": "provider_cleanup_escrow",
+                "limit": _MAX_POOL_ENTRIES,
+                "actual": _MAX_POOL_ENTRIES,
+            },
+        )
+
+    @staticmethod
+    def _acquire_entry_control_lease(descriptor_weight: int) -> Any | None:
+        """Charge a conservative SDK/transport footprint, scaled by pool width."""
+        control_bytes = min(1 << 20, (16 << 10) + descriptor_weight * (8 << 10))
+        return acquire_operation_memory(control_bytes, stage="remote_provider_pool_entry")
+
+    @property
+    def transport_capacity(self) -> int:
+        """Worst-case per-entry SDK connection width already FD-admitted."""
+        return self._default_descriptor_weight
+
+    def _ensure_entry_capacity(self) -> None:
+        """Keep loop-affine provider metadata bounded even without an operation ledger."""
+        active = sum(1 for entry in self._entry_escrow if entry.kind != "free")
+        if active < _MAX_POOL_ENTRIES:
+            return
+        raise SchemaSanitizerResourceError(
+            "remote provider session pool entry capacity exhausted",
+            detail={
+                "stage": "remote_provider_pool",
+                "limit_name": "provider_pool_entries",
+                "limit": _MAX_POOL_ENTRIES,
+                "actual": _MAX_POOL_ENTRIES,
+            },
+        )
 
     async def borrow_client(
         self,
         key: tuple[Any, ...],
         factory: Callable[[], Awaitable[Any]],
         *,
-        descriptor_weight: int = 1,
+        descriptor_weight: int | None = None,
     ) -> Any:
-        """Return a borrowed client, retaining its descriptor budget once."""
-        descriptor_weight = _validate_descriptor_weight(descriptor_weight)
+        """Return a borrowed client, retaining its transport capacity once."""
+        descriptor_weight = _validate_descriptor_weight(
+            self._default_descriptor_weight if descriptor_weight is None else descriptor_weight
+        )
         pool_key = _compact_pool_key(key)
         entry = await self._get_or_create_client(pool_key, factory, descriptor_weight)
         return _BorrowedClient(entry.value)
@@ -250,48 +468,93 @@ class RemoteProviderSessionPool:
         key: tuple[Any, ...],
         factory: Callable[[], Awaitable[AsyncContextManager[Any]]],
         *,
-        descriptor_weight: int = 1,
+        descriptor_weight: int | None = None,
     ) -> AsyncContextManager[Any]:
-        """Return a borrowed view of one entered provider context manager."""
-        descriptor_weight = _validate_descriptor_weight(descriptor_weight)
+        """Return a borrowed manager, retaining its transport capacity once."""
+        descriptor_weight = _validate_descriptor_weight(
+            self._default_descriptor_weight if descriptor_weight is None else descriptor_weight
+        )
         pool_key = _compact_pool_key(key)
         async with self._key_guard(pool_key):
             self._ensure_open()
             entry = self._entries.get(pool_key)
             if entry is None:
-                descriptor_lease = acquire_file_descriptors(descriptor_weight)
+                self._ensure_entry_capacity()
+                entry = self._reserve_entry_escrow()
                 try:
+                    control_lease = self._acquire_entry_control_lease(descriptor_weight)
+                    try:
+                        descriptor_lease = acquire_file_descriptors(descriptor_weight)
+                    except BaseException:
+                        if control_lease is not None:
+                            control_lease.release()
+                        raise
+                    entry.bind_owners(
+                        descriptor_lease=descriptor_lease, control_lease=control_lease
+                    )
                     manager = await factory()
-                    value = await manager.__aenter__()
+                    # Publish the raw manager into escrow before __aenter__. A
+                    # partially successful __aenter__ therefore remains cleanup-owned.
+                    entry.bind_manager(manager)
+                    try:
+                        value = await manager.__aenter__()
+                    except BaseException as primary:
+                        try:
+                            await entry.close_and_commit()
+                        except BaseException as cleanup_error:
+                            add_bounded_note(
+                                primary,
+                                "provider manager rollback also failed after __aenter__",
+                                cleanup_error,
+                            )
+                            raise
+                        else:
+                            entry.recycle()
+                            raise
+                    entry.publish_value(value)
+                    try:
+                        self._entries[pool_key] = entry
+                    except BaseException as primary:
+                        # The preallocated escrow slot remains authoritative even
+                        # if dict growth and immediate cleanup both fail.
+                        try:
+                            await entry.close_and_commit()
+                        except BaseException as cleanup_error:
+                            add_bounded_note(
+                                primary,
+                                "provider manager cleanup also failed after pool insertion failure",
+                                cleanup_error,
+                            )
+                        else:
+                            entry.recycle()
+                        raise
+                    entry.published = True
                 except BaseException:
-                    descriptor_lease.release()
+                    # Slots with any live owner stay published for __aexit__; an
+                    # untouched reservation can be recycled immediately.
+                    if (
+                        entry.kind == "reserved"
+                        and entry.resource is None
+                        and entry.descriptor_lease is None
+                        and entry.control_lease is None
+                    ):
+                        entry.physical_closed = True
+                        entry.recycle()
                     raise
                 if self._closed:
                     try:
-                        await manager.__aexit__(None, None, None)
-                    finally:
-                        descriptor_lease.release()
-                    raise RuntimeError("remote provider session pool is closed")
-
-                async def close_manager() -> None:
-                    """Close the retained provider manager once."""
-                    await manager.__aexit__(None, None, None)
-
-                try:
-                    entry = _PoolEntry(value, close_manager, descriptor_lease)
-                    self._entries[pool_key] = entry
-                except BaseException as exc:
-                    try:
-                        await manager.__aexit__(None, None, None)
+                        await entry.close_and_commit()
                     except BaseException as cleanup_error:
+                        closed = RuntimeError("remote provider session pool is closed")
                         add_bounded_note(
-                            exc,
-                            "provider manager cleanup also failed after pool insertion failure",
-                            cleanup_error,
+                            closed, "provider manager close also failed", cleanup_error
                         )
-                    finally:
-                        descriptor_lease.release()
-                    raise
+                        raise closed
+                    else:
+                        self._entries.pop(pool_key, None)
+                        entry.recycle()
+                    raise RuntimeError("remote provider session pool is closed")
+        assert entry.value is not None
         return _BorrowedManager(entry.value)
 
     async def _get_or_create_client(
@@ -300,44 +563,64 @@ class RemoteProviderSessionPool:
         factory: Callable[[], Awaitable[Any]],
         descriptor_weight: int,
     ) -> _PoolEntry:
-        """Create one directly closable client under its key-local lock."""
+        """Create one client with construction escrow reserved pre-resource."""
         async with self._key_guard(key):
             self._ensure_open()
             entry = self._entries.get(key)
             if entry is not None:
                 return entry
-            descriptor_lease = acquire_file_descriptors(descriptor_weight)
+            self._ensure_entry_capacity()
+            entry = self._reserve_entry_escrow()
             try:
+                control_lease = self._acquire_entry_control_lease(descriptor_weight)
+                try:
+                    descriptor_lease = acquire_file_descriptors(descriptor_weight)
+                except BaseException:
+                    if control_lease is not None:
+                        control_lease.release()
+                    raise
+                entry.bind_owners(descriptor_lease=descriptor_lease, control_lease=control_lease)
                 value = await factory()
+                # Attribute assignment into a preallocated slot is the first
+                # post-construction action; no fallible container publication is
+                # needed to retain the physical resource.
+                entry.bind_client(value)
+                try:
+                    self._entries[key] = entry
+                except BaseException as primary:
+                    try:
+                        await entry.close_and_commit()
+                    except BaseException as cleanup_error:
+                        add_bounded_note(
+                            primary,
+                            "provider client cleanup also failed after pool insertion failure",
+                            cleanup_error,
+                        )
+                    else:
+                        entry.recycle()
+                    raise
+                entry.published = True
             except BaseException:
-                descriptor_lease.release()
+                if (
+                    entry.kind == "reserved"
+                    and entry.resource is None
+                    and entry.descriptor_lease is None
+                    and entry.control_lease is None
+                ):
+                    entry.physical_closed = True
+                    entry.recycle()
                 raise
             if self._closed:
                 try:
-                    await _close_client_value(value)
-                finally:
-                    descriptor_lease.release()
-                raise RuntimeError("remote provider session pool is closed")
-
-            async def close_client() -> None:
-                """Close a retained provider client once."""
-                await _close_client_value(value)
-
-            try:
-                entry = _PoolEntry(value, close_client, descriptor_lease)
-                self._entries[key] = entry
-            except BaseException as exc:
-                try:
-                    await _close_client_value(value)
+                    await entry.close_and_commit()
                 except BaseException as cleanup_error:
-                    add_bounded_note(
-                        exc,
-                        "provider client cleanup also failed after pool insertion failure",
-                        cleanup_error,
-                    )
-                finally:
-                    descriptor_lease.release()
-                raise
+                    closed = RuntimeError("remote provider session pool is closed")
+                    add_bounded_note(closed, "provider client close also failed", cleanup_error)
+                    raise closed
+                else:
+                    self._entries.pop(key, None)
+                    entry.recycle()
+                raise RuntimeError("remote provider session pool is closed")
             return entry
 
     @asynccontextmanager
@@ -348,8 +631,29 @@ class RemoteProviderSessionPool:
             self._ensure_open()
             gate = self._key_locks.get(key)
             if gate is None:
-                gate = _KeyGate(asyncio.Lock())
-                self._key_locks[key] = gate
+                if len(self._key_locks) >= _MAX_PENDING_KEY_GATES:
+                    raise SchemaSanitizerResourceError(
+                        "remote provider key-gate capacity exhausted",
+                        detail={
+                            "stage": "remote_provider_pool",
+                            "limit_name": "provider_pending_key_gates",
+                            "limit": _MAX_PENDING_KEY_GATES,
+                            "actual": len(self._key_locks) + 1,
+                        },
+                    )
+                gate_lease = acquire_operation_memory(512, stage="remote_provider_key_gate")
+                try:
+                    gate = _KeyGate(asyncio.Lock(), control_lease=gate_lease)
+                    self._key_locks[key] = gate
+                except BaseException as primary:
+                    if gate_lease is not None:
+                        try:
+                            gate_lease.release()
+                        except BaseException as cleanup_error:
+                            add_bounded_note(
+                                primary, "provider key-gate rollback also failed", cleanup_error
+                            )
+                    raise
             gate.users += 1
         try:
             async with gate.lock:
@@ -358,8 +662,15 @@ class RemoteProviderSessionPool:
             # This pool is event-loop affine, so synchronous mutation here is
             # atomic with respect to every other pool operation. Avoiding an
             # await makes gate retirement immune to repeated task cancellation.
-            gate.users = max(0, gate.users - 1)
+            if gate.users <= 0:
+                self._protocol_violations += 1
+            else:
+                gate.users -= 1
             if gate.users == 0 and self._key_locks.get(key) is gate:
+                lease = gate.control_lease
+                if lease is not None:
+                    lease.release()
+                    gate.control_lease = None
                 self._key_locks.pop(key, None)
 
     def _require_lock(self) -> asyncio.Lock:
@@ -409,16 +720,51 @@ def activate_provider_session_pool(pool: Any):
             _reset_current_pool_after_fork()
 
 
+_FORK_CURRENT_POOL_BANKS: tuple[ContextVar[RemoteProviderSessionPool | None], ...] = (
+    ContextVar[RemoteProviderSessionPool | None](
+        "schema_sanitizer_provider_session_pool_child_0", default=None
+    ),
+    ContextVar[RemoteProviderSessionPool | None](
+        "schema_sanitizer_provider_session_pool_child_1", default=None
+    ),
+)
+_FORK_CURRENT_POOL_BANK_INDEX = 0
+_FORK_PREPARED_CURRENT_POOL: ContextVar[RemoteProviderSessionPool | None] | None = None
+
+
+def _prepare_provider_session_pool_for_fork() -> None:
+    global _FORK_PREPARED_CURRENT_POOL
+    _FORK_PREPARED_CURRENT_POOL = _FORK_CURRENT_POOL_BANKS[_FORK_CURRENT_POOL_BANK_INDEX]
+
+
+def _clear_provider_session_pool_fork_preparation() -> None:
+    global _FORK_PREPARED_CURRENT_POOL
+    _FORK_PREPARED_CURRENT_POOL = None
+
+
 def _reset_current_pool_after_fork() -> None:
-    """Detach inherited clients without finalizing parent loop-affine objects."""
+    """Swap to a preallocated empty child ContextVar without decrefing owners."""
+    global _CURRENT_POOL, _FORK_PREPARED_CURRENT_POOL
+    global _FORK_CURRENT_POOL_BANK_INDEX
+    prepared = _FORK_PREPARED_CURRENT_POOL
+    if prepared is None:
+        return
     inherited = _CURRENT_POOL.get()
     if inherited is not None:
-        quarantine_inherited_state("provider-session-pool", inherited)
-    _CURRENT_POOL.set(None)
+        quarantine_inherited_state("provider-session-pool", inherited, _CURRENT_POOL)
+    _CURRENT_POOL = prepared
+    _FORK_PREPARED_CURRENT_POOL = None
+    _FORK_CURRENT_POOL_BANK_INDEX = 1 - _FORK_CURRENT_POOL_BANK_INDEX
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_current_pool_after_fork)
+from ..core_impl.fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler(
+    "provider-session-pool",
+    before=_prepare_provider_session_pool_for_fork,
+    after_in_parent=_clear_provider_session_pool_fork_preparation,
+    after_in_child=_reset_current_pool_after_fork,
+)
 
 
 def current_provider_session_pool() -> RemoteProviderSessionPool | None:

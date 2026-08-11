@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from schema_sanitizer.core_impl.async_scheduler import (
+    drain_ordered_iterable_results,
     ordered_indexed_results,
     retry_async,
     unordered_indexed_results,
@@ -54,7 +55,9 @@ def test_ordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
             return str(index).encode()
 
         with pytest.raises(RuntimeError, match="boom"):
-            async for _index, _payload in ordered_indexed_results(3, fetch, window=3):
+            async for _index, _payload in ordered_indexed_results(
+                3, fetch, window=3, expected_retained_bytes=1024
+            ):
                 raise AssertionError("failed first task should not yield")
 
         assert cancelled == [1, 2]
@@ -90,7 +93,9 @@ def test_unordered_indexed_results_uses_bounded_task_window() -> None:
                 active -= 1
 
         results: list[tuple[int, int]] = []
-        async for index, value in unordered_indexed_results(5, fetch, window=2):
+        async for index, value in unordered_indexed_results(
+            5, fetch, window=2, expected_retained_bytes=256
+        ):
             results.append((index, value))
             if index == 1:
                 release_zero.set()
@@ -122,7 +127,9 @@ def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None
             return index
 
         with pytest.raises(RuntimeError, match="boom"):
-            async for _index, _value in unordered_indexed_results(3, fetch, window=2):
+            async for _index, _value in unordered_indexed_results(
+                3, fetch, window=2, expected_retained_bytes=256
+            ):
                 raise AssertionError("failed task should not yield")
 
         assert cancelled == [1]
@@ -153,7 +160,12 @@ def test_unordered_indexed_results_reuses_fixed_worker_tasks(
             await asyncio.sleep(0)
             return index
 
-        values = [value async for _index, value in unordered_indexed_results(100, fetch, window=4)]
+        values = [
+            value
+            async for _index, value in unordered_indexed_results(
+                100, fetch, window=4, expected_retained_bytes=256
+            )
+        ]
         assert sorted(values) == list(range(100))
         assert created == 4
 
@@ -244,7 +256,36 @@ def test_ordered_indexed_results_reports_earliest_ordinal_failure() -> None:
             raise ValueError("earlier")
 
         with pytest.raises(ValueError, match="earlier"):
-            async for _index, _value in ordered_indexed_results(2, fetch, window=2):
+            async for _index, _value in ordered_indexed_results(
+                2, fetch, window=2, expected_retained_bytes=256
+            ):
                 raise AssertionError("failing work must not yield")
+
+    asyncio.run(run())
+
+
+def test_drain_ordered_iterable_results_materializes_only_one_window() -> None:
+    """Large iterables retain only O(window) unconsumed references."""
+
+    async def run() -> None:
+        produced = 0
+        consumed = 0
+        max_ahead = 0
+
+        def values():
+            nonlocal produced, max_ahead
+            for value in range(100):
+                produced += 1
+                max_ahead = max(max_ahead, produced - consumed)
+                yield value
+
+        async def fetch(value: int) -> None:
+            nonlocal consumed
+            await asyncio.sleep(0)
+            consumed += 1
+
+        await drain_ordered_iterable_results(values(), fetch, window=4)
+        assert consumed == 100
+        assert max_ahead <= 4
 
     asyncio.run(run())

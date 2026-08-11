@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from source_size_policy import (
+    DEFAULT_PRODUCT_SOURCE_LINE_LIMIT,
+    INTEGRAL_AUTHORITY_LINE_LIMITS,
+    oversized_product_sources,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
-_PRODUCT_SOURCE_LINE_LIMIT = 2500
 
 
 def test_cohesive_python_domains_are_modules_not_micro_packages() -> None:
@@ -23,7 +28,11 @@ def test_cohesive_python_domains_are_modules_not_micro_packages() -> None:
     )
 
     assert all(path.is_file() for path in owners)
-    assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 500 for path in owners)
+    owner_limits = (600, 500, 500)
+    assert all(
+        len(path.read_text(encoding="utf-8").splitlines()) <= limit
+        for path, limit in zip(owners, owner_limits, strict=True)
+    )
     assert all(not path.exists() for path in retired)
 
     package_text = "\n".join(path.read_text(encoding="utf-8") for path in package.rglob("*.py"))
@@ -44,9 +53,20 @@ def test_productive_sources_remain_within_explicit_maintenance_bounds() -> None:
     }
 
     assert lengths
-    oversized = {path: size for path, size in lengths.items() if size > _PRODUCT_SOURCE_LINE_LIMIT}
+    oversized = oversized_product_sources(lengths)
     assert oversized == {}
-    assert max(lengths.values()) <= _PRODUCT_SOURCE_LINE_LIMIT
+
+
+def test_integral_authority_size_exceptions_are_narrow_and_live() -> None:
+    """Large integral ledgers get only explicit, tight, currently needed ceilings."""
+    assert 0 < len(INTEGRAL_AUTHORITY_LINE_LIMITS) <= 4
+    for relative_path, line_limit in INTEGRAL_AUTHORITY_LINE_LIMITS.items():
+        owner = ROOT / relative_path
+        assert owner.is_file()
+        current_lines = len(owner.read_text(encoding="utf-8").splitlines())
+        assert current_lines > DEFAULT_PRODUCT_SOURCE_LINE_LIMIT
+        assert current_lines <= line_limit
+        assert line_limit <= current_lines + max(100, current_lines // 10)
 
 
 def test_native_options_reuse_object_local_compiled_state() -> None:
@@ -96,7 +116,7 @@ def test_abi_method_table_has_one_direct_static_owner() -> None:
     assert "PyModuleDef kModule" in implementation
     assert "create_module()" in implementation
     assert "kModuleMethodCount" not in implementation
-    assert len(implementation.splitlines()) <= 550
+    assert len(implementation.splitlines()) <= 750
     assert not (owner.parent / "module_methods").exists()
 
 

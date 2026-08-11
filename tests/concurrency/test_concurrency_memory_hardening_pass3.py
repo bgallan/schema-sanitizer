@@ -233,9 +233,9 @@ def test_transfer_helper_forwards_chunk_weight(monkeypatch: pytest.MonkeyPatch) 
         policy=SimpleNamespace(async_concurrency=4),
     )
 
-    def run_remote(operation, *, permit_weight: int, permit_label: str):
-        """Capture the computed permit request without starting an event loop."""
-        observed.update(weight=permit_weight, label=permit_label, operation=operation)
+    def run_remote(operation, *, permit_label: str, footprint) -> str:
+        """Capture the atomic footprint without starting an event loop."""
+        observed.update(footprint=footprint, label=permit_label, operation=operation)
         return "ok"
 
     fake.run_remote = run_remote
@@ -255,11 +255,12 @@ def test_transfer_helper_forwards_chunk_weight(monkeypatch: pytest.MonkeyPatch) 
         permit_label="weighted-transfer",
     )
     assert result == "ok"
-    assert observed == {
-        "weight": 4,
-        "label": "weighted-transfer",
-        "operation": operation,
-    }
+    assert observed["label"] == "weighted-transfer"
+    assert observed["operation"] is operation
+    footprint = observed["footprint"]
+    assert footprint.remote_weight == 4
+    assert footprint.network_fds == 0
+    assert footprint.local_file_fds == 0
 
 
 def test_process_memory_pressure_reports_untracked_rss(

@@ -69,6 +69,7 @@ class PartitionRunPlan:
     source_latest_update: datetime | None = field(default=None, compare=False, repr=False)
     source_window: UtcWindow | None = field(default=None, repr=False)
     source_manifest: SourceManifest | None = field(default=None, repr=False)
+    _metadata_owner: object | None = field(default=None, compare=False, repr=False)
 
     def __init__(
         self,
@@ -85,6 +86,7 @@ class PartitionRunPlan:
         source_latest_update: datetime | None = None,
         source_window: UtcWindow | None = None,
         source_manifest: SourceManifest | None = None,
+        _metadata_owner: object | None = None,
     ):
         """Initialize a partition run plan."""
         if source_uri is None:
@@ -127,6 +129,30 @@ class PartitionRunPlan:
         )
         object.__setattr__(self, "source_window", source_window)
         object.__setattr__(self, "source_manifest", source_manifest)
+        discovered_owner = getattr(discovered_input, "_metadata_owner", None)
+        object.__setattr__(
+            self,
+            "_metadata_owner",
+            discovered_owner if discovered_owner is not None else _metadata_owner,
+        )
+
+    def with_metadata_owner(self, owner: object | None) -> PartitionRunPlan:
+        """Return an equivalent plan retaining one shared discovery metadata owner."""
+        return PartitionRunPlan(
+            self.logical_date,
+            self.source_uri,
+            self.output_uri,
+            self.logical_hour,
+            discovered_input=self.discovered_input,
+            discovery_seconds=self.discovery_seconds,
+            source_file_count=self.source_file_count,
+            source_bytes=self.source_bytes,
+            source_earliest_update=self.source_earliest_update,
+            source_latest_update=self.source_latest_update,
+            source_window=self.source_window,
+            source_manifest=self.source_manifest,
+            _metadata_owner=owner,
+        )
 
     def with_discovered_input(self, discovered_input: Any | None) -> PartitionRunPlan:
         """Return the same partition plan with internal discovered source metadata."""
@@ -143,6 +169,7 @@ class PartitionRunPlan:
             source_latest_update=self.source_latest_update,
             source_window=self.source_window,
             source_manifest=self.source_manifest,
+            _metadata_owner=self._metadata_owner,
         )
 
     def with_discovery_timing(
@@ -167,6 +194,7 @@ class PartitionRunPlan:
             source_latest_update=self.source_latest_update,
             source_window=self.source_window,
             source_manifest=self.source_manifest,
+            _metadata_owner=self._metadata_owner,
         )
 
     @property

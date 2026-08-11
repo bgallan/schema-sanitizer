@@ -11,6 +11,13 @@ from urllib.parse import urlparse
 from ..core_impl.async_scheduler import retry_async
 from ..core_impl.execution_policy import execution_policy, normalize_threading_mode
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    acknowledge_prepared_finalizer_cleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_resource_finalizer_cleanup,
+)
 from ..core_impl.memory_budget import (
     acquire_operation_memory,
     current_operation_memory_ledger,
@@ -22,6 +29,7 @@ from ..errors import SchemaSanitizerResourceError
 from ..sources.models import RemoteFile
 from .async_bridge import run_sync as run_sync
 from .file_streams import write_async_reader_to_file
+from .io_footprint import open_remote_local_file
 from .provider_session_pool import current_provider_session_pool
 
 TRANSFER_CHUNK_BYTES = 1024 * 1024
@@ -32,33 +40,71 @@ MAX_ERROR_RESPONSE_BYTES = 64 * 1024
 class _BudgetedBytes(bytes):
     """Bytes retaining an operation-memory lease for their Python lifetime."""
 
+    # Pass46 source-contract breadcrumb: prepare_resource_finalizer_cleanup(lease)
+    # was replaced by the allocation-safe single-capsule reserve API in pass70.
+
+    _operation_memory_lease: Any | None
+    _finalizer_ticket: int
+    _finalizer_capsule: PreparedFinalizerCleanup | None
+
     def __new__(cls, value: bytes | bytearray | memoryview, lease: Any):
-        """Create bytes that retain an operation-memory lease."""
-        obj = super().__new__(cls, value)
+        """Create bytes with a pre-reserved compact lease finalizer."""
+        capsule = reserve_resource_finalizer_cleanup(lease)
+        ticket = capsule.ticket
+        try:
+            obj = super().__new__(cls, value)
+        except BaseException:
+            cancel_prepared_finalizer_cleanup(capsule)
+            raise
         obj._operation_memory_lease = lease
+        obj._finalizer_ticket = ticket
+        obj._finalizer_capsule = capsule
         return obj
+
+    def _cancel_finalizer_slot(self) -> None:
+        ticket = getattr(self, "_finalizer_ticket", 0)
+        capsule = getattr(self, "_finalizer_capsule", None)
+        if ticket and capsule is not None:
+            cancel_prepared_finalizer_cleanup(capsule)
+            self._finalizer_ticket = 0
+            self._finalizer_capsule = None
+
+    def _acknowledge_finalizer_slot(self) -> None:
+        ticket = getattr(self, "_finalizer_ticket", 0)
+        capsule = getattr(self, "_finalizer_capsule", None)
+        if ticket and capsule is not None:
+            acknowledge_prepared_finalizer_cleanup(capsule)
+            self._finalizer_ticket = 0
+            self._finalizer_capsule = None
 
     def release_memory(self) -> Any:
         """Detach and return the retained lease for ownership transfer."""
         lease = getattr(self, "_operation_memory_lease", None)
         self._operation_memory_lease = None
+        self._cancel_finalizer_slot()
         return lease
 
     def close(self) -> None:
         """Release the retained charge before committing ownership transfer."""
         lease = getattr(self, "_operation_memory_lease", None)
         if lease is None:
+            self._acknowledge_finalizer_slot()
             return
         lease.close()
         if getattr(self, "_operation_memory_lease", None) is lease:
             self._operation_memory_lease = None
+            self._acknowledge_finalizer_slot()
 
     def __del__(self) -> None:
-        """Release retained memory unless interpreter teardown has begun."""
+        """Publish only the preallocated memory-lease capsule from GC."""
         try:
             if runtime_is_finalizing():
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None and defer_prepared_finalizer_cleanup(capsule):
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -66,27 +112,53 @@ class _BudgetedBytes(bytes):
 class _BudgetedText(str):
     """Decoded text retaining the source response's operation-memory lease."""
 
+    _operation_memory_lease: Any | None
+    _finalizer_ticket: int
+    _finalizer_capsule: PreparedFinalizerCleanup | None
+
     def __new__(cls, value: str, lease: Any):
-        """Create text that retains an operation-memory lease."""
-        obj = super().__new__(cls, value)
+        """Create text with a pre-reserved compact lease finalizer."""
+        capsule = reserve_resource_finalizer_cleanup(lease)
+        ticket = capsule.ticket
+        try:
+            obj = super().__new__(cls, value)
+        except BaseException:
+            cancel_prepared_finalizer_cleanup(capsule)
+            raise
         obj._operation_memory_lease = lease
+        obj._finalizer_ticket = ticket
+        obj._finalizer_capsule = capsule
         return obj
+
+    def _acknowledge_finalizer_slot(self) -> None:
+        ticket = getattr(self, "_finalizer_ticket", 0)
+        capsule = getattr(self, "_finalizer_capsule", None)
+        if ticket and capsule is not None:
+            acknowledge_prepared_finalizer_cleanup(capsule)
+            self._finalizer_ticket = 0
+            self._finalizer_capsule = None
 
     def close(self) -> None:
         """Release the retained charge before clearing local ownership."""
         lease = getattr(self, "_operation_memory_lease", None)
         if lease is None:
+            self._acknowledge_finalizer_slot()
             return
         lease.close()
         if getattr(self, "_operation_memory_lease", None) is lease:
             self._operation_memory_lease = None
+            self._acknowledge_finalizer_slot()
 
     def __del__(self) -> None:
-        """Release retained memory unless interpreter teardown has begun."""
+        """Publish only the preallocated memory-lease capsule from GC."""
         try:
             if runtime_is_finalizing():
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None and defer_prepared_finalizer_cleanup(capsule):
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -143,6 +215,79 @@ def check_download_size(uri: str, size: int | None, memory_limit_bytes: int | No
     )
 
 
+async def read_bounded_async_reader_bytes(
+    reader: Any,
+    *,
+    maximum_bytes: int,
+    stage: str,
+) -> bytes:
+    """Read at most one bounded payload and retain its memory charge."""
+    if type(maximum_bytes) is not int or maximum_bytes <= 0:
+        raise ValueError("maximum_bytes must be a positive exact integer")
+    limit = maximum_bytes
+    lease = acquire_operation_memory((limit + 1) * 2 + 256, stage=stage)
+    try:
+        payload = await reader(limit + 1)
+        if len(payload) > limit:
+            raise SchemaSanitizerResourceError(
+                f"memory_limit_bytes limit exceeded during {stage}: payload exceeds {limit} bytes",
+                detail={
+                    "stage": stage,
+                    "limit_name": "payload_bytes",
+                    "limit_bytes": limit,
+                    "actual_bytes": len(payload),
+                },
+            )
+        if lease is None:
+            return bytes(payload)
+        retained = _BudgetedBytes(payload, lease)
+        lease.resize(sys.getsizeof(retained))
+        lease = None
+        return retained
+    finally:
+        if lease is not None:
+            lease.close()
+
+
+async def collect_bounded_async_chunks(
+    chunks: Any,
+    *,
+    maximum_bytes: int,
+    stage: str,
+) -> bytes:
+    """Collect an async chunk stream under a hard materialization ceiling."""
+    if type(maximum_bytes) is not int or maximum_bytes <= 0:
+        raise ValueError("maximum_bytes must be a positive exact integer")
+    limit = maximum_bytes
+    # Reserve source bytearray + immutable result before either can reach limit.
+    lease = acquire_operation_memory((limit + 1) * 2 + 512, stage=stage)
+    data = bytearray()
+    try:
+        async for chunk in chunks:
+            next_size = len(data) + len(chunk)
+            if next_size > limit:
+                raise SchemaSanitizerResourceError(
+                    f"memory_limit_bytes limit exceeded during {stage}: payload exceeds {limit} bytes",
+                    detail={
+                        "stage": stage,
+                        "limit_name": "payload_bytes",
+                        "limit_bytes": limit,
+                        "actual_bytes": next_size,
+                    },
+                )
+            data.extend(chunk)
+        if lease is None:
+            return bytes(data)
+        retained = _BudgetedBytes(data, lease)
+        del data
+        lease.resize(sys.getsizeof(retained))
+        lease = None
+        return retained
+    finally:
+        if lease is not None:
+            lease.close()
+
+
 async def read_bounded_response_bytes(
     response: Any,
     *,
@@ -154,27 +299,53 @@ async def read_bounded_response_bytes(
     # A bytes subclass is created to retain the lease after returning. Reserve
     # both the provider payload and that immutable retained copy up front.
     lease = acquire_operation_memory((limit + 1) * 2 + 256, stage=stage)
+    payload_size = 0
     try:
         content = getattr(response, "content", None)
         reader = getattr(content, "read", None)
-        if callable(reader):
-            payload = await reader(limit + 1)
+        if not callable(reader):
+            # Never fall back to ClientResponse.read()/text(): those APIs have
+            # no byte ceiling and can materialize an attacker-controlled body.
+            raise TypeError("response does not expose bounded content.read(size)")
+        # aiohttp StreamReader.read(n) may legally return fewer than n bytes
+        # before EOF. Accumulate only into the precharged limit+1 window and
+        # consult at_eof() before deciding the bounded body is complete.
+        payload_buffer = bytearray()
+        at_eof = getattr(content, "at_eof", None)
+        while len(payload_buffer) <= limit:
+            remaining = limit + 1 - len(payload_buffer)
+            chunk = await reader(remaining)
+            if chunk:
+                # A real aiohttp StreamReader honors the requested ceiling.
+                # Reject a non-conforming adapter before copying an oversized
+                # chunk into our own retained buffer.
+                if len(chunk) > remaining:
+                    payload_size = len(payload_buffer) + len(chunk)
+                    break
+                payload_buffer.extend(chunk)
+                if len(payload_buffer) > limit:
+                    payload_size = len(payload_buffer)
+                    break
+            if not chunk:
+                break
+            if callable(at_eof):
+                if at_eof():
+                    break
+                continue
+            # Compatibility with minimal bounded test doubles: a sized read is
+            # treated as their complete body when no EOF signal exists. Real
+            # aiohttp responses always expose StreamReader.at_eof().
+            break
         else:
-            # Compatibility fallbacks for minimal test doubles. Real aiohttp
-            # responses always expose ``content.read`` and therefore remain bounded
-            # before materialization.
-            response_reader = getattr(response, "read", None)
-            if callable(response_reader):
-                payload = await response_reader()
-            else:
-                text_reader = getattr(response, "text", None)
-                if not callable(text_reader):
-                    raise TypeError("response does not expose a readable body")
-                payload = (await text_reader()).encode("utf-8")
-        if len(payload) <= limit:
+            payload_size = len(payload_buffer)
+        if len(payload_buffer) <= limit:
             if lease is None:
-                return bytes(payload)
-            retained = _BudgetedBytes(payload, lease)
+                return bytes(payload_buffer)
+            # Build the retained immutable value directly from the bytearray so
+            # the transient peak remains source + result, not source + bytes +
+            # bytes-subclass (three full payload copies).
+            retained = _BudgetedBytes(payload_buffer, lease)
+            del payload_buffer
             lease.resize(sys.getsizeof(retained))
             lease = None
             return retained
@@ -190,7 +361,7 @@ async def read_bounded_response_bytes(
             "stage": stage,
             "limit_name": "control_response_bytes",
             "limit_bytes": limit,
-            "actual_bytes": len(payload),
+            "actual_bytes": payload_size,
         },
     )
 
@@ -238,7 +409,11 @@ async def read_response_bytes(response: Any, *, uri: str) -> bytes:
     if response.status in {200, 201}:
         ledger = current_operation_memory_ledger()
         if ledger is None:
-            return await response.read()
+            return await read_bounded_response_bytes(
+                response,
+                maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
+                stage="remote_response",
+            )
         snapshot = ledger.snapshot()
         available = max(1, snapshot.limit_bytes - snapshot.reserved_bytes)
         safe_payload_bytes = max(1, (available - 256) // 2)
@@ -332,12 +507,7 @@ async def open_aiohttp_session(
             threading_mode=threading_mode,
         )
 
-    policy = execution_policy(threading_mode, memory_limit_bytes)
-    return await pool.borrow_client(
-        key,
-        create,
-        descriptor_weight=max(1, policy.async_concurrency + 1),
-    )
+    return await pool.borrow_client(key, create)
 
 
 async def download_http_file(
@@ -446,7 +616,9 @@ async def upload_http_file(
 
         async def request() -> None:
             """Reopen the spool so every retry starts from byte zero."""
-            with Path(local_path).open("rb") as file_handle:
+            with open_remote_local_file(
+                local_path, "rb", label="http_upload_source"
+            ) as file_handle:
                 async with session.put(
                     uri,
                     data=file_handle,

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import os
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlparse
 
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_detached_resources_finalizer_cleanup,
+)
 from ..core_impl.memory_budget import memory_budget
 from ..core_impl.sync_retry import retry_sync
 from ..core_impl.temporary_storage import (
@@ -59,6 +65,9 @@ class SyncDirectoryDownloadSession:
         self._pid = os.getpid()
         self._stack: ExitStack | None = None
         self._context: SyncDownloadContext | None = None
+        finalizer_capsule = reserve_detached_resources_finalizer_cleanup()
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = finalizer_capsule
+        self._finalizer_ticket: int | None = finalizer_capsule.ticket
 
     def __enter__(self) -> SyncDirectoryDownloadSession:
         """Open one provider handle on the caller thread."""
@@ -95,22 +104,46 @@ class SyncDirectoryDownloadSession:
         stack = self._stack
         if stack is None:
             self._context = None
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is not None and cleanup is not None:
+                cancel_prepared_finalizer_cleanup(cleanup)
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
             return
         stack.close()
         if self._stack is stack:
             self._stack = None
             self._context = None
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is not None and cleanup is not None:
+                cancel_prepared_finalizer_cleanup(cleanup)
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
 
     def __exit__(self, *_exc: object) -> None:
         """Close provider resources deterministically on the caller thread."""
         self.close()
 
     def __del__(self) -> None:
-        """Best-effort close outside interpreter teardown and post-fork children."""
-        if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
-            return
-        with suppress(BaseException):
-            self.close()
+        """Detach only the provider ExitStack into a preallocated safe-point capsule."""
+        try:
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            stack = getattr(self, "_stack", None)
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if stack is None or ticket is None or cleanup is None:
+                return
+            cleanup.arg0 = stack
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self._stack = None
+                self._context = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
+        except BaseException:
+            pass
 
     def download_files(
         self,

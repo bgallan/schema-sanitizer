@@ -63,22 +63,26 @@ public:
   class Registration final {
   public:
     Registration() = default;
-    Registration(ProcessCpuGovernor *owner, bool active) noexcept
-        : owner_(active ? owner : nullptr) {
+    Registration(ProcessCpuGovernor *owner, std::size_t worker_count) noexcept
+        : owner_(worker_count > 1U ? owner : nullptr), width_(worker_count) {
       if (owner_) {
         owner_->Register();
       }
     }
     Registration(const Registration &) = delete;
     Registration &operator=(const Registration &) = delete;
-    Registration(Registration &&other) noexcept : owner_(other.owner_) {
+    Registration(Registration &&other) noexcept
+        : owner_(other.owner_), width_(other.width_) {
       other.owner_ = nullptr;
+      other.width_ = 0U;
     }
     Registration &operator=(Registration &&other) noexcept {
       if (this != &other) {
         Release();
         owner_ = other.owner_;
+        width_ = other.width_;
         other.owner_ = nullptr;
+        other.width_ = 0U;
       }
       return *this;
     }
@@ -86,7 +90,7 @@ public:
 
     [[nodiscard]] TaskLease
     Acquire(sanitize::internal::StopToken stop) noexcept {
-      return owner_ ? owner_->AcquireTask(stop) : TaskLease{};
+      return owner_ ? owner_->AcquireTask(stop, width_) : TaskLease{};
     }
 
   private:
@@ -98,20 +102,23 @@ public:
     }
 
     ProcessCpuGovernor *owner_ = nullptr;
+    std::size_t width_ = 0U;
   };
 
-  [[nodiscard]] Registration MakeRegistration(bool multi_worker) noexcept {
-    return Registration(this, multi_worker);
+  [[nodiscard]] Registration
+  MakeRegistration(std::size_t worker_count) noexcept {
+    return Registration(this, worker_count);
   }
-  [[nodiscard]] std::int64_t capacity() const noexcept { return capacity_; }
+  [[nodiscard]] std::int64_t capacity() const noexcept {
+    return std::max<std::int64_t>(1, available_cpu_capacity());
+  }
 
 private:
   struct Waiter final {
     Waiter *next = nullptr;
   };
 
-  ProcessCpuGovernor()
-      : capacity_(std::max<std::int64_t>(1, available_cpu_capacity())) {}
+  ProcessCpuGovernor() = default;
 
   void Register() noexcept {
     registered_arenas_.fetch_add(1, std::memory_order_acq_rel);
@@ -153,27 +160,31 @@ private:
     current->next = nullptr;
   }
 
-  [[nodiscard]] TaskLease
-  AcquireTask(sanitize::internal::StopToken stop) noexcept {
-    if (registered_arenas_.load(std::memory_order_acquire) <= 1) {
+  [[nodiscard]] TaskLease AcquireTask(sanitize::internal::StopToken stop,
+                                      std::size_t arena_width) noexcept {
+    const auto current_capacity = capacity();
+    if (registered_arenas_.load(std::memory_order_acquire) <= 1 &&
+        static_cast<std::int64_t>(arena_width) <= current_capacity) {
       return {};
     }
     const auto started = std::chrono::steady_clock::now();
     Waiter waiter;
     std::unique_lock lock(mutex_);
-    if (registered_arenas_.load(std::memory_order_acquire) <= 1) {
+    const auto can_bypass = [&] {
+      return registered_arenas_.load(std::memory_order_acquire) <= 1 &&
+             static_cast<std::int64_t>(arena_width) <= capacity();
+    };
+    if (can_bypass()) {
       return {};
     }
     Enqueue(&waiter);
-    const bool contended = head_ != &waiter || active_tasks_ >= capacity_;
+    const bool contended = head_ != &waiter || active_tasks_ >= capacity();
     const auto admitted = WaitWithStop(ready_, lock, stop, [&] {
-      return registered_arenas_.load(std::memory_order_acquire) <= 1 ||
-             (head_ == &waiter && active_tasks_ < capacity_);
+      return can_bypass() || (head_ == &waiter && active_tasks_ < capacity());
     });
-    const auto single_operation =
-        registered_arenas_.load(std::memory_order_acquire) <= 1;
+    const bool bypass = can_bypass();
     Remove(&waiter);
-    if (!admitted || single_operation) {
+    if (!admitted || bypass) {
       lock.unlock();
       ready_.notify_all();
       return {};
@@ -195,7 +206,6 @@ private:
     ready_.notify_all();
   }
 
-  const std::int64_t capacity_;
   std::atomic<std::int64_t> registered_arenas_{0};
   std::mutex mutex_;
   std::condition_variable_any ready_;

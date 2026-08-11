@@ -38,7 +38,9 @@ def test_generated_byte_reader_releases_and_wipes_backing_buffer(
 
     reader.close()
 
-    assert reader._buffer is not retained
+    # Clearing the existing allocation avoids allocating a replacement during
+    # terminal cleanup while still wiping every sensitive byte in place.
+    assert reader._buffer is retained
     assert bytes(retained) == b""
     assert reader._buffer == bytearray()
 

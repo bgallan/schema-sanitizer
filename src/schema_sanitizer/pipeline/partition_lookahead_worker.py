@@ -8,11 +8,22 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
 from threading import Lock, Thread, current_thread
-from typing import Any, cast
+from typing import Any
 
 from ..core_impl.durations import deadline_ns_from_timeout, remaining_seconds
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_owner_finalizer_cleanup,
+    reserve_owner_finalizer_cleanup,
+)
 from ..core_impl.fork_safety import ensure_runtime_fork_safe
+from ..core_impl.governed_thread import (
+    reap_governed_thread_retirements,
+    retire_governed_runtime_thread,
+    start_governed_runtime_thread,
+)
 from ..core_impl.process_resources import acquire_project_threads
 from ..core_impl.retry_scheduler import adopt_failed_release
 from ..core_impl.runtime_registry import reserve_runtime_service
@@ -42,6 +53,8 @@ class ThreadPoolExecutor:
         """Start exactly one daemon host with one pending-task slot."""
         if max_workers != 1:
             raise ValueError("partition lookahead supports exactly one worker")
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = reserve_owner_finalizer_cleanup()
+        self._finalizer_ticket = self._finalizer_capsule.ticket
         self._pid = os.getpid()
         self._queue: Queue[_DaemonTask] = Queue(maxsize=1)
         self._lock = Lock()
@@ -59,15 +72,14 @@ class ThreadPoolExecutor:
                 daemon=True,
             )
             registration = self._runtime_registration
-            start_thread = getattr(cast(Any, registration), "start_thread", None)
-            if callable(start_thread):
-                start_thread(self._thread)
-                started = True
-            else:  # compatibility for narrow test/control doubles
-                self._thread.start()
-                started = True
-                registration.activate()
+            start_governed_runtime_thread(registration, self._thread)
+            started = True
         except BaseException as exc:
+            if not started:
+                try:
+                    started = bool(self._thread.is_alive())
+                except BaseException:
+                    started = False
             if started:
                 # The worker has consumed the permit. Preserve its reserved
                 # registry slot and request terminal drain instead of releasing
@@ -94,7 +106,16 @@ class ThreadPoolExecutor:
                     )
                 else:
                     self._thread_lease = None
+            self._retire_finalizer_slot()
             raise
+
+    def _retire_finalizer_slot(self) -> None:
+        ticket = self._finalizer_ticket
+        capsule = self._finalizer_capsule
+        if ticket and capsule is not None:
+            cancel_prepared_finalizer_cleanup(capsule)
+            self._finalizer_ticket = 0
+            self._finalizer_capsule = None
 
     def submit(
         self,
@@ -163,13 +184,18 @@ class ThreadPoolExecutor:
         thread = getattr(self, "_thread", None)
         if thread is not None and thread is not current_thread():
             thread.join(timeout=remaining_seconds(deadline_ns))
-        self._retry_stopped_thread_lease()
+        # The worker's terminal finally transfers the permit into retirement
+        # debt before returning. Once join proves physical death, that debt is
+        # the sole authority allowed to release/adopt the permit; a direct
+        # retry here would race the debt and can double-release the same lease.
+        reap_governed_thread_retirements()
         stopped = bool(thread is not None and not thread.is_alive() and self._thread_lease is None)
         if stopped:
             registration = self._runtime_registration
             self._runtime_registration = None
             if registration is not None:
                 registration.close()
+            self._retire_finalizer_slot()
         return stopped
 
     def _release_thread_lease_owner(self) -> bool:
@@ -222,24 +248,35 @@ class ThreadPoolExecutor:
                 finally:
                     del task
         finally:
-            released = self._release_thread_lease_owner()
-            if released:
-                registration = self._runtime_registration
-                if registration is not None:
-                    try:
-                        registration.close()
-                    except BaseException as exc:
-                        clear_exception_traceback(exc)
-                    else:
-                        if self._runtime_registration is registration:
-                            self._runtime_registration = None
+            registration = self._runtime_registration
+            try:
+                retired = retire_governed_runtime_thread(
+                    getattr(self, "_thread", None),
+                    registration,
+                    self._release_thread_lease_owner,
+                    terminal_from_current=True,
+                )
+            except BaseException as exc:
+                clear_exception_traceback(exc)
+                retired = False
+            if retired and self._runtime_registration is registration:
+                self._runtime_registration = None
+
+    def _finalizer_cleanup_from_escrow(self) -> None:
+        """Retry a stopped worker permit from a governed cleanup path."""
+        self._retry_stopped_thread_lease()
 
     def __del__(self) -> None:
-        """Retry a stopped worker permit outside child/finalization teardown."""
+        """Transfer stopped-worker cleanup without taking locks during GC."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self._retry_stopped_thread_lease()
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                if defer_owner_finalizer_cleanup(self, capsule):
+                    self._finalizer_ticket = 0
+                    self._finalizer_capsule = None
         except BaseException:
             pass
 

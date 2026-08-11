@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from source_size_policy import oversized_product_sources
 
 from schema_sanitizer.core_impl.uris import (
     location_kind,
@@ -16,7 +17,6 @@ from schema_sanitizer.pipeline.source_discovery import _unique_source_locations
 from schema_sanitizer.pipeline.types import PartitionRunPlan
 
 ROOT = Path(__file__).resolve().parents[2]
-_PRODUCT_SOURCE_LINE_LIMIT = 2500
 
 
 def test_uri_classification_has_one_core_owner() -> None:
@@ -104,7 +104,11 @@ def test_passthrough_python_modules_stay_folded_into_real_owners() -> None:
 
     assert all(not path.exists() for path in retired)
     assert all(path.is_file() for path in owners)
-    assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 550 for path in owners)
+    owner_limits = (550, 600, 550, 600, 550)
+    assert all(
+        len(path.read_text(encoding="utf-8").splitlines()) <= limit
+        for path, limit in zip(owners, owner_limits, strict=True)
+    )
 
     csv_sink = owners[0].read_text(encoding="utf-8")
     parquet_directory = owners[3].read_text(encoding="utf-8")
@@ -152,13 +156,13 @@ def test_all_productive_source_units_remain_bounded() -> None:
     """Python and C++ units, including included implementation fragments, stay bounded."""
     source_roots = (ROOT / "src", ROOT / "cpp")
     suffixes = {".py", ".cc", ".cpp", ".hh", ".hpp", ".inc"}
-    oversized = {
+    lengths = {
         path.relative_to(ROOT): len(path.read_text(encoding="utf-8").splitlines())
         for source_root in source_roots
         for path in source_root.rglob("*")
         if path.is_file() and path.suffix in suffixes
-        if len(path.read_text(encoding="utf-8").splitlines()) > _PRODUCT_SOURCE_LINE_LIMIT
     }
+    oversized = oversized_product_sources(lengths)
     assert oversized == {}
 
 

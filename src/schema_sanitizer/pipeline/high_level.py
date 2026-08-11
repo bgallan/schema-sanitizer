@@ -160,6 +160,7 @@ class ParquetPipeline:
         *,
         read_output_schema: OutputSchemaReader | None = None,
         after_partition: AfterPartitionCallback | None = None,
+        result_retention: str = "full",
     ) -> PartitionPipelineResult:
         """Execute the plan while carrying one schema registry forward."""
         kwargs = self.options.to_kwargs()
@@ -178,6 +179,7 @@ class ParquetPipeline:
             to_parquet_kwargs=kwargs,
             read_output_schema=read_output_schema,
             after_partition=after_partition,
+            result_retention=result_retention,
         )
 
 

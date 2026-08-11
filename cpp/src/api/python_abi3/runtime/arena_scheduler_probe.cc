@@ -2,6 +2,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include "internal/runtime/operation_task_arena.hh"
+#include "internal/runtime/process_cpu_governor.hh"
 
 #include <array>
 #include <atomic>
@@ -272,12 +273,21 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
 
   const auto startup_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  if (!wait_until(blockers_started, blocker_count, startup_deadline)) {
+  const auto startup_target = std::min<std::size_t>(
+      blocker_count,
+      static_cast<std::size_t>(
+          sanitize::internal::process_cpu_governor().capacity()));
+  if (!wait_until(blockers_started, startup_target, startup_deadline)) {
     release_gate(&release_blockers);
     PyErr_SetString(PyExc_RuntimeError,
                     "mixed-lane probe blockers did not start");
     return nullptr;
   }
+  // The probe validates lane scheduling/stealing, not deliberate CPU
+  // oversubscription. Release the prewarm blockers once the dynamic CPU
+  // governor has admitted its runnable window; queued blockers then drain
+  // ahead of ordinary work while spare CPU leases remain available.
+  release_gate(&release_blockers);
 
   const auto work = [&](std::size_t, sanitize::internal::StopToken stop) {
     if (!stop.stop_requested()) {
@@ -381,35 +391,37 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
     return nullptr;
   }
   auto arena = std::move(arena_result).ValueOrDie();
-  std::array<std::atomic<bool>, 32> broad_done{};
   std::atomic<std::size_t> blockers_started{0};
   std::atomic<std::size_t> high_outputs_finished{0};
   std::atomic<std::size_t> broad_finished{0};
-  std::atomic<std::size_t> outputs_before_broad{0};
   std::atomic<bool> release_high{false};
-  std::atomic<bool> release_low{false};
 
-  for (std::size_t ordinal = 0; ordinal < workers; ++ordinal) {
+  // Put one blocker at the front of every high-output worker queue. Broad and
+  // dedicated output packets are queued behind it before the gate opens. The
+  // dynamic CPU governor therefore needs to run only a subset of blockers at
+  // once; after release it can rotate across all physical lanes without
+  // changing the local FIFO/preference ordering being measured.
+  const auto high_workers = workers - high_begin;
+  for (std::size_t ordinal = 0; ordinal < high_workers; ++ordinal) {
     auto status = arena->Submit(
-        [&](std::size_t worker_index, sanitize::internal::StopToken stop) {
+        [&](std::size_t, sanitize::internal::StopToken stop) {
           blockers_started.fetch_add(1, std::memory_order_release);
-          auto *release =
-              worker_index >= high_begin ? &release_high : &release_low;
-          (void)wait_gate_or_stop(release, stop);
+          (void)wait_gate_or_stop(&release_high, stop);
         },
-        workers, TaskArenaLane::kAll);
+        high_workers, TaskArenaLane::kOutput);
     if (!status.ok()) {
       release_gate(&release_high);
-      release_gate(&release_low);
       PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
       return nullptr;
     }
   }
   const auto startup_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  if (!wait_until(blockers_started, workers, startup_deadline)) {
+  const auto startup_target = std::min<std::size_t>(
+      high_workers, static_cast<std::size_t>(
+                        sanitize::internal::process_cpu_governor().capacity()));
+  if (!wait_until(blockers_started, startup_target, startup_deadline)) {
     release_gate(&release_high);
-    release_gate(&release_low);
     PyErr_SetString(PyExc_RuntimeError,
                     "output preference blockers did not start");
     return nullptr;
@@ -424,13 +436,11 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
           if (worker_index >= high_begin) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
           }
-          broad_done[worker_index].store(true, std::memory_order_release);
           broad_finished.fetch_add(1, std::memory_order_release);
         },
         workers, TaskArenaLane::kAll);
     if (!status.ok()) {
       release_gate(&release_high);
-      release_gate(&release_low);
       PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
       return nullptr;
     }
@@ -438,20 +448,15 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
   for (int wave = 0; wave < output_waves; ++wave) {
     for (std::size_t ordinal = 0; ordinal < workers / 2U; ++ordinal) {
       auto status = arena->Submit(
-          [&](std::size_t relative_worker, sanitize::internal::StopToken stop) {
+          [&](std::size_t, sanitize::internal::StopToken stop) {
             if (stop.stop_requested()) {
               return;
-            }
-            const auto physical = high_begin + relative_worker;
-            if (!broad_done[physical].load(std::memory_order_acquire)) {
-              outputs_before_broad.fetch_add(1, std::memory_order_release);
             }
             high_outputs_finished.fetch_add(1, std::memory_order_release);
           },
           workers / 2U, TaskArenaLane::kOutput, TaskTelemetryKind::kOutput);
       if (!status.ok()) {
         release_gate(&release_high);
-        release_gate(&release_low);
         PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
         return nullptr;
       }
@@ -469,7 +474,6 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
   const auto output_elapsed =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - released_at);
-  release_gate(&release_low);
   const auto broad_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
   const auto broad_drained =
@@ -484,9 +488,8 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
   if (!result) {
     return nullptr;
   }
-  if (!tuple_set_item_steal(result, 0,
-                            PyLong_FromSize_t(outputs_before_broad.load(
-                                std::memory_order_acquire))) ||
+  if (!tuple_set_item_steal(
+          result, 0, PyLong_FromSize_t(arena->output_preference_bypasses())) ||
       !tuple_set_item_steal(result, 1,
                             PyLong_FromSize_t(high_outputs_finished.load(
                                 std::memory_order_acquire))) ||
@@ -522,6 +525,9 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
   const auto half = workers / 2U;
   const auto output_count = half - 1U;
   const auto broad_count = workers - 1U;
+  const auto cpu_window = std::min<std::size_t>(
+      workers, static_cast<std::size_t>(
+                   sanitize::internal::process_cpu_governor().capacity()));
   auto arena_result = OperationTaskArena::Make(workers);
   if (!arena_result.ok()) {
     PyErr_SetString(PyExc_RuntimeError,
@@ -529,6 +535,11 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
     return nullptr;
   }
   auto arena = std::move(arena_result).ValueOrDie();
+  const auto all_plan =
+      arena->PrepareSubmissionPlan(workers, TaskArenaLane::kAll);
+  const auto output_plan =
+      arena->PrepareSubmissionPlan(half, TaskArenaLane::kOutput);
+  const auto helper_index = workers - 1U;
 
   std::array<std::atomic<bool>, 32> release_worker{};
   std::atomic<std::size_t> blockers_started{0};
@@ -538,17 +549,26 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
   std::atomic<std::size_t> broad_finished{0};
   std::atomic<bool> release_broad{false};
 
-  for (std::size_t ordinal = 0; ordinal < workers; ++ordinal) {
-    auto status = arena->Submit(
-        [&](std::size_t worker_index, sanitize::internal::StopToken stop) {
-          blockers_started.fetch_add(1, std::memory_order_release);
-          while (
-              !release_worker[worker_index].load(std::memory_order_acquire) &&
-              !stop.stop_requested()) {
-            std::this_thread::yield();
-          }
-        },
-        workers, TaskArenaLane::kAll);
+  const auto blocker = [&](std::size_t worker_index,
+                           sanitize::internal::StopToken stop) {
+    blockers_started.fetch_add(1, std::memory_order_release);
+    while (!release_worker[worker_index].load(std::memory_order_acquire) &&
+           !stop.stop_requested()) {
+      std::this_thread::yield();
+    }
+  };
+
+  // Start the high-lane helper first and place only enough additional blockers
+  // to occupy the *actual* runnable CPU window. Submission tickets make the
+  // helper/victim geometry deterministic without requiring every physical
+  // worker to run simultaneously (which would contradict ProcessCpuGovernor).
+  auto status = arena->Submit(blocker, all_plan, helper_index);
+  if (!status.ok()) {
+    PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
+    return nullptr;
+  }
+  for (std::size_t ordinal = 0; ordinal + 1U < cpu_window; ++ordinal) {
+    status = arena->Submit(blocker, all_plan, ordinal);
     if (!status.ok()) {
       for (auto &release : release_worker) {
         release.store(true, std::memory_order_release);
@@ -559,17 +579,22 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
   }
   const auto startup_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  if (!wait_until(blockers_started, workers, startup_deadline)) {
+  if (!wait_until(blockers_started, cpu_window, startup_deadline)) {
     for (auto &release : release_worker) {
       release.store(true, std::memory_order_release);
     }
     PyErr_SetString(PyExc_RuntimeError,
-                    "output steal probe blockers did not start");
+                    "output steal probe runnable blockers did not start");
     return nullptr;
   }
 
+  // Put one output at the front of every high victim queue except the helper.
+  // Then put broad work behind it. At <=8 workers legacy reverse stealing sees
+  // the broad tail first; at >8 workers high-core stealing prefers a *front*
+  // dedicated output. The Pass54 anti-starvation rule still forbids skipping a
+  // compatible broad front to reach an output hidden later in another queue.
   for (std::size_t ordinal = 0; ordinal < output_count; ++ordinal) {
-    auto status = arena->Submit(
+    status = arena->Submit(
         [&](std::size_t, sanitize::internal::StopToken stop) {
           if (stop.stop_requested()) {
             return;
@@ -579,7 +604,7 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
           }
           outputs_finished.fetch_add(1, std::memory_order_release);
         },
-        half, TaskArenaLane::kOutput, TaskTelemetryKind::kOutput);
+        output_plan, ordinal, TaskTelemetryKind::kOutput);
     if (!status.ok()) {
       for (auto &release : release_worker) {
         release.store(true, std::memory_order_release);
@@ -589,7 +614,7 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
     }
   }
   for (std::size_t ordinal = 0; ordinal < broad_count; ++ordinal) {
-    auto status = arena->Submit(
+    status = arena->Submit(
         [&](std::size_t, sanitize::internal::StopToken stop) {
           if (stop.stop_requested()) {
             return;
@@ -601,7 +626,7 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
           }
           broad_finished.fetch_add(1, std::memory_order_release);
         },
-        workers, TaskArenaLane::kAll);
+        all_plan, ordinal);
     if (!status.ok()) {
       for (auto &release : release_worker) {
         release.store(true, std::memory_order_release);
@@ -612,7 +637,10 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
     }
   }
 
-  release_worker[workers - 1U].store(true, std::memory_order_release);
+  // Free only the helper. It gives back and immediately reacquires one CPU
+  // lease, then has no local work and must steal from the deterministic victim
+  // queues above. The remaining blockers keep the runnable window saturated.
+  release_worker[helper_index].store(true, std::memory_order_release);
   const auto observation_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (outputs_finished.load(std::memory_order_acquire) < output_count &&

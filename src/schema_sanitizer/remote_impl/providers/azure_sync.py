@@ -7,6 +7,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Iterator
 
+from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import current_operation_memory_ledger
 from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.uris import name_matches, normalize_extensions
@@ -18,51 +19,71 @@ from ...input_impl.directory_inputs import (
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_sync_reader_to_file
+from ..io_footprint import open_remote_local_file
+from ..sync_cleanup_escrow import reserve_sync_cleanup
 from .azure import AzureRef, parse_uri, render_uri
 
 
 class _AzureServiceOwner:
-    """Own one synchronous service client and credential."""
+    """Retryable owner for one synchronous service client and credential."""
 
-    def __init__(self, service: Any, credential: Any) -> None:
-        """Store both resources for deterministic same-thread closure."""
-        self.service = service
-        self.credential = credential
+    def __init__(self) -> None:
+        self.service: Any | None = None
+        self.credential: Any | None = None
 
     def close(self) -> None:
-        """Close both resources, preserving the first failure."""
+        """Retire each resource only after its own physical close succeeds."""
         first_error: BaseException | None = None
-        for resource in (self.service, self.credential):
+        for attribute in ("service", "credential"):
+            resource = getattr(self, attribute)
+            if resource is None:
+                continue
             close = getattr(resource, "close", None)
             if close is None:
+                setattr(self, attribute, None)
                 continue
             try:
                 close()
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
+            else:
+                setattr(self, attribute, None)
         if first_error is not None:
             raise first_error
 
 
 @contextmanager
 def open_service(ref: AzureRef) -> Iterator[Any]:
-    """Open one blocking Azure service and credential on the caller thread."""
-    blob = import_module("azure.storage.blob")
-    identity = import_module("azure.identity")
-    credential = identity.DefaultAzureCredential()
+    """Open Azure under pre-reserved terminal cleanup + network-FD ownership."""
+    owner = _AzureServiceOwner()
+    reservation = reserve_sync_cleanup(label="azure_sync_service", network_fds=1)
+    reservation.bind_owner(owner)
+    primary: BaseException | None = None
     try:
-        service = blob.BlobServiceClient(account_url=ref.account_url, credential=credential)
-    except BaseException:
-        close = getattr(credential, "close", None)
-        if close is not None:
-            close()
-        raise
-    owner = _AzureServiceOwner(service, credential)
-    try:
+        blob = import_module("azure.storage.blob")
+        identity = import_module("azure.identity")
+        owner.credential = identity.DefaultAzureCredential()
+        owner.service = blob.BlobServiceClient(
+            account_url=ref.account_url, credential=owner.credential
+        )
         yield owner.service
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        owner.close()
+        try:
+            reservation.close_and_commit()
+        except BaseException as cleanup_error:
+            reservation.abandon_to_escrow()
+            if primary is not None:
+                from ...core_impl.safe_errors import add_bounded_note
+
+                add_bounded_note(
+                    primary, "Azure synchronous cleanup retained for retry", cleanup_error
+                )
+            else:
+                raise
 
 
 def _missing_or_permission(exc: Exception, uri: str) -> bool:
@@ -155,7 +176,9 @@ def upload_file(
     size = Path(local_path).stat().st_size
     with open_service(ref) as service:
         blob = service.get_blob_client(ref.container, ref.blob)
-        with Path(local_path).open("rb") as file_handle:
+        with open_remote_local_file(
+            local_path, "rb", label="azure_sync_upload_source"
+        ) as file_handle:
             blob.upload_blob(
                 file_handle,
                 overwrite=True,
@@ -190,9 +213,9 @@ def list_files(
                 relative,
                 size if isinstance(size, int) else None,
             )
-            metadata_budget.charge_file(remote_file)
+            metadata_budget.charge_file(remote_file, associations=4)
             files.append(remote_file)
-    files.sort(key=lambda file: file.name)
+    governed_sort(files, key=lambda file: file.name, stage="remote_discovery_sort")
     return files
 
 
@@ -204,9 +227,10 @@ def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Discover requested Azure directories serially in canonical order."""
     accepted = normalize_extensions(suffixes)
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
         uris,
-        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+        metadata_budget=metadata_budget,
     )
     groups: dict[tuple[str, str, str], dict[str, list[str]]] = {}
     for uri in uris:
@@ -216,10 +240,15 @@ def directories_containing_files(
             continue
         parent_prefix, child = parsed
         key = (ref.account_url, ref.container, parent_prefix)
-        groups.setdefault(key, {}).setdefault(child, []).append(uri)
+        # pass63 proof anchor: metadata_budget.charge_group_associations()
+        discovery.publish_group_association(
+            lambda: groups.setdefault(key, {}).setdefault(child, []).append(uri)
+        )
     by_account: dict[str, list[tuple[str, str, dict[str, list[str]]]]] = {}
     for (account_url, container, parent), children in groups.items():
-        by_account.setdefault(account_url, []).append((container, parent, children))
+        discovery.publish_group_association(
+            lambda: by_account.setdefault(account_url, []).append((container, parent, children))
+        )
     for account_url, account_groups in by_account.items():
         ref = AzureRef(account_url, account_groups[0][0], "", "")
         with open_service(ref) as service:

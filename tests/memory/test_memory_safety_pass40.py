@@ -242,8 +242,6 @@ def test_availability_callbacks_are_one_shot_and_off_releaser_thread(
 ) -> None:
     from schema_sanitizer.core_impl import process_resources as module
 
-    governor = module._Governor(1, "pass40-callback")
-    lease = governor.acquire(1)
     callback_thread: list[int] = []
     called = threading.Event()
 
@@ -252,7 +250,8 @@ def test_availability_callbacks_are_one_shot_and_off_releaser_thread(
         callback_thread.append(threading.get_ident())
         called.set()
 
-    monkeypatch.setattr(module, "_dispatch_availability_event", dispatch)
+    governor = module._Governor(1, "pass40-callback", availability_dispatcher=dispatch)
+    lease = governor.acquire(1)
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
     releasing_thread = threading.get_ident()
     lease.release()

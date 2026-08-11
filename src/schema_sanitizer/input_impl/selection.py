@@ -10,6 +10,7 @@ from typing import Any, Literal, TypeAlias, cast
 
 from ..core_impl.generated_bytes import BufferedGeneratedBytesReader
 from ..core_impl.memory_budget import memory_budget
+from ..core_impl.process_resources import open_governed_file
 from ..core_impl.uris import (
     local_path_from_file_uri,
     looks_like_file_uri,
@@ -90,7 +91,7 @@ class TranscodingPathByteReader(BufferedGeneratedBytesReader):
     def _open_stream(self) -> None:
         """Open the binary path source and reset decoder state."""
         self._close_stream()
-        self._stream = open(self._path, "rb")
+        self._stream = open_governed_file(self._path, "rb")
         self._decoder = codecs.getincrementaldecoder(self._encoding)("strict")
         self._source_eof = False
 
@@ -421,7 +422,7 @@ def single_file_descriptor(path: str | os.PathLike[str]) -> FolderFile:
         display_name=str(local),
         name=local.name,
         size=local.stat().st_size,
-        open_binary=lambda: local.open("rb"),
+        open_binary=lambda: open_governed_file(local, "rb"),
         native_path=str(local),
     )
 

@@ -47,7 +47,10 @@ def test_dynamic_worker_bitmaps_schedule_above_32_without_a_hard_cap() -> None:
         )
 
         assert arena_workers == workers
-        assert peak > 16
+        # Pass54 separates physical arena width from dynamic runnable CPU
+        # credit. A constrained cgroup may legitimately cap simultaneous work
+        # well below 16 while all wide physical lanes still participate.
+        assert 1 <= peak <= workers
         assert total_threads == workers
         assert 16 < upstream_threads <= workers
         assert 16 < output_threads <= workers
@@ -233,11 +236,21 @@ def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None
         memory_limit_bytes=64 * 1024 * 1024,
     )
     try:
+        stream_resources = stream._keepalive
+        payload_owner = stream_resources._payload_owner
+        assert payload_owner.memory_lease.reserved_bytes > 0
+        first_batch = next(stream)
+        first_rows = first_batch.num_rows
+        del first_batch
+        assert payload_owner.memory_lease.reserved_bytes > 0
         _capacity, leased, waiting = _governor_stats()
         assert leased > 0
         assert waiting == 0
-        assert sum(batch.num_rows for batch in stream) == 2
+        assert first_rows + sum(batch.num_rows for batch in stream) == 2
         assert list(stream) == []
+        assert stream_resources._payload_owner is None
+        assert payload_owner.memory_lease is None
+        assert payload_owner.control_ticket is None
         _capacity, leased, waiting = _governor_stats()
         assert leased == 0
         assert waiting == 0
@@ -247,3 +260,20 @@ def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None
     _capacity, leased, waiting = _governor_stats()
     assert leased == 0
     assert waiting == 0
+
+    # The closed stream can publish its ledger finalizer only after the native
+    # reader drops its last buffer.  Starting the next ledger is a safe point
+    # that must retire that conservative cross-process contribution.
+    from schema_sanitizer.api_impl.operation_context import (
+        OperationExecutionContext,
+        operation_finalizer_snapshot,
+    )
+    from schema_sanitizer.core_impl.cross_process_memory import process_cross_memory_snapshot
+
+    successor = OperationExecutionContext(
+        threading_mode="single",
+        memory_limit_bytes=64 * 1024 * 1024,
+    )
+    successor.close()
+    assert process_cross_memory_snapshot()["logical_contributions"] == 0
+    assert operation_finalizer_snapshot()[2] == 0

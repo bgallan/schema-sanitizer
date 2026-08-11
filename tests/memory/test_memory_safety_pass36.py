@@ -373,26 +373,15 @@ def test_published_claim_is_rolled_back_if_parent_fsync_fails(
     module.release_path_identity(identity)
 
 
-def test_claim_owner_finalizer_only_transfers_ownership(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_claim_owner_finalizer_only_transfers_ownership() -> None:
     import schema_sanitizer.core_impl.path_identity as module
 
-    retained: list[Any] = []
-    monkeypatch.setattr(
-        module,
-        "_retain_abandoned_claim_owner",
-        lambda owner, **_kwargs: retained.append(owner),
-    )
-    monkeypatch.setattr(
-        module,
-        "_release_claim_owner",
-        lambda _owner: (_ for _ in ()).throw(AssertionError("blocking I/O")),
-    )
-    owner = module.PathClaimOwner(b"x", "/never-touch", None)
+    owner = module.PathClaimOwner(None, None, None)
     owner.__del__()
-    assert retained == [owner]
-    owner.released = True
+    assert owner.finalizer_ticket == -1
+    assert module.path_claim_finalizer_snapshot()[0] == 1
+    assert module._drain_path_claim_finalizers(limit=1) == 1
+    assert module.path_claim_finalizer_snapshot()[0] == 0
 
 
 def test_sweep_recovers_dead_claim_write_record(
@@ -441,6 +430,7 @@ def test_path_claim_admission_is_bounded(
 
     monkeypatch.setattr(module, "_MAX_LIVE_PATH_CLAIMS", 1)
     monkeypatch.setattr(module, "_PATH_CLAIM_ADMISSIONS", 0)
+    monkeypatch.setattr(module, "_PATH_CLAIM_ADMISSION_OWNERS", module.BoundedGenerationPool(1))
     first = module._acquire_path_claim_admission()
     with pytest.raises(OSError, match="capacity exhausted"):
         module._acquire_path_claim_admission()
@@ -551,7 +541,8 @@ def test_pass36_source_contracts() -> None:
     assert "_ScandirCleanupOwner" in identity
     assert "_MAX_LIVE_PATH_CLAIMS" in identity
     assert "owner_pid != os.getpid()" in identity
-    assert "published claim rollback was deferred" in identity
+    assert "Arm the pre-rooted claim authority without filesystem I/O" in identity
+    assert "_PATH_CLAIM_FINALIZER_ESCROW.publish_rooted" in identity
     assert "empty task" in arena
     leased = arena.index("OperationTaskArena::SubmitLeased")
     empty_task = arena.index("if (!task)", leased)

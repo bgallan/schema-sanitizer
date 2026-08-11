@@ -1,0 +1,481 @@
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src/schema_sanitizer"
+CPP = ROOT / "cpp/src"
+
+
+def _clear_external_coordinator(module) -> None:
+    with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+        module._EXTERNAL_RUNTIME_POOL_COORDINATOR.clear()
+
+
+def test_resident_zero_is_authoritative_on_public_acquire(monkeypatch: pytest.MonkeyPatch) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    _clear_external_coordinator(module)
+    width = [3]
+    events: list[tuple[str, int]] = []
+
+    class Runtime:
+        @staticmethod
+        def schema_sanitizer_resident_thread_count() -> int:
+            return width[0]
+
+    class Native:
+        supports_resident_attribution = True
+
+        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+            return desired
+
+        def process_physical_thread_permits_release(self, amount: int) -> None:
+            events.append(("claim-release", amount))
+
+        def external_runtime_resident_threads_add(self, amount: int) -> None:
+            events.append(("resident-add", amount))
+
+        def external_runtime_resident_threads_release(self, amount: int) -> None:
+            events.append(("resident-release", amount))
+
+    native = Native()
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
+
+    permit, granted = module._acquire_shared_external_native_thread_permits(Runtime, 2)
+    assert permit is not None and granted == 2
+    permit.process_physical_thread_permits_release(2)
+    assert module.external_runtime_pool_snapshot()["resident_width"] == 3
+
+    width[0] = 0
+    permit2, granted2 = module._acquire_shared_external_native_thread_permits(Runtime, 1)
+    assert permit2 is not None and granted2 == 1
+    assert ("resident-release", 3) in events
+    permit2.process_physical_thread_permits_release(1)
+    assert module.external_runtime_pool_snapshot()["coordinator_entries"] == 0
+
+
+def test_unknown_resident_probe_preserves_stale_identity_credit_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    _clear_external_coordinator(module)
+    state = [3]
+    events: list[tuple[str, int]] = []
+
+    class Runtime:
+        @staticmethod
+        def schema_sanitizer_resident_thread_count() -> int:
+            value = state[0]
+            if value < 0:
+                raise RuntimeError("probe unavailable")
+            return value
+
+    class Native:
+        supports_resident_attribution = True
+
+        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+            return desired
+
+        def process_physical_thread_permits_release(self, amount: int) -> None:
+            pass
+
+        def external_runtime_resident_threads_add(self, amount: int) -> None:
+            events.append(("resident-add", amount))
+
+        def external_runtime_resident_threads_release(self, amount: int) -> None:
+            events.append(("resident-release", amount))
+
+    native = Native()
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
+    permit, granted = module._acquire_shared_external_native_thread_permits(Runtime, 1)
+    assert permit is not None and granted == 1
+    permit.process_physical_thread_permits_release(1)
+    assert module.external_runtime_pool_snapshot()["resident_width"] == 3
+
+    state[0] = -1
+    permit2, granted2 = module._acquire_shared_external_native_thread_permits(Runtime, 1)
+    assert permit2 is not None and granted2 == 1
+    # Probe failure is uncertainty, not proof of zero resident workers. Keeping
+    # identity prevents reopening CPU capacity while the external pool may live.
+    assert ("resident-release", 3) not in events
+    permit2.process_physical_thread_permits_release(1)
+    assert module.external_runtime_pool_snapshot()["resident_width"] == 3
+
+    state[0] = 0
+    permit3, granted3 = module._acquire_shared_external_native_thread_permits(Runtime, 1)
+    assert permit3 is not None and granted3 == 1
+    permit3.process_physical_thread_permits_release(1)
+    assert ("resident-release", 3) in events
+    assert module.external_runtime_pool_snapshot()["coordinator_entries"] == 0
+
+
+def test_declared_pool_identity_deduplicates_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    _clear_external_coordinator(module)
+    events: list[tuple[str, int]] = []
+
+    class Runtime:
+        def schema_sanitizer_thread_pool_identity(self) -> str:
+            return "shared-arrow-pool"
+
+        def schema_sanitizer_resident_thread_count(self) -> int:
+            return 4
+
+    class Native:
+        supports_resident_attribution = True
+
+        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+            events.append(("acquire", desired))
+            return desired
+
+        def process_physical_thread_permits_release(self, amount: int) -> None:
+            events.append(("release", amount))
+
+        def external_runtime_resident_threads_add(self, amount: int) -> None:
+            events.append(("resident-add", amount))
+
+        def external_runtime_resident_threads_release(self, amount: int) -> None:
+            events.append(("resident-release", amount))
+
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    a, b = Runtime(), Runtime()
+    pa, ga = module._acquire_shared_external_native_thread_permits(a, 3)
+    pb, gb = module._acquire_shared_external_native_thread_permits(b, 2)
+    assert pa is not None and pb is not None
+    assert (ga, gb) == (3, 2)
+    snap = module.external_runtime_pool_snapshot()
+    assert snap["coordinator_entries"] == 1
+    assert snap["resident_width"] == 4
+    assert [event for event in events if event[0] == "resident-add"] == [("resident-add", 4)]
+    # Overlap shares the established width; only one native generation was acquired.
+    assert [event for event in events if event[0] == "acquire"] == [("acquire", 3)]
+    pb.process_physical_thread_permits_release(2)
+    pa.process_physical_thread_permits_release(3)
+    _clear_external_coordinator(module)
+
+
+def test_external_pool_registry_has_global_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    _clear_external_coordinator(module)
+    monkeypatch.setattr(module, "_MAX_EXTERNAL_RUNTIME_POOL_ENTRIES", 1)
+    first = object()
+    second = object()
+    with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+        _key, entry = module._external_runtime_entry_locked(first, create=True)
+        assert entry is not None
+        with pytest.raises(Exception, match="coordinator capacity exhausted"):
+            module._external_runtime_entry_locked(second, create=True)
+        module._EXTERNAL_RUNTIME_POOL_COORDINATOR.clear()
+
+
+def test_external_pool_total_claim_bound_precedes_native_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    _clear_external_coordinator(module)
+    monkeypatch.setattr(module, "_MAX_EXTERNAL_RUNTIME_POOL_TOTAL_CLAIMS", 1)
+    calls = 0
+
+    class Runtime:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        def schema_sanitizer_thread_pool_identity(self) -> str:
+            return self.token
+
+        @staticmethod
+        def schema_sanitizer_resident_thread_count() -> int:
+            return 1
+
+    class Native:
+        supports_resident_attribution = False
+
+        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+            nonlocal calls
+            calls += 1
+            return desired
+
+        def process_physical_thread_permits_release(self, amount: int) -> None:
+            pass
+
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    first, width = module._acquire_shared_external_native_thread_permits(Runtime("pool-a"), 1)
+    assert first is not None and width == 1
+    blocked, blocked_width = module._acquire_shared_external_native_thread_permits(
+        Runtime("pool-b"), 1
+    )
+    assert blocked is not None and blocked_width == 0
+    assert calls == 1
+    assert module.external_runtime_pool_snapshot()["claims"] == 1
+
+    logical_calls = 0
+
+    def acquire_logical(*_args, **_kwargs):
+        nonlocal logical_calls
+        logical_calls += 1
+        raise AssertionError("aggregate claim cap must precede logical governor commit")
+
+    monkeypatch.setattr(module, "acquire_project_threads", acquire_logical)
+    with pytest.raises(Exception, match="logical claim capacity exhausted"):
+        module._acquire_shared_external_logical_thread_lease(Runtime("pool-c"), 1)
+    assert logical_calls == 0
+    assert module.external_runtime_pool_snapshot()["coordinator_entries"] == 1
+
+    first.process_physical_thread_permits_release(1)
+    _clear_external_coordinator(module)
+
+
+def test_physical_claim_slot_is_published_before_native_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    _clear_external_coordinator(module)
+
+    class Runtime:
+        @staticmethod
+        def schema_sanitizer_resident_thread_count() -> int:
+            return 1
+
+    runtime = Runtime()
+    calls = 0
+
+    class Native:
+        supports_resident_attribution = False
+
+        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+            nonlocal calls
+            calls += 1
+            return desired
+
+        def process_physical_thread_permits_release(self, amount: int) -> None:
+            pass
+
+    class FailInsert(dict[int, int]):
+        def __setitem__(self, key: int, value: int) -> None:
+            if key not in self:
+                raise MemoryError("injected claim-slot OOM")
+            super().__setitem__(key, value)
+
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+        _key, entry = module._external_runtime_entry_locked(runtime, create=True)
+        assert entry is not None
+        entry.physical_claims = FailInsert()
+    with pytest.raises(MemoryError, match="claim-slot OOM"):
+        module._acquire_shared_external_native_thread_permits(runtime, 2)
+    assert calls == 0
+    assert module.external_runtime_pool_snapshot()["coordinator_entries"] == 0
+
+
+def test_logical_claim_slot_is_published_before_governor_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources as module
+
+    _clear_external_coordinator(module)
+    runtime = object()
+    calls = 0
+
+    class FailInsert(dict[int, int]):
+        def __setitem__(self, key: int, value: int) -> None:
+            if key not in self:
+                raise MemoryError("injected logical-slot OOM")
+            super().__setitem__(key, value)
+
+    def acquire(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("governor must not be reached")
+
+    monkeypatch.setattr(module, "acquire_project_threads", acquire)
+    with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+        _key, entry = module._external_runtime_entry_locked(runtime, create=True)
+        assert entry is not None
+        entry.logical_claims = FailInsert()
+    with pytest.raises(MemoryError, match="logical-slot OOM"):
+        module._acquire_shared_external_logical_thread_lease(runtime, 2)
+    assert calls == 0
+    assert module.external_runtime_pool_snapshot()["coordinator_entries"] == 0
+
+
+def test_capacity_shrink_ejects_impossible_fifo_head() -> None:
+    from schema_sanitizer.core_impl.process_resources import _Governor
+
+    governor = _Governor(2, "pass69_shrink", teardown_reserve=0)
+    held = governor.acquire(1)
+    result: list[str] = []
+    entered = threading.Event()
+
+    def wait_big() -> None:
+        entered.set()
+        try:
+            governor.acquire(2, timeout_seconds=None)
+        except Exception as exc:  # exact error type is covered by production tests
+            result.append(str(exc))
+
+    thread = threading.Thread(target=wait_big)
+    thread.start()
+    assert entered.wait(1.0)
+    # Ensure the waiter has reached the queue before shrinking.
+    for _ in range(1000):
+        if governor.snapshot().waiting:
+            break
+        threading.Event().wait(0.001)
+    assert governor.snapshot().waiting == 1
+    governor.refresh_capacity(1)
+    thread.join(1.0)
+    assert not thread.is_alive()
+    assert result and "no longer fits refreshed capacity" in result[0]
+    assert governor.snapshot().waiting == 0
+    held.release()
+
+
+def test_parallel_constructor_oom_keeps_failed_worker_release_in_reserved_escrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import memory_budget as module
+    from schema_sanitizer.core_impl import process_resources
+
+    before = module._STAGE_ADMISSION_CONSTRUCTION_ESCROW.published_count()
+
+    class RetryExecution:
+        amount = 1
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def release(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("injected worker cleanup failure")
+
+    execution = RetryExecution()
+    monkeypatch.setattr(module, "adaptive_parallel_slots", lambda *a, **k: 2)
+    monkeypatch.setattr(process_resources, "acquire_project_threads", lambda *a, **k: execution)
+
+    class OOMAdmission:
+        def __new__(cls, *_args, **_kwargs):
+            raise MemoryError("injected admission construction OOM")
+
+    with pytest.raises(MemoryError, match="construction OOM"):
+        module.acquire_parallel_admission(
+            2,
+            per_slot_bytes=64,
+            stage="pass69_constructor",
+            physical_threads=True,
+            _admission_type=OOMAdmission,  # type: ignore[arg-type]
+        )
+    assert execution.calls == 1
+    assert module._STAGE_ADMISSION_CONSTRUCTION_ESCROW.published_count() == before + 1
+    module.drain_abandoned_memory_finalizers()
+    assert execution.calls == 2
+    assert module._STAGE_ADMISSION_CONSTRUCTION_ESCROW.published_count() == before
+
+
+def test_stage_attachment_roots_pending_lease_before_tuple_growth() -> None:
+    source = (SRC / "core_impl/memory_budget.py").read_text(encoding="utf-8")
+    attach = source[
+        source.index("def attach_domain") : source.index("def _promote_stage_admission")
+    ]
+    assert attach.index("self.pending_domain_lease = lease") < attach.index(
+        "self.domain_leases = (*existing"
+    )
+    acquire = source[
+        source.index("def acquire_stage_concurrency_admission") : source.index(
+            "def adaptive_concurrency_target"
+        )
+    ]
+    assert acquire.index("ordered_domains =") < acquire.index("acquire_parallel_admission(")
+    assert "_admission_type=StageConcurrencyAdmission" in acquire
+
+
+def test_native_pass69_stack_snapshot_resident_and_fd_contracts() -> None:
+    arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
+    header = (CPP / "internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
+    probe = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
+
+    assert "SCHEMA_SANITIZER_THREAD_STACK_RESERVATION_BYTES" in arena
+    assert "RLIMIT_STACK" in arena
+    assert "ProcessThreadStackReservationCount" in arena
+    assert "ProcessThreadStackReservationCount(total_reserved)" in arena
+    assert "return std::max(total_reserved, modelled)" in arena
+    assert "g_process_external_runtime_stack_debt_threads" in arena
+    assert "std::max(external_active, resident_stack_debt)" in arena
+    assert "g_process_thread_ledger_mutations_inflight" in arena
+    assert "g_process_thread_ledger_mutation_epoch" in arena
+    assert "epoch_before == epoch_after" in arena
+    assert "ReadThreadPermitLedgerSnapshot" in arena
+    assert "thread_permit_snapshot_stable" in header
+    assert "g_external_runtime_resident_protocol_violations" in arena
+    assert (
+        "compare_exchange_weak"
+        in arena[arena.index("add_process_external_runtime_resident_threads") :]
+    )
+    assert "g_process_fd_waiters" in arena
+    assert "kProcessFdTicketSlots" in arena
+    assert "g_process_fd_next_ticket" in arena
+    assert "g_process_fd_serving_ticket" in arena
+    assert "g_process_fd_cancelled_tickets" in arena
+    assert "TryReserveFdTicket" in arena
+    assert "RetireFdTicketLocked" in arena
+    assert "g_process_fd_wait_mutex" in arena
+    assert "g_process_fd_wait_cv" in arena
+    assert "queued_waiter" in arena
+    assert "PyTuple_New(30)" in probe
+    assert "snapshot.external_runtime_stack_debt_threads" in probe
+    assert probe.count("if (!result && granted != 0U)") >= 4
+    compact_probe = "".join(probe.split())
+    assert "release_process_external_runtime_thread_permits(granted);" in compact_probe
+    assert "release_process_file_descriptor_permits(granted)" in probe
+
+    resources = (SRC / "core_impl/process_resources.py").read_text(encoding="utf-8")
+    assert "external_runtime_pool_coordinator" in resources
+    assert "_MAX_EXTERNAL_RUNTIME_POOL_ENTRIES" in resources
+    assert "_MAX_EXTERNAL_RUNTIME_POOL_TOTAL_CLAIMS" in resources
+    assert "_MAX_EXTERNAL_RUNTIME_POOL_IDENTITY_UNITS" in resources
+    assert "_EXTERNAL_RUNTIME_POOL_CLAIM_CONTROL_BYTES" in resources
+
+
+def test_release_gate_rejects_unstable_or_resident_protocol_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import concurrency_coverage as coverage
+    from schema_sanitizer.core_impl import runtime_diagnostics
+
+    base = {
+        "available": True,
+        "completion_memory_protocol_violations": 0,
+        "counter_underflows": 0,
+        "native_physical_threads": 2,
+        "external_runtime_thread_permits": 1,
+        "total_physical_thread_permits": 3,
+        "native_physical_thread_capacity": 8,
+        "thread_permit_snapshot_stable": 1,
+        "external_runtime_resident_protocol_violations": 0,
+    }
+    monkeypatch.setattr(runtime_diagnostics, "_native_arena_snapshot", lambda: dict(base))
+    coverage.validate_native_concurrency_protocol_health()
+
+    old_schema = dict(base, snapshot_schema_fields=27)
+    monkeypatch.setattr(runtime_diagnostics, "_native_arena_snapshot", lambda: old_schema)
+    with pytest.raises(RuntimeError, match="predates pass69"):
+        coverage.validate_native_concurrency_protocol_health()
+
+    unstable = dict(base, thread_permit_snapshot_stable=0)
+    monkeypatch.setattr(runtime_diagnostics, "_native_arena_snapshot", lambda: unstable)
+    with pytest.raises(RuntimeError, match="not transactionally stable"):
+        coverage.validate_native_concurrency_protocol_health()
+
+    bad_resident = dict(base, external_runtime_resident_protocol_violations=1)
+    monkeypatch.setattr(runtime_diagnostics, "_native_arena_snapshot", lambda: bad_resident)
+    with pytest.raises(RuntimeError, match="resident-thread protocol violations"):
+        coverage.validate_native_concurrency_protocol_health()

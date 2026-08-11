@@ -40,6 +40,8 @@ class _Response:
         self.status = status
         self.headers = headers or {}
         self._body = body
+        self._offset = 0
+        self.content = self
         self._enter_error = enter_error
 
     async def __aenter__(self) -> _Response:
@@ -51,13 +53,16 @@ class _Response:
     async def __aexit__(self, *_exc: object) -> None:
         """Leave the fake response context."""
 
-    async def read(self) -> bytes:
-        """Return the configured body."""
-        return self._body
+    async def read(self, size: int) -> bytes:
+        """Return at most ``size`` bytes through the bounded reader API."""
+        end = min(len(self._body), self._offset + size)
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
 
-    async def text(self) -> str:
-        """Decode the configured body for error messages."""
-        return self._body.decode("utf-8", errors="replace")
+    def at_eof(self) -> bool:
+        """Report whether the configured body has been consumed."""
+        return self._offset == len(self._body)
 
 
 def _sparse_file(path: Path, size: int) -> None:
@@ -429,11 +434,11 @@ def test_gcs_resumable_nonretryable_failure_aborts(
     assert session.aborted is True
 
 
-def test_azure_upload_uses_memory_bounded_sdk_concurrency(
+def test_azure_upload_serializes_ungoverned_sdk_concurrency(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Azure's SDK chunking consumes the shared operation-derived window."""
+    """Azure SDK fanout stays serial; governed operations own parallelism."""
     require_native()
     from schema_sanitizer.remote_impl.providers import azure
 
@@ -486,7 +491,7 @@ def test_azure_upload_uses_memory_bounded_sdk_concurrency(
     assert service.closed is True
     assert service.blob.kwargs is not None
     assert service.blob.kwargs["length"] == 80 << 20
-    assert 1 < service.blob.kwargs["max_concurrency"] <= 8
+    assert service.blob.kwargs["max_concurrency"] == 1
 
 
 def test_s3_multipart_reports_earliest_failing_part(

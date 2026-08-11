@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ...core_impl.async_scheduler import drain_ordered_indexed_results
+from ...core_impl.async_scheduler import drain_ordered_iterable_results
 from ...core_impl.execution_policy import execution_policy
+from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import current_operation_memory_ledger
+from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.temporary_storage import StreamingStorageReservation
+from ...core_impl.terminal_ownership import publish_terminal_owner, retire_terminal_owner
 from ...core_impl.uris import name_matches, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
@@ -23,40 +27,211 @@ from ...input_impl.directory_inputs import (
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_async_iterator_to_file
+from ..io_footprint import open_remote_local_file
 from ..provider_session_pool import current_provider_session_pool
+from ..transport import collect_bounded_async_chunks
 from ..upload_policy import remote_upload_policy
 
+_MAX_AZURE_ROLLBACK_OWNERS = 128
+_AZURE_ROLLBACK_LOCK = threading.Lock()
+_AZURE_ROLLBACK_GENERATION = 0
 
-class _AzureServiceOwner:
-    """Own one Blob service and the credential created specifically for it."""
 
-    def __init__(self, service: Any, credential: Any) -> None:
-        """Store both SDK resources for one idempotent combined close."""
-        self._service = service
-        self._credential = credential
-        self._closed = False
+@dataclass(slots=True)
+class _AzureRollbackSlot:
+    """Preallocated terminal escrow reserved before credential construction."""
 
-    def __getattr__(self, name: str) -> Any:
-        """Forward Azure service methods and properties."""
-        return getattr(self._service, name)
+    generation: int = 0
+    state: str = "free"
+    credential: Any | None = None
+    task: asyncio.Task[Any] | None = None
 
-    async def close(self) -> None:
-        """Close service transport and credential exactly once."""
-        if self._closed:
-            return
-        self._closed = True
-        first_error: BaseException | None = None
-        for resource in (self._service, self._credential):
-            close = getattr(resource, "close", None)
-            if close is None:
+
+_AZURE_ROLLBACK_SLOTS = [_AzureRollbackSlot() for _ in range(_MAX_AZURE_ROLLBACK_OWNERS)]
+
+
+def _azure_rollback_token(index: int, generation: int) -> int:
+    return (generation << 8) | index | 1
+
+
+def _reserve_azure_rollback_slot() -> tuple[int, int] | None:
+    """Reserve terminal ownership before a fallible credential is created."""
+    global _AZURE_ROLLBACK_GENERATION
+    with _AZURE_ROLLBACK_LOCK:
+        for index, slot in enumerate(_AZURE_ROLLBACK_SLOTS):
+            if slot.state != "free":
                 continue
-            try:
+            _AZURE_ROLLBACK_GENERATION += 1
+            slot.generation = _AZURE_ROLLBACK_GENERATION
+            slot.state = "reserved"
+            slot.credential = None
+            slot.task = None
+            return index, slot.generation
+    return None
+
+
+def _release_azure_rollback_reservation(reservation: tuple[int, int]) -> None:
+    index, generation = reservation
+    with _AZURE_ROLLBACK_LOCK:
+        slot = _AZURE_ROLLBACK_SLOTS[index]
+        if slot.generation != generation or slot.state != "reserved":
+            return
+        slot.state = "free"
+        slot.credential = None
+        slot.task = None
+
+
+async def _retry_azure_credential_rollback(index: int, generation: int) -> None:
+    """Keep a failed constructor credential owned until physical close commits."""
+    delay = 0.01
+    token = _azure_rollback_token(index, generation)
+    while True:
+        with _AZURE_ROLLBACK_LOCK:
+            slot = _AZURE_ROLLBACK_SLOTS[index]
+            if slot.generation != generation or slot.state != "published":
+                return
+            credential = slot.credential
+        close = getattr(credential, "close", None)
+        try:
+            if close is not None:
                 result = close()
                 if inspect.isawaitable(result):
                     await result
+        except asyncio.CancelledError:
+            # No false commit: the static slot remains the authoritative owner.
+            continue
+        except BaseException:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                continue
+            delay = min(0.25, delay * 2.0)
+            continue
+        with _AZURE_ROLLBACK_LOCK:
+            slot = _AZURE_ROLLBACK_SLOTS[index]
+            if slot.generation == generation and slot.state == "published":
+                slot.state = "free"
+                slot.credential = None
+                slot.task = None
+        retire_terminal_owner("azure_credential_rollback", token)
+        return
+
+
+def _publish_azure_credential_rollback(reservation: tuple[int, int], credential: Any) -> bool:
+    """Publish a credential into its already-reserved terminal slot."""
+    index, generation = reservation
+    token = _azure_rollback_token(index, generation)
+    with _AZURE_ROLLBACK_LOCK:
+        slot = _AZURE_ROLLBACK_SLOTS[index]
+        if slot.generation != generation or slot.state != "reserved":
+            return False
+        slot.credential = credential
+        slot.state = "published"
+    publish_terminal_owner("azure_credential_rollback", token, retained_bytes=512)
+    try:
+        task = asyncio.get_running_loop().create_task(
+            _retry_azure_credential_rollback(index, generation)
+        )
+    except BaseException:
+        # The preallocated slot is still authoritative. Provider-pool shutdown
+        # and later Azure safe points can drive this generation explicitly.
+        return True
+    with _AZURE_ROLLBACK_LOCK:
+        slot = _AZURE_ROLLBACK_SLOTS[index]
+        if slot.generation == generation and slot.state == "published":
+            slot.task = task
+    return True
+
+
+def _retain_azure_credential_rollback(credential: Any) -> bool:
+    """Compatibility wrapper that still uses preallocated terminal storage."""
+    reservation = _reserve_azure_rollback_slot()
+    return (
+        False
+        if reservation is None
+        else _publish_azure_credential_rollback(reservation, credential)
+    )
+
+
+async def drain_azure_credential_rollbacks() -> int:
+    """Drive published generations that could not create a retry task."""
+    pending: list[tuple[int, int]] = []
+    with _AZURE_ROLLBACK_LOCK:
+        for index, slot in enumerate(_AZURE_ROLLBACK_SLOTS):
+            if slot.state == "published" and slot.task is None:
+                pending.append((index, slot.generation))
+    for index, generation in pending:
+        # One direct attempt is enough for a safe point. A failure leaves the
+        # static owner published and will be retried at the next safe point.
+        with _AZURE_ROLLBACK_LOCK:
+            slot = _AZURE_ROLLBACK_SLOTS[index]
+            credential = (
+                slot.credential
+                if slot.generation == generation and slot.state == "published"
+                else None
+            )
+        if credential is None:
+            continue
+        try:
+            close = getattr(credential, "close", None)
+            if close is not None:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+        except BaseException:
+            continue
+        token = _azure_rollback_token(index, generation)
+        with _AZURE_ROLLBACK_LOCK:
+            slot = _AZURE_ROLLBACK_SLOTS[index]
+            if slot.generation == generation and slot.state == "published":
+                slot.state = "free"
+                slot.credential = None
+                slot.task = None
+        retire_terminal_owner("azure_credential_rollback", token)
+    with _AZURE_ROLLBACK_LOCK:
+        return sum(1 for slot in _AZURE_ROLLBACK_SLOTS if slot.state == "published")
+
+
+class _AzureServiceOwner:
+    """Own one Blob service and credential with retryable per-resource cleanup."""
+
+    def __init__(self, service: Any, credential: Any) -> None:
+        self._service = service
+        self._credential = credential
+        self._service_closed = False
+        self._credential_closed = False
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._service, name)
+
+    async def _close_one(self, resource: Any, flag_name: str) -> None:
+        if getattr(self, flag_name):
+            return
+        close = getattr(resource, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        setattr(self, flag_name, True)
+
+    async def close(self) -> None:
+        """Retry only resources whose physical close has not yet committed."""
+        if self._closed:
+            return
+        first_error: BaseException | None = None
+        for resource, flag_name in (
+            (self._service, "_service_closed"),
+            (self._credential, "_credential_closed"),
+        ):
+            try:
+                await self._close_one(resource, flag_name)
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
+                if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                    break
+        self._closed = self._service_closed and self._credential_closed
         if first_error is not None:
             raise first_error
 
@@ -105,22 +280,49 @@ def parse_uri(uri: str) -> AzureRef:
 
 
 async def _open_service_unpooled(ref: AzureRef) -> Any:
-    """Create one directly owned async Azure Blob service client."""
+    """Create one directly owned service with construction escrow pre-reserved."""
+    reservation = _reserve_azure_rollback_slot()
+    if reservation is None:
+        raise RuntimeError("Azure credential cleanup escrow exhausted")
     blob = import_module("azure.storage.blob.aio")
     identity = import_module("azure.identity.aio")
-    credential = identity.DefaultAzureCredential()
+    try:
+        credential = identity.DefaultAzureCredential()
+    except BaseException:
+        _release_azure_rollback_reservation(reservation)
+        raise
     try:
         service = blob.BlobServiceClient(
             account_url=ref.account_url,
             credential=credential,
         )
-    except BaseException:
+    except BaseException as primary:
         close = getattr(credential, "close", None)
         if close is not None:
-            result = close()
-            if inspect.isawaitable(result):
-                await result
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except BaseException as cleanup_error:
+                retained = _publish_azure_credential_rollback(reservation, credential)
+                add_bounded_note(
+                    primary,
+                    (
+                        "Azure credential cleanup also failed after service construction; "
+                        + (
+                            "retry ownership retained"
+                            if retained
+                            else "retry ownership publication failed"
+                        )
+                    ),
+                    cleanup_error,
+                )
+                if retained:
+                    reservation = None
+        if reservation is not None:
+            _release_azure_rollback_reservation(reservation)
         raise
+    _release_azure_rollback_reservation(reservation)
     return _AzureServiceOwner(service, credential)
 
 
@@ -173,7 +375,7 @@ async def download_file_with_service(
     """Download one Azure Blob using a shared service client."""
     ref = parse_uri(file.uri)
     blob = service.get_blob_client(ref.container, ref.blob)
-    stream = await blob.download_blob()
+    stream = await blob.download_blob(max_concurrency=1)
     await _write_azure_stream(stream, local_path, storage_reservation=storage_reservation)
 
 
@@ -189,9 +391,11 @@ async def download_file(
     ref = parse_uri(uri)
     service = await open_service(ref)
     try:
-        policy = execution_policy(threading_mode, memory_limit_bytes)
+        # SDK-internal fanout bypasses the process-wide remote-I/O/task/FD
+        # governors. Keep one blob transfer serial and obtain concurrency only
+        # from the schema-sanitizer scheduler across governed operations.
         blob = service.get_blob_client(ref.container, ref.blob)
-        stream = await blob.download_blob(max_concurrency=policy.async_concurrency)
+        stream = await blob.download_blob(max_concurrency=1)
         await _write_azure_stream(stream, local_path, storage_reservation=storage_reservation)
     finally:
         await service.close()
@@ -236,16 +440,17 @@ async def file_metadata(
         await service.close()
 
 
-async def download_bytes(uri: str) -> bytes:
-    """Download one Azure Blob into bytes."""
+async def download_bytes(uri: str, *, maximum_bytes: int) -> bytes:
+    """Download one Azure Blob only under an explicit materialization ceiling."""
     ref = parse_uri(uri)
     service = await open_service(ref)
     try:
-        stream = await service.get_blob_client(ref.container, ref.blob).download_blob()
-        data = bytearray()
-        async for chunk in stream.chunks():
-            data.extend(chunk)
-        return bytes(data)
+        stream = await service.get_blob_client(ref.container, ref.blob).download_blob(
+            max_concurrency=1
+        )
+        return await collect_bounded_async_chunks(
+            stream.chunks(), maximum_bytes=maximum_bytes, stage="azure_download_bytes"
+        )
     finally:
         await service.close()
 
@@ -268,12 +473,12 @@ async def upload_file(
     service = await open_service(ref)
     try:
         blob = service.get_blob_client(ref.container, ref.blob)
-        with Path(local_path).open("rb") as file_handle:
+        with open_remote_local_file(local_path, "rb", label="azure_upload_source") as file_handle:
             await blob.upload_blob(
                 file_handle,
                 overwrite=True,
                 length=tuning.file_size,
-                max_concurrency=tuning.concurrency,
+                max_concurrency=1,
             )
     finally:
         await service.close()
@@ -305,11 +510,11 @@ async def list_files(
             remote_file = RemoteFile(
                 render_uri(ref, name), relative, size if isinstance(size, int) else None
             )
-            metadata_budget.charge_file(remote_file)
+            metadata_budget.charge_file(remote_file, associations=4)
             files.append(remote_file)
     finally:
         await service.close()
-    files.sort(key=lambda file: file.name)
+    governed_sort(files, key=lambda file: file.name, stage="remote_discovery_sort")
     return files
 
 
@@ -322,9 +527,10 @@ async def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether Azure directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
         uris,
-        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+        metadata_budget=metadata_budget,
     )
     groups: dict[tuple[str, str, str], dict[str, list[str]]] = {}
     for uri in uris:
@@ -334,8 +540,13 @@ async def directories_containing_files(
             continue
         parent_prefix, child = parsed
         account_url, container = ref.account_url, ref.container
-        groups.setdefault((account_url, container, parent_prefix), {}).setdefault(child, []).append(
-            uri
+        # pass63 proof anchor: metadata_budget.charge_group_associations()
+        discovery.publish_group_association(
+            lambda: (
+                groups.setdefault((account_url, container, parent_prefix), {})
+                .setdefault(child, [])
+                .append(uri)
+            )
         )
 
     if not groups:
@@ -376,16 +587,15 @@ async def directories_containing_files(
         finally:
             await service.close()
 
-    grouped = list(groups.items())
+    async def scan_key(key: tuple[str, str, str]) -> None:
+        """Scan one Azure parent group without materialising all group keys."""
+        account_url, container, parent = key
+        await scan_group(account_url, container, parent, groups[key])
 
-    async def scan_index(index: int) -> None:
-        """Scan one canonically ordered Azure parent group."""
-        (account_url, container, parent), children = grouped[index]
-        await scan_group(account_url, container, parent, children)
-
-    await drain_ordered_indexed_results(
-        len(grouped),
-        scan_index,
+    await drain_ordered_iterable_results(
+        groups,
+        scan_key,
         window=concurrency,
+        expected_retained_bytes=64,
     )
     return discovery.finish()

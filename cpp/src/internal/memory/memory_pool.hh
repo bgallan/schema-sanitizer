@@ -37,14 +37,22 @@ public:
   [[nodiscard]] int64_t peak_bytes_reserved() const noexcept;
   [[nodiscard]] int64_t over_release_count() const noexcept;
   [[nodiscard]] int64_t over_release_bytes() const noexcept;
+  [[nodiscard]] bool corrupted() const noexcept;
 
 private:
   [[nodiscard]] sanitize::Status ReserveLocal(int64_t bytes,
                                               std::string_view stage);
   [[nodiscard]] int64_t ReleaseLocal(int64_t bytes) noexcept;
 
+  static constexpr std::uint64_t kCorruptedBit = std::uint64_t{1} << 63;
+  static constexpr std::uint64_t kBytesMask = kCorruptedBit - 1;
+
   int64_t limit_bytes_ = 1;
-  std::atomic<int64_t> bytes_reserved_{0};
+  // One linearizable state word: low 63 bits are resident bytes and the high
+  // bit is the irreversible corruption/admission-quarantine latch. Combining
+  // them prevents a reserve CAS from slipping between over-release commit and
+  // latch publication while keeping the hot path lock-free.
+  std::atomic<std::uint64_t> state_{0};
   std::atomic<int64_t> peak_bytes_reserved_{0};
   std::atomic<int64_t> over_release_count_{0};
   std::atomic<int64_t> over_release_bytes_{0};
@@ -154,6 +162,19 @@ struct ProcessResidentMemoryStats final {
 
 [[nodiscard]] ProcessResidentMemoryStats
 process_resident_memory_stats() noexcept;
+
+struct AllocationRegistryStats final {
+  int64_t metadata_bytes = 0;
+  int64_t peak_metadata_bytes = 0;
+  int64_t capacity_records = 0;
+  int64_t live_entries = 0;
+  std::uint64_t rejected_registrations = 0;
+  std::uint64_t secondary_probes = 0;
+  std::uint64_t collision_rejections = 0;
+  int64_t max_shard_occupancy = 0;
+};
+
+[[nodiscard]] AllocationRegistryStats allocation_registry_stats() noexcept;
 
 inline MemoryPool *memory_pool_from_handle(void *handle) noexcept {
   return handle ? static_cast<MemoryPool *>(handle) : default_memory_pool();

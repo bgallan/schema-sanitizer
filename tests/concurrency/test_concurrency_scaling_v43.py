@@ -116,7 +116,10 @@ def test_synthetic_sixteen_worker_arena_separates_eight_plus_eight_lanes() -> No
     )
 
     assert workers == 16
-    assert peak == 16
+    # Pass54 separates physical arena width from runnable CPU admission. The
+    # arena still owns sixteen physical workers/lane identities, while the
+    # dynamic ProcessCpuGovernor may cap simultaneous runnable tasks below 16.
+    assert 1 <= peak <= workers
     assert total_threads == 16
     assert overlap == 0
     assert upstream == 8

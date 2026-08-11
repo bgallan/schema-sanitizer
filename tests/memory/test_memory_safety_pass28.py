@@ -110,6 +110,7 @@ def _bare_coordinator() -> Any:
     coordinator._failed_submissions = deque()
     coordinator._permit_registration = None
     coordinator._thread_lease = None
+    coordinator._protocol_violations = 0
     return coordinator
 
 
@@ -278,6 +279,7 @@ def test_close_retries_retained_cleanup_without_reopening_runtime(native_stub: N
     coordinator._permit_registration = owner
     coordinator._thread_lease = None
     coordinator._thread = DeadThread()
+    coordinator._protocol_violations = 0
 
     with pytest.raises(OSError, match="transient"):
         coordinator.close()

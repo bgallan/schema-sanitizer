@@ -54,6 +54,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         ):
             yaml_env_blocks.append(path.relative_to(ROOT).as_posix())
     allowed_environment_files = {
+        "cpp/src/internal/runtime/operation_task_arena.cc",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
         "src/schema_sanitizer/core_impl/cross_process_storage.py",
@@ -67,6 +68,9 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "tests/memory/test_memory_safety_pass35.py",
         "tests/memory/test_memory_safety_pass36.py",
         "tests/memory/test_memory_safety_pass41.py",
+        "tests/memory/test_memory_safety_pass72.py",
+        "tests/memory/test_memory_safety_pass78.py",
+        "cpp/tests/ordered_executor_tsan.cc",
     }
     assert set(offenders) <= allowed_environment_files
     allowed_names = {
@@ -76,6 +80,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "SCHEMA_SANITIZER_MALLOC_TRIM",
         "SCHEMA_SANITIZER_MAX_OPEN_FILES",
         "SCHEMA_SANITIZER_MAX_PROJECT_THREADS",
+        "SCHEMA_SANITIZER_THREAD_STACK_RESERVATION_BYTES",
         "SCHEMA_SANITIZER_TELEMETRY_TUNING",
     }
     production = "\n".join(

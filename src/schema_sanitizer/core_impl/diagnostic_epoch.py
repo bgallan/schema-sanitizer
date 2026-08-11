@@ -16,6 +16,7 @@ from contextlib import contextmanager
 _LOCK = threading.Lock()
 _PID = os.getpid()
 _EPOCH = 0
+_MAX_EPOCH = (1 << 63) - 2
 _ACTIVE_WRITERS = 0
 
 
@@ -31,37 +32,60 @@ def _ensure_process() -> None:
 
 
 def diagnostic_transition() -> int:
-    """Publish one transition while preserving odd parity for active writers."""
+    """Publish bounded telemetry without ever breaking an authoritative commit."""
     global _EPOCH
-    _ensure_process()
-    with _LOCK:
-        _EPOCH += 2
-        return _EPOCH
+    try:
+        _ensure_process()
+        with _LOCK:
+            current = _EPOCH
+            if current <= _MAX_EPOCH - 2:
+                try:
+                    _EPOCH = current + 2
+                except BaseException:
+                    _EPOCH = _MAX_EPOCH
+            else:
+                _EPOCH = _MAX_EPOCH
+            return _EPOCH
+    except BaseException:
+        return _EPOCH if isinstance(_EPOCH, int) else 0
 
 
 def diagnostic_write_begin() -> int:
-    """Enter a multi-step mutation; concurrent writers preserve odd parity."""
+    """Best-effort enter of the diagnostic seqlock; never throws outward."""
     global _EPOCH, _ACTIVE_WRITERS
-    _ensure_process()
-    with _LOCK:
-        if _ACTIVE_WRITERS == 0:
-            _EPOCH += 1
-        else:
-            _EPOCH += 2
-        _ACTIVE_WRITERS += 1
-        return _EPOCH
+    try:
+        _ensure_process()
+        with _LOCK:
+            current = _EPOCH
+            writers = _ACTIVE_WRITERS
+            try:
+                _EPOCH = min(_MAX_EPOCH, current + (1 if writers == 0 else 2))
+                _ACTIVE_WRITERS = min(_MAX_EPOCH, writers + 1)
+            except BaseException:
+                _EPOCH = _MAX_EPOCH
+            return _EPOCH
+    except BaseException:
+        return _EPOCH if isinstance(_EPOCH, int) else 0
 
 
 def diagnostic_write_end() -> int:
-    """Leave one writer; only the last writer publishes an even epoch."""
+    """Best-effort leave of the diagnostic seqlock; never throws outward."""
     global _EPOCH, _ACTIVE_WRITERS
-    _ensure_process()
-    with _LOCK:
-        if _ACTIVE_WRITERS <= 0:
-            raise RuntimeError("diagnostic seqlock writer is not active")
-        _ACTIVE_WRITERS -= 1
-        _EPOCH += 1 if _ACTIVE_WRITERS == 0 else 2
-        return _EPOCH
+    try:
+        _ensure_process()
+        with _LOCK:
+            writers = _ACTIVE_WRITERS
+            if writers <= 0:
+                return _EPOCH
+            writers -= 1
+            _ACTIVE_WRITERS = writers
+            try:
+                _EPOCH = min(_MAX_EPOCH, _EPOCH + (1 if writers == 0 else 2))
+            except BaseException:
+                _EPOCH = _MAX_EPOCH
+            return _EPOCH
+    except BaseException:
+        return _EPOCH if isinstance(_EPOCH, int) else 0
 
 
 @contextmanager
@@ -75,10 +99,15 @@ def diagnostic_write() -> Iterator[None]:
 
 
 def diagnostic_epoch() -> int:
-    """Return the current epoch without invoking callbacks or user code."""
-    _ensure_process()
-    with _LOCK:
-        return _EPOCH
+    """Return the current diagnostic epoch without perturbing authoritative state."""
+    try:
+        _ensure_process()
+        with _LOCK:
+            return _EPOCH
+    except BaseException:
+        # Diagnostics are never allowed to turn a successful ownership commit
+        # into an apparent failure. Zero means "observation unavailable".
+        return 0
 
 
 __all__ = [

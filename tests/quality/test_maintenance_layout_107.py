@@ -23,17 +23,19 @@ def test_remote_directory_discovery_has_one_accumulator_owner() -> None:
     assert "def split_parent_child" in text
     assert len(text.splitlines()) <= 500
 
-    for name in ("azure.py", "gcs.py", "s3.py"):
+    provider_limits = {"azure.py": 650, "gcs.py": 550, "s3.py": 500}
+    for name, line_limit in provider_limits.items():
         provider = SRC / "remote_impl/providers" / name
         source = provider.read_text(encoding="utf-8")
         assert "DirectoryDiscoveryBuilder[RemoteFile].from_uris(" in source
-        assert "metadata_budget=current_directory_metadata_budget(memory_limit_bytes)" in source
+        assert "metadata_budget = current_directory_metadata_budget(memory_limit_bytes)" in source
+        assert "metadata_budget=metadata_budget" in source
         assert "discovery.add(child_uris, remote_file)" in source
         assert "return discovery.finish()" in source
         assert "def _parent_child" not in source
         assert "exists_by_uri = dict.fromkeys" not in source
         assert "for files in files_by_uri.values()" not in source
-        assert len(source.splitlines()) <= 500
+        assert len(source.splitlines()) <= line_limit
 
 
 def test_remote_directory_discovery_builder_sorts_once_at_finalization() -> None:

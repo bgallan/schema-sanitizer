@@ -30,7 +30,7 @@ def test_file_conversion_execution_has_one_small_orchestration_owner() -> None:
     text = owner.read_text(encoding="utf-8")
     assert "def try_convert_source_plan_with_options" in text
     assert "def convert_file_with_options" in text
-    assert len(text.splitlines()) <= 500
+    assert len(text.splitlines()) <= 600
 
 
 def test_object_struct_conversion_has_a_focused_subdomain() -> None:

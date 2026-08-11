@@ -8,14 +8,25 @@ from collections.abc import Iterator
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Condition, Lock, RLock
-from typing import Any
+from typing import Any, cast
 
 from schema_sanitizer.core_impl.safe_errors import add_bounded_note
 
 from ...core_impl.durations import deadline_ns_from_timeout, remaining_seconds
 from ...core_impl.execution_policy import execution_policy
 from ...core_impl.finalization import runtime_is_finalizing
-from ...core_impl.memory_budget import adaptive_concurrency_target, memory_budget
+from ...core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_finalizer_cleanup,
+)
+from ...core_impl.memory_budget import (
+    adaptive_parallel_slots as _adaptive_parallel_slots,
+)
+from ...core_impl.memory_budget import (
+    memory_budget,
+)
 from ...core_impl.resource_lifecycle import (
     _cleanup_with_note,
     _close_suppressing_errors,
@@ -30,6 +41,15 @@ from .remote_cleanup import take_prefetched_chunks
 from .remote_runtime import RemotePathSourceChunkProviderBase
 
 _PREFETCH_COMPAT_INIT_LOCK = Lock()
+
+
+def adaptive_concurrency_target(
+    desired: int, *, per_slot_bytes: int, reserve_bytes: int | None = None
+) -> int:
+    """Compatibility injection point with zero-slot helper semantics."""
+    return _adaptive_parallel_slots(
+        desired, per_slot_bytes=per_slot_bytes, reserve_bytes=reserve_bytes
+    )
 
 
 class _StorageLeaseRollbackOwner:
@@ -47,6 +67,83 @@ class _StorageLeaseRollbackOwner:
                 return False
             self._claimed = True
             return True
+
+
+def _cleanup_remote_prefetch_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Drain detached remote-prefetch owners without retaining manifest/config graphs."""
+    futures = cast("deque[Future[Any]] | None", capsule.arg0)
+    callbackless = cast("dict[Future[Any], _StorageLeaseRollbackOwner] | None", capsule.arg1)
+    failed_storage = cast("deque[Any] | None", capsule.arg2)
+    coordinator = cast("RemoteIoCoordinator | None", capsule.arg3)
+    download_session = capsule.arg4
+    closer = cast("SharedDownloadSessionCloser | None", capsule.arg5)
+    owns_coordinator = bool(capsule.arg6)
+
+    if futures is not None:
+        while futures:
+            future = futures[-1]
+            ownership = getattr(future, "_schema_sanitizer_staged_ownership", None)
+            if ownership is not None:
+                ownership.abandon()
+            if not future.done():
+                future.cancel()
+                submission = getattr(future, "_schema_sanitizer_remote_submission", None)
+                terminal = getattr(submission, "terminal", None)
+                if terminal is not None and not terminal.is_set():
+                    raise RuntimeError("remote prefetch task remains non-terminal")
+                if terminal is None and not future.done():
+                    raise RuntimeError("remote prefetch future remains non-terminal")
+            futures.pop()
+        capsule.arg0 = None
+
+    if callbackless is not None:
+        while callbackless:
+            future = next(iter(callbackless))
+            owner = callbackless[future]
+            submission = getattr(future, "_schema_sanitizer_remote_submission", None)
+            terminal = getattr(submission, "terminal", None)
+            ready = terminal.is_set() if terminal is not None else future.done()
+            if not ready:
+                future.cancel()
+                raise RuntimeError("callbackless staging future remains non-terminal")
+            if owner.claim():
+                if submission is not None:
+                    task_error = getattr(
+                        submission, "task_error", getattr(submission, "operation_error", None)
+                    )
+                    failed = task_error is not None
+                else:
+                    try:
+                        failed = future.cancelled() or future.exception() is not None
+                    except CancelledError:
+                        failed = True
+                if failed:
+                    owner.lease.release()
+            del callbackless[future]
+        capsule.arg1 = None
+
+    if failed_storage is not None:
+        while failed_storage:
+            lease = failed_storage[-1]
+            lease.release()
+            failed_storage.pop()
+        capsule.arg2 = None
+
+    if download_session is not None:
+        if coordinator is None:
+            raise RuntimeError("remote download session lost its coordinator")
+        if closer is None:
+            closer = SharedDownloadSessionCloser(coordinator, download_session, ())
+            capsule.arg5 = closer
+        if not closer.close(timeout_seconds=0.0):
+            raise RuntimeError("remote download session cleanup remains retryable")
+        capsule.arg4 = None
+        capsule.arg5 = None
+
+    if coordinator is not None and owns_coordinator:
+        coordinator.close()
+    capsule.arg3 = None
+    capsule.arg6 = None
 
 
 class RemoteChunkPrefetchIterator:
@@ -77,12 +174,16 @@ class RemoteChunkPrefetchIterator:
         self._cleanup_callbacks_inflight = 0
         self._admissions_inflight = 0
         self._consumers_inflight = 0
+        self._protocol_violations = 0
         self._starting = False
         self._fill_in_progress = False
         self._close_started = False
         self._session_closer: SharedDownloadSessionCloser | None = None
         self._closed = False
         self._started = False
+        finalizer_capsule = reserve_finalizer_cleanup(_cleanup_remote_prefetch_capsule)
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = finalizer_capsule
+        self._finalizer_ticket: int | None = finalizer_capsule.ticket
 
     def _assert_owner_process(self) -> None:
         """Reject inherited iterator use before touching parent-owned state."""
@@ -153,9 +254,7 @@ class RemoteChunkPrefetchIterator:
                         raise
                 finally:
                     with condition:
-                        self._consumers_inflight = max(
-                            0, getattr(self, "_consumers_inflight", 1) - 1
-                        )
+                        self._finish_lifecycle_counter_locked("_consumers_inflight")
                         condition.notify_all()
 
                 if staged is None:
@@ -177,9 +276,16 @@ class RemoteChunkPrefetchIterator:
         """Start external resources through a claim/work/commit transaction."""
         self._assert_owner_process()
         condition = self._lifecycle_condition()
+        deadline_ns = deadline_ns_from_timeout(
+            getattr(self, "_remote_timeout_seconds", 30.0),
+            name="remote prefetch startup wait timeout",
+            allow_zero=False,
+        )
         with condition:
             while self._starting:
-                condition.wait()
+                remaining = remaining_seconds(deadline_ns)
+                if remaining <= 0 or not condition.wait(timeout=remaining):
+                    raise RuntimeError("remote prefetch startup exceeded its deadline")
             if self._started or getattr(self, "_close_started", False):
                 return
             self._starting = True
@@ -211,7 +317,11 @@ class RemoteChunkPrefetchIterator:
                         download_session = None
                         raise
                 else:
-                    coordinator = RemoteIoCoordinator(open_session)
+                    coordinator = RemoteIoCoordinator(
+                        open_session,
+                        operation_memory_ledger=getattr(operation_context, "memory_ledger", None),
+                        stage_bytes_per_permit=self._io_chunk_bytes,
+                    )
                     owns_coordinator = True
 
             with condition:
@@ -234,7 +344,7 @@ class RemoteChunkPrefetchIterator:
         finally:
             with condition:
                 self._starting = False
-                self._admissions_inflight = max(0, self._admissions_inflight - 1)
+                self._finish_lifecycle_counter_locked("_admissions_inflight")
                 condition.notify_all()
 
         if committed:
@@ -272,11 +382,21 @@ class RemoteChunkPrefetchIterator:
                 self._admissions_inflight = 0
             if not hasattr(self, "_consumers_inflight"):
                 self._consumers_inflight = 0
+            if not hasattr(self, "_protocol_violations"):
+                self._protocol_violations = 0
             if not hasattr(self, "_starting"):
                 self._starting = False
             if not hasattr(self, "_fill_in_progress"):
                 self._fill_in_progress = False
             return condition
+
+    def _finish_lifecycle_counter_locked(self, name: str) -> None:
+        """Retire one quiescence latch without hiding protocol underflow."""
+        value = int(getattr(self, name, 0))
+        if value <= 0:
+            self._protocol_violations = int(getattr(self, "_protocol_violations", 0)) + 1
+            return
+        setattr(self, name, value - 1)
 
     def _release_or_retain_storage_lease(
         self, storage_lease: Any, *, primary: BaseException | None = None
@@ -396,9 +516,7 @@ class RemoteChunkPrefetchIterator:
                     self._complete_storage_rollback(done, rollback_owner)
                 finally:
                     with condition:
-                        self._cleanup_callbacks_inflight = max(
-                            0, self._cleanup_callbacks_inflight - 1
-                        )
+                        self._finish_lifecycle_counter_locked("_cleanup_callbacks_inflight")
                         condition.notify_all()
 
             try:
@@ -412,7 +530,7 @@ class RemoteChunkPrefetchIterator:
                 # non-standard bridge rejects callback registration. Iteration
                 # or close resolves the owner after the Future is terminal.
                 with condition:
-                    self._cleanup_callbacks_inflight = max(0, self._cleanup_callbacks_inflight - 1)
+                    self._finish_lifecycle_counter_locked("_cleanup_callbacks_inflight")
                     self._callbackless_storage_futures[future] = rollback_owner
                     condition.notify_all()
                 setattr(
@@ -440,9 +558,16 @@ class RemoteChunkPrefetchIterator:
         """Queue work through per-item claim/work/commit transactions."""
         self._assert_owner_process()
         condition = self._lifecycle_condition()
+        deadline_ns = deadline_ns_from_timeout(
+            getattr(self, "_remote_timeout_seconds", 30.0),
+            name="remote prefetch fill wait timeout",
+            allow_zero=False,
+        )
         with condition:
             while self._fill_in_progress:
-                condition.wait()
+                remaining = remaining_seconds(deadline_ns)
+                if remaining <= 0 or not condition.wait(timeout=remaining):
+                    raise RuntimeError("remote prefetch fill exceeded its deadline")
             if self._closed or getattr(self, "_close_started", False):
                 return
             self._fill_in_progress = True
@@ -495,7 +620,7 @@ class RemoteChunkPrefetchIterator:
                     raise
                 finally:
                     with condition:
-                        self._admissions_inflight = max(0, self._admissions_inflight - 1)
+                        self._finish_lifecycle_counter_locked("_admissions_inflight")
                         condition.notify_all()
         finally:
             with condition:
@@ -642,20 +767,50 @@ class RemoteChunkPrefetchIterator:
                     raise RuntimeError(
                         "remote staging storage release remains retryable after close failure"
                     )
+                if getattr(self, "_protocol_violations", 0):
+                    raise RuntimeError(
+                        "remote staging lifecycle protocol violation prevents clean close"
+                    )
                 self._futures = deque()
                 self._coordinator = None
                 self._closed = True
+                ticket = getattr(self, "_finalizer_ticket", None)
+                cleanup = getattr(self, "_finalizer_capsule", None)
+                if ticket is not None and cleanup is not None:
+                    cancel_prepared_finalizer_cleanup(cleanup)
+                    self._finalizer_ticket = None
+                    self._finalizer_capsule = None
         finally:
             with condition:
                 self._close_in_progress = False
                 condition.notify_all()
 
     def __del__(self) -> None:
-        """Close abandoned prefetch work outside interpreter teardown."""
+        """Detach only bounded staging owners into a preallocated safe-point capsule."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", None)
+            cleanup = getattr(self, "_finalizer_capsule", None)
+            if ticket is None or cleanup is None or getattr(self, "_closed", False):
+                return
+            cleanup.arg0 = getattr(self, "_futures", None)
+            cleanup.arg1 = getattr(self, "_callbackless_storage_futures", None)
+            cleanup.arg2 = getattr(self, "_failed_storage_leases", None)
+            cleanup.arg3 = getattr(self, "_coordinator", None)
+            cleanup.arg4 = getattr(self, "_download_session", None)
+            cleanup.arg5 = getattr(self, "_session_closer", None)
+            cleanup.arg6 = bool(getattr(self, "_owns_coordinator", False))
+            if defer_prepared_finalizer_cleanup(cleanup):
+                self._futures = None  # type: ignore[assignment]
+                self._callbackless_storage_futures = None  # type: ignore[assignment]
+                self._failed_storage_leases = None  # type: ignore[assignment]
+                self._coordinator = None
+                self._download_session = None
+                self._session_closer = None
+                self._manifest = None
+                self._finalizer_ticket = None
+                self._finalizer_capsule = None
         except BaseException:
             pass
 

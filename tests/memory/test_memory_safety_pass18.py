@@ -57,14 +57,14 @@ def test_live_owner_prepared_storage_transaction_rolls_back_before_retry(
     device = 101
     monkeypatch.setattr(journal, "_write_main", _partial_write_then_fail)
     with pytest.raises(OSError, match="injected partial"):
-        storage.reserve_cross_process(device, 100, 1024)
+        storage._reserve_cross_process_raw(device, 100, 1024)
 
     path = tmp_path / f"schema-sanitizer-temp-{device}.json"
     assert path.with_name(f"{path.name}.journal").exists()
     monkeypatch.undo()
     _enable_storage(monkeypatch, tmp_path)
 
-    assert storage.reserve_cross_process(device, 100, 1024) == 100
+    assert storage._reserve_cross_process_raw(device, 100, 1024) == 100
     assert storage.cross_process_reserved_bytes(device) == 100
     assert not path.with_name(f"{path.name}.journal").exists()
 
@@ -106,7 +106,7 @@ def test_empty_or_canonical_prefix_never_discards_prepared_journal(
 
     _enable_storage(monkeypatch, tmp_path)
     device = 102
-    assert storage.reserve_cross_process(device, 11, 1024) == 11
+    assert storage._reserve_cross_process_raw(device, 11, 1024) == 11
 
     def truncate_then_fail(handle: Any, _payload: bytes) -> None:
         handle.seek(0)
@@ -118,11 +118,11 @@ def test_empty_or_canonical_prefix_never_discards_prepared_journal(
 
     monkeypatch.setattr(journal, "_write_main", truncate_then_fail)
     with pytest.raises(OSError, match="empty truncate"):
-        storage.reserve_cross_process(device, 7, 1024)
+        storage._reserve_cross_process_raw(device, 7, 1024)
 
     monkeypatch.undo()
     _enable_storage(monkeypatch, tmp_path)
-    assert storage.reserve_cross_process(device, 7, 1024) == 18
+    assert storage._reserve_cross_process_raw(device, 7, 1024) == 18
     assert storage.cross_process_reserved_bytes(device) == 18
 
 
@@ -183,7 +183,7 @@ def test_committed_journal_makes_success_safe_when_cleanup_fails(
     device = 107
     real_remove = journal._remove_journal
     monkeypatch.setattr(journal, "_remove_journal", lambda _path: None)
-    assert storage.reserve_cross_process(device, 91, 1024) == 91
+    assert storage._reserve_cross_process_raw(device, 91, 1024) == 91
 
     path = tmp_path / f"schema-sanitizer-temp-{device}.json"
     sidecar = path.with_name(f"{path.name}.journal")
@@ -192,7 +192,7 @@ def test_committed_journal_makes_success_safe_when_cleanup_fails(
 
     assert storage.cross_process_reserved_bytes(device) == 91
     assert not sidecar.exists()
-    assert storage.reserve_cross_process(device, 9, 1024) == 100
+    assert storage._reserve_cross_process_raw(device, 9, 1024) == 100
 
 
 @_REQUIRES_POSIX_COORDINATION
@@ -208,7 +208,7 @@ def test_valid_divergent_main_state_from_legacy_writer_wins(
     device = 109
     real_remove = journal._remove_journal
     monkeypatch.setattr(journal, "_remove_journal", lambda _path: None)
-    storage.reserve_cross_process(device, 40, 1024)
+    storage._reserve_cross_process_raw(device, 40, 1024)
 
     path = tmp_path / f"schema-sanitizer-temp-{device}.json"
     current = json.loads(path.read_text(encoding="utf-8"))
@@ -259,10 +259,10 @@ def test_journal_staging_file_is_reused_without_uuid_orphans(
     staging = journal._journal_temporary_path(path)
     staging.write_bytes(b"orphaned-partial-staging")
 
-    assert storage.reserve_cross_process(device, 10, 1024) == 10
+    assert storage._reserve_cross_process_raw(device, 10, 1024) == 10
     assert not staging.exists()
     assert not list(tmp_path.glob(f".{path.name}.journal.*.tmp"))
-    assert storage.reserve_cross_process(device, 5, 1024) == 15
+    assert storage._reserve_cross_process_raw(device, 5, 1024) == 15
     assert not staging.exists()
 
 
@@ -287,7 +287,7 @@ def test_journal_staging_hardlink_is_rejected_before_truncate(
     os.link(victim, staging)
 
     with pytest.raises(OSError, match="additional hard links"):
-        storage.reserve_cross_process(device, 1, 1024)
+        storage._reserve_cross_process_raw(device, 1, 1024)
     assert victim.read_bytes() == original
 
 
@@ -381,12 +381,12 @@ def test_committed_marker_publication_failure_rolls_back_incremental_state(
 
     monkeypatch.setattr(journal, "_publish_record", fail_committed)
     with pytest.raises(OSError, match="committed marker failure"):
-        storage.reserve_cross_process(device, 100, 1024)
+        storage._reserve_cross_process_raw(device, 100, 1024)
 
     path = tmp_path / f"schema-sanitizer-temp-{device}.json"
     assert storage._decode_state(path.read_bytes())["processes"] == {}
     monkeypatch.setattr(journal, "_publish_record", publish)
-    assert storage.reserve_cross_process(device, 100, 1024) == 100
+    assert storage._reserve_cross_process_raw(device, 100, 1024) == 100
 
 
 def test_janitor_sweeps_large_backlogs_in_bounded_batches(

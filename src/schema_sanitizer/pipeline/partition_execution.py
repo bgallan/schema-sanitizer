@@ -107,6 +107,49 @@ def parse_final_schema_registry(result: PartitionPipelineResult) -> dict[str, An
     return result.final_schema_registry
 
 
+def _normalize_result_retention(value: str) -> str:
+    """Normalize bounded partition-history retention policy."""
+    if type(value) is not str:
+        raise TypeError("result_retention must be an exact string")
+    normalized = value.strip().lower()
+    if normalized not in {"full", "metadata_only", "streaming"}:
+        raise ValueError("result_retention must be 'full', 'metadata_only', or 'streaming'")
+    return normalized
+
+
+def _metadata_only_run_result(run_result: PartitionRunResult) -> PartitionRunResult:
+    """Drop bulky schemas/stats/native state while preserving audit timing."""
+    plan = run_result.plan
+    compact_plan = PartitionRunPlan(
+        plan.logical_date,
+        plan.source_uri,
+        plan.output_uri,
+        plan.logical_hour,
+        discovery_seconds=plan.discovery_seconds,
+        source_file_count=plan.source_file_count,
+        source_bytes=plan.source_bytes,
+        source_earliest_update=plan.source_earliest_update,
+        source_latest_update=plan.source_latest_update,
+        source_window=plan.source_window,
+        # Counts/bytes/update extrema above preserve the audit summary without
+        # retaining an O(files) immutable SourceManifest in compact history.
+        source_manifest=None,
+    )
+    return PartitionRunResult(
+        plan=compact_plan,
+        output_schema=None,
+        stats=None,
+        schema_registry=None,
+        schema_drifts=None,
+        schema_registry_json=None,
+        schema_drifts_json=None,
+        wall_seconds=run_result.wall_seconds,
+        cpu_seconds=run_result.cpu_seconds,
+        io_wait_seconds=run_result.io_wait_seconds,
+        native_registry_state=None,
+    )
+
+
 def _compile_native_registry_state(
     registry_json: str,
     kwargs: Mapping[str, Any],
@@ -130,6 +173,7 @@ def run_partitioned_to_parquet(
     to_parquet_kwargs: Mapping[str, Any] | ToParquetKwargsFactory,
     read_output_schema: OutputSchemaReader | None = None,
     after_partition: AfterPartitionCallback | None = None,
+    result_retention: str = "full",
 ) -> PartitionPipelineResult:
     """Write every planned partition while carrying canonical registry JSON forward."""
     return run_partitioned_to_parquet_registry_json(
@@ -138,6 +182,7 @@ def run_partitioned_to_parquet(
         to_parquet_kwargs=to_parquet_kwargs,
         read_output_schema=read_output_schema,
         after_partition=after_partition,
+        result_retention=result_retention,
     )
 
 
@@ -149,8 +194,16 @@ def run_partitioned_to_parquet_registry_json(
     read_output_schema: OutputSchemaReader | None = None,
     after_partition: AfterPartitionCallback | None = None,
     initial_schema_registry_state: SchemaRegistryState | None = None,
+    result_retention: str = "full",
 ) -> PartitionPipelineResult:
-    """Write partitions while carrying the registry as canonical JSON."""
+    """Write partitions while carrying the registry as canonical JSON.
+
+    ``result_retention`` bounds history independently from conversion state:
+    ``full`` preserves historical behaviour, ``metadata_only`` retains compact
+    timing/audit records, and ``streaming`` relies on ``after_partition`` and
+    stores no per-partition history.
+    """
+    retention_mode = _normalize_result_retention(result_retention)
     if initial_schema_registry_state is None:
         current_schema_registry_json = _normalize_registry_json(initial_schema_registry_json)
         current_native_registry_state: Any | None = None
@@ -298,7 +351,10 @@ def run_partitioned_to_parquet_registry_json(
             if registry_updated:
                 current_schema_registry_json = schema_registry_json or current_schema_registry_json
                 current_native_registry_state = result.native_registry_state
-            completed_runs.append(run_result)
+            if retention_mode == "full":
+                completed_runs.append(run_result)
+            elif retention_mode == "metadata_only":
+                completed_runs.append(_metadata_only_run_result(run_result))
             if after_partition is not None:
                 after_partition(
                     index,
@@ -329,6 +385,7 @@ def run_partitioned_to_parquet_registry_state(
     to_parquet_kwargs: Mapping[str, Any] | ToParquetKwargsFactory,
     read_output_schema: OutputSchemaReader | None = None,
     after_partition: AfterPartitionCallback | None = None,
+    result_retention: str = "full",
 ) -> PartitionPipelineResult:
     """Write partitions while carrying JSON plus native registry state."""
     return run_partitioned_to_parquet_registry_json(
@@ -338,4 +395,5 @@ def run_partitioned_to_parquet_registry_state(
         to_parquet_kwargs=to_parquet_kwargs,
         read_output_schema=read_output_schema,
         after_partition=after_partition,
+        result_retention=result_retention,
     )

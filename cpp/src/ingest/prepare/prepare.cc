@@ -13,6 +13,7 @@
 
 #include "ingest/prepare/prepare_internal.hh"
 #include "internal/materialization/stream.hh"
+#include "internal/memory/memory_budget.hh"
 #include "internal/planning/plan_compile.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "internal/runtime/operation_task_arena.hh"
@@ -65,6 +66,12 @@ sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
                           static_cast<std::size_t>(std::max<std::int64_t>(
                               1, execution_policy.effective_workers)),
                           telemetry));
+  const auto arena_budget =
+      internal::memory_budget_from_limit(opts->spec.memory_limit_bytes);
+  task_arena->SetBackpressureTimeoutMillis(
+      internal::backpressure_timeout_millis_from(arena_budget));
+  task_arena->SetBackpressureDeadlineMillis(
+      internal::backpressure_deadline_millis_from(arena_budget));
   frontend.set_task_arena(task_arena);
 
   const bool has_contract = static_cast<bool>(opts->spec.arrow_schema_contract);

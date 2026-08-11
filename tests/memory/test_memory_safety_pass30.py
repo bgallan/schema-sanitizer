@@ -172,6 +172,7 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     coordinator._close_results = {}
     coordinator._close_waiters = {}
     coordinator._close_error = None
+    coordinator._protocol_violations = 0
     coordinator._permit_registration = None
     coordinator._thread_lease = None
     coordinator._thread = _DeadThread()
@@ -547,6 +548,7 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     coordinator._close_results = {}
     coordinator._close_waiters = {}
     coordinator._close_error = None
+    coordinator._protocol_violations = 0
     coordinator._permit_registration = None
     coordinator._thread_lease = None
     coordinator._thread = _DeadThread()

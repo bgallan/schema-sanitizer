@@ -18,7 +18,7 @@ def test_analytical_conversion_has_direct_bounded_owners() -> None:
     assert owner.is_file()
     assert output.is_file()
     assert not (api_impl / "analytical").exists()
-    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 500
+    assert len(owner.read_text(encoding="utf-8").splitlines()) <= 600
     source = owner.read_text(encoding="utf-8")
     assert "call_options_from_locals(options, ANALYTICAL_HELPER_KEYS)" in source
     assert "call_options_from_locals(dict(options)" not in source

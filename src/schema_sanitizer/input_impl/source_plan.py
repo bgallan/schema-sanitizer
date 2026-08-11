@@ -5,10 +5,16 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from ..core_impl.error_translation import call_core
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_finalizer_cleanup,
+)
 from ..core_impl.generated_metadata import (
     SCHEMA_DRIFTS_COLUMN,
     SCHEMA_REGISTRY_COLUMN,
@@ -55,6 +61,34 @@ class PreparedSourceBatch:
         return path_source_tuples(self)
 
 
+def _cleanup_native_source_plan_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Retry only the detached source-plan owners, never the rich wrapper."""
+    kind = capsule.arg0
+    payload = capsule.arg1
+    if payload is not None:
+        if kind == SEQUENCE:
+            owned = list(cast(Iterable[Any], payload))
+            _close_sequence_retryably(owned)
+            if owned:
+                capsule.arg1 = owned
+                raise RuntimeError("deferred source-plan sequence cleanup remains retryable")
+        elif not _close_suppressing_errors(payload):
+            raise RuntimeError("deferred source-plan payload cleanup remains retryable")
+        capsule.arg1 = None
+
+    close_items = capsule.arg2
+    if close_items is not None:
+        if not isinstance(close_items, list):
+            close_items = list(cast(Iterable[Any], close_items))
+            capsule.arg2 = close_items
+        _close_sequence_retryably(close_items)
+        if close_items:
+            raise RuntimeError("deferred source-plan close items remain retryable")
+        capsule.arg2 = None
+    # native_payload is deliberately only rooted until all closeable owners are
+    # gone; clearing the capsule after success drops it at this governed point.
+
+
 @dataclass(slots=True)
 class NativeSourcePlan:
     """Canonical native source execution plan."""
@@ -68,6 +102,26 @@ class NativeSourcePlan:
     native_payload: Any | None = None
     close_items: list[Any] = field(default_factory=list)
     _pid: int = field(default_factory=os.getpid, init=False, repr=False)
+    _finalizer_ticket: int = field(default=0, init=False, repr=False)
+    _finalizer_capsule: PreparedFinalizerCleanup | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        capsule = reserve_finalizer_cleanup(_cleanup_native_source_plan_capsule)
+        ticket = capsule.ticket
+        self._finalizer_ticket = ticket
+        self._finalizer_capsule = capsule
+
+    def _retire_finalizer_if_clean(self) -> None:
+        if self.payload is not None or self.close_items or self.native_payload is not None:
+            return
+        ticket = self._finalizer_ticket
+        capsule = self._finalizer_capsule
+        if ticket and capsule is not None:
+            cancel_prepared_finalizer_cleanup(capsule)
+            self._finalizer_ticket = 0
+            self._finalizer_capsule = None
 
     def close(self) -> None:
         """Close plan resources while retaining failures for a later retry."""
@@ -87,13 +141,34 @@ class NativeSourcePlan:
         if payload_closed and not self.close_items:
             self.native_payload = None
             self.source_batch = None
+        self._retire_finalizer_if_clean()
 
     def __del__(self) -> None:
         """Retry abandoned cleanup outside shutdown and post-fork children."""
         try:
             if runtime_is_finalizing():
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                capsule.arg0 = getattr(self, "kind", None)
+                capsule.arg1 = getattr(self, "payload", None)
+                capsule.arg2 = getattr(self, "close_items", None)
+                capsule.arg3 = getattr(self, "native_payload", None)
+                if defer_prepared_finalizer_cleanup(capsule):
+                    # Detach the rich wrapper immediately.  Only the resources
+                    # captured above remain rooted by the prepared capsule.
+                    self.payload = None
+                    self.close_items = None  # type: ignore[assignment]
+                    self.native_payload = None
+                    self.source_batch = None
+                    self._finalizer_ticket = 0
+                    self._finalizer_capsule = None
+                return
+            # Synthetic object.__new__ doubles have never acquired production
+            # ownership and therefore have nothing safe to publish. The legacy
+            # unreserved FinalizerEscrow is intentionally not used in production.
+            return
         except BaseException:
             pass
 

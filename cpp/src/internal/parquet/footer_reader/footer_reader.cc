@@ -8,6 +8,7 @@
 #include "internal/memory/memory_budget.hh"
 #include "internal/memory/memory_pool.hh"
 #include "internal/runtime/ordered_executor.hh"
+#include "internal/runtime/process_fd_governor.hh"
 #include "internal/runtime/process_identity.hh"
 #include "internal/string_lookup.hh"
 

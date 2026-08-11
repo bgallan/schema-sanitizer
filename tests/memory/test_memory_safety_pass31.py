@@ -453,6 +453,7 @@ def test_remote_coordinator_construction_runs_outside_resource_lock(
     owner._remote_coordinator = None
     owner._remote_coordinator_building = False
     owner._close_started = False
+    owner._finalizer_owner = SimpleNamespace(arg0=None)
 
     results: list[Any] = []
     builder = Thread(target=lambda: results.append(owner.remote_coordinator()))

@@ -126,6 +126,7 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     coordinator._permit_registration = owner
     coordinator._thread_lease = None
     coordinator._thread = _DeadThread()
+    coordinator._protocol_violations = 0
 
     with pytest.raises(OSError, match="first generation"):
         coordinator.close()
@@ -357,6 +358,7 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
 ) -> None:
     from schema_sanitizer.core_impl import system_pressure as module
 
+    module._prepare_pressure_for_fork()
     module._reset_after_fork()
     entered = Event()
     release = Event()
@@ -367,6 +369,11 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
         return None, None
 
     monkeypatch.setattr(module, "_parse_psi", blocked_psi)
+    # This test exercises PSI refresh single-flight semantics only. Isolate it
+    # from real cgroup pressure on the host so unrelated memory load cannot
+    # change the cached scale while the refresher is deliberately blocked.
+    monkeypatch.setattr(module, "_cgroup_events", lambda: (0, 0))
+    monkeypatch.setattr(module, "_cgroup_usage_ratio", lambda: None)
     refresher = Thread(target=lambda: module.system_pressure_snapshot(refresh=True))
     refresher.start()
     assert entered.wait(1)
@@ -387,6 +394,7 @@ def test_pressure_refresh_releases_claim_for_control_flow_exception(
     class StopSampling(BaseException):
         pass
 
+    module._prepare_pressure_for_fork()
     module._reset_after_fork()
     monkeypatch.setattr(module, "_parse_psi", lambda _path: (_ for _ in ()).throw(StopSampling()))
     with pytest.raises(StopSampling):

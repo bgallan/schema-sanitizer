@@ -25,28 +25,58 @@ class _AnalyticalStreamResources:
         opened: OpenedSourcePlanRegistryStream,
         prepared_input: PreparedPublicInput,
         operation_context: OperationExecutionContext,
+        payload_owner: Any = None,
     ) -> None:
         """Own all resources transferred by one lazy analytical call."""
         self._opened: OpenedSourcePlanRegistryStream | None = opened
+        self._payload_owner: Any = payload_owner
         self._prepared_input: PreparedPublicInput | None = prepared_input
         self._operation_context: OperationExecutionContext | None = operation_context
 
+    def retains(
+        self,
+        prepared_input: PreparedPublicInput,
+        operation_context: OperationExecutionContext,
+        payload_owner: Any = None,
+    ) -> bool:
+        """Confirm an exact lazy-stream handoff after an asynchronous unwind."""
+        return (
+            self._prepared_input is prepared_input
+            and self._operation_context is operation_context
+            and (payload_owner is None or self._payload_owner is payload_owner)
+        )
+
     def close(self) -> None:
         """Release resources while retaining any cleanup failures for retry."""
-        _close_and_clear_attrs(self, "_opened", "_prepared_input", "_operation_context")
+        _close_and_clear_attrs(
+            self,
+            "_opened",
+            "_payload_owner",
+            "_prepared_input",
+            "_operation_context",
+        )
 
 
 def lazy_stream_from_opened(
     opened: OpenedSourcePlanRegistryStream,
     prepared_input: PreparedPublicInput,
     operation_context: OperationExecutionContext,
+    *,
+    payload_owner: Any = None,
+    handoff: list[Stream] | None = None,
 ) -> Stream:
     """Transfer an opened analytical operation to a lazy batch iterator."""
     stream = Stream(opened.materialization_stream())
+    # Publish the wrapper in caller-owned plain storage before attaching rich
+    # owners. If an async exception lands during the handoff, the outer cleanup
+    # can inspect this exact Stream instead of double-closing its authorities.
+    if handoff is not None:
+        handoff.append(stream)
     stream._keepalive = _AnalyticalStreamResources(
         opened,
         prepared_input,
         operation_context,
+        payload_owner,
     )
     stream._close_on_exhaustion = True
     stream.schema_registry_json = opened.schema_registry_json

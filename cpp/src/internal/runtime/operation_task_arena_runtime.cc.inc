@@ -258,6 +258,8 @@ bool take_local(const std::shared_ptr<OperationTaskArena::State> &state,
       if (preferred != slot.tasks.end() && preferred != slot.tasks.begin()) {
         *out = std::move(*preferred);
         slot.tasks.erase(preferred);
+        state->output_preference_bypasses.fetch_add(1U,
+                                                    std::memory_order_relaxed);
         if (preference_used) {
           *preference_used = true;
         }
@@ -282,6 +284,8 @@ bool take_local(const std::shared_ptr<OperationTaskArena::State> &state,
     if (preferred != slot.tasks.end() && preferred != slot.tasks.begin()) {
       *out = std::move(*preferred);
       slot.tasks.erase(preferred);
+      state->output_preference_bypasses.fetch_add(1U,
+                                                  std::memory_order_relaxed);
       if (preference_used) {
         *preference_used = true;
       }
@@ -305,6 +309,7 @@ bool take_local(const std::shared_ptr<OperationTaskArena::State> &state,
   slot.queued.store(slot.queued_local, std::memory_order_relaxed);
   SaturatingAtomicSubtract(state->queued_total, 1U);
   SaturatingAtomicSubtract(state->queued_bytes, out->retained_bytes);
+  ArenaCleanupReaper::Instance().ReleaseQueuedBytes(state, out->retained_bytes);
   if (slot.tasks.empty()) {
     mark_empty(state, index);
   }
@@ -369,6 +374,20 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
               }
               selected = std::prev(reverse.base());
             }
+            // A steal must obey the same one-bypass fairness contract as a
+            // local dequeue. Without this check, a CPU-constrained wide arena
+            // can repeatedly steal dedicated output packets from the back of
+            // a victim queue while its compatible broad front remains queued.
+            if (selected != candidate.tasks.begin() &&
+                dedicated_high_output(*selected, state) &&
+                compatible(candidate.tasks.front(), index) &&
+                !dedicated_high_output(candidate.tasks.front(), state)) {
+              // Cross-worker stealing never recreates the output-priority
+              // bypass. The owner may consume one dedicated output ahead of
+              // its own broad front, but a thief must preserve the victim
+              // queue's compatible front so repeated steals cannot starve it.
+              selected = candidate.tasks.begin();
+            }
             *out = std::move(*selected);
             if constexpr (!PreferDedicatedOutput) {
               if (candidate.dedicated_output_queued > 0U) {
@@ -384,6 +403,8 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
                                    std::memory_order_relaxed);
             SaturatingAtomicSubtract(state->queued_total, 1U);
             SaturatingAtomicSubtract(state->queued_bytes, out->retained_bytes);
+            ArenaCleanupReaper::Instance().ReleaseQueuedBytes(
+                state, out->retained_bytes);
             if (candidate.tasks.empty()) {
               mark_empty(state, candidate_index);
             }
@@ -467,6 +488,12 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
       }
       selected = std::prev(reverse.base());
     }
+    if (selected != candidate.tasks.begin() &&
+        dedicated_high_output(*selected, state) &&
+        compatible(candidate.tasks.front(), index) &&
+        !dedicated_high_output(candidate.tasks.front(), state)) {
+      selected = candidate.tasks.begin();
+    }
     *out = std::move(*selected);
     if constexpr (!PreferDedicatedOutput) {
       if (candidate.dedicated_output_queued > 0U) {
@@ -481,6 +508,8 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
     candidate.queued.store(candidate.queued_local, std::memory_order_relaxed);
     SaturatingAtomicSubtract(state->queued_total, 1U);
     SaturatingAtomicSubtract(state->queued_bytes, out->retained_bytes);
+    ArenaCleanupReaper::Instance().ReleaseQueuedBytes(state,
+                                                      out->retained_bytes);
     if (candidate.tasks.empty()) {
       mark_empty(state, candidate_index);
     }
@@ -561,28 +590,75 @@ private:
   bool active_ = false;
 };
 
+class ActiveRetainedCharge;
+thread_local ActiveRetainedCharge *g_active_retained_charge = nullptr;
+
 class ActiveRetainedCharge final {
 public:
-  ActiveRetainedCharge(const std::shared_ptr<OperationTaskArena::State> &state,
-                       OperationTaskArena::State::QueuedTask *queued) noexcept
-      : state_(state), queued_(queued), bytes_(queued->retained_bytes) {
+  ActiveRetainedCharge(
+      const std::shared_ptr<OperationTaskArena::State> &state,
+      std::size_t bytes,
+      OperationTaskArena::Task *task_to_clear = nullptr) noexcept
+      : state_(state), bytes_(bytes), task_to_clear_(task_to_clear),
+        previous_(g_active_retained_charge) {
     const auto active =
         state_->active_bytes.fetch_add(bytes_, std::memory_order_acq_rel) +
         bytes_;
     (void)update_peak(&state_->peak_active_bytes, active);
+    g_active_retained_charge = this;
   }
   ActiveRetainedCharge(const ActiveRetainedCharge &) = delete;
   ActiveRetainedCharge &operator=(const ActiveRetainedCharge &) = delete;
   ~ActiveRetainedCharge() noexcept {
-    queued_->task = OperationTaskArena::Task{};
-    SaturatingAtomicSubtract(state_->active_bytes, bytes_);
-    SaturatingAtomicSubtract(state_->retained_bytes_total, bytes_);
+    if (task_to_clear_ != nullptr) {
+      *task_to_clear_ = OperationTaskArena::Task{};
+    }
+    if (!transferred_) {
+      SaturatingAtomicSubtract(state_->active_bytes, bytes_);
+      SaturatingAtomicSubtract(state_->retained_bytes_total, bytes_);
+      state_->NotifyRetainedAvailability();
+    }
+    g_active_retained_charge = previous_;
+  }
+
+  [[nodiscard]] bool TryTransfer(OperationTaskArena::State *state,
+                                 std::size_t active_credit,
+                                 std::size_t completion_bytes) noexcept {
+    if (transferred_ || state_.get() != state || active_credit != bytes_) {
+      return false;
+    }
+    auto retained =
+        state_->retained_bytes_total.load(std::memory_order_acquire);
+    for (;;) {
+      if (retained < active_credit ||
+          completion_bytes > state_->queue_byte_capacity) {
+        return false;
+      }
+      const auto without_active = retained - active_credit;
+      if (without_active > state_->queue_byte_capacity - completion_bytes) {
+        return false;
+      }
+      const auto next = without_active + completion_bytes;
+      if (state_->retained_bytes_total.compare_exchange_weak(
+              retained, next, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        SaturatingAtomicSubtract(state_->active_bytes, active_credit);
+        if (next < retained) {
+          state_->NotifyRetainedAvailability();
+        }
+        transferred_ = true;
+        (void)update_peak(&state_->peak_retained_bytes_total, next);
+        return true;
+      }
+    }
   }
 
 private:
   std::shared_ptr<OperationTaskArena::State> state_;
-  OperationTaskArena::State::QueuedTask *queued_;
-  std::size_t bytes_;
+  std::size_t bytes_ = 0U;
+  OperationTaskArena::Task *task_to_clear_ = nullptr;
+  ActiveRetainedCharge *previous_ = nullptr;
+  bool transferred_ = false;
 };
 
 template <bool PreferDedicatedOutput, bool CheckGlobalStopping>
@@ -609,6 +685,13 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
         return;
       }
     }
+    // Acquire runnable CPU capacity before committing any dequeue. Otherwise a
+    // wide physical arena can remove many packets from their queues and then
+    // park those packets behind the process CPU governor, defeating queue
+    // fairness/output preference and hiding retained work from backpressure.
+    // The lease is released immediately when this wake finds no compatible
+    // task, so idle workers never pin runnable capacity while parked.
+    auto cpu_lease = state->cpu_registration.Acquire(stop);
     // The jthread token is hot; the global flag owns admission and park wakeup.
     activity.AdvertiseDequeue();
     OperationTaskArena::State::QueuedTask queued;
@@ -631,6 +714,9 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
       allow_output_preference = !preference_used;
     }
     if (!found) {
+      // Do not hold runnable capacity across a slot park or a failed steal
+      // scan.
+      cpu_lease = {};
       telemetry_batch.Flush();
       std::unique_lock lock(slot.mutex);
       // A producer may have appended local work after the failed steal scan
@@ -675,8 +761,8 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
       }
       continue;
     }
-    ActiveRetainedCharge retained_charge(state, &queued);
-    auto cpu_lease = state->cpu_registration.Acquire(stop);
+    ActiveRetainedCharge retained_charge(state, queued.retained_bytes,
+                                         &queued.task);
     if (telemetry && cpu_lease.waited()) {
       telemetry->AddCounter(PerformanceCounter::kProcessCpuGovernorWaits);
       telemetry->AddCounter(PerformanceCounter::kProcessCpuGovernorWaitNs,

@@ -50,6 +50,12 @@ def test_uncertain_close_never_retries_recycled_fd(
     descriptor = os.open(os.devnull, os.O_RDONLY)
     lease = Lease()
     owner = module._IdentityDescriptorOwner(descriptor, lease)
+    retained_debts: list[object] = []
+    monkeypatch.setattr(
+        module,
+        "retain_uncertain_fd_close",
+        lambda capability, **_kwargs: not retained_debts.append(capability),
+    )
     real_close = os.close
     first = True
 
@@ -69,7 +75,8 @@ def test_uncertain_close_never_retries_recycled_fd(
         assert replacement == descriptor
         owner.release()
         os.fstat(replacement)
-        assert lease.calls == 1
+        assert retained_debts == [lease]
+        assert lease.calls == 0
     finally:
         real_close(replacement)
 
@@ -363,5 +370,5 @@ def test_pass34_reconciliation_source_contracts() -> None:
     assert "without holding the local ledger lock" in memory
     assert "_resize_inflight" in storage
     assert "_pending_resize_growth" in storage
-    assert "Relinquish the FD number before an uncertain close" in identity
+    assert "Detach before close so EINTR/uncertainty" in identity
     assert "path fingerprint does not own a releasable claim" in identity

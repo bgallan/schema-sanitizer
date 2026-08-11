@@ -24,7 +24,11 @@ def test_remote_registry_stream_has_one_current_native_route() -> None:
     owner = ROOT / "src/schema_sanitizer/api_impl/source_plan/registry.py"
     text = owner.read_text(encoding="utf-8")
     assert "to_registry_sink_path_source_chunk_provider_auto_registry" in text
-    assert "getattr(" not in text
+    # Safe finalizers legitimately use guarded attribute reads during partial
+    # construction. The retired route was dynamic capability probing on the
+    # native module, which remains forbidden.
+    assert "getattr(_native" not in text
+    assert "supports_auto_registry" not in text
     assert len(text.splitlines()) <= 500
 
 
