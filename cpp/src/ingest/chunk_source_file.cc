@@ -125,9 +125,11 @@ map_file_read_only(const std::string &path, std::uint64_t limit) {
 #if defined(_WIN32)
   const auto utf8_path = std::u8string(path.begin(), path.end());
   const auto native_path = std::filesystem::path(utf8_path).wstring();
+  // Staged inputs are renamed into a private cleanup directory while Arrow may
+  // still retain this read-only mapping. Do not grant write sharing.
   mapped->file =
-      CreateFileW(native_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                  OPEN_EXISTING,
+      CreateFileW(native_path.c_str(), GENERIC_READ,
+                  FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
   if (mapped->file == INVALID_HANDLE_VALUE) {
     return sanitize::Status::IOError(

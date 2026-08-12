@@ -351,6 +351,8 @@ def test_cross_process_storage_reconciliation_preserves_same_device_sibling_acco
 ) -> None:
     from schema_sanitizer.core_impl import cross_process_storage as module
 
+    if module.fcntl is None:
+        pytest.skip("cross-process coordination requires POSIX flock")
     monkeypatch.setenv(module._ENV_ENABLED, "1")
     monkeypatch.setenv(module._ENV_DIRECTORY, str(tmp_path))
     first = module.open_cross_process_storage_account(7803)

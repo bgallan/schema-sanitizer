@@ -86,8 +86,12 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
     workflows = f"{ci_workflow}\n{publish_workflow}"
     assert "if(WIN32)" in cmake
     assert 'set(_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT "bundled")' in cmake
-    assert "zlib132.zip" in cmake
-    assert "SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28" in cmake
+    assert (
+        "URL https://zlib.net/zlib132.zip "
+        "https://github.com/madler/zlib/releases/download/v1.3.2/zlib132.zip "
+        "URL_HASH "
+        "SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28" in compact_cmake
+    )
     assert 'set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)' in compact_cmake
     assert 'set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)' in compact_cmake
     assert "ZLIB::ZLIBSTATIC" in cmake

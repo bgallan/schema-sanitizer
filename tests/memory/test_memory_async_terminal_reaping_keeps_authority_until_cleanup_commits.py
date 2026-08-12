@@ -205,14 +205,12 @@ def test_cgroup_mount_join_rejects_unrelated_subtree() -> None:
     from schema_sanitizer.core_impl.cgroup_view import _join_mount_path
 
     assert _join_mount_path("/sys/fs/cgroup", "/kubepods/a", "/kubepods/b/pod") is None
-    assert (
-        str(_join_mount_path("/sys/fs/cgroup", "/kubepods/a", "/kubepods/a/pod"))
-        == "/sys/fs/cgroup/pod"
-    )
-    assert (
-        str(_join_mount_path("/sys/fs/cgroup", "/", "/user.slice/a"))
-        == "/sys/fs/cgroup/user.slice/a"
-    )
+    nested = _join_mount_path("/sys/fs/cgroup", "/kubepods/a", "/kubepods/a/pod")
+    root_relative = _join_mount_path("/sys/fs/cgroup", "/", "/user.slice/a")
+    assert nested is not None
+    assert root_relative is not None
+    assert nested.as_posix() == "/sys/fs/cgroup/pod"
+    assert root_relative.as_posix() == "/sys/fs/cgroup/user.slice/a"
 
 
 def test_cgroup_resolution_fails_closed_after_repeated_membership_migration(

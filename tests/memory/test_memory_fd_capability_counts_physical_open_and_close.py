@@ -121,6 +121,20 @@ def test_native_fd_lease_has_explicit_physical_close_commit_and_debt() -> None:
     assert "fd_lease.commit_physical_close(closed)" in mapped
 
 
+def test_windows_read_only_mapping_allows_staged_path_rename_without_write_sharing() -> None:
+    """Mapped staged inputs permit cleanup rename without granting write sharing."""
+    mapped = (CPP / "ingest/chunk_source_file.cc").read_text(encoding="utf-8")
+    create_file = mapped[
+        mapped.index("CreateFileW(native_path.c_str()") : mapped.index(
+            "if (mapped->file == INVALID_HANDLE_VALUE)"
+        )
+    ]
+    compact_create_file = " ".join(create_file.split())
+    assert "GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE" in compact_create_file
+    assert "FILE_SHARE_WRITE" not in create_file
+    assert "OPEN_EXISTING" in create_file
+
+
 def test_duckdb_stream_handoff_has_no_full_batch_list_barrier() -> None:
     results = _source("api_impl/results.py")
     coverage = _source("core_impl/concurrency_coverage.py")

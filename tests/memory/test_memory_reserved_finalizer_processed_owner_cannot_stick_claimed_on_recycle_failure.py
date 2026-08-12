@@ -88,6 +88,8 @@ def test_cross_process_growth_repairs_journal_when_local_commit_fails(
 ) -> None:
     from schema_sanitizer.core_impl import cross_process_memory as module
 
+    if module.fcntl is None:
+        pytest.skip("cross-process coordination requires POSIX flock")
     monkeypatch.setenv("SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS", "1")
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path))
     lease = module.CrossProcessMemoryLease(1_000, 10)
@@ -118,6 +120,8 @@ def test_cross_process_release_retains_journal_cleanup_owner_after_fsync_failure
 ) -> None:
     from schema_sanitizer.core_impl import cross_process_memory as module
 
+    if module.fcntl is None:
+        pytest.skip("cross-process coordination requires POSIX flock")
     monkeypatch.setenv("SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS", "1")
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path))
     lease = module.CrossProcessMemoryLease(1_000, 12)

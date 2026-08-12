@@ -206,12 +206,12 @@ def test_python_lifecycle_condition_waits_are_all_bounded() -> None:
 def test_cgroup_view_resolves_nested_membership_and_refreshes_after_short_ttl() -> None:
     from schema_sanitizer.core_impl.cgroup_view import _join_mount_path
 
-    assert str(_join_mount_path("/sys/fs/cgroup", "/", "/user.slice/app.scope")) == (
-        "/sys/fs/cgroup/user.slice/app.scope"
-    )
-    assert str(_join_mount_path("/sys/fs/cgroup", "/kubepods", "/kubepods/pod/x")) == (
-        "/sys/fs/cgroup/pod/x"
-    )
+    nested = _join_mount_path("/sys/fs/cgroup", "/", "/user.slice/app.scope")
+    pod = _join_mount_path("/sys/fs/cgroup", "/kubepods", "/kubepods/pod/x")
+    assert nested is not None
+    assert pod is not None
+    assert nested.as_posix() == "/sys/fs/cgroup/user.slice/app.scope"
+    assert pod.as_posix() == "/sys/fs/cgroup/pod/x"
     source = _source("core_impl/cgroup_view.py")
     assert "_CACHE_TTL_NS" in source
     assert "time.monotonic_ns()" in source

@@ -546,6 +546,8 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
     for name, days in retention.items():
         assert _with_value(uploads[name], "retention-days") == days
         assert _with_value(uploads[name], "if-no-files-found") == "error"
+    platform_evidence = uploads["platform-evidence-${{ matrix.artifact }}"]
+    assert "success() || (failure() && hashFiles('artifacts/**') != '')" in platform_evidence
     assert _with_value(uploads["release-distributions"], "path") == "release/"
 
 

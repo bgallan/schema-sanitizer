@@ -377,10 +377,18 @@ def test_fd_hard_capacity_subtracts_native_governed_opened(monkeypatch: pytest.M
         def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int]:
             return (10, 10, 100, 0)
 
+    class Resource:
+        RLIMIT_NOFILE = object()
+
+        @staticmethod
+        def getrlimit(kind: object) -> tuple[int, int]:
+            assert kind is Resource.RLIMIT_NOFILE
+            return (100, 100)
+
     monkeypatch.setattr(module, "_fd_requested_capacity", lambda: 100)
     monkeypatch.setattr(module, "_open_fd_count", lambda: 20)
     monkeypatch.setattr(module, "_python_governed_fds_opened", lambda: 2)
-    monkeypatch.setattr(module.resource, "getrlimit", lambda _kind: (100, 100))
+    monkeypatch.setattr(module, "resource", Resource())
     monkeypatch.setattr(native_runtime, "native_core", Native())
     # reserve=16, external=20-10 native-governed = 10 => 100-16-10
     assert module._fd_hard_capacity() == 74
