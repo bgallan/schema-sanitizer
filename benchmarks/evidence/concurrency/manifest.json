@@ -1,0 +1,287 @@
+{
+  "schema_version": 1,
+  "description": "Exact index of retained concurrency evidence and native probes, organized by stable subsystem contract.",
+  "domains": [
+    "layout",
+    "lifecycle",
+    "safety",
+    "scheduler",
+    "telemetry"
+  ],
+  "records": [
+    {
+      "id": "executor-local-admission-ticket",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/executor-local-admission-ticket.json",
+      "probes": []
+    },
+    {
+      "id": "queue-accounting-publication",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/queue-accounting-publication.json",
+      "probes": []
+    },
+    {
+      "id": "successful-drain-publication",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/successful-drain-publication.json",
+      "probes": []
+    },
+    {
+      "id": "worker-steal-publication",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/worker-steal-publication.json",
+      "probes": []
+    },
+    {
+      "id": "started-worker-mask-fast-path",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/started-worker-mask-fast-path.json",
+      "probes": []
+    },
+    {
+      "id": "shutdown-waiter-notification",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/shutdown-waiter-notification.json",
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/shutdown-waiter-notification-benchmark.cc"
+      ]
+    },
+    {
+      "id": "stop-token-worker-loop",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/stop-token-worker-loop.json",
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/stop-token-worker-loop-benchmark.cc"
+      ]
+    },
+    {
+      "id": "native-stop-token",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/native-stop-token.json",
+      "probes": []
+    },
+    {
+      "id": "initialized-worker-admission-snapshot",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/initialized-worker-admission-snapshot.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/initialized-worker-admission-snapshot-benchmark.cc"
+      ]
+    },
+    {
+      "id": "external-task-lease-sentinel",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/external-task-lease-sentinel.json",
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/external-task-lease-sentinel-benchmark.cc"
+      ]
+    },
+    {
+      "id": "static-external-task-lease",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/static-external-task-lease.json",
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/static-external-task-lease-benchmark.cc"
+      ]
+    },
+    {
+      "id": "terminal-flag-snapshot",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/terminal-flag-snapshot.json",
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/terminal-flag-snapshot-benchmark.cc"
+      ]
+    },
+    {
+      "id": "high-core-inflight-publication",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/high-core-inflight-publication.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/high-core-inflight-publication-benchmark.cc"
+      ]
+    },
+    {
+      "id": "memory-ordering-validation",
+      "domain": "safety",
+      "evidence": "benchmarks/evidence/concurrency/safety/memory-ordering-validation.json",
+      "probes": []
+    },
+    {
+      "id": "high-core-inflight-consumption",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/high-core-inflight-consumption.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/high-core-inflight-consumption-benchmark.cc"
+      ]
+    },
+    {
+      "id": "native-completion",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/native-completion.json",
+      "probes": []
+    },
+    {
+      "id": "native-completion-16-workers",
+      "domain": "lifecycle",
+      "evidence": "benchmarks/evidence/concurrency/lifecycle/native-completion-16-workers.json",
+      "probes": []
+    },
+    {
+      "id": "worker-single-store-publication",
+      "domain": "telemetry",
+      "evidence": "benchmarks/evidence/concurrency/telemetry/worker-single-store-publication.json",
+      "probes": [
+        "benchmarks/probes/concurrency/telemetry/worker-single-store-publication-benchmark.cc"
+      ]
+    },
+    {
+      "id": "submission-shards",
+      "domain": "telemetry",
+      "evidence": "benchmarks/evidence/concurrency/telemetry/submission-shards.json",
+      "probes": [
+        "benchmarks/probes/concurrency/telemetry/submission-shards-benchmark.cc"
+      ]
+    },
+    {
+      "id": "completion-shards",
+      "domain": "telemetry",
+      "evidence": "benchmarks/evidence/concurrency/telemetry/completion-shards.json",
+      "probes": [
+        "benchmarks/probes/concurrency/telemetry/completion-shards-benchmark.cc",
+        "benchmarks/probes/concurrency/telemetry/completion-shards-tsan.cc"
+      ]
+    },
+    {
+      "id": "worker-local-peak-cache",
+      "domain": "telemetry",
+      "evidence": "benchmarks/evidence/concurrency/telemetry/worker-local-peak-cache.json",
+      "probes": [
+        "benchmarks/probes/concurrency/telemetry/worker-local-peak-cache-benchmark.cc",
+        "benchmarks/probes/concurrency/telemetry/worker-local-peak-cache-tsan.cc"
+      ]
+    },
+    {
+      "id": "active-streak-shards",
+      "domain": "telemetry",
+      "evidence": "benchmarks/evidence/concurrency/telemetry/active-streak-shards.json",
+      "probes": [
+        "benchmarks/probes/concurrency/telemetry/active-streak-shards-benchmark.cc",
+        "benchmarks/probes/concurrency/telemetry/active-streak-shards-tsan.cc"
+      ]
+    },
+    {
+      "id": "initialized-worker-park-snapshot",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/initialized-worker-park-snapshot.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/initialized-worker-park-snapshot-benchmark.cc",
+        "benchmarks/probes/concurrency/scheduler/initialized-worker-park-snapshot-tsan.cc"
+      ]
+    },
+    {
+      "id": "sharded-queue-visibility",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/sharded-queue-visibility.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/sharded-queue-visibility-benchmark.cc",
+        "benchmarks/probes/concurrency/scheduler/sharded-queue-visibility-tsan.cc"
+      ]
+    },
+    {
+      "id": "running-publication-cacheline",
+      "domain": "layout",
+      "evidence": "benchmarks/evidence/concurrency/layout/running-publication-cacheline.json",
+      "probes": [
+        "benchmarks/probes/concurrency/layout/running-publication-cacheline-benchmark.cc",
+        "benchmarks/probes/concurrency/layout/running-publication-cacheline-tsan.cc"
+      ]
+    },
+    {
+      "id": "sparse-round-robin-selection",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/sparse-round-robin-selection.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/sparse-round-robin-selection-benchmark.cc",
+        "benchmarks/probes/concurrency/scheduler/sparse-round-robin-selection-tsan.cc"
+      ]
+    },
+    {
+      "id": "arena-writer-domain-cacheline",
+      "domain": "layout",
+      "evidence": "benchmarks/evidence/concurrency/layout/arena-writer-domain-cacheline.json",
+      "probes": [
+        "benchmarks/probes/concurrency/layout/arena-writer-domain-cacheline-benchmark.cc",
+        "benchmarks/probes/concurrency/layout/arena-writer-domain-cacheline-tsan.cc"
+      ]
+    },
+    {
+      "id": "wake-epoch-cacheline",
+      "domain": "layout",
+      "evidence": "benchmarks/evidence/concurrency/layout/wake-epoch-cacheline.json",
+      "probes": [
+        "benchmarks/probes/concurrency/layout/wake-epoch-cacheline-benchmark.cc",
+        "benchmarks/probes/concurrency/layout/wake-epoch-cacheline-tsan.cc"
+      ]
+    },
+    {
+      "id": "lane-origin-modulo",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/lane-origin-modulo.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/lane-origin-modulo-benchmark.cc",
+        "benchmarks/probes/concurrency/scheduler/lane-origin-modulo-tsan.cc"
+      ]
+    },
+    {
+      "id": "fixed-visibility-snapshot",
+      "domain": "scheduler",
+      "evidence": "benchmarks/evidence/concurrency/scheduler/fixed-visibility-snapshot.json",
+      "probes": [
+        "benchmarks/probes/concurrency/scheduler/fixed-visibility-snapshot-benchmark.cc",
+        "benchmarks/probes/concurrency/scheduler/fixed-visibility-snapshot-tsan.cc"
+      ]
+    },
+    {
+      "id": "compact-queued-task",
+      "domain": "layout",
+      "evidence": "benchmarks/evidence/concurrency/layout/compact-queued-task.json",
+      "probes": [
+        "benchmarks/probes/concurrency/layout/compact-queued-task-benchmark.cc",
+        "benchmarks/probes/concurrency/layout/compact-queued-task-tsan.cc"
+      ]
+    },
+    {
+      "id": "arena-lifecycle",
+      "domain": "lifecycle",
+      "evidence": null,
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/arena-lifecycle-tsan.cc"
+      ]
+    },
+    {
+      "id": "arena-memory-lifecycle",
+      "domain": "lifecycle",
+      "evidence": null,
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/arena-memory-lifecycle-tsan.cc"
+      ]
+    },
+    {
+      "id": "arena-teardown",
+      "domain": "lifecycle",
+      "evidence": null,
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/arena-teardown-tsan.cc"
+      ]
+    },
+    {
+      "id": "arena-ownership",
+      "domain": "lifecycle",
+      "evidence": null,
+      "probes": [
+        "benchmarks/probes/concurrency/lifecycle/arena-ownership-tsan.cc"
+      ]
+    }
+  ]
+}

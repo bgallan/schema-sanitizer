@@ -152,7 +152,7 @@ add_custom_target(
   schema_sanitizer_check_cpp_documentation
   COMMAND
     ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_LIST_DIR}/meta/ci/check_cpp_documentation.py
+    ${CMAKE_CURRENT_LIST_DIR}/meta/ci/native/check_cpp_documentation.py
     --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
   WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
   COMMENT "Checking C/C++ callable documentation with clang-doc"

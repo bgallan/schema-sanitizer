@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,7 @@ import pytest
 
 def _validator() -> Any:
     """Load the standalone release-version validation module."""
-    path = Path(__file__).resolve().parents[2] / "meta/ci/validate_release_version.py"
+    path = Path(__file__).resolve().parents[2] / "meta/ci/release/validate_release_version.py"
     spec = importlib.util.spec_from_file_location("validate_release_version", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load {path}")
@@ -47,6 +49,33 @@ def test_release_tag_is_read_from_manual_workflow_event(tmp_path: Path) -> None:
     event_file.write_text('{"inputs":{"release_tag":"v0.3.8"}}', encoding="utf-8")
 
     assert _validator().release_tag_from_event(event_file) == "v0.3.8"
+
+
+def test_required_release_tag_fails_closed_in_cli(tmp_path: Path) -> None:
+    """The release CLI must reject a dispatch that omits its explicit tag."""
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("0.3.8\n", encoding="utf-8")
+    event_file = tmp_path / "event.json"
+    event_file.write_text('{"inputs":{}}', encoding="utf-8")
+    script = Path(__file__).resolve().parents[2] / "meta/ci/release/validate_release_version.py"
+    command = [
+        sys.executable,
+        str(script),
+        "--version-file",
+        str(version_file),
+        "--github-event",
+        str(event_file),
+        "--require-release-tag",
+    ]
+
+    rejected = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "release_tag is required" in rejected.stderr
+
+    event_file.write_text('{"inputs":{"release_tag":"v0.3.8"}}', encoding="utf-8")
+    accepted = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert accepted.returncode == 0
+    assert accepted.stdout == "package-version=0.3.8\n"
 
 
 def test_publish_confirmation_is_read_from_manual_workflow_event(tmp_path: Path) -> None:

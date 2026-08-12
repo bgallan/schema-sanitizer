@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from input_contract_shared import *  # noqa: F403
+from _support.input_contract import *  # noqa: F403
 
 
 def test_source_plan_sequence_probe_flattens_path_sources_once() -> None:

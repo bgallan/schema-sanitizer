@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 pa = pytest.importorskip("pyarrow")
-from threading_golden import semantic_stats
+from _support.threading_goldens import semantic_stats
 
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options

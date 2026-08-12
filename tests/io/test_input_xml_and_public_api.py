@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from input_contract_shared import *  # noqa: F403
+from _support.input_contract import *  # noqa: F403
 
 
 def test_read_xml_without_row_tag_emits_document_row(tmp_path) -> None:

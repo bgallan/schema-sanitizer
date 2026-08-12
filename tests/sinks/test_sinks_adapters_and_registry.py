@@ -9,10 +9,10 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import read_test_csv, read_test_json, require_native
-from sinks_shared import (
+from _support.sinks import (
     write_csv as _write_csv,
 )
+from conftest import read_test_csv, read_test_json, require_native
 
 import schema_sanitizer as ss
 

@@ -60,7 +60,7 @@ ss.to_parquet(
 )
 ```
 
-Every conversion returns a `Result` containing the output, statistics,
+Every `to_*` conversion returns a `Result` containing the output, statistics,
 execution policy, schema registry, and detected schema changes.
 
 ## [What it does](#index)
@@ -124,18 +124,18 @@ output is the safe choice when a complete result may be too large.
 
 The [documentation guide](docs/README.md) organizes detailed material by task:
 
-- [Getting started](docs/getting-started.md)
-- [Python API](docs/python-api.md)
-- [Configuration options](docs/options.md)
-- [Inputs and filesystems](docs/inputs-and-filesystems.md)
-- [Schema heuristics](docs/heuristics.md)
-- [Partitioned pipelines](docs/pipelines.md)
-- [BigQuery integration](docs/bigquery.md)
-- [Concurrency and memory](docs/concurrency-memory-hardening.md)
-- [Reader security](docs/reader-security-limits.md)
-- [Compatibility](docs/compatibility.md)
-- [CI/CD pipeline](docs/ci-cd.md)
-- [Development and contribution](docs/development.md)
+- [Getting started](docs/guides/getting-started.md)
+- [Python API](docs/reference/python-api.md)
+- [Configuration options](docs/reference/options.md)
+- [Inputs and filesystems](docs/reference/inputs-and-filesystems.md)
+- [Schemas and registries](docs/reference/schema-and-registry.md)
+- [Partitioned pipelines](docs/guides/partitioned-pipelines.md)
+- [BigQuery integration](docs/reference/bigquery.md)
+- [Resources and concurrency](docs/operations/resources-and-concurrency.md)
+- [Reader security](docs/operations/reader-security-limits.md)
+- [Compatibility](docs/reference/compatibility.md)
+- [CI/CD pipeline](docs/project/ci-cd.md)
+- [Development and contribution](docs/project/development.md)
 
 Complete programs live in [`examples/`](examples/).
 [Example 7](examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py)
@@ -152,7 +152,7 @@ pytest -q
 pre-commit run --all-files
 ```
 
-See the [development guide](docs/development.md) for native builds, focused
+See the [development guide](docs/project/development.md) for native builds, focused
 tests, benchmarks, and CI.
 
 ## [License](#index)

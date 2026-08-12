@@ -10,13 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.bench_concurrency_telemetry import _dram_high_width_coverage
-from benchmarks.concurrency_telemetry_analysis import (
+from benchmarks.concurrency.telemetry.analysis import (
     classify_run,
     parse_perf_stat,
     recommend_frontier,
 )
-from benchmarks.concurrency_telemetry_support import format_cpu_list, parse_cpu_list
+from benchmarks.concurrency.telemetry.cli import _dram_high_width_coverage
+from benchmarks.concurrency.telemetry.support import format_cpu_list, parse_cpu_list
+
+_TELEMETRY_MODULE = "benchmarks.concurrency.telemetry.cli"
 
 
 def _native(primary: str = "mixed_or_unresolved") -> dict:
@@ -192,11 +194,11 @@ def test_proven_dram_plateau_precedes_cache_guess() -> None:
 
 def test_plan_only_emits_exact_cpu_sets_without_native_runtime() -> None:
     """The host can validate its affinity plan before building or running native code."""
-    root = Path(__file__).parents[2]
     completed = subprocess.run(
         [
             sys.executable,
-            str(root / "benchmarks" / "bench_concurrency_telemetry.py"),
+            "-m",
+            _TELEMETRY_MODULE,
             "--plan-only",
             "--workers",
             "1,2",
@@ -217,13 +219,12 @@ def test_plan_only_emits_exact_cpu_sets_without_native_runtime() -> None:
 
 def test_plan_report_can_be_reused_as_exact_affinity_input(tmp_path: Path) -> None:
     """A reviewed plan report is accepted directly for an exact rerun."""
-    root = Path(__file__).parents[2]
-    script = root / "benchmarks" / "bench_concurrency_telemetry.py"
     plan = tmp_path / "plan.json"
     subprocess.run(
         [
             sys.executable,
-            str(script),
+            "-m",
+            _TELEMETRY_MODULE,
             "--plan-only",
             "--workers",
             "1,2",
@@ -236,7 +237,8 @@ def test_plan_report_can_be_reused_as_exact_affinity_input(tmp_path: Path) -> No
     completed = subprocess.run(
         [
             sys.executable,
-            str(script),
+            "-m",
+            _TELEMETRY_MODULE,
             "--plan-only",
             "--workers",
             "1,2",
@@ -254,12 +256,12 @@ def test_plan_report_can_be_reused_as_exact_affinity_input(tmp_path: Path) -> No
 
 def test_devnull_mode_bypasses_atomic_publication(tmp_path: Path) -> None:
     """Explicit /dev/null measurements use the direct native sink successfully."""
-    root = Path(__file__).parents[2]
     report_path = tmp_path / "devnull.json"
     subprocess.run(
         [
             sys.executable,
-            str(root / "benchmarks" / "bench_concurrency_telemetry.py"),
+            "-m",
+            _TELEMETRY_MODULE,
             "--workers",
             "1,2",
             "--workloads",
@@ -297,12 +299,12 @@ def test_high_core_wide_fixture_activates_32_workers_and_breaks_16(
     """Eligible fixed-wide work starts 32 workers and exceeds 16-way activity."""
     if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < 32:
         pytest.skip("requires 32 visible CPUs")
-    root = Path(__file__).parents[2]
     report_path = tmp_path / "high-core.json"
     subprocess.run(
         [
             sys.executable,
-            str(root / "benchmarks" / "bench_concurrency_telemetry.py"),
+            "-m",
+            _TELEMETRY_MODULE,
             "--workers",
             "16,32",
             "--workloads",
@@ -331,15 +333,15 @@ def test_high_core_wide_fixture_activates_32_workers_and_breaks_16(
     assert 16 < native["counters"]["peak_active_tasks"] <= 32
 
 
-def test_v35_benchmark_owners_remain_cohesive_and_below_500_lines() -> None:
+def test_benchmark_owners_remain_cohesive_and_below_500_lines() -> None:
     """The host protocol stays split by responsibility without large owners."""
-    root = Path(__file__).parents[2] / "benchmarks"
+    root = Path(__file__).parents[2] / "benchmarks" / "concurrency" / "telemetry"
     owners = [
-        root / "bench_concurrency_telemetry.py",
-        root / "concurrency_telemetry_analysis.py",
-        root / "concurrency_telemetry_runner.py",
-        root / "concurrency_telemetry_support.py",
-        root / "concurrency_high_core_suite.py",
-        root / "bench_high_core_evidence.py",
+        root / "cli.py",
+        root / "analysis.py",
+        root / "runner.py",
+        root / "support.py",
+        root / "high_core_suite.py",
+        root / "high_core_evidence.py",
     ]
     assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 500 for path in owners)

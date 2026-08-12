@@ -37,6 +37,7 @@ dev = [
   "pytest-asyncio>=0.24",
   "pre-commit>=3.7",
   "build>=1.2",
+  "detect-secrets==1.5.0",
   "ruff>=0.6.0",
   "mypy>=1.10",
   "aiohttp>=3.9",
@@ -106,7 +107,7 @@ Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 build = "cp311-*"
 build-verbosity = 1
 test-requires = ["pyarrow"]
-test-command = "python {project}/meta/ci/check_parquet_compression_matrix.py"
+test-command = "python {project}/meta/ci/parquet/check_parquet_compression_matrix.py"
 
 [tool.cibuildwheel.linux]
 skip = "*-musllinux_*"
@@ -167,10 +168,8 @@ regex = '^(?P<value>\d+\.\d+(?:\.\d+)?(?:\.post\d+)?)$'
 include = [
   "/CMakeLists.txt",
   "/cmake/SchemaSanitizerCompression.cmake",
-  "/docs/README.md",
-  "/docs/compatibility.md",
-  "/docs/heuristics.md",
-  "/meta/ci/check_parquet_compression_matrix.py",
+  "/docs/**",
+  "/meta/ci/parquet/check_parquet_compression_matrix.py",
   "/LICENSE",
   "/README.md",
   "/meta/VERSION",

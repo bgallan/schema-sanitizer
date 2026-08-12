@@ -9,16 +9,16 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from conftest import require_native
-from sinks_shared import (
+from _support.sinks import (
     without_generated_metadata as _without_generated_metadata,
 )
-from sinks_shared import (
+from _support.sinks import (
     without_generated_metadata_rows as _without_generated_metadata_rows,
 )
-from sinks_shared import (
+from _support.sinks import (
     write_csv as _write_csv,
 )
+from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.adapters.pyarrow.jsonl_sink import _schema_supports_native_jsonl

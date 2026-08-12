@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "meta" / "ci" / "run_fuzz_regressions.py"
+SCRIPT = ROOT / "meta" / "ci" / "fuzz" / "run_fuzz_regressions.py"
 
 
 def _module():
@@ -70,6 +70,45 @@ def test_regression_runner_rejects_empty_regression_set(tmp_path: Path) -> None:
         module.run_regressions(build_root, regression_root)
 
 
+def test_regression_runner_rejects_a_missing_target_directory(tmp_path: Path) -> None:
+    """A populated sibling target cannot hide a missing parser regression set."""
+    module = _module()
+    build_root = tmp_path / "build"
+    regression_root = tmp_path / "regressions"
+    build_root.mkdir()
+    missing = module.TARGETS[0]
+    for target in module.TARGETS:
+        module.fuzzer_binary(build_root, target).write_bytes(b"binary")
+        if target == missing:
+            continue
+        target_root = regression_root / target
+        target_root.mkdir(parents=True)
+        (target_root / "case.bin").write_bytes(target.encode())
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=rf"missing regular fuzz target directory: .*{missing}",
+    ):
+        module.run_regressions(build_root, regression_root)
+
+
+def test_regression_cases_reject_a_symlinked_target(tmp_path: Path) -> None:
+    """Custom roots cannot redirect one parser target outside its declared tree."""
+    module = _module()
+    regression_root = tmp_path / "regressions"
+    real_target = tmp_path / "real-target"
+    real_target.mkdir()
+    regression_root.mkdir()
+    target = module.TARGETS[0]
+    try:
+        (regression_root / target).symlink_to(real_target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are unavailable: {error}")
+
+    with pytest.raises(FileNotFoundError, match="missing regular fuzz target directory"):
+        module.regression_cases(regression_root, target)
+
+
 def test_campaign_runner_uses_stable_target_seeds_and_limits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -79,15 +118,19 @@ def test_campaign_runner_uses_stable_target_seeds_and_limits(
     build_root = tmp_path / "build"
     regression_root = tmp_path / "regressions"
     calls: list[list[str]] = []
+    staged_corpora: list[Path] = []
 
     build_root.mkdir()
     for target in module.TARGETS:
         module.fuzzer_binary(build_root, target).write_bytes(b"binary")
-        (regression_root / target).mkdir(parents=True)
+        target_root = regression_root / target
+        target_root.mkdir(parents=True)
+        (target_root / "case.bin").write_bytes(target.encode())
 
     def fake_run(command: list[str], *, check: bool) -> None:
         """Capture one bounded mutation campaign."""
         assert check is True
+        staged_corpora.append(Path(command[-1]))
         calls.append(command)
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
@@ -108,7 +151,9 @@ def test_campaign_runner_uses_stable_target_seeds_and_limits(
             f"-max_input_ms={module.DEFAULT_MAX_INPUT_MS}",
             f"-max_rss_mb={module.DEFAULT_MAX_RSS_MB}",
         ]
-        assert Path(command[6]) == regression_root / target
+        assert Path(command[6]).name == target
+        assert Path(command[6]) != regression_root / target
+    assert all(not corpus.exists() for corpus in staged_corpora)
 
 
 def test_libfuzzer_runner_uses_native_timeout_and_rss_flags(

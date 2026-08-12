@@ -47,7 +47,7 @@ def test_dynamic_worker_bitmaps_schedule_above_32_without_a_hard_cap() -> None:
         )
 
         assert arena_workers == workers
-        # Pass54 separates physical arena width from dynamic runnable CPU
+        # Physical arena width remains separate from dynamic runnable CPU
         # credit. A constrained cgroup may legitimately cap simultaneous work
         # well below 16 while all wide physical lanes still participate.
         assert 1 <= peak <= workers

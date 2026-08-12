@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 from conftest import require_native
 
+from benchmarks.readers import linear_scaling
+
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "benchmarks" / "bench_reader_linear_scaling.py"
-REPORT = ROOT / "benchmarks" / "reader_linear_scaling.json"
+REPORT = ROOT / "benchmarks" / "evidence" / "readers" / "linear-scaling.json"
 
 
 def test_recorded_reader_linear_scaling_evidence_stays_within_budget() -> None:
@@ -38,12 +38,7 @@ def test_recorded_reader_linear_scaling_evidence_stays_within_budget() -> None:
 def test_reader_linear_scaling_harness_runs_all_text_frontends() -> None:
     """A tiny smoke run protects the executable benchmark contract."""
     require_native()
-    spec = importlib.util.spec_from_file_location("bench_reader_linear_scaling", SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    report = module.run(ROOT, sizes=[8, 16], repeats=1)
+    report = linear_scaling.run(ROOT, sizes=[8, 16], repeats=1)
     names = {item["name"] for item in report["comparisons"]}
     assert names == {
         "csv_single",
@@ -58,9 +53,9 @@ def test_reader_linear_scaling_harness_runs_all_text_frontends() -> None:
 
 def test_reader_complexity_contract_documents_every_native_reader() -> None:
     """The public contract must cover text readers and Parquet explicitly."""
-    contract = (ROOT / "docs" / "reader-complexity.md").read_text(encoding="utf-8")
+    contract = (ROOT / "docs" / "operations" / "reader-complexity.md").read_text(encoding="utf-8")
 
     assert "O(input bytes + decoded output bytes)" in contract
     for reader in ("CSV", "JSON", "XML", "Parquet"):
         assert f"- {reader}" in contract
-    assert "bench_reader_linear_scaling.py" in contract
+    assert "benchmarks.readers.linear_scaling" in contract

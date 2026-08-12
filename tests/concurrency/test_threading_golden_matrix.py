@@ -12,7 +12,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 
-from threading_golden import (
+from _support.threading_goldens import (
     assert_exceptions_equivalent,
     assert_logical_files_equivalent,
     assert_results_equivalent,
@@ -25,20 +25,13 @@ from schema_sanitizer.options_impl.call_options import normalize_call_options
 from schema_sanitizer.pipeline import PartitionRunPlan
 from schema_sanitizer.pipeline.advanced import infer_warm_up_schema_registry_state
 
-_FIXED_TIME_NS = 1_700_000_000_123_456_000
+pytestmark = pytest.mark.usefixtures("fixed_operation_clock")
+
 _FIXED_TIME = datetime(2023, 11, 14, 22, 13, 20, 123456)
 _FIXED_DETECTED_AT = "2023-11-14T22:13:20.123456Z"
 _SECOND_FIXED_TIME_NS = 1_700_000_111_654_321_000
 _SECOND_FIXED_DETECTED_AT = "2023-11-14T22:15:11.654321Z"
 _MEMORY_LIMIT = 256 * 1024 * 1024
-
-
-@pytest.fixture(autouse=True)
-def fixed_operation_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give every public operation the same explicit conversion timestamp."""
-    from schema_sanitizer.api_impl import operation_context
-
-    monkeypatch.setattr(operation_context, "time_ns", lambda: _FIXED_TIME_NS)
 
 
 def _write_input(path: Path, input_format: str, rows: int = 513) -> dict[str, Any]:

@@ -12,8 +12,10 @@ if __package__ in {None, ""}:  # pragma: no cover - direct source checkout execu
     sys.path.insert(0, str(_REPOSITORY_ROOT / "src"))
 
 try:
+    from examples.example_08.cli import parse_positive_int
     from examples.example_08.local_validation import load_local_csv_directory_to_polars
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
+    from cli import parse_positive_int
     from local_validation import load_local_csv_directory_to_polars
 
 
@@ -33,9 +35,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--event-column", default="event")
     parser.add_argument("--include-null-payloads", action="store_true")
     parser.add_argument(
+        "--memory-limit-bytes",
+        type=parse_positive_int,
+        help="Operation-wide schema-sanitizer memory budget in bytes.",
+    )
+    parser.add_argument(
         "--multi-threading",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
     )
     return parser
 
@@ -51,6 +58,7 @@ def main() -> int:
         csv_delimiter=args.csv_delimiter,
         csv_escape_char=args.csv_escape_char,
         multi_threading=args.multi_threading,
+        memory_limit_bytes=args.memory_limit_bytes,
     )
     frame = result.frame
     if args.output_parquet is not None:

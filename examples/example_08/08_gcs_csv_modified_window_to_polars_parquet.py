@@ -56,7 +56,7 @@ def main() -> int:
     )
     result = run_modified_time_csv_workflow(
         config,
-        gcs_client=NativeGcsWorkflowClient(),
+        gcs_client=NativeGcsWorkflowClient(resources=config.resources),
         bigquery_client=AdbcBigQueryWorkflowClient(args),
     )
     print(f"Published {len(result.completed_days)} UTC day(s)")

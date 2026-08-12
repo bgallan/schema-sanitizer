@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _support.sinks import fail_pyarrow_sink
 from conftest import require_native
-from sinks_shared import fail_pyarrow_sink
 
 
 def test_parquet_native_file_output_splits_large_pages_without_dictionary(

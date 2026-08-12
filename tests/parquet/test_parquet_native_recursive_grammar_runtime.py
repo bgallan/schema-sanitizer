@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
-from parquet_recursive_fuzz_helpers import (
+from _support.parquet_recursive_cases import (
     _RECURSIVE_FUZZ_SCALARS,
     _recursive_fuzz_cartesian_specs,
     _recursive_fuzz_full_value_factory,
     _recursive_fuzz_seeded_specs,
 )
-from parquet_recursive_fuzz_helpers import (
+from _support.parquet_recursive_cases import (
     _recursive_fuzz_empty_value as empty_value,
 )
-from parquet_runtime_shared import pa
-from parquet_runtime_shared import recursive_arrow_type as arrow_type
-from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
+from _support.parquet_runtime import pa
+from _support.parquet_runtime import recursive_arrow_type as arrow_type
+from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
+from conftest import require_native
 
 
 @_requires_pyarrow

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "meta" / "ci" / "check_downstream_install.py"
+SCRIPT = ROOT / "meta" / "ci" / "release" / "check_downstream_install.py"
 
 
 def _module():
@@ -61,3 +62,12 @@ def test_every_extra_is_installed_and_imported_in_isolation(
             assert requirement == os.fspath(wheel)
         else:
             assert requirement == f"{wheel}[{extra}]"
+
+
+def test_downstream_profiles_cover_every_published_runtime_extra() -> None:
+    """Adding an optional runtime dependency requires an isolated install gate."""
+    module = _module()
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    published = set(pyproject["project"]["optional-dependencies"]) - {"dev"}
+
+    assert set(module.EXTRA_IMPORTS) == {"core", *published}

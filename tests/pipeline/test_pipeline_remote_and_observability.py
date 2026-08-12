@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from pipeline_shared import *  # noqa: F403
+from _support.pipeline import *  # noqa: F403
 
 
 def test_pipeline_native_registry_stream_handles_normal_partition_drift(

@@ -1,0 +1,148 @@
+{
+  "task_count": 20000,
+  "work_iterations": 0,
+  "pair_count": 5,
+  "host_logical_cpus": 5,
+  "workers": {
+    "2": {
+      "pairs": [
+        {
+          "baseline": 33940,
+          "candidate": 33522
+        },
+        {
+          "candidate": 34875,
+          "baseline": 41964
+        },
+        {
+          "baseline": 46541,
+          "candidate": 47214
+        },
+        {
+          "candidate": 33624,
+          "baseline": 40006
+        },
+        {
+          "baseline": 30928,
+          "candidate": 30445
+        }
+      ],
+      "baseline_median_us": 40006,
+      "candidate_median_us": 33624,
+      "paired_median_reduction_percent": 1.5616916709777546,
+      "candidate_wins": 4
+    },
+    "4": {
+      "pairs": [
+        {
+          "baseline": 34792,
+          "candidate": 40231
+        },
+        {
+          "candidate": 68877,
+          "baseline": 41273
+        },
+        {
+          "baseline": 63006,
+          "candidate": 38578
+        },
+        {
+          "candidate": 69095,
+          "baseline": 28422
+        },
+        {
+          "baseline": 50289,
+          "candidate": 42885
+        }
+      ],
+      "baseline_median_us": 41273,
+      "candidate_median_us": 42885,
+      "paired_median_reduction_percent": -15.63290411588871,
+      "candidate_wins": 2
+    },
+    "5": {
+      "pairs": [
+        {
+          "baseline": 68496,
+          "candidate": 39400
+        },
+        {
+          "candidate": 36904,
+          "baseline": 38322
+        },
+        {
+          "baseline": 36872,
+          "candidate": 34509
+        },
+        {
+          "candidate": 39418,
+          "baseline": 46399
+        },
+        {
+          "baseline": 35700,
+          "candidate": 69151
+        }
+      ],
+      "baseline_median_us": 38322,
+      "candidate_median_us": 39400,
+      "paired_median_reduction_percent": 6.408656975482751,
+      "candidate_wins": 4
+    },
+    "8": {
+      "pairs": [
+        {
+          "baseline": 101054,
+          "candidate": 95597
+        },
+        {
+          "candidate": 64655,
+          "baseline": 87831
+        },
+        {
+          "baseline": 82383,
+          "candidate": 88259
+        },
+        {
+          "candidate": 80029,
+          "baseline": 55334
+        },
+        {
+          "baseline": 91992,
+          "candidate": 60127
+        }
+      ],
+      "baseline_median_us": 87831,
+      "candidate_median_us": 80029,
+      "paired_median_reduction_percent": 5.4000831238743645,
+      "candidate_wins": 3
+    },
+    "16": {
+      "pairs": [
+        {
+          "baseline": 75882,
+          "candidate": 58759
+        },
+        {
+          "candidate": 67876,
+          "baseline": 76210
+        },
+        {
+          "baseline": 94181,
+          "candidate": 72956
+        },
+        {
+          "candidate": 90722,
+          "baseline": 86827
+        },
+        {
+          "baseline": 67907,
+          "candidate": 80262
+        }
+      ],
+      "baseline_median_us": 76210,
+      "candidate_median_us": 72956,
+      "paired_median_reduction_percent": 10.935572759480383,
+      "candidate_wins": 3
+    }
+  }
+}

@@ -6,7 +6,7 @@ requiring PyArrow. Runtime materialization lives in focused native modules.
 
 from __future__ import annotations
 
-from parquet_recursive_fuzz_helpers import (
+from _support.parquet_recursive_cases import (
     _recursive_fuzz_cartesian_specs,
     _recursive_fuzz_null_empty_matrix_specs,
     _recursive_fuzz_profile_labels,

@@ -11,14 +11,14 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
+from schema_sanitizer.pipeline import PartitionRunPlan as DateRunPlan
+from schema_sanitizer.pipeline import PartitionRunResult as DateRunResult
 from schema_sanitizer.pipeline.advanced import (
     compact_uri,
     cpu_io_wall_percentages,
     format_duration,
     sample_items,
 )
-from schema_sanitizer.pipeline.types import PartitionRunPlan as DateRunPlan
-from schema_sanitizer.pipeline.types import PartitionRunResult as DateRunResult
 
 LOGGER = logging.getLogger("gcs_input_to_silver_parquet")
 

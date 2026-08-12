@@ -8,10 +8,9 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from _support.parquet_runtime import pa, pq, sample_table
+from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
 from conftest import read_test_parquet, require_native
-from parquet_runtime_shared import pa, pq
-from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
-from parquet_runtime_support import sample_table
 
 import schema_sanitizer as ss
 
