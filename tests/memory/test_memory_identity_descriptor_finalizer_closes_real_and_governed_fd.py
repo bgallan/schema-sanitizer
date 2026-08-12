@@ -37,11 +37,24 @@ def test_identity_descriptor_finalizer_closes_real_and_governed_fd(
     os.fstat(descriptor)
     del identity
     gc.collect()
+
+    # Finalization publishes this owner for bounded safe-point cleanup. Another
+    # cleanup worker may already have claimed the slot, so GC completion does
+    # not imply that the physical close has committed synchronously.
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if owner.descriptor_snapshot() is None and owner.fd_lease is None and lease._released:
+            break
+        time.sleep(0.01)
+
     assert owner.descriptor_snapshot() is None
     assert owner.fd_lease is None
     # Check the resources owned by this identity. Global counts may change
     # concurrently while bounded cleanup workers make progress.
     assert lease._released
+    with pytest.raises(OSError) as captured:
+        os.fstat(descriptor)
+    assert captured.value.errno == errno.EBADF
 
 
 def test_staged_path_handoff_transfers_original_claim_owner(

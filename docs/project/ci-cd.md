@@ -130,6 +130,11 @@ installed public conversion smoke on 3.12, 3.13, and 3.14, and every platform
 loads it on 3.14. Matrix jobs use `fail-fast: false`, preserving evidence from
 the other platforms when one fails.
 
+The matrix pins cibuildwheel and abi3audit. After cibuildwheel emits each
+repaired wheel, CI runs `abi3audit --strict` explicitly as a blocking gate. This
+preserves the upstream stable-ABI check while avoiding its hidden cold-runner
+download of `virtualenv.pyz` from release hosting.
+
 ### Packaging, dependencies, and security
 
 The distribution gate requires exactly one sdist and four ABI3 wheels with one
@@ -365,9 +370,11 @@ Build and inspect the source distribution and the wheel for the local platform
 with:
 
 ```bash
-python -m pip install -U build cibuildwheel packaging twine
+python -m pip install -U build abi3audit==0.0.26 \
+  cibuildwheel==4.2.0 packaging twine
 python -m build --sdist --outdir dist
 python -m cibuildwheel --output-dir wheelhouse
+python -m abi3audit --strict --report wheelhouse/*.whl
 python -m twine check dist/* wheelhouse/*
 python meta/ci/release/check_distribution_contents.py dist/* wheelhouse/*
 ```

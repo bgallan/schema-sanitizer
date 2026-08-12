@@ -56,6 +56,7 @@ jobs:
               for requirement in values
           ]
           ci_tools = [
+              "abi3audit==0.0.26",
               "actionlint-py==1.7.12.24",
               "bandit==1.9.4",
               "build==1.5.0",
@@ -184,7 +185,9 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install wheel tooling
-        run: python -m pip install -U pip cibuildwheel==4.2.0 pytest
+        run: >-
+          python -m pip install -U pip
+          abi3audit==0.0.26 cibuildwheel==4.2.0 pytest
       - name: Assert the build environment has no PyArrow
         run: >-
           python -c
@@ -198,6 +201,9 @@ jobs:
         run: >-
           python -m cibuildwheel --output-dir wheelhouse
           --archs '${{ matrix.arch }}'
+      - name: Audit the CPython stable ABI
+        shell: bash
+        run: python -m abi3audit --strict --report wheelhouse/*.whl
       - name: Install the built wheel without adapters
         shell: bash
         run: |

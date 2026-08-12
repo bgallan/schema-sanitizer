@@ -294,6 +294,7 @@ def test_dependency_audit_includes_pinned_ci_executables() -> None:
     ci = _workflow("ci.yml")
 
     for requirement in (
+        "abi3audit==0.0.26",
         "actionlint-py==1.7.12.24",
         "bandit==1.9.4",
         "build==1.5.0",
@@ -312,6 +313,26 @@ def test_dependency_audit_includes_pinned_ci_executables() -> None:
         "zizmor==1.29.0",
     ):
         assert f'"{requirement}"' in ci
+
+
+def test_wheel_build_runs_the_stable_abi_audit_explicitly() -> None:
+    """The ABI gate stays strict without cibuildwheel's hidden venv download."""
+    ci = _workflow("ci.yml")
+    platform_job = _job_body(ci, "platform-wheels")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    cibuildwheel = pyproject["tool"]["cibuildwheel"]
+    install = next(step for step in _step_bodies(ci) if "name: Install wheel tooling" in step)
+    audit = next(step for step in _step_bodies(ci) if "name: Audit the CPython stable ABI" in step)
+
+    assert cibuildwheel["audit-command"] == ""
+    assert "abi3audit==0.0.26 cibuildwheel==4.2.0 pytest" in install
+    assert "shell: bash" in audit
+    assert "python -m abi3audit --strict --report wheelhouse/*.whl" in audit
+    assert (
+        platform_job.index("python -m cibuildwheel")
+        < platform_job.index("python -m abi3audit")
+        < platform_job.index("name: Install the built wheel")
+    )
 
 
 def test_validation_has_six_job_owners_and_one_stable_gate() -> None:

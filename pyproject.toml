@@ -104,6 +104,9 @@ Changelog = "https://github.com/bgallan/schema-sanitizer/releases"
 Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 
 [tool.cibuildwheel]
+# CI runs the same strict ABI audit explicitly after wheel output so a cold
+# runner does not need cibuildwheel's auxiliary virtualenv.pyz download.
+audit-command = ""
 build = "cp311-*"
 build-verbosity = 1
 test-requires = ["pyarrow"]
