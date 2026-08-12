@@ -17,7 +17,6 @@ def test_orphaned_prepared_capsule_can_die_and_arm_separate_root() -> None:
     from schema_sanitizer.core_impl import finalizer_cleanup as module
 
     escrow = module._PREPARED_FINALIZER_ESCROW
-    baseline = escrow.active_count()
     calls: list[int] = []
 
     capsule = module.reserve_finalizer_cleanup(lambda _owner: calls.append(1))
@@ -27,14 +26,41 @@ def test_orphaned_prepared_capsule_can_die_and_arm_separate_root() -> None:
     assert escrow._slots[slot] is authority
     assert escrow._slots[slot] is not capsule
 
-    del capsule
-    gc.collect()
+    # Hold this generation's slot while the wrapper disappears.  The finalizer
+    # handoff must arm the separately rooted authority without blocking, even
+    # though it cannot publish the slot immediately.  A global active-count
+    # delta is not an ownership invariant: this GC may retire unrelated owners
+    # left by earlier tests while it arms this exact generation.
+    with escrow._slot_locks[slot]:
+        del capsule
+        gc.collect()
+        assert authority.is_armed_for(ticket)
+        assert escrow._ticket_slots[ticket] == slot
+        assert escrow._tickets[slot] == ticket
+        assert escrow._slots[slot] is authority
 
-    assert authority._escrow_armed is True
-    assert escrow.active_count() == baseline + 1
-    assert module.drain_finalizer_cleanup() >= 1
+    deadline = time.monotonic() + 1.0
+    while (
+        ticket in escrow._ticket_slots
+        or authority.is_armed_for(ticket)
+        or authority.ticket == ticket
+    ):
+        module.drain_finalizer_cleanup()
+        if (
+            ticket not in escrow._ticket_slots
+            and not authority.is_armed_for(ticket)
+            and authority.ticket == 0
+        ):
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("exact prepared finalizer generation was not retired")
+        time.sleep(0)
+
     assert calls == [1]
-    assert escrow.active_count() <= baseline
+    assert ticket not in escrow._ticket_slots
+    assert not authority.is_armed_for(ticket)
+    assert authority.ticket == 0
+    assert escrow._slots[slot] is not authority
 
 
 def test_cancel_release_exception_is_irreversibly_ack_only(

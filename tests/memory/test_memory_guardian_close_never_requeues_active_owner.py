@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -128,24 +129,37 @@ def test_level_triggered_availability_closes_release_before_register_gap(
 ) -> None:
     from schema_sanitizer.core_impl import process_resources as module
 
-    notifier = module._AvailabilityNotifier()
-    local_threads = module._Governor(
-        1, "guardian-close-never-requeues-active-owner-level-notifier-thread"
-    )
-    monkeypatch.setattr(module, "_AVAILABILITY_NOTIFIER", notifier)
-    monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", local_threads)
-    observed = threading.Event()
     governor = module._Governor(
         1,
         "guardian-close-never-requeues-active-owner-level",
         level_triggered_availability=True,
-        availability_dispatcher=lambda _event: observed.set(),
+        availability_dispatcher=lambda _event: None,
     )
+    notifier = module._AVAILABILITY_NOTIFIER
+    real_publish = notifier.publish
+    published: list[Any] = []
+
+    def capture_target_and_forward_others(deliveries: tuple[Any, ...]) -> tuple[Any, ...]:
+        target = tuple(delivery for delivery in deliveries if delivery.governor is governor)
+        others = tuple(delivery for delivery in deliveries if delivery.governor is not governor)
+        published.extend(target)
+        return real_publish(others) if others else ()
+
+    # Existing process services may publish concurrently.  Route their work to
+    # the real notifier while accepting only this governor's canonical delivery
+    # synchronously; replacing the module-global notifier would let unrelated
+    # owners contaminate this unit test's queue and shutdown result.
+    monkeypatch.setattr(notifier, "publish", capture_target_and_forward_others)
+
     lease = governor.acquire(1, timeout_seconds=0)
     lease.release()
-    assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
-    assert observed.wait(1)
-    assert notifier.close(deadline_seconds=1.0)
+    event = module.AvailabilityEvent.RETRY_SCHEDULER
+    assert governor.register_availability_event(event)
+    delivery = governor._availability_events[event]
+    assert published == [delivery]
+    assert delivery.governor is governor
+    assert delivery.event is event
+    governor.unregister_availability_event(event)
 
 
 def test_notifier_rearm_during_execution_is_not_lost(
