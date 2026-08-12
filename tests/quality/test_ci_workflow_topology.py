@@ -213,8 +213,34 @@ def test_action_pins_have_automated_review_and_semantic_security_gates() -> None
         precommit,
         re.MULTILINE,
     )
-    assert len(remote_hooks) == 6
+    assert len(remote_hooks) == 5
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in remote_hooks)
+
+
+def test_shfmt_uses_an_isolated_prebuilt_wheel_without_a_remote_build_hook() -> None:
+    """A cold pre-commit run must not depend on a system shfmt executable."""
+    precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    install_step = next(
+        step
+        for step in _step_bodies(_workflow("ci.yml"))
+        if "name: Install development and audit tools" in step
+    )
+
+    assert "shfmt-py==4.0.0" not in pyproject["project"]["optional-dependencies"]["dev"]
+    assert "--only-binary=shfmt-py" not in install_step
+    assert "github.com/scop/pre-commit-shfmt" not in precommit
+    assert re.search(
+        r"^      - id: shfmt\n"
+        r"        name: shfmt\n"
+        r"        entry: shfmt\n"
+        r"        language: python\n"
+        r"        additional_dependencies: \[shfmt-py==4\.0\.0\]\n"
+        r"        files: \\.sh\$\n"
+        r"        args: \[-w, -i, '2', -ci\]$",
+        precommit,
+        re.MULTILINE,
+    )
 
 
 def test_ci_shell_entry_points_are_executable() -> None:
@@ -417,11 +443,13 @@ def test_native_launcher_arguments_preserve_shell_word_boundaries() -> None:
     """Compiler/linker flags and interpreter paths remain arrays or quoted scalars."""
     ci = _workflow("ci.yml")
 
+    assert ci.count('read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"') == 2
     assert (
-        ci.count('read -r -a python_embed_flags <<< "$(python3-config --embed --cflags --ldflags)"')
-        == 2
+        ci.count('read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"') == 2
     )
-    assert ci.count('"${python_embed_flags[@]}"') == 2
+    assert ci.count('"${python_embed_cflags[@]}"') == 2
+    assert ci.count('"${python_embed_ldflags[@]}"') == 2
+    assert "python3-config --embed --cflags --ldflags" not in ci
     assert '-DPython3_EXECUTABLE="$(command -v python)"' in ci
     assert "$(which python)" not in ci
 

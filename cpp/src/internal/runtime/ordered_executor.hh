@@ -41,8 +41,9 @@ KnownRetainedByteValue(const Value &value) noexcept {
       }
     }
     return static_cast<std::size_t>(value);
+  } else {
+    return 0U;
   }
-  return 0U;
 }
 
 template <class Value>

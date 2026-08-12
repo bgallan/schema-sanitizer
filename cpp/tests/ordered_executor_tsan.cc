@@ -43,6 +43,14 @@ concept ConstantMemoryBudget = requires {
 
 static_assert(ConstantMemoryBudget<256LL * 1024LL * 1024LL>);
 static_assert(!ConstantMemoryBudget<-1>);
+static_assert(sanitize::internal::KnownRetainedByteValue(std::int64_t{-1}) ==
+              0U);
+static_assert(sanitize::internal::KnownRetainedByteValue(std::int64_t{7}) ==
+              7U);
+static_assert(sanitize::internal::KnownRetainedByteValue(std::uint64_t{7}) ==
+              7U);
+static_assert(sanitize::internal::KnownRetainedByteValue(true) == 0U);
+static_assert(sanitize::internal::KnownRetainedByteValue(7.0) == 0U);
 
 class ProbeWatchdog final {
 public:

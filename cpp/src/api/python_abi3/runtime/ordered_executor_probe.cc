@@ -1223,9 +1223,11 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
                                     stage_runnable_width),
               static_cast<std::size_t>(
                   sanitize::internal::process_cpu_governor().capacity())));
-  const auto make_worker = [state, expected_peak](bool is_output) {
-    return [state, expected_peak, is_output](std::uint64_t &&value, std::size_t,
-                                             sanitize::internal::StopToken stop)
+  const bool release_inline = requested_workers == 1;
+  const auto make_worker = [state, release_inline](bool is_output) {
+    return [state, release_inline,
+            is_output](std::uint64_t &&value, std::size_t,
+                       sanitize::internal::StopToken stop)
                -> sanitize::Result<std::uint64_t> {
       {
         std::lock_guard lock(state->mutex);
@@ -1240,7 +1242,11 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
                                                 std::memory_order_relaxed,
                                                 std::memory_order_relaxed)) {
       }
-      if (active == expected_peak) {
+      // A one-worker arena executes inline during Submit(), so no coordinator
+      // frame is available to open the probe barrier. Wider arenas always use
+      // governed worker threads and keep the barrier closed until submission
+      // has populated every stage-eligible physical slot.
+      if (release_inline) {
         state->release.store(true, std::memory_order_release);
         state->release.notify_all();
       }
@@ -1299,6 +1305,12 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
   }
   const auto startup_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  // Keep the admitted callbacks blocked until both stages have submitted all
+  // work. Releasing from the callback that first reaches the CPU limit lets a
+  // small, fast cohort drain queues before the remaining stage-eligible workers
+  // are started. Once every eligible slot has work, FIFO CPU admission rotates
+  // the bounded runnable credits through that complete set without exceeding
+  // expected_peak.
   while (state->peak.load(std::memory_order_acquire) < expected_peak &&
          std::chrono::steady_clock::now() < startup_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));

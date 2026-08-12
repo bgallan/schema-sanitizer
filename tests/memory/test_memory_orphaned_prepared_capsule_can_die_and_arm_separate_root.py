@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import gc
+import time
 from pathlib import Path
 
 import pytest
@@ -146,7 +147,6 @@ def test_control_plane_deferred_drain_reconciles_dirty_authoritative_counters() 
 def test_path_claim_escrow_roots_authority_not_destructed_owner() -> None:
     import schema_sanitizer.core_impl.path_identity as module
 
-    baseline = module._PATH_CLAIM_FINALIZER_ESCROW.active_count()
     owner = module.PathClaimOwner(None, None, None)
     ticket = owner.finalizer_ticket
     authority = owner.finalizer_owner
@@ -155,11 +155,38 @@ def test_path_claim_escrow_roots_authority_not_destructed_owner() -> None:
     assert module._PATH_CLAIM_FINALIZER_ESCROW._slots[slot] is authority
     assert module._PATH_CLAIM_FINALIZER_ESCROW._slots[slot] is not owner
 
-    del owner
-    gc.collect()
-    assert authority._escrow_armed is True
-    assert module._drain_path_claim_finalizers(limit=8) >= 1
-    assert module._PATH_CLAIM_FINALIZER_ESCROW.active_count() <= baseline
+    # Hold the exact generation's slot while the wrapper disappears.  The
+    # finalizer handoff is non-blocking and must durably arm the already-rooted
+    # authority even when it cannot publish the slot immediately.  Without
+    # this lock, the global safe-point consumer may legitimately retire the
+    # authority before the assertion observes the intermediate armed state.
+    with module._PATH_CLAIM_FINALIZER_ESCROW._slot_locks[slot]:
+        del owner
+        gc.collect()
+        assert authority.is_armed_for(ticket)
+        assert module._PATH_CLAIM_FINALIZER_ESCROW._tickets[slot] == ticket
+        assert module._PATH_CLAIM_FINALIZER_ESCROW._slots[slot] is authority
+
+    deadline = time.monotonic() + 1.0
+    while (
+        ticket in module._PATH_CLAIM_FINALIZER_ESCROW._ticket_slots
+        or authority.is_armed_for(ticket)
+        or authority.ticket == ticket
+    ):
+        module._drain_path_claim_finalizers(limit=8)
+        if (
+            ticket not in module._PATH_CLAIM_FINALIZER_ESCROW._ticket_slots
+            and not authority.is_armed_for(ticket)
+            and authority.ticket == 0
+        ):
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("exact path-claim finalizer generation was not retired")
+        time.sleep(0)
+    assert not authority.is_armed_for(ticket)
+    assert ticket not in module._PATH_CLAIM_FINALIZER_ESCROW._ticket_slots
+    assert authority.ticket == 0
+    assert module._PATH_CLAIM_FINALIZER_ESCROW._slots[slot] is not authority
 
 
 def test_direct_cross_memory_escrow_roots_authority_not_lease(

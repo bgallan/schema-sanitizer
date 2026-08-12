@@ -48,8 +48,8 @@ def test_dynamic_worker_bitmaps_schedule_above_32_without_a_hard_cap() -> None:
 
         assert arena_workers == workers
         # Physical arena width remains separate from dynamic runnable CPU
-        # credit. A constrained cgroup may legitimately cap simultaneous work
-        # well below 16 while all wide physical lanes still participate.
+        # credit. A constrained runner may cap simultaneous work while FIFO
+        # admission still rotates that credit through every wide bitmap slot.
         assert 1 <= peak <= workers
         assert total_threads == workers
         assert 16 < upstream_threads <= workers

@@ -540,12 +540,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          read -r -a python_embed_flags <<< "$(python3-config --embed --cflags --ldflags)"
+          read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
+          read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
           clang++ -std=c++17 -fsanitize=address,undefined \
             -fno-omit-frame-pointer -fno-sanitize-recover=all \
+            "${python_embed_cflags[@]}" \
             meta/ci/sanitizers/asan_python_launcher.cc \
-            "${python_embed_flags[@]}" \
-            -o python-asan
+            -o python-asan \
+            "${python_embed_ldflags[@]}"
       - name: Exercise malformed input, lifecycle, and nested Parquet
         if: matrix.mode == 'linux-full'
         run: >-
@@ -678,12 +680,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          read -r -a python_embed_flags <<< "$(python3-config --embed --cflags --ldflags)"
+          read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
+          read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
           g++-14 -std=c++17 -fsanitize=thread \
             -fno-omit-frame-pointer \
+            "${python_embed_cflags[@]}" \
             meta/ci/sanitizers/tsan_python_launcher.cc \
-            "${python_embed_flags[@]}" \
-            -o python-tsan
+            -o python-tsan \
+            "${python_embed_ldflags[@]}"
       - name: Run the executor and all full-extension TSan domains
         run: >-
           meta/ci/sanitizers/run_tsan_extension_suite.sh

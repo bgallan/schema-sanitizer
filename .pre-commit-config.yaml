@@ -62,16 +62,17 @@ repos:
     hooks:
       - id: shellcheck
         files: \.sh$
-  - repo: https://github.com/scop/pre-commit-shfmt
-    rev: 05c1426671b9237fb5e1444dd63aa5731bec0dfb  # v3.13.1-1
-    hooks:
-      - id: shfmt
-        files: \.sh$
-        args: [-w, -i, '2', -ci]
 
   # Project-local formatters not covered above.
   - repo: local
     hooks:
+      - id: shfmt
+        name: shfmt
+        entry: shfmt
+        language: python
+        additional_dependencies: [shfmt-py==4.0.0]
+        files: \.sh$
+        args: [-w, -i, '2', -ci]
       - id: actionlint
         name: GitHub Actions semantics
         entry: actionlint
