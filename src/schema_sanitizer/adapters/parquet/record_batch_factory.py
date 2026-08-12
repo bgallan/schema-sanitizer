@@ -1009,6 +1009,8 @@ def _cleanup_parquet_factory_capsule(capsule: PreparedFinalizerCleanup) -> None:
 class ParquetRecordBatchStreamFactory:
     """Reusable PyArrow RecordBatchReader factory for direct native ingestion."""
 
+    schema: Any
+
     def __init__(
         self,
         data: Any,
@@ -1145,6 +1147,11 @@ class ParquetRecordBatchStreamFactory:
             record_batch_reader_from_iterable=record_batch_reader_from_iterable,
             logger=_LOGGER,
         )
+
+    def __arrow_c_schema__(self) -> Any:
+        """Export the cached schema without opening a data-bearing stream."""
+        self._ensure_owner_process()
+        return self.schema.__arrow_c_schema__()
 
     def _ensure_owner_process(self) -> None:
         """Reject use of PyArrow/native state inherited by a forked child."""

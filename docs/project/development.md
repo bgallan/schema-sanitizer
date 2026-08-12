@@ -32,6 +32,11 @@ pytest -q
 pre-commit run --all-files
 ```
 
+The ShellCheck and shfmt hooks install their exact wrapper-wheel dependencies
+inside pre-commit environments; do not require separate system executables or
+duplicate those packages in the `dev` extra. After changing either pin, use a
+fresh `PRE_COMMIT_HOME` to verify that a cold hook bootstrap succeeds.
+
 Tests are grouped by domain under [`tests/`](../../tests/README.md):
 
 ```bash

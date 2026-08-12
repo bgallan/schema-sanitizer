@@ -203,6 +203,13 @@ update arrives as a reviewable commit-pin change. Review upstream release notes
 and the pin diff before merging; update pre-commit hook pins deliberately, and
 never replace a full SHA with a mutable branch or tag.
 
+ShellCheck and shfmt are local pre-commit hooks with exact `shellcheck-py` and
+`shfmt-py` dependency pins. Their supported-platform wheels contain the
+executables, so a clean quality runner neither depends on a system installation
+nor builds a wrapper that downloads a second binary from release hosting. The
+dependency-audit input lists both wrapper packages explicitly even though
+pre-commit installs them in isolated environments.
+
 PyPI publication uses
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) instead of a
 stored API token. The publisher action obtains a short-lived GitHub OIDC
@@ -333,6 +340,13 @@ python -m pip install -U pip '.[dev]' \
   coverage pip-audit bandit detect-secrets tomli
 pre-commit run --all-files
 pytest -q
+```
+
+When changing either shell-tool pin, also prove that its isolated environment
+can bootstrap without a warm pre-commit cache:
+
+```bash
+PRE_COMMIT_HOME="$(mktemp -d)" pre-commit run --all-files
 ```
 
 A local full-suite branch report can check the same regression floor:

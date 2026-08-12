@@ -208,17 +208,24 @@ def test_action_pins_have_automated_review_and_semantic_security_gates() -> None
     assert "id: zizmor" in precommit
     assert "zizmor==1.29.0" in precommit
 
-    remote_hooks = re.findall(
-        r"^  - repo: https://[^\n]+\n    rev: ([^\s#]+)",
-        precommit,
-        re.MULTILINE,
+    remote_hooks = dict(
+        re.findall(
+            r"^  - repo: (https://[^\n]+)\n    rev: ([^\s#]+)",
+            precommit,
+            re.MULTILINE,
+        )
     )
-    assert len(remote_hooks) == 5
-    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in remote_hooks)
+    assert set(remote_hooks) == {
+        "https://github.com/pre-commit/pre-commit-hooks",
+        "https://github.com/pre-commit/mirrors-clang-format",
+        "https://github.com/astral-sh/ruff-pre-commit",
+        "https://github.com/executablebooks/mdformat",
+    }
+    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in remote_hooks.values())
 
 
-def test_shfmt_uses_an_isolated_prebuilt_wheel_without_a_remote_build_hook() -> None:
-    """A cold pre-commit run must not depend on a system shfmt executable."""
+def test_shell_tools_use_isolated_prebuilt_wheels_without_remote_build_hooks() -> None:
+    """Cold shell checks must not require system tools or release-asset downloads."""
     precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     install_step = next(
@@ -227,9 +234,22 @@ def test_shfmt_uses_an_isolated_prebuilt_wheel_without_a_remote_build_hook() -> 
         if "name: Install development and audit tools" in step
     )
 
-    assert "shfmt-py==4.0.0" not in pyproject["project"]["optional-dependencies"]["dev"]
-    assert "--only-binary=shfmt-py" not in install_step
+    for requirement in ("shellcheck-py==0.11.0.1", "shfmt-py==4.0.0"):
+        assert requirement not in pyproject["project"]["optional-dependencies"]["dev"]
+        assert f"--only-binary={requirement.split('==', 1)[0]}" not in install_step
+
+    assert "github.com/shellcheck-py/shellcheck-py" not in precommit
     assert "github.com/scop/pre-commit-shfmt" not in precommit
+    assert re.search(
+        r"^      - id: shellcheck\n"
+        r"        name: shellcheck\n"
+        r"        entry: shellcheck\n"
+        r"        language: python\n"
+        r"        additional_dependencies: \[shellcheck-py==0\.11\.0\.1\]\n"
+        r"        files: \\.sh\$$",
+        precommit,
+        re.MULTILINE,
+    )
     assert re.search(
         r"^      - id: shfmt\n"
         r"        name: shfmt\n"
@@ -284,6 +304,8 @@ def test_dependency_audit_includes_pinned_ci_executables() -> None:
         "mypy==1.19.1",
         "packaging==26.3",
         "pip-audit==2.10.1",
+        "shellcheck-py==0.11.0.1",
+        "shfmt-py==4.0.0",
         "toml-sort==0.24.3",
         "twine==7.0.0",
         "yamlfix==1.18.0",

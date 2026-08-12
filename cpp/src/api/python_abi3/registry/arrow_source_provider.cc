@@ -15,6 +15,7 @@
 
 #include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
+#include "api/python_abi3/arrow_direct/schema/logical.hh"
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
@@ -164,6 +165,28 @@ bool parse_arrow_sources(PyObject *sources_obj,
 sanitize::Result<sanitize::LogicalSchema>
 arrow_source_logical_schema(PyObject *stream_obj,
                             const sanitize::PreparedOptionsPtr &prepared) {
+  const int has_schema_protocol =
+      PyObject_HasAttrString(stream_obj, "__arrow_c_schema__");
+  if (has_schema_protocol < 0) {
+    return python_arrow_provider_error_status(
+        "Arrow-source schema protocol lookup failed");
+  }
+  if (has_schema_protocol != 0) {
+    PyObject *capsule = nullptr;
+    ArrowSchema *schema = nullptr;
+    if (!acquire_arrow_schema(stream_obj, &capsule, &schema)) {
+      return python_arrow_provider_error_status(
+          "Arrow-source schema export failed");
+    }
+    std::unique_ptr<PyObject, decltype(&decref_with_gil)> capsule_owner(
+        capsule, decref_with_gil);
+    std::vector<ArrowInputNode> fields;
+    return logical_schema_from_arrow_schema(
+        schema, &fields,
+        ArrowDirectOptions{
+            .timestamp_precision = prepared->spec.timestamp_precision,
+            .memory_limit_bytes = prepared->spec.memory_limit_bytes});
+  }
   sanitize::LogicalSchema input_schema;
   auto frontend_r = make_arrow_frontend(
       stream_obj, &input_schema,

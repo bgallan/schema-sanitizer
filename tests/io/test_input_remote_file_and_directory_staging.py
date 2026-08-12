@@ -261,6 +261,73 @@ def test_remote_parquet_single_file_public_reader_uses_staged_arrow_path(
     ]
 
 
+def test_remote_parquet_schema_probe_retires_readers_before_staged_cleanup(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A schema-only probe must not defer PyArrow handles past staged cleanup."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from schema_sanitizer.adapters.parquet import record_batch_factory
+    from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
+    from schema_sanitizer.remote_impl import staging as remote_staging
+    from schema_sanitizer.remote_impl.staging import StagedPath
+
+    require_native()
+    staged_file = tmp_path / "probe-events.parquet"
+    pq.write_table(pa.table({"id": [1, 2]}), staged_file)
+    deferred_stream_owners: list[tuple[object, ...]] = []
+    original_defer = record_batch_factory.defer_prepared_finalizer_cleanup
+
+    def record_deferred_stream_owner(capsule) -> bool:
+        """Record only Parquet stream graphs handed to the finalizer escrow."""
+        if capsule.callback is record_batch_factory._cleanup_parquet_stream_owner_capsule:
+            deferred_stream_owners.append(tuple(capsule.arg0 or ()))
+        return original_defer(capsule)
+
+    class OrderedStagedPath(StagedPath):
+        """Assert external readers retire before the staging owner is closed."""
+
+        def close(self) -> None:
+            assert deferred_stream_owners == []
+            super().close()
+
+    def fake_stage_remote_single_file(
+        uri, *, memory_limit_bytes, threading_mode="single", operation_context=None
+    ):
+        """Return one PyArrow-written staged file that requires fallback decoding."""
+        assert uri == "s3://bucket/probe-events.parquet"
+        assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
+        return OrderedStagedPath(str(staged_file))
+
+    monkeypatch.setattr(
+        record_batch_factory,
+        "defer_prepared_finalizer_cleanup",
+        record_deferred_stream_owner,
+    )
+    monkeypatch.setattr(
+        remote_staging,
+        "stage_remote_single_file",
+        fake_stage_remote_single_file,
+    )
+    try:
+        result = ss.to_pyarrow(
+            "s3://bucket/probe-events.parquet",
+            input_format="parquet",
+        )
+    finally:
+        # Keeps this regression hermetic when run against an older extension:
+        # any captured owner remains authoritative until a governed safe point.
+        drain_finalizer_cleanup()
+
+    assert [{"id": row["id"]} for row in result.clean_data.to_pylist()] == [
+        {"id": 1},
+        {"id": 2},
+    ]
+    assert deferred_stream_owners == []
+    assert not staged_file.exists()
+
+
 def test_remote_parquet_single_file_writer_uses_staged_arrow_path(
     monkeypatch,
     tmp_path,
