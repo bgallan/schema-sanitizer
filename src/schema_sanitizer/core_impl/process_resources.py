@@ -2031,6 +2031,7 @@ _NOTIFIER_THREAD_GOVERNOR = _Governor(1, "availability_notifier_threads")
 _AVAILABILITY_NOTIFIER = _AvailabilityNotifier(reserve_thread_slot=True)
 
 
+_DEFAULT_MAX_PROJECT_THREADS = 256
 _ABSOLUTE_MAX_PROJECT_THREADS = 512
 _ABSOLUTE_MAX_OPEN_FILES = 16_384
 _CONSERVATIVE_THREAD_STACK_BYTES = 8 * 1024 * 1024
@@ -2175,7 +2176,13 @@ def _process_physical_thread_count() -> int | None:
 
 
 def _thread_requested_capacity() -> int:
-    default = min(256, max(8, (os.cpu_count() or 1) * 4))
+    # This is the process-wide envelope, not a worker-count recommendation.
+    # CPU-sized executors select their own widths, while the live hard-cap
+    # calculation below accounts for native/provider threads already present
+    # in the process.  A CPU-scaled envelope would therefore count the same
+    # constraint twice and can collapse to zero after importing a runtime with
+    # a persistent pool (Arrow, Polars, DuckDB, ...).
+    default = _DEFAULT_MAX_PROJECT_THREADS
     configured = os.getenv("SCHEMA_SANITIZER_MAX_PROJECT_THREADS")
     if configured:
         try:

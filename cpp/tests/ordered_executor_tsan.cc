@@ -2,6 +2,7 @@
 
 #include "internal/memory/memory_budget.hh"
 #include "internal/memory/memory_pool.hh"
+#include "internal/runtime/cpu_capacity.hh"
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/process_fd_governor.hh"
 #include "internal/runtime/ordered_executor.hh"
@@ -224,7 +225,19 @@ bool run_earliest_failure_round() {
 }
 
 bool run_shared_operation_arena_round() {
-  auto arena_result = sanitize::internal::OperationTaskArena::Make(8);
+  constexpr std::size_t max_worker_count = 8U;
+  const auto detected_capacity = sanitize::internal::available_cpu_capacity();
+  if (detected_capacity < 2) {
+    std::cerr << "sanitizer probe skipped: case=shared_arena reason=requires "
+                 "at least two CPU credits\n";
+    return true;
+  }
+  const auto worker_count = std::min<std::size_t>(
+      max_worker_count, static_cast<std::size_t>(detected_capacity));
+  const auto upstream_width = worker_count / 2U;
+  const auto output_width = worker_count - upstream_width;
+  auto arena_result =
+      sanitize::internal::OperationTaskArena::Make(worker_count);
   if (!arena_result.ok()) {
     return false;
   }
@@ -243,27 +256,35 @@ bool run_shared_operation_arena_round() {
   };
 
   auto upstream_result = Executor::Make(
-      4, 8, 8, worker, arena, sanitize::internal::TaskArenaLane::kUpstream);
-  auto output_result = Executor::Make(
-      4, 8, 8, worker, arena, sanitize::internal::TaskArenaLane::kOutput);
+      upstream_width, upstream_width * 2U, upstream_width * 2U, worker, arena,
+      sanitize::internal::TaskArenaLane::kUpstream);
+  auto output_result =
+      Executor::Make(output_width, output_width * 2U, output_width * 2U, worker,
+                     arena, sanitize::internal::TaskArenaLane::kOutput);
   if (!upstream_result.ok() || !output_result.ok()) {
     return false;
   }
   auto upstream = std::move(upstream_result).ValueOrDie();
   auto output = std::move(output_result).ValueOrDie();
-  for (std::uint64_t ordinal = 0; ordinal < 4U; ++ordinal) {
+  for (std::size_t ordinal = 0; ordinal < upstream_width; ++ordinal) {
     if (!upstream->Submit({ordinal, ordinal}).ok() ||
         !output->Submit({ordinal, ordinal + 100U}).ok()) {
       return false;
     }
   }
+  for (std::size_t ordinal = upstream_width; ordinal < output_width;
+       ++ordinal) {
+    if (!output->Submit({ordinal, ordinal + 100U}).ok()) {
+      return false;
+    }
+  }
   const auto startup_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (started.load(std::memory_order_acquire) < 8U &&
+  while (started.load(std::memory_order_acquire) < worker_count &&
          std::chrono::steady_clock::now() < startup_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
-  if (started.load(std::memory_order_acquire) < 8U) {
+  if (started.load(std::memory_order_acquire) < worker_count) {
     std::cerr << "shared arena startup timed out: started="
               << started.load(std::memory_order_acquire) << '\n';
     release_gate(&release);
@@ -275,7 +296,7 @@ bool run_shared_operation_arena_round() {
   if (!upstream->FinishSubmission().ok() || !output->FinishSubmission().ok()) {
     return false;
   }
-  for (std::uint64_t ordinal = 0; ordinal < 4U; ++ordinal) {
+  for (std::size_t ordinal = 0; ordinal < upstream_width; ++ordinal) {
     auto upstream_next = upstream->TakeNext();
     auto output_next = output->TakeNext();
     if (!upstream_next.ok() || !output_next.ok()) {
@@ -289,11 +310,22 @@ bool run_shared_operation_arena_round() {
       return false;
     }
   }
+  for (std::size_t ordinal = upstream_width; ordinal < output_width;
+       ++ordinal) {
+    auto output_next = output->TakeNext();
+    if (!output_next.ok()) {
+      return false;
+    }
+    auto output_outcome = std::move(output_next).ValueOrDie();
+    if (!output_outcome.result.ok() || output_outcome.ordinal != ordinal) {
+      return false;
+    }
+  }
   upstream.reset();
   output.reset();
-  const bool valid = arena->worker_count() == 8U &&
-                     arena->peak_active_tasks() == 8U &&
-                     arena->submitted_tasks() == 8U;
+  const bool valid = arena->worker_count() == worker_count &&
+                     arena->peak_active_tasks() == worker_count &&
+                     arena->submitted_tasks() == worker_count;
   arena->Shutdown();
   return valid;
 }
@@ -301,8 +333,16 @@ bool run_shared_operation_arena_round() {
 #include "ordered_executor_tsan_completion.cc.inc"
 
 bool run_backlog_driven_admission_round() {
-  constexpr std::size_t worker_count = 8U;
+  constexpr std::size_t max_worker_count = 8U;
   constexpr std::size_t sequential_tasks = 32U;
+  const auto detected_capacity = sanitize::internal::available_cpu_capacity();
+  if (detected_capacity < 2) {
+    std::cerr << "sanitizer probe skipped: case=backlog_admission "
+                 "reason=requires at least two CPU credits\n";
+    return true;
+  }
+  const auto worker_count = std::min<std::size_t>(
+      max_worker_count, static_cast<std::size_t>(detected_capacity));
   auto arena_result =
       sanitize::internal::OperationTaskArena::Make(worker_count);
   if (!arena_result.ok()) {
@@ -393,14 +433,22 @@ bool run_backlog_driven_admission_round() {
 }
 
 bool run_lane_work_stealing_round() {
-  constexpr std::size_t worker_count = 4U;
+  constexpr std::size_t max_worker_count = 4U;
+  const auto detected_capacity = sanitize::internal::available_cpu_capacity();
+  if (detected_capacity < 2) {
+    std::cerr << "sanitizer probe skipped: case=lane_stealing reason=requires "
+                 "at least two CPU credits\n";
+    return true;
+  }
+  const auto worker_count = std::min<std::size_t>(
+      max_worker_count, static_cast<std::size_t>(detected_capacity));
   auto arena_result =
       sanitize::internal::OperationTaskArena::Make(worker_count);
   if (!arena_result.ok()) {
     return false;
   }
   auto arena = std::move(arena_result).ValueOrDie();
-  std::array<std::atomic<bool>, worker_count> release{};
+  std::array<std::atomic<bool>, max_worker_count> release{};
   std::atomic<std::size_t> entered{0};
   std::atomic<std::size_t> completed{0};
   std::atomic<bool> ownership_ok{true};
@@ -436,8 +484,8 @@ bool run_lane_work_stealing_round() {
               << entered.load(std::memory_order_acquire)
               << " ownership=" << ownership_ok.load(std::memory_order_acquire)
               << '\n';
-    for (auto &gate : release) {
-      release_gate(&gate);
+    for (std::size_t index = 0; index < worker_count; ++index) {
+      release_gate(&release[index]);
     }
     return false;
   }
@@ -452,8 +500,8 @@ bool run_lane_work_stealing_round() {
       },
       worker_count, sanitize::internal::TaskArenaLane::kAll);
   if (!displaced_status.ok()) {
-    for (auto &gate : release) {
-      release_gate(&gate);
+    for (std::size_t index = 0; index < worker_count; ++index) {
+      release_gate(&release[index]);
     }
     return false;
   }

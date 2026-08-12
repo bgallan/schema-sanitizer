@@ -400,9 +400,30 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
     assert "std::from_chars" in probe
     assert 'argc == 3 && std::string_view(argv[1]) == "--case"' in probe
     assert "shared arena startup timed out" in probe
+    assert "available_cpu_capacity()" in probe
+    assert "const auto upstream_width = worker_count / 2U" in probe
+    assert "const auto output_width = worker_count - upstream_width" in probe
+    assert "arena->peak_active_tasks() == worker_count" in probe
+    assert "sanitizer probe skipped: case=shared_arena reason=requires" in probe
+    assert "sanitizer probe skipped: case=backlog_admission" in probe
+    assert "sanitizer probe skipped: case=lane_stealing reason=requires" in probe
+    assert probe.count("return true;", probe.index("run_shared_operation_arena_round")) >= 3
     assert "stage cancellation startup timed out" in probe
     assert "cancellation startup timed out" in probe
     assert "sanitizer probe watchdog expired" in probe
+
+
+def test_native_launcher_arguments_preserve_shell_word_boundaries() -> None:
+    """Compiler/linker flags and interpreter paths remain arrays or quoted scalars."""
+    ci = _workflow("ci.yml")
+
+    assert (
+        ci.count('read -r -a python_embed_flags <<< "$(python3-config --embed --cflags --ldflags)"')
+        == 2
+    )
+    assert ci.count('"${python_embed_flags[@]}"') == 2
+    assert '-DPython3_EXECUTABLE="$(command -v python)"' in ci
+    assert "$(which python)" not in ci
 
 
 def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> None:

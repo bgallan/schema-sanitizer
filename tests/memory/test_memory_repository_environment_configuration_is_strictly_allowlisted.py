@@ -71,6 +71,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "tests/memory/test_memory_rejected_retry_replacement_keeps_previous_owner.py",
         "tests/memory/test_memory_external_admission_closes_before_internal_teardown_reserve.py",
         "tests/memory/test_memory_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure.py",
+        "tests/memory/test_memory_resident_zero_is_authoritative_on_public_acquire.py",
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }

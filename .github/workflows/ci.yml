@@ -537,12 +537,15 @@ jobs:
           .
       - name: Build the Linux sanitizer-first CPython launcher
         if: matrix.mode == 'linux-full'
-        run: >-
-          clang++ -std=c++17 -fsanitize=address,undefined
-          -fno-omit-frame-pointer -fno-sanitize-recover=all
-          meta/ci/sanitizers/asan_python_launcher.cc
-          $(python3-config --embed --cflags --ldflags)
-          -o python-asan
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a python_embed_flags <<< "$(python3-config --embed --cflags --ldflags)"
+          clang++ -std=c++17 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -fno-sanitize-recover=all \
+            meta/ci/sanitizers/asan_python_launcher.cc \
+            "${python_embed_flags[@]}" \
+            -o python-asan
       - name: Exercise malformed input, lifecycle, and nested Parquet
         if: matrix.mode == 'linux-full'
         run: >-
@@ -655,7 +658,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER=gcc-14 \
             -DCMAKE_CXX_COMPILER=g++-14 \
-            -DPython3_EXECUTABLE=$(which python) \
+            -DPython3_EXECUTABLE="$(command -v python)" \
             -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
             -DSCHEMA_SANITIZER_SANITIZER=tsan \
             -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
@@ -672,12 +675,15 @@ jobs:
           --seed 15172026
           --max-len 262144
       - name: Build sanitizer-first CPython launcher
-        run: >-
-          g++-14 -std=c++17 -fsanitize=thread
-          -fno-omit-frame-pointer
-          meta/ci/sanitizers/tsan_python_launcher.cc
-          $(python3-config --embed --cflags --ldflags)
-          -o python-tsan
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a python_embed_flags <<< "$(python3-config --embed --cflags --ldflags)"
+          g++-14 -std=c++17 -fsanitize=thread \
+            -fno-omit-frame-pointer \
+            meta/ci/sanitizers/tsan_python_launcher.cc \
+            "${python_embed_flags[@]}" \
+            -o python-tsan
       - name: Run the executor and all full-extension TSan domains
         run: >-
           meta/ci/sanitizers/run_tsan_extension_suite.sh

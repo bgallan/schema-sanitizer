@@ -42,7 +42,7 @@ Deployments may impose stricter process controls with environment variables:
 
 | Variable | Purpose |
 |---|---|
-| `SCHEMA_SANITIZER_MAX_PROJECT_THREADS` | Upper bound for project-owned physical threads. Live OS, cgroup, CPU, and memory headroom may reduce it further. |
+| `SCHEMA_SANITIZER_MAX_PROJECT_THREADS` | Upper bound for project-owned physical threads. Live process-thread, cgroup PID, OS, and memory headroom may reduce it further; CPU availability separately limits runnable credits. |
 | `SCHEMA_SANITIZER_MAX_OPEN_FILES` | Upper bound for governed file-descriptor reservations. OS limits and observed external descriptors may reduce it further. |
 | `SCHEMA_SANITIZER_THREAD_STACK_RESERVATION_BYTES` | Conservative per-thread stack charge used when deriving safe physical-thread capacity. |
 | `SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS=1` | Enables host-local resident-memory coordination between worker processes on supported POSIX systems. |
@@ -149,10 +149,11 @@ integrated external runtimes share a physical-thread envelope. Runnable CPU
 capacity is a separate dynamic resource: a pool may retain parked workers while
 cgroup or affinity changes reduce how many may run concurrently.
 
-Thread capacity considers configured policy, observed process threads, CPU
-availability, cgroup PID headroom, OS limits, and conservative stack memory.
-External runtime pools are charged without assuming that a configured width is
-proof of a matching resident thread identity.
+Physical-thread capacity considers configured policy, observed process threads,
+cgroup PID headroom, OS limits, and conservative stack memory. Runnable
+capacity separately considers CPU availability, affinity, and cgroup CPU
+limits. External runtime pools are charged without assuming that a configured
+width is proof of a matching resident thread identity.
 
 File-descriptor admission covers local inputs and outputs, remote sockets,
 provider sessions, temporary files, coordination journals, directory scans,

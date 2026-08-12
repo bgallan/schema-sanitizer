@@ -576,11 +576,17 @@ public:
   }
 
   void Stop() noexcept {
+    // Publish the park boundary before retiring the active streak. The normal
+    // park path owns the slot mutex, so a producer may select this idle slot
+    // but cannot publish its next packet until both transitions complete. The
+    // destructor path runs only after stop/cancellation has begun rejecting
+    // producers. Thus active_tasks()==0 cannot coexist with stale running=true
+    // and cause an unnecessary extra worker for serial work.
+    state_->slots[index_]->running.store(false, std::memory_order_release);
     if (active_) {
       SaturatingAtomicSubtract(state_->active, 1U);
       active_ = false;
     }
-    state_->slots[index_]->running.store(false, std::memory_order_release);
   }
 
 private:

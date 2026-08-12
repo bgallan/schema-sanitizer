@@ -114,10 +114,30 @@ std::mutex g_process_fd_wait_mutex;
 std::condition_variable g_process_fd_wait_cv;
 constexpr std::size_t kReaperThreadPermitCapacity = 2U;
 
+[[nodiscard]] const char *
+ReadNumericEnvironmentVariable(const char *name,
+                               std::array<char, 64> &storage) noexcept {
+#if defined(_WIN32)
+  // MSVC deprecates getenv under /W4 and turns C4996 into an error under /WX.
+  // These three settings contain only integer limits, so a fixed stack buffer
+  // is both sufficient and keeps the noexcept capacity paths allocation-free.
+  const auto length = ::GetEnvironmentVariableA(
+      name, storage.data(), static_cast<DWORD>(storage.size()));
+  return length != 0U && static_cast<std::size_t>(length) < storage.size()
+             ? storage.data()
+             : nullptr;
+#else
+  static_cast<void>(storage);
+  return std::getenv(name);
+#endif
+}
+
 [[nodiscard]] std::size_t ConfiguredProcessFdCapacity() noexcept {
   constexpr std::size_t kAbsoluteCap = 65536U;
   std::size_t capacity = 4096U;
-  const char *configured = std::getenv("SCHEMA_SANITIZER_MAX_OPEN_FILES");
+  std::array<char, 64> configured_storage{};
+  const char *configured = ReadNumericEnvironmentVariable(
+      "SCHEMA_SANITIZER_MAX_OPEN_FILES", configured_storage);
   if (configured && *configured != '\0') {
     if (*configured == '-') {
       return 0U;
@@ -250,7 +270,9 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
   // credits. Wide arenas may keep many parked workers while ProcessCpuGovernor
   // independently bounds how many execute simultaneously.
   constexpr std::size_t default_capacity = 256U;
-  const char *configured = std::getenv("SCHEMA_SANITIZER_MAX_PROJECT_THREADS");
+  std::array<char, 64> configured_storage{};
+  const char *configured = ReadNumericEnvironmentVariable(
+      "SCHEMA_SANITIZER_MAX_PROJECT_THREADS", configured_storage);
   if (!configured || *configured == '\0') {
     return default_capacity;
   }
@@ -323,8 +345,10 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
 
 [[nodiscard]] std::uint64_t ThreadStackReservationBytes() noexcept {
   constexpr std::uint64_t kDefault = 8ULL * 1024ULL * 1024ULL;
-  if (const char *configured =
-          std::getenv("SCHEMA_SANITIZER_THREAD_STACK_RESERVATION_BYTES");
+  std::array<char, 64> configured_storage{};
+  if (const char *configured = ReadNumericEnvironmentVariable(
+          "SCHEMA_SANITIZER_THREAD_STACK_RESERVATION_BYTES",
+          configured_storage);
       configured && *configured != '\0') {
     if (*configured == '-') {
       return kDefault;
@@ -887,9 +911,13 @@ ReadThreadPermitLedgerSnapshot() noexcept {
     out.external = g_process_external_runtime_thread_permits.load(
         std::memory_order_acquire);
     out.total = g_process_total_thread_permits.load(std::memory_order_acquire);
-    std::atomic_thread_fence(std::memory_order_acquire);
-    const auto epoch_after =
-        g_process_thread_ledger_mutation_epoch.load(std::memory_order_acquire);
+    // Close the optimistic snapshot with an acquire/release RMW. The release
+    // half keeps every preceding subledger load before this linearization
+    // point; the acquire half observes a writer's published epoch. A zero
+    // increment leaves the generation unchanged while remaining visible to
+    // ThreadSanitizer, whose GCC runtime cannot model a standalone fence.
+    const auto epoch_after = g_process_thread_ledger_mutation_epoch.fetch_add(
+        0U, std::memory_order_acq_rel);
     if (g_process_thread_ledger_mutations_inflight.load(
             std::memory_order_acquire) == 0U &&
         epoch_before == epoch_after &&

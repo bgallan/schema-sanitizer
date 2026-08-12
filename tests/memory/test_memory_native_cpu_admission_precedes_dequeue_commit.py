@@ -255,6 +255,22 @@ def test_thread_capacity_uses_live_memory_headroom_not_only_ceiling() -> None:
     assert "process_physical_thread_count" in source
 
 
+def test_default_thread_envelope_survives_reasonable_external_runtime_pools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import process_resources
+
+    monkeypatch.delenv("SCHEMA_SANITIZER_MAX_PROJECT_THREADS", raising=False)
+    monkeypatch.setattr(process_resources.os, "cpu_count", lambda: 3)
+    monkeypatch.setattr(process_resources, "_process_physical_thread_count", lambda: 32)
+    monkeypatch.setattr(process_resources, "_cgroup_pid_headroom", lambda: None)
+    monkeypatch.setattr(process_resources, "_effective_memory_headroom_bytes", lambda: None)
+    monkeypatch.setattr(process_resources, "resource", None)
+
+    assert process_resources._thread_requested_capacity() == 256
+    assert process_resources._thread_hard_capacity(governed_in_use=0) == 224
+
+
 def test_terminal_thread_and_fd_debts_are_fixed_slot_banks() -> None:
     thread = _source("core_impl/governed_thread.py")
     process = _source("core_impl/process_resources.py")

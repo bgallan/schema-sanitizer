@@ -1213,9 +1213,14 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
     std::atomic<bool> release{false};
   };
   auto state = std::make_shared<SharedState>();
+  const auto task_count = static_cast<std::size_t>(tasks_per_stage);
+  const auto stage_runnable_width =
+      std::min(static_cast<std::size_t>(upstream_workers), task_count) +
+      std::min(static_cast<std::size_t>(output_workers), task_count);
   const auto expected_peak = std::max<std::size_t>(
       1U, std::min<std::size_t>(
-              static_cast<std::size_t>(requested_workers),
+              std::min<std::size_t>(static_cast<std::size_t>(requested_workers),
+                                    stage_runnable_width),
               static_cast<std::size_t>(
                   sanitize::internal::process_cpu_governor().capacity())));
   const auto make_worker = [state, expected_peak](bool is_output) {
@@ -1298,6 +1303,8 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
          std::chrono::steady_clock::now() < startup_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
+  const bool reached_expected_peak =
+      state->peak.load(std::memory_order_acquire) >= expected_peak;
   state->release.store(true, std::memory_order_release);
   state->release.notify_all();
   for (int ordinal = 0; ordinal < tasks_per_stage; ++ordinal) {
@@ -1308,6 +1315,12 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
       PyErr_SetString(PyExc_RuntimeError, "operation arena probe task failed");
       return nullptr;
     }
+  }
+  if (!reached_expected_peak) {
+    PyErr_SetString(
+        PyExc_RuntimeError,
+        "operation arena probe did not reach runnable CPU capacity");
+    return nullptr;
   }
 
   std::size_t overlap = 0;
@@ -1346,7 +1359,16 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
 }
 
 PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *) {
-  constexpr std::size_t worker_count = 4U;
+  constexpr std::size_t kMaximumWorkerCount = 4U;
+  const auto worker_count = std::min<std::size_t>(
+      kMaximumWorkerCount,
+      static_cast<std::size_t>(
+          sanitize::internal::process_cpu_governor().capacity()));
+  if (worker_count < 2U) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "arena stealing probe requires two runnable CPUs");
+    return nullptr;
+  }
   auto arena_result =
       sanitize::internal::OperationTaskArena::Make(worker_count);
   if (!arena_result.ok()) {
@@ -1355,15 +1377,15 @@ PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *) {
     return nullptr;
   }
   auto arena = std::move(arena_result).ValueOrDie();
-  std::array<std::atomic<bool>, worker_count> release_worker{};
+  std::array<std::atomic<bool>, kMaximumWorkerCount> release_worker{};
   std::atomic<std::size_t> blockers_started{0};
   std::atomic<bool> displaced_finished{false};
   std::atomic<std::size_t> displaced_worker{99};
   std::atomic<std::size_t> completed{0};
 
   const auto release_all = [&]() noexcept {
-    for (auto &release : release_worker) {
-      release.store(true, std::memory_order_release);
+    for (std::size_t index = 0; index < worker_count; ++index) {
+      release_worker[index].store(true, std::memory_order_release);
     }
   };
   for (std::size_t ordinal = 0; ordinal < worker_count; ++ordinal) {

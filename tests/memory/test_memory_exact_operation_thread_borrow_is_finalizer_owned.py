@@ -73,7 +73,12 @@ def test_resource_finalizers_tolerate_cleared_shutdown_globals(
 ) -> None:
     """Late interpreter teardown cannot leak an unraisable ``TypeError``."""
     module = importlib.import_module(module_name)
-    owner = object.__new__(getattr(module, owner_name))
+    owner_type = getattr(module, owner_name)
+    # CPython 3.11 rejects ``object.__new__`` for ``io.IOBase`` subclasses
+    # such as GovernedFile.  Calling the type's allocator still bypasses
+    # ``__init__`` (the teardown state this test needs) and is portable across
+    # every supported CPython release.
+    owner = owner_type.__new__(owner_type)
     monkeypatch.setattr(module, "runtime_is_finalizing", None)
     owner.__del__()
 

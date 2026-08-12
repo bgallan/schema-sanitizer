@@ -98,13 +98,13 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
     """Verify pre-discovered remote directories reuse the canonical remote source-plan path."""
     import schema_sanitizer.input_impl.source_plan as source_plan_model
     from schema_sanitizer.api_impl.input import preparation as public_input
+    from schema_sanitizer.api_impl.input import remote_directory_preparation
     from schema_sanitizer.api_impl.source_plan import attached as source_plan_attached
     from schema_sanitizer.input_impl.directory_inputs import (
         DiscoveredDirectoryInput,
         discovered_directory_inputs,
     )
     from schema_sanitizer.remote_impl import sync_backend
-    from schema_sanitizer.remote_impl.packetization import remote_staging_packet_policy
     from schema_sanitizer.sources import RemoteFile
 
     files = (
@@ -116,7 +116,21 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         """Fail if discovered remote inputs are listed again."""
         raise AssertionError("discovered remote directory should not be relisted")
 
+    packet_policies = []
+    real_packet_policy = remote_directory_preparation.remote_staging_packet_policy
+
+    def capture_packet_policy(memory_limit_bytes):
+        """Record the exact dynamic policy consumed by preparation."""
+        policy = real_packet_policy(memory_limit_bytes)
+        packet_policies.append((memory_limit_bytes, policy))
+        return policy
+
     monkeypatch.setattr(sync_backend, "list_remote_directory", fail_listing)
+    monkeypatch.setattr(
+        remote_directory_preparation,
+        "remote_staging_packet_policy",
+        capture_packet_policy,
+    )
 
     with discovered_directory_inputs(
         {
@@ -147,6 +161,10 @@ def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
         assert plan.route_name == "remote_native_manifest_chunks"
         assert manifest is not None
         assert manifest.files == tuple(files)
-        assert manifest.chunk_size == remote_staging_packet_policy(None).max_files
+        assert len(packet_policies) == 1
+        memory_limit_bytes, packet_policy = packet_policies[0]
+        assert memory_limit_bytes is None
+        assert manifest.chunk_size == packet_policy.max_files
+        assert manifest.chunk_target_bytes == packet_policy.target_bytes
     finally:
         prepared.close()

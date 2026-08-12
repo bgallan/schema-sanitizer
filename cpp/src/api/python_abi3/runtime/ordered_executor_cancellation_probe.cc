@@ -4,7 +4,9 @@
 
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/ordered_executor.hh"
+#include "internal/runtime/process_cpu_governor.hh"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -61,11 +63,14 @@ PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *) {
   }
   const auto start_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (active.load(std::memory_order_acquire) < 4U &&
+  const auto expected_active = std::min<std::size_t>(
+      4U, static_cast<std::size_t>(
+              sanitize::internal::process_cpu_governor().capacity()));
+  while (active.load(std::memory_order_acquire) < expected_active &&
          std::chrono::steady_clock::now() < start_deadline) {
     std::this_thread::yield();
   }
-  if (active.load(std::memory_order_acquire) == 0U) {
+  if (active.load(std::memory_order_acquire) < expected_active) {
     PyErr_SetString(PyExc_RuntimeError,
                     "arena cancellation probe workers did not start");
     return nullptr;
@@ -77,6 +82,17 @@ PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *) {
   const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
                               std::chrono::steady_clock::now() - started)
                               .count();
+  const auto active_after = active.load(std::memory_order_acquire);
+  const auto observed_stop_after =
+      observed_stop.load(std::memory_order_acquire);
+  const auto queued_after = arena->queued_tasks();
+  if (active_after != 0U || observed_stop_after != expected_active ||
+      queued_after != 0U) {
+    PyErr_SetString(
+        PyExc_RuntimeError,
+        "arena cancellation probe did not stop its exact active CPU window");
+    return nullptr;
+  }
 
   PyObject *result = PyTuple_New(4);
   if (!result) {
@@ -84,14 +100,10 @@ PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *) {
   }
   if (!tuple_set_item_steal(
           result, 0, PyLong_FromLongLong(static_cast<long long>(elapsed_us))) ||
-      !tuple_set_item_steal(
-          result, 1,
-          PyLong_FromSize_t(active.load(std::memory_order_acquire))) ||
-      !tuple_set_item_steal(
-          result, 2,
-          PyLong_FromSize_t(observed_stop.load(std::memory_order_acquire))) ||
-      !tuple_set_item_steal(result, 3,
-                            PyLong_FromSize_t(arena->queued_tasks()))) {
+      !tuple_set_item_steal(result, 1, PyLong_FromSize_t(active_after)) ||
+      !tuple_set_item_steal(result, 2,
+                            PyLong_FromSize_t(observed_stop_after)) ||
+      !tuple_set_item_steal(result, 3, PyLong_FromSize_t(queued_after))) {
     Py_DECREF(result);
     return nullptr;
   }

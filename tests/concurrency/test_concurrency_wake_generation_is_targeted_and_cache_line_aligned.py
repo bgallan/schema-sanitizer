@@ -77,11 +77,13 @@ def test_native_probe_coalesces_busy_submissions_and_survives_park_waves() -> No
     ) = native_core.operation_task_arena_wake_coalescing_probe(workers, rounds, waves)
 
     wave_tasks = waves * workers * 2
+    runnable_blockers = submitted - rounds - wave_tasks
     assert elapsed_ns > 0
-    assert submitted == workers + rounds + wave_tasks
+    assert 1 <= runnable_blockers <= workers
+    assert submitted == runnable_blockers + rounds + wave_tasks
     assert finished == rounds + wave_tasks
     assert queued == 0
-    assert wake_before_preload == wake_after_preload == workers
-    assert workers < wake_final < submitted
+    assert wake_before_preload == wake_after_preload == runnable_blockers
+    assert runnable_blockers < wake_final < submitted
     assert started == workers
-    assert peak == workers
+    assert runnable_blockers <= peak <= workers

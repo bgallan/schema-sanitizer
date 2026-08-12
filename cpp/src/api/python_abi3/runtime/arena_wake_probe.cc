@@ -2,6 +2,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include "internal/runtime/operation_task_arena.hh"
+#include "internal/runtime/process_cpu_governor.hh"
 
 #include "internal/runtime/thread_compat.hh"
 #include <algorithm>
@@ -63,6 +64,11 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
     return nullptr;
   }
   auto arena = std::move(arena_result).ValueOrDie();
+  const auto runnable_blockers = std::min<std::size_t>(
+      workers, static_cast<std::size_t>(
+                   sanitize::internal::process_cpu_governor().capacity()));
+  const auto preload_plan =
+      arena->PrepareSubmissionPlan(runnable_blockers, TaskArenaLane::kAll);
   std::atomic<std::size_t> blockers_started{0};
   std::atomic<std::size_t> blockers_finished{0};
   std::atomic<std::size_t> work_finished{0};
@@ -76,8 +82,8 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
     }
     blockers_finished.fetch_add(1, std::memory_order_release);
   };
-  for (std::size_t index = 0; index < workers; ++index) {
-    const auto status = arena->Submit(blocker, workers, TaskArenaLane::kAll);
+  for (std::size_t index = 0; index < runnable_blockers; ++index) {
+    const auto status = arena->Submit(blocker, preload_plan);
     if (!status.ok()) {
       release_blockers.store(true, std::memory_order_release);
       PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
@@ -108,7 +114,7 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
       1U, std::min<std::size_t>(static_cast<std::size_t>(rounds),
                                 arena->queue_capacity() / 2U));
   for (std::size_t index = 0; index < preload_batch; ++index) {
-    const auto status = arena->Submit(work, workers, TaskArenaLane::kAll);
+    const auto status = arena->Submit(work, preload_plan);
     if (!status.ok()) {
       release_blockers.store(true, std::memory_order_release);
       PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
@@ -121,7 +127,7 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
   const auto preload_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(20);
   if (!wait_for_count(work_finished, preload_batch, preload_deadline) ||
-      !wait_for_count(blockers_finished, workers, preload_deadline) ||
+      !wait_for_count(blockers_finished, runnable_blockers, preload_deadline) ||
       !wait_for_arena_idle(arena, preload_deadline)) {
     PyErr_SetString(PyExc_RuntimeError, "wake probe preload did not drain");
     return nullptr;

@@ -406,6 +406,15 @@ def test_native_stack_snapshot_resident_and_fd_contracts() -> None:
     probe = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
 
     assert "SCHEMA_SANITIZER_THREAD_STACK_RESERVATION_BYTES" in arena
+    assert "ReadNumericEnvironmentVariable" in arena
+    assert "GetEnvironmentVariableA" in arena
+    assert "std::array<char, 64> configured_storage" in arena
+    windows_environment_reader = arena[
+        arena.index(
+            "#if defined(_WIN32)", arena.index("ReadNumericEnvironmentVariable")
+        ) : arena.index("#else", arena.index("ReadNumericEnvironmentVariable"))
+    ]
+    assert "std::getenv(" not in windows_environment_reader
     assert "RLIMIT_STACK" in arena
     assert "ProcessThreadStackReservationCount" in arena
     assert "ProcessThreadStackReservationCount(total_reserved)" in arena
@@ -416,6 +425,26 @@ def test_native_stack_snapshot_resident_and_fd_contracts() -> None:
     assert "g_process_thread_ledger_mutation_epoch" in arena
     assert "epoch_before == epoch_after" in arena
     assert "ReadThreadPermitLedgerSnapshot" in arena
+    snapshot = arena[
+        arena.index("ReadThreadPermitLedgerSnapshot()") : arena.index(
+            "process_thread_stack_reservation_bytes"
+        )
+    ]
+    assert "fetch_add(\n        0U, std::memory_order_acq_rel)" in snapshot
+    assert "std::atomic_thread_fence(" not in snapshot
+    assert snapshot.index("out.total =") < snapshot.index("const auto epoch_after")
+
+    arena_runtime = (CPP / "internal/runtime/operation_task_arena_runtime.cc.inc").read_text(
+        encoding="utf-8"
+    )
+    activity_stop = arena_runtime[
+        arena_runtime.index("void Stop() noexcept") : arena_runtime.index(
+            "private:", arena_runtime.index("void Stop() noexcept")
+        )
+    ]
+    assert activity_stop.index("running.store(false") < activity_stop.index(
+        "SaturatingAtomicSubtract(state_->active"
+    )
     assert "thread_permit_snapshot_stable" in header
     assert "g_external_runtime_resident_protocol_violations" in arena
     assert (
