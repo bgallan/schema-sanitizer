@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -107,23 +108,25 @@ def test_unknown_async_results_degrade_to_single_materializer() -> None:
     class UnknownPayload:
         pass
 
-    async def run() -> int:
+    async def run() -> tuple[int, bool]:
         active = 0
         peak = 0
+        caller = asyncio.current_task()
+        materializers: set[asyncio.Task[object] | None] = set()
 
         async def fetch(_index: int) -> UnknownPayload:
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
-            await asyncio.sleep(0.001)
+            materializers.add(asyncio.current_task())
             active -= 1
             return UnknownPayload()
 
         async for _index, _value in ordered_indexed_results(12, fetch, window=8):
             pass
-        return peak
+        return peak, materializers == {caller}
 
-    assert asyncio.run(run()) == 1
+    assert asyncio.run(run()) == (1, True)
 
 
 def test_async_hard_bound_never_uses_sampled_tail_extrapolation() -> None:
@@ -275,23 +278,36 @@ def test_prebounded_async_results_still_run_concurrently_without_terminal_queue(
     async def run() -> int:
         active = 0
         peak = 0
+        all_workers_entered = asyncio.Event()
+        release_workers = asyncio.Event()
 
         async def fetch(index: int) -> bytes:
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
+            if active == 4:
+                all_workers_entered.set()
             try:
-                await asyncio.sleep(0.005)
+                await release_workers.wait()
                 return str(index).encode()
             finally:
                 active -= 1
 
-        values = [
-            value
-            async for _index, value in scheduler.unordered_indexed_results(
-                12, fetch, window=4, expected_retained_bytes=64
-            )
-        ]
+        async def collect() -> list[bytes]:
+            return [
+                value
+                async for _index, value in scheduler.unordered_indexed_results(
+                    12, fetch, window=4, expected_retained_bytes=64
+                )
+            ]
+
+        collector = asyncio.create_task(collect())
+        try:
+            await asyncio.wait_for(all_workers_entered.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
+            assert peak == 4
+        finally:
+            release_workers.set()
+        values = await asyncio.wait_for(collector, timeout=SCHEDULER_TIMEOUT_SECONDS)
         assert {int(value) for value in values} == set(range(12))
         return peak
 

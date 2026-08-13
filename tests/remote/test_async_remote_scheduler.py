@@ -6,6 +6,7 @@ import asyncio
 from typing import AbstractSet
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.core_impl import async_scheduler
 from schema_sanitizer.core_impl.async_scheduler import (
@@ -263,7 +264,10 @@ def test_bounded_event_wait_propagates_external_task_cancellation() -> None:
         waiting = asyncio.create_task(
             async_scheduler._bounded_async_event_wait(event, stage="async_result_slot_test")
         )
-        await asyncio.wait_for(event.wait_started.wait(), timeout=1)
+        await asyncio.wait_for(
+            event.wait_started.wait(),
+            timeout=SCHEDULER_TIMEOUT_SECONDS,
+        )
         assert event.waiting_task is waiting
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):

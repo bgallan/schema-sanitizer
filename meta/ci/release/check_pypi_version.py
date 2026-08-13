@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
+
+_RETRY_DELAYS_SECONDS = (1.0, 2.0)
+_TRANSIENT_HTTP_STATUSES = {429, *range(500, 600)}
 
 if __package__:
     from .validate_release_version import validate_release_version
@@ -21,6 +26,7 @@ def pypi_release_exists(
     version: str,
     *,
     index_url: str = "https://pypi.org/pypi",
+    sleeper: Callable[[float], object] = time.sleep,
 ) -> bool:
     """Return whether PyPI exposes an exact project/version JSON resource."""
     parsed_index = urlsplit(index_url)
@@ -34,16 +40,26 @@ def pypi_release_exists(
         resource,
         headers={"Accept": "application/json", "User-Agent": "schema-sanitizer-release-preflight"},
     )
-    try:
-        # The parsed index is restricted to two HTTPS PyPI hosts above.
-        with urlopen(request, timeout=20) as response:  # nosec B310
-            payload = json.load(response)
-    except HTTPError as exc:
-        if exc.code == 404:
-            return False
-        raise RuntimeError(f"PyPI returned HTTP {exc.code} for {project} {version}") from exc
-    except (OSError, URLError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"could not verify {project} {version} on PyPI: {exc}") from exc
+    attempts = len(_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            # The parsed index is restricted to two HTTPS PyPI hosts above.
+            with urlopen(request, timeout=20) as response:  # nosec B310
+                payload = json.load(response)
+            break
+        except HTTPError as exc:
+            if exc.code == 404:
+                return False
+            if exc.code not in _TRANSIENT_HTTP_STATUSES or attempt == attempts - 1:
+                raise RuntimeError(
+                    f"PyPI returned HTTP {exc.code} for {project} {version}"
+                ) from exc
+        except (OSError, URLError) as exc:
+            if attempt == attempts - 1:
+                raise RuntimeError(f"could not verify {project} {version} on PyPI: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"could not verify {project} {version} on PyPI: {exc}") from exc
+        sleeper(_RETRY_DELAYS_SECONDS[attempt])
     if not isinstance(payload, dict) or not isinstance(payload.get("info"), dict):
         raise RuntimeError(f"PyPI returned malformed JSON for {project} {version}")
     reported_version = payload["info"].get("version")

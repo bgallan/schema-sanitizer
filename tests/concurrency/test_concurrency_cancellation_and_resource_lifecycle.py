@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.core_impl.cancellation import (
     OperationCancellationToken,
@@ -206,20 +207,20 @@ def test_cancelled_governor_ticket_does_not_block_followers(
 
     def follower() -> None:
         """Provide a deterministic test or worker helper."""
-        lease = governor.acquire(timeout_seconds=1)
+        lease = governor.acquire(timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
         follower_acquired.set()
         lease.release()
 
     first = threading.Thread(target=timeout_waiter)
     second = threading.Thread(target=follower)
     first.start()
-    assert first_waiting.wait(timeout=1)
+    assert first_waiting.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    assert timed_out.wait(timeout=1)
+    assert timed_out.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     holder.release()
-    assert follower_acquired.wait(timeout=1)
-    first.join(timeout=1)
-    second.join(timeout=1)
+    assert follower_acquired.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    first.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    second.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
     assert governor.snapshot().in_use == 0
 
 
@@ -353,8 +354,8 @@ def test_initialized_runtime_fails_fast_after_fork() -> None:
     result = context.Queue()
     child = context.Process(target=_fork_safety_child, args=(result,))
     child.start()
-    message = result.get(timeout=2)
-    child.join(timeout=2)
+    message = result.get(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    child.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
     assert child.exitcode == 0
     assert "spawn" in message
     assert "forkserver" in message

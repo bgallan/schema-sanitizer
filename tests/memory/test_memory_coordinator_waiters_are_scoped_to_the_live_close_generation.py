@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
@@ -13,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -50,7 +50,7 @@ class _GenerationRelease:
             raise OSError("first generation failed")
         if self.calls == 2:
             self.recovery_entered.set()
-            assert self.allow_recovery.wait(2)
+            assert self.allow_recovery.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
@@ -60,12 +60,13 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     coordinator = object.__new__(RemoteIoCoordinator)
     coordinator._pid = os.getpid()
     coordinator._lock = Lock()
+    coordinator._close_condition = WaitObservedCondition(coordinator._lock)
     coordinator._release_lock = Lock()
     coordinator._closed = False
     coordinator._closing = False
     coordinator._close_complete = Event()
     coordinator._close_error = None
-    coordinator._shutdown_timeout_seconds = 1.0
+    coordinator._shutdown_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     coordinator._loop = None
     coordinator._futures = set()
     coordinator._failed_submissions = deque()
@@ -87,14 +88,15 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
 
     recovery = Thread(target=close_once)
     recovery.start()
-    assert owner.recovery_entered.wait(1)
+    assert owner.recovery_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
+    coordinator._close_condition.wait_entered.clear()
     waiter = Thread(target=close_once)
     waiter.start()
-    time.sleep(0.03)
+    assert coordinator._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert waiter.is_alive(), "waiter observed the previous generation's event"
     owner.allow_recovery.set()
-    recovery.join(1)
-    waiter.join(1)
+    recovery.join(SCHEDULER_TIMEOUT_SECONDS)
+    waiter.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not errors
     assert coordinator._permit_registration is None
 
@@ -110,7 +112,7 @@ class _BlockingRetryLease:
         self.calls += 1
         if self.calls == 1:
             self.first_entered.set()
-            assert self.allow_first.wait(2)
+            assert self.allow_first.wait(SCHEDULER_TIMEOUT_SECONDS)
             raise OSError("callback rollback failed")
         self.released = True
 
@@ -136,18 +138,19 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
     iterator._download_session = None
     iterator._session_closer = None
     iterator._close_lock = RLock()
+    iterator._close_condition = WaitObservedCondition(iterator._close_lock)
     iterator._close_started = False
     iterator._closed = False
     iterator._failed_storage_leases = deque()
     iterator._futures = deque()
-    iterator._remote_timeout_seconds = 1.0
+    iterator._remote_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
 
     lease = _BlockingRetryLease()
     future = iterator._submit_stage(0, lease)
     iterator._futures.append(future)
     setter = Thread(target=lambda: future.set_exception(RuntimeError("stage failed")))
     setter.start()
-    assert lease.first_entered.wait(1)
+    assert lease.first_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     close_errors: list[BaseException] = []
 
@@ -159,12 +162,12 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
 
     closer = Thread(target=close_iterator)
     closer.start()
-    time.sleep(0.03)
+    assert iterator._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert closer.is_alive()
     assert not iterator._closed
     lease.allow_first.set()
-    setter.join(1)
-    closer.join(1)
+    setter.join(SCHEDULER_TIMEOUT_SECONDS)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not close_errors
     assert lease.released
     assert iterator._closed

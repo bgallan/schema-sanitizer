@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -57,6 +58,7 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
     from schema_sanitizer.remote_impl.async_bridge import _BridgeRunner
 
     started = Event()
+    cancellation_observed = Event()
     release = Event()
     finalized = Event()
 
@@ -72,6 +74,7 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
+            cancellation_observed.set()
             while not release.is_set():
                 await asyncio.sleep(0.005)
         finally:
@@ -80,14 +83,14 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
     lease = Lease()
     runner = _BridgeRunner(stubborn(), copy_context(), lease)
     runner.start()
-    assert started.wait(1)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     runner.cancel()
     assert runner.result.cancelled()
-    time.sleep(0.03)
+    assert cancellation_observed.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert lease.releases == 0
     assert not finalized.is_set()
     release.set()
-    runner._thread.join(1)
+    runner._thread.join(SCHEDULER_TIMEOUT_SECONDS)
     assert finalized.is_set()
     assert lease.releases == 1
 
@@ -113,7 +116,7 @@ def test_coordinator_timeout_keeps_live_host_retryable() -> None:
         operation_id="path-identity-charges-fd-and-removes-zombie-regression",
     )
     future = coordinator.submit(stubborn)
-    assert started.wait(1)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     with pytest.raises(RuntimeError, match="shutdown exceeded"):
         coordinator.close()
     assert coordinator._thread.is_alive()
@@ -157,10 +160,10 @@ def test_terminal_callback_runs_off_loop_and_is_retried() -> None:
             raise OSError("transient cleanup failure")
 
     owner.add_terminal_callback(cleanup)
-    assert future.result(timeout=1) == 1
-    assert first_failure.wait(1)
+    assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == 1
+    assert first_failure.wait(SCHEDULER_TIMEOUT_SECONDS)
     second = coordinator.submit(immediate)
-    assert second.result(timeout=1) == 1
+    assert second.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == 1
     coordinator.close()
     assert calls == 2
     assert callback_thread
@@ -213,7 +216,7 @@ def test_janitor_filesystem_claim_does_not_hold_global_lock(
 
     def blocked_claim(_path: object) -> None:
         entered.set()
-        assert allow.wait(1)
+        assert allow.wait(SCHEDULER_TIMEOUT_SECONDS)
         return None
 
     class Lease:
@@ -227,11 +230,11 @@ def test_janitor_filesystem_claim_does_not_hold_global_lock(
         target=lambda: janitor.quarantine(tmp_path / "missing", is_dir=False, lease=Lease())
     )
     worker.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert janitor._lock.acquire(timeout=0.1)
     janitor._lock.release()
     allow.set()
-    worker.join(1)
+    worker.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not worker.is_alive()
 
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
+import io
+import tarfile
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
@@ -126,3 +129,42 @@ def test_release_filename_validator_rejects_wheel_build_tags() -> None:
 
     with pytest.raises(AssertionError, match="must not carry a build tag"):
         validator.validate_release_filenames(filenames)
+
+
+def test_archive_timestamp_check_reads_gzip_header(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Archive clocks must encode the configured source epoch, not runner time."""
+    validator = _load_validator()
+    epoch = 946_684_800
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", str(epoch))
+    sdist = tmp_path / "fixture.tar.gz"
+    with sdist.open("wb") as handle:
+        with gzip.GzipFile(fileobj=handle, mode="wb", mtime=epoch) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w") as archive:
+                member = tarfile.TarInfo("fixture/value.txt")
+                member.mtime = epoch
+                member.size = 1
+                archive.addfile(member, io.BytesIO(b"x"))
+    validator._validate_archive_timestamps(sdist)
+
+
+def test_archive_timestamp_check_rejects_runner_clock_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A wheel carrying the runner wall clock cannot pass deterministic validation."""
+    validator = _load_validator()
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "946684800")
+    sdist = tmp_path / "fixture.tar.gz"
+    with sdist.open("wb") as handle:
+        with gzip.GzipFile(fileobj=handle, mode="wb", mtime=946_684_802) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w") as archive:
+                member = tarfile.TarInfo("fixture/value.txt")
+                member.mtime = 946_684_802
+                member.size = 1
+                archive.addfile(member, io.BytesIO(b"x"))
+
+    with pytest.raises(AssertionError, match="SOURCE_DATE_EPOCH"):
+        validator._validate_archive_timestamps(sdist)

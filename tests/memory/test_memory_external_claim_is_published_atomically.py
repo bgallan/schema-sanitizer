@@ -74,20 +74,27 @@ def test_external_claim_is_published_atomically(
     module.release_path_identity(owners[0])
 
 
-def test_retry_cancel_reschedule_never_reuses_old_generation() -> None:
-    from schema_sanitizer.core_impl.retry_scheduler import (
-        cancel_retry,
-        schedule_retry,
-    )
+def test_retry_cancel_reschedule_never_reuses_old_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import schema_sanitizer.core_impl.retry_scheduler as module
 
     key = ("external-claim-is-published-atomically-aba", object())
     calls: list[str] = []
-    assert schedule_retry(key, lambda: calls.append("old"), delay_seconds=0.03)
-    cancel_retry(key)
-    assert schedule_retry(key, lambda: calls.append("new"), delay_seconds=0.25)
-    time.sleep(0.1)
+    scheduler = module._RetryScheduler()
+    monkeypatch.setattr(scheduler, "_ensure_workers", lambda: None)
+    assert scheduler.schedule(key, lambda: calls.append("old"), delay_seconds=0)
+    old = next(iter(scheduler._current.values()))
+    old_token = old.token
+    scheduler.cancel(key)
+    assert old.token == 0
+    assert scheduler.schedule(key, lambda: calls.append("new"), delay_seconds=60)
+    new = next(iter(scheduler._current.values()))
+    assert new is not old
+    assert new.token != old_token
     assert calls == []
-    cancel_retry(key)
+    scheduler.cancel(key)
+    assert scheduler.close(deadline_seconds=0)
 
 
 def test_retry_heap_compacts_replaced_payloads() -> None:

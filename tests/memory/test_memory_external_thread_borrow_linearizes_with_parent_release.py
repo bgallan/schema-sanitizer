@@ -5,11 +5,11 @@ from __future__ import annotations
 import gc
 import os
 import threading
-import time
 import weakref
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -24,6 +24,7 @@ def test_external_thread_borrow_linearizes_with_parent_release(
 
     governor = module._Governor(4, "external-thread-borrow-linearizes-with-parent_atomic_borrow")
     operation = governor.try_acquire_up_to(4, minimum=4)
+    object.__setattr__(operation, "_lock", ContentionObservedLock())
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_native_external_thread_api", lambda: None)
     monkeypatch.setattr(concurrency_contracts, "current_runtime_execution_lease", lambda: operation)
@@ -34,7 +35,7 @@ def test_external_thread_borrow_linearizes_with_parent_release(
 
     def blocked(self: object, desired: int, *, minimum: int = 1) -> int:
         entered.set()
-        assert continue_borrow.wait(2)
+        assert continue_borrow.wait(SCHEDULER_TIMEOUT_SECONDS)
         return original(self, desired, minimum=minimum)
 
     monkeypatch.setattr(module._OperationThreadBorrowBudget, "try_borrow_up_to", blocked)
@@ -49,13 +50,13 @@ def test_external_thread_borrow_linearizes_with_parent_release(
         target=lambda: _capture_error(operation.release, release_errors)
     )
     acquire_thread.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     release_thread.start()
-    time.sleep(0.05)
+    assert operation._lock.contention_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert release_thread.is_alive(), "parent release must block behind atomic child publication"
     continue_borrow.set()
-    acquire_thread.join(2)
-    release_thread.join(2)
+    acquire_thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    release_thread.join(SCHEDULER_TIMEOUT_SECONDS)
     assert len(result) == 1
     runtime = result[0]
     assert getattr(runtime, "workers") == 3

@@ -19,11 +19,13 @@ runs:
         # Use one exact patch on all four platforms. Test shards use it too.
         python-version: 3.11.9
         cache: pip
-        cache-dependency-path: pyproject.toml
+        cache-dependency-path: |-
+          pyproject.toml
+          .github/actions/build-platform-wheel/action.yml
     - name: Install wheel tooling
       shell: bash
       run: >-
-        python -m pip install -U pip
+        python -m pip install pip==26.1.2
         abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
     - name: Assert the build environment has no PyArrow
       shell: bash
@@ -38,8 +40,18 @@ runs:
     - name: Build and test the CPython 3.11 ABI3 wheel
       env:
         CIBW_ARCH: ${{ inputs.arch }}
+        # cibuildwheel Linux builds run in a container; explicitly propagate
+        # the deterministic timestamp and bounded/non-interactive pip policy.
+        CIBW_ENVIRONMENT_PASS_LINUX: >-
+          SOURCE_DATE_EPOCH PIP_DISABLE_PIP_VERSION_CHECK PIP_NO_INPUT
+          PIP_RETRIES PIP_TIMEOUT
       shell: bash
-      run: python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}"
+      run: |-
+        set -euo pipefail
+        SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+        [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
+        export SOURCE_DATE_EPOCH
+        python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}"
     - name: Audit the CPython stable ABI
       shell: bash
       run: python -m abi3audit --strict --report wheelhouse/*.whl
@@ -77,46 +89,54 @@ runs:
       if: inputs.artifact == 'linux'
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
-        python-version: '3.12'
+        python-version: 3.12.11
         cache: pip
-        cache-dependency-path: pyproject.toml
+        cache-dependency-path: |-
+          pyproject.toml
+          .github/actions/build-platform-wheel/action.yml
     - name: Exercise the ABI3 wheel on CPython 3.12
       if: inputs.artifact == 'linux'
       shell: bash
       run: |
-        python -m pip install -U pyarrow wheelhouse/*.whl
+        python -m pip install pip==26.1.2
+        python -m pip install pyarrow==25.0.1 wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up CPython 3.13 for stable-ABI functional coverage
       if: inputs.artifact == 'linux'
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
-        python-version: '3.13'
+        python-version: 3.13.15
         cache: pip
-        cache-dependency-path: pyproject.toml
+        cache-dependency-path: |-
+          pyproject.toml
+          .github/actions/build-platform-wheel/action.yml
     - name: Exercise the ABI3 wheel on CPython 3.13
       if: inputs.artifact == 'linux'
       shell: bash
       run: |
-        python -m pip install -U pyarrow wheelhouse/*.whl
+        python -m pip install pip==26.1.2
+        python -m pip install pyarrow==25.0.1 wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up the newest supported Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
-        python-version: '3.14'
+        python-version: 3.14.3
         cache: pip
-        cache-dependency-path: pyproject.toml
+        cache-dependency-path: |-
+          pyproject.toml
+          .github/actions/build-platform-wheel/action.yml
     - name: Verify the ABI3 wheel on Python 3.14
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install -U pip
+        python -m pip install pip==26.1.2
         python -m pip install wheelhouse/*.whl
         python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
     - name: Exercise the ABI3 wheel on CPython 3.14
       if: inputs.artifact == 'linux'
       shell: bash
       run: |
-        python -m pip install -U pyarrow
+        python -m pip install pyarrow==25.0.1
         python -I meta/ci/release/downstream_smoke.py
     - name: Upload the certified platform wheel
       id: upload-certified-platform-wheel
@@ -126,7 +146,7 @@ runs:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse/*.whl
         if-no-files-found: error
-        retention-days: 1
+        retention-days: 7
         compression-level: 0
     - name: Retry certified platform wheel upload
       if: ${{ always() && steps.upload-certified-platform-wheel.outcome == 'failure' }}
@@ -135,6 +155,6 @@ runs:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse/*.whl
         if-no-files-found: error
-        retention-days: 1
+        retention-days: 7
         compression-level: 0
         overwrite: true

@@ -155,14 +155,16 @@ artifact, rather than an import from `src/`, on:
 | macOS 15 / ARM64 | `macosx_11_0_arm64` | Full wheel suite, ASan/UBSan parser fuzzing, and repeated concurrency probes. |
 
 Each wheel is built for CPython 3.11 with the stable ABI (`cp311-abi3`). The
-complete suite runs on the same CPython 3.11 patch and the same pinned direct
+complete suite runs on the same CPython 3.11 patch and the same fully locked
 adapter versions on all four platforms, so timing and behavior comparisons do
-not silently mix dependency or interpreter upgrades. Those direct test pins
+not silently mix direct, transitive, or interpreter upgrades. Those test locks
 live in `meta/ci/requirements/platform-tests.txt`, which is also the setup-Python
 cache key, so changing the environment invalidates the cache deterministically.
-Linux additionally
-executes the installed public conversion smoke on 3.12, 3.13, and 3.14, and
-every platform loads it on 3.14. `platform-wheel-builds` defines the runner,
+Validation cells use exact interpreter patches as well. Python and native build
+tools are pinned, while pip and apt receive bounded transport retries and
+timeouts. Linux additionally executes the installed public conversion smoke on
+exact 3.12, 3.13, and 3.14 patches, and every platform loads it on the exact
+3.14 patch. `platform-wheel-builds` defines the runner,
 release platform, cibuildwheel architecture, and wheel and evidence artifact
 identifiers once for each of the four targets. `platform-tests` lists the exact
 12-entry product of those four platforms and the `concurrency`,
@@ -272,8 +274,11 @@ entry therefore prevents assembly.
 
 Downstream installation exercises `core` and every published runtime extra:
 `pyarrow`, `pandas`, `polars`, `duckdb`, `gcs`, `s3`, `azure`, `bigquery`,
-`cloud`, and `all`. The dependency audit resolves runtime, build-system, CI-tool,
-and every optional requirement. Bandit covers Python sources. `detect-secrets`
+`cloud`, and `all`. Its isolated environments resolve through
+`meta/ci/requirements/downstream.txt`; the ranges published to users are still
+checked, but the canonical CI result cannot change when the package index gains
+a new release. The dependency audit resolves runtime, build-system, CI-tool,
+the CI constraint sets, and every optional requirement. Bandit covers Python sources. `detect-secrets`
 scans tracked repository files without credential-verification network calls;
 only byte-exact fuzz payloads are excluded because their full tree is enforced
 separately by `check_fuzz_corpus.py` and its SHA-256 manifest.
@@ -287,13 +292,15 @@ release gate.
 ## [Release evidence](#index)
 
 All artifact uploads fail if their expected files are absent and have explicit
-retention periods. Transport-sensitive wheel, source-distribution, evidence,
-and final-release uploads retry once; the retry is still a blocking failure.
+retention periods. Every upload retries once after a transport failure; an
+exhausted retry is still blocking. Platform tests, the terminal validation gate,
+and the manual publisher also retry their exact downloads after removing only
+the corresponding possibly partial destination.
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
-| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 1 day | The three matching shard entries in `platform-tests` and `validation-gate`. |
-| `source-distribution` | One validated intermediate sdist. | 1 day | `validation-gate`. |
+| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 7 days | The three matching shard entries in `platform-tests` and `validation-gate`. |
+| `source-distribution` | One validated intermediate sdist. | 7 days | `validation-gate`. |
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 30 days | Manual publication and external audit. |
 | `python-branch-coverage` | Contextual HTML, XML, JSON, and high-risk gap report. | 14 days | Maintainers and auditors. |
 | `native-llvm-coverage` | LLVM profiles, summaries, and contextual HTML. | 14 days | Maintainers and auditors. |
@@ -302,8 +309,15 @@ and final-release uploads retry once; the retry is still a blocking failure.
 The `source-distribution` validation entry builds and exercises the sdist while
 platform work is in flight. After every matrix succeeds, `validation-gate`
 downloads that immutable source artifact and the four intermediate wheels,
-then validates the five files as one set. It creates a canonical
-`release-manifest.json` containing:
+then validates the five files as one set. Wheel and sdist builders derive
+`SOURCE_DATE_EPOCH` from the checked-out commit,
+rather than the runner wall clock. The archive validator requires the canonical
+sdist gzip header and every tar member to encode that epoch. Repaired wheel ZIP
+timestamps are not used as a gate because the independent platform repair tools
+do not share one cross-platform timestamp-preservation contract; wheel bytes are
+instead bound by the release manifest digests below.
+
+The gate creates a canonical `release-manifest.json` containing:
 
 - format identifier, project, and version;
 - the exact Git commit SHA, GitHub run ID, and run attempt;
@@ -330,7 +344,7 @@ authority:
 |---|---|---|
 | `preflight` | Checks out the selected commit and validates branch, version, tag, tag target, unused PyPI version, protected GitHub environment, and confirmation. | Read-only Actions metadata and contents; no OIDC token. |
 | reusable `validation` | Executes the same `ci.yml` used by PRs and `main`. | Read-only contents and GitHub artifact writes; no OIDC token. |
-| `publish` | Has no checkout, Python setup, or arbitrary `run` step. It downloads `release-distributions` by exact name and invokes the PyPI action. | `id-token: write` only, scoped to the protected `pypi` environment. |
+| `publish` | Has no checkout, Python setup, or repository-code execution. It downloads `release-distributions` by exact name, and its sole fixed shell step removes only `release/` before a transport retry. It then invokes the PyPI action. | `id-token: write` only, scoped to the protected `pypi` environment. |
 
 Every external action used by workflows or repository-owned composite actions,
 and every remote pre-commit hook, including GitHub-maintained actions, is pinned
@@ -385,7 +399,13 @@ reviewer, prevents self-review and administrator bypass, and permits only the
 `main` branch through a custom deployment policy. The environment name forms
 part of the OIDC trust claim. A missing or mismatched GitHub environment or PyPI
 Trusted Publisher must make publication fail; it must not be worked around by
-granting a broader token.
+granting a broader token. PyPI and GitHub API reads make at most three attempts.
+GitHub API transport errors, HTTP 429, and 5xx responses use short bounded
+backoff. HTTP 403 retries only when GitHub supplies `Retry-After` or reports
+`X-RateLimit-Remaining: 0`; official retry/reset timing is honored up to 30
+seconds per attempt, with a short fallback when no reset is supplied. Other 4xx
+responses and malformed data fail immediately. The exact remote
+`main` SHA is read through that authenticated, retrying API path as well.
 
 ## [Publication runbook](#index)
 

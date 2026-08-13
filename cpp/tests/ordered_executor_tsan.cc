@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
@@ -113,6 +114,15 @@ void wait_for_stop(sanitize::internal::StopToken stop) {
   }
 }
 
+template <typename Predicate>
+bool wait_until_or_watchdog(Predicate predicate,
+                            std::chrono::steady_clock::time_point deadline) {
+  while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  return predicate();
+}
+
 bool run_ordered_success_round() {
   std::atomic<std::size_t> active{0};
   auto made = Executor::Make(
@@ -176,15 +186,25 @@ bool run_ordered_success_round() {
 }
 
 bool run_earliest_failure_round() {
+  if (sanitize::internal::available_cpu_capacity() < 2) {
+    std::cerr << "sanitizer probe skipped: case=earliest_failure reason="
+                 "requires two CPU credits for forced failure ordering\n";
+    return true;
+  }
+  std::atomic<bool> later_failure_entered{false};
   auto made = Executor::Make(
       6, 12, 12,
-      [](std::uint64_t &&value, std::size_t, sanitize::internal::StopToken stop)
+      [&later_failure_entered](std::uint64_t &&value, std::size_t,
+                               sanitize::internal::StopToken stop)
           -> sanitize::Result<std::uint64_t> {
         if (value == 17U) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(2));
+          if (!wait_gate_or_stop(&later_failure_entered, stop)) {
+            return sanitize::Status::Cancelled("probe cancelled");
+          }
           return sanitize::Status::Invalid("failure 17");
         }
         if (value == 19U) {
+          release_gate(&later_failure_entered);
           return sanitize::Status::Invalid("failure 19");
         }
         if (stop.stop_requested()) {
@@ -691,10 +711,12 @@ bool run_process_fd_governor_round() {
   std::atomic<std::size_t> waiter_grant{0U};
   std::thread waiter([&] {
     waiter_grant.store(
-        sanitize::internal::acquire_process_file_descriptor_permits_wait(1U, 1U, 1000U),
+        sanitize::internal::acquire_process_file_descriptor_permits_wait(1U, 1U, 10'000U),
         std::memory_order_release);
   });
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const bool waiter_registered = wait_until_or_watchdog(
+      [] { return sanitize::internal::process_file_descriptor_waiters() == 1U; },
+      std::chrono::steady_clock::now() + std::chrono::seconds(5));
   sanitize::internal::release_process_file_descriptor_permits(1U);
   --held;
   waiter.join();
@@ -711,7 +733,7 @@ bool run_process_fd_governor_round() {
   }
   if (had_previous) ::setenv("SCHEMA_SANITIZER_MAX_OPEN_FILES", previous.c_str(), 1);
   else ::unsetenv("SCHEMA_SANITIZER_MAX_OPEN_FILES");
-  return granted == 1U && opened_visible &&
+  return waiter_registered && granted == 1U && opened_visible &&
          sanitize::internal::process_file_descriptor_permits_in_use() == 0U &&
          sanitize::internal::process_file_descriptors_opened() == 0U;
 #else
@@ -798,6 +820,11 @@ bool run_arena_backpressure_deadline_round() {
 }
 
 bool run_arena_heterogeneous_backpressure_round() {
+  if (sanitize::internal::available_cpu_capacity() < 2) {
+    std::cerr << "sanitizer probe skipped: case=arena_heterogeneous_backpressure "
+                 "reason=requires two CPU credits for simultaneous blockers\n";
+    return true;
+  }
   auto made = sanitize::internal::OperationTaskArena::Make(3U);
   if (!made.ok()) {
     return false;
@@ -808,7 +835,11 @@ bool run_arena_heterogeneous_backpressure_round() {
     arena->Shutdown();
     return false;
   }
-  arena->SetBackpressureTimeoutMillis(1500U);
+  // This case exercises admission ordering, not the timeout path. Keep the
+  // product deadline beyond the local 10-second hang fuse below.
+  arena->SetBackpressureTimeoutMillis(20'000U);
+  const auto case_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
 
   std::atomic<std::size_t> blockers_started{0U};
   std::atomic<bool> release_large{false};
@@ -838,13 +869,10 @@ bool run_arena_heterogeneous_backpressure_round() {
     return false;
   }
 
-  const auto start_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (blockers_started.load(std::memory_order_acquire) < 2U &&
-         std::chrono::steady_clock::now() < start_deadline) {
-    std::this_thread::yield();
-  }
-  if (blockers_started.load(std::memory_order_acquire) < 2U) {
+  const bool blockers_are_running = wait_until_or_watchdog([&] {
+    return blockers_started.load(std::memory_order_acquire) >= 2U;
+  }, case_deadline);
+  if (!blockers_are_running) {
     release_large.store(true, std::memory_order_release);
     release_small.store(true, std::memory_order_release);
     arena->Shutdown();
@@ -865,12 +893,9 @@ bool run_arena_heterogeneous_backpressure_round() {
     large_done.store(true, std::memory_order_release);
     large_done.notify_all();
   });
-  const auto first_waiter_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  while (arena->backpressure_waiters() < 1U &&
-         std::chrono::steady_clock::now() < first_waiter_deadline) {
-    std::this_thread::yield();
-  }
+  const bool first_waiter_registered =
+      wait_until_or_watchdog(
+          [&] { return arena->backpressure_waiters() >= 1U; }, case_deadline);
   std::thread small_producer([&] {
     auto status = arena->SubmitCharged(
         [](std::size_t, sanitize::internal::StopToken) {}, 3U,
@@ -881,27 +906,20 @@ bool run_arena_heterogeneous_backpressure_round() {
     small_done.notify_all();
   });
 
-  const auto second_waiter_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  while (arena->backpressure_waiters() < 2U &&
-         std::chrono::steady_clock::now() < second_waiter_deadline) {
-    std::this_thread::yield();
-  }
+  const bool both_waiters_registered =
+      wait_until_or_watchdog(
+          [&] { return arena->backpressure_waiters() >= 2U; }, case_deadline);
   const bool waiters_do_not_publish_queue_slots =
-      arena->backpressure_waiters() >= 2U &&
+      first_waiter_registered && both_waiters_registered &&
       arena->queued_tasks() == queued_before_waiters;
 
   // Exactly 20 bytes become available. The 20-byte producer must progress even
   // though an older 50-byte producer cannot; this catches size-blind notify_one.
   release_small.store(true, std::memory_order_release);
-  const auto small_progress_deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (!small_done.load(std::memory_order_acquire) &&
-         std::chrono::steady_clock::now() < small_progress_deadline) {
-    std::this_thread::yield();
-  }
+  const bool small_finished = wait_until_or_watchdog(
+      [&] { return small_done.load(std::memory_order_acquire); }, case_deadline);
   const bool size_aware_progress =
-      small_done.load(std::memory_order_acquire) &&
+      small_finished &&
       small_accepted.load(std::memory_order_acquire) &&
       !large_done.load(std::memory_order_acquire);
 
@@ -916,6 +934,11 @@ bool run_arena_heterogeneous_backpressure_round() {
 
 
 bool run_arena_backpressure_starvation_round() {
+  if (sanitize::internal::available_cpu_capacity() < 3) {
+    std::cerr << "sanitizer probe skipped: case=arena_backpressure_starvation "
+                 "reason=requires three CPU credits for lane-isolated blockers\n";
+    return true;
+  }
   auto made = sanitize::internal::OperationTaskArena::Make(3U);
   if (!made.ok()) {
     return false;
@@ -926,7 +949,33 @@ bool run_arena_backpressure_starvation_round() {
     arena->Shutdown();
     return false;
   }
-  arena->SetBackpressureTimeoutMillis(2500U);
+  // This case exercises bounded bypass, not timeout behavior. The internal
+  // deadline must outlive each explicit 10-second test watchdog.
+  arena->SetBackpressureTimeoutMillis(20'000U);
+  const auto case_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+
+  // Start the output-only worker before five producer threads race to publish
+  // work into that one-slot lane. This removes lazy-start scheduling from the
+  // fairness contract exercised below.
+  std::atomic<bool> output_worker_entered{false};
+  auto output_prewarm = arena->SubmitCharged(
+      [&output_worker_entered](std::size_t,
+                               sanitize::internal::StopToken) {
+        output_worker_entered.store(true, std::memory_order_release);
+        output_worker_entered.notify_all();
+      },
+      1U, sanitize::internal::TaskArenaLane::kOutput,
+      sanitize::internal::TaskMemoryCharge(1U));
+  const bool output_worker_ready = output_prewarm.ok() &&
+      wait_until_or_watchdog([&] {
+        return output_worker_entered.load(std::memory_order_acquire) &&
+               arena->retained_bytes() == 0U;
+      }, case_deadline);
+  if (!output_worker_ready) {
+    arena->Shutdown();
+    return false;
+  }
 
   // Pin the large blocker to worker 0, all credit-release blockers to worker 1,
   // and bypass tasks to worker 2.  This makes the retained-credit sequence
@@ -973,15 +1022,14 @@ bool run_arena_backpressure_starvation_round() {
     }
   }
 
-  const auto first_blocker_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  while (!small_blocker_started[0].load(std::memory_order_acquire) &&
-         std::chrono::steady_clock::now() < first_blocker_deadline) {
-    std::this_thread::yield();
-  }
-  if (!small_blocker_started[0].load(std::memory_order_acquire)) {
+  const bool first_blocker_started = wait_until_or_watchdog([&] {
+    return small_blocker_started[0].load(std::memory_order_acquire);
+  }, case_deadline);
+  if (!first_blocker_started) {
     release_large_blocker.store(true, std::memory_order_release);
-    for (auto &flag : release_small_blockers) flag.store(true, std::memory_order_release);
+    for (auto &flag : release_small_blockers) {
+      flag.store(true, std::memory_order_release);
+    }
     arena->Shutdown();
     return false;
   }
@@ -997,12 +1045,9 @@ bool run_arena_backpressure_starvation_round() {
     large_submit_done.store(true, std::memory_order_release);
     large_submit_done.notify_all();
   });
-  const auto oldest_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  while (arena->backpressure_waiters() < 1U &&
-         std::chrono::steady_clock::now() < oldest_deadline) {
-    std::this_thread::yield();
-  }
+  const bool oldest_registered =
+      wait_until_or_watchdog(
+          [&] { return arena->backpressure_waiters() >= 1U; }, case_deadline);
 
   std::atomic<std::size_t> small_accepted{0U};
   std::array<std::thread, 5> small_producers;
@@ -1025,43 +1070,30 @@ bool run_arena_backpressure_starvation_round() {
     });
   }
 
-  const auto all_waiters_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  while (arena->backpressure_waiters() < 6U &&
-         std::chrono::steady_clock::now() < all_waiters_deadline) {
-    std::this_thread::yield();
-  }
-  bool observed_four_bypasses = arena->backpressure_waiters() >= 6U;
+  bool observed_four_bypasses = oldest_registered &&
+      wait_until_or_watchdog(
+          [&] { return arena->backpressure_waiters() >= 6U; }, case_deadline);
   for (std::size_t released = 0; released < 4U && observed_four_bypasses;
        ++released) {
-    const auto started_deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while (!small_blocker_started[released].load(std::memory_order_acquire) &&
-           std::chrono::steady_clock::now() < started_deadline) {
-      std::this_thread::yield();
-    }
-    if (!small_blocker_started[released].load(std::memory_order_acquire)) {
+    const bool blocker_started = wait_until_or_watchdog([&] {
+      return small_blocker_started[released].load(std::memory_order_acquire);
+    }, case_deadline);
+    if (!blocker_started) {
       observed_four_bypasses = false;
       break;
     }
     release_small_blockers[released].store(true, std::memory_order_release);
-    const auto progress_deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while (small_accepted.load(std::memory_order_acquire) < released + 1U &&
-           std::chrono::steady_clock::now() < progress_deadline) {
-      std::this_thread::yield();
-    }
-    observed_four_bypasses =
+    observed_four_bypasses = wait_until_or_watchdog([&] {
+      return small_accepted.load(std::memory_order_acquire) >= released + 1U ||
+             large_submit_done.load(std::memory_order_acquire);
+    }, case_deadline) &&
         small_accepted.load(std::memory_order_acquire) >= released + 1U;
   }
 
-  const auto fifth_started_deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-  while (!small_blocker_started[4].load(std::memory_order_acquire) &&
-         std::chrono::steady_clock::now() < fifth_started_deadline) {
-    std::this_thread::yield();
-  }
-  if (small_blocker_started[4].load(std::memory_order_acquire)) {
+  const bool fifth_blocker_started = wait_until_or_watchdog([&] {
+    return small_blocker_started[4].load(std::memory_order_acquire);
+  }, case_deadline);
+  if (fifth_blocker_started) {
     release_small_blockers[4].store(true, std::memory_order_release);
   } else {
     observed_four_bypasses = false;
@@ -1069,14 +1101,14 @@ bool run_arena_backpressure_starvation_round() {
 
   // The fifth 10-byte fragment must remain available for the oldest 50-byte
   // request rather than being stolen by the fifth small waiter.
-  const auto prevention_deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
-  while (arena->starvation_preventions() == 0U &&
-         std::chrono::steady_clock::now() < prevention_deadline) {
-    std::this_thread::yield();
-  }
+  const bool prevention_observed = wait_until_or_watchdog([&] {
+    return arena->starvation_preventions() > 0U ||
+           small_accepted.load(std::memory_order_acquire) != 4U ||
+           large_submit_done.load(std::memory_order_acquire);
+  }, case_deadline);
   const bool bounded_bypass_engaged =
-      observed_four_bypasses && arena->backpressure_bypasses() >= 4U &&
+      observed_four_bypasses && prevention_observed &&
+      arena->backpressure_bypasses() >= 4U &&
       arena->starvation_preventions() > 0U &&
       small_accepted.load(std::memory_order_acquire) == 4U &&
       !large_submit_done.load(std::memory_order_acquire);
@@ -1085,14 +1117,11 @@ bool run_arena_backpressure_starvation_round() {
   // accumulate behind the bounded-bypass barrier until the oldest request can
   // atomically claim the full 50 bytes.
   for (auto &flag : release_bypass_tasks) flag.store(true, std::memory_order_release);
-  const auto large_progress_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  while (!large_submit_done.load(std::memory_order_acquire) &&
-         std::chrono::steady_clock::now() < large_progress_deadline) {
-    std::this_thread::yield();
-  }
+  const bool large_finished = wait_until_or_watchdog(
+      [&] { return large_submit_done.load(std::memory_order_acquire); },
+      case_deadline);
   const bool oldest_progressed =
-      large_submit_done.load(std::memory_order_acquire) &&
+      large_finished &&
       large_accepted.load(std::memory_order_acquire);
 
   release_large_blocker.store(true, std::memory_order_release);
@@ -1176,15 +1205,13 @@ bool run_arena_concurrent_shutdown_round() {
   }
   auto arena = std::move(made).ValueOrDie();
   const auto plan = arena->PrepareSubmissionPlan(8U, sanitize::internal::TaskArenaLane::kAll);
-  std::atomic<bool> start{false};
   std::atomic<bool> valid{true};
   std::atomic<std::size_t> executed{0U};
+  std::barrier race_start{6};
   std::array<std::thread, 5U> threads;
   for (std::size_t index = 0; index < 4U; ++index) {
-    threads[index] = std::thread([arena, plan, &start, &valid, &executed] {
-      while (!start.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-      }
+    threads[index] = std::thread([arena, plan, &race_start, &valid, &executed] {
+      race_start.arrive_and_wait();
       for (std::size_t ordinal = 0; ordinal < 1024U; ++ordinal) {
         const auto status = arena->Submit(
             [&executed](std::size_t, sanitize::internal::StopToken stop) {
@@ -1201,10 +1228,8 @@ bool run_arena_concurrent_shutdown_round() {
       }
     });
   }
-  threads[4] = std::thread([arena, &start] {
-    while (!start.load(std::memory_order_acquire)) {
-      std::this_thread::yield();
-    }
+  threads[4] = std::thread([arena, &race_start] {
+    race_start.arrive_and_wait();
     for (std::size_t sample = 0; sample < 4096U; ++sample) {
       (void)arena->worker_count();
       (void)arena->active_tasks();
@@ -1213,8 +1238,7 @@ bool run_arena_concurrent_shutdown_round() {
       (void)arena->telemetry();
     }
   });
-  start.store(true, std::memory_order_release);
-  std::this_thread::sleep_for(std::chrono::microseconds(100));
+  race_start.arrive_and_wait();
   arena->Shutdown();
   for (auto &thread : threads) {
     thread.join();
@@ -1372,6 +1396,25 @@ int main(int argc, char **argv) {
   if (argc != 1) {
     if (argc == 3 && std::string_view(argv[1]) == "--case") {
       selected_case = std::string_view(argv[2]);
+    } else if (argc == 3 &&
+               std::string_view(argv[1]) == "--require-cpu-capacity") {
+      std::size_t required_capacity = 0U;
+      const auto raw = std::string_view(argv[2]);
+      const auto parsed = std::from_chars(
+          raw.data(), raw.data() + raw.size(), required_capacity);
+      if (parsed.ec != std::errc{} || parsed.ptr != raw.data() + raw.size() ||
+          required_capacity == 0U) {
+        std::cerr << "--require-cpu-capacity must be a positive integer\n";
+        return 2;
+      }
+      const auto available = sanitize::internal::available_cpu_capacity();
+      if (available < static_cast<std::int64_t>(required_capacity)) {
+        std::cerr << "sanitizer runner exposes " << available
+                  << " CPU credits; at least " << required_capacity
+                  << " are required for complete concurrency coverage\n";
+        return 1;
+      }
+      return 0;
     } else if (argc == 3 && std::string_view(argv[1]) == "--rounds") {
       const auto raw = std::string_view(argv[2]);
       const auto parsed =
@@ -1383,7 +1426,7 @@ int main(int argc, char **argv) {
       }
     } else {
       std::cerr << "usage: schema_sanitizer_sanitized_ordered_executor "
-                   "[--rounds N|--case NAME]\n";
+                   "[--rounds N|--case NAME|--require-cpu-capacity N]\n";
       return 2;
     }
   }

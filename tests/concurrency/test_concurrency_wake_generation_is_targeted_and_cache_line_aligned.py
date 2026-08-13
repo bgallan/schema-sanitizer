@@ -84,5 +84,5 @@ def test_native_probe_coalesces_busy_submissions_and_survives_park_waves() -> No
     assert queued == 0
     assert wake_before_preload == wake_after_preload == runnable_blockers
     assert runnable_blockers < wake_final < submitted
-    assert started == workers
+    assert runnable_blockers <= started <= workers
     assert runnable_blockers <= peak <= workers

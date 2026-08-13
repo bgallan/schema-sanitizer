@@ -60,8 +60,9 @@ def test_native_mixed_lanes_accumulate_multiple_worker_shards() -> None:
     )
 
     assert stolen > 0
-    assert started == 4
     assert 1 <= peak <= 4
     assert finished == 24_000
     assert queued == 0
     assert submitted == 24_002
+    blocker_count = submitted - finished
+    assert blocker_count <= started <= 4

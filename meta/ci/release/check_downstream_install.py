@@ -58,15 +58,28 @@ def create_environment(root: Path, name: str) -> Path:
         shutil.rmtree(environment)
     venv.EnvBuilder(with_pip=True).create(environment)
     python = environment_python(environment)
-    subprocess.run([os.fspath(python), "-m", "pip", "install", "-U", "pip"], check=True)
+    subprocess.run(
+        [os.fspath(python), "-m", "pip", "install", "pip==26.1.2"],
+        check=True,
+    )
     return python
 
 
-def validate_consumer(wheel: Path, root: Path, scripts: Path) -> None:
+def validate_consumer(wheel: Path, root: Path, scripts: Path, constraints: Path) -> None:
     """Exercise runtime and typing behavior outside the repository."""
     python = create_environment(root, "consumer")
     subprocess.run(
-        [os.fspath(python), "-m", "pip", "install", "mypy", "pyarrow", os.fspath(wheel)],
+        [
+            os.fspath(python),
+            "-m",
+            "pip",
+            "install",
+            "-c",
+            os.fspath(constraints),
+            "mypy",
+            "pyarrow",
+            os.fspath(wheel),
+        ],
         check=True,
     )
     subprocess.run(
@@ -88,14 +101,22 @@ def validate_consumer(wheel: Path, root: Path, scripts: Path) -> None:
     )
 
 
-def validate_extras(wheel: Path, root: Path) -> None:
+def validate_extras(wheel: Path, root: Path, constraints: Path) -> None:
     """Install every optional extra alone and verify its advertised imports."""
     for extra, imports in EXTRA_IMPORTS.items():
         print(f"[downstream-extra] {extra}", flush=True)
         python = create_environment(root, f"extra-{extra}")
         requirement = os.fspath(wheel) if extra == "core" else f"{wheel}[{extra}]"
         subprocess.run(
-            [os.fspath(python), "-m", "pip", "install", requirement],
+            [
+                os.fspath(python),
+                "-m",
+                "pip",
+                "install",
+                "-c",
+                os.fspath(constraints),
+                requirement,
+            ],
             check=True,
         )
         statements = ["import schema_sanitizer", *(f"import {name}" for name in imports)]
@@ -112,15 +133,23 @@ def main() -> None:
     parser.add_argument("wheel", type=Path)
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--scripts", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument(
+        "--constraints",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "requirements/downstream.txt",
+    )
     args = parser.parse_args()
 
     wheel = args.wheel.resolve()
     scripts = args.scripts.resolve()
+    constraints = args.constraints.resolve()
     args.work_root.mkdir(parents=True, exist_ok=True)
     if not wheel.is_file():
         raise SystemExit(f"wheel does not exist: {wheel}")
-    validate_consumer(wheel, args.work_root, scripts)
-    validate_extras(wheel, args.work_root)
+    if not constraints.is_file():
+        raise SystemExit(f"constraints do not exist: {constraints}")
+    validate_consumer(wheel, args.work_root, scripts, constraints)
+    validate_extras(wheel, args.work_root, constraints)
     print("downstream wheel and isolated extras passed")
 
 

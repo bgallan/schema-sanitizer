@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
-import time
 from concurrent.futures import Future
 from pathlib import Path
 from threading import Condition, Event, Lock, Thread
@@ -13,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -32,6 +32,7 @@ def test_cancelled_bridge_retains_submission_until_real_task_terminal() -> None:
     from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 
     started = Event()
+    cancellation_observed = Event()
     allow_terminal = Event()
     coordinator = RemoteIoCoordinator(
         shutdown_timeout_seconds=2.0,
@@ -44,20 +45,21 @@ def test_cancelled_bridge_retains_submission_until_real_task_terminal() -> None:
         try:
             await asyncio.sleep(60)
         except asyncio.CancelledError:
+            cancellation_observed.set()
             while not allow_terminal.is_set():
                 await asyncio.sleep(0.002)
             return "late-success"
 
     future = coordinator.submit(operation)
-    assert started.wait(1)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     owner = getattr(future, "_schema_sanitizer_remote_submission")
     future.cancel()
     assert future.cancelled()
-    time.sleep(0.03)
+    assert cancellation_observed.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert not owner.terminal.is_set()
     assert coordinator.permit_snapshot().pending_submissions == 1
     allow_terminal.set()
-    assert owner.terminal.wait(1)
+    assert owner.terminal.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert coordinator.permit_snapshot().pending_submissions == 0
     coordinator.close()
 
@@ -114,7 +116,7 @@ def test_claim_path_identity_does_not_block_on_fifo(tmp_path: Path) -> None:
 
     thread = Thread(target=claim)
     thread.start()
-    thread.join(0.5)
+    thread.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not thread.is_alive()
     assert not errors
     assert identities[0] is not None
@@ -182,7 +184,7 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
 
     loop_thread = Thread(target=run_loop)
     loop_thread.start()
-    assert loop_started.wait(1)
+    assert loop_started.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     class Coordinator:
         def submit(self, operation: Any) -> Future[Any]:
@@ -195,7 +197,7 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
         async def __aenter__(self) -> "Session":
             def block() -> None:
                 block_started.set()
-                allow_loop.wait(2)
+                allow_loop.wait(SCHEDULER_TIMEOUT_SECONDS)
 
             asyncio.get_running_loop().call_soon(block)
             return self
@@ -209,17 +211,16 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
     )
     try:
         caller.start()
-        assert block_started.wait(1)
-        time.sleep(0.03)
+        assert block_started.wait(SCHEDULER_TIMEOUT_SECONDS)
         assert caller.is_alive()
         allow_loop.set()
-        caller.join(1)
+        caller.join(SCHEDULER_TIMEOUT_SECONDS)
         assert not caller.is_alive()
         assert not errors
     finally:
         allow_loop.set()
         loop.call_soon_threadsafe(loop.stop)
-        loop_thread.join(1)
+        loop_thread.join(SCHEDULER_TIMEOUT_SECONDS)
         loop.close()
 
 
@@ -406,11 +407,11 @@ def test_remote_coordinator_construction_runs_outside_resource_lock(
     results: list[Any] = []
     builder = Thread(target=lambda: results.append(owner.remote_coordinator()))
     builder.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert owner._lock.acquire(timeout=0.1)
     owner._lock.release()
     allow.set()
-    builder.join(1)
+    builder.join(SCHEDULER_TIMEOUT_SECONDS)
     assert results == [sentinel]
 
 
@@ -451,7 +452,7 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
 
     loop_thread = Thread(target=run_loop)
     loop_thread.start()
-    assert loop_started.wait(1)
+    assert loop_started.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     class Coordinator:
         def submit(self, operation: Any) -> Future[Any]:
@@ -483,17 +484,17 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
     caller = Thread(target=enter)
     try:
         caller.start()
-        assert blocker_started.wait(1)
-        caller.join(1)
+        assert blocker_started.wait(SCHEDULER_TIMEOUT_SECONDS)
+        caller.join(SCHEDULER_TIMEOUT_SECONDS)
         assert not caller.is_alive()
         assert len(errors) == 1
         assert isinstance(errors[0], TimeoutError)
         allow_loop.set()
-        assert exited.wait(1)
+        assert exited.wait(SCHEDULER_TIMEOUT_SECONDS)
     finally:
         allow_loop.set()
         loop.call_soon_threadsafe(loop.stop)
-        loop_thread.join(1)
+        loop_thread.join(SCHEDULER_TIMEOUT_SECONDS)
         loop.close()
 
 
@@ -644,7 +645,7 @@ def test_lookahead_timed_out_close_auto_resumes_after_last_admission(
 
     def prepare(self: Any, _plan: Any, _options: Any) -> object:
         entered.set()
-        assert allow.wait(1)
+        assert allow.wait(SCHEDULER_TIMEOUT_SECONDS)
         return sentinel
 
     monkeypatch.setattr(module.PartitionSourceLookahead, "_prepare_with_new_context", prepare)
@@ -657,14 +658,14 @@ def test_lookahead_timed_out_close_auto_resumes_after_last_admission(
     results: list[Any] = []
     worker = Thread(target=lambda: results.append(owner.prepare_first(object())))
     worker.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     with pytest.raises(RuntimeError, match="admissions exceeded"):
         owner.close()
     assert owner._close_started
     assert not owner._closed
 
     allow.set()
-    worker.join(1)
+    worker.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not worker.is_alive()
     assert results == [sentinel]
     assert owner._closed

@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -188,25 +189,34 @@ def test_ordered_async_pending_storage_is_fixed_ring_and_handles_out_of_order(
     assert "_AsyncPendingResultSlot" in ordered
     assert "index % worker_count" in ordered
 
-    async def run() -> list[int]:
+    async def run() -> tuple[list[int], list[int]]:
         monkeypatch.setattr(
             scheduler,
             "_acquire_async_scheduler_admission",
             lambda _requested: scheduler._AsyncSchedulerAdmission(2),
         )
+        later_completed = asyncio.Event()
+        completion_order: list[int] = []
 
         async def fetch(index: int) -> int:
             if index == 0:
-                await asyncio.sleep(0.02)
+                await asyncio.wait_for(later_completed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
             else:
-                await asyncio.sleep(0)
+                later_completed.set()
+            completion_order.append(index)
             return index
 
-        return [
-            value async for _index, value in scheduler.ordered_indexed_results(8, fetch, window=2)
+        values = [
+            value
+            async for _index, value in scheduler.ordered_indexed_results(
+                8, fetch, window=2, expected_retained_bytes=64
+            )
         ]
+        return values, completion_order
 
-    assert asyncio.run(run()) == list(range(8))
+    values, completion_order = asyncio.run(run())
+    assert values == list(range(8))
+    assert completion_order.index(1) < completion_order.index(0)
 
 
 def test_async_task_domain_release_commits_exactly_once_under_one_lock() -> None:

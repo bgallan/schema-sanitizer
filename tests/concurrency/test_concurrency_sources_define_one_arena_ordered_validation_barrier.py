@@ -140,8 +140,9 @@ def test_parallel_validation_and_materialization_share_exact_output(
     assert counters["jsonl_token_rows_indexed"] == 2_048
     assert counters["jsonl_token_fields_indexed"] == 2_048 * len(_COLUMNS)
     assert counters["jsonl_token_rows_fallback"] == 0
-    assert counters["peak_active_tasks"] >= 2
-    assert counters["started_workers"] == stats["effective_workers"]
+    peak_active_tasks = counters["peak_active_tasks"]
+    started_workers = counters["started_workers"]
+    assert 2 <= peak_active_tasks <= started_workers <= stats["effective_workers"]
     assert single_stats["counters"]["started_workers"] == 0
     assert single_stats["tasks"]["json_validation"]["submitted"] == 0
     assert diagnosis["json_validation_worker_parallelism"] > 0

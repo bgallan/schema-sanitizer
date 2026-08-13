@@ -5,11 +5,11 @@ from __future__ import annotations
 import gc
 import os
 import threading
-import time
 import weakref
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -157,13 +157,14 @@ def test_shutdown_single_flight_propagates_same_failure_to_waiters(
     from schema_sanitizer.core_impl import runtime_shutdown as module
 
     module._reset_runtime_shutdown_for_tests()
+    monkeypatch.setattr(module, "_SHUTDOWN_CONDITION", WaitObservedCondition())
     entered = threading.Event()
     resume = threading.Event()
     failure = RuntimeError("external-admission-closes-before-internal-teardown shutdown failure")
 
     def fail(_deadline_ns: int, _generation: int) -> object:
         entered.set()
-        assert resume.wait(2)
+        assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
         raise failure
 
     monkeypatch.setattr(module, "_perform_shutdown", fail)
@@ -171,19 +172,19 @@ def test_shutdown_single_flight_propagates_same_failure_to_waiters(
 
     def invoke() -> None:
         try:
-            module.shutdown_concurrency_runtime(deadline_seconds=2)
+            module.shutdown_concurrency_runtime(deadline_seconds=SCHEDULER_TIMEOUT_SECONDS)
         except BaseException as exc:  # noqa: BLE001 - contract under test
             observed.append(exc)
 
     first = threading.Thread(target=invoke)
     second = threading.Thread(target=invoke)
     first.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    time.sleep(0.02)
+    assert module._SHUTDOWN_CONDITION.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     resume.set()
-    first.join(2)
-    second.join(2)
+    first.join(SCHEDULER_TIMEOUT_SECONDS)
+    second.join(SCHEDULER_TIMEOUT_SECONDS)
     try:
         assert not first.is_alive() and not second.is_alive()
         assert observed == [failure, failure] or observed == [failure] * 2

@@ -11,6 +11,13 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
+env:
+  # All Python package downloads are bounded and non-interactive, including
+  # pip subprocesses created by downstream-isolation checks.
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_INPUT: '1'
+  PIP_RETRIES: '10'
+  PIP_TIMEOUT: '60'
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
     }}
@@ -149,48 +156,48 @@ jobs:
           - name: quality, security, and Python coverage
             task: quality
             runner: ubuntu-24.04
-            python: '3.11'
+            python: 3.11.9
             timeout: 50
           - name: source distribution and downstream packaging
             task: source-distribution
             runner: ubuntu-24.04
-            python: '3.11'
+            python: 3.11.9
             timeout: 90
           - name: coverage / native LLVM
             task: native-llvm-coverage
             runner: ubuntu-24.04
-            python: '3.11'
+            python: 3.11.9
             timeout: 50
           - name: sanitizer / Linux GCC ThreadSanitizer
             task: thread-sanitizer
             runner: ubuntu-24.04
-            python: '3.13'
+            python: 3.13.15
             timeout: 45
           - name: sanitizer / linux-x86_64-asan-ubsan
             task: platform-sanitizer
             runner: ubuntu-24.04
-            python: '3.11'
+            python: 3.11.9
             timeout: 70
             sanitizer: asan-ubsan
             mode: linux-full
           - name: sanitizer / windows-amd64-asan
             task: platform-sanitizer
             runner: windows-2025
-            python: '3.11'
+            python: 3.11.9
             timeout: 70
             sanitizer: asan
             mode: native
           - name: sanitizer / macos-x86_64-asan-ubsan
             task: platform-sanitizer
             runner: macos-15-intel
-            python: '3.11'
+            python: 3.11.9
             timeout: 70
             sanitizer: asan-ubsan
             mode: native
           - name: sanitizer / macos-arm64-asan-ubsan
             task: platform-sanitizer
             runner: macos-15
-            python: '3.11'
+            python: 3.11.9
             timeout: 70
             sanitizer: asan-ubsan
             mode: native
@@ -202,7 +209,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |-
+            pyproject.toml
+            meta/ci/requirements/*.txt
+            .github/actions/*/action.yml
       - name: Require a known validation workload
         env:
           VALIDATION_TASK: ${{ matrix.task }}
@@ -260,22 +270,60 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: 3.11.9
           cache: pip
-          cache-dependency-path: pyproject.toml
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+          cache-dependency-path: |-
+            pyproject.toml
+            meta/ci/requirements/*.txt
+            .github/actions/*/action.yml
+      - id: download-source-distribution
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: source-distribution
-          path: dist
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+          path: download/source
+      - name: Remove a partial source-distribution download before retrying
+        if: ${{ always() && steps.download-source-distribution.outcome == 'failure' }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- download/source
+      - name: Retry the source-distribution download
+        if: ${{ always() && steps.download-source-distribution.outcome == 'failure' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: dist
+          name: source-distribution
+          path: download/source
+      - id: download-platform-wheels
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: download/wheels
+          pattern: dist-wheels-*
+          merge-multiple: true
+      - name: Remove partial platform-wheel downloads before retrying
+        if: ${{ always() && steps.download-platform-wheels.outcome == 'failure' }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- download/wheels
+      - name: Retry the platform-wheel downloads
+        if: ${{ always() && steps.download-platform-wheels.outcome == 'failure' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: download/wheels
           pattern: dist-wheels-*
           merge-multiple: true
       - name: Validate the complete release artifact set
         shell: bash
         run: |
-          python -m pip install -U pip twine==7.0.0 packaging==26.3
+          set -euo pipefail
+          mkdir -p dist
+          cp download/source/*.tar.gz download/wheels/*.whl dist/
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+          [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
+          export SOURCE_DATE_EPOCH
+          python -m pip install pip==26.1.2 twine==7.0.0 packaging==26.3
           python -m twine check dist/*
           python meta/ci/release/check_distribution_contents.py --release-set dist/*
       - name: Assemble the auditable release artifact

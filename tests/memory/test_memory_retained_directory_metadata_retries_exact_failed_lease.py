@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
@@ -194,15 +195,26 @@ def test_remote_io_waiter_self_expires_at_operation_deadline(
     assert waiting == 0
 
 
-def test_sync_and_async_remote_waiters_share_one_process_authority() -> None:
+def test_sync_and_async_remote_waiters_share_one_process_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     async def run() -> None:
         governor = RemoteIoPermitGovernor(capacity=1)
         first = await governor.acquire(1, operation_id="async-holder")
         acquired = threading.Event()
+        enqueued = threading.Event()
         release = threading.Event()
         errors: list[BaseException] = []
+        original_enqueue = governor._enqueue_waiter_locked
+
+        def observe_enqueue(waiter: object) -> None:
+            original_enqueue(waiter)  # type: ignore[arg-type]
+            if getattr(waiter, "sync_event", None) is not None:
+                enqueued.set()
+
+        monkeypatch.setattr(governor, "_enqueue_waiter_locked", observe_enqueue)
 
         def worker() -> None:
             try:
@@ -216,12 +228,14 @@ def test_sync_and_async_remote_waiters_share_one_process_authority() -> None:
 
         thread = threading.Thread(target=worker)
         thread.start()
-        await asyncio.sleep(0.03)
+        assert await asyncio.to_thread(enqueued.wait, SCHEDULER_TIMEOUT_SECONDS), (
+            "synchronous waiter was not authoritatively enqueued"
+        )
         assert not acquired.is_set()
         first.release()
-        assert await asyncio.to_thread(acquired.wait, 0.5)
+        assert await asyncio.to_thread(acquired.wait, SCHEDULER_TIMEOUT_SECONDS)
         release.set()
-        thread.join(timeout=1.0)
+        thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
         assert not thread.is_alive()
         assert not errors
 

@@ -19,6 +19,7 @@ void release_process_file_descriptor_permits(std::size_t amount) noexcept;
 void mark_process_file_descriptors_opened(std::size_t amount) noexcept;
 void mark_process_file_descriptors_closed(std::size_t amount) noexcept;
 [[nodiscard]] std::size_t process_file_descriptor_permits_in_use() noexcept;
+[[nodiscard]] std::size_t process_file_descriptor_waiters() noexcept;
 [[nodiscard]] std::size_t process_file_descriptors_opened() noexcept;
 [[nodiscard]] std::optional<std::size_t>
 process_file_descriptor_count() noexcept;

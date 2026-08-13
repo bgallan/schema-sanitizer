@@ -6,13 +6,26 @@ runs:
   steps:
     - name: Install development and audit tools
       shell: bash
-      run: >-
-        python -m pip install -U pip '.[dev]'
-        coverage==7.15.4 pip-audit==2.10.1 bandit==1.9.4
-        tomli==2.4.1
+      run: |-
+        set -euo pipefail
+        python -m pip install pip==26.1.2
+        python -m pip install -c meta/ci/requirements/quality.txt \
+          '.[dev]' coverage==7.15.4 pip-audit==2.10.1 \
+          bandit==1.9.4 tomli==2.4.1
     - name: Lint, format, and static typing
       shell: bash
-      run: pre-commit run --all-files
+      run: |-
+        set -euo pipefail
+        for attempt in 1 2 3; do
+          if timeout --signal=TERM --kill-after=15s 120s pre-commit install-hooks; then
+            break
+          fi
+          if (( attempt == 3 )); then
+            exit 1
+          fi
+          sleep $((attempt * 2))
+        done
+        pre-commit run --all-files
     - name: Build dependency inputs and audit them
       shell: bash
       run: |
@@ -50,9 +63,18 @@ runs:
             "yamlfix==1.18.0",
             "zizmor==1.29.0",
         ]
+        ci_constraints = [
+            requirement
+            for path in sorted(Path("meta/ci/requirements").glob("*.txt"))
+            for requirement in path.read_text(encoding="utf-8").splitlines()
+            if requirement and not requirement.startswith("#")
+        ]
         for name, requirements in (
             ("runtime-requirements.txt", runtime),
-            ("full-requirements.txt", runtime + build + extras + ci_tools),
+            (
+                "full-requirements.txt",
+                runtime + build + extras + ci_tools + ci_constraints,
+            ),
         ):
             Path(name).write_text(
                 "\n".join(dict.fromkeys(requirements)) + "\n",
@@ -116,6 +138,8 @@ runs:
         python meta/ci/quality/report_risk_coverage.py coverage-python.json \
           --output coverage-python-risk-gaps.txt
     - name: Upload Python branch coverage
+      id: upload-python-branch-coverage
+      continue-on-error: true
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: python-branch-coverage
@@ -126,3 +150,16 @@ runs:
           coverage-python-risk-gaps.txt
         if-no-files-found: error
         retention-days: 14
+    - name: Retry Python branch coverage upload after a transport failure
+      if: ${{ always() && steps.upload-python-branch-coverage.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: python-branch-coverage
+        path: |
+          coverage-python-html/
+          coverage-python.xml
+          coverage-python.json
+          coverage-python-risk-gaps.txt
+        if-no-files-found: error
+        retention-days: 14
+        overwrite: true
