@@ -303,9 +303,48 @@ def test_allocation_registry_uses_one_process_global_slab_with_shrink_only_admis
     source = (CPP / "internal/memory/memory_pool_registry.cc.inc").read_text()
     assert "struct GlobalRegistryBank" in source
     assert "std::make_unique<GlobalAllocationSlot[]>(capacity)" in source
+    assert "std::make_unique<std::uint32_t[]>(capacity)" in source
+    assert "sizeof(GlobalRegistryBank) ==" in source
+    assert "global_registry_fixed_overhead_bytes()" in source
     assert "owner_token_" in source
     assert "usable_slots_per_shard" in source
     assert "current_limit = registry_metadata_limit_bytes()" in source
+    assert "kRegistryLimitRefreshPeriodNs" in source
+    assert "std::chrono::steady_clock::now()" in source
+    assert "std::lock_guard refresh_lock(limit_refresh_mutex)" in source
+    # Allocate/Free use a preallocated chained index and free list. Full-bank
+    # scans are reserved for destruction, where orphaned owner entries must be
+    # purged even after a memory.max shrink.
+    assert "bucket_heads" in source
+    assert "free_heads" in source
+    assert "redirected_entries" in source
+    assert "global_registry_fixed_overhead_bytes()" in source
+    fixed = source[
+        source.index("global_registry_fixed_overhead_bytes") : source.index(
+            "struct GlobalRegistryBank"
+        )
+    ]
+    assert "sizeof(std::unique_ptr<GlobalAllocationSlot[]>)" in fixed
+    assert "sizeof(std::unique_ptr<std::uint32_t[]>)" in fixed
+    assert "sizeof(std::mutex)" in fixed
+    register = source[
+        source.index("InsertResult register_in_primary") : source.index("bool claim_in_one_shard")
+    ]
+    claim = source[source.index("bool claim_in_one_shard") : source.index("void purge_owner")]
+    assert "find_slot(" not in register
+    assert "slots_per_shard; ++index" not in register
+    assert "slots_per_shard; ++index" not in claim
+    assert "slot.owner == owner_token_ && slot.buffer == buffer" in claim
+    assert "static_cast<std::size_t>(index) >= bank.cached_usable_slots()" in source
+    assert "result = register_in_primary" in source
+    assert "result = register_in_two_shards" in source
+    assert "std::scoped_lock" in source
+    assert "redirected_to_secondary(bank, primary)" in source
+    assert "if (!reserve_owner_entry())" in source
+    reserve_start = source.index("bool reserve_owner_entry")
+    reserve = source[reserve_start : source.index("shard_index(", reserve_start)]
+    assert "compare_exchange_weak" in reserve
+    assert "current < limit" in reserve
     # Pools no longer allocate a private registry table.
     constructor = source[
         source.index("class LiveAllocationRegistry") : source.index("bool register_allocation")

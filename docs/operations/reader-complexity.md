@@ -30,5 +30,9 @@ chunk boundary. `benchmarks.readers.linear_scaling` exercises hostile
 but valid CSV, JSONL, and XML patterns at increasing sizes in serial and
 parallel modes. The normalized time-growth gate is intentionally generous to
 absorb scheduler and filesystem noise while detecting super-linear regressions.
+An independent absolute-median policy, calibrated from a named healthy run on
+all supported platforms, also rejects uniformly slow but still-linear readers.
+Benchmark reports identify the measured commit and native-extension digest;
+changing measurement evidence alone cannot relax the versioned policy.
 Parquet's corresponding guarantee is enforced structurally through range,
 page, decompression, and level-expansion limits plus sanitizer fuzzing.

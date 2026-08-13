@@ -245,10 +245,16 @@ jobs:
           mkdir -p artifacts
           python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
             --certificate-output artifacts/parquet-contract-runtime-certificate.json
-      - name: Full suite including adapters, HTTP faults, and concurrency
-        # Do not prepend src/: on Windows that bypasses the wheel's repaired DLL
-        # bootstrap while still loading its native extension.
-        run: pytest -q -o pythonpath=.
+      - name: Cross-platform reader linear-scaling smoke
+        shell: bash
+        run: >-
+          python -I benchmarks/readers/linear_scaling.py
+          --sizes 1024,2048
+          --repeats 3
+          --maximum-normalized-growth 8
+          --latency-budget benchmarks/readers/linear_scaling_budget.json
+          --wheel wheelhouse/*.whl
+          --output artifacts/reader-linear-scaling-${{ matrix.artifact }}.json
       - name: Cross-platform threading benchmark smoke
         run: >-
           python -m benchmarks.concurrency.threading.matrix
@@ -258,13 +264,17 @@ jobs:
           --repeats 1
           --only parquet
           --output artifacts/threading-matrix-${{ matrix.artifact }}.json
-      - name: Cross-platform reader linear-scaling smoke
-        run: >-
-          python -m benchmarks.readers.linear_scaling
-          --sizes 1024,2048
-          --repeats 3
-          --maximum-normalized-growth 8
-          --output artifacts/reader-linear-scaling-${{ matrix.artifact }}.json
+      - name: Full suite including adapters, HTTP faults, and concurrency
+        # Do not prepend src/: on Windows that bypasses the wheel's repaired DLL
+        # bootstrap while still loading its native extension.
+        shell: bash
+        run: |
+          set -euo pipefail
+          pytest -q -o pythonpath=. \
+            --durations=50 \
+            --durations-min=0.05 \
+            --junitxml="artifacts/pytest-${{ matrix.artifact }}.xml" \
+            2>&1 | tee "artifacts/pytest-durations-${{ matrix.artifact }}.log"
       - name: Set up CPython 3.12 for stable-ABI functional coverage
         if: matrix.artifact == 'linux'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

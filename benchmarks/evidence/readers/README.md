@@ -29,8 +29,13 @@ separately documented 64 MiB early-release limit.
 fixtures and compares elapsed-time growth with input-byte growth in serial and
 parallel modes. The retained [`linear-scaling.json`](linear-scaling.json) report
 uses repeated Release measurements; CI also runs a smaller, deliberately
-noise-tolerant smoke on every supported wheel platform. The algorithmic contract
-and the structural Parquet argument are documented in
+noise-tolerant smoke on every supported wheel platform. CI combines its
+normalized-growth envelope with the independent, versioned absolute policy in
+[`linear_scaling_budget.json`](../../readers/linear_scaling_budget.json), so a
+large constant-factor regression cannot pass merely because it remains linear.
+Each generated report includes native-binary provenance; CI additionally
+matches the loaded extension's digest to the extension stored in the platform
+wheel. The algorithmic contract and the structural Parquet argument are documented in
 [`docs/operations/reader-complexity.md`](../../../docs/operations/reader-complexity.md).
 
 ## Validation record

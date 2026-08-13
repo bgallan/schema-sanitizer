@@ -374,6 +374,33 @@ def test_platform_suite_exercises_the_installed_wheel() -> None:
     assert "pytest -q -o pythonpath=." in platform_job
 
 
+def test_platform_suite_persists_test_timings_on_failure() -> None:
+    """Every wheel runner retains complete and ranked pytest timing evidence."""
+    ci = _workflow("ci.yml")
+    platform_job = _job_body(ci, "platform-wheels")
+    full_suite = next(
+        step
+        for step in _step_bodies(ci)
+        if "name: Full suite including adapters, HTTP faults, and concurrency" in step
+    )
+    upload = next(
+        step
+        for step in _step_bodies(ci)
+        if "name: platform-evidence-${{ matrix.artifact }}" in step
+    )
+
+    assert "shell: bash" in full_suite
+    assert "set -euo pipefail" in full_suite
+    assert "--durations=50" in full_suite
+    assert "--durations-min=0.05" in full_suite
+    assert '--junitxml="artifacts/pytest-${{ matrix.artifact }}.xml"' in full_suite
+    assert 'tee "artifacts/pytest-durations-${{ matrix.artifact }}.log"' in full_suite
+    assert platform_job.index("name: Full suite") < platform_job.index(
+        "name: Upload platform evidence"
+    )
+    assert "failure() && hashFiles('artifacts/**') != ''" in upload
+
+
 def test_validation_owns_full_extension_tsan_gate() -> None:
     """Linux CI must build and repeatedly exercise the complete TSan extension."""
     ci = _workflow("ci.yml")
@@ -410,7 +437,7 @@ def test_remote_http_fault_gate_runs_on_every_supported_platform() -> None:
 
     assert "platform-wheels:" in ci
     assert "Full suite including adapters, HTTP faults, and concurrency" in ci
-    assert "run: pytest -q" in ci
+    assert "pytest -q -o pythonpath=." in ci
     assert "--ignore" not in ci
     for runner in ("ubuntu-24.04", "windows-2025", "macos-15-intel", "macos-15"):
         assert runner in ci
@@ -556,9 +583,27 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
 
     assert "python -m benchmarks.concurrency.threading.matrix" in platform_job
     assert "--profile ci" in platform_job
-    assert "python -m benchmarks.readers.linear_scaling" in platform_job
+    assert "python -I benchmarks/readers/linear_scaling.py" in platform_job
     assert "--maximum-normalized-growth 8" in platform_job
+    assert "--latency-budget benchmarks/readers/linear_scaling_budget.json" in platform_job
+    assert "--wheel wheelhouse/*.whl" in platform_job
+    reader_step = next(
+        step
+        for step in _step_bodies(ci)
+        if "name: Cross-platform reader linear-scaling smoke" in step
+    )
+    assert "shell: bash" in reader_step
     assert "reader-linear-scaling-${{ matrix.artifact }}.json" in platform_job
+    # Cheap performance gates fail before the expensive full pytest suite.
+    assert platform_job.index("name: Cross-platform reader linear-scaling smoke") < (
+        platform_job.index("name: Cross-platform threading benchmark smoke")
+    )
+    assert platform_job.index("name: Cross-platform threading benchmark smoke") < (
+        platform_job.index("name: Full suite")
+    )
+    assert platform_job.index("name: Cross-platform reader linear-scaling smoke") < (
+        platform_job.index("name: Full suite")
+    )
     for artifact in ("linux", "windows", "macos-x86_64", "macos-arm64"):
         assert f"artifact: {artifact}" in ci
 

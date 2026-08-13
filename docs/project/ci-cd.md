@@ -130,6 +130,25 @@ installed public conversion smoke on 3.12, 3.13, and 3.14, and every platform
 loads it on 3.14. Matrix jobs use `fail-fast: false`, preserving evidence from
 the other platforms when one fails.
 
+Every full-suite invocation also emits a JUnit XML report with the duration of
+each test and a terminal log ranking the 50 slowest phases above 50 ms. Both
+files identify their matrix platform and are retained in that platform's
+evidence artifact. The log is piped through `tee` with `pipefail`, so pytest's
+exit status remains authoritative; when pytest fails, the evidence upload still
+runs and preserves the partial diagnostics produced before the failure.
+
+Before the full suite, each installed wheel runs the reader performance gate.
+It enforces both normalized growth and the versioned absolute-latency policy in
+`benchmarks/readers/linear_scaling_budget.json`; a reader that remains linear
+but becomes uniformly slower therefore fails. The report records the commit,
+platform, package version, and SHA-256 of the native extension. CI runs the
+benchmark in isolated Python mode and verifies that the loaded extension's
+bytes match the extension inside the declared wheel, preventing a checkout or
+stale build from satisfying the gate. The reader and threading smokes run
+before pytest so a performance regression fails quickly without spending tens
+of minutes on the full suite; successful runs retain the same checks and
+coverage.
+
 The matrix pins cibuildwheel and abi3audit. After cibuildwheel emits each
 repaired wheel, CI runs `abi3audit --strict` explicitly as a blocking gate. This
 preserves the upstream stable-ABI check while avoiding its hidden cold-runner
@@ -167,7 +186,7 @@ retention periods:
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 30 days | Manual publication and external audit. |
 | `python-branch-coverage` | Contextual HTML, XML, JSON, and high-risk gap report. | 14 days | Maintainers and auditors. |
 | `native-llvm-coverage` | LLVM profiles, summaries, and contextual HTML. | 14 days | Maintainers and auditors. |
-| `platform-evidence-${{ matrix.artifact }}` | Parquet certificate and bounded benchmark results. | 14 days | Maintainers and auditors. |
+| `platform-evidence-${{ matrix.artifact }}` | Pytest JUnit timings and slowest-phase log, Parquet certificate, and bounded benchmark results. | 14 days | Maintainers and auditors. |
 
 `distribution` downloads the four intermediate wheels, builds the sdist, and
 validates the five files as one set. It then creates a canonical

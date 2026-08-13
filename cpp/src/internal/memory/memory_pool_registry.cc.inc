@@ -1,6 +1,6 @@
 // Implements bounded live-allocation ownership tracking without allocation-time
-// metadata growth. Every registry owns one flat table allocated at pool
-// construction; Allocate/Free only mutate existing slots.
+// metadata growth. One process-wide bank owns preallocated chained-hash indexes
+// and free lists; Allocate/Free only mutate existing slots.
 
 bool hardened_allocation_registry_enabled() noexcept { return true; }
 
@@ -96,51 +96,110 @@ constexpr std::size_t kGlobalRegistryShardCount = 256U;
 constexpr std::size_t kMinimumGlobalSlotsPerShard = 8U;
 constexpr std::size_t kMaximumPoolRecords = 65'536U;
 constexpr std::uint64_t kBytesPerRecordBudget = 1024U;
+constexpr std::int64_t kRegistryLimitRefreshPeriodNs = 250'000'000LL;
+constexpr std::uint32_t kNoGlobalRegistrySlot =
+    std::numeric_limits<std::uint32_t>::max();
 static_assert((kGlobalRegistryShardCount & (kGlobalRegistryShardCount - 1U)) ==
               0U);
+
+[[nodiscard]] std::int64_t registry_monotonic_now_ns() noexcept {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 struct GlobalAllocationSlot final {
   std::uintptr_t owner = 0U;
   std::uint8_t *buffer = nullptr;
   LiveAllocationRecord record{};
+  std::uint32_t next_bucket = kNoGlobalRegistrySlot;
+  // Empty slots link the free list; occupied slots retain the primary shard
+  // that selected them so a two-choice redirect can be retired exactly.
+  std::uint32_t free_next_or_origin = kNoGlobalRegistrySlot;
 };
+
+[[nodiscard]] constexpr std::int64_t
+global_registry_fixed_overhead_bytes() noexcept {
+  // Dynamic slot and bucket arrays are charged per record below. This is the
+  // complete resident state retained once per process outside those arrays.
+  return static_cast<std::int64_t>(
+      sizeof(std::unique_ptr<GlobalAllocationSlot[]>) +
+      sizeof(std::unique_ptr<std::uint32_t[]>) +
+      sizeof(std::array<std::uint32_t, kGlobalRegistryShardCount>) * 2U +
+      sizeof(
+          std::array<std::atomic<std::uint32_t>, kGlobalRegistryShardCount>) +
+      sizeof(std::array<std::mutex, kGlobalRegistryShardCount>) +
+      sizeof(std::atomic<std::size_t>) + sizeof(std::atomic<std::int64_t>) +
+      sizeof(std::mutex) + sizeof(std::size_t) * 2U + sizeof(std::int64_t));
+}
 
 struct GlobalRegistryBank final {
   std::unique_ptr<GlobalAllocationSlot[]> slots;
+  std::unique_ptr<std::uint32_t[]> bucket_heads;
   std::array<std::uint32_t, kGlobalRegistryShardCount> occupancy{};
+  std::array<std::uint32_t, kGlobalRegistryShardCount> free_heads{};
+  std::array<std::atomic<std::uint32_t>, kGlobalRegistryShardCount>
+      redirected_entries{};
   std::array<std::mutex, kGlobalRegistryShardCount> mutexes{};
+  std::atomic<std::size_t> cached_usable_slots_per_shard{0U};
+  std::atomic<std::int64_t> next_limit_refresh_ns{0};
+  std::mutex limit_refresh_mutex;
   std::size_t slots_per_shard = 0U;
   std::size_t capacity = 0U;
   std::int64_t metadata_bytes = 0;
 
   GlobalRegistryBank() noexcept {
     const auto limit = registry_metadata_limit_bytes();
-    const auto fixed_overhead =
-        static_cast<std::int64_t>(sizeof(occupancy) + sizeof(mutexes));
+    const auto fixed_overhead = global_registry_fixed_overhead_bytes();
     if (limit <= fixed_overhead) {
       g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
       return;
     }
     const auto available = static_cast<std::uint64_t>(limit - fixed_overhead);
-    auto records = static_cast<std::size_t>(
-        available / static_cast<std::uint64_t>(sizeof(GlobalAllocationSlot)));
+    constexpr auto bytes_per_record =
+        sizeof(GlobalAllocationSlot) + sizeof(std::uint32_t);
+    auto records = static_cast<std::size_t>(available / bytes_per_record);
     records -= records % kGlobalRegistryShardCount;
     if (records < kGlobalRegistryShardCount * kMinimumGlobalSlotsPerShard) {
       g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
       return;
     }
     slots_per_shard = records / kGlobalRegistryShardCount;
+    if (slots_per_shard >= kNoGlobalRegistrySlot) {
+      slots_per_shard = 0U;
+      g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
+      return;
+    }
     capacity = slots_per_shard * kGlobalRegistryShardCount;
     try {
       slots = std::make_unique<GlobalAllocationSlot[]>(capacity);
+      bucket_heads = std::make_unique<std::uint32_t[]>(capacity);
     } catch (...) {
+      slots.reset();
+      bucket_heads.reset();
       slots_per_shard = 0U;
       capacity = 0U;
       g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
       return;
     }
-    metadata_bytes = static_cast<std::int64_t>(
-        capacity * sizeof(GlobalAllocationSlot) + fixed_overhead);
+    std::fill_n(bucket_heads.get(), capacity, kNoGlobalRegistrySlot);
+    for (std::size_t shard = 0U; shard < kGlobalRegistryShardCount; ++shard) {
+      auto *begin = slots.get() + shard * slots_per_shard;
+      for (std::size_t index = 0U; index < slots_per_shard; ++index) {
+        begin[index].free_next_or_origin =
+            index + 1U < slots_per_shard
+                ? static_cast<std::uint32_t>(index + 1U)
+                : kNoGlobalRegistrySlot;
+      }
+      free_heads[shard] = 0U;
+    }
+    cached_usable_slots_per_shard.store(slots_per_shard,
+                                        std::memory_order_release);
+    next_limit_refresh_ns.store(registry_monotonic_now_ns() +
+                                    kRegistryLimitRefreshPeriodNs,
+                                std::memory_order_release);
+    metadata_bytes =
+        static_cast<std::int64_t>(capacity * bytes_per_record + fixed_overhead);
     g_live_registry_metadata_bytes.store(metadata_bytes,
                                          std::memory_order_release);
     g_peak_live_registry_metadata_bytes.store(metadata_bytes,
@@ -151,26 +210,64 @@ struct GlobalRegistryBank final {
         static_cast<std::int64_t>(capacity), std::memory_order_release);
   }
 
-  [[nodiscard]] std::size_t usable_slots_per_shard() const noexcept {
-    if (!slots || slots_per_shard == 0U) {
+  [[nodiscard]] std::size_t usable_slots_per_shard() noexcept {
+    if (!slots || !bucket_heads || slots_per_shard == 0U) {
       return 0U;
     }
     // memory.max may shrink after startup.  The physical bank remains fixed
     // (so no teardown allocation/free is needed), but new registrations are
-    // admitted only into the shrink-only usable prefix.
-    const auto current_limit = registry_metadata_limit_bytes();
-    const auto fixed_overhead =
-        static_cast<std::int64_t>(sizeof(occupancy) + sizeof(mutexes));
-    if (current_limit <= fixed_overhead) {
-      return 0U;
+    // admitted only into the shrink-only usable prefix. Resolving the cgroup
+    // hierarchy opens several procfs/control files, so sample it at most four
+    // times per second rather than once per allocation. A continuously active
+    // process observes a shrink within 250 ms; after an idle period, the first
+    // registration serializes the refresh before it can admit a new entry.
+    const auto now = registry_monotonic_now_ns();
+    const auto next = next_limit_refresh_ns.load(std::memory_order_acquire);
+    if (now < next) {
+      return cached_usable_slots_per_shard.load(std::memory_order_acquire);
     }
-    const auto usable_records = static_cast<std::size_t>(
-        (current_limit - fixed_overhead) /
-        static_cast<std::int64_t>(sizeof(GlobalAllocationSlot)));
-    return std::min(slots_per_shard,
-                    usable_records / kGlobalRegistryShardCount);
+    std::lock_guard refresh_lock(limit_refresh_mutex);
+    const auto locked_now = registry_monotonic_now_ns();
+    const auto refreshed_next =
+        next_limit_refresh_ns.load(std::memory_order_acquire);
+    if (locked_now < refreshed_next) {
+      return cached_usable_slots_per_shard.load(std::memory_order_acquire);
+    }
+    const auto current_limit = registry_metadata_limit_bytes();
+    const auto fixed_overhead = global_registry_fixed_overhead_bytes();
+    constexpr auto bytes_per_record =
+        sizeof(GlobalAllocationSlot) + sizeof(std::uint32_t);
+    std::size_t desired = 0U;
+    if (current_limit > fixed_overhead) {
+      const auto usable_records =
+          static_cast<std::size_t>((current_limit - fixed_overhead) /
+                                   static_cast<std::int64_t>(bytes_per_record));
+      desired =
+          std::min(slots_per_shard, usable_records / kGlobalRegistryShardCount);
+    }
+    auto observed =
+        cached_usable_slots_per_shard.load(std::memory_order_acquire);
+    while (desired < observed &&
+           !cached_usable_slots_per_shard.compare_exchange_weak(
+               observed, desired, std::memory_order_acq_rel,
+               std::memory_order_acquire)) {
+    }
+    const auto usable = std::min(observed, desired);
+    next_limit_refresh_ns.store(registry_monotonic_now_ns() +
+                                    kRegistryLimitRefreshPeriodNs,
+                                std::memory_order_release);
+    return usable;
+  }
+
+  [[nodiscard]] std::size_t cached_usable_slots() const noexcept {
+    return cached_usable_slots_per_shard.load(std::memory_order_acquire);
   }
 };
+
+static_assert(
+    sizeof(GlobalRegistryBank) ==
+        static_cast<std::size_t>(global_registry_fixed_overhead_bytes()),
+    "registry metadata accounting must include padding and fixed state");
 
 GlobalRegistryBank &global_registry_bank() noexcept {
   static GlobalRegistryBank bank;
@@ -250,37 +347,49 @@ public:
       return true;
     }
     auto &bank = global_registry_bank();
-    if (!buffer || !bank.slots || bank.capacity == 0U ||
-        live_entries_.load(std::memory_order_relaxed) >=
-            static_cast<std::int64_t>(record_limit_)) {
+    if (!buffer || !bank.slots || bank.capacity == 0U) {
+      g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
+      return false;
+    }
+    if (!reserve_owner_entry()) {
       g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
       return false;
     }
     const auto usable = bank.usable_slots_per_shard();
     if (usable == 0U) {
+      live_entries_.fetch_sub(1, std::memory_order_relaxed);
       g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
       return false;
     }
-    const auto primary = shard_index(buffer);
-    const auto secondary = secondary_shard_index(buffer, primary);
     InsertResult result = InsertResult::kFull;
-    if (primary == secondary) {
+    const auto primary = shard_index(buffer);
+    bool requires_slow_path = false;
+    {
       std::lock_guard lock(bank.mutexes[primary]);
-      result =
-          register_in_shards(bank, usable, primary, secondary, buffer, record);
-    } else {
+      if (!redirected_to_secondary(bank, primary)) {
+        result = register_in_primary(bank, usable, primary, buffer, record);
+      } else {
+        requires_slow_path = true;
+      }
+    }
+    if (result == InsertResult::kFull || requires_slow_path) {
+      const auto secondary = secondary_shard_index(buffer, primary);
+      g_live_registry_secondary_probes.fetch_add(1U, std::memory_order_relaxed);
       const auto first = std::min(primary, secondary);
       const auto second = std::max(primary, secondary);
       std::scoped_lock lock(bank.mutexes[first], bank.mutexes[second]);
-      result =
-          register_in_shards(bank, usable, primary, secondary, buffer, record);
+      result = register_in_two_shards(bank, usable, primary, secondary, buffer,
+                                      record);
     }
     const bool inserted = result == InsertResult::kInserted;
     if (result == InsertResult::kFull) {
       g_live_registry_collision_rejections.fetch_add(1U,
                                                      std::memory_order_relaxed);
     }
-    observe_registration(inserted);
+    if (!inserted) {
+      live_entries_.fetch_sub(1, std::memory_order_relaxed);
+      g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
+    }
     return inserted;
   }
 
@@ -294,16 +403,16 @@ public:
       return false;
     }
     const auto primary = shard_index(buffer);
-    const auto secondary = secondary_shard_index(buffer, primary);
     bool claimed = false;
-    if (primary == secondary) {
+    {
       std::lock_guard lock(bank.mutexes[primary]);
-      claimed = claim_in_shards(bank, primary, secondary, buffer, record);
-    } else {
-      const auto first = std::min(primary, secondary);
-      const auto second = std::max(primary, secondary);
-      std::scoped_lock lock(bank.mutexes[first], bank.mutexes[second]);
-      claimed = claim_in_shards(bank, primary, secondary, buffer, record);
+      claimed = claim_in_one_shard(bank, primary, buffer, record);
+    }
+    if (!claimed && redirected_to_secondary(bank, primary)) {
+      const auto secondary = secondary_shard_index(buffer, primary);
+      g_live_registry_secondary_probes.fetch_add(1U, std::memory_order_relaxed);
+      std::lock_guard lock(bank.mutexes[secondary]);
+      claimed = claim_in_one_shard(bank, secondary, buffer, record);
     }
     if (claimed) {
       live_entries_.fetch_sub(1, std::memory_order_relaxed);
@@ -315,15 +424,23 @@ public:
 private:
   enum class InsertResult : std::uint8_t { kInserted, kDuplicate, kFull };
 
-  void observe_registration(bool inserted) noexcept {
-    if (!inserted) {
-      g_live_registry_rejections.fetch_add(1U, std::memory_order_relaxed);
-      return;
-    }
-    live_entries_.fetch_add(1, std::memory_order_relaxed);
+  static void observe_registration() noexcept {
     const auto current =
         g_live_registry_entries.fetch_add(1, std::memory_order_relaxed) + 1;
     update_atomic_peak(&g_peak_live_registry_entries, current);
+  }
+
+  [[nodiscard]] bool reserve_owner_entry() noexcept {
+    auto current = live_entries_.load(std::memory_order_relaxed);
+    const auto limit = static_cast<std::int64_t>(record_limit_);
+    while (current < limit) {
+      if (live_entries_.compare_exchange_weak(current, current + 1,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_relaxed)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   [[nodiscard]] static std::size_t
@@ -351,50 +468,148 @@ private:
     return bank.slots.get() + shard * bank.slots_per_shard;
   }
 
-  GlobalAllocationSlot *find_slot(GlobalRegistryBank &bank, std::size_t usable,
-                                  std::size_t shard, std::uint8_t *buffer,
-                                  GlobalAllocationSlot **empty) noexcept {
-    auto *begin = shard_begin(bank, shard);
-    for (std::size_t index = 0; index < usable; ++index) {
-      auto &slot = begin[index];
-      if (slot.owner == owner_token_ && slot.buffer == buffer) {
-        return &slot;
-      }
-      if (slot.owner == 0U && empty && !*empty) {
-        *empty = &slot;
-      }
-    }
-    return nullptr;
+  [[nodiscard]] static std::size_t bucket_index(const GlobalRegistryBank &bank,
+                                                const std::uint8_t *buffer,
+                                                std::size_t shard) noexcept {
+    auto mixed = reinterpret_cast<std::uintptr_t>(buffer);
+    // The bucket is selected by buffer address; owner remains part of the
+    // equality key so different pool generations cannot claim each other.
+    mixed ^= static_cast<std::uintptr_t>(0x9e3779b97f4a7c15ULL) +
+             (mixed << 6U) + (mixed >> 2U);
+    mixed ^= mixed >> 30U;
+    mixed *= static_cast<std::uintptr_t>(0xbf58476d1ce4e5b9ULL);
+    mixed ^= mixed >> 27U;
+    mixed *= static_cast<std::uintptr_t>(0x94d049bb133111ebULL);
+    mixed ^= mixed >> 31U;
+    return shard * bank.slots_per_shard +
+           static_cast<std::size_t>(mixed % bank.slots_per_shard);
   }
 
-  InsertResult register_in_shards(GlobalRegistryBank &bank, std::size_t usable,
-                                  std::size_t primary, std::size_t secondary,
-                                  std::uint8_t *buffer,
-                                  LiveAllocationRecord record) noexcept {
-    GlobalAllocationSlot *primary_empty = nullptr;
-    GlobalAllocationSlot *secondary_empty = nullptr;
-    if (find_slot(bank, usable, primary, buffer, &primary_empty)) {
+  [[nodiscard]] std::uint32_t
+  find_slot_index(GlobalRegistryBank &bank, std::size_t shard,
+                  std::uint8_t *buffer) const noexcept {
+    const auto bucket = bucket_index(bank, buffer, shard);
+    auto index = bank.bucket_heads[bucket];
+    auto *begin = shard_begin(bank, shard);
+    while (index != kNoGlobalRegistrySlot) {
+      const auto &slot = begin[index];
+      if (slot.owner == owner_token_ && slot.buffer == buffer) {
+        return index;
+      }
+      index = slot.next_bucket;
+    }
+    return kNoGlobalRegistrySlot;
+  }
+
+  [[nodiscard]] bool
+  redirected_to_secondary(const GlobalRegistryBank &bank,
+                          std::size_t primary) const noexcept {
+    return bank.redirected_entries[primary].load(std::memory_order_acquire) !=
+           0U;
+  }
+
+  [[nodiscard]] static bool has_usable_free_slot(GlobalRegistryBank &bank,
+                                                 std::size_t usable,
+                                                 std::size_t shard) noexcept {
+    auto &head = bank.free_heads[shard];
+    auto *begin = shard_begin(bank, shard);
+    // The usable prefix only shrinks. Once a free suffix slot becomes
+    // inadmissible it can be retired permanently from this free list; a live
+    // suffix slot remains indexed until its owner reclaims it.
+    while (head != kNoGlobalRegistrySlot &&
+           static_cast<std::size_t>(head) >= usable) {
+      const auto retired = head;
+      head = begin[retired].free_next_or_origin;
+      begin[retired].free_next_or_origin = kNoGlobalRegistrySlot;
+    }
+    return head != kNoGlobalRegistrySlot;
+  }
+
+  [[nodiscard]] static std::uint32_t
+  pop_usable_free_slot(GlobalRegistryBank &bank, std::size_t usable,
+                       std::size_t shard) noexcept {
+    if (!has_usable_free_slot(bank, usable, shard)) {
+      return kNoGlobalRegistrySlot;
+    }
+    auto &head = bank.free_heads[shard];
+    const auto index = head;
+    auto *begin = shard_begin(bank, shard);
+    head = begin[index].free_next_or_origin;
+    begin[index].free_next_or_origin = kNoGlobalRegistrySlot;
+    return index;
+  }
+
+  static void return_free_slot(GlobalRegistryBank &bank, std::size_t shard,
+                               std::uint32_t index) noexcept {
+    if (static_cast<std::size_t>(index) >= bank.cached_usable_slots()) {
+      return;
+    }
+    auto *begin = shard_begin(bank, shard);
+    begin[index].free_next_or_origin = bank.free_heads[shard];
+    bank.free_heads[shard] = index;
+  }
+
+  void link_slot(GlobalRegistryBank &bank, std::size_t shard,
+                 std::size_t origin_shard, std::uint32_t index,
+                 std::uint8_t *buffer, LiveAllocationRecord record) noexcept {
+    auto *begin = shard_begin(bank, shard);
+    auto &slot = begin[index];
+    const auto bucket = bucket_index(bank, buffer, shard);
+    slot.record = record;
+    slot.buffer = buffer;
+    slot.owner = owner_token_;
+    slot.next_bucket = bank.bucket_heads[bucket];
+    slot.free_next_or_origin = static_cast<std::uint32_t>(origin_shard);
+    bank.bucket_heads[bucket] = index;
+    // The global count becomes visible while the publishing shard lock is
+    // still held, before a claim can unlink and decrement this entry.
+    observe_registration();
+  }
+
+  InsertResult register_in_primary(GlobalRegistryBank &bank, std::size_t usable,
+                                   std::size_t primary, std::uint8_t *buffer,
+                                   LiveAllocationRecord record) noexcept {
+    if (find_slot_index(bank, primary, buffer) != kNoGlobalRegistrySlot) {
       return InsertResult::kDuplicate;
     }
-    if (secondary != primary &&
-        find_slot(bank, usable, secondary, buffer, &secondary_empty)) {
-      return InsertResult::kDuplicate;
-    }
-    GlobalAllocationSlot *target = primary_empty;
-    auto target_shard = primary;
-    if (secondary != primary && secondary_empty &&
-        (!primary_empty ||
-         bank.occupancy[secondary] < bank.occupancy[primary])) {
-      g_live_registry_secondary_probes.fetch_add(1U, std::memory_order_relaxed);
-      target = secondary_empty;
-      target_shard = secondary;
-    }
-    if (!target) {
+    if (!has_usable_free_slot(bank, usable, primary)) {
       return InsertResult::kFull;
     }
-    target->record = record;
-    target->buffer = buffer;
-    target->owner = owner_token_;
+    const auto target_index = pop_usable_free_slot(bank, usable, primary);
+    if (target_index == kNoGlobalRegistrySlot) {
+      return InsertResult::kFull;
+    }
+    link_slot(bank, primary, primary, target_index, buffer, record);
+    const auto occupancy = ++bank.occupancy[primary];
+    update_atomic_peak(&g_live_registry_max_shard_occupancy,
+                       static_cast<std::int64_t>(occupancy));
+    return InsertResult::kInserted;
+  }
+
+  InsertResult register_in_two_shards(GlobalRegistryBank &bank,
+                                      std::size_t usable, std::size_t primary,
+                                      std::size_t secondary,
+                                      std::uint8_t *buffer,
+                                      LiveAllocationRecord record) noexcept {
+    if (find_slot_index(bank, primary, buffer) != kNoGlobalRegistrySlot) {
+      return InsertResult::kDuplicate;
+    }
+    if (find_slot_index(bank, secondary, buffer) != kNoGlobalRegistrySlot) {
+      return InsertResult::kDuplicate;
+    }
+    auto target_shard = primary;
+    auto target_index = pop_usable_free_slot(bank, usable, primary);
+    if (target_index == kNoGlobalRegistrySlot) {
+      target_shard = secondary;
+      target_index = pop_usable_free_slot(bank, usable, secondary);
+    }
+    if (target_index == kNoGlobalRegistrySlot) {
+      return InsertResult::kFull;
+    }
+    link_slot(bank, target_shard, primary, target_index, buffer, record);
+    if (target_shard != primary) {
+      bank.redirected_entries[primary].fetch_add(1U, std::memory_order_release);
+    }
     const auto occupancy = ++bank.occupancy[target_shard];
     update_atomic_peak(&g_live_registry_max_shard_occupancy,
                        static_cast<std::int64_t>(occupancy));
@@ -405,34 +620,48 @@ private:
                           std::uint8_t *buffer,
                           LiveAllocationRecord *record) noexcept {
     auto *begin = shard_begin(bank, shard);
-    // Claims must inspect the full physical bank so allocations registered
-    // before a memory.max shrink remain reclaimable.
-    for (std::size_t index = 0; index < bank.slots_per_shard; ++index) {
+    const auto bucket = bucket_index(bank, buffer, shard);
+    auto *link = &bank.bucket_heads[bucket];
+    while (*link != kNoGlobalRegistrySlot) {
+      const auto index = *link;
       auto &slot = begin[index];
-      if (slot.owner != owner_token_ || slot.buffer != buffer) {
-        continue;
+      if (slot.owner == owner_token_ && slot.buffer == buffer) {
+        const auto origin_shard = slot.free_next_or_origin;
+        if (record) {
+          *record = slot.record;
+        }
+        *link = slot.next_bucket;
+        slot = GlobalAllocationSlot{};
+        return_free_slot(bank, shard, index);
+        if (origin_shard < kGlobalRegistryShardCount && origin_shard != shard) {
+          bank.redirected_entries[origin_shard].fetch_sub(
+              1U, std::memory_order_release);
+        }
+        if (bank.occupancy[shard] > 0U) {
+          --bank.occupancy[shard];
+        }
+        return true;
       }
-      if (record) {
-        *record = slot.record;
-      }
-      slot = GlobalAllocationSlot{};
-      if (bank.occupancy[shard] > 0U) {
-        --bank.occupancy[shard];
-      }
-      return true;
+      link = &slot.next_bucket;
     }
     return false;
   }
 
-  bool claim_in_shards(GlobalRegistryBank &bank, std::size_t primary,
-                       std::size_t secondary, std::uint8_t *buffer,
-                       LiveAllocationRecord *record) noexcept {
-    if (claim_in_one_shard(bank, primary, buffer, record)) {
-      return true;
+  static bool unlink_slot(GlobalRegistryBank &bank, std::size_t shard,
+                          std::uint32_t index) noexcept {
+    auto *begin = shard_begin(bank, shard);
+    auto &slot = begin[index];
+    if (slot.owner == 0U || slot.buffer == nullptr) {
+      return false;
     }
-    if (secondary != primary) {
-      g_live_registry_secondary_probes.fetch_add(1U, std::memory_order_relaxed);
-      return claim_in_one_shard(bank, secondary, buffer, record);
+    const auto bucket = bucket_index(bank, slot.buffer, shard);
+    auto *link = &bank.bucket_heads[bucket];
+    while (*link != kNoGlobalRegistrySlot) {
+      if (*link == index) {
+        *link = slot.next_bucket;
+        return true;
+      }
+      link = &begin[*link].next_bucket;
     }
     return false;
   }
@@ -452,7 +681,16 @@ private:
         if (slot.owner != owner_token_) {
           continue;
         }
+        const auto origin_shard = slot.free_next_or_origin;
+        if (!unlink_slot(bank, shard, static_cast<std::uint32_t>(index))) {
+          continue;
+        }
         slot = GlobalAllocationSlot{};
+        return_free_slot(bank, shard, static_cast<std::uint32_t>(index));
+        if (origin_shard < kGlobalRegistryShardCount && origin_shard != shard) {
+          bank.redirected_entries[origin_shard].fetch_sub(
+              1U, std::memory_order_release);
+        }
         if (bank.occupancy[shard] > 0U) {
           --bank.occupancy[shard];
         }
