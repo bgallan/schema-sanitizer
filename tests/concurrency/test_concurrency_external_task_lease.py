@@ -72,5 +72,6 @@ def test_lease_has_typed_owner_and_member_policy():
 def test_native_cancellation_drains_exactly():
     """Cancelling an arena leaves no active or queued native tasks."""
     require_native()
-    _, active, observed, q = native_core.operation_task_arena_cancellation_probe()
+    drained, active, observed, q = native_core.operation_task_arena_cancellation_probe()
+    assert drained is True
     assert active == 0 and observed >= 1 and q == 0

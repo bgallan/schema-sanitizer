@@ -55,11 +55,10 @@ def test_performance_telemetry_uses_the_same_worker_ownership() -> None:
 def test_native_mixed_lanes_accumulate_multiple_worker_shards() -> None:
     """Mixed input/output lanes still drain while compatible workers steal."""
     require_native()
-    elapsed, stolen, started, peak, finished, queued, submitted = (
+    _elapsed, stolen, started, peak, finished, queued, submitted = (
         native_core.operation_task_arena_mixed_lane_probe(4, 8_000)
     )
 
-    assert elapsed > 0
     assert stolen > 0
     assert started == 4
     assert 1 <= peak <= 4

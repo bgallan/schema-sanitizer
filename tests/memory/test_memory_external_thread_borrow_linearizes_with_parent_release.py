@@ -316,10 +316,18 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
     first = threading.Thread(target=owner.close)
     first.start()
     assert entered.wait(2)
-    started = time.monotonic()
+    clock_values = iter((100.0, 101.0))
+    clock_reads = 0
+
+    def advancing_clock() -> float:
+        nonlocal clock_reads
+        clock_reads += 1
+        return next(clock_values)
+
+    monkeypatch.setattr(module, "monotonic", advancing_clock)
     with pytest.raises(module.SchemaSanitizerResourceError, match="timed out"):
         owner.close()
-    assert time.monotonic() - started < 0.5
+    assert clock_reads == 2
     continue_close.set()
     first.join(2)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
@@ -23,12 +22,24 @@ from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
 
-def test_remote_permits_bound_unrelated_coordinator_loops() -> None:
+def test_remote_permits_bound_unrelated_coordinator_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Two operation event loops cannot exceed one shared weighted ceiling."""
     governor = RemoteIoPermitGovernor(2)
     first_started = threading.Event()
     second_started = threading.Event()
     release_first = threading.Event()
+    small_queued = threading.Event()
+    original_enqueue = governor._enqueue_waiter_locked  # noqa: SLF001
+
+    def observe_enqueue(waiter: object) -> None:
+        """Publish when the blocked small request is authoritatively queued."""
+        original_enqueue(waiter)  # type: ignore[arg-type]
+        if getattr(waiter, "label", None) == "small":
+            small_queued.set()
+
+    monkeypatch.setattr(governor, "_enqueue_waiter_locked", observe_enqueue)
     first = RemoteIoCoordinator(permit_governor=governor)
     second = RemoteIoCoordinator(permit_governor=governor)
 
@@ -47,7 +58,7 @@ def test_remote_permits_bound_unrelated_coordinator_loops() -> None:
     large_future = first.submit(large, permit_weight=2, permit_label="large")
     assert first_started.wait(timeout=1)
     small_future = second.submit(small, permit_weight=1, permit_label="small")
-    sleep(0.05)
+    assert small_queued.wait(timeout=1)
     assert not second_started.is_set()
     release_first.set()
     assert large_future.result(timeout=1) == "large"
@@ -73,7 +84,8 @@ def test_remote_permit_bypass_is_latency_friendly_but_bounded() -> None:
             tiny = await asyncio.wait_for(governor.acquire(1, label=f"tiny-{index}"), timeout=0.2)
             tiny.release()
         fifth = asyncio.create_task(governor.acquire(1, label="tiny-5"))
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0)
+        assert governor.snapshot().waiting == 2
         fifth_waited = not fifth.done()
         holder.release()
         large = await asyncio.wait_for(large_task, timeout=0.2)
@@ -168,7 +180,9 @@ def test_memory_ledger_records_bytes_still_live_when_owner_closes() -> None:
     assert ledger.snapshot().reserved_bytes == 0
 
 
-def test_daemon_lookahead_executor_has_bounded_shutdown() -> None:
+def test_daemon_lookahead_executor_has_bounded_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cancellation-resistant lookahead task cannot block process shutdown."""
     started = threading.Event()
     release = threading.Event()
@@ -180,19 +194,30 @@ def test_daemon_lookahead_executor_has_bounded_shutdown() -> None:
     def stubborn() -> str:
         """Ignore executor cancellation until explicitly released."""
         started.set()
-        release.wait(timeout=2)
+        release.wait()
         return "done"
 
     future = executor.submit(stubborn)
     assert started.wait(timeout=1)
-    before = monotonic()
-    executor.shutdown(wait=False, cancel_futures=True)
-    assert monotonic() - before < 0.5
-    assert executor._thread.daemon  # noqa: SLF001
-    assert executor._thread.is_alive()  # noqa: SLF001
-    release.set()
-    assert future.result(timeout=1) == "done"
-    executor._thread.join(timeout=1)  # noqa: SLF001
+    real_join = executor._thread.join  # noqa: SLF001
+    join_timeouts: list[float | None] = []
+
+    def observe_join(timeout: float | None = None) -> None:
+        """Reject any blocking join from the explicit non-waiting shutdown path."""
+        join_timeouts.append(timeout)
+        assert timeout == 0.0
+        real_join(timeout=timeout)
+
+    monkeypatch.setattr(executor._thread, "join", observe_join)  # noqa: SLF001
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+        assert join_timeouts == [0.0]
+        assert executor._thread.daemon  # noqa: SLF001
+        assert executor._thread.is_alive()  # noqa: SLF001
+    finally:
+        release.set()
+        assert future.result(timeout=1) == "done"
+        real_join(timeout=1)
     assert not executor._thread.is_alive()  # noqa: SLF001
 
 

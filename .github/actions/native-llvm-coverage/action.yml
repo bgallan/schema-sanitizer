@@ -1,0 +1,103 @@
+---
+name: Run native LLVM coverage
+description: Build an LLVM-instrumented extension and publish native coverage.
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM 18 coverage toolchain
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-18 llvm-18
+        clang-18 --version
+        llvm-profdata-18 --version
+        llvm-cov-18 --version
+    - name: Install instrumented package
+      shell: bash
+      run: |
+        python -m pip install -U pip ninja 'cmake>=4.3,<4.4' scikit-build-core==0.11.6
+        python -m pip install -U pytest pyarrow polars
+        mkdir -p coverage-native/raw
+        python -m pip install --no-build-isolation -v \
+          --config-settings=install.strip=false \
+          --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18 \
+          --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18 \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_COVERAGE=ON \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN='${{ github.workspace }}/coverage-native/raw/schema-sanitizer-%p.profraw' \
+          .
+    - name: Run native coverage suites
+      shell: bash
+      run: |
+        mkdir -p coverage-native/raw/regular
+        pytest -q \
+          tests/io/test_api.py \
+          tests/io/test_input_xml_and_public_api.py \
+          tests/sinks/test_sinks_csv_jsonl.py \
+          tests/pipeline/test_csv_header_modes.py \
+          tests/pipeline/test_csv_union_projection.py
+        mv coverage-native/raw/schema-sanitizer-*.profraw \
+          coverage-native/raw/regular/
+        mkdir -p coverage-native/raw/adversarial
+        pytest -q \
+          tests/io/test_contracts.py \
+          tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py \
+          tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py \
+          tests/concurrency/test_runtime_resource_close_and_finalization.py \
+          tests/sinks/test_streaming_writer_lifecycle.py \
+          tests/remote/test_async_remote_scheduler.py \
+          tests/quality/test_high_risk_coverage_gaps.py \
+          tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
+        mv coverage-native/raw/schema-sanitizer-*.profraw \
+          coverage-native/raw/adversarial/
+        mkdir -p coverage-native/raw/integration
+        pytest -q \
+          tests/io/test_input_remote_file_and_directory_staging.py \
+          tests/io/test_input_remote_directory_discovery.py \
+          tests/io/test_input_remote_lazy_json_plans.py \
+          tests/remote/test_cloud_emulator_configuration.py \
+          tests/remote/test_bigquery_integration.py \
+          tests/pipeline/test_modified_time_csv_discovery.py \
+          tests/pipeline/test_modified_time_csv_planning.py \
+          tests/pipeline/test_source_manifest_inputs.py \
+          tests/pipeline/test_modified_time_csv_schema.py \
+          tests/pipeline/test_example_08_orchestration.py \
+          tests/pipeline/test_example_08_fake_cloud.py \
+          tests/pipeline/test_modified_time_csv_contracts.py
+        mv coverage-native/raw/schema-sanitizer-*.profraw \
+          coverage-native/raw/integration/
+    - name: Render LLVM reports
+      shell: bash
+      run: |
+        EXTENSION=$(python - <<'PY'
+        import schema_sanitizer._core_abi3 as core
+        print(core.__file__)
+        PY
+        )
+        for suite in regular adversarial integration; do
+          llvm-profdata-18 merge -sparse coverage-native/raw/${suite}/*.profraw \
+            -o coverage-native/${suite}.profdata
+          llvm-cov-18 report "${EXTENSION}" \
+            -instr-profile=coverage-native/${suite}.profdata \
+            > coverage-native/${suite}-summary.txt
+        done
+        llvm-profdata-18 merge -sparse coverage-native/raw/*/*.profraw \
+          -o coverage-native/combined.profdata
+        llvm-cov-18 show "${EXTENSION}" \
+          -instr-profile=coverage-native/combined.profdata \
+          -format=html \
+          -show-branches=count \
+          -output-dir=coverage-native/html
+        llvm-cov-18 report "${EXTENSION}" \
+          -instr-profile=coverage-native/combined.profdata \
+          > coverage-native/combined-summary.txt
+        cat coverage-native/combined-summary.txt
+    - name: Upload native LLVM coverage
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: native-llvm-coverage
+        path: coverage-native/
+        if-no-files-found: error
+        retention-days: 14

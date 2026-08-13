@@ -35,7 +35,7 @@ def test_native_mixed_lanes_preserve_exact_drain_and_worker_budget() -> None:
     require_native()
     rounds = 20_000
     (
-        elapsed_ns,
+        _elapsed_ns,
         stolen,
         started,
         peak,
@@ -44,7 +44,6 @@ def test_native_mixed_lanes_preserve_exact_drain_and_worker_budget() -> None:
         submitted,
     ) = native_core.operation_task_arena_mixed_lane_probe(4, rounds)
 
-    assert elapsed_ns > 0
     assert submitted == 2 + rounds * 3
     assert finished == rounds * 3
     assert queued == 0
@@ -60,7 +59,7 @@ def test_native_park_wake_cycles_keep_transition_masks_live() -> None:
     rounds = 10_000
     waves = 96
     (
-        elapsed_ns,
+        _elapsed_ns,
         submitted,
         finished,
         queued,
@@ -73,7 +72,6 @@ def test_native_park_wake_cycles_keep_transition_masks_live() -> None:
 
     wave_tasks = waves * workers * 2
     runnable_blockers = submitted - rounds - wave_tasks
-    assert elapsed_ns > 0
     assert 1 <= runnable_blockers <= workers
     assert submitted == runnable_blockers + rounds + wave_tasks
     assert finished == rounds + wave_tasks

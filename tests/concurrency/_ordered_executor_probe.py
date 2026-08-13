@@ -47,9 +47,8 @@ def assert_exact_completion(
     work_iterations: int,
 ) -> None:
     """Assert the complete native result contract for inline and arena paths."""
-    elapsed_us, completed, checksum, started, peak, queued, submitted = result
+    _elapsed_us, completed, checksum, started, peak, queued, submitted = result
 
-    assert elapsed_us > 0
     assert completed == tasks
     assert checksum == completion_checksum(tasks, work_iterations)
     assert queued == 0

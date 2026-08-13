@@ -235,10 +235,16 @@ def test_janitor_filesystem_claim_does_not_hold_global_lock(
     assert not worker.is_alive()
 
 
-def test_permit_operation_queues_have_constant_time_removal() -> None:
+def test_permit_operation_queues_have_bounded_removal_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from collections import OrderedDict
 
-    from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor, _Waiter
+    from schema_sanitizer.remote_impl.io_permits import (
+        _MAX_LOCAL_BYPASS_SCAN,
+        RemoteIoPermitGovernor,
+        _Waiter,
+    )
 
     loop = asyncio.new_event_loop()
     try:
@@ -251,11 +257,25 @@ def test_permit_operation_queues_have_constant_time_removal() -> None:
                 governor._enqueue_waiter_locked(waiter)
             queue = governor._operation_waiters["one-operation"]
             assert isinstance(queue, OrderedDict)
-            started = time.monotonic()
+
+            examined = 0
+            effective_weight = governor._effective_weight
+
+            def counted_effective_weight(waiter: _Waiter) -> int:
+                nonlocal examined
+                examined += 1
+                return effective_weight(waiter)
+
+            monkeypatch.setattr(governor, "_effective_weight", counted_effective_weight)
+            peak_examined_per_removal = 0
             for waiter in reversed(waiters):
+                before = examined
                 governor._remove_waiter_locked(waiter)
-            elapsed = time.monotonic() - started
-        assert elapsed < 0.25
+                peak_examined_per_removal = max(
+                    peak_examined_per_removal,
+                    examined - before,
+                )
+        assert peak_examined_per_removal <= _MAX_LOCAL_BYPASS_SCAN + 1
         assert governor._waiting_count == 0
     finally:
         loop.close()

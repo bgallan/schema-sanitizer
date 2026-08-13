@@ -108,15 +108,29 @@ def test_path_identity_does_not_release_credit_before_close_finishes(
     monkeypatch.setattr(module.os, "close", blocked_close)
     monkeypatch.setattr(module, "record_physical_file_descriptors_closed", lambda _n=1: None)
     owner = module._IdentityDescriptorOwner(123, Lease())
+    waiter_entered = threading.Event()
+
+    class TrackingCondition(threading.Condition):
+        def wait(self, timeout: float | None = None) -> bool:
+            waiter_entered.set()
+            return super().wait(timeout)
+
+    owner._condition = TrackingCondition(owner.lock)
     first = threading.Thread(target=owner.release)
     second = threading.Thread(target=owner.release)
     first.start()
     assert entered.wait(2)
     second.start()
-    assert not lease_released.wait(0.1)
+    assert waiter_entered.wait(2)
+    with owner._condition:
+        assert owner._state == owner._CLOSING
+        assert owner.fd_lease is not None
+    assert not lease_released.is_set()
     continue_close.set()
     first.join(2)
     second.join(2)
+    assert not first.is_alive()
+    assert not second.is_alive()
     assert lease_released.is_set()
 
 
@@ -356,15 +370,29 @@ def test_scandir_owner_does_not_release_credit_before_iterator_close(
 
     monkeypatch.setattr(module, "record_physical_file_descriptors_closed", lambda _n=1: None)
     owner = module._ScandirCleanupOwner(Iterator(), Lease())
+    waiter_entered = threading.Event()
+
+    class TrackingCondition(threading.Condition):
+        def wait(self, timeout: float | None = None) -> bool:
+            waiter_entered.set()
+            return super().wait(timeout)
+
+    owner._condition = TrackingCondition(owner.lock)
     first = threading.Thread(target=owner.release)
     second = threading.Thread(target=owner.release)
     first.start()
     assert entered.wait(2)
     second.start()
-    assert not lease_released.wait(0.1)
+    assert waiter_entered.wait(2)
+    with owner._condition:
+        assert owner._state == owner._CLOSING
+        assert owner.lease is not None
+    assert not lease_released.is_set()
     continue_close.set()
     first.join(2)
     second.join(2)
+    assert not first.is_alive()
+    assert not second.is_alive()
     assert lease_released.is_set()
 
 

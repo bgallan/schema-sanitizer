@@ -105,8 +105,8 @@ def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:
 
     @asynccontextmanager
     async def context():
-        """Enter too late, then record cleanup of the abandoned provider."""
-        await asyncio.sleep(0.5)
+        """Suspend startup until the coordinator cancels the abandoned provider."""
+        await asyncio.Event().wait()
         try:
             yield object()
         finally:
@@ -158,6 +158,9 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
             self.exited = 0
             self.thread_ids: set[int] = set()
             self.staged: dict[int, FakeStaged] = {}
+            self.zero_started = asyncio.Event()
+            self.later_completed = asyncio.Event()
+            self.completion_order: list[int] = []
 
         @asynccontextmanager
         async def open_staging_session(self):
@@ -171,7 +174,13 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
         async def stage_chunk_async(self, start: int, _session: object) -> FakeStaged:
             """Complete chunks out of order on the same I/O thread."""
             self.thread_ids.add(threading.get_ident())
-            await asyncio.sleep(0.02 if start == 0 else 0)
+            if start == 0:
+                self.zero_started.set()
+                await asyncio.wait_for(self.later_completed.wait(), timeout=5)
+            else:
+                await asyncio.wait_for(self.zero_started.wait(), timeout=5)
+                self.later_completed.set()
+            self.completion_order.append(start)
             staged = FakeStaged(start)
             self.staged[start] = staged
             return staged
@@ -185,6 +194,7 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
     assert manifest.entered == 1
     assert manifest.exited == 1
     assert len(manifest.thread_ids) == 1
+    assert manifest.completion_order.index(0) > 0
     assert first.closed is False
     assert all(staged.closed for start, staged in manifest.staged.items() if start != 0)
 
@@ -203,6 +213,8 @@ def test_directory_session_applies_one_global_transfer_limit(
     closes = 0
     active = 0
     max_active = 0
+    policy = execution_policy("multi", 64 * 1024 * 1024)
+    full_window = asyncio.Event()
 
     async def fake_open(_files, **_kwargs):
         """Open one stand-in provider context."""
@@ -220,8 +232,10 @@ def test_directory_session_applies_one_global_transfer_limit(
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
+        if active == policy.async_concurrency:
+            full_window.set()
         try:
-            await asyncio.sleep(0.01)
+            await asyncio.wait_for(full_window.wait(), timeout=5)
             with open(local_path, "wb") as handle:
                 handle.write(file.name.encode())
         finally:
@@ -250,7 +264,6 @@ def test_directory_session_applies_one_global_transfer_limit(
 
     asyncio.run(run())
 
-    policy = execution_policy("multi", 64 * 1024 * 1024)
     assert opens == 1
     assert closes == 1
     assert max_active == policy.async_concurrency

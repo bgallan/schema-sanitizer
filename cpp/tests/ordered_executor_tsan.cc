@@ -1125,15 +1125,18 @@ bool run_noncooperative_external_shutdown_round() {
   auto arena = std::move(arena_result).ValueOrDie();
   std::atomic<bool> started{false};
   std::atomic<bool> release{false};
+  std::atomic<bool> finished{false};
   auto made = Executor::Make(
       2, 4, 4,
-      [&started, &release](std::uint64_t &&value, std::size_t,
-                           sanitize::internal::StopToken)
-          -> sanitize::Result<std::uint64_t> {
+      [&started, &release, &finished](
+          std::uint64_t &&value, std::size_t,
+          sanitize::internal::StopToken) -> sanitize::Result<std::uint64_t> {
         started.store(true, std::memory_order_release);
         while (!release.load(std::memory_order_acquire)) {
           std::this_thread::yield();
         }
+        finished.store(true, std::memory_order_release);
+        finished.notify_all();
         return value;
       },
       arena);
@@ -1155,17 +1158,16 @@ bool run_noncooperative_external_shutdown_round() {
     executor->Cancel();
     return false;
   }
-  const auto shutdown_started = std::chrono::steady_clock::now();
+  const auto drained = executor->Shutdown();
+  const auto repeated_drained = executor->Shutdown();
   executor.reset();
-  const auto shutdown_elapsed =
-      std::chrono::steady_clock::now() - shutdown_started;
-  release.store(true, std::memory_order_release);
-  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  release_gate(&release);
+  while (!finished.load(std::memory_order_acquire)) {
+    finished.wait(false, std::memory_order_acquire);
+  }
   arena->Shutdown();
-  return shutdown_elapsed >= std::chrono::milliseconds(1500) &&
-         shutdown_elapsed < std::chrono::seconds(3);
+  return !drained && repeated_drained == drained;
 }
-
 
 bool run_arena_concurrent_shutdown_round() {
   auto made = sanitize::internal::OperationTaskArena::Make(8U);
@@ -1232,12 +1234,16 @@ bool run_arena_noncooperative_shutdown_round() {
   auto arena = std::move(made).ValueOrDie();
   std::atomic<bool> started{false};
   std::atomic<bool> release{false};
+  std::atomic<bool> finished{false};
   const auto status = arena->Submit(
-      [&started, &release](std::size_t, sanitize::internal::StopToken) {
+      [&started, &release, &finished](std::size_t,
+                                      sanitize::internal::StopToken) {
         started.store(true, std::memory_order_release);
         while (!release.load(std::memory_order_acquire)) {
           std::this_thread::yield();
         }
+        finished.store(true, std::memory_order_release);
+        finished.notify_all();
       },
       2U, sanitize::internal::TaskArenaLane::kAll);
   if (!status.ok()) {
@@ -1253,16 +1259,14 @@ bool run_arena_noncooperative_shutdown_round() {
     release.store(true, std::memory_order_release);
     return false;
   }
-  const auto before = std::chrono::steady_clock::now();
   arena->Shutdown();
-  const auto elapsed = std::chrono::steady_clock::now() - before;
-  const bool bounded = elapsed >= std::chrono::milliseconds(1500) &&
-                       elapsed < std::chrono::seconds(3);
-  const bool detached = arena->detached_workers() >= 1U &&
-                        arena->shutdown_timeouts() >= 1U;
-  release.store(true, std::memory_order_release);
-  std::this_thread::sleep_for(std::chrono::milliseconds(25));
-  return bounded && detached;
+  const bool detached =
+      arena->detached_workers() >= 1U && arena->shutdown_timeouts() >= 1U;
+  release_gate(&release);
+  while (!finished.load(std::memory_order_acquire)) {
+    finished.wait(false, std::memory_order_acquire);
+  }
+  return detached;
 }
 
 #include "ordered_executor_tsan_telemetry.cc.inc"

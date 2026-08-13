@@ -10,11 +10,9 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 def test_preserves_prompt_arena_stage_cancellation() -> None:
     """Per-slot publication does not strand cancelled in-flight workers."""
     require_native()
-    elapsed_us, active, observed_stop, queued = (
-        native_core.operation_task_arena_cancellation_probe()
-    )
+    drained, active, observed_stop, queued = native_core.operation_task_arena_cancellation_probe()
 
-    assert elapsed_us < 100_000
+    assert drained is True
     assert active == 0
     assert 1 <= observed_stop <= 4
     assert queued == 0

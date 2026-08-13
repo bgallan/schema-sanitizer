@@ -50,7 +50,8 @@ def test_high_core_submission_rollback_matches_publication_strategy():
 def test_native_cancellation_still_drains():
     """Terminalization does not leave active or queued arena tasks behind."""
     require_native()
-    _, active, observed, queued = native_core.operation_task_arena_cancellation_probe()
+    drained, active, observed, queued = native_core.operation_task_arena_cancellation_probe()
+    assert drained is True
     assert active == 0
     assert observed >= 1
     assert queued == 0

@@ -24,7 +24,10 @@ a CI gate and therefore lives at
 ## Invocation contract
 
 - [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is the canonical
-  automated caller. The manual publication workflow reuses it unchanged.
+  automated caller. Its `validation-matrix` dispatches the `quality`,
+  `source-distribution`, `native-llvm-coverage`, `thread-sanitizer`, and
+  `platform-sanitizer` workloads through repository-owned composite actions.
+  The manual publication workflow reuses it unchanged.
 - [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml) owns the local
   cleanup and fuzz-integrity gates.
 - [`CMakeLists.txt`](../../CMakeLists.txt) exposes

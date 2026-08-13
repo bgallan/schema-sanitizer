@@ -7,7 +7,6 @@ import json
 import multiprocessing
 import os
 import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -116,11 +115,18 @@ def test_streaming_writer_reserves_disk_before_every_write(tmp_path: Path) -> No
     ]
 
 
-def test_operation_cancellation_deadline_and_manual_event() -> None:
+def test_operation_cancellation_deadline_and_manual_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One public token covers deadline and explicit cooperative cancellation."""
+    from schema_sanitizer.core_impl import cancellation as cancellation_module
+
+    now = [100.0]
+    monkeypatch.setattr(cancellation_module, "monotonic", lambda: now[0])
     with operation_cancellation(timeout_seconds=0.02) as token:
         assert not token.cancelled()
-        time.sleep(0.03)
+        assert token.deadline == 100.02
+        now[0] = 100.02
         with pytest.raises(SchemaSanitizerCancelledError, match="cancelled"):
             token.raise_if_cancelled(stage="deadline_test")
 
@@ -160,8 +166,8 @@ def test_async_bridge_has_a_finite_default_wait(
         """Invoke the synchronous bridge from an active event loop."""
 
         async def slow() -> None:
-            """Remain alive beyond the bounded bridge wait."""
-            await asyncio.sleep(0.1)
+            """Remain suspended until the bounded bridge cancels this task."""
+            await asyncio.Event().wait()
 
         with pytest.raises(TimeoutError, match="bounded wait"):
             async_bridge.run_sync(slow(), threading_mode="multi")
@@ -169,12 +175,23 @@ def test_async_bridge_has_a_finite_default_wait(
     asyncio.run(exercise())
 
 
-def test_cancelled_governor_ticket_does_not_block_followers() -> None:
+def test_cancelled_governor_ticket_does_not_block_followers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A timed-out FIFO ticket is skipped so later requests still progress."""
     governor = _Governor(1, "test_slots")
     holder = governor.acquire()
     timed_out = threading.Event()
     follower_acquired = threading.Event()
+    first_waiting = threading.Event()
+    original_wait = governor._condition.wait  # noqa: SLF001
+
+    def observe_wait(timeout: float | None = None) -> bool:
+        """Publish that the first blocked ticket reached the condition wait."""
+        first_waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(governor._condition, "wait", observe_wait)  # noqa: SLF001
 
     def timeout_waiter() -> None:
         """Provide a deterministic test or worker helper."""
@@ -192,7 +209,7 @@ def test_cancelled_governor_ticket_does_not_block_followers() -> None:
     first = threading.Thread(target=timeout_waiter)
     second = threading.Thread(target=follower)
     first.start()
-    time.sleep(0.01)
+    assert first_waiting.wait(timeout=1)
     second.start()
     assert timed_out.wait(timeout=1)
     holder.release()
@@ -270,8 +287,13 @@ def test_provider_throttle_neutral_release_does_not_open_circuit() -> None:
     assert snapshot.consecutive_failures == 0
 
 
-def test_provider_throttle_reduces_window_and_opens_bounded_circuit() -> None:
+def test_provider_throttle_reduces_window_and_opens_bounded_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Repeated throttling applies multiplicative decrease and bounded fail-fast."""
+    from schema_sanitizer.remote_impl import provider_throttle
+
+    monkeypatch.setattr(provider_throttle, "monotonic", lambda: 100.0)
     governor = ProviderThrottleGovernor()
     initial = governor.snapshot("api").window
     for _ in range(5):
@@ -283,7 +305,7 @@ def test_provider_throttle_reduces_window_and_opens_bounded_circuit() -> None:
     snapshot = governor.snapshot("api")
     assert snapshot.window < initial
     assert snapshot.throttled_responses == 5
-    assert snapshot.circuit_open_until > time.monotonic()
+    assert snapshot.circuit_open_until == 101.0
 
 
 def test_operation_diagnostics_separate_live_and_completed_operations() -> None:
@@ -326,8 +348,13 @@ def test_initialized_runtime_fails_fast_after_fork() -> None:
     assert "forkserver" in message
 
 
-def test_provider_throttle_respects_retry_after_header() -> None:
+def test_provider_throttle_respects_retry_after_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A provider Retry-After response blocks new admission for that endpoint."""
+    from schema_sanitizer.remote_impl import provider_throttle
+
+    monkeypatch.setattr(provider_throttle, "monotonic", lambda: 100.0)
     governor = ProviderThrottleGovernor()
     lease, _delay = governor.try_acquire("retry-after")
     assert lease is not None
@@ -341,8 +368,8 @@ def test_provider_throttle_respects_retry_after_header() -> None:
     lease.failure(Throttled("rate limited"))
     next_lease, delay = governor.try_acquire("retry-after")
     assert next_lease is None
-    assert 0 < delay <= 1.0
-    assert governor.snapshot("retry-after").circuit_open_until >= time.monotonic() + 1.5
+    assert delay == 1.0
+    assert governor.snapshot("retry-after").circuit_open_until == 102.0
 
 
 def test_staged_path_retains_lease_when_cleanup_fails(

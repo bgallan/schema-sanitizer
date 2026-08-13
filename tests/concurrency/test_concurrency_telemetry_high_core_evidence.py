@@ -29,7 +29,7 @@ def test_arrow_stream_workload_consumes_and_releases_without_pyarrow(
     source = tmp_path / "wide.jsonl"
     _write_fixture(source, 512)
 
-    elapsed, report, output = run_operation(
+    _elapsed, report, output = run_operation(
         source,
         tmp_path / "unused.jsonl",
         workload="arrow_stream",
@@ -37,7 +37,6 @@ def test_arrow_stream_workload_consumes_and_releases_without_pyarrow(
         memory_limit_bytes=_MEMORY_LIMIT,
     )
 
-    assert elapsed > 0
     assert output["rows"] == 512
     assert output["batches"] > 0
     assert report["finished"] is True

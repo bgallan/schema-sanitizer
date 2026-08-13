@@ -16,141 +16,7 @@ concurrency:
     }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # Source-only checks that do not need a platform matrix.
-  checks:
-    name: quality, security, and Python coverage
-    runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install development and audit tools
-        run: >-
-          python -m pip install -U pip '.[dev]'
-          coverage==7.15.4 pip-audit==2.10.1 bandit==1.9.4
-          tomli==2.4.1
-      - name: Lint, format, and static typing
-        run: pre-commit run --all-files
-      - name: Build dependency inputs and audit them
-        shell: bash
-        run: |
-          python - <<'PY'
-          try:
-              import tomllib
-          except ModuleNotFoundError:
-              import tomli as tomllib
-          from pathlib import Path
-          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          project = pyproject.get("project", {})
-          runtime = list(project.get("dependencies", []))
-          build = list(pyproject.get("build-system", {}).get("requires", []))
-          extras = [
-              requirement
-              for values in project.get("optional-dependencies", {}).values()
-              for requirement in values
-          ]
-          ci_tools = [
-              "abi3audit==0.0.26",
-              "actionlint-py==1.7.12.24",
-              "bandit==1.9.4",
-              "build==1.5.0",
-              "cibuildwheel==4.2.0",
-              "cmakelang==0.6.13",
-              "coverage==7.15.4",
-              "detect-secrets==1.5.0",
-              "mypy==1.19.1",
-              "packaging==26.3",
-              "pip-audit==2.10.1",
-              "shellcheck-py==0.11.0.1",
-              "shfmt-py==4.0.0",
-              "toml-sort==0.24.3",
-              "twine==7.0.0",
-              "yamlfix==1.18.0",
-              "zizmor==1.29.0",
-          ]
-          for name, requirements in (
-              ("runtime-requirements.txt", runtime),
-              ("full-requirements.txt", runtime + build + extras + ci_tools),
-          ):
-              Path(name).write_text(
-                  "\n".join(dict.fromkeys(requirements)) + "\n",
-                  encoding="utf-8",
-              )
-          PY
-          pip-audit -r runtime-requirements.txt --progress-spinner off
-          pip-audit -r full-requirements.txt --progress-spinner off
-      - name: Static Python security scan
-        run: bandit -r src meta/ci -ll
-      - name: Secret scan
-        shell: bash
-        run: |
-          detect-secrets scan \
-            --no-verify \
-            --exclude-files '^(\.git/|build/|dist/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|fuzz/(corpus|regressions)/(csv|json|parquet|xml)/)' \
-            > .detect-secrets.ci.json
-          python meta/ci/quality/check_detect_secrets_report.py .detect-secrets.ci.json
-      - name: Benchmark harness smoke
-        run: python -m benchmarks.ingestion.cli --rows 8 --width 2 --repeats 1
-      - name: Collect contextual Python branch coverage
-        shell: bash
-        run: |
-          coverage erase
-          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=regular -m pytest -q \
-            tests/io/test_api.py \
-            tests/io/test_input_python_and_local.py \
-            tests/io/test_input_xml_and_public_api.py \
-            tests/sinks/test_sinks_csv_jsonl.py \
-            tests/pipeline/test_modified_time_csv_discovery.py \
-            tests/pipeline/test_modified_time_csv_planning.py \
-            tests/pipeline/test_source_manifest_inputs.py \
-            tests/pipeline/test_csv_header_modes.py \
-            tests/pipeline/test_csv_union_projection.py \
-            tests/pipeline/test_modified_time_csv_schema.py \
-            tests/pipeline/test_modified_time_csv_contracts.py
-          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=adversarial -m pytest -q \
-            tests/io/test_contracts.py \
-            tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py \
-            tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py \
-            tests/concurrency/test_runtime_resource_close_and_finalization.py \
-            tests/sinks/test_streaming_writer_lifecycle.py \
-            tests/remote/test_async_remote_scheduler.py \
-            tests/quality/test_high_risk_coverage_gaps.py \
-            tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
-          coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=integration -m pytest -q \
-            tests/io/test_input_remote_file_and_directory_staging.py \
-            tests/io/test_input_remote_directory_discovery.py \
-            tests/io/test_input_remote_lazy_json_plans.py \
-            tests/remote/test_cloud_emulator_configuration.py \
-            tests/remote/test_bigquery_integration.py \
-            tests/pipeline/test_example_08_orchestration.py \
-            tests/pipeline/test_example_08_fake_cloud.py
-          coverage combine
-          coverage report --fail-under=44
-          coverage html --show-contexts -d coverage-python-html
-          coverage xml -o coverage-python.xml
-          coverage json -o coverage-python.json
-          python meta/ci/quality/report_risk_coverage.py coverage-python.json \
-            --output coverage-python-risk-gaps.txt
-      - name: Upload Python branch coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: python-branch-coverage
-          path: |
-            coverage-python-html/
-            coverage-python.xml
-            coverage-python.json
-            coverage-python-risk-gaps.txt
-          if-no-files-found: error
-          retention-days: 14
-
-  # Build the four release wheels as one thematic matrix. Every platform keeps
-  # its own runner and artifact while sharing an identical build contract.
+  # Build the four release wheels as one homogeneous platform matrix.
   platform-wheel-builds:
     name: wheel / ${{ matrix['display-name'] }}
     runs-on: ${{ matrix.runner }}
@@ -189,10 +55,10 @@ jobs:
           artifact: ${{ matrix.artifact }}
           arch: ${{ matrix.arch }}
 
-  # Keep each workload in its own thematic matrix so the four platforms run in
-  # parallel without oversubscribing the native concurrency tests on one runner.
-  platform-tests-concurrency:
-    name: tests / concurrency / ${{ matrix['display-name'] }}
+  # Twelve independent cells keep all platform/shard pairs visible while
+  # collecting them under one thematic test owner.
+  platform-tests:
+    name: tests / ${{ matrix.shard }} / ${{ matrix['display-name'] }}
     needs: [platform-wheel-builds]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -204,86 +70,62 @@ jobs:
             runner: ubuntu-24.04
             platform-name: linux-x86_64
             artifact: linux
+            shard: concurrency
           - display-name: Windows AMD64
             runner: windows-2025
             platform-name: windows-amd64
             artifact: windows
+            shard: concurrency
           - display-name: macOS x86-64
             runner: macos-15-intel
             platform-name: macos-x86_64
             artifact: macos-x86_64
+            shard: concurrency
           - display-name: macOS ARM64
             runner: macos-15
             platform-name: macos-arm64
             artifact: macos-arm64
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/test-platform-wheel
-        with:
-          platform-name: ${{ matrix['platform-name'] }}
-          artifact: ${{ matrix.artifact }}
-          shard: concurrency
-  platform-tests-memory-parquet:
-    name: tests / memory-parquet / ${{ matrix['display-name'] }}
-    needs: [platform-wheel-builds]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
+            shard: concurrency
           - display-name: Linux x86-64
             runner: ubuntu-24.04
             platform-name: linux-x86_64
             artifact: linux
+            shard: memory-parquet
           - display-name: Windows AMD64
             runner: windows-2025
             platform-name: windows-amd64
             artifact: windows
+            shard: memory-parquet
           - display-name: macOS x86-64
             runner: macos-15-intel
             platform-name: macos-x86_64
             artifact: macos-x86_64
+            shard: memory-parquet
           - display-name: macOS ARM64
             runner: macos-15
             platform-name: macos-arm64
             artifact: macos-arm64
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/test-platform-wheel
-        with:
-          platform-name: ${{ matrix['platform-name'] }}
-          artifact: ${{ matrix.artifact }}
-          shard: memory-parquet
-  platform-tests-io-pipeline:
-    name: tests / io-pipeline / ${{ matrix['display-name'] }}
-    needs: [platform-wheel-builds]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
+            shard: memory-parquet
           - display-name: Linux x86-64
             runner: ubuntu-24.04
             platform-name: linux-x86_64
             artifact: linux
+            shard: io-pipeline
           - display-name: Windows AMD64
             runner: windows-2025
             platform-name: windows-amd64
             artifact: windows
+            shard: io-pipeline
           - display-name: macOS x86-64
             runner: macos-15-intel
             platform-name: macos-x86_64
             artifact: macos-x86_64
+            shard: io-pipeline
           - display-name: macOS ARM64
             runner: macos-15
             platform-name: macos-arm64
             artifact: macos-arm64
+            shard: io-pipeline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -292,102 +134,127 @@ jobs:
         with:
           platform-name: ${{ matrix['platform-name'] }}
           artifact: ${{ matrix.artifact }}
-          shard: io-pipeline
+          shard: ${{ matrix.shard }}
 
-  # Preserve one stable platform owner for distribution and branch protection.
-  platform-wheels:
-    name: platform wheels and tests
-    if: always()
-    needs:
-      - platform-wheel-builds
-      - platform-tests-concurrency
-      - platform-tests-memory-parquet
-      - platform-tests-io-pipeline
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Require every platform build and test shard to succeed
-        env:
-          WHEEL_BUILDS_RESULT: ${{ needs.platform-wheel-builds.result }}
-          TESTS_CONCURRENCY_RESULT: ${{ needs.platform-tests-concurrency.result }}
-          TESTS_MEMORY_PARQUET_RESULT: ${{ needs.platform-tests-memory-parquet.result }}
-          TESTS_IO_PIPELINE_RESULT: ${{ needs.platform-tests-io-pipeline.result }}
-        shell: bash
-        run: |-
-          set -euo pipefail
-          for result in \
-            "${WHEEL_BUILDS_RESULT}" \
-            "${TESTS_CONCURRENCY_RESULT}" \
-            "${TESTS_MEMORY_PARQUET_RESULT}" \
-            "${TESTS_IO_PIPELINE_RESULT}"; do
-            if [[ "${result}" != "success" ]]; then
-              echo "A platform wheel owner ended with ${result}" >&2
-              exit 1
-            fi
-          done
-
-  # Source packaging is independent of every platform wheel. Run it from the
-  # start so its rebuild and downstream-install checks leave the critical path.
-  source-distribution:
-    name: source distribution and downstream packaging
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+  # Source, quality, coverage, and sanitizer workloads are one heterogeneous
+  # validation matrix. An explicit include list preserves every runner and SLA.
+  validation-matrix:
+    name: validation / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: quality, security, and Python coverage
+            task: quality
+            runner: ubuntu-24.04
+            python: '3.11'
+            timeout: 50
+          - name: source distribution and downstream packaging
+            task: source-distribution
+            runner: ubuntu-24.04
+            python: '3.11'
+            timeout: 90
+          - name: coverage / native LLVM
+            task: native-llvm-coverage
+            runner: ubuntu-24.04
+            python: '3.11'
+            timeout: 50
+          - name: sanitizer / Linux GCC ThreadSanitizer
+            task: thread-sanitizer
+            runner: ubuntu-24.04
+            python: '3.13'
+            timeout: 45
+          - name: sanitizer / linux-x86_64-asan-ubsan
+            task: platform-sanitizer
+            runner: ubuntu-24.04
+            python: '3.11'
+            timeout: 70
+            sanitizer: asan-ubsan
+            mode: linux-full
+          - name: sanitizer / windows-amd64-asan
+            task: platform-sanitizer
+            runner: windows-2025
+            python: '3.11'
+            timeout: 70
+            sanitizer: asan
+            mode: native
+          - name: sanitizer / macos-x86_64-asan-ubsan
+            task: platform-sanitizer
+            runner: macos-15-intel
+            python: '3.11'
+            timeout: 70
+            sanitizer: asan-ubsan
+            mode: native
+          - name: sanitizer / macos-arm64-asan-ubsan
+            task: platform-sanitizer
+            runner: macos-15
+            python: '3.11'
+            timeout: 70
+            sanitizer: asan-ubsan
+            mode: native
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Validate version and build the source distribution
+      - name: Require a known validation workload
+        env:
+          VALIDATION_TASK: ${{ matrix.task }}
         shell: bash
-        run: |
-          python meta/ci/release/validate_release_version.py
-          python -m pip install -U pip build==1.5.0 twine==7.0.0 packaging==26.3
-          python -m build --sdist --outdir dist
-          python -m twine check dist/*.tar.gz
-          python meta/ci/release/check_distribution_contents.py dist/*.tar.gz
-      - name: Rebuild and test as an isolated downstream consumer
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p downstream-wheel
-          python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
-          python meta/ci/release/check_distribution_contents.py downstream-wheel/*.whl
-          WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
-          python meta/ci/release/check_downstream_install.py "${WHEEL}" \
-            --work-root "${{ runner.temp }}/downstream-checks"
-      - name: Upload the validated source distribution
-        id: upload-source-distribution
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        run: |-
+          case "${VALIDATION_TASK}" in
+            quality|source-distribution|native-llvm-coverage|thread-sanitizer|platform-sanitizer) ;;
+            *)
+              echo "Unknown validation workload: ${VALIDATION_TASK}" >&2
+              exit 2
+              ;;
+          esac
+      - if: matrix.task == 'quality'
+        uses: ./.github/actions/quality-validation
+      - if: matrix.task == 'source-distribution'
+        uses: ./.github/actions/source-distribution
+      - if: matrix.task == 'native-llvm-coverage'
+        uses: ./.github/actions/native-llvm-coverage
+      - if: matrix.task == 'thread-sanitizer'
+        uses: ./.github/actions/thread-sanitizer
+      - if: matrix.task == 'platform-sanitizer'
+        uses: ./.github/actions/platform-sanitizer
         with:
-          name: source-distribution
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-      - name: Retry the source-distribution upload after a transport failure
-        if: steps.upload-source-distribution.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: source-distribution
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-          overwrite: true
+          sanitizer: ${{ matrix.sanitizer }}
+          mode: ${{ matrix.mode }}
 
-  # Once every platform test and the independent source checks succeed, combine
-  # their immutable artifacts and validate exactly what publication consumes.
-  distribution:
-    name: release artifact assembly
-    needs: [platform-wheels, source-distribution]
+  # This is the only final job and the only stable check branch protection
+  # needs. Release assembly starts only after every matrix is green.
+  validation-gate:
+    name: validation gate
+    if: always()
+    needs: [platform-wheel-builds, platform-tests, validation-matrix]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Require every validation matrix to succeed
+        env:
+          WHEEL_BUILDS_RESULT: ${{ needs.platform-wheel-builds.result }}
+          PLATFORM_TESTS_RESULT: ${{ needs.platform-tests.result }}
+          VALIDATION_MATRIX_RESULT: ${{ needs.validation-matrix.result }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          for result in \
+            "${WHEEL_BUILDS_RESULT}" \
+            "${PLATFORM_TESTS_RESULT}" \
+            "${VALIDATION_MATRIX_RESULT}"; do
+            if [[ "${result}" != "success" ]]; then
+              echo "A validation matrix ended with ${result}" >&2
+              exit 1
+            fi
+          done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -434,7 +301,7 @@ jobs:
           retention-days: 30
           compression-level: 0
       - name: Retry the publishable release-set upload after a transport failure
-        if: steps.upload-release-distributions.outcome == 'failure'
+        if: ${{ always() && steps.upload-release-distributions.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: release-distributions
@@ -443,354 +310,3 @@ jobs:
           retention-days: 30
           compression-level: 0
           overwrite: true
-  coverage-native:
-    name: coverage / native LLVM
-    runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install LLVM 18 coverage toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 llvm-18
-          clang-18 --version
-          llvm-profdata-18 --version
-          llvm-cov-18 --version
-      - name: Install instrumented package
-        run: |
-          python -m pip install -U pip ninja 'cmake>=4.3,<4.4' scikit-build-core==0.11.6
-          python -m pip install -U pytest pyarrow polars
-          mkdir -p coverage-native/raw
-          python -m pip install --no-build-isolation -v \
-            --config-settings=install.strip=false \
-            --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18 \
-            --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18 \
-            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
-            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_COVERAGE=ON \
-            --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
-            --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON \
-            --config-settings=cmake.define.SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN='${{ github.workspace }}/coverage-native/raw/schema-sanitizer-%p.profraw' \
-            .
-      - name: Run native coverage suites
-        shell: bash
-        run: |
-          mkdir -p coverage-native/raw/regular
-          pytest -q \
-            tests/io/test_api.py \
-            tests/io/test_input_xml_and_public_api.py \
-            tests/sinks/test_sinks_csv_jsonl.py \
-            tests/pipeline/test_csv_header_modes.py \
-            tests/pipeline/test_csv_union_projection.py
-          mv coverage-native/raw/schema-sanitizer-*.profraw \
-            coverage-native/raw/regular/
-          mkdir -p coverage-native/raw/adversarial
-          pytest -q \
-            tests/io/test_contracts.py \
-            tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py \
-            tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py \
-            tests/concurrency/test_runtime_resource_close_and_finalization.py \
-            tests/sinks/test_streaming_writer_lifecycle.py \
-            tests/remote/test_async_remote_scheduler.py \
-            tests/quality/test_high_risk_coverage_gaps.py \
-            tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
-          mv coverage-native/raw/schema-sanitizer-*.profraw \
-            coverage-native/raw/adversarial/
-          mkdir -p coverage-native/raw/integration
-          pytest -q \
-            tests/io/test_input_remote_file_and_directory_staging.py \
-            tests/io/test_input_remote_directory_discovery.py \
-            tests/io/test_input_remote_lazy_json_plans.py \
-            tests/remote/test_cloud_emulator_configuration.py \
-            tests/remote/test_bigquery_integration.py \
-            tests/pipeline/test_modified_time_csv_discovery.py \
-            tests/pipeline/test_modified_time_csv_planning.py \
-            tests/pipeline/test_source_manifest_inputs.py \
-            tests/pipeline/test_modified_time_csv_schema.py \
-            tests/pipeline/test_example_08_orchestration.py \
-            tests/pipeline/test_example_08_fake_cloud.py \
-            tests/pipeline/test_modified_time_csv_contracts.py
-          mv coverage-native/raw/schema-sanitizer-*.profraw \
-            coverage-native/raw/integration/
-      - name: Render LLVM reports
-        shell: bash
-        run: |
-          EXTENSION=$(python - <<'PY'
-          import schema_sanitizer._core_abi3 as core
-          print(core.__file__)
-          PY
-          )
-          for suite in regular adversarial integration; do
-            llvm-profdata-18 merge -sparse coverage-native/raw/${suite}/*.profraw \
-              -o coverage-native/${suite}.profdata
-            llvm-cov-18 report "${EXTENSION}" \
-              -instr-profile=coverage-native/${suite}.profdata \
-              > coverage-native/${suite}-summary.txt
-          done
-          llvm-profdata-18 merge -sparse coverage-native/raw/*/*.profraw \
-            -o coverage-native/combined.profdata
-          llvm-cov-18 show "${EXTENSION}" \
-            -instr-profile=coverage-native/combined.profdata \
-            -format=html \
-            -show-branches=count \
-            -output-dir=coverage-native/html
-          llvm-cov-18 report "${EXTENSION}" \
-            -instr-profile=coverage-native/combined.profdata \
-            > coverage-native/combined-summary.txt
-          cat coverage-native/combined-summary.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: native-llvm-coverage
-          path: coverage-native/
-          if-no-files-found: error
-          retention-days: 14
-  platform-sanitizers:
-    name: sanitizer / ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 70
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64-asan-ubsan
-            os: ubuntu-24.04
-            sanitizer: asan-ubsan
-            mode: linux-full
-          - name: windows-amd64-asan
-            os: windows-2025
-            sanitizer: asan
-            mode: native
-          - name: macos-x86_64-asan-ubsan
-            os: macos-15-intel
-            sanitizer: asan-ubsan
-            mode: native
-          - name: macos-arm64-asan-ubsan
-            os: macos-15
-            sanitizer: asan-ubsan
-            mode: native
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install build dependencies
-        run: >-
-          python -m pip install -U pip ninja 'cmake>=4.3,<4.4'
-          scikit-build-core==0.11.6 pytest pyarrow
-      - name: Build and install the Linux instrumented extension
-        if: matrix.mode == 'linux-full'
-        run: >-
-          python -m pip install -v --no-build-isolation
-          --config-settings=cmake.define.CMAKE_C_COMPILER=clang
-          --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++
-          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF
-          --config-settings=cmake.define.SCHEMA_SANITIZER_SANITIZER=asan-ubsan
-          --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON
-          .
-      - name: Build the Linux sanitizer-first CPython launcher
-        if: matrix.mode == 'linux-full'
-        shell: bash
-        run: |
-          set -euo pipefail
-          read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
-          read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
-          clang++ -std=c++17 -fsanitize=address,undefined \
-            -fno-omit-frame-pointer -fno-sanitize-recover=all \
-            "${python_embed_cflags[@]}" \
-            meta/ci/sanitizers/asan_python_launcher.cc \
-            -o python-asan \
-            "${python_embed_ldflags[@]}"
-      - name: Exercise malformed input, lifecycle, and nested Parquet
-        if: matrix.mode == 'linux-full'
-        run: >-
-          ./python-asan -m pytest -q
-          tests/io/test_input_python_and_local.py
-          tests/schema/test_options_bytes.py
-          tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py
-          tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py
-          tests/concurrency/test_runtime_resource_close_and_finalization.py
-          tests/parquet/test_parquet_direct_nested_projection.py
-          tests/parquet/test_parquet_native_nested_list_map_combinators.py
-          tests/parquet/test_parquet_native_recursive_adversarial_shapes.py
-          tests/parquet/test_parquet_native_recursive_extreme_runtime.py
-          tests/pipeline/test_csv_union_projection.py
-      - name: Configure Linux ASan/UBSan
-        if: matrix.mode == 'linux-full'
-        run: >-
-          cmake -S . -B build/platform-sanitizer -G Ninja
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DCMAKE_C_COMPILER=clang
-          -DCMAKE_CXX_COMPILER=clang++
-          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
-          -DSCHEMA_SANITIZER_SANITIZER=${{ matrix.sanitizer }}
-          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
-          -DSCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer
-          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-      - name: Configure Windows ASan
-        if: runner.os == 'Windows'
-        run: >-
-          cmake -S . -B build/platform-sanitizer
-          -A x64
-          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
-          -DSCHEMA_SANITIZER_SANITIZER=${{ matrix.sanitizer }}
-          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
-          -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
-          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-      - name: Configure macOS ASan/UBSan
-        if: runner.os == 'macOS'
-        run: >-
-          cmake -S . -B build/platform-sanitizer -G Ninja
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
-          -DSCHEMA_SANITIZER_SANITIZER=${{ matrix.sanitizer }}
-          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
-          -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
-          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-      - name: Build native concurrency and fuzz targets
-        run: >-
-          cmake --build build/platform-sanitizer
-          --config RelWithDebInfo
-          --target schema_sanitizer_sanitized_ordered_executor
-          schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
-          schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
-          --parallel 4
-      - name: Run repeated sanitized concurrency probe
-        # MSVC ASan can hang outside the probe watchdog. Windows still builds
-        # the probe and executes all four native fuzzers below; Linux TSan owns
-        # the repeated race-sensitive concurrency gate.
-        if: matrix.mode == 'native' && runner.os != 'Windows'
-        run: >-
-          ctest --test-dir build/platform-sanitizer
-          -C RelWithDebInfo
-          -R schema_sanitizer_sanitized_ordered_executor
-          --repeat until-fail:2
-          --output-on-failure
-      - name: Run platform fuzz regressions and mutation campaigns
-        if: matrix.mode == 'native'
-        run: >-
-          python meta/ci/fuzz/run_fuzz_regressions.py
-          --build-root build/platform-sanitizer/fuzz
-          --campaign-runs 500
-          --seed 15172026
-          --max-len 262144
-      - name: Run Linux ASan/UBSan fuzz regressions and mutation campaigns
-        if: matrix.mode == 'linux-full'
-        run: >-
-          python meta/ci/fuzz/run_fuzz_regressions.py
-          --build-root build/platform-sanitizer/fuzz
-          --engine libfuzzer
-          --campaign-runs 1000
-          --seed 15172026
-          --max-len 262144
-  thread-sanitizer:
-    name: sanitizer / Linux GCC ThreadSanitizer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.13'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install GCC 14 and build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-14 g++-14
-          python -m pip install -U pip ninja 'cmake>=4.3,<4.4' pytest pyarrow
-      - name: Configure and build the fully instrumented extension
-        run: |
-          cmake -S . -B build/tsan -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_COMPILER=gcc-14 \
-            -DCMAKE_CXX_COMPILER=g++-14 \
-            -DPython3_EXECUTABLE="$(command -v python)" \
-            -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
-            -DSCHEMA_SANITIZER_SANITIZER=tsan \
-            -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
-            -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone \
-            -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
-            -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
-            -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-          cmake --build build/tsan --parallel 4
-      - name: Run TSan fuzz regressions and mutation campaigns
-        run: >-
-          python meta/ci/fuzz/run_fuzz_regressions.py
-          --build-root build/tsan/fuzz
-          --campaign-runs 1000
-          --seed 15172026
-          --max-len 262144
-      - name: Build sanitizer-first CPython launcher
-        shell: bash
-        run: |
-          set -euo pipefail
-          read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
-          read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
-          g++-14 -std=c++17 -fsanitize=thread \
-            -fno-omit-frame-pointer \
-            "${python_embed_cflags[@]}" \
-            meta/ci/sanitizers/tsan_python_launcher.cc \
-            -o python-tsan \
-            "${python_embed_ldflags[@]}"
-      - name: Run the executor and all full-extension TSan domains
-        run: >-
-          meta/ci/sanitizers/run_tsan_extension_suite.sh
-          build/tsan ./python-tsan 2
-          "$(python -c 'import site; print(site.getsitepackages()[0])')"
-
-  # This stable result is the only check external branch protection needs.
-  validation-gate:
-    name: validation gate
-    if: always()
-    needs:
-      - checks
-      - platform-wheels
-      - distribution
-      - coverage-native
-      - platform-sanitizers
-      - thread-sanitizer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Require every validation owner to succeed
-        env:
-          CHECKS_RESULT: ${{ needs.checks.result }}
-          PLATFORM_WHEELS_RESULT: ${{ needs.platform-wheels.result }}
-          DISTRIBUTION_RESULT: ${{ needs.distribution.result }}
-          COVERAGE_NATIVE_RESULT: ${{ needs.coverage-native.result }}
-          PLATFORM_SANITIZERS_RESULT: ${{ needs.platform-sanitizers.result }}
-          THREAD_SANITIZER_RESULT: ${{ needs.thread-sanitizer.result }}
-        shell: bash
-        run: |-
-          set -euo pipefail
-          for result in \
-            "${CHECKS_RESULT}" \
-            "${PLATFORM_WHEELS_RESULT}" \
-            "${DISTRIBUTION_RESULT}" \
-            "${COVERAGE_NATIVE_RESULT}" \
-            "${PLATFORM_SANITIZERS_RESULT}" \
-            "${THREAD_SANITIZER_RESULT}"; do
-            if [[ "${result}" != "success" ]]; then
-              echo "A validation owner ended with ${result}" >&2
-              exit 1
-            fi
-          done

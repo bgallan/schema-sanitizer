@@ -76,12 +76,8 @@ PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *) {
     return nullptr;
   }
 
-  const auto started = std::chrono::steady_clock::now();
-  executor->Cancel();
+  const auto drained = executor->Shutdown();
   executor.reset();
-  const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                              std::chrono::steady_clock::now() - started)
-                              .count();
   const auto active_after = active.load(std::memory_order_acquire);
   const auto observed_stop_after =
       observed_stop.load(std::memory_order_acquire);
@@ -98,8 +94,8 @@ PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *) {
   if (!result) {
     return nullptr;
   }
-  if (!tuple_set_item_steal(
-          result, 0, PyLong_FromLongLong(static_cast<long long>(elapsed_us))) ||
+  if (!tuple_set_item_steal(result, 0,
+                            PyBool_FromLong(static_cast<long>(drained))) ||
       !tuple_set_item_steal(result, 1, PyLong_FromSize_t(active_after)) ||
       !tuple_set_item_steal(result, 2,
                             PyLong_FromSize_t(observed_stop_after)) ||

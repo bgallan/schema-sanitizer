@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -86,16 +85,27 @@ def test_guardian_reads_owner_metadata_outside_its_lock(
 
     monkeypatch.setattr(temporary_storage, "TemporaryStorageLease", Owner)
     guardian = module._ReleaseGuardian()
+
+    class FailOnContentionCondition(threading.Condition):
+        def __enter__(self) -> FailOnContentionCondition:
+            if not self.acquire(blocking=False):
+                raise AssertionError("guardian snapshot waited on owner metadata")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.release()
+
+    guardian._condition = FailOnContentionCondition()
     monkeypatch.setattr(guardian, "_ensure_workers", lambda: None)
     thread = threading.Thread(
         target=lambda: guardian.adopt(Owner(), retained_bytes=128), daemon=True
     )
     thread.start()
     assert entered.wait(1)
-    started = time.monotonic()
-    guardian.snapshot()
-    assert time.monotonic() - started < 0.2
-    resume.set()
+    try:
+        guardian.snapshot()
+    finally:
+        resume.set()
     thread.join(1)
     assert not thread.is_alive()
 
@@ -136,11 +146,14 @@ def test_cleanup_close_retains_pending_callback_owner(
     assert queue[0].args[0] is owner
 
 
-def test_runtime_registry_closes_services_with_one_shared_deadline() -> None:
-    from schema_sanitizer.core_impl.durations import deadline_ns_from_timeout
-    from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
+def test_runtime_registry_closes_services_with_one_shared_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import runtime_registry as module
 
-    registry = _RuntimeServiceRegistry()
+    monkeypatch.setattr(module, "remaining_seconds", lambda _deadline_ns: 0.75)
+
+    registry = module._RuntimeServiceRegistry()
     calls: list[float] = []
 
     class Service:
@@ -152,14 +165,10 @@ def test_runtime_registry_closes_services_with_one_shared_deadline() -> None:
     registration = registry.register(
         service, kind="process-lease-amount-is-immutable-and", close_name="close"
     )
-    closed, remaining = registry.close_all(
-        deadline_ns=deadline_ns_from_timeout(
-            1.0, name="process-lease-amount-is-immutable-and registry"
-        )
-    )
+    closed, remaining = registry.close_all(deadline_ns=1)
     assert closed == 1
     assert remaining == 0
-    assert calls and 0 <= calls[0] <= 1.0
+    assert calls == [0.75]
     registration.close()
 
 

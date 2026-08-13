@@ -48,10 +48,9 @@ def test_native_stealing_and_mixed_lanes_remain_exact() -> None:
     assert queued == 0
     assert peak == effective_workers
     for workers in (4, 8, 16):
-        elapsed, stolen, started, peak, finished, queued, submitted = (
+        _elapsed, stolen, started, peak, finished, queued, submitted = (
             native_core.operation_task_arena_mixed_lane_probe(workers, 2_000)
         )
-        assert elapsed > 0
         assert stolen > 0
         assert 1 <= started <= workers
         assert 1 <= peak <= workers

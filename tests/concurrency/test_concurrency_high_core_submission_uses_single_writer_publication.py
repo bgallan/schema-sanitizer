@@ -38,7 +38,8 @@ def test_low_core_and_consumption_paths_retain_atomic_rmw():
 def test_native_cancellation_drains_after_publication() -> None:
     """Cancellation after publication leaves no active or queued tasks."""
     require_native()
-    _, active, observed, queued = native_core.operation_task_arena_cancellation_probe()
+    drained, active, observed, queued = native_core.operation_task_arena_cancellation_probe()
+    assert drained is True
     assert active == 0
     assert observed >= 1
     assert queued == 0

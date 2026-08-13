@@ -132,6 +132,9 @@ def test_modified_time_csv_tests_use_topic_oriented_modules() -> None:
 def test_consolidated_ci_owns_modified_time_csv_validation() -> None:
     """Focused suites run inside the existing compact CI and sanitizer jobs."""
     workflow = _read(".github/workflows/ci.yml")
+    quality = _read(".github/actions/quality-validation/action.yml")
+    platform_sanitizer = _read(".github/actions/platform-sanitizer/action.yml")
+    source_distribution = _read(".github/actions/source-distribution/action.yml")
     platform_tests = _read(".github/actions/test-platform-wheel/action.yml")
     tsan_runner = _read("meta/ci/sanitizers/run_tsan_extension_suite.sh")
     native_probe = _read("cpp/tests/ordered_executor_tsan.cc")
@@ -148,11 +151,14 @@ def test_consolidated_ci_owns_modified_time_csv_validation() -> None:
         "tests/pipeline/test_modified_time_csv_contracts.py",
     )
 
+    validation_sources = workflow + quality + platform_sanitizer + source_distribution
     for suite in focused_suites:
-        assert suite in workflow
-    assert workflow.count("tests/pipeline/test_csv_union_projection.py") >= 3
+        assert suite in validation_sources
+    assert (validation_sources + tsan_runner).count(
+        "tests/pipeline/test_csv_union_projection.py"
+    ) >= 3
     assert "tests/pipeline" in platform_tests
     assert "pytest -q -o pythonpath=." in platform_tests
-    assert "check_downstream_install.py" in workflow
+    assert "check_downstream_install.py" in source_distribution
     assert "tests/pipeline/test_csv_union_projection.py" in tsan_runner
     assert '#include "ordered_executor_tsan_csv_projection.cc.inc"' in native_probe

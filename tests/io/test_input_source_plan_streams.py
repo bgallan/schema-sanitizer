@@ -361,6 +361,7 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
 
     active_downloads = 0
     max_active_downloads = 0
+    full_window = asyncio.Event()
 
     files = [
         RemoteFile(f"s3://bucket/partition/{index}.jsonl", f"{index}.jsonl") for index in range(5)
@@ -390,9 +391,13 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         assert client is not None
         active_downloads += 1
         max_active_downloads = max(max_active_downloads, active_downloads)
-        await asyncio.sleep(0.01)
-        Path(local_path).write_text(f'{{"file":"{file.name}"}}\n', encoding="utf-8")
-        active_downloads -= 1
+        if active_downloads == 2:
+            full_window.set()
+        try:
+            await asyncio.wait_for(full_window.wait(), timeout=5)
+            Path(local_path).write_text(f'{{"file":"{file.name}"}}\n', encoding="utf-8")
+        finally:
+            active_downloads -= 1
 
     monkeypatch.setattr(remote_downloads, "provider_client_for_downloads", fake_client)
     monkeypatch.setattr(remote_downloads, "close_provider_client", fake_close)

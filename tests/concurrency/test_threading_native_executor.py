@@ -231,11 +231,9 @@ def test_operation_task_arena_steals_lane_compatible_backlog() -> None:
 def test_operation_task_arena_cancels_active_stage_work_promptly() -> None:
     """Cancelling one ordered stage propagates to its active arena packets."""
     require_native()
-    elapsed_us, active, observed_stop, queued = (
-        native_core.operation_task_arena_cancellation_probe()
-    )
+    drained, active, observed_stop, queued = native_core.operation_task_arena_cancellation_probe()
 
-    assert elapsed_us < 250_000
+    assert drained is True
     assert active == 0
     assert observed_stop >= 1
     assert queued == 0

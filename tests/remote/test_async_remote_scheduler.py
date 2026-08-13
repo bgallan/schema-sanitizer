@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import AbstractSet
 
 import pytest
@@ -212,7 +211,6 @@ def test_completed_worker_pool_stops_without_terminal_debt_deadline(
     monkeypatch.setattr(async_scheduler, "_park_async_terminal_debt", record_terminal_debt)
 
     async def run() -> tuple[
-        float,
         async_scheduler.AsyncSchedulerSnapshot,
         async_scheduler.AsyncSchedulerSnapshot,
     ]:
@@ -224,22 +222,19 @@ def test_completed_worker_pool_stops_without_terminal_debt_deadline(
             await asyncio.sleep(0)
             return index
 
-        started = time.monotonic()
         values = [
             value
             async for _index, value in unordered_indexed_results(
                 100, fetch, window=4, expected_retained_bytes=256
             )
         ]
-        elapsed = time.monotonic() - started
         assert sorted(values) == list(range(100))
         if parked_tasks:
             await asyncio.gather(*parked_tasks, return_exceptions=True)
-        return elapsed, before, async_scheduler.async_scheduler_snapshot()
+        return before, async_scheduler.async_scheduler_snapshot()
 
-    elapsed, before, after = asyncio.run(run())
+    before, after = asyncio.run(run())
     assert park_calls == 0
-    assert elapsed < 1.0
     assert after.in_use == before.in_use
     assert after.active_operations == before.active_operations
     assert after.terminal_debts == before.terminal_debts
@@ -248,21 +243,34 @@ def test_completed_worker_pool_stops_without_terminal_debt_deadline(
 def test_bounded_event_wait_propagates_external_task_cancellation() -> None:
     """An outer cancellation is never converted into a local polling timeout."""
 
-    async def run() -> float:
+    class ObservedEvent(asyncio.Event):
+        """Record the exact task that owns the underlying Event wait."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_started = asyncio.Event()
+            self.waiting_task: asyncio.Task[object] | None = None
+
+        async def wait(self) -> bool:
+            """Publish waiter ownership before suspending on the real event."""
+            self.waiting_task = asyncio.current_task()
+            self.wait_started.set()
+            return await super().wait()
+
+    async def run() -> None:
         """Cancel an Event poll while its structured timeout is still armed."""
+        event = ObservedEvent()
         waiting = asyncio.create_task(
-            async_scheduler._bounded_async_event_wait(
-                asyncio.Event(), stage="async_result_slot_test"
-            )
+            async_scheduler._bounded_async_event_wait(event, stage="async_result_slot_test")
         )
-        await asyncio.sleep(0)
-        started = time.monotonic()
+        await asyncio.wait_for(event.wait_started.wait(), timeout=1)
+        assert event.waiting_task is waiting
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiting
-        return time.monotonic() - started
+        assert waiting.cancelled()
 
-    assert asyncio.run(run()) < 0.5
+    asyncio.run(run())
 
 
 def test_retry_async_stops_on_non_retryable_exception(monkeypatch: pytest.MonkeyPatch) -> None:

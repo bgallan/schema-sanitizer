@@ -46,8 +46,8 @@ def test_four_plus_hot_path_has_no_dynamic_global_stop_reload() -> None:
 def test_native_cancellation_remains_exact() -> None:
     """The distinct worker loops preserve exact cancellation drain."""
     require_native()
-    elapsed, active, observed_stop, queued = native_core.operation_task_arena_cancellation_probe()
-    assert elapsed >= 0
+    drained, active, observed_stop, queued = native_core.operation_task_arena_cancellation_probe()
+    assert drained is True
     assert active == 0
     assert observed_stop >= 1
     assert queued == 0

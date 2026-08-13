@@ -140,10 +140,9 @@ def test_native_concurrent_producers_preserve_exact_shards() -> None:
     """Concurrent coordinators cannot lose or duplicate shard increments."""
     require_native()
     for workers in (2, 4):
-        elapsed, submitted, finished, queued, started, peak = (
+        _elapsed, submitted, finished, queued, started, peak = (
             native_core.operation_task_arena_concurrent_submit_probe(workers, 2, 2_000)
         )
-        assert elapsed > 0
         assert submitted == 4_000
         assert finished == 4_000
         assert queued == 0

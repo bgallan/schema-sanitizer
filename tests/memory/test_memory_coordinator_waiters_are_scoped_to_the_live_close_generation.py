@@ -306,10 +306,27 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
 
     module._prepare_pressure_for_fork()
     module._reset_after_fork()
+
+    class FailOnContentionLock:
+        def __init__(self) -> None:
+            self._lock = Lock()
+
+        def __enter__(self) -> FailOnContentionLock:
+            if not self._lock.acquire(blocking=False):
+                raise AssertionError("pressure snapshot waited on the sampling lock")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self._lock.release()
+
+    monkeypatch.setattr(module, "_lock", FailOnContentionLock())
     entered = Event()
     release = Event()
+    parse_calls = 0
 
     def blocked_psi(_path: Path) -> tuple[float | None, float | None]:
+        nonlocal parse_calls
+        parse_calls += 1
         entered.set()
         assert release.wait(2)
         return None, None
@@ -323,9 +340,8 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
     refresher = Thread(target=lambda: module.system_pressure_snapshot(refresh=True))
     refresher.start()
     assert entered.wait(1)
-    started = time.monotonic()
     snapshot = module.system_pressure_snapshot(refresh=True)
-    assert time.monotonic() - started < 0.1
+    assert parse_calls == 1
     assert snapshot.scale == 1.0
     release.set()
     refresher.join(1)
@@ -372,17 +388,26 @@ def test_output_upload_error_remains_primary_when_cleanup_fails(
     assert any("cleanup failed" in note for note in caught.value.__notes__)
 
 
-def test_session_close_zero_timeout_is_a_nonblocking_poll() -> None:
-    from schema_sanitizer.remote_impl.session_lifecycle import SharedDownloadSessionCloser
+def test_session_close_zero_timeout_is_a_nonblocking_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.remote_impl import session_lifecycle as module
 
-    pending: Future[Any] = Future()
+    result_timeouts: list[float | None] = []
+
+    class PendingFuture(Future[Any]):
+        def result(self, timeout: float | None = None) -> Any:
+            result_timeouts.append(timeout)
+            raise TimeoutError
+
+    pending: Future[Any] = PendingFuture()
 
     class Coordinator:
         def submit(self, _operation: Any) -> Future[Any]:
             return pending
 
-    closer = SharedDownloadSessionCloser(Coordinator(), object(), ())
-    started = time.monotonic()
+    monkeypatch.setattr(module, "monotonic", lambda: 100.0)
+    closer = module.SharedDownloadSessionCloser(Coordinator(), object(), ())
     assert not closer.close(timeout_seconds=0.0)
-    assert time.monotonic() - started < 0.1
+    assert result_timeouts == [0.0]
     pending.cancel()

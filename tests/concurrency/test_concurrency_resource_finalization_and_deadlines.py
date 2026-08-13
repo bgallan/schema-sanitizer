@@ -96,6 +96,27 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
     entered = threading.Event()
     release = threading.Event()
     closed = threading.Event()
+    close_contention_checked = threading.Event()
+    close_lock_acquired = threading.Event()
+    close_thread: threading.Thread | None = None
+    contention_observations: list[bool] = []
+
+    class ObservedCloseCondition(threading.Condition):
+        """Authenticate the close thread's failed non-blocking lock acquisition."""
+
+        def __enter__(self) -> bool:
+            if threading.current_thread() is close_thread:
+                acquired_without_wait = self.acquire(blocking=False)
+                contention_observations.append(not acquired_without_wait)
+                if acquired_without_wait:
+                    self.release()
+                close_contention_checked.set()
+            acquired = super().__enter__()
+            if threading.current_thread() is close_thread:
+                close_lock_acquired.set()
+            return acquired
+
+    ledger._close_condition = ObservedCloseCondition(ledger._lock)  # noqa: SLF001
 
     def reserve(capsule: object, size: int, stage: str) -> None:
         """Pause the native reserve while the Python ledger lock is held."""
@@ -117,13 +138,16 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
         ledger.close()
         closed.set()
 
-    close_thread = threading.Thread(target=close)
+    close_thread = threading.Thread(target=close, name="observed-ledger-close")
     close_thread.start()
-    sleep(0.02)
+    assert close_contention_checked.wait(timeout=1)
+    assert contention_observations == [True]
+    assert not close_lock_acquired.is_set()
     assert not closed.is_set()
     release.set()
     reserve_thread.join(timeout=2)
     close_thread.join(timeout=2)
+    assert close_lock_acquired.is_set()
     assert closed.is_set()
     ledger.release(1024)
     assert ledger.snapshot().reserved_bytes == 0
@@ -266,8 +290,12 @@ def test_async_scheduler_surfaces_non_exception_failure_without_hanging() -> Non
         asyncio.run(asyncio.wait_for(run(), timeout=1))
 
 
-def test_remote_close_forcibly_stops_cancellation_resistant_host_thread() -> None:
+def test_remote_close_forcibly_stops_cancellation_resistant_host_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A resistant coroutine keeps its host owned until real termination."""
+    from schema_sanitizer.remote_impl import io_coordinator as io_coordinator_module
+
     started = threading.Event()
     release = threading.Event()
     coordinator = RemoteIoCoordinator(
@@ -286,11 +314,25 @@ def test_remote_close_forcibly_stops_cancellation_resistant_host_thread() -> Non
 
     coordinator.submit(stubborn)
     assert started.wait(timeout=1)
-    before = monotonic()
-    with pytest.raises(RuntimeError, match="shutdown exceeded its deadline"):
-        coordinator.close()
-    assert monotonic() - before < 0.5
+    original_monotonic = io_coordinator_module.monotonic
+    clock = iter((100.0, 101.0))
+    observed: list[float] = []
+
+    def expired_clock() -> float:
+        """Advance directly from deadline creation to its expired state."""
+        value = next(clock)
+        observed.append(value)
+        return value
+
+    monkeypatch.setattr(io_coordinator_module, "monotonic", expired_clock)
+    try:
+        with pytest.raises(RuntimeError, match="shutdown exceeded its deadline"):
+            coordinator.close()
+    finally:
+        monkeypatch.setattr(io_coordinator_module, "monotonic", original_monotonic)
+    assert observed == [100.0, 101.0]
     assert coordinator._thread.is_alive()  # noqa: SLF001
+    assert not release.is_set()
     release.set()
     coordinator.close()
     coordinator._thread.join(timeout=0.5)  # noqa: SLF001
@@ -386,23 +428,107 @@ def test_native_and_python_reservations_share_one_process_counter(tmp_path: Path
     assert blocker._finalizer_ticket is None  # noqa: SLF001
 
 
-def test_operation_remote_wait_has_a_hard_transport_deadline() -> None:
-    """A cooperative remote coroutine cannot block its synchronous caller forever."""
+def test_operation_remote_wait_has_a_hard_transport_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The synchronous adapter forwards its exact deadline and cancels on timeout."""
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    from schema_sanitizer.api_impl import operation_context as operation_context_module
+
     context = OperationExecutionContext(
         threading_mode="multi",
         memory_limit_bytes=64 << 20,
     )
     context._resources.remote_timeout_seconds = 0.02  # noqa: SLF001
+    observed_timeouts: list[float | None] = []
+
+    class TimedOutFuture:
+        """Record the bounded wait and model its exact timeout branch."""
+
+        def result(self, *, timeout: float | None = None) -> None:
+            observed_timeouts.append(timeout)
+            raise FutureTimeoutError
+
+        def cancel(self) -> bool:
+            """Record the required cancellation of timed-out transport work."""
+            observed_timeouts.append(-1.0)
+            return True
 
     async def block() -> None:
         """Wait until the bounded caller cancels this operation."""
         await asyncio.Event().wait()
 
+    monkeypatch.setattr(context, "submit_remote", lambda *_args, **_kwargs: TimedOutFuture())
+    monkeypatch.setattr(
+        operation_context_module,
+        "bounded_wait_timeout",
+        lambda default: default,
+    )
     try:
-        before = monotonic()
         with pytest.raises(TimeoutError, match="bounded transport deadline"):
             context.run_remote(block)
-        assert monotonic() - before < 0.5
+        assert observed_timeouts == [0.02, -1.0]
+    finally:
+        context.close()
+
+
+def test_operation_remote_timeout_cancels_a_live_coordinator_coroutine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout branch cancels work already running on the real coordinator."""
+    from concurrent.futures import Future
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    from schema_sanitizer.api_impl import operation_context as operation_context_module
+
+    context = OperationExecutionContext(
+        threading_mode="multi",
+        memory_limit_bytes=64 << 20,
+    )
+    context._resources.remote_timeout_seconds = 0.02  # noqa: SLF001
+    real_submit = context.submit_remote
+    operation_started = threading.Event()
+    operation_cancelled = threading.Event()
+    submitted: list[Future[None]] = []
+    observed_timeouts: list[float | None] = []
+
+    async def block() -> None:
+        """Publish live execution, then record coordinator-delivered cancellation."""
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            operation_cancelled.set()
+            raise
+
+    def submit_with_controlled_result(*args: object, **kwargs: object) -> Future[None]:
+        """Keep the real Future but control when its synchronous result path times out."""
+        future = real_submit(*args, **kwargs)  # type: ignore[arg-type]
+        assert isinstance(future, Future)
+        submitted.append(future)
+
+        def timeout_after_start(*, timeout: float | None = None) -> None:
+            assert operation_started.wait(timeout=1)
+            observed_timeouts.append(timeout)
+            raise FutureTimeoutError
+
+        monkeypatch.setattr(future, "result", timeout_after_start)
+        return future
+
+    monkeypatch.setattr(context, "submit_remote", submit_with_controlled_result)
+    monkeypatch.setattr(
+        operation_context_module,
+        "bounded_wait_timeout",
+        lambda default: default,
+    )
+    try:
+        with pytest.raises(TimeoutError, match="bounded transport deadline"):
+            context.run_remote(block)
+        assert observed_timeouts == [0.02]
+        assert len(submitted) == 1
+        assert submitted[0].cancelled()
+        assert operation_cancelled.wait(timeout=1)
     finally:
         context.close()
 

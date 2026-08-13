@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -150,8 +149,12 @@ def test_process_resident_ledger_blocks_cross_operation_oversubscription() -> No
     assert process_resident_memory_snapshot().reserved_bytes == baseline.reserved_bytes
 
 
-def test_remote_close_deadline_includes_cancelled_future_drain() -> None:
+def test_remote_close_deadline_includes_cancelled_future_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cancellation-resistant coroutine cannot block close before shutdown."""
+    from schema_sanitizer.remote_impl import io_coordinator as io_coordinator_module
+
     started = threading.Event()
     release = threading.Event()
     coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=1.0)
@@ -168,10 +171,25 @@ def test_remote_close_deadline_includes_cancelled_future_drain() -> None:
 
     coordinator.submit(stubborn)
     assert started.wait(timeout=1)
-    before = monotonic()
-    with pytest.raises(RuntimeError, match="shutdown exceeded its deadline"):
-        coordinator.close()
-    assert monotonic() - before < 0.5
+    original_monotonic = io_coordinator_module.monotonic
+    clock = iter((100.0, 101.0))
+    observed: list[float] = []
+
+    def expired_clock() -> float:
+        """Advance directly from deadline creation to its expired state."""
+        value = next(clock)
+        observed.append(value)
+        return value
+
+    monkeypatch.setattr(io_coordinator_module, "monotonic", expired_clock)
+    try:
+        with pytest.raises(RuntimeError, match="shutdown exceeded its deadline"):
+            coordinator.close()
+    finally:
+        monkeypatch.setattr(io_coordinator_module, "monotonic", original_monotonic)
+    assert observed == [100.0, 101.0]
+    assert coordinator._thread.is_alive()  # noqa: SLF001
+    assert not release.is_set()
     release.set()
     coordinator.close()
     coordinator._thread.join(timeout=1)  # noqa: SLF001
@@ -196,6 +214,7 @@ def test_concurrent_remote_close_waits_for_the_owner() -> None:
     """A second close caller observes completed provider cleanup, not early return."""
     exit_started = threading.Event()
     exit_finished = threading.Event()
+    release_exit = asyncio.Event()
 
     @asynccontextmanager
     async def context():
@@ -204,7 +223,7 @@ def test_concurrent_remote_close_waits_for_the_owner() -> None:
             yield object()
         finally:
             exit_started.set()
-            await asyncio.sleep(0.05)
+            await release_exit.wait()
             exit_finished.set()
 
     coordinator = RemoteIoCoordinator(context, shutdown_timeout_seconds=1.0)
@@ -226,6 +245,8 @@ def test_concurrent_remote_close_waits_for_the_owner() -> None:
         thread.start()
     barrier.wait()
     assert exit_started.wait(timeout=1)
+    assert completions == []
+    coordinator._loop.call_soon_threadsafe(release_exit.set)  # noqa: SLF001
     for thread in threads:
         thread.join(timeout=2)
         assert not thread.is_alive()
@@ -323,8 +344,12 @@ def test_provider_manager_entered_after_shutdown_is_exited_immediately() -> None
     assert manager.exit_calls == 1
 
 
-def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result() -> None:
+def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Closing a shared prefetcher does not wait forever or leak late staging."""
+    from schema_sanitizer.api_impl.source_plan import remote as remote_source
+
     started = threading.Event()
     release = threading.Event()
     staged_closed = threading.Event()
@@ -373,9 +398,19 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result() -> None
     iterator = RemoteChunkPrefetchIterator(Manifest())
     iterator.__enter__()
     assert started.wait(timeout=1)
-    before = monotonic()
+    close_timeouts: list[float] = []
+
+    def bounded_close(_closer: object, *, timeout_seconds: float) -> bool:
+        """Model an exhausted session deadline without waiting on wall time."""
+        close_timeouts.append(timeout_seconds)
+        return False
+
+    monkeypatch.setattr(remote_source, "remaining_seconds", lambda _deadline: 0.05)
+    monkeypatch.setattr(remote_source.SharedDownloadSessionCloser, "close", bounded_close)
     iterator.close()
-    assert monotonic() - before < 0.5
+    assert close_timeouts == [0.05]
+    assert not staged_closed.is_set()
+    assert not release.is_set()
     release.set()
     assert staged_closed.wait(timeout=1)
     coordinator.close()

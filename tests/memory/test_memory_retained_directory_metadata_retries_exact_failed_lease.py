@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -159,25 +158,40 @@ def test_azure_credential_terminal_slot_is_reserved_before_constructor() -> None
     assert "drain_azure_credential_rollbacks" in source
 
 
-def test_remote_io_waiter_self_expires_at_operation_deadline() -> None:
-    from schema_sanitizer.core_impl.cancellation import operation_cancellation
+def test_remote_io_waiter_self_expires_at_operation_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import cancellation as cancellation_module
     from schema_sanitizer.errors import SchemaSanitizerCancelledError
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
-    async def run() -> float:
+    class StepClock:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def __call__(self) -> float:
+            self.reads += 1
+            return 0.0 if self.reads <= 4 else 2.0
+
+    clock = StepClock()
+    monkeypatch.setattr(cancellation_module, "monotonic", clock)
+
+    async def run() -> tuple[int, int]:
         governor = RemoteIoPermitGovernor(capacity=1)
         first = await governor.acquire(1, operation_id="holder")
-        started = time.monotonic()
         try:
-            with operation_cancellation(timeout_seconds=0.05):
+            with cancellation_module.operation_cancellation(timeout_seconds=1.0):
                 with pytest.raises(SchemaSanitizerCancelledError):
                     await governor.acquire(1, operation_id="deadline")
         finally:
             first.release()
-        return time.monotonic() - started
+        snapshot = governor.snapshot()
+        return snapshot.cancellations, snapshot.waiting
 
-    elapsed = asyncio.run(run())
-    assert elapsed < 0.20
+    cancellations, waiting = asyncio.run(run())
+    assert clock.reads == 6
+    assert cancellations == 1
+    assert waiting == 0
 
 
 def test_sync_and_async_remote_waiters_share_one_process_authority() -> None:

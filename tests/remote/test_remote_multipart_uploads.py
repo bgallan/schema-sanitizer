@@ -119,6 +119,9 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
             self.peak_active = 0
             self.completed_parts: list[dict[str, Any]] | None = None
             self.aborted = False
+            self.part_one_started = asyncio.Event()
+            self.part_two_completed = asyncio.Event()
+            self.completion_order: list[int] = []
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
             """Start one fake upload."""
@@ -130,7 +133,14 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
             self.active += 1
             self.peak_active = max(self.peak_active, self.active)
             try:
-                await asyncio.sleep((6 - part) * 0.001)
+                if part == 1:
+                    self.part_one_started.set()
+                    await asyncio.wait_for(self.part_two_completed.wait(), timeout=5)
+                elif part == 2:
+                    await asyncio.wait_for(self.part_one_started.wait(), timeout=5)
+                self.completion_order.append(part)
+                if part == 2:
+                    self.part_two_completed.set()
                 return {"ETag": f'"etag-{part}"'}
             finally:
                 self.active -= 1
@@ -161,6 +171,7 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
 
     assert client.peak_active > 1
     assert client.aborted is False
+    assert client.completion_order.index(2) < client.completion_order.index(1)
     assert client.completed_parts is not None
     assert [part["PartNumber"] for part in client.completed_parts] == [1, 2, 3, 4, 5]
 
@@ -511,6 +522,8 @@ def test_s3_multipart_reports_earliest_failing_part(
         def __init__(self) -> None:
             """Initialize the fake provider state."""
             self.aborted = False
+            self.part_two_started = asyncio.Event()
+            self.part_three_failed = asyncio.Event()
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
             """Start one fake upload."""
@@ -520,9 +533,12 @@ def test_s3_multipart_reports_earliest_failing_part(
             """Fail the later ordinal first in wall-clock time."""
             part = int(kwargs["PartNumber"])
             if part == 2:
-                await asyncio.sleep(0.02)
+                self.part_two_started.set()
+                await asyncio.wait_for(self.part_three_failed.wait(), timeout=5)
                 raise ValueError("canonical part 2 failure")
             if part == 3:
+                await asyncio.wait_for(self.part_two_started.wait(), timeout=5)
+                self.part_three_failed.set()
                 raise ValueError("later part 3 failure")
             await asyncio.sleep(0)
             return {"ETag": f'"etag-{part}"'}

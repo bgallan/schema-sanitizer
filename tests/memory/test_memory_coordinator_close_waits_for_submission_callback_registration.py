@@ -424,11 +424,27 @@ def test_permit_scheduler_grants_many_operations_without_quadratic_scan() -> Non
                     f"operation-{index}",
                 )
                 governor._enqueue_waiter_locked(waiter)
-            started = time.monotonic()
+            candidate_calls = 0
+            effective_weight_calls = 0
+            original_candidate = governor._operation_candidate_locked
+            original_effective_weight = governor._effective_weight
+
+            def counted_candidate(*args: Any, **kwargs: Any) -> Any:
+                nonlocal candidate_calls
+                candidate_calls += 1
+                return original_candidate(*args, **kwargs)
+
+            def counted_effective_weight(*args: Any, **kwargs: Any) -> int:
+                nonlocal effective_weight_calls
+                effective_weight_calls += 1
+                return original_effective_weight(*args, **kwargs)
+
+            governor._operation_candidate_locked = counted_candidate  # type: ignore[method-assign]
+            governor._effective_weight = counted_effective_weight  # type: ignore[method-assign]
             deliveries = governor._grant_ready_locked()
-            elapsed = time.monotonic() - started
         assert len(deliveries) == count
-        assert elapsed < 0.5
+        assert candidate_calls == count
+        assert effective_weight_calls <= 4 * count
     finally:
         loop.close()
 

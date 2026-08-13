@@ -485,7 +485,7 @@ public:
   OrderedExecutor(const OrderedExecutor &) = delete;
   OrderedExecutor &operator=(const OrderedExecutor &) = delete;
 
-  ~OrderedExecutor() { shutdown(); }
+  ~OrderedExecutor() { (void)shutdown(); }
   // Submit contiguous ordinals; consume once the dispatch window is full.
   sanitize::Status Submit(Packet packet) {
     const auto retained_bytes = EstimateQueueRetainedBytes(packet.payload);
@@ -803,6 +803,10 @@ public:
     }
     notify_all();
   }
+  // Cancel and drain external arena tasks, reporting whether every scheduled
+  // completion lease retired before the bounded safety deadline. This is an
+  // internal lifecycle primitive; repeated calls preserve the first result.
+  [[nodiscard]] bool Shutdown() noexcept { return shutdown(); }
   // True only for the strict caller-thread path.
   [[nodiscard]] bool inline_mode() const noexcept {
     return worker_count_ == 1 && (!arena_ || arena_->inline_mode());
@@ -1061,16 +1065,23 @@ private:
     task_space_.notify_all();
     result_ready_.notify_all();
   }
-  void shutdown() noexcept {
+  [[nodiscard]] bool shutdown() noexcept {
+    if (shutdown_complete_) {
+      return shutdown_drained_;
+    }
     Cancel();
+    auto drained = true;
     if (arena_shared_) {
       // External arena tasks own only this shared control block. A non-
       // cooperative task can no longer pin or dereference the executor object
       // after the bounded drain deadline.
-      (void)arena_shared_->WaitUntil(std::chrono::steady_clock::now() +
-                                     std::chrono::seconds(2));
+      drained = arena_shared_->WaitUntil(std::chrono::steady_clock::now() +
+                                         std::chrono::seconds(2));
     }
     workers_.clear();
+    shutdown_drained_ = drained;
+    shutdown_complete_ = true;
+    return shutdown_drained_;
   }
   const std::size_t worker_count_;
   const std::size_t task_queue_capacity_;
@@ -1100,6 +1111,8 @@ private:
   std::uint64_t next_take_ordinal_ = 0;
   std::size_t next_external_completion_shard_ = 0;
   std::atomic<std::size_t> in_flight_{0};
+  bool shutdown_complete_ = false;
+  bool shutdown_drained_ = true;
   // Monotonic cancellation/fatality bits share one cache location so normal
   // result publication needs one acquire snapshot rather than two loads.
   bool accepting_ = true;

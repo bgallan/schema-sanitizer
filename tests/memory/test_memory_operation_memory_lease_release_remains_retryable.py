@@ -1016,6 +1016,14 @@ def test_temporary_pool_close_waits_for_started_admission(
 
     monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", Governor())
     pool = _temporary_pool_for_operation_lease()
+    close_wait_entered = threading.Event()
+
+    class TrackingCondition(threading.Condition):
+        def wait(self, timeout: float | None = None) -> bool:
+            close_wait_entered.set()
+            return super().wait(timeout)
+
+    pool._condition = TrackingCondition(pool._lock)
     leases: list[Any] = []
     acquire_thread = threading.Thread(
         target=lambda: leases.append(pool.acquire(7, label="pending", path=tmp_path))
@@ -1026,7 +1034,12 @@ def test_temporary_pool_close_waits_for_started_admission(
     closed = threading.Event()
     close_thread = threading.Thread(target=lambda: (pool.close(), closed.set()))
     close_thread.start()
-    assert not closed.wait(timeout=0.05)
+    assert close_wait_entered.wait(timeout=2.0)
+    with pool._condition:
+        assert pool._closed
+        assert pool._pending_active_leases == 1
+        assert not pool._close_complete
+    assert not closed.is_set()
     with pytest.raises(RuntimeError, match="closed"):
         pool.acquire(1, label="late", path=tmp_path)
 

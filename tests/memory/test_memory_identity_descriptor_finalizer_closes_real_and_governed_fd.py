@@ -212,17 +212,24 @@ def test_terminal_callback_drain_never_runs_callback_inline(
 
     def callback(_future: Future[object]) -> None:
         called.set()
-        threading.Event().wait(10)
+        raise AssertionError("terminal callback ran inline")
 
     owner.callbacks_pending = 1
     owner.callback_quiescent.clear()
     coordinator._deferred_terminal_callbacks.append((owner, callback))
     coordinator._terminal_callback_owners.add(id(owner))
     monkeypatch.setattr(module, "dispatch_cleanup", lambda *a, **k: False)
-    started = time.monotonic()
+    clock_reads = 0
+
+    def expired_clock() -> float:
+        nonlocal clock_reads
+        clock_reads += 1
+        return 10.0
+
+    monkeypatch.setattr(module, "monotonic", expired_clock)
     with pytest.raises(RuntimeError, match="deadline"):
-        coordinator._drain_terminal_callback_work(time.monotonic() + 0.05)
-    assert time.monotonic() - started < 0.5
+        coordinator._drain_terminal_callback_work(10.0)
+    assert clock_reads >= 1
     assert not called.is_set()
 
 
@@ -363,11 +370,36 @@ def test_weight_buckets_skip_nonfitting_operations_without_linear_scan() -> None
                 )
             light = _Waiter(loop, loop.create_future(), 1, "light", "light-op")
             governor._enqueue_waiter_locked(light)
-            started = time.monotonic()
+            candidate_calls = 0
+            bucket_weight_calls = 0
+            effective_weight_calls = 0
+            original_candidate = governor._operation_candidate_locked
+            original_bucket_weight = governor._operation_bucket_weight_locked
+            original_effective_weight = governor._effective_weight
+
+            def counted_candidate(*args: object, **kwargs: object) -> object:
+                nonlocal candidate_calls
+                candidate_calls += 1
+                return original_candidate(*args, **kwargs)
+
+            def counted_bucket_weight(*args: object, **kwargs: object) -> int | None:
+                nonlocal bucket_weight_calls
+                bucket_weight_calls += 1
+                return original_bucket_weight(*args, **kwargs)
+
+            def counted_effective_weight(*args: object, **kwargs: object) -> int:
+                nonlocal effective_weight_calls
+                effective_weight_calls += 1
+                return original_effective_weight(*args, **kwargs)
+
+            governor._operation_candidate_locked = counted_candidate  # type: ignore[method-assign]
+            governor._operation_bucket_weight_locked = counted_bucket_weight  # type: ignore[method-assign]
+            governor._effective_weight = counted_effective_weight  # type: ignore[method-assign]
             selected = governor._take_candidate_locked(1)
-            elapsed = time.monotonic() - started
         assert selected is light
-        assert elapsed < 0.05
+        assert candidate_calls == 1
+        assert bucket_weight_calls == 2
+        assert effective_weight_calls == 4
     finally:
         loop.close()
 

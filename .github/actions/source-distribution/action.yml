@@ -1,0 +1,44 @@
+---
+name: Validate source distribution and downstream packaging
+description: Build, inspect, rebuild, install, and upload the source distribution.
+runs:
+  using: composite
+  steps:
+    - name: Validate version and build the source distribution
+      shell: bash
+      run: |
+        python meta/ci/release/validate_release_version.py
+        python -m pip install -U pip build==1.5.0 twine==7.0.0 packaging==26.3
+        python -m build --sdist --outdir dist
+        python -m twine check dist/*.tar.gz
+        python meta/ci/release/check_distribution_contents.py dist/*.tar.gz
+    - name: Rebuild and test as an isolated downstream consumer
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p downstream-wheel
+        python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
+        python meta/ci/release/check_distribution_contents.py downstream-wheel/*.whl
+        WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
+        python meta/ci/release/check_downstream_install.py "${WHEEL}" \
+          --work-root "${{ runner.temp }}/downstream-checks"
+    - name: Upload the validated source distribution
+      id: upload-source-distribution
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: source-distribution
+        path: dist/*.tar.gz
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
+    - name: Retry the source-distribution upload after a transport failure
+      if: ${{ always() && steps.upload-source-distribution.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: source-distribution
+        path: dist/*.tar.gz
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
+        overwrite: true

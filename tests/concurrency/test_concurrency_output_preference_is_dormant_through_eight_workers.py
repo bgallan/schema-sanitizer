@@ -64,7 +64,7 @@ def test_mixed_lanes_still_drain_and_steal_without_extra_workers() -> None:
     """The preference keeps mixed lanes live and within the arena budget."""
     require_native()
     (
-        elapsed_ns,
+        _elapsed_ns,
         stolen,
         started,
         peak,
@@ -73,7 +73,6 @@ def test_mixed_lanes_still_drain_and_steal_without_extra_workers() -> None:
         submitted,
     ) = native_core.operation_task_arena_mixed_lane_probe(16, 1_000)
 
-    assert elapsed_ns >= 0
     assert stolen > 0
     assert 1 <= started <= 16
     assert 1 <= peak <= 16

@@ -65,7 +65,7 @@ def test_native_probe_coalesces_busy_submissions_and_survives_park_waves() -> No
     waves = 64
     workers = 4
     (
-        elapsed_ns,
+        _elapsed_ns,
         submitted,
         finished,
         queued,
@@ -78,7 +78,6 @@ def test_native_probe_coalesces_busy_submissions_and_survives_park_waves() -> No
 
     wave_tasks = waves * workers * 2
     runnable_blockers = submitted - rounds - wave_tasks
-    assert elapsed_ns > 0
     assert 1 <= runnable_blockers <= workers
     assert submitted == runnable_blockers + rounds + wave_tasks
     assert finished == rounds + wave_tasks

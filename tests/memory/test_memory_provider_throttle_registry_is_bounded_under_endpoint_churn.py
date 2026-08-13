@@ -96,9 +96,14 @@ def test_provider_throttle_never_evicts_live_endpoint_state() -> None:
     admitted.release()
 
 
-def test_provider_throttle_does_not_evict_open_circuit_state() -> None:
+def test_provider_throttle_does_not_evict_open_circuit_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Endpoint churn cannot erase a live circuit-breaker cooldown."""
-    governor = ProviderThrottleGovernor(max_tracked_keys=1)
+    from schema_sanitizer.remote_impl import provider_throttle as module
+
+    monkeypatch.setattr(module, "monotonic", lambda: 100.0)
+    governor = module.ProviderThrottleGovernor(max_tracked_keys=1)
     lease, delay = governor.try_acquire("penalized")
     assert lease is not None, delay
     throttled = RuntimeError("rate limited")
@@ -114,7 +119,7 @@ def test_provider_throttle_does_not_evict_open_circuit_state() -> None:
     assert registry.open_circuits == 1
     assert registry.evictions == 0
     assert registry.saturation_rejections == 1
-    assert governor.snapshot("penalized").circuit_open_until > time.monotonic()
+    assert governor.snapshot("penalized").circuit_open_until == 130.0
 
 
 def test_provider_throttle_registry_stays_bounded_under_threaded_churn() -> None:

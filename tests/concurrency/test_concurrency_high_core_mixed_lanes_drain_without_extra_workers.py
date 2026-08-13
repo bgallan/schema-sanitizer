@@ -10,11 +10,10 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 def test_high_core_mixed_lanes_drain_without_extra_workers() -> None:
     """Signal coalescing cannot strand compatible work or oversubscribe."""
     require_native()
-    elapsed_ns, stolen, started, peak, finished, queued, submitted = (
+    _elapsed_ns, stolen, started, peak, finished, queued, submitted = (
         native_core.operation_task_arena_mixed_lane_probe(16, 4_000)
     )
 
-    assert elapsed_ns > 0
     assert stolen > 0
     assert 1 <= started <= 16
     assert 1 <= peak <= 16

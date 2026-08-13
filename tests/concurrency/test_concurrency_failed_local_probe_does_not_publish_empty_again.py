@@ -81,10 +81,9 @@ def test_native_direct_producers_finish_exactly() -> None:
     """Concurrent direct producers leave no queued arena tasks."""
     require_native()
     for workers in (2, 4, 8, 16):
-        elapsed, submitted, finished, queued, started, peak = (
+        _elapsed, submitted, finished, queued, started, peak = (
             native_core.operation_task_arena_concurrent_submit_probe(workers, 2, 1_500)
         )
-        assert elapsed > 0
         assert submitted == 3_000
         assert finished == 3_000
         assert queued == 0

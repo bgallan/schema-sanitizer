@@ -106,6 +106,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     # preflight boundary. Keeping the expected file set exact detects expansion.
     assert sorted(yaml_env_blocks) == [
         ".github/actions/build-platform-wheel/action.yml",
+        ".github/actions/platform-sanitizer/action.yml",
         ".github/actions/test-platform-wheel/action.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/publish.yml",
