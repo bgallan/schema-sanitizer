@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import time
 import weakref
 from pathlib import Path
 from threading import Event, Thread
@@ -480,19 +481,44 @@ def test_cpp_arena_submission_rolls_back_completion_on_throwing_publication() ->
 
 
 def test_prepared_capsule_self_publishes_unused_reserved_ticket() -> None:
-    from schema_sanitizer.core_impl.finalizer_cleanup import (
-        drain_finalizer_cleanup,
-        finalizer_cleanup_snapshot,
-        prepare_reference_finalizer_cleanup,
-    )
+    from schema_sanitizer.core_impl import finalizer_cleanup as module
 
-    drain_finalizer_cleanup()
-    before, _overflows = finalizer_cleanup_snapshot()
-    _ticket, capsule = prepare_reference_finalizer_cleanup()
-    del capsule
-    gc.collect()
-    pending, _overflows = finalizer_cleanup_snapshot()
-    assert pending == before + 1
-    assert drain_finalizer_cleanup() >= 1
-    after, _overflows = finalizer_cleanup_snapshot()
-    assert after == before
+    escrow = module._PREPARED_FINALIZER_ESCROW
+    ticket, capsule = module.prepare_reference_finalizer_cleanup()
+    authority = capsule._authority
+    slot = escrow._ticket_slots[ticket]
+    assert escrow._tickets[slot] == ticket
+    assert escrow._slots[slot] is authority
+
+    # Authenticate this exact pre-reserved generation while its wrapper dies.
+    # A process-global cleanup count may also fall when this GC or drain retires
+    # unrelated owners, so it cannot prove publication or retirement here.
+    with escrow._slot_locks[slot]:
+        del capsule
+        gc.collect()
+        assert authority.is_armed_for(ticket)
+        assert escrow._ticket_slots[ticket] == slot
+        assert escrow._tickets[slot] == ticket
+        assert escrow._slots[slot] is authority
+
+    deadline = time.monotonic() + 1.0
+    while (
+        ticket in escrow._ticket_slots
+        or authority.is_armed_for(ticket)
+        or authority.ticket == ticket
+    ):
+        module.drain_finalizer_cleanup()
+        if (
+            ticket not in escrow._ticket_slots
+            and not authority.is_armed_for(ticket)
+            and authority.ticket == 0
+        ):
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("exact unused prepared finalizer generation was not retired")
+        time.sleep(0)
+
+    assert ticket not in escrow._ticket_slots
+    assert not authority.is_armed_for(ticket)
+    assert authority.ticket == 0
+    assert escrow._slots[slot] is not authority

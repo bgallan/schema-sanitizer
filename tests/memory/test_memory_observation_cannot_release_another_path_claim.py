@@ -179,21 +179,38 @@ def test_cleanup_dispatcher_counts_active_retained_bytes() -> None:
     assert cleanup_dispatcher_snapshot().active_bytes <= before.active_bytes
 
 
-def test_retry_replacement_preserves_exact_byte_accounting() -> None:
-    from schema_sanitizer.core_impl.retry_scheduler import (
-        cancel_retry,
-        retry_scheduler_snapshot,
-        schedule_retry,
-    )
+def test_retry_replacement_preserves_exact_byte_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.core_impl import retry_scheduler as module
 
+    scheduler = module._RetryScheduler()
+    monkeypatch.setattr(scheduler, "_ensure_workers", lambda: None)
     key = ("observation-cannot-release-another-path-claim-charge", id(object()))
-    before = retry_scheduler_snapshot()
-    assert schedule_retry(key, lambda: None, delay_seconds=60, retained_bytes=100)
-    assert schedule_retry(key, lambda: None, delay_seconds=60, retained_bytes=300)
-    current = retry_scheduler_snapshot()
-    assert current.pending_bytes == before.pending_bytes + 300
-    cancel_retry(key)
-    assert retry_scheduler_snapshot().pending_bytes == before.pending_bytes
+    normalized_key = module._normalize_retry_key(key)
+    assert scheduler.snapshot().pending_bytes == 0
+    assert scheduler.schedule(key, lambda: None, delay_seconds=60, retained_bytes=100)
+    assert scheduler.snapshot().pending_bytes == 100
+    assert scheduler.schedule(key, lambda: None, delay_seconds=60, retained_bytes=300)
+    current = scheduler.snapshot()
+    assert current.pending_retries == 1
+    assert current.pending_bytes == 300
+    assert scheduler._current[normalized_key].retained_bytes == 300
+    scheduler.cancel(key)
+    after = scheduler.snapshot()
+    assert after.pending_retries == 0
+    assert after.pending_bytes == 0
+    assert after.generation_entries == 0
+    assert all(
+        normalized_key not in owners
+        for owners in (
+            scheduler._current,
+            scheduler._ready_by_key,
+            scheduler._active_by_key,
+            scheduler._successors,
+            scheduler._emergency,
+        )
+    )
 
 
 def test_retry_subsystems_do_not_create_threading_timers() -> None:
