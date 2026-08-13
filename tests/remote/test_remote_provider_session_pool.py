@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
 class _FakeClient:
@@ -140,7 +141,10 @@ def test_provider_pool_initializes_distinct_keys_concurrently() -> None:
         async with RemoteProviderSessionPool() as pool:
             first = asyncio.create_task(pool.borrow_client(("http", "a"), create))
             second = asyncio.create_task(pool.borrow_client(("http", "b"), create))
-            await asyncio.wait_for(both_started.wait(), timeout=1)
+            await asyncio.wait_for(
+                both_started.wait(),
+                timeout=SCHEDULER_TIMEOUT_SECONDS,
+            )
             release.set()
             await asyncio.gather(first, second)
         return peak, clients

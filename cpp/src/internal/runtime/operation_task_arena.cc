@@ -1403,11 +1403,12 @@ void mark_process_file_descriptors_closed(std::size_t amount) noexcept {
 std::size_t process_file_descriptor_permits_in_use() noexcept {
   return g_process_file_descriptor_permits.load(std::memory_order_acquire);
 }
-
+std::size_t process_file_descriptor_waiters() noexcept {
+  return g_process_fd_waiters.load(std::memory_order_acquire);
+}
 std::size_t process_file_descriptors_opened() noexcept {
   return g_process_file_descriptors_opened.load(std::memory_order_acquire);
 }
-
 std::optional<std::size_t> process_file_descriptor_count() noexcept {
   return ProcessFileDescriptorCount();
 }
@@ -2056,6 +2057,9 @@ sanitize::Status AcquireRetainedSubmitCredit(
       return sanitize::Status::Cancelled(
           "OperationTaskArena::Submit: cancelled during byte backpressure");
     }
+    // Detect releases between the first attempt and waiter publication.
+    const auto admission_epoch =
+        state->retained_epoch.load(std::memory_order_acquire);
     if (try_admit()) {
       if (ticket_index == kNoTicket) {
         state->retained_ready.notify_all();
@@ -2110,8 +2114,10 @@ sanitize::Status AcquireRetainedSubmitCredit(
       }
       std::unique_lock retained_lock(state->retained_wait_mutex);
       epoch = state->retained_epoch.load(std::memory_order_acquire);
-      if (state->stopping.load(std::memory_order_acquire) ||
-          state->cancel_requested.load(std::memory_order_acquire)) {
+      if (epoch != admission_epoch) {
+        availability_changed = true;
+      } else if (state->stopping.load(std::memory_order_acquire) ||
+                 state->cancel_requested.load(std::memory_order_acquire)) {
         availability_changed = true;
       } else {
         const auto wait_status = state->retained_ready.wait_until(

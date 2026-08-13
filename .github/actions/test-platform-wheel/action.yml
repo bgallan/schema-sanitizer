@@ -21,18 +21,34 @@ runs:
         cache: pip
         cache-dependency-path: meta/ci/requirements/platform-tests.txt
     - name: Download the certified platform wheel
+      id: download-platform-wheel
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: dist-wheels-${{ inputs.platform-name }}
+        path: wheelhouse
+    - name: Remove a partial platform-wheel download before retrying
+      if: ${{ always() && steps.download-platform-wheel.outcome == 'failure' }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- wheelhouse
+    - name: Retry the certified platform-wheel download
+      if: ${{ always() && steps.download-platform-wheel.outcome == 'failure' }}
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
       with:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse
     - name: Install the wheel and full-suite dependencies
       shell: bash
-      run: >-
-        python -m pip install
-        --retries 10
-        --timeout 60
-        -r meta/ci/requirements/platform-tests.txt
-        wheelhouse/*.whl
+      run: |-
+        set -euo pipefail
+        python -m pip install pip==26.1.2
+        python -m pip install \
+          --retries 10 \
+          --timeout 60 \
+          -r meta/ci/requirements/platform-tests.txt \
+          wheelhouse/*.whl
     - name: Assert tests import the installed wheel
       shell: bash
       run: |

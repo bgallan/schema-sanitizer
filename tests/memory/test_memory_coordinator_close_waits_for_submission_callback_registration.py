@@ -7,7 +7,6 @@ import asyncio
 import os
 import subprocess
 import sys
-import time
 from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
@@ -16,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -75,7 +75,7 @@ class _BlockingCallbackFuture(Future[Any]):
 
     def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
         self.registration_entered.set()
-        assert self.allow_registration.wait(2)
+        assert self.allow_registration.wait(SCHEDULER_TIMEOUT_SECONDS)
         super().add_done_callback(fn)
 
     def cancel(self) -> bool:
@@ -90,10 +90,12 @@ def test_coordinator_close_waits_for_submission_callback_registration(
 
     owner = _SubmissionOwner()
     created: list[_BlockingCallbackFuture] = []
+    future_created = Event()
 
     def submit_bridge(coroutine: Any, _loop: Any) -> _BlockingCallbackFuture:
         future = _BlockingCallbackFuture(coroutine)
         created.append(future)
+        future_created.set()
         return future
 
     monkeypatch.setattr(module.asyncio, "run_coroutine_threadsafe", submit_bridge)
@@ -101,10 +103,10 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     coordinator._pid = os.getpid()
     coordinator._operation_id = "coordinator-close-waits-for-submission-callback"
     coordinator._permit_governor = _Governor(owner)
-    coordinator._shutdown_timeout_seconds = 1.0
+    coordinator._shutdown_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     coordinator._lock = Lock()
     coordinator._release_lock = Lock()
-    coordinator._close_condition = Condition(coordinator._lock)
+    coordinator._close_condition = WaitObservedCondition(coordinator._lock)
     coordinator._loop = _StoppedLoop()
     coordinator._context = None
     coordinator._futures = set()
@@ -129,20 +131,20 @@ def test_coordinator_close_waits_for_submission_callback_registration(
         target=lambda: submitted.append(coordinator.submit(lambda _context: asyncio.sleep(0)))
     )
     submitter.start()
-    while not created:
-        time.sleep(0.001)
+    assert future_created.wait(SCHEDULER_TIMEOUT_SECONDS)
     future = created[0]
-    assert future.registration_entered.wait(1)
+    assert future.registration_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     close_errors: list[BaseException] = []
     closer = Thread(target=lambda: _capture_error(coordinator.close, close_errors))
     closer.start()
-    time.sleep(0.03)
+    assert coordinator._close_condition.enter_observed.wait(SCHEDULER_TIMEOUT_SECONDS)
+    assert coordinator._submission_callbacks_inflight == 1
     assert closer.is_alive()
     assert not owner.released
     future.allow_registration.set()
-    submitter.join(1)
-    closer.join(1)
+    submitter.join(SCHEDULER_TIMEOUT_SECONDS)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not close_errors
     assert owner.released
     assert coordinator._submission_callbacks_inflight == 0
@@ -299,7 +301,7 @@ def test_lookahead_close_does_not_reenter_under_callback_registration(
     owner._executor = executor
     closer = Thread(target=owner.close)
     closer.start()
-    closer.join(1)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not closer.is_alive()
     assert prepared.closed
     assert executor.closed
@@ -321,7 +323,7 @@ def test_session_entry_timeout_self_closes_without_second_submission() -> None:
 
     thread = Thread(target=run_loop)
     thread.start()
-    assert started.wait(1)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     class Coordinator:
         submissions = 0
@@ -350,11 +352,11 @@ def test_session_entry_timeout_self_closes_without_second_submission() -> None:
         with pytest.raises(TimeoutError):
             enter_shared_download_session(coordinator, Session(), timeout_seconds=0.02)
         allow_entry.set()
-        assert exited.wait(1)
+        assert exited.wait(SCHEDULER_TIMEOUT_SECONDS)
         assert coordinator.submissions == 1
     finally:
         loop.call_soon_threadsafe(loop.stop)
-        thread.join(1)
+        thread.join(SCHEDULER_TIMEOUT_SECONDS)
         loop.close()
 
 
@@ -375,16 +377,18 @@ def test_staged_result_concurrent_abandon_closes_once() -> None:
     staged = Staged()
     owner = StagedResultOwnership()
     owner.publish(staged)
+    owner._condition = WaitObservedCondition()
+    owner._lock = owner._condition
     results: list[bool] = []
     first = Thread(target=lambda: results.append(owner.abandon()))
     second = Thread(target=lambda: results.append(owner.abandon()))
     first.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    time.sleep(0.02)
+    assert owner._condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     release.set()
-    first.join(1)
-    second.join(1)
+    first.join(SCHEDULER_TIMEOUT_SECONDS)
+    second.join(SCHEDULER_TIMEOUT_SECONDS)
     assert staged.calls == 1
     assert results == [True, True]
 
@@ -495,10 +499,10 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
         "coordinator-close-waits-for-submission-callback-registration-failure"
     )
     coordinator._permit_governor = _Governor(owner)
-    coordinator._shutdown_timeout_seconds = 1.0
+    coordinator._shutdown_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     coordinator._lock = Lock()
     coordinator._release_lock = Lock()
-    coordinator._close_condition = Condition(coordinator._lock)
+    coordinator._close_condition = WaitObservedCondition(coordinator._lock)
     coordinator._loop = _StoppedLoop()
     coordinator._context = None
     coordinator._futures = set()
@@ -523,14 +527,16 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     assert len(created) == 1
     assert not owner.released
     assert coordinator._submission_callbacks_inflight == 1
+    coordinator._close_condition.enter_observed.clear()
 
     close_errors: list[BaseException] = []
     closer = Thread(target=lambda: _capture_error(coordinator.close, close_errors))
     closer.start()
-    time.sleep(0.03)
+    assert coordinator._close_condition.enter_observed.wait(SCHEDULER_TIMEOUT_SECONDS)
+    assert coordinator._submission_callbacks_inflight == 1
     assert closer.is_alive()
     created[0].finish()
-    closer.join(1)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not closer.is_alive()
     assert not close_errors
     assert owner.released
@@ -593,7 +599,7 @@ def test_lookahead_close_waits_for_trigger_commit(
     owner.enabled = True
     owner._memory_limit_bytes = 64 << 20
     owner._close_lock = Lock()
-    owner._close_condition = Condition(owner._close_lock)
+    owner._close_condition = WaitObservedCondition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
     owner._consumer_inflight = False
@@ -609,14 +615,14 @@ def test_lookahead_close_waits_for_trigger_commit(
 
     trigger = Thread(target=owner.trigger)
     trigger.start()
-    assert submit_entered.wait(1)
+    assert submit_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     closer = Thread(target=owner.close)
     closer.start()
-    time.sleep(0.03)
+    assert owner._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert closer.is_alive()
     allow_submit.set()
-    trigger.join(1)
-    closer.join(1)
+    trigger.join(SCHEDULER_TIMEOUT_SECONDS)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not trigger.is_alive()
     assert not closer.is_alive()
     assert submitted_future.cancelled()
@@ -658,7 +664,7 @@ def test_prefetch_close_waits_for_external_storage_admission(
     owner._failed_storage_leases = deque()
     owner._next_start = 0
     owner._close_lock = RLock()
-    owner._close_condition = Condition(owner._close_lock)
+    owner._close_condition = WaitObservedCondition(owner._close_lock)
     owner._close_in_progress = False
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
@@ -673,14 +679,14 @@ def test_prefetch_close_waits_for_external_storage_admission(
 
     filler = Thread(target=owner._fill_prefetch_window)
     filler.start()
-    assert acquire_entered.wait(1)
+    assert acquire_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     closer = Thread(target=owner.close)
     closer.start()
-    time.sleep(0.03)
+    assert owner._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert closer.is_alive()
     allow_acquire.set()
-    filler.join(1)
-    closer.join(1)
+    filler.join(SCHEDULER_TIMEOUT_SECONDS)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not filler.is_alive()
     assert not closer.is_alive()
     assert owner._closed
@@ -700,7 +706,14 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
     staged = Staged()
     ownership = StagedResultOwnership()
     ownership.publish(staged)
-    future: Future[Any] = Future()
+    consumer_claimed = Event()
+
+    class ClaimedFuture(Future[Any]):
+        def result(self, timeout: float | None = None) -> Any:
+            consumer_claimed.set()
+            return super().result(timeout=timeout)
+
+    future: Future[Any] = ClaimedFuture()
     setattr(future, "_schema_sanitizer_staged_ownership", ownership)
 
     owner = object.__new__(module.RemoteChunkPrefetchIterator)
@@ -712,7 +725,7 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
     owner._futures = deque((future,))
     owner._failed_storage_leases = deque()
     owner._close_lock = RLock()
-    owner._close_condition = Condition(owner._close_lock)
+    owner._close_condition = WaitObservedCondition(owner._close_lock)
     owner._close_in_progress = False
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
@@ -729,18 +742,16 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
     consumed: list[Any] = []
     consumer = Thread(target=lambda: consumed.append(next(owner)))
     consumer.start()
-    deadline = time.monotonic() + 1
-    while owner._consumers_inflight == 0 and time.monotonic() < deadline:
-        time.sleep(0.001)
+    assert consumer_claimed.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert owner._consumers_inflight == 1
 
     closer = Thread(target=owner.close)
     closer.start()
-    time.sleep(0.03)
+    assert owner._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert closer.is_alive()
     future.set_result(staged)
-    consumer.join(1)
-    closer.join(1)
+    consumer.join(SCHEDULER_TIMEOUT_SECONDS)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert not consumer.is_alive()
     assert not closer.is_alive()
     assert consumed == [staged]

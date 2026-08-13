@@ -7,6 +7,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -142,19 +143,26 @@ def test_async_scheduler_cancellation_resistance_transfers_admission_to_terminal
         module.reopen_async_scheduler_for_tests()
         monkeypatch.setattr(module, "_ASYNC_CANCEL_TIMEOUT_SECONDS", 0.001)
         admission = module._acquire_async_scheduler_admission(1)
+        started = asyncio.Event()
+        cancellation_observed = asyncio.Event()
+        allow_terminal = asyncio.Event()
 
         async def resistant() -> None:
+            started.set()
             try:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
-                await asyncio.sleep(0.03)
+                cancellation_observed.set()
+                await allow_terminal.wait()
 
         task = asyncio.create_task(resistant())
-        await asyncio.sleep(0)
+        await asyncio.wait_for(started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
         parked = await module._stop_workers([task], admission)
+        await asyncio.wait_for(cancellation_observed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
         during = module.async_scheduler_snapshot().terminal_debts
         assert parked is True
-        await asyncio.sleep(0.06)
+        allow_terminal.set()
+        await asyncio.wait_for(task, timeout=SCHEDULER_TIMEOUT_SECONDS)
         after = module.async_scheduler_snapshot().terminal_debts
         assert module.wait_async_scheduler_quiescent(0.1) is True
         return during, after

@@ -413,14 +413,16 @@ def test_execution_context_pool_serializes_lazy_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent callers construct exactly one process-local native context."""
-    import time
     from concurrent.futures import ThreadPoolExecutor
-    from threading import Lock
+    from threading import Barrier, Lock
+
+    from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
     from schema_sanitizer.api_impl import execution_context as module
 
     constructed = 0
     counter_lock = Lock()
+    caller_barrier = Barrier(8)
     replacement = object()
 
     def construct() -> object:
@@ -428,13 +430,16 @@ def test_execution_context_pool_serializes_lazy_construction(
         nonlocal constructed
         with counter_lock:
             constructed += 1
-        time.sleep(0.01)
         return replacement
+
+    def get_context(_index: int) -> object:
+        caller_barrier.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+        return pool.get()
 
     monkeypatch.setattr(module, "ExecutionContext", construct)
     pool = module.ExecutionContextPool()
     with ThreadPoolExecutor(max_workers=8) as executor:
-        contexts = list(executor.map(lambda _index: pool.get(), range(32)))
+        contexts = list(executor.map(get_context, range(32)))
 
     assert constructed == 1
     assert all(context is replacement for context in contexts)

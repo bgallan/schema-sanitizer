@@ -10,6 +10,7 @@ from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
@@ -131,7 +132,7 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
     )
     reserve_thread = threading.Thread(target=lambda: ledger.reserve(1024, stage="close_barrier"))
     reserve_thread.start()
-    assert entered.wait(timeout=1)
+    assert entered.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     def close() -> None:
         """Record when close crosses the in-flight reserve barrier."""
@@ -140,7 +141,7 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
 
     close_thread = threading.Thread(target=close, name="observed-ledger-close")
     close_thread.start()
-    assert close_contention_checked.wait(timeout=1)
+    assert close_contention_checked.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     assert contention_observations == [True]
     assert not close_lock_acquired.is_set()
     assert not closed.is_set()
@@ -313,7 +314,7 @@ def test_remote_close_forcibly_stops_cancellation_resistant_host_thread(
                 continue
 
     coordinator.submit(stubborn)
-    assert started.wait(timeout=1)
+    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     original_monotonic = io_coordinator_module.monotonic
     clock = iter((100.0, 101.0))
     observed: list[float] = []
@@ -335,7 +336,7 @@ def test_remote_close_forcibly_stops_cancellation_resistant_host_thread(
     assert not release.is_set()
     release.set()
     coordinator.close()
-    coordinator._thread.join(timeout=0.5)  # noqa: SLF001
+    coordinator._thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)  # noqa: SLF001
     assert not coordinator._thread.is_alive()  # noqa: SLF001
 
 
@@ -509,7 +510,7 @@ def test_operation_remote_timeout_cancels_a_live_coordinator_coroutine(
         submitted.append(future)
 
         def timeout_after_start(*, timeout: float | None = None) -> None:
-            assert operation_started.wait(timeout=1)
+            assert operation_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             observed_timeouts.append(timeout)
             raise FutureTimeoutError
 
@@ -528,7 +529,7 @@ def test_operation_remote_timeout_cancels_a_live_coordinator_coroutine(
         assert observed_timeouts == [0.02]
         assert len(submitted) == 1
         assert submitted[0].cancelled()
-        assert operation_cancelled.wait(timeout=1)
+        assert operation_cancelled.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     finally:
         context.close()
 
@@ -583,7 +584,7 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
         with pytest.raises(TimeoutError, match="session startup"):
             iterator.__enter__()
         release.set()
-        assert exited.wait(timeout=1)
+        assert exited.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     finally:
         iterator.close()
         operation.close()

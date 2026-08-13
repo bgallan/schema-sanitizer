@@ -9,6 +9,7 @@ from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
@@ -95,7 +96,7 @@ def test_remote_io_coordinator_close_has_a_bounded_provider_deadline() -> None:
     coordinator = RemoteIoCoordinator(context, shutdown_timeout_seconds=0.05)
     with pytest.raises(RuntimeError, match="shutdown exceeded its deadline"):
         coordinator.close()
-    assert exit_started.wait(timeout=1)
+    assert exit_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:

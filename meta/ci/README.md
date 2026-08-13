@@ -15,7 +15,7 @@ workflow or configuration file.
 | [`fuzz/`](fuzz/) | Corpus integrity and bounded regression campaigns | `check_fuzz_corpus.py`, `run_fuzz_regressions.py` |
 | [`sanitizers/`](sanitizers/) | ASan/UBSan/TSan process launch and orchestration | CPython launchers and the TSan extension suite |
 | [`release/`](release/) | Distribution identity, downstream installation, provenance, and PyPI preflight | archive checker, release manifest, isolated consumer checks, environment/version checks |
-| [`requirements/`](requirements/) | Reproducible CI-only dependency sets and their cache identity | pinned platform-test adapters and pytest |
+| [`requirements/`](requirements/) | Reproducible CI-only dependency sets and their cache identity | pinned platform-test adapters, quality tools, and isolated downstream extras |
 
 The reader-limit evidence aggregator is a benchmark analysis tool rather than
 a CI gate and therefore lives at
@@ -41,6 +41,17 @@ the archive validator, the PyPI check uses the version validator, and the
 downstream installer launches its smoke and type-check programs by path.
 Do not add compatibility wrappers at the `meta/ci` root. Update every
 versioned caller atomically when moving or renaming an entry point.
+
+CI package downloads use bounded pip retries and complete exact locks. Apt-owned
+toolchains add repository, connection, and dpkg-lock bounds. Release preflight
+retries transport failures, HTTP 429, server errors, and HTTP 403 only with an
+official GitHub rate-limit header; its server-requested delay is capped at 30
+seconds per attempt, while semantic client errors fail immediately. Platform
+and release-set consumers retry artifact downloads only after clearing their
+exact partial destination. Intermediate wheels and the sdist are retained
+for seven days so delayed failed-job reruns can still consume their producers.
+The canonical sdist encodes the checked-out commit time through
+`SOURCE_DATE_EPOCH`, which its archive validator checks explicitly.
 
 ## Local checks
 

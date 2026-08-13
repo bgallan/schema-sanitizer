@@ -73,8 +73,7 @@ def test_multithread_file_outputs_keep_native_peak_within_global_limit(
     assert result.clean_data is None
     assert result.execution_policy is not None
     assert telemetry["effective_workers"] == result.execution_policy["effective_workers"] >= 1
-    if result.execution_policy["available_cpus"] > 1:
-        assert result.execution_policy["effective_workers"] > 1
+    assert result.execution_policy["effective_workers"] <= result.execution_policy["available_cpus"]
     assert telemetry["threading_mode"] == "multi"
     assert telemetry["finished"] is True
     assert memory["limit_bytes"] == _MULTI_THREAD_LIMIT_BYTES

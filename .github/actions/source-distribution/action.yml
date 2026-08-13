@@ -7,8 +7,12 @@ runs:
     - name: Validate version and build the source distribution
       shell: bash
       run: |
+        set -euo pipefail
+        SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+        [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
+        export SOURCE_DATE_EPOCH
         python meta/ci/release/validate_release_version.py
-        python -m pip install -U pip build==1.5.0 twine==7.0.0 packaging==26.3
+        python -m pip install pip==26.1.2 build==1.5.0 twine==7.0.0 packaging==26.3
         python -m build --sdist --outdir dist
         python -m twine check dist/*.tar.gz
         python meta/ci/release/check_distribution_contents.py dist/*.tar.gz
@@ -30,7 +34,7 @@ runs:
         name: source-distribution
         path: dist/*.tar.gz
         if-no-files-found: error
-        retention-days: 1
+        retention-days: 7
         compression-level: 0
     - name: Retry the source-distribution upload after a transport failure
       if: ${{ always() && steps.upload-source-distribution.outcome == 'failure' }}
@@ -39,6 +43,6 @@ runs:
         name: source-distribution
         path: dist/*.tar.gz
         if-no-files-found: error
-        retention-days: 1
+        retention-days: 7
         compression-level: 0
         overwrite: true

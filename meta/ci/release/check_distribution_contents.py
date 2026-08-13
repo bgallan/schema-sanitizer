@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import os
 import tarfile
 import zipfile
 from email.message import Message
@@ -83,6 +85,8 @@ _SDIST_REQUIRED = {
     "meta/ci/quality/check_primary_cleanup.py",
     "meta/ci/quality/report_risk_coverage.py",
     "meta/ci/requirements/platform-tests.txt",
+    "meta/ci/requirements/downstream.txt",
+    "meta/ci/requirements/quality.txt",
     "meta/ci/release/check_distribution_contents.py",
     "meta/ci/release/check_downstream_install.py",
     "meta/ci/release/check_github_release_environment.py",
@@ -97,6 +101,43 @@ _SDIST_REQUIRED = {
     "pyproject.toml",
     "src/schema_sanitizer/py.typed",
 }
+
+
+def _source_date_epoch() -> int | None:
+    """Return the required deterministic archive timestamp when configured."""
+    raw_value = os.environ.get("SOURCE_DATE_EPOCH")
+    if raw_value is None:
+        return None
+    try:
+        epoch = int(raw_value)
+    except ValueError as exc:
+        raise AssertionError("SOURCE_DATE_EPOCH must be an integer") from exc
+    if epoch < 0:
+        raise AssertionError("SOURCE_DATE_EPOCH must be non-negative")
+    return epoch
+
+
+def _validate_archive_timestamps(path: Path) -> None:
+    """Require build archives to encode only the commit-derived timestamp."""
+    epoch = _source_date_epoch()
+    if epoch is None:
+        return
+    if path.name.endswith((".tar.gz", ".tgz")):
+        with path.open("rb") as handle:
+            with gzip.GzipFile(fileobj=handle) as compressed:
+                compressed.peek(1)
+                gzip_epoch = compressed.mtime
+        with tarfile.open(path, "r:gz") as archive:
+            timestamps = {int(member.mtime) for member in archive.getmembers()}
+        if gzip_epoch != epoch or timestamps != {epoch}:
+            raise AssertionError(
+                f"{path.name}: archive timestamps are not SOURCE_DATE_EPOCH={epoch}"
+            )
+        return
+    # Repaired platform wheels are produced by auditwheel/delocate or native
+    # Windows tooling after the initial build. Those independent writers do
+    # not promise to preserve every input ZIP member timestamp, so the strict
+    # byte-level timestamp gate intentionally belongs to the canonical sdist.
 
 
 def _members(path: Path) -> list[str]:
@@ -263,6 +304,7 @@ def validate(path: Path) -> None:
         _validate_archive_metadata(path)
     else:
         raise ValueError(f"unsupported release artifact: {path}")
+    _validate_archive_timestamps(path)
     print(f"validated {path}: {len(names)} files")
 
 

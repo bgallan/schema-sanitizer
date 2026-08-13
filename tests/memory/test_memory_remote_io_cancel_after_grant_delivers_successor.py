@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-import time
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
 
 
 def test_remote_io_cancel_after_grant_delivers_successor() -> None:
@@ -58,23 +58,29 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
     registration = registry.reserve(
         Service(), kind="remote-io-cancel-after-grant-delivers", close_name="close"
     )
+    registration._lock = ContentionObservedLock()
     target_started = Event()
     target_exit = Event()
     start_entered = Event()
     allow_start = Event()
 
-    thread = Thread(target=lambda: (target_started.set(), target_exit.wait(1.0)))
+    thread = Thread(
+        target=lambda: (
+            target_started.set(),
+            target_exit.wait(SCHEDULER_TIMEOUT_SECONDS),
+        )
+    )
     physical_start = thread.start
 
     def blocked_start() -> None:
         start_entered.set()
-        assert allow_start.wait(1.0)
+        assert allow_start.wait(SCHEDULER_TIMEOUT_SECONDS)
         physical_start()
 
     thread.start = blocked_start  # type: ignore[method-assign]
     starter = Thread(target=lambda: registration.start_thread(thread))
     starter.start()
-    assert start_entered.wait(1.0)
+    assert start_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     close_done = Event()
 
@@ -84,18 +90,18 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
 
     closer = Thread(target=close_registration)
     closer.start()
-    time.sleep(0.02)
+    assert registration._lock.contention_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert not close_done.is_set()
     allow_start.set()
-    starter.join(1.0)
-    assert target_started.wait(1.0)
-    closer.join(1.0)
+    starter.join(SCHEDULER_TIMEOUT_SECONDS)
+    assert target_started.wait(SCHEDULER_TIMEOUT_SECONDS)
+    closer.join(SCHEDULER_TIMEOUT_SECONDS)
     assert close_done.is_set()
     assert registry.snapshot().registered_services == 1
     assert any(entry.state.name == "RETIRING" for entry in registry._entries.values())
 
     target_exit.set()
-    thread.join(1.0)
+    thread.join(SCHEDULER_TIMEOUT_SECONDS)
     registration.close()
     assert registry.snapshot().registered_services == 0
 
@@ -396,17 +402,17 @@ def test_governed_thread_permit_lives_until_physical_thread_exit() -> None:
     def target() -> None:
         assert defer_governed_thread_retirement(holder["thread"], lambda: releases.append(1))
         ready.set()
-        exit_event.wait(1.0)
+        exit_event.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     thread = Thread(target=target)
     holder["thread"] = thread
     thread.start()
-    assert ready.wait(1.0)
+    assert ready.wait(SCHEDULER_TIMEOUT_SECONDS)
     reap_governed_thread_retirements()
     assert releases == []
     assert governed_thread_retirement_snapshot()[0] >= 1
     exit_event.set()
-    thread.join(1.0)
+    thread.join(SCHEDULER_TIMEOUT_SECONDS)
     reap_governed_thread_retirements()
     assert releases == [1]
 
@@ -433,8 +439,8 @@ def test_retirement_reaper_claims_debt_before_reentrant_release() -> None:
     thread = Thread(target=target)
     holder["thread"] = thread
     thread.start()
-    assert done.wait(1.0)
-    thread.join(1.0)
+    assert done.wait(SCHEDULER_TIMEOUT_SECONDS)
+    thread.join(SCHEDULER_TIMEOUT_SECONDS)
     reap_governed_thread_retirements()
     assert calls == [1]
 

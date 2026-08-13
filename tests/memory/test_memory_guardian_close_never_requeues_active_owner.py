@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
 def test_guardian_close_never_requeues_active_owner(
@@ -22,6 +23,16 @@ def test_guardian_close_never_requeues_active_owner(
 
     monkeypatch.setattr(module, "acquire_release_guardian_thread", lambda: Permit())
     guardian = module._ReleaseGuardian()
+    close_wait_entered = threading.Event()
+    close_thread: threading.Thread | None = None
+
+    class CloseObservedCondition(threading.Condition):
+        def wait(self, timeout: float | None = None) -> bool:
+            if threading.current_thread() is close_thread:
+                close_wait_entered.set()
+            return super().wait(timeout)
+
+    guardian._condition = CloseObservedCondition()
     entered = threading.Event()
     resume = threading.Event()
     calls = 0
@@ -37,7 +48,7 @@ def test_guardian_close_never_requeues_active_owner(
                 concurrent += 1
                 peak = max(peak, concurrent)
             entered.set()
-            assert resume.wait(2)
+            assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
             with lock:
                 concurrent -= 1
 
@@ -48,15 +59,17 @@ def test_guardian_close_never_requeues_active_owner(
     owner = BlockingOwner()
     assert guardian.adopt(owner)
     assert guardian.adopt(QuickOwner())
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     result: list[bool] = []
-    closer = threading.Thread(target=lambda: result.append(guardian.close(deadline_seconds=1.0)))
-    closer.start()
-    time.sleep(0.05)
+    close_thread = threading.Thread(
+        target=lambda: result.append(guardian.close(deadline_seconds=SCHEDULER_TIMEOUT_SECONDS))
+    )
+    close_thread.start()
+    assert close_wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert calls == 1
     assert peak == 1
     resume.set()
-    closer.join(2)
+    close_thread.join(SCHEDULER_TIMEOUT_SECONDS)
     assert result == [True]
     assert calls == 1
 
@@ -86,8 +99,8 @@ def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
 
     worker = threading.Thread(target=retire)
     worker.start()
-    assert registered.wait(1)
-    assert release_entered.wait(1)
+    assert registered.wait(SCHEDULER_TIMEOUT_SECONDS)
+    assert release_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert not scheduler.close(deadline_seconds=0.03)
     assert scheduler.snapshot().retiring_workers == 1
     release_resume.set()
@@ -119,7 +132,11 @@ def test_notifier_hard_deadline_is_dispatch_barrier(
     delivery.next_attempt_ns = time.monotonic_ns() + 150_000_000
     assert notifier.publish((delivery,)) == ()
     assert not notifier.close(deadline_seconds=0.01)
-    time.sleep(0.25)
+    with notifier._condition:
+        assert notifier._condition.wait_for(
+            lambda: len(notifier._parked) == 1,
+            timeout=SCHEDULER_TIMEOUT_SECONDS,
+        )
     assert not called.is_set()
     assert notifier.snapshot().parked_callbacks == 1
 
@@ -189,7 +206,7 @@ def test_notifier_rearm_during_execution_is_not_lost(
     assert governor.register_availability_event(event)
     delivery = module._AvailabilityDelivery(governor, event, governor._availability_events[event])
     assert notifier.publish((delivery,)) == ()
-    assert completed.wait(1)
+    assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
     deadline = time.monotonic() + 1
     while governor.snapshot().availability_callbacks and time.monotonic() < deadline:
         time.sleep(0.005)
@@ -260,7 +277,7 @@ def test_dispatcher_watchdog_tracks_real_active_call_age(
         assert resume.wait(2)
 
     assert dispatcher.submit(blocked)
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     snapshot = dispatcher.snapshot()
     assert snapshot.active_calls == 1
     assert snapshot.oldest_active_ns > 0

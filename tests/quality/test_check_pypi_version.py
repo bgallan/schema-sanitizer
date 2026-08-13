@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -67,9 +67,72 @@ def test_pypi_lookup_fails_closed_on_service_errors(monkeypatch: pytest.MonkeyPa
     def unavailable(request: object, *, timeout: int) -> _Response:
         raise HTTPError(request.full_url, 503, "unavailable", {}, None)
 
-    monkeypatch.setattr(checker, "urlopen", unavailable)
+    calls = 0
+
+    def counted_unavailable(request: object, *, timeout: int) -> _Response:
+        nonlocal calls
+        calls += 1
+        return unavailable(request, timeout=timeout)
+
+    monkeypatch.setattr(checker, "urlopen", counted_unavailable)
     with pytest.raises(RuntimeError, match="HTTP 503"):
-        checker.pypi_release_exists("schema-sanitizer", "0.4.3")
+        checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=lambda _delay: None)
+    assert calls == 3
+
+
+def test_pypi_lookup_retries_transport_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bounded retry absorbs transient transport failure without weakening policy."""
+    checker = _checker()
+    responses: list[object] = [URLError("reset"), {"info": {"version": "0.4.3"}}]
+    delays: list[float] = []
+
+    def flaky(_request: object, *, timeout: int) -> _Response:
+        assert timeout == 20
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return _Response(json.dumps(response).encode())
+
+    monkeypatch.setattr(checker, "urlopen", flaky)
+    assert checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=delays.append) is True
+    assert delays == [1.0]
+
+
+def test_pypi_lookup_does_not_retry_semantic_client_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only 429 is a retryable 4xx; authentication and policy failures are immediate."""
+    checker = _checker()
+    calls = 0
+    delays: list[float] = []
+
+    def forbidden(request: object, *, timeout: int) -> _Response:
+        nonlocal calls
+        calls += 1
+        raise HTTPError(request.full_url, 403, "forbidden", {}, None)
+
+    monkeypatch.setattr(checker, "urlopen", forbidden)
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=delays.append)
+    assert calls == 1
+    assert delays == []
+
+
+def test_pypi_lookup_retries_rate_limit_before_exact_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rate-limited lookup may retry, while the eventual 404 still proves availability."""
+    checker = _checker()
+    statuses = iter((429, 404))
+    delays: list[float] = []
+
+    def response(request: object, *, timeout: int) -> _Response:
+        status = next(statuses)
+        raise HTTPError(request.full_url, status, "response", {}, None)
+
+    monkeypatch.setattr(checker, "urlopen", response)
+    assert checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=delays.append) is False
+    assert delays == [1.0]
 
 
 @pytest.mark.parametrize(

@@ -5,9 +5,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -68,6 +70,166 @@ def test_release_environment_requires_exact_protected_main_policy(
 
     monkeypatch.setattr(checker, "urlopen", fake_urlopen)
     checker.validate_release_environment("bgallan/project", "pypi")
+
+
+def test_github_lookup_retries_transport_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A temporary API transport failure consumes one deterministic retry."""
+    checker = _checker()
+    responses: list[object] = [URLError("reset"), _settings()]
+    delays: list[float] = []
+
+    def flaky(_request: object, *, timeout: int) -> _Response:
+        assert timeout == 20
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return _Response(json.dumps(response).encode())
+
+    monkeypatch.setattr(checker, "urlopen", flaky)
+    assert (
+        checker._github_json(
+            "https://api.github.com/repos/bgallan/project/environments/pypi",
+            sleeper=delays.append,
+        )
+        == _settings()
+    )
+    assert delays == [1.0]
+
+
+def test_github_lookup_retries_429_but_not_other_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rate limits are transient while invalid authority fails immediately."""
+    checker = _checker()
+    statuses = iter((429, 403))
+    calls = 0
+    delays: list[float] = []
+
+    def rejected(request: object, *, timeout: int) -> _Response:
+        nonlocal calls
+        calls += 1
+        status = next(statuses)
+        raise HTTPError(request.full_url, status, "rejected", {}, None)
+
+    monkeypatch.setattr(checker, "urlopen", rejected)
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        checker._github_json(
+            "https://api.github.com/repos/bgallan/project/environments/pypi",
+            sleeper=delays.append,
+        )
+    assert calls == 2
+    assert delays == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("headers", "now", "expected_delay"),
+    [
+        ({"Retry-After": "12"}, 0.0, 12.0),
+        (
+            {"Retry-After": "Thu, 13 Aug 2026 15:00:00 GMT"},
+            datetime(2026, 8, 13, 14, 59, 50, tzinfo=timezone.utc).timestamp(),
+            10.0,
+        ),
+        ({"Retry-After": "300"}, 0.0, 30.0),
+        ({"X-RateLimit-Remaining": "0"}, 100.0, 1.0),
+        (
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "115"},
+            100.0,
+            15.0,
+        ),
+        (
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1000"},
+            100.0,
+            30.0,
+        ),
+    ],
+)
+def test_github_lookup_retries_documented_rate_limited_403(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    now: float,
+    expected_delay: float,
+) -> None:
+    """A 403 retries only when GitHub supplies a documented rate-limit signal."""
+    checker = _checker()
+    calls = 0
+    delays: list[float] = []
+
+    def rate_limited(request: object, *, timeout: int) -> _Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise HTTPError(request.full_url, 403, "rate limited", headers, None)
+        return _Response(json.dumps(_settings()).encode())
+
+    monkeypatch.setattr(checker, "urlopen", rate_limited)
+    assert (
+        checker._github_json(
+            "https://api.github.com/repos/bgallan/project/environments/pypi",
+            sleeper=delays.append,
+            clock=lambda: now,
+        )
+        == _settings()
+    )
+    assert calls == 2
+    assert delays == [expected_delay]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Retry-After": "unbounded"},
+        {"Retry-After": "-1"},
+        {"X-RateLimit-Remaining": "1"},
+    ],
+)
+def test_github_lookup_rejects_unqualified_403_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+) -> None:
+    """Permissions and malformed headers cannot be disguised as rate limits."""
+    checker = _checker()
+    calls = 0
+    delays: list[float] = []
+
+    def forbidden(request: object, *, timeout: int) -> _Response:
+        nonlocal calls
+        calls += 1
+        raise HTTPError(request.full_url, 403, "forbidden", headers, None)
+
+    monkeypatch.setattr(checker, "urlopen", forbidden)
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        checker._github_json(
+            "https://api.github.com/repos/bgallan/project/environments/pypi",
+            sleeper=delays.append,
+        )
+    assert calls == 1
+    assert delays == []
+
+
+def test_main_sha_uses_the_retrying_api_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Release identity is checked through the same hardened GitHub transport."""
+    checker = _checker()
+    expected = "a" * 40
+    captured: list[str] = []
+
+    def reference(url: str, _token: str) -> dict[str, object]:
+        captured.append(url)
+        return {"object": {"sha": expected}}
+
+    monkeypatch.setattr(checker, "_github_json", reference)
+    checker.validate_main_sha("bgallan/project", expected, token="token")
+    assert captured == ["https://api.github.com/repos/bgallan/project/git/ref/heads/main"]
+
+
+def test_main_sha_fails_closed_if_the_branch_moved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A release cannot proceed from a stale dispatch commit."""
+    checker = _checker()
+    monkeypatch.setattr(
+        checker, "_github_json", lambda *_args, **_kwargs: {"object": {"sha": "b" * 40}}
+    )
+
+    with pytest.raises(RuntimeError, match="main moved"):
+        checker.validate_main_sha("bgallan/project", "a" * 40)
 
 
 @pytest.mark.parametrize(

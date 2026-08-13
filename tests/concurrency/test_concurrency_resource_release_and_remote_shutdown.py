@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 from schema_sanitizer.core_impl.memory_budget import (
@@ -170,7 +171,7 @@ def test_remote_close_deadline_includes_cancelled_future_drain(
                 continue
 
     coordinator.submit(stubborn)
-    assert started.wait(timeout=1)
+    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     original_monotonic = io_coordinator_module.monotonic
     clock = iter((100.0, 101.0))
     observed: list[float] = []
@@ -192,7 +193,7 @@ def test_remote_close_deadline_includes_cancelled_future_drain(
     assert not release.is_set()
     release.set()
     coordinator.close()
-    coordinator._thread.join(timeout=1)  # noqa: SLF001
+    coordinator._thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)  # noqa: SLF001
     assert not coordinator._thread.is_alive()  # noqa: SLF001
 
 
@@ -206,7 +207,7 @@ def test_remote_close_from_owned_thread_fails_without_deadlock() -> None:
             coordinator.close()
         return "alive"
 
-    assert coordinator.submit(close_from_loop).result(timeout=1) == "alive"
+    assert coordinator.submit(close_from_loop).result(timeout=SCHEDULER_TIMEOUT_SECONDS) == "alive"
     coordinator.close()
 
 
@@ -244,7 +245,7 @@ def test_concurrent_remote_close_waits_for_the_owner() -> None:
     for thread in threads:
         thread.start()
     barrier.wait()
-    assert exit_started.wait(timeout=1)
+    assert exit_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     assert completions == []
     coordinator._loop.call_soon_threadsafe(release_exit.set)  # noqa: SLF001
     for thread in threads:
@@ -397,7 +398,7 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
 
     iterator = RemoteChunkPrefetchIterator(Manifest())
     iterator.__enter__()
-    assert started.wait(timeout=1)
+    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     close_timeouts: list[float] = []
 
     def bounded_close(_closer: object, *, timeout_seconds: float) -> bool:
@@ -412,5 +413,5 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
     assert not staged_closed.is_set()
     assert not release.is_set()
     release.set()
-    assert staged_closed.wait(timeout=1)
+    assert staged_closed.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     coordinator.close()

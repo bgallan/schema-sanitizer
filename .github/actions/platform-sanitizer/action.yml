@@ -11,18 +11,28 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install the Linux Clang 18 toolchain
+      if: inputs.mode == 'linux-full'
+      shell: bash
+      run: |-
+        set -euo pipefail
+        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
+          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
+          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+          install -y clang-18
     - name: Install build dependencies
       shell: bash
       run: >-
-        python -m pip install -U pip ninja 'cmake>=4.3,<4.4'
-        scikit-build-core==0.11.6 pytest pyarrow
+        python -m pip install pip==26.1.2 ninja==1.13.0 cmake==4.3.4
+        scikit-build-core==0.11.6 pytest==9.1.1 pyarrow==25.0.1
     - name: Build and install the Linux instrumented extension
       if: inputs.mode == 'linux-full'
       shell: bash
       run: >-
         python -m pip install -v --no-build-isolation
-        --config-settings=cmake.define.CMAKE_C_COMPILER=clang
-        --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++
+        --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18
+        --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18
         --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF
         --config-settings=cmake.define.SCHEMA_SANITIZER_SANITIZER=asan-ubsan
         --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON
@@ -35,7 +45,7 @@ runs:
         set -euo pipefail
         read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
         read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
-        clang++ -std=c++17 -fsanitize=address,undefined \
+        clang++-18 -std=c++17 -fsanitize=address,undefined \
           -fno-omit-frame-pointer -fno-sanitize-recover=all \
           "${python_embed_cflags[@]}" \
           meta/ci/sanitizers/asan_python_launcher.cc \
@@ -64,8 +74,8 @@ runs:
       run: >-
         cmake -S . -B build/platform-sanitizer -G Ninja
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
-        -DCMAKE_C_COMPILER=clang
-        -DCMAKE_CXX_COMPILER=clang++
+        -DCMAKE_C_COMPILER=clang-18
+        -DCMAKE_CXX_COMPILER=clang++-18
         -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
         -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
         -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
@@ -112,6 +122,12 @@ runs:
         schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
         schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
         --parallel 4
+    - name: Require capacity for complete native concurrency coverage
+      if: runner.os != 'Windows'
+      shell: bash
+      run: >-
+        build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor
+        --require-cpu-capacity 3
     - name: Run repeated sanitized concurrency probe
       # MSVC ASan can hang outside the probe watchdog. Windows still builds
       # the probe and executes all four native fuzzers below; Linux TSan owns

@@ -86,7 +86,6 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
         encoding="utf-8"
     )
     publish_workflow = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
-    workflows = f"{ci_workflow}\n{build_action}\n{publish_workflow}"
     assert "if(WIN32)" in cmake
     assert 'set(_SCHEMA_SANITIZER_ZLIB_PROVIDER_DEFAULT "bundled")' in cmake
     assert (
@@ -112,4 +111,9 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
         assert f"arch: {architecture}" in ci_workflow
     assert "python -m cibuildwheel" not in publish_workflow
     assert "uses: ./.github/workflows/ci.yml" in publish_workflow
-    assert "CIBW_" + "ENVIRONMENT" not in workflows
+    assert build_action.count("CIBW_ENVIRONMENT_PASS_LINUX: >-") == 1
+    assert "SOURCE_DATE_EPOCH PIP_DISABLE_PIP_VERSION_CHECK PIP_NO_INPUT" in build_action
+    assert "PIP_RETRIES PIP_TIMEOUT" in build_action
+    assert "CIBW_ENVIRONMENT:" not in build_action
+    assert "CIBW_ENVIRONMENT" not in ci_workflow
+    assert "CIBW_ENVIRONMENT" not in publish_workflow

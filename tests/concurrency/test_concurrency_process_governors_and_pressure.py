@@ -7,6 +7,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 from schema_sanitizer.core_impl import memory_budget as memory_budget_module
@@ -56,13 +57,13 @@ def test_remote_permits_bound_unrelated_coordinator_loops(
         return "small"
 
     large_future = first.submit(large, permit_weight=2, permit_label="large")
-    assert first_started.wait(timeout=1)
+    assert first_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     small_future = second.submit(small, permit_weight=1, permit_label="small")
-    assert small_queued.wait(timeout=1)
+    assert small_queued.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     assert not second_started.is_set()
     release_first.set()
-    assert large_future.result(timeout=1) == "large"
-    assert small_future.result(timeout=1) == "small"
+    assert large_future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == "large"
+    assert small_future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == "small"
     first.close()
     second.close()
     snapshot = governor.snapshot()
@@ -81,17 +82,20 @@ def test_remote_permit_bypass_is_latency_friendly_but_bounded() -> None:
         large_task = asyncio.create_task(governor.acquire(4, label="large"))
         await asyncio.sleep(0)
         for index in range(4):
-            tiny = await asyncio.wait_for(governor.acquire(1, label=f"tiny-{index}"), timeout=0.2)
+            tiny = await asyncio.wait_for(
+                governor.acquire(1, label=f"tiny-{index}"),
+                timeout=SCHEDULER_TIMEOUT_SECONDS,
+            )
             tiny.release()
         fifth = asyncio.create_task(governor.acquire(1, label="tiny-5"))
         await asyncio.sleep(0)
         assert governor.snapshot().waiting == 2
         fifth_waited = not fifth.done()
         holder.release()
-        large = await asyncio.wait_for(large_task, timeout=0.2)
+        large = await asyncio.wait_for(large_task, timeout=SCHEDULER_TIMEOUT_SECONDS)
         assert not fifth.done()
         large.release()
-        tiny = await asyncio.wait_for(fifth, timeout=0.2)
+        tiny = await asyncio.wait_for(fifth, timeout=SCHEDULER_TIMEOUT_SECONDS)
         tiny.release()
         return governor.snapshot().bounded_bypasses, fifth_waited
 
@@ -141,10 +145,12 @@ def test_native_execution_policy_shrinks_under_process_pressure() -> None:
     if baseline_policy.effective_workers <= 1:
         pytest.skip("host exposes no multi-worker baseline")
     baseline = process_resident_memory_snapshot()
-    available = baseline.capacity_bytes - baseline.reserved_bytes
-    if available <= (2 << 20):
-        pytest.skip("process resident pool has no pressure-test headroom")
     blocker = OperationMemoryLedger(baseline.capacity_bytes)
+    live = process_resident_memory_snapshot()
+    available = live.capacity_bytes - live.reserved_bytes
+    if available <= (2 << 20):
+        blocker.close()
+        pytest.skip("process resident pool has no pressure-test headroom")
     lease = blocker.acquire(available - (1 << 20), stage="adaptive_worker_pressure")
     try:
         pressured = execution_policy("multi", 256 << 20)
@@ -198,7 +204,7 @@ def test_daemon_lookahead_executor_has_bounded_shutdown(
         return "done"
 
     future = executor.submit(stubborn)
-    assert started.wait(timeout=1)
+    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     real_join = executor._thread.join  # noqa: SLF001
     join_timeouts: list[float | None] = []
 
@@ -216,8 +222,8 @@ def test_daemon_lookahead_executor_has_bounded_shutdown(
         assert executor._thread.is_alive()  # noqa: SLF001
     finally:
         release.set()
-        assert future.result(timeout=1) == "done"
-        real_join(timeout=1)
+        assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == "done"
+        real_join(timeout=SCHEDULER_TIMEOUT_SECONDS)
     assert not executor._thread.is_alive()  # noqa: SLF001
 
 

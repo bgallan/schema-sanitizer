@@ -10,6 +10,7 @@ import types
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
 def test_unscoped_governor_release_cannot_bypass_exact_ledger() -> None:
@@ -139,7 +140,7 @@ def test_guardian_is_governed_and_deduplicates_terminal_owner(
 
     owner = Owner()
     assert guardian.adopt(owner, retained_bytes=128)
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     with permit_lock:
         assert 1 <= active_permits <= module._MAX_RELEASE_GUARDIAN_WORKERS
     resume.set()
@@ -152,7 +153,6 @@ def test_guardian_is_governed_and_deduplicates_terminal_owner(
     assert guardian.snapshot().dead_letter_owners == 1
     assert guardian.adopt(owner, retained_bytes=128)
     assert not guardian.adopt(owner, method="close", retained_bytes=128)
-    time.sleep(0.05)
     snapshot = guardian.snapshot()
     assert snapshot.dead_letter_owners == 1
     assert snapshot.active_releases == 0

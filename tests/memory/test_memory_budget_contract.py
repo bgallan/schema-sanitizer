@@ -227,6 +227,7 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
             offenders.append(path.relative_to(root).as_posix())
     allowed_environment_files = {
         "cpp/src/internal/runtime/operation_task_arena.cc",
+        "meta/ci/release/check_distribution_contents.py",
         "meta/ci/release/check_github_release_environment.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
@@ -246,6 +247,7 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         "tests/memory/test_memory_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure.py",
         "tests/memory/test_memory_resident_zero_is_authoritative_on_public_acquire.py",
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
+        "tests/quality/test_distribution_archive_cleanliness.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }
     assert set(offenders) <= allowed_environment_files
