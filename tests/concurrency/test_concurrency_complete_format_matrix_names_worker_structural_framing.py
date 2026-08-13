@@ -49,8 +49,8 @@ def _materialization_stats() -> tuple[int, int]:
     )
 
 
-def _write_object_array(path: Path, *, rows: int = 2_048) -> None:
-    """Write a deterministic array exercising structural bytes inside strings."""
+def _write_object_array(path: Path, *, rows: int = 8_192) -> None:
+    """Write a sub-chunk array with enough work for observable worker overlap."""
     payload = [
         {
             "ordinal": row,
@@ -110,6 +110,7 @@ def test_object_arrays_keep_exact_single_multi_data_and_real_work(
     require_native()
     source = tmp_path / f"{input_format}.json"
     _write_object_array(source)
+    assert source.stat().st_size < 1 << 20
 
     outputs: dict[str, Path] = {}
     telemetry: dict[str, tuple[int, int]] = {}
