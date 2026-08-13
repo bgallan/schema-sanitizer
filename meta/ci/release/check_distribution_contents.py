@@ -89,7 +89,7 @@ _SDIST_REQUIRED = {
     "meta/ci/requirements/quality.txt",
     "meta/ci/release/check_distribution_contents.py",
     "meta/ci/release/check_downstream_install.py",
-    "meta/ci/release/check_github_release_environment.py",
+    "meta/ci/release/check_github_release_state.py",
     "meta/ci/release/check_pypi_version.py",
     "meta/ci/release/downstream_smoke.py",
     "meta/ci/release/downstream_typecheck.py",

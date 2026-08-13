@@ -162,10 +162,10 @@ def test_publish_request_is_explicit_and_always_targets_pypi() -> None:
     publisher = _job_body(publish, "publish")
 
     assert set(re.findall(r"^      ([a-z0-9_]+):$", preamble, re.MULTILINE)) == {
-        "release_tag",
+        "release_version",
         "confirm_publish",
     }
-    for input_name in ("release_tag", "confirm_publish"):
+    for input_name in ("release_version", "confirm_publish"):
         input_body = preamble.split(f"      {input_name}:\n", 1)[1]
         next_input = re.search(r"^      [a-z0-9_]+:$", input_body, re.MULTILINE)
         if next_input is not None:
@@ -173,13 +173,12 @@ def test_publish_request_is_explicit_and_always_targets_pypi() -> None:
         assert "required: true" in input_body
     for obsolete_mode in ("repository:", "check-only", "testpypi", "repository-url"):
         assert obsolete_mode not in publish.lower()
-    assert "--require-release-tag" in preflight
+    assert "--require-release-version" in preflight
     assert "--require-publish-confirmation" in preflight
     assert "python meta/ci/release/check_pypi_version.py" in preflight
-    assert "python meta/ci/release/check_github_release_environment.py" in preflight
-    assert 'git cat-file -t "refs/tags/${RELEASE_TAG}"' in preflight
-    assert '[[ "${TAG_TYPE}" != "tag" ]]' in preflight
-    assert "refs/tags/${RELEASE_TAG}^{commit}" in preflight
+    assert "python meta/ci/release/check_github_release_state.py" in preflight
+    assert "refs/tags" not in preflight
+    assert "git cat-file" not in preflight
     assert "--expected-main-sha" in preflight
     assert '"${GITHUB_SHA}"' in preflight
     assert "git ls-remote" not in preflight
@@ -191,11 +190,21 @@ def test_publish_request_is_explicit_and_always_targets_pypi() -> None:
     assert "if:" not in publish_step
 
 
+def test_publish_serializes_every_production_version_in_one_group() -> None:
+    """Differently typed release requests cannot race PyPI publication."""
+    preamble = _workflow_preamble(_workflow("publish.yml"))
+
+    concurrency = preamble.split("concurrency:\n", 1)[1]
+    assert re.search(r"^  group: pypi-production$", concurrency, re.MULTILINE)
+    assert re.search(r"^  cancel-in-progress: false$", concurrency, re.MULTILINE)
+    assert "inputs.release_version" not in concurrency
+
+
 def test_oidc_publisher_is_a_code_free_least_privilege_boundary() -> None:
     """Only exact artifact handling crosses the isolated PyPI trust boundary."""
     publisher = _job_body(_workflow("publish.yml"), "publish")
 
-    assert re.search(r"^    environment:(?: pypi|\n      name: pypi)$", publisher, re.MULTILINE)
+    assert "environment:" not in publisher
     assert "id-token: write" in publisher
     for unnecessary_permission in ("contents: read", "contents: write", "actions: write"):
         assert unnecessary_permission not in publisher
@@ -232,11 +241,11 @@ def test_manual_publisher_retries_only_after_cleaning_its_exact_download_path() 
 
 
 def test_release_preflight_has_only_the_read_permissions_it_uses() -> None:
-    """Environment inspection and tag validation cannot mutate repository state."""
+    """Version and remote-main validation cannot mutate repository state."""
     preflight = _job_body(_workflow("publish.yml"), "preflight")
     permissions = preflight.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0]
 
-    assert permissions == "      actions: read\n      contents: read\n"
+    assert permissions == "      contents: read\n"
     assert "id-token:" not in preflight
     assert "actions/setup-python@" in preflight
     assert "python-version: 3.11.9" in preflight

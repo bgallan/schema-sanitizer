@@ -23,7 +23,7 @@ EXPECTED_HELPERS = {
     "quality/report_risk_coverage.py",
     "release/check_distribution_contents.py",
     "release/check_downstream_install.py",
-    "release/check_github_release_environment.py",
+    "release/check_github_release_state.py",
     "release/check_pypi_version.py",
     "release/downstream_smoke.py",
     "release/downstream_typecheck.py",

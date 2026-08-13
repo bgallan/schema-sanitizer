@@ -60,7 +60,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         ".github/actions/build-platform-wheel/action.yml",
         "cpp/src/internal/runtime/operation_task_arena.cc",
         "meta/ci/release/check_distribution_contents.py",
-        "meta/ci/release/check_github_release_environment.py",
+        "meta/ci/release/check_github_release_state.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
         "src/schema_sanitizer/core_impl/cross_process_storage.py",
