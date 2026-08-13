@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 import zipfile
 from pathlib import Path
@@ -15,6 +16,17 @@ from benchmarks.readers import linear_scaling
 ROOT = Path(__file__).resolve().parents[2]
 REPORT = ROOT / "benchmarks" / "evidence" / "readers" / "linear-scaling.json"
 BUDGET = ROOT / "benchmarks" / "readers" / "linear_scaling_budget.json"
+
+
+class _ManualClock:
+    def __init__(self) -> None:
+        self.now = 0
+
+    def __call__(self) -> int:
+        return self.now
+
+    def advance(self, duration: int) -> None:
+        self.now += duration
 
 
 def test_recorded_reader_linear_scaling_evidence_stays_within_budget() -> None:
@@ -54,7 +66,84 @@ def test_reader_linear_scaling_harness_runs_all_text_frontends() -> None:
         "xml_single",
         "xml_multi",
     }
+    assert report["warmups"] == 2
+    assert report["measurement_schedule"] == "rotating-round-robin-epochs"
     assert all(len(item["growth"]) == 1 for item in report["comparisons"])
+    assert all(
+        len(sample["duration_samples_ns"]) == 1
+        for item in report["comparisons"]
+        for sample in item["samples"]
+    )
+
+
+def test_round_robin_measurement_warms_every_case_and_rotates_each_epoch() -> None:
+    """No case remains permanently first or absorbs consecutive cold measurements."""
+    history: list[tuple[str, int]] = []
+    keys = ["a", "b", "c", "d", "e"]
+    calls = {key: lambda ordinal, case=key: history.append((case, ordinal)) for key in keys}
+
+    first = linear_scaling._measure_round_robin(
+        calls,
+        warmups=2,
+        repeats=3,
+        clock=lambda: 0,
+    )
+
+    epoch_size = len(keys)
+    epochs = [
+        history[offset : offset + epoch_size] for offset in range(0, len(history), epoch_size)
+    ]
+    assert [set(epoch) for epoch in epochs] == [
+        {(key, ordinal) for key in keys} for ordinal in (-2, -1, 0, 1, 2)
+    ]
+    orders = [tuple(key for key, _ in epoch) for epoch in epochs]
+    assert len(set(orders)) == len(epochs)
+    assert first == {key: [0, 0, 0] for key in keys}
+    assert orders == [
+        tuple(linear_scaling._epoch_order(keys, epoch)) for epoch in range(len(epochs))
+    ]
+
+
+def test_round_robin_median_rejects_one_shared_runner_noise_epoch() -> None:
+    """One system-wide noisy epoch is an outlier for every case, not one case's median."""
+    clock = _ManualClock()
+    cases = ("csv_single", "csv_multi", "jsonl_single")
+
+    def timed_call(ordinal: int) -> None:
+        clock.advance(10_000 if ordinal == 0 else 10)
+
+    samples = linear_scaling._measure_round_robin(
+        {case: timed_call for case in cases},
+        warmups=2,
+        repeats=3,
+        clock=clock,
+    )
+
+    assert samples == {case: [10_000, 10, 10] for case in cases}
+    assert {case: statistics.median(values) for case, values in samples.items()} == {
+        case: 10 for case in cases
+    }
+
+
+def test_round_robin_median_preserves_a_persistent_300x_regression() -> None:
+    """Round-robin ordering filters transient noise without selecting lucky samples."""
+    clock = _ManualClock()
+
+    def normal(_: int) -> None:
+        clock.advance(10)
+
+    def regressed(_: int) -> None:
+        clock.advance(3_000)
+
+    samples = linear_scaling._measure_round_robin(
+        {"normal": normal, "regressed": regressed},
+        warmups=2,
+        repeats=3,
+        clock=clock,
+    )
+
+    assert statistics.median(samples["normal"]) == 10
+    assert statistics.median(samples["regressed"]) == 3_000
 
 
 def _synthetic_report(budget: dict[str, object], *, ratios: dict[str, float]) -> dict[str, object]:

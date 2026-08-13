@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import math
 import platform
 import statistics
 import subprocess
@@ -13,9 +14,12 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 DEFAULT_LATENCY_BUDGET = Path(__file__).with_name("linear_scaling_budget.json")
+DEFAULT_WARMUP_EPOCHS = 2
+
+_CaseKey = TypeVar("_CaseKey")
 
 
 def _write_fixtures(root: Path, rows: int) -> dict[str, Path]:
@@ -47,23 +51,57 @@ def _write_fixtures(root: Path, rows: int) -> dict[str, Path]:
     return fixtures
 
 
-def _timed(call: Any, repeats: int) -> int:
-    call(-1)
-    samples: list[int] = []
-    for ordinal in range(repeats):
-        started = time.perf_counter_ns()
-        call(ordinal)
-        samples.append(time.perf_counter_ns() - started)
-    return int(statistics.median(samples))
+def _epoch_order(items: list[_CaseKey], epoch: int) -> list[_CaseKey]:
+    """Return a deterministic rotation whose stride changes between epochs."""
+    if len(items) < 2:
+        return list(items)
+    strides = [value for value in range(1, len(items)) if math.gcd(value, len(items)) == 1]
+    rotation = len(items) // 2 + 1
+    while math.gcd(rotation, len(items)) != 1:
+        rotation += 1
+    start = (epoch * rotation) % len(items)
+    stride = strides[epoch % len(strides)]
+    return [items[(start + stride * offset) % len(items)] for offset in range(len(items))]
 
 
-def run(root: Path, sizes: list[int], repeats: int) -> dict[str, Any]:
+def _measure_round_robin(
+    calls: dict[_CaseKey, Callable[[int], None]],
+    *,
+    warmups: int,
+    repeats: int,
+    clock: Callable[[], int] = time.perf_counter_ns,
+) -> dict[_CaseKey, list[int]]:
+    """Warm and measure every case once per rotated round-robin epoch."""
+    keys = list(calls)
+    samples = {key: [] for key in keys}
+    for epoch in range(warmups + repeats):
+        measured_ordinal = epoch - warmups
+        for key in _epoch_order(keys, epoch):
+            call = calls[key]
+            if measured_ordinal < 0:
+                call(measured_ordinal)
+                continue
+            started = clock()
+            call(measured_ordinal)
+            samples[key].append(clock() - started)
+    return samples
+
+
+def run(
+    root: Path,
+    sizes: list[int],
+    repeats: int,
+    *,
+    warmups: int = DEFAULT_WARMUP_EPOCHS,
+) -> dict[str, Any]:
     """Run serial and parallel text readers and return growth evidence."""
     import schema_sanitizer as ss
 
     cases: dict[str, list[dict[str, Any]]] = {}
     with tempfile.TemporaryDirectory(prefix="schema-sanitizer-linear-") as temp:
         fixture_root = Path(temp)
+        calls: dict[tuple[str, int], Callable[[int], None]] = {}
+        sources: dict[tuple[str, int], Path] = {}
         for rows in sizes:
             fixtures = _write_fixtures(fixture_root, rows)
             for input_format, source in fixtures.items():
@@ -71,31 +109,53 @@ def run(root: Path, sizes: list[int], repeats: int) -> dict[str, Any]:
                     mode = "multi" if multi_threading else "single"
                     name = f"{input_format}_{mode}"
 
-                    def convert(ordinal: int) -> None:
-                        output = fixture_root / f"{name}-{rows}-{ordinal}.jsonl"
+                    def convert(
+                        ordinal: int,
+                        *,
+                        benchmark_name: str = name,
+                        benchmark_rows: int = rows,
+                        benchmark_format: str = input_format,
+                        benchmark_source: Path = source,
+                        benchmark_multi_threading: bool = multi_threading,
+                    ) -> None:
+                        output = fixture_root / (
+                            f"{benchmark_name}-{benchmark_rows}-{ordinal}.jsonl"
+                        )
                         output.unlink(missing_ok=True)
                         options: dict[str, Any] = {}
-                        if input_format == "xml":
+                        if benchmark_format == "xml":
                             options["xml_row_tag"] = "row"
                         ss.to_jsonl(
-                            source,
+                            benchmark_source,
                             output,
-                            input_format=input_format,
-                            multi_threading=multi_threading,
+                            input_format=benchmark_format,
+                            multi_threading=benchmark_multi_threading,
                             memory_limit_bytes=128 << 20,
                             **options,
                         )
                         output.unlink()
 
-                    median_ns = _timed(convert, repeats)
-                    cases.setdefault(name, []).append(
-                        {
-                            "rows": rows,
-                            "input_bytes": source.stat().st_size,
-                            "median_ns": median_ns,
-                            "ns_per_input_byte": median_ns / max(1, source.stat().st_size),
-                        }
-                    )
+                    key = (name, rows)
+                    calls[key] = convert
+                    sources[key] = source
+
+        duration_samples = _measure_round_robin(
+            calls,
+            warmups=max(0, warmups),
+            repeats=max(1, repeats),
+        )
+        for (name, rows), samples_ns in duration_samples.items():
+            source = sources[(name, rows)]
+            median_ns = int(statistics.median(samples_ns))
+            cases.setdefault(name, []).append(
+                {
+                    "rows": rows,
+                    "input_bytes": source.stat().st_size,
+                    "duration_samples_ns": samples_ns,
+                    "median_ns": median_ns,
+                    "ns_per_input_byte": median_ns / max(1, source.stat().st_size),
+                }
+            )
 
     comparisons = []
     for name, samples in sorted(cases.items()):
@@ -124,7 +184,9 @@ def run(root: Path, sizes: list[int], repeats: int) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "sizes": sizes,
-        "repeats": repeats,
+        "repeats": max(1, repeats),
+        "warmups": max(0, warmups),
+        "measurement_schedule": "rotating-round-robin-epochs",
         "comparisons": comparisons,
     }
 
@@ -377,6 +439,7 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--sizes", default="500,1000,2000")
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUP_EPOCHS)
     parser.add_argument("--maximum-normalized-growth", type=float, default=1.75)
     parser.add_argument("--latency-budget", type=Path, default=DEFAULT_LATENCY_BUDGET)
     parser.add_argument("--wheel", type=Path)
@@ -397,7 +460,7 @@ def main() -> None:
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         parser.error(str(exc))
     report = evaluate_report(
-        run(root, sizes, max(1, args.repeats)),
+        run(root, sizes, max(1, args.repeats), warmups=max(0, args.warmups)),
         maximum_normalized_growth=args.maximum_normalized_growth,
         latency_budget=latency_budget,
     )

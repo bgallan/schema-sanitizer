@@ -42,22 +42,26 @@ _REQUIRES_POSIX_COORDINATION = pytest.mark.skipif(
 
 def _hold_cross_process_memory(
     directory: str,
-    ready: multiprocessing.synchronize.Event,
-    release: multiprocessing.synchronize.Event,
-    result: multiprocessing.queues.Queue,
+    connection: multiprocessing.connection.Connection,
 ) -> None:
     """Hold one crash-recoverable resident-memory reservation in a child."""
     os.environ["SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS"] = "1"
     os.environ["SCHEMA_SANITIZER_COORDINATION_DIR"] = directory
+    lease: CrossProcessMemoryLease | None = None
     try:
         lease = CrossProcessMemoryLease(100, 70)
-        result.put(("reserved", lease.reserved_bytes))
-        ready.set()
-        release.wait(timeout=5)
-        lease.release()
+        connection.send(("reserved", lease.reserved_bytes))
+        if connection.recv() != "release":  # pragma: no cover - protocol guard
+            raise RuntimeError("unexpected cross-process memory test command")
     except BaseException as exc:  # pragma: no cover - returned to parent
-        result.put(("error", type(exc).__name__, str(exc)))
-        ready.set()
+        try:
+            connection.send(("error", type(exc).__name__, str(exc)))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        if lease is not None:
+            lease.release()
+        connection.close()
 
 
 def _fork_safety_child(result: multiprocessing.queues.Queue) -> None:
@@ -227,21 +231,29 @@ def test_cross_process_memory_rejects_combined_overcommit(
     monkeypatch.setenv("SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS", "1")
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path))
     context = multiprocessing.get_context("spawn")
-    ready = context.Event()
-    release = context.Event()
-    result = context.Queue()
+    parent_connection, child_connection = context.Pipe(duplex=True)
     child = context.Process(
         target=_hold_cross_process_memory,
-        args=(str(tmp_path), ready, release, result),
+        args=(str(tmp_path), child_connection),
     )
     child.start()
-    assert ready.wait(timeout=5)
-    assert result.get(timeout=2) == ("reserved", 70)
-    with pytest.raises(SchemaSanitizerResourceError, match="cross-process"):
-        CrossProcessMemoryLease(100, 40)
-    assert cross_process_memory_reserved_bytes() == 70
-    release.set()
-    child.join(timeout=5)
+    child_connection.close()
+    try:
+        assert parent_connection.poll(30), "child reservation handshake timed out"
+        assert parent_connection.recv() == ("reserved", 70)
+        with pytest.raises(SchemaSanitizerResourceError, match="cross-process"):
+            CrossProcessMemoryLease(100, 40)
+        assert cross_process_memory_reserved_bytes() == 70
+    finally:
+        try:
+            parent_connection.send("release")
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        parent_connection.close()
+        child.join(timeout=30)
+        if child.is_alive():  # pragma: no cover - emergency anti-hang cleanup
+            child.terminate()
+            child.join(timeout=30)
     assert child.exitcode == 0
     assert cross_process_memory_reserved_bytes() == 0
 
