@@ -44,7 +44,10 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     for path in ROOT.rglob("*"):
         if path == Path(__file__).resolve() or not path.is_file():
             continue
-        if any(part in ignored or part.startswith("build-") for part in path.parts):
+        relative = path.relative_to(ROOT)
+        if any(part in ignored for part in relative.parts) or (
+            relative.parts and relative.parts[0].startswith("build-")
+        ):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if any(token in text for token in forbidden):
@@ -98,10 +101,12 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     }
     configured_names = {f"SCHEMA_SANITIZER_{name}" for name in configured_names}
     assert configured_names == allowed_names
-    # Workflow environment mappings are limited to the final validation result
-    # handoff and the untrusted-input-safe release preflight boundary.  Keeping
-    # the expected multiset exact detects any additional block in either file.
+    # YAML environment mappings are limited to composite-action input isolation,
+    # the final validation result handoff, and the untrusted-input-safe release
+    # preflight boundary. Keeping the expected file set exact detects expansion.
     assert sorted(yaml_env_blocks) == [
+        ".github/actions/build-platform-wheel/action.yml",
+        ".github/actions/test-platform-wheel/action.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/publish.yml",
     ]

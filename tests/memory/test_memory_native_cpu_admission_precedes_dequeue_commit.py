@@ -235,14 +235,30 @@ def test_physical_thread_observation_is_cross_platform_and_fail_closed() -> None
     assert 'opendir("/proc/self/task")' in source
     assert "CreateToolhelp32Snapshot" in source
     assert "task_threads(mach_task_self()" in source
+    capacity = source[
+        source.index("EffectiveProcessThreadCapacity") : source.index(
+            "TryAcquireProcessThreadPermitsUpTo"
+        )
+    ]
+    assert capacity.count("ProcessPhysicalThreadCount()") == 1
+    assert "if (!process_threads)" in capacity
+    assert "return 0U;" in capacity[capacity.index("if (!process_threads)") :]
+    shared_acquire = source[
+        source.index("TryAcquireProcessThreadPermitsUpTo") : source.index(
+            "TryAcquireProcessPhysicalThreadPermitsUpTo"
+        )
+    ]
+    assert shared_acquire.index("EffectiveProcessThreadCapacity(total)") < shared_acquire.index(
+        "g_process_total_thread_permits.compare_exchange_weak"
+    )
     permit = source[
         source.index("TryAcquireProcessPhysicalThreadPermitsUpTo") : source.index(
             "TryAcquireProcessExternalRuntimeThreadPermitsUpTo"
         )
     ]
-    assert "if (!process_threads)" in permit
-    assert "break;" in permit[permit.index("if (!process_threads)") :]
+    assert "ProcessPhysicalThreadCount()" not in permit
     assert "TryAcquireProcessThreadPermitsUpTo" in permit
+    assert "EffectiveProcessThreadCapacity performs the authoritative fail-closed" in permit
     module = (CPP / "api/python_abi3/_core_abi3_module.cc").read_text()
     assert '"process_physical_thread_count"' in module
 

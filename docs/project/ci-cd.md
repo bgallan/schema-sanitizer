@@ -33,6 +33,10 @@ flowchart LR
 
     CI --> OWNERS[Six validation owners]
     REUSE --> OWNERS2[The same six owners]
+    OWNERS --> BUILDS[Four independent wheel builds]
+    OWNERS2 --> BUILDS2[Four independent wheel builds]
+    BUILDS --> SHARDS[Two test shards per platform]
+    BUILDS2 --> SHARDS2[Two test shards per platform]
     OWNERS --> GATE[validation-gate]
     OWNERS2 --> GATE2[validation-gate]
 
@@ -75,7 +79,7 @@ owner succeeds:
 | Owner | Contract |
 |---|---|
 | `checks` | Pre-commit, Actionlint, Zizmor, static typing, dependency and source security scans, secret scan, benchmark smoke, contextual Python branch coverage, and enforced high-risk floors. |
-| `platform-wheels` | Builds each release wheel once, installs that wheel, and runs package, adapter, HTTP-fault, concurrency, benchmark, Parquet, and ABI3 checks on every supported platform. |
+| `platform-wheels` | Aggregates four independent wheel builds and the identical two-shard functional fanout for every platform; each wheel is built once and feeds both of its platform's shards. |
 | `distribution` | Builds the sdist, combines it with the four wheels, validates the exact release set, tests downstream installation profiles, and emits the final release artifact. |
 | `coverage-native` | Produces LLVM line and branch reports from regular, adversarial, and integration native-extension suites. |
 | `platform-sanitizers` | Runs focused Linux extension tests under ASan/UBSan, parser fuzz campaigns on all four platforms, and repeated sanitized concurrency probes on macOS. |
@@ -114,7 +118,7 @@ one requires an explicitly reviewed explanation.
 | `integrations/bigquery/sidecar.py` | 75% |
 | `integrations/bigquery/registry.py` | 48% |
 
-The wheel matrix also executes the complete pytest suite against the installed
+The platform jobs also execute the complete pytest suite against the installed
 artifact, rather than an import from `src/`, on:
 
 | Runner | Release platform | Native safety coverage |
@@ -129,8 +133,21 @@ complete suite runs on the same CPython 3.11 patch and the same pinned direct
 adapter versions on all four platforms, so timing and behavior comparisons do
 not silently mix dependency or interpreter upgrades. Linux additionally
 executes the installed public conversion smoke on 3.12, 3.13, and 3.14, and
-every platform loads it on 3.14. Matrix jobs use `fail-fast: false`, preserving
-evidence from the other platforms when one fails.
+every platform loads it on 3.14. Each platform build has its own two-job test
+fanout, so Linux or ARM tests can start as soon as their wheel is ready instead
+of waiting for the slower Windows build. All fanouts use `fail-fast: false`,
+preserving evidence from the companion shard when one fails.
+
+The functional suite has the same exhaustive, disjoint split on all four
+platforms. `concurrency-memory` owns `tests/concurrency` and `tests/memory`;
+`remaining` owns `tests/examples`, `tests/io`, `tests/parquet`, `tests/pipeline`,
+`tests/quality`, `tests/remote`, `tests/schema`, and `tests/sinks`. The topology
+contract derives the repository's test directories and fails if a new one is
+not assigned exactly once. Separate hosted runners provide real parallelism
+without oversubscribing a single runner's native concurrency tests. The cost is
+one additional checkout, Python setup, dependency installation, and runner per
+platform; two shards deliberately limit that overhead while roughly halving the
+long functional phase on slower platforms.
 
 Ordered-executor completion has one canonical functional matrix and one
 high-volume native stress case. Every platform runs both profiles against its
@@ -141,14 +158,14 @@ targets without multiplying the same 16-worker probe through unrelated source
 contract tests. Local pytest runs still include both profiles unless a marker
 expression is supplied.
 
-Every full-suite invocation also emits a JUnit XML report with the duration of
+Every functional-shard invocation emits a JUnit XML report with the duration of
 each test and a terminal log ranking the 50 slowest phases above 50 ms. Both
-files identify their matrix platform and are retained in that platform's
+files identify their platform and shard and are retained in that shard's
 evidence artifact. The log is piped through `tee` with `pipefail`, so pytest's
 exit status remains authoritative; when pytest fails, the evidence upload still
 runs and preserves the partial diagnostics produced before the failure.
 
-Each matrix entry also records a runner manifest with the exact Python and
+Each test shard also records a runner manifest with the exact Python and
 installed package versions, operating-system and architecture identifiers,
 logical CPU count, and process affinity where supported. Linux adds its cgroup
 CPU quota and throttling counters. Hardware supplied by hosted runners is not
@@ -156,7 +173,8 @@ identical across architectures, so this manifest distinguishes an environment
 difference from a product regression while the software and test workload stay
 fixed.
 
-Before the full suite, each installed wheel runs the reader performance gate.
+Before the functional tests, the `concurrency-memory` shard runs the reader
+performance gate once for each installed wheel.
 It enforces both normalized growth and the versioned absolute-latency policy in
 `benchmarks/readers/linear_scaling_budget.json`; a reader that remains linear
 but becomes uniformly slower therefore fails. The static policy identifies its
@@ -170,7 +188,7 @@ before pytest so a performance regression fails quickly without spending tens
 of minutes on the full suite; successful runs retain the same checks and
 coverage.
 
-The matrix pins cibuildwheel and abi3audit. After cibuildwheel emits each
+The shared build action pins cibuildwheel and abi3audit. After cibuildwheel emits each
 repaired wheel, CI runs `abi3audit --strict` explicitly as a blocking gate. This
 preserves the upstream stable-ABI check while avoiding its hidden cold-runner
 download of `virtualenv.pyz` from release hosting.
@@ -203,11 +221,11 @@ retention periods:
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
-| `dist-wheels-${{ matrix.name }}` | One intermediate platform wheel. | 1 day | `distribution` only. |
+| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 1 day | Its two functional shards and `distribution`. |
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 30 days | Manual publication and external audit. |
 | `python-branch-coverage` | Contextual HTML, XML, JSON, and high-risk gap report. | 14 days | Maintainers and auditors. |
 | `native-llvm-coverage` | LLVM profiles, summaries, and contextual HTML. | 14 days | Maintainers and auditors. |
-| `platform-evidence-${{ matrix.artifact }}` | Functional and native-stress JUnit timings, slowest-phase logs, runner/dependency manifest, Parquet certificate, and bounded benchmark results. | 14 days | Maintainers and auditors. |
+| `platform-evidence-PLATFORM-SHARD` | Functional JUnit timings, slowest-phase log, and runner/dependency manifest; the `concurrency-memory` artifact also contains native stress, Parquet certificate, and benchmark evidence. | 14 days | Maintainers and auditors. |
 
 `distribution` downloads the four intermediate wheels, builds the sdist, and
 validates the five files as one set. It then creates a canonical
@@ -240,8 +258,9 @@ authority:
 | reusable `validation` | Executes the same `ci.yml` used by PRs and `main`. | Read-only contents and GitHub artifact writes; no OIDC token. |
 | `publish` | Has no checkout, Python setup, or arbitrary `run` step. It downloads `release-distributions` by exact name and invokes the PyPI action. | `id-token: write` only, scoped to the protected `pypi` environment. |
 
-Every external action and remote pre-commit hook, including GitHub-maintained
-actions, is pinned to a full 40-character commit SHA. A nearby version comment
+Every external action used by workflows or repository-owned composite actions,
+and every remote pre-commit hook, including GitHub-maintained actions, is pinned
+to a full 40-character commit SHA. A nearby version comment
 preserves readability. The Dependabot configuration in
 `.github/dependabot.yml` checks the `github-actions` ecosystem weekly so an
 update arrives as a reviewable commit-pin change. Review upstream release notes
@@ -451,6 +470,8 @@ configuration because the toolchains and runners are platform-specific.
 - Build every release file once. Publication must download
   `release-distributions` by exact name and must not rebuild, mutate, or
   wildcard-select packages.
+- Keep the two test shards disjoint and exhaustive, use the same selection on
+  every platform, and make each fanout depend only on its own platform build.
 - Treat 44 percent as a baseline. Extend contextual risk tests and raise the
   floor when coverage improves; do not optimize the metric by excluding
   relevant production modules.

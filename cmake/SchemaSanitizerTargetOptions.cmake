@@ -3,6 +3,19 @@
 # These functions keep warning, sanitizer, clang-tidy, and reproducibility
 # settings consistent across native targets.
 
+# Compiles the translation units within an MSVC target concurrently. Visual
+# Studio generators otherwise invoke cl.exe once with every source but leave its
+# multi-process mode disabled; /MPN preserves the target graph and LTO while
+# distributing those independent compilations across N processes.
+function(schema_sanitizer_enable_msvc_parallel_compile target)
+  if(NOT MSVC)
+    return()
+  endif()
+
+  target_compile_options(
+    ${target} PRIVATE "/MP${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}")
+endfunction()
+
 # Enables compiler warnings and optional Werror for a target.
 function(schema_sanitizer_enable_warnings target)
   if(NOT SCHEMA_SANITIZER_ENABLE_WARNINGS)

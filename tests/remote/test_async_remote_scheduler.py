@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from typing import AbstractSet
 
 import pytest
 
+from schema_sanitizer.core_impl import async_scheduler
 from schema_sanitizer.core_impl.async_scheduler import (
     drain_ordered_iterable_results,
     ordered_indexed_results,
@@ -170,6 +173,96 @@ def test_unordered_indexed_results_reuses_fixed_worker_tasks(
         assert created == 4
 
     asyncio.run(run())
+
+
+def test_completed_worker_pool_stops_without_terminal_debt_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle result-slot waits remain directly cancellable on Python 3.11."""
+
+    original_park = async_scheduler._park_async_terminal_debt
+    park_calls = 0
+    parked_tasks: list[asyncio.Task[None]] = []
+
+    def record_terminal_debt(
+        tasks: AbstractSet[asyncio.Task[None]],
+        admission: async_scheduler._AsyncSchedulerAdmission,
+        result_slots: list[async_scheduler._AsyncWorkerResultSlot] | None,
+        pending_slots: list[async_scheduler._AsyncPendingResultSlot] | None = None,
+        *,
+        reap_completed: bool = True,
+    ) -> bool:
+        """Record a regression, then preserve ownership and make cleanup finite."""
+        nonlocal park_calls
+        park_calls += 1
+        parked_tasks.extend(tasks)
+        # A second cancellation lets an implementation that regresses clean up
+        # its terminal debt instead of contaminating the rest of the test run.
+        for task in tasks:
+            task.cancel()
+        return original_park(
+            tasks,
+            admission,
+            result_slots,
+            pending_slots,
+            reap_completed=reap_completed,
+        )
+
+    monkeypatch.setattr(async_scheduler, "_ASYNC_CANCEL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(async_scheduler, "_park_async_terminal_debt", record_terminal_debt)
+
+    async def run() -> tuple[
+        float,
+        async_scheduler.AsyncSchedulerSnapshot,
+        async_scheduler.AsyncSchedulerSnapshot,
+    ]:
+        """Complete a pool and capture exact scheduler ownership around shutdown."""
+        before = async_scheduler.async_scheduler_snapshot()
+
+        async def fetch(index: int) -> int:
+            """Produce enough values to recycle every fixed worker repeatedly."""
+            await asyncio.sleep(0)
+            return index
+
+        started = time.monotonic()
+        values = [
+            value
+            async for _index, value in unordered_indexed_results(
+                100, fetch, window=4, expected_retained_bytes=256
+            )
+        ]
+        elapsed = time.monotonic() - started
+        assert sorted(values) == list(range(100))
+        if parked_tasks:
+            await asyncio.gather(*parked_tasks, return_exceptions=True)
+        return elapsed, before, async_scheduler.async_scheduler_snapshot()
+
+    elapsed, before, after = asyncio.run(run())
+    assert park_calls == 0
+    assert elapsed < 1.0
+    assert after.in_use == before.in_use
+    assert after.active_operations == before.active_operations
+    assert after.terminal_debts == before.terminal_debts
+
+
+def test_bounded_event_wait_propagates_external_task_cancellation() -> None:
+    """An outer cancellation is never converted into a local polling timeout."""
+
+    async def run() -> float:
+        """Cancel an Event poll while its structured timeout is still armed."""
+        waiting = asyncio.create_task(
+            async_scheduler._bounded_async_event_wait(
+                asyncio.Event(), stage="async_result_slot_test"
+            )
+        )
+        await asyncio.sleep(0)
+        started = time.monotonic()
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        return time.monotonic() - started
+
+    assert asyncio.run(run()) < 0.5
 
 
 def test_retry_async_stops_on_non_retryable_exception(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -762,21 +762,15 @@ TryAcquireProcessPhysicalThreadPermitsUpTo(std::size_t desired,
   if (!runtime_owner_process()) {
     return 0U;
   }
-  // Preserve the public fail-closed observation boundary before delegating to
-  // the shared atomic authority; the CAS loop re-observes after contention.
-  do {
-    const auto process_threads = ProcessPhysicalThreadCount();
-    if (!process_threads) {
-      break;
-    }
-    return TryAcquireProcessThreadPermitsUpTo(
-        desired, minimum, [](std::size_t granted) noexcept {
-          g_process_physical_thread_permits.fetch_add(
-              granted, std::memory_order_acq_rel);
-        });
-  } while (false);
-  g_native_physical_thread_rejections.fetch_add(1U, std::memory_order_relaxed);
-  return 0U;
+  // EffectiveProcessThreadCapacity performs the authoritative fail-closed OS
+  // observation inside the shared CAS loop. Keeping a second observation in
+  // this wrapper would double the platform syscall cost without constraining
+  // the committed grant; contention still re-observes before every retry.
+  return TryAcquireProcessThreadPermitsUpTo(
+      desired, minimum, [](std::size_t granted) noexcept {
+        g_process_physical_thread_permits.fetch_add(granted,
+                                                    std::memory_order_acq_rel);
+      });
 }
 
 [[nodiscard]] std::size_t TryAcquireProcessExternalRuntimeThreadPermitsUpTo(

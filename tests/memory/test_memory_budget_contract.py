@@ -198,8 +198,11 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
     for path in root.rglob("*"):
         if path == Path(__file__).resolve():
             continue
-        if not path.is_file() or any(
-            part in ignored or part == "build" or part.startswith("build-") for part in path.parts
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root)
+        if any(part in ignored or part == "build" for part in relative.parts) or (
+            relative.parts and relative.parts[0].startswith("build-")
         ):
             continue
         if (

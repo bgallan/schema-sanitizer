@@ -83,7 +83,7 @@ repos:
         entry: zizmor --offline --persona auditor --min-severity medium
         language: python
         additional_dependencies: [zizmor==1.29.0]
-        files: ^\.github/workflows/.*\.ya?ml$
+        files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$
       - id: mypy
         name: mypy
         entry: mypy

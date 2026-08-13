@@ -1,0 +1,128 @@
+---
+name: Build and certify a platform wheel
+description: Build one ABI3 wheel and run the platform-independent ABI checks.
+inputs:
+  platform-name:
+    description: Stable release-platform identifier used by the wheel artifact.
+    required: true
+  artifact:
+    description: Short platform identifier used by platform-specific conditions.
+    required: true
+  arch:
+    description: cibuildwheel architecture selector.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        # Use one exact patch on all four platforms. Test shards use it too.
+        python-version: 3.11.9
+        cache: pip
+        cache-dependency-path: pyproject.toml
+    - name: Install wheel tooling
+      shell: bash
+      run: >-
+        python -m pip install -U pip
+        abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
+    - name: Assert the build environment has no PyArrow
+      shell: bash
+      run: >-
+        python -c
+        "import importlib.util,sys;
+        sys.exit(0 if importlib.util.find_spec('pyarrow') is None else 1)"
+    - name: Prevent Arrow C++ headers
+      if: runner.os == 'Linux'
+      shell: bash
+      run: meta/ci/native/check_no_arrow_cpp.sh
+    - name: Build and test the CPython 3.11 ABI3 wheel
+      env:
+        CIBW_ARCH: ${{ inputs.arch }}
+      shell: bash
+      run: python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}"
+    - name: Audit the CPython stable ABI
+      shell: bash
+      run: python -m abi3audit --strict --report wheelhouse/*.whl
+    - name: Install the built wheel without adapters
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install wheelhouse/*.whl
+        python - <<'PY'
+        from pathlib import Path
+        import schema_sanitizer as package
+        import schema_sanitizer._core_abi3 as core
+        checkout = Path.cwd().resolve()
+        extension = Path(core.__file__).resolve()
+        if extension.is_relative_to(checkout):
+            raise SystemExit(f"native extension came from checkout, not wheel: {extension}")
+        print(package.__version__, extension)
+        PY
+        pytest --collect-only -q \
+          tests/parquet/test_parquet_contract_native_and_pipeline_status.py \
+          tests/parquet/test_parquet_contract_certification_and_batch_size.py \
+          tests/parquet/test_parquet_contract_filters_and_runtime_readiness.py
+    - name: Verify the extension does not link Arrow C++
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        EXT_PATH=$(python - <<'PY'
+        import schema_sanitizer._core_abi3 as core
+        print(core.__file__)
+        PY
+        )
+        meta/ci/native/check_no_libarrow_linkage.sh "${EXT_PATH}"
+    - name: Set up CPython 3.12 for stable-ABI functional coverage
+      if: inputs.artifact == 'linux'
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: pyproject.toml
+    - name: Exercise the ABI3 wheel on CPython 3.12
+      if: inputs.artifact == 'linux'
+      shell: bash
+      run: |
+        python -m pip install -U pyarrow wheelhouse/*.whl
+        python -I meta/ci/release/downstream_smoke.py
+    - name: Set up CPython 3.13 for stable-ABI functional coverage
+      if: inputs.artifact == 'linux'
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: '3.13'
+        cache: pip
+        cache-dependency-path: pyproject.toml
+    - name: Exercise the ABI3 wheel on CPython 3.13
+      if: inputs.artifact == 'linux'
+      shell: bash
+      run: |
+        python -m pip install -U pyarrow wheelhouse/*.whl
+        python -I meta/ci/release/downstream_smoke.py
+    - name: Set up the newest supported Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: '3.14'
+        cache: pip
+        cache-dependency-path: pyproject.toml
+    - name: Verify the ABI3 wheel on Python 3.14
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install -U pip
+        python -m pip install wheelhouse/*.whl
+        python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
+    - name: Exercise the ABI3 wheel on CPython 3.14
+      if: inputs.artifact == 'linux'
+      shell: bash
+      run: |
+        python -m pip install -U pyarrow
+        python -I meta/ci/release/downstream_smoke.py
+    - name: Upload the certified platform wheel
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: dist-wheels-${{ inputs.platform-name }}
+        path: wheelhouse/*.whl
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0

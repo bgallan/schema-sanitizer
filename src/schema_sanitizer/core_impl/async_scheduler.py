@@ -413,7 +413,13 @@ async def _bounded_async_event_wait(event: asyncio.Event, *, stage: str) -> None
         check_operation_cancelled(stage=stage)
         waiter = event.wait
         try:
-            await asyncio.wait_for(waiter(), timeout=0.25)
+            # Keep the Event wait in this Task. On Python 3.11, wait_for()
+            # delegates to an inner Task whose simultaneous completion and
+            # outer cancellation can delay worker shutdown until the terminal
+            # debt deadline. The structured timeout distinguishes its own
+            # expiry from an external cancellation and propagates the latter.
+            async with asyncio.timeout(0.25):
+                await waiter()
         except TimeoutError:
             continue
 

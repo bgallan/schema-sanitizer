@@ -19,6 +19,7 @@ EXPECTED_HELPERS = {
     "parquet/check_parquet_contract_runtime_suite.py",
     "quality/check_detect_secrets_report.py",
     "quality/check_primary_cleanup.py",
+    "quality/record_runner_environment.py",
     "quality/report_risk_coverage.py",
     "release/check_distribution_contents.py",
     "release/check_downstream_install.py",

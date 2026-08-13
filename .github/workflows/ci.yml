@@ -149,281 +149,180 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # One task per supported platform builds the release wheel once, then reuses
-  # it for core-only, full-suite, benchmark, contract, and ABI checks.
-  platform-wheels:
-    name: platform and wheel (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            artifact: linux
-            os: ubuntu-24.04
-            arch: x86_64
-          - name: windows-amd64
-            artifact: windows
-            os: windows-2025
-            arch: AMD64
-          - name: macos-x86_64
-            artifact: macos-x86_64
-            os: macos-15-intel
-            arch: x86_64
-          - name: macos-arm64
-            artifact: macos-arm64
-            os: macos-15
-            arch: arm64
+  # Build each wheel independently so its test shards can start without waiting
+  # for a slower platform build. The local action keeps all four build contracts
+  # byte-for-byte identical apart from runner and cibuildwheel architecture.
+  platform-wheel-linux:
+    name: wheel / Linux x86-64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: ./.github/actions/build-platform-wheel
         with:
-          # Use one exact patch with official binaries on all four runners so
-          # platform comparisons do not mix different CPython maintenance releases.
-          python-version: 3.11.9
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install wheel tooling
-        run: >-
-          python -m pip install -U pip
-          abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
-      - name: Assert the build environment has no PyArrow
-        run: >-
-          python -c
-          "import importlib.util,sys;
-          sys.exit(0 if importlib.util.find_spec('pyarrow') is None else 1)"
-      - name: Prevent Arrow C++ headers
-        if: runner.os == 'Linux'
+          platform-name: linux-x86_64
+          artifact: linux
+          arch: x86_64
+  platform-wheel-windows:
+    name: wheel / Windows AMD64
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-platform-wheel
+        with:
+          platform-name: windows-amd64
+          artifact: windows
+          arch: AMD64
+  platform-wheel-macos-x86-64:
+    name: wheel / macOS x86-64
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-platform-wheel
+        with:
+          platform-name: macos-x86_64
+          artifact: macos-x86_64
+          arch: x86_64
+  platform-wheel-macos-arm64:
+    name: wheel / macOS ARM64
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-platform-wheel
+        with:
+          platform-name: macos-arm64
+          artifact: macos-arm64
+          arch: arm64
+
+  # The same exhaustive two-way split runs against each platform's one wheel.
+  # Separate runners avoid oversubscribing the native concurrency tests.
+  platform-tests-linux:
+    name: tests / Linux x86-64 / ${{ matrix.shard }}
+    needs: [platform-wheel-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [concurrency-memory, remaining]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: linux-x86_64
+          artifact: linux
+          shard: ${{ matrix.shard }}
+  platform-tests-windows:
+    name: tests / Windows AMD64 / ${{ matrix.shard }}
+    needs: [platform-wheel-windows]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [concurrency-memory, remaining]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: windows-amd64
+          artifact: windows
+          shard: ${{ matrix.shard }}
+  platform-tests-macos-x86-64:
+    name: tests / macOS x86-64 / ${{ matrix.shard }}
+    needs: [platform-wheel-macos-x86-64]
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [concurrency-memory, remaining]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: macos-x86_64
+          artifact: macos-x86_64
+          shard: ${{ matrix.shard }}
+  platform-tests-macos-arm64:
+    name: tests / macOS ARM64 / ${{ matrix.shard }}
+    needs: [platform-wheel-macos-arm64]
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [concurrency-memory, remaining]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: macos-arm64
+          artifact: macos-arm64
+          shard: ${{ matrix.shard }}
+
+  # Preserve one stable platform owner for distribution and branch protection.
+  platform-wheels:
+    name: platform wheels and tests
+    if: always()
+    needs:
+      - platform-wheel-linux
+      - platform-wheel-windows
+      - platform-wheel-macos-x86-64
+      - platform-wheel-macos-arm64
+      - platform-tests-linux
+      - platform-tests-windows
+      - platform-tests-macos-x86-64
+      - platform-tests-macos-arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform build and test shard to succeed
+        env:
+          WHEEL_LINUX_RESULT: ${{ needs.platform-wheel-linux.result }}
+          WHEEL_WINDOWS_RESULT: ${{ needs.platform-wheel-windows.result }}
+          WHEEL_MACOS_X86_64_RESULT: ${{ needs.platform-wheel-macos-x86-64.result }}
+          WHEEL_MACOS_ARM64_RESULT: ${{ needs.platform-wheel-macos-arm64.result }}
+          TESTS_LINUX_RESULT: ${{ needs.platform-tests-linux.result }}
+          TESTS_WINDOWS_RESULT: ${{ needs.platform-tests-windows.result }}
+          TESTS_MACOS_X86_64_RESULT: ${{ needs.platform-tests-macos-x86-64.result }}
+          TESTS_MACOS_ARM64_RESULT: ${{ needs.platform-tests-macos-arm64.result }}
         shell: bash
-        run: meta/ci/native/check_no_arrow_cpp.sh
-      - name: Build and test the CPython 3.11 ABI3 wheel
-        run: >-
-          python -m cibuildwheel --output-dir wheelhouse
-          --archs '${{ matrix.arch }}'
-      - name: Audit the CPython stable ABI
-        shell: bash
-        run: python -m abi3audit --strict --report wheelhouse/*.whl
-      - name: Install the built wheel without adapters
-        shell: bash
-        run: |
+        run: |-
           set -euo pipefail
-          python -m pip install wheelhouse/*.whl
-          python - <<'PY'
-          from pathlib import Path
-          import schema_sanitizer as package
-          import schema_sanitizer._core_abi3 as core
-          checkout = Path.cwd().resolve()
-          extension = Path(core.__file__).resolve()
-          if extension.is_relative_to(checkout):
-              raise SystemExit(f"native extension came from checkout, not wheel: {extension}")
-          print(package.__version__, extension)
-          PY
-          pytest --collect-only -q \
-            tests/parquet/test_parquet_contract_native_and_pipeline_status.py \
-            tests/parquet/test_parquet_contract_certification_and_batch_size.py \
-            tests/parquet/test_parquet_contract_filters_and_runtime_readiness.py
-      - name: Verify the extension does not link Arrow C++
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          EXT_PATH=$(python - <<'PY'
-          import schema_sanitizer._core_abi3 as core
-          print(core.__file__)
-          PY
-          )
-          meta/ci/native/check_no_libarrow_linkage.sh "${EXT_PATH}"
-      - name: Install full-suite dependencies
-        run: >-
-          python -m pip install -U
-          pytest==9.1.1 aiohttp==3.14.3 pyarrow==25.0.1
-          pandas==3.0.5 polars==1.43.2 duckdb==1.5.5
-      - name: Compile and certify the Parquet runtime
-        shell: bash
-        run: |
-          python -m compileall -q src
-          python meta/ci/parquet/check_parquet_contract_runtime.py
-          mkdir -p artifacts
-          python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
-            --certificate-output artifacts/parquet-contract-runtime-certificate.json
-      - name: Record runner CPU environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - "artifacts/runner-cpu-${{ matrix.artifact }}.json" <<'PY'
-          import json
-          import os
-          import platform
-          import sys
-          from importlib import metadata
-          from pathlib import Path
-          def optional_text(path: str) -> str | None:
-              try:
-                  return Path(path).read_text(encoding="utf-8").strip()
-              except (OSError, UnicodeError):
-                  return None
-          def optional_key_values(path: str) -> dict[str, int] | None:
-              text = optional_text(path)
-              if text is None:
-                  return None
-              values: dict[str, int] = {}
-              try:
-                  for line in text.splitlines():
-                      key, value = line.split()
-                      values[key] = int(value)
-              except (TypeError, ValueError):
-                  return None
-              return values
-          affinity: list[int] | None = None
-          if hasattr(os, "sched_getaffinity"):
-              try:
-                  affinity = sorted(os.sched_getaffinity(0))
-              except OSError:
-                  pass
-          is_linux = sys.platform.startswith("linux")
-          evidence = {
-              "schema_version": 1,
-              "python": {
-                  "implementation": platform.python_implementation(),
-                  "version": platform.python_version(),
-              },
-              "installed_distributions": {
-                  name: metadata.version(name)
-                  for name in (
-                      "aiohttp",
-                      "duckdb",
-                      "pandas",
-                      "polars",
-                      "pyarrow",
-                      "pytest",
-                      "schema-sanitizer",
-                  )
-              },
-              "platform": {
-                  "system": platform.system(),
-                  "release": platform.release(),
-                  "machine": platform.machine(),
-              },
-              "cpu": {
-                  "logical_count": os.cpu_count(),
-                  "affinity": affinity,
-                  "affinity_count": len(affinity) if affinity is not None else None,
-                  "linux_cgroup_v2_cpu_max": (
-                      optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None
-                  ),
-                  "linux_cgroup_v2_cpu_stat": (
-                      optional_key_values("/sys/fs/cgroup/cpu.stat") if is_linux else None
-                  ),
-              },
-          }
-          output = Path(sys.argv[1])
-          output.parent.mkdir(parents=True, exist_ok=True)
-          output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          print(output.read_text(encoding="utf-8"), end="")
-          PY
-      - name: Cross-platform reader linear-scaling smoke
-        shell: bash
-        run: >-
-          python -I benchmarks/readers/linear_scaling.py
-          --sizes 1024,2048
-          --repeats 3
-          --maximum-normalized-growth 8
-          --latency-budget benchmarks/readers/linear_scaling_budget.json
-          --wheel wheelhouse/*.whl
-          --output artifacts/reader-linear-scaling-${{ matrix.artifact }}.json
-      - name: Cross-platform threading benchmark smoke
-        run: >-
-          python -m benchmarks.concurrency.threading.matrix
-          --profile ci
-          --rows 256
-          --warmups 0
-          --repeats 1
-          --only parquet
-          --output artifacts/threading-matrix-${{ matrix.artifact }}.json
-      - name: Cross-platform native completion stress
-        shell: bash
-        run: |
-          set -euo pipefail
-          pytest -q -o pythonpath=. \
-            -m native_stress \
-            --durations=10 \
-            --durations-min=0.05 \
-            --junitxml="artifacts/pytest-native-stress-${{ matrix.artifact }}.xml" \
-            tests/concurrency/test_ordered_executor_completion_probe.py \
-            2>&1 | tee "artifacts/pytest-native-stress-durations-${{ matrix.artifact }}.log"
-      - name: Full suite including adapters, HTTP faults, and concurrency
-        # Do not prepend src/: on Windows that bypasses the wheel's repaired DLL
-        # bootstrap while still loading its native extension.
-        shell: bash
-        run: |
-          set -euo pipefail
-          pytest -q -o pythonpath=. \
-            -m 'not native_stress' \
-            --durations=50 \
-            --durations-min=0.05 \
-            --junitxml="artifacts/pytest-${{ matrix.artifact }}.xml" \
-            2>&1 | tee "artifacts/pytest-durations-${{ matrix.artifact }}.log"
-      - name: Set up CPython 3.12 for stable-ABI functional coverage
-        if: matrix.artifact == 'linux'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Exercise the ABI3 wheel on CPython 3.12
-        if: matrix.artifact == 'linux'
-        run: |
-          python -m pip install -U pyarrow wheelhouse/*.whl
-          python -I meta/ci/release/downstream_smoke.py
-      - name: Set up CPython 3.13 for stable-ABI functional coverage
-        if: matrix.artifact == 'linux'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.13'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Exercise the ABI3 wheel on CPython 3.13
-        if: matrix.artifact == 'linux'
-        run: |
-          python -m pip install -U pyarrow wheelhouse/*.whl
-          python -I meta/ci/release/downstream_smoke.py
-      - name: Set up the newest supported Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.14'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Verify the ABI3 wheel on Python 3.14
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install -U pip
-          python -m pip install wheelhouse/*.whl
-          python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
-      - name: Exercise the ABI3 wheel on CPython 3.14
-        if: matrix.artifact == 'linux'
-        run: |
-          python -m pip install -U pyarrow
-          python -I meta/ci/release/downstream_smoke.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dist-wheels-${{ matrix.name }}
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-      - name: Upload platform evidence
-        # A healthy job must produce evidence. After an earlier failure, retain
-        # any evidence that exists without adding a second missing-path error.
-        if: ${{ success() || (failure() && hashFiles('artifacts/**') != '') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: platform-evidence-${{ matrix.artifact }}
-          path: artifacts/
-          if-no-files-found: error
-          retention-days: 14
+          for result in \
+            "${WHEEL_LINUX_RESULT}" \
+            "${WHEEL_WINDOWS_RESULT}" \
+            "${WHEEL_MACOS_X86_64_RESULT}" \
+            "${WHEEL_MACOS_ARM64_RESULT}" \
+            "${TESTS_LINUX_RESULT}" \
+            "${TESTS_WINDOWS_RESULT}" \
+            "${TESTS_MACOS_X86_64_RESULT}" \
+            "${TESTS_MACOS_ARM64_RESULT}"; do
+            if [[ "${result}" != "success" ]]; then
+              echo "A platform wheel owner ended with ${result}" >&2
+              exit 1
+            fi
+          done
 
   # Build the sdist once, combine it with the platform wheels, then validate
   # exactly the artifact set consumed by the publish workflow.
