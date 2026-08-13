@@ -143,6 +143,15 @@ def load_latency_budget(path: Path) -> dict[str, Any]:
     limits = value.get("maximum_median_to_scaled_reference_ratio")
     if not isinstance(reference, dict) or not isinstance(reference.get("cases"), dict):
         raise ValueError(f"latency budget has no reference cases: {path}")
+    artifacts = reference.get("platform_artifact_ids")
+    required_platforms = {"linux", "macos-arm64", "macos-x86_64", "windows"}
+    if not isinstance(artifacts, dict) or set(artifacts) != required_platforms:
+        raise ValueError(f"latency budget must identify all supported platform artifacts: {path}")
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item <= 0
+        for item in artifacts.values()
+    ):
+        raise ValueError(f"latency budget platform artifact IDs must be positive integers: {path}")
     if not isinstance(limits, dict):
         raise ValueError(f"latency budget has no per-case limits: {path}")
 

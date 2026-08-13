@@ -140,8 +140,10 @@ runs and preserves the partial diagnostics produced before the failure.
 Before the full suite, each installed wheel runs the reader performance gate.
 It enforces both normalized growth and the versioned absolute-latency policy in
 `benchmarks/readers/linear_scaling_budget.json`; a reader that remains linear
-but becomes uniformly slower therefore fails. The report records the commit,
-platform, package version, and SHA-256 of the native extension. CI runs the
+but becomes uniformly slower therefore fails. The static policy identifies its
+healthy run and all four platform artifacts, using the slowest median for each
+case as the cross-platform reference. The report records the commit, platform,
+package version, and SHA-256 of the native extension. CI runs the
 benchmark in isolated Python mode and verifies that the loaded extension's
 bytes match the extension inside the declared wheel, preventing a checkout or
 stale build from satisfying the gate. The reader and threading smokes run

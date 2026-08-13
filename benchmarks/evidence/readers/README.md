@@ -33,6 +33,8 @@ noise-tolerant smoke on every supported wheel platform. CI combines its
 normalized-growth envelope with the independent, versioned absolute policy in
 [`linear_scaling_budget.json`](../../readers/linear_scaling_budget.json), so a
 large constant-factor regression cannot pass merely because it remains linear.
+The policy records the four platform-artifact identifiers from its named
+healthy run and uses the slowest median for each case as its reference.
 Each generated report includes native-binary provenance; CI additionally
 matches the loaded extension's digest to the extension stored in the platform
 wheel. The algorithmic contract and the structural Parquet argument are documented in

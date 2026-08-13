@@ -1,56 +1,62 @@
 {
   "schema_version": 1,
   "benchmark": "benchmarks.readers.linear_scaling",
-  "description": "Static median-latency references for the largest retained healthy fixture. Runtime ceilings scale linearly for larger inputs and retain the reference ceiling for smaller inputs. Per-case envelopes are calibrated against the slowest of Linux, macOS arm64, macOS x86_64, and Windows measurements from the healthy run while rejecting the observed multi-second regression.",
+  "description": "Static median-latency references aggregated as the slowest supported-platform result for each case in one healthy run. Runtime ceilings scale linearly for larger inputs and retain the reference ceiling for smaller inputs. Per-case envelopes absorb hosted-runner variance while rejecting the observed multi-second regression.",
   "reference": {
-    "source": "benchmarks/evidence/readers/linear-scaling.json",
+    "source": "GitHub Actions platform-evidence artifacts from the named run",
+    "aggregation": "maximum median per case across linux, macos-arm64, macos-x86_64, and windows",
     "commit_sha": "079b120ada27e574a144920696577a5a19230427",
     "github_actions_run_id": 31203093265,
     "distribution_version": "0.4.1",
+    "platform_artifact_ids": {
+      "linux": 9003776303,
+      "macos-arm64": 9003702217,
+      "macos-x86_64": 9003974465,
+      "windows": 9004062506
+    },
     "sizes": [
-      500,
-      1000,
-      2000
+      1024,
+      2048
     ],
     "cases": {
       "csv_multi": {
-        "rows": 2000,
-        "input_bytes": 51791,
-        "median_ns": 6436126
+        "rows": 2048,
+        "input_bytes": 53087,
+        "median_ns": 19642186
       },
       "csv_single": {
-        "rows": 2000,
-        "input_bytes": 51791,
-        "median_ns": 7411875
+        "rows": 2048,
+        "input_bytes": 53087,
+        "median_ns": 24022477
       },
       "jsonl_multi": {
-        "rows": 2000,
-        "input_bytes": 172670,
-        "median_ns": 51386503
+        "rows": 2048,
+        "input_bytes": 176894,
+        "median_ns": 100550366
       },
       "jsonl_single": {
-        "rows": 2000,
-        "input_bytes": 172670,
-        "median_ns": 59816769
+        "rows": 2048,
+        "input_bytes": 176894,
+        "median_ns": 111020996
       },
       "xml_multi": {
-        "rows": 2000,
-        "input_bytes": 121793,
-        "median_ns": 58938886
+        "rows": 2048,
+        "input_bytes": 124769,
+        "median_ns": 146511062
       },
       "xml_single": {
-        "rows": 2000,
-        "input_bytes": 121793,
-        "median_ns": 63037541
+        "rows": 2048,
+        "input_bytes": 124769,
+        "median_ns": 159870605
       }
     }
   },
   "maximum_median_to_scaled_reference_ratio": {
     "csv_multi": 16.0,
     "csv_single": 20.0,
-    "jsonl_multi": 10.0,
-    "jsonl_single": 10.0,
-    "xml_multi": 16.0,
-    "xml_single": 16.0
+    "jsonl_multi": 8.0,
+    "jsonl_single": 8.0,
+    "xml_multi": 8.0,
+    "xml_single": 8.0
   }
 }

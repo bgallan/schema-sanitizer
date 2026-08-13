@@ -67,6 +67,19 @@ def test_pinned_pre_commit_revision_is_not_treated_as_a_secret(tmp_path: Path) -
     assert filter_findings(report, tmp_path) == {}
 
 
+def test_public_reader_reference_commit_is_not_treated_as_a_secret(tmp_path: Path) -> None:
+    """The reviewed Git commit anchoring the latency policy is public metadata."""
+    budget = tmp_path / "benchmarks/readers/linear_scaling_budget.json"
+    budget.parent.mkdir(parents=True)
+    budget.write_text(
+        json.dumps({"commit_sha": "ab" * 20}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    report = {"results": {"benchmarks/readers/linear_scaling_budget.json": [_finding(2)]}}
+
+    assert filter_findings(report, tmp_path) == {}
+
+
 @pytest.mark.parametrize(
     ("filename", "line", "kind"),
     [
@@ -98,6 +111,16 @@ def test_pinned_pre_commit_revision_is_not_treated_as_a_secret(tmp_path: Path) -
         (
             ".pre-commit-config.yaml",
             f"    token: {PUBLIC_DIGEST[:40]}  # v1.2.3",
+            "Hex High Entropy String",
+        ),
+        (
+            "benchmarks/readers/other.json",
+            f'"commit_sha": "{PUBLIC_DIGEST[:40]}"',
+            "Hex High Entropy String",
+        ),
+        (
+            "benchmarks/readers/linear_scaling_budget.json",
+            f'"token": "{PUBLIC_DIGEST[:40]}"',
             "Hex High Entropy String",
         ),
     ],

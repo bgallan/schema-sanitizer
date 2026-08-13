@@ -103,7 +103,7 @@ def test_static_latency_gate_catches_constant_30x_regression_with_linear_slope()
     assert "normalized_growth" not in report["failures"]
     failure = report["failures"]["absolute_latency"]["xml_single"]
     assert failure["observed_ratio"] == pytest.approx(30.0)
-    assert failure["maximum_ratio"] == 16.0
+    assert failure["maximum_ratio"] == 8.0
     assert report["within_budget"] is False
 
 
@@ -149,6 +149,13 @@ def test_static_latency_budget_is_versioned_and_covers_every_case() -> None:
     assert budget["schema_version"] == 1
     assert budget["reference"]["distribution_version"] == "0.4.1"
     assert budget["reference"]["github_actions_run_id"] == 31203093265
+    assert budget["reference"]["aggregation"].startswith("maximum median per case")
+    assert set(budget["reference"]["platform_artifact_ids"]) == {
+        "linux",
+        "macos-arm64",
+        "macos-x86_64",
+        "windows",
+    }
     assert len(budget["reference"]["commit_sha"]) == 40
     assert set(budget["reference"]["cases"]) == {
         "csv_single",
@@ -158,6 +165,17 @@ def test_static_latency_budget_is_versioned_and_covers_every_case() -> None:
         "xml_single",
         "xml_multi",
     }
+
+
+def test_static_latency_budget_requires_every_platform_artifact(tmp_path: Path) -> None:
+    """A partial platform sample cannot masquerade as cross-platform policy."""
+    budget = json.loads(BUDGET.read_text(encoding="utf-8"))
+    del budget["reference"]["platform_artifact_ids"]["windows"]
+    path = tmp_path / "partial-budget.json"
+    path.write_text(json.dumps(budget), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="all supported platform artifacts"):
+        linear_scaling.load_latency_budget(path)
 
 
 def test_provenance_hashes_the_measured_native_extension() -> None:

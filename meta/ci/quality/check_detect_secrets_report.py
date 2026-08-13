@@ -13,6 +13,9 @@ _PUBLIC_SHA256_LINE = re.compile(r'^\s*"[^"]+_sha256"\s*:\s*"[0-9a-fA-F]{64}"\s*
 _FUZZ_INTEGRITY_SHA256_LINE = re.compile(
     r'^\s*(?:EXPECTED_TREE_SHA256\s*=|"[^"]+"\s*:)\s*"[0-9a-fA-F]{64}"\s*,?\s*$'
 )
+_PUBLIC_READER_REFERENCE_COMMIT_LINE = re.compile(
+    r'^\s*"commit_sha"\s*:\s*"[0-9a-fA-F]{40}"\s*,?\s*$'
+)
 _PINNED_PRE_COMMIT_REVISION = re.compile(r"^\s+rev:\s+[0-9a-f]{40}\s+#\s+[^\s]+\s*$")
 
 
@@ -55,6 +58,16 @@ def _is_public_fuzz_integrity_digest(root: Path, filename: str, item: dict[str, 
     return _FUZZ_INTEGRITY_SHA256_LINE.fullmatch(line) is not None
 
 
+def _is_public_reader_reference_commit(root: Path, filename: str, item: dict[str, Any]) -> bool:
+    """Recognize the public Git commit anchoring the reader latency policy."""
+    if item.get("type") != "Hex High Entropy String":
+        return False
+    if filename != "benchmarks/readers/linear_scaling_budget.json":
+        return False
+    line = _source_line(root, filename, item.get("line_number"))
+    return _PUBLIC_READER_REFERENCE_COMMIT_LINE.fullmatch(line) is not None
+
+
 def _is_pinned_pre_commit_revision(root: Path, filename: str, item: dict[str, Any]) -> bool:
     """Recognize immutable public Git commit pins for remote hooks."""
     if item.get("type") != "Hex High Entropy String" or filename != ".pre-commit-config.yaml":
@@ -73,6 +86,7 @@ def filter_findings(report: dict[str, Any], root: Path) -> dict[str, list[dict[s
             if not _is_notebook_cell_id(root, filename, item.get("line_number"))
             and not _is_public_benchmark_digest(root, filename, item)
             and not _is_public_fuzz_integrity_digest(root, filename, item)
+            and not _is_public_reader_reference_commit(root, filename, item)
             and not _is_pinned_pre_commit_revision(root, filename, item)
         ]
         if kept:
