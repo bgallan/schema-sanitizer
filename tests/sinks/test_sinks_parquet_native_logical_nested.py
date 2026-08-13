@@ -7,8 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from _support.sinks import fail_pyarrow_sink
 from conftest import require_native
-from sinks_shared import fail_pyarrow_sink
 
 
 def test_parquet_native_file_output_writes_integer_width_logical_types(

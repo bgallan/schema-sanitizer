@@ -2,9 +2,12 @@
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/memory/pool_resource.hh"
 #include "internal/runtime/atomic_worker_bitmap.hh"
+#include "internal/runtime/cgroup_view.hh"
 #include "internal/runtime/numa_locality.hh"
 #include "internal/runtime/operation_task_arena_selection.hh"
 #include "internal/runtime/process_cpu_governor.hh"
+#include "internal/runtime/process_fd_governor.hh"
+#include "internal/runtime/process_identity.hh"
 
 #include <algorithm>
 #include <array>
@@ -12,8 +15,26 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
+#if defined(__linux__)
+#include <dirent.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <tlhelp32.h>
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <libproc.h>
+#include <mach/mach.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -21,6 +42,7 @@
 #include <memory_resource>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -35,7 +57,761 @@ std::atomic<std::size_t> g_reaper_workers{0U};
 std::atomic<std::size_t> g_reaper_thread_permits{0U};
 std::atomic<std::size_t> g_reaper_thread_start_failures{0U};
 std::atomic<std::size_t> g_native_counter_underflows{0U};
+// One process-global physical-thread permit domain shared by native workers
+// and Python governed Thread.start() calls through the ABI.
+// One atomic admission authority commits the combined managed + external
+// physical-thread envelope. Per-domain counters below are diagnostic/ownership
+// subledgers only; they never independently decide capacity.
+std::atomic<std::size_t> g_process_total_thread_permits{0U};
+std::atomic<std::size_t> g_process_physical_thread_permits{0U};
+std::atomic<std::size_t> g_process_external_runtime_thread_permits{0U};
+// Amount-based native release APIs are retained for ABI compatibility, but
+// any impossible debit poisons the whole permit domain.  This prevents a
+// duplicate/stale release from turning corrupted accounting into reusable
+// process headroom.  Exact Python/native RAII owners may still retire debt.
+std::atomic<bool> g_process_thread_permit_corrupted{false};
+// Runtime-reported resident external workers are observational credits, not
+// active claims. They are kept distinct so a persistent pool is not mistaken
+// for unrelated unmanaged process threads after an operation releases its
+// claim.
+std::atomic<std::size_t> g_process_external_runtime_resident_threads{0U};
+// Memory debt is intentionally distinct from identity credit. If a resident
+// probe becomes temporarily unavailable, CPU attribution may retract to zero
+// while stack reservations remain charged until positive retirement evidence.
+std::atomic<std::size_t> g_process_external_runtime_stack_debt_threads{0U};
+std::atomic<std::size_t> g_external_runtime_resident_protocol_violations{0U};
+// Residency identity and stack-debt form one invariant-bearing subledger.
+// A dedicated allocation-free writer gate makes validation + publication a
+// transaction; the general permit mutation epoch only protects readers from
+// torn aggregate snapshots and intentionally does not serialize writers.
+std::atomic_flag g_external_runtime_residency_writer = ATOMIC_FLAG_INIT;
+std::atomic<bool> g_external_runtime_residency_corrupted{false};
+// Number of writers between the combined permit commit and its per-domain
+// subledger publication. Snapshots wait for zero instead of observing a
+// transient non-conserving total. Writers remain mutually concurrent.
+std::atomic<std::size_t> g_process_thread_ledger_mutations_inflight{0U};
+std::atomic<std::uint64_t> g_process_thread_ledger_mutation_epoch{0U};
+std::atomic<std::size_t> g_managed_running_threads{0U};
+std::atomic<std::size_t> g_native_physical_thread_rejections{0U};
+std::atomic<std::size_t> g_completion_memory_protocol_violations{0U};
+std::atomic<std::size_t> g_process_file_descriptor_permits{0U};
+std::atomic<std::size_t> g_process_file_descriptors_opened{0U};
+std::atomic<std::size_t> g_process_file_descriptor_rejections{0U};
+std::atomic<std::size_t> g_process_file_descriptor_protocol_violations{0U};
+std::atomic<bool> g_process_file_descriptor_permit_corrupted{false};
+std::atomic<std::size_t> g_process_file_descriptor_uncertain_close_debts{0U};
+std::atomic<std::uint64_t> g_process_fd_epoch{0U};
+std::atomic<std::size_t> g_process_fd_waiters{0U};
+// Strict FIFO ticketing replaces Pass69's g_process_fd_fifo_mutex /
+// std::timed_mutex scheduler-dependent ordering. A fixed cancellation ring
+// keeps timeout retirement allocation-free and bounded.
+constexpr std::size_t kProcessFdTicketSlots = 65536U;
+std::atomic<std::uint64_t> g_process_fd_next_ticket{0U};
+std::atomic<std::uint64_t> g_process_fd_serving_ticket{0U};
+std::array<std::atomic<std::uint64_t>, kProcessFdTicketSlots>
+    g_process_fd_cancelled_tickets{};
+std::mutex g_process_fd_wait_mutex;
+std::condition_variable g_process_fd_wait_cv;
 constexpr std::size_t kReaperThreadPermitCapacity = 2U;
+
+[[nodiscard]] const char *
+ReadNumericEnvironmentVariable(const char *name,
+                               std::array<char, 64> &storage) noexcept {
+#if defined(_WIN32)
+  // MSVC deprecates getenv under /W4 and turns C4996 into an error under /WX.
+  // These three settings contain only integer limits, so a fixed stack buffer
+  // is both sufficient and keeps the noexcept capacity paths allocation-free.
+  const auto length = ::GetEnvironmentVariableA(
+      name, storage.data(), static_cast<DWORD>(storage.size()));
+  return length != 0U && static_cast<std::size_t>(length) < storage.size()
+             ? storage.data()
+             : nullptr;
+#else
+  static_cast<void>(storage);
+  return std::getenv(name);
+#endif
+}
+
+[[nodiscard]] std::size_t ConfiguredProcessFdCapacity() noexcept {
+  constexpr std::size_t kAbsoluteCap = 65536U;
+  std::size_t capacity = 4096U;
+  std::array<char, 64> configured_storage{};
+  const char *configured = ReadNumericEnvironmentVariable(
+      "SCHEMA_SANITIZER_MAX_OPEN_FILES", configured_storage);
+  if (configured && *configured != '\0') {
+    if (*configured == '-') {
+      return 0U;
+    }
+    char *end = nullptr;
+    const auto parsed = std::strtoull(configured, &end, 10);
+    if (end != configured && (!end || *end == '\0')) {
+      capacity =
+          std::min<std::size_t>(kAbsoluteCap, static_cast<std::size_t>(parsed));
+    }
+  }
+#if defined(__linux__) || defined(__APPLE__)
+  struct rlimit limits{};
+  if (::getrlimit(RLIMIT_NOFILE, &limits) == 0 &&
+      limits.rlim_cur != RLIM_INFINITY) {
+    const auto soft = static_cast<std::uint64_t>(limits.rlim_cur);
+    const auto reserve =
+        std::max<std::uint64_t>(16U, std::min<std::uint64_t>(256U, soft / 8U));
+    const auto usable = soft > reserve ? soft - reserve : 0U;
+    capacity = std::min<std::size_t>(
+        capacity, static_cast<std::size_t>(
+                      std::min<std::uint64_t>(usable, kAbsoluteCap)));
+  }
+#endif
+  return capacity;
+}
+
+[[nodiscard]] std::optional<std::size_t> ProcessFileDescriptorCount() noexcept {
+#if defined(__linux__)
+  DIR *directory = ::opendir("/proc/self/fd");
+  if (!directory) {
+    return std::nullopt;
+  }
+  std::size_t count = 0U;
+  while (const auto *entry = ::readdir(directory)) {
+    const char first = entry->d_name[0];
+    if (first >= '0' && first <= '9') {
+      ++count;
+    }
+  }
+  // The directory handle itself appears in /proc/self/fd.
+  if (count != 0U) {
+    --count;
+  }
+  if (::closedir(directory) != 0) {
+    return std::nullopt;
+  }
+  return count;
+#elif defined(__APPLE__)
+  proc_taskallinfo info{};
+  const int bytes =
+      ::proc_pidinfo(::getpid(), PROC_PIDTASKALLINFO, 0, &info, sizeof(info));
+  if (bytes != static_cast<int>(sizeof(info))) {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(info.pbsd.pbi_nfiles);
+#else
+  return std::nullopt;
+#endif
+}
+
+[[nodiscard]] std::size_t
+TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
+                               bool queued_waiter = false) noexcept {
+  if (!runtime_owner_process() || desired == 0U || minimum == 0U ||
+      minimum > desired ||
+      g_process_file_descriptor_permit_corrupted.load(
+          std::memory_order_acquire)) {
+    return 0U;
+  }
+  // Do not let opportunistic/native try-acquire traffic repeatedly overtake a
+  // blocked cross-language waiter. Waiting callers bypass this check while
+  // remaining bounded/cancellable at the Python layer.
+  if (!queued_waiter &&
+      g_process_fd_waiters.load(std::memory_order_acquire) != 0U) {
+    return 0U;
+  }
+  auto current =
+      g_process_file_descriptor_permits.load(std::memory_order_acquire);
+  for (;;) {
+    auto effective_capacity = ConfiguredProcessFdCapacity();
+#if defined(__linux__) || defined(__APPLE__)
+    const auto observed = ProcessFileDescriptorCount();
+    if (!observed) {
+      g_process_file_descriptor_rejections.fetch_add(1U,
+                                                     std::memory_order_relaxed);
+      return 0U;
+    }
+    // Reserved permits and physically-open governed descriptors are distinct.
+    // Only the latter can be subtracted from /proc/self/fd.  Treating all
+    // reservations as already-open would admit beyond the intended safety
+    // margin when many threads reserve before calling open().
+    const auto opened =
+        g_process_file_descriptors_opened.load(std::memory_order_acquire);
+    const auto external = *observed > opened ? *observed - opened : 0U;
+    effective_capacity =
+        external >= effective_capacity ? 0U : effective_capacity - external;
+#endif
+    if (current >= effective_capacity) {
+      break;
+    }
+    const auto available = effective_capacity - current;
+    const auto granted = std::min(desired, available);
+    if (granted < minimum) {
+      break;
+    }
+    if (g_process_file_descriptor_permit_corrupted.load(
+            std::memory_order_acquire)) {
+      return 0U;
+    }
+    if (g_process_file_descriptor_permits.compare_exchange_weak(
+            current, current + granted, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      // Close the tiny check/CAS race. If quarantine linearized concurrently,
+      // never expose the claim. Retain it as conservative terminal debt rather
+      // than amount-releasing it and risking theft from another exact owner.
+      if (g_process_file_descriptor_permit_corrupted.load(
+              std::memory_order_acquire)) {
+        return 0U;
+      }
+      return granted;
+    }
+  }
+  return 0U;
+}
+
+[[nodiscard]] std::size_t ConfiguredProcessThreadCapacity() noexcept {
+  constexpr std::size_t kAbsoluteCap = 512U;
+  // Physical thread ownership is deliberately independent from runnable CPU
+  // credits. Wide arenas may keep many parked workers while ProcessCpuGovernor
+  // independently bounds how many execute simultaneously.
+  constexpr std::size_t default_capacity = 256U;
+  std::array<char, 64> configured_storage{};
+  const char *configured = ReadNumericEnvironmentVariable(
+      "SCHEMA_SANITIZER_MAX_PROJECT_THREADS", configured_storage);
+  if (!configured || *configured == '\0') {
+    return default_capacity;
+  }
+  if (*configured == '-') {
+    return 0U;
+  }
+  char *end = nullptr;
+  const auto parsed = std::strtoull(configured, &end, 10);
+  if (end == configured || (end && *end != '\0')) {
+    return default_capacity;
+  }
+  return std::min<std::size_t>(kAbsoluteCap, static_cast<std::size_t>(parsed));
+}
+
+[[nodiscard]] std::optional<std::size_t> ProcessPhysicalThreadCount() noexcept {
+#if defined(__linux__)
+  DIR *directory = ::opendir("/proc/self/task");
+  if (!directory) {
+    return std::nullopt;
+  }
+  std::size_t count = 0U;
+  while (const auto *entry = ::readdir(directory)) {
+    const char first = entry->d_name[0];
+    if (first >= '0' && first <= '9') {
+      ++count;
+    }
+  }
+  if (::closedir(directory) != 0) {
+    return std::nullopt;
+  }
+  return count;
+#elif defined(_WIN32)
+  const DWORD process_id = ::GetCurrentProcessId();
+  HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    return std::nullopt;
+  }
+  THREADENTRY32 entry{};
+  entry.dwSize = sizeof(entry);
+  std::size_t count = 0U;
+  if (::Thread32First(snapshot, &entry) != FALSE) {
+    do {
+      if (entry.th32OwnerProcessID == process_id) {
+        ++count;
+      }
+      entry.dwSize = sizeof(entry);
+    } while (::Thread32Next(snapshot, &entry) != FALSE);
+  } else {
+    ::CloseHandle(snapshot);
+    return std::nullopt;
+  }
+  ::CloseHandle(snapshot);
+  return count;
+#elif defined(__APPLE__)
+  thread_act_array_t threads = nullptr;
+  mach_msg_type_number_t count = 0;
+  if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) {
+    return std::nullopt;
+  }
+  if (threads != nullptr) {
+    const auto bytes = static_cast<vm_size_t>(count) * sizeof(thread_t);
+    (void)vm_deallocate(mach_task_self(),
+                        reinterpret_cast<vm_address_t>(threads), bytes);
+  }
+  return static_cast<std::size_t>(count);
+#else
+  return std::nullopt;
+#endif
+}
+
+[[nodiscard]] std::uint64_t ThreadStackReservationBytes() noexcept {
+  constexpr std::uint64_t kDefault = 8ULL * 1024ULL * 1024ULL;
+  std::array<char, 64> configured_storage{};
+  if (const char *configured = ReadNumericEnvironmentVariable(
+          "SCHEMA_SANITIZER_THREAD_STACK_RESERVATION_BYTES",
+          configured_storage);
+      configured && *configured != '\0') {
+    if (*configured == '-') {
+      return kDefault;
+    }
+    char *end = nullptr;
+    const auto parsed = std::strtoull(configured, &end, 10);
+    if (end != configured && (!end || *end == '\0') && parsed != 0U) {
+      return std::max<std::uint64_t>(kDefault,
+                                     static_cast<std::uint64_t>(parsed));
+    }
+  }
+#if defined(__linux__) || defined(__APPLE__)
+  struct rlimit limits{};
+  if (::getrlimit(RLIMIT_STACK, &limits) == 0 &&
+      limits.rlim_cur != RLIM_INFINITY && limits.rlim_cur != 0U) {
+    return std::max<std::uint64_t>(kDefault,
+                                   static_cast<std::uint64_t>(limits.rlim_cur));
+  }
+#endif
+  return kDefault;
+}
+
+[[nodiscard]] std::optional<std::size_t> ProcessPidThreadHeadroom() noexcept {
+#if defined(__linux__)
+  using cgroup_view_detail::ValueState;
+  const auto version = cgroup_view_detail::current_version("pids");
+  if (version == 1 || version == 2) {
+    const auto sample = cgroup_view_detail::effective_headroom(
+        "pids", "pids.max", "pids.current");
+    if (sample.state == ValueState::kUnknown) {
+      return 0U;
+    }
+    if (sample.state == ValueState::kValue) {
+      constexpr std::size_t kPidReserve = 16U;
+      const auto headroom = static_cast<std::size_t>(std::min<std::uint64_t>(
+          sample.value, std::numeric_limits<std::size_t>::max()));
+      return headroom > kPidReserve ? headroom - kPidReserve : 0U;
+    }
+  }
+#endif
+  return std::nullopt;
+}
+
+// Historical pass70 contract name: ProcessRlimitThreadCapacity. Pass71
+// refines Linux semantics to per-UID headroom rather than a process-local cap.
+[[nodiscard]] std::optional<std::size_t>
+ProcessRlimitThreadHeadroom() noexcept {
+#if defined(__linux__)
+  struct rlimit limits{};
+  if (::getrlimit(RLIMIT_NPROC, &limits) != 0 ||
+      limits.rlim_cur == RLIM_INFINITY) {
+    return std::nullopt;
+  }
+  // RLIMIT_NPROC is charged to the real UID on Linux, not exclusively to this
+  // process. Count same-UID threads from /proc so the admission signal is
+  // headroom rather than a misleading process-local absolute ceiling.
+  DIR *dir = ::opendir("/proc");
+  if (dir == nullptr) {
+    return std::nullopt;
+  }
+  const auto real_uid = static_cast<unsigned long>(::getuid());
+  std::uint64_t uid_threads = 0U;
+  while (const dirent *entry = ::readdir(dir)) {
+    const char *name = entry->d_name;
+    if (name == nullptr || *name < '0' || *name > '9') {
+      continue;
+    }
+    bool numeric = true;
+    for (const char *cursor = name; *cursor != '\0'; ++cursor) {
+      if (*cursor < '0' || *cursor > '9') {
+        numeric = false;
+        break;
+      }
+    }
+    if (!numeric) {
+      continue;
+    }
+    char path[64]{};
+    if (std::snprintf(path, sizeof(path), "/proc/%s/status", name) <= 0) {
+      continue;
+    }
+    FILE *status = std::fopen(path, "r");
+    if (status == nullptr) {
+      continue;
+    }
+    unsigned long observed_uid = std::numeric_limits<unsigned long>::max();
+    std::uint64_t threads = 0U;
+    char line[256]{};
+    while (std::fgets(line, sizeof(line), status) != nullptr) {
+      if (std::strncmp(line, "Uid:", 4U) == 0) {
+        unsigned long parsed = 0U;
+        if (std::sscanf(line + 4, "%lu", &parsed) == 1) {
+          observed_uid = parsed;
+        }
+      } else if (std::strncmp(line, "Threads:", 8U) == 0) {
+        unsigned long long parsed = 0U;
+        if (std::sscanf(line + 8, "%llu", &parsed) == 1) {
+          threads = static_cast<std::uint64_t>(parsed);
+        }
+      }
+    }
+    std::fclose(status);
+    if (observed_uid == real_uid) {
+      const auto max_u64 = std::numeric_limits<std::uint64_t>::max();
+      uid_threads =
+          threads > max_u64 - uid_threads ? max_u64 : uid_threads + threads;
+    }
+  }
+  ::closedir(dir);
+  constexpr std::uint64_t kReserve = 16U;
+  const auto soft = static_cast<std::uint64_t>(limits.rlim_cur);
+  const auto used_with_reserve =
+      uid_threads > std::numeric_limits<std::uint64_t>::max() - kReserve
+          ? std::numeric_limits<std::uint64_t>::max()
+          : uid_threads + kReserve;
+  const auto headroom =
+      soft > used_with_reserve ? soft - used_with_reserve : 0U;
+  return static_cast<std::size_t>(std::min<std::uint64_t>(
+      headroom, std::numeric_limits<std::size_t>::max()));
+#elif defined(__APPLE__)
+  // macOS does not expose Linux /proc accounting. Keep RLIMIT_NPROC as a weak
+  // ceiling signal there; kernel thread creation remains the final authority.
+  struct rlimit limits{};
+  if (::getrlimit(RLIMIT_NPROC, &limits) == 0 &&
+      limits.rlim_cur != RLIM_INFINITY) {
+    constexpr std::uint64_t kReserve = 16U;
+    const auto soft = static_cast<std::uint64_t>(limits.rlim_cur);
+    const auto bounded = soft > kReserve ? soft - kReserve : 0U;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(
+        bounded, std::numeric_limits<std::size_t>::max()));
+  }
+#endif
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::size_t>
+ManagedThreadMemoryCapacity(std::size_t current_permits,
+                            std::size_t stack_reservations) noexcept {
+  const std::uint64_t kStackReservation = ThreadStackReservationBytes();
+  constexpr std::uint64_t kEmergencyReserve = 256ULL * 1024ULL * 1024ULL;
+  std::uint64_t headroom = 0U;
+#if defined(__linux__)
+  using cgroup_view_detail::ValueState;
+  cgroup_view_detail::UnsignedSample sample{};
+  const auto version = cgroup_view_detail::current_version("memory");
+  if (version == 2) {
+    sample = cgroup_view_detail::effective_headroom("memory", "memory.max",
+                                                    "memory.current");
+  } else if (version == 1) {
+    sample = cgroup_view_detail::effective_headroom(
+        "memory", "memory.limit_in_bytes", "memory.usage_in_bytes");
+  } else {
+    return current_permits;
+  }
+  if (sample.state == ValueState::kUnknown) {
+    return current_permits;
+  }
+  if (sample.state == ValueState::kUnbounded) {
+    return std::nullopt;
+  }
+  headroom = sample.value;
+#elif defined(_WIN32)
+  MEMORYSTATUSEX status{};
+  status.dwLength = sizeof(status);
+  if (::GlobalMemoryStatusEx(&status) == FALSE) {
+    return current_permits;
+  }
+  headroom = static_cast<std::uint64_t>(status.ullAvailPhys);
+#elif defined(__APPLE__)
+  mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+  vm_statistics64_data_t stats{};
+  if (::host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                          reinterpret_cast<host_info64_t>(&stats),
+                          &count) != KERN_SUCCESS) {
+    return current_permits;
+  }
+  vm_size_t page_size = 0U;
+  if (::host_page_size(mach_host_self(), &page_size) != KERN_SUCCESS ||
+      page_size == 0U) {
+    return current_permits;
+  }
+  const auto pages = static_cast<std::uint64_t>(stats.free_count) +
+                     static_cast<std::uint64_t>(stats.inactive_count) +
+                     static_cast<std::uint64_t>(stats.speculative_count);
+  headroom = pages > std::numeric_limits<std::uint64_t>::max() / page_size
+                 ? std::numeric_limits<std::uint64_t>::max()
+                 : pages * static_cast<std::uint64_t>(page_size);
+#else
+  return std::nullopt;
+#endif
+  const auto usable =
+      headroom > kEmergencyReserve ? headroom - kEmergencyReserve : 0ULL;
+  const auto max_size =
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+  const auto bounded_permits =
+      std::min<std::uint64_t>(current_permits, max_size);
+  const auto bounded_stacks =
+      std::min<std::uint64_t>(stack_reservations, max_size);
+  const auto virtual_reserved =
+      bounded_stacks >
+              std::numeric_limits<std::uint64_t>::max() / kStackReservation
+          ? std::numeric_limits<std::uint64_t>::max()
+          : bounded_stacks * kStackReservation;
+  const auto remaining =
+      usable > virtual_reserved ? usable - virtual_reserved : 0ULL;
+  const auto additional = remaining / kStackReservation;
+  const auto total =
+      std::min<std::uint64_t>(max_size, bounded_permits + additional);
+  return static_cast<std::size_t>(total);
+}
+
+[[nodiscard]] std::size_t NativePhysicalThreadCapacity() noexcept {
+  constexpr std::size_t kAbsoluteCap = 512U;
+  const auto configured = ConfiguredProcessThreadCapacity();
+  if (configured == 0U) {
+    return 0U;
+  }
+  return std::min(configured, kAbsoluteCap);
+}
+
+class ExternalRuntimeResidencyWriterGuard final {
+public:
+  ExternalRuntimeResidencyWriterGuard() noexcept {
+    while (g_external_runtime_residency_writer.test_and_set(
+        std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }
+  ExternalRuntimeResidencyWriterGuard(
+      const ExternalRuntimeResidencyWriterGuard &) = delete;
+  ExternalRuntimeResidencyWriterGuard &
+  operator=(const ExternalRuntimeResidencyWriterGuard &) = delete;
+  ~ExternalRuntimeResidencyWriterGuard() noexcept {
+    g_external_runtime_residency_writer.clear(std::memory_order_release);
+  }
+};
+
+[[nodiscard]] bool ExternalRuntimeResidencyHealthy() noexcept {
+  return !g_external_runtime_residency_corrupted.load(
+      std::memory_order_acquire);
+}
+
+void QuarantineExternalRuntimeResidency() noexcept {
+  g_external_runtime_residency_corrupted.store(true, std::memory_order_release);
+  g_external_runtime_resident_protocol_violations.fetch_add(
+      1U, std::memory_order_relaxed);
+}
+
+void BeginThreadPermitLedgerMutation() noexcept {
+  g_process_thread_ledger_mutations_inflight.fetch_add(
+      1U, std::memory_order_acq_rel);
+  g_process_thread_ledger_mutation_epoch.fetch_add(1U,
+                                                   std::memory_order_acq_rel);
+}
+
+void EndThreadPermitLedgerMutation() noexcept {
+  // Publish a generation change before dropping the in-flight marker. A reader
+  // that missed the short-lived writer still observes epoch_before !=
+  // epoch_after.
+  g_process_thread_ledger_mutation_epoch.fetch_add(1U,
+                                                   std::memory_order_release);
+  g_process_thread_ledger_mutations_inflight.fetch_sub(
+      1U, std::memory_order_release);
+}
+
+[[nodiscard]] std::size_t
+ProcessThreadStackReservationCount(std::size_t total_reserved) noexcept {
+  const auto managed_reserved =
+      g_process_physical_thread_permits.load(std::memory_order_acquire);
+  const auto external_active =
+      g_process_external_runtime_thread_permits.load(std::memory_order_acquire);
+  const auto resident_stack_debt =
+      g_process_external_runtime_stack_debt_threads.load(
+          std::memory_order_acquire);
+  // Pass69 source-contract breadcrumb: std::max(external_active,
+  // resident_external). Pass70 intentionally substitutes resident_stack_debt so
+  // an unknown identity probe cannot forgive virtual stack memory that may
+  // still be resident.
+  const auto external_stack_width =
+      std::max(external_active, resident_stack_debt);
+  const auto max_size = std::numeric_limits<std::size_t>::max();
+  const auto modelled = managed_reserved > max_size - external_stack_width
+                            ? max_size
+                            : managed_reserved + external_stack_width;
+  // The combined total is the admission authority and can temporarily lead its
+  // domain subledgers while a writer is publishing ownership. Never let that
+  // normal publication window reduce active-stack memory protection.
+  return std::max(total_reserved, modelled);
+}
+
+[[nodiscard]] std::size_t
+EffectiveProcessThreadCapacity(std::size_t total_reserved) noexcept {
+  const auto configured_process_capacity = ConfiguredProcessThreadCapacity();
+  const auto physical_capacity = NativePhysicalThreadCapacity();
+  if (configured_process_capacity == 0U || physical_capacity == 0U) {
+    return 0U;
+  }
+  const auto process_threads = ProcessPhysicalThreadCount();
+  if (!process_threads) {
+    return 0U;
+  }
+  const auto managed_running =
+      g_managed_running_threads.load(std::memory_order_acquire);
+  const auto observed_unmanaged = *process_threads > managed_running
+                                      ? *process_threads - managed_running
+                                      : 0U;
+  const auto resident_external =
+      g_process_external_runtime_resident_threads.load(
+          std::memory_order_acquire);
+  // Only runtime-reported resident workers may offset OS-observed unmanaged
+  // threads. Active claims are reservations, not identity evidence, and are
+  // therefore never subtracted from the observation independently.
+  // Historical source-contract breadcrumb: external_threads are represented by
+  // resident identity evidence, never by active reservation claims.
+  const auto attributed_external =
+      std::min(observed_unmanaged, resident_external);
+  const auto unaccounted_external = observed_unmanaged - attributed_external;
+  // Historical pass53 name breadcrumb: process_managed_capacity. The effective
+  // process capacity is now shared by managed and external active reservations.
+  const auto process_capacity =
+      unaccounted_external >= configured_process_capacity
+          ? 0U
+          : configured_process_capacity - unaccounted_external;
+  auto effective_capacity = std::min(physical_capacity, process_capacity);
+  const auto pid_headroom = ProcessPidThreadHeadroom();
+  if (pid_headroom) {
+    const auto max_size = std::numeric_limits<std::size_t>::max();
+    const auto pid_capacity = *pid_headroom > max_size - total_reserved
+                                  ? max_size
+                                  : total_reserved + *pid_headroom;
+    effective_capacity = std::min(effective_capacity, pid_capacity);
+  } else if (const auto rlimit_headroom = ProcessRlimitThreadHeadroom()) {
+    // cgroup pids is the hard authority when present. RLIMIT_NPROC is a weaker
+    // per-UID fallback; on Linux its /proc scan is therefore paid only when the
+    // cgroup controller cannot supply an authoritative headroom signal.
+#if defined(__linux__)
+    const auto max_size = std::numeric_limits<std::size_t>::max();
+    const auto rlimit_capacity = *rlimit_headroom > max_size - total_reserved
+                                     ? max_size
+                                     : total_reserved + *rlimit_headroom;
+    effective_capacity = std::min(effective_capacity, rlimit_capacity);
+#else
+    effective_capacity = std::min(effective_capacity, *rlimit_headroom);
+#endif
+  }
+  const auto stack_reservations =
+      ProcessThreadStackReservationCount(total_reserved);
+  if (const auto memory_capacity =
+          ManagedThreadMemoryCapacity(total_reserved, stack_reservations)) {
+    effective_capacity = std::min(effective_capacity, *memory_capacity);
+  }
+  return effective_capacity;
+}
+
+template <typename CommitDomain>
+[[nodiscard]] std::size_t
+TryAcquireProcessThreadPermitsUpTo(std::size_t desired, std::size_t minimum,
+                                   CommitDomain &&commit_domain) noexcept {
+  if (!runtime_owner_process() || desired == 0U || minimum == 0U ||
+      minimum > desired ||
+      g_process_thread_permit_corrupted.load(std::memory_order_acquire)) {
+    return 0U;
+  }
+  // Pass53 source-contract breadcrumb:
+  // g_process_physical_thread_permits.compare_exchange_weak was replaced by the
+  // pass68+ combined-total admission CAS; the managed counter is now only an
+  // ownership subledger.
+  auto total = g_process_total_thread_permits.load(std::memory_order_acquire);
+  for (;;) {
+    const auto effective_capacity = EffectiveProcessThreadCapacity(total);
+    if (total >= effective_capacity) {
+      break;
+    }
+    const auto available = effective_capacity - total;
+    const auto granted = std::min(desired, available);
+    if (granted < minimum) {
+      break;
+    }
+    if (g_process_thread_permit_corrupted.load(std::memory_order_acquire)) {
+      break;
+    }
+    BeginThreadPermitLedgerMutation();
+    if (g_process_total_thread_permits.compare_exchange_weak(
+            total, total + granted, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      // The combined reservation is the admission commit. Keep the mutation
+      // marker live until the ownership subledger has published so diagnostics
+      // can obtain a conserving snapshot without serializing writers.
+      // Always publish the matching subledger before observing quarantine so
+      // diagnostics remain conserving. A concurrently poisoned grant is kept as
+      // terminal debt and never exposed; amount-based rollback could otherwise
+      // debit an unrelated exact owner.
+      commit_domain(granted);
+      const bool poisoned =
+          g_process_thread_permit_corrupted.load(std::memory_order_acquire);
+      EndThreadPermitLedgerMutation();
+      if (poisoned) {
+        break;
+      }
+      return granted;
+    }
+    EndThreadPermitLedgerMutation();
+  }
+  g_native_physical_thread_rejections.fetch_add(1U, std::memory_order_relaxed);
+  return 0U;
+}
+
+[[nodiscard]] std::size_t
+TryAcquireProcessPhysicalThreadPermitsUpTo(std::size_t desired,
+                                           std::size_t minimum) noexcept {
+  if (!runtime_owner_process()) {
+    return 0U;
+  }
+  // EffectiveProcessThreadCapacity performs the authoritative fail-closed OS
+  // observation inside the shared CAS loop. Keeping a second observation in
+  // this wrapper would double the platform syscall cost without constraining
+  // the committed grant; contention still re-observes before every retry.
+  return TryAcquireProcessThreadPermitsUpTo(
+      desired, minimum, [](std::size_t granted) noexcept {
+        g_process_physical_thread_permits.fetch_add(granted,
+                                                    std::memory_order_acq_rel);
+      });
+}
+
+[[nodiscard]] std::size_t TryAcquireProcessExternalRuntimeThreadPermitsUpTo(
+    std::size_t desired, std::size_t minimum) noexcept {
+  if (!runtime_owner_process()) {
+    return 0U;
+  }
+  return TryAcquireProcessThreadPermitsUpTo(
+      desired, minimum, [](std::size_t granted) noexcept {
+        g_process_external_runtime_thread_permits.fetch_add(
+            granted, std::memory_order_acq_rel);
+      });
+}
+
+template <class Function>
+[[nodiscard]] std::thread StartGovernedNativeThread(Function &&function) {
+  ProcessPhysicalThreadPermitLease permit(1U);
+  if (!permit) {
+    throw std::system_error(
+        std::make_error_code(std::errc::resource_unavailable_try_again),
+        "native physical thread capacity exhausted");
+  }
+  // The permit moves into the thread callable before std::thread can publish a
+  // running worker. Constructor failure destroys the callable and therefore
+  // returns the permit automatically; normal exit does the same exactly once.
+  return std::thread([permit = std::move(permit),
+                      function = std::forward<Function>(function)]() mutable {
+    g_managed_running_threads.fetch_add(1U, std::memory_order_acq_rel);
+    struct RunningGuard final {
+      ~RunningGuard() {
+        const auto previous =
+            g_managed_running_threads.fetch_sub(1U, std::memory_order_acq_rel);
+        if (previous == 0U) {
+          g_managed_running_threads.store(0U, std::memory_order_release);
+          g_native_counter_underflows.fetch_add(1U, std::memory_order_relaxed);
+        }
+      }
+    } running_guard;
+    std::invoke(function);
+  });
+}
 
 bool TryAcquireReaperThreadPermit() noexcept {
   auto current = g_reaper_thread_permits.load(std::memory_order_acquire);
@@ -49,25 +825,631 @@ bool TryAcquireReaperThreadPermit() noexcept {
   return false;
 }
 
-void SaturatingAtomicSubtract(std::atomic<std::size_t> &target,
-                              std::size_t amount) noexcept {
+[[nodiscard]] std::size_t SaturatingAtomicTake(std::atomic<std::size_t> &target,
+                                               std::size_t amount) noexcept {
   auto current = target.load(std::memory_order_acquire);
   while (true) {
-    const auto next = current >= amount ? current - amount : 0U;
+    const auto removed = std::min(current, amount);
+    const auto next = current - removed;
     if (current < amount) {
       g_native_counter_underflows.fetch_add(1U, std::memory_order_relaxed);
     }
     if (target.compare_exchange_weak(current, next, std::memory_order_acq_rel,
                                      std::memory_order_acquire)) {
-      return;
+      return removed;
     }
   }
+}
+
+[[nodiscard]] std::size_t TakePermitDomainOrQuarantine(
+    std::atomic<std::size_t> &target, std::size_t amount,
+    std::atomic<bool> &corrupted,
+    std::atomic<std::size_t> *protocol_violations = nullptr) noexcept {
+  auto current = target.load(std::memory_order_acquire);
+  bool violation_recorded = false;
+  for (;;) {
+    const bool invalid = current < amount;
+    if (invalid) {
+      // Poison before attempting the debit. A concurrent acquisition that
+      // already won its CAS performs a post-CAS poison check and retains that
+      // tentative grant as conservative terminal debt, so an invalid release
+      // can never be "made valid" by stealing capacity from a later owner.
+      // Record each bad release once even if its CAS retries.
+      corrupted.store(true, std::memory_order_release);
+      if (!violation_recorded) {
+        violation_recorded = true;
+        g_native_counter_underflows.fetch_add(1U, std::memory_order_relaxed);
+        if (protocol_violations != nullptr) {
+          protocol_violations->fetch_add(1U, std::memory_order_relaxed);
+        }
+      }
+    }
+    const auto removed = std::min(current, amount);
+    const auto next = current - removed;
+    if (target.compare_exchange_weak(current, next, std::memory_order_acq_rel,
+                                     std::memory_order_acquire)) {
+      return removed;
+    }
+  }
+}
+
+void SaturatingAtomicSubtract(std::atomic<std::size_t> &target,
+                              std::size_t amount) noexcept {
+  static_cast<void>(SaturatingAtomicTake(target, amount));
 }
 
 void ReleaseReaperThreadPermit() noexcept {
   SaturatingAtomicSubtract(g_reaper_thread_permits, 1U);
 }
+
+struct ThreadPermitLedgerSnapshot final {
+  std::size_t managed = 0U;
+  std::size_t external = 0U;
+  std::size_t total = 0U;
+  bool stable = false;
+};
+
+[[nodiscard]] ThreadPermitLedgerSnapshot
+ReadThreadPermitLedgerSnapshot() noexcept {
+  ThreadPermitLedgerSnapshot out;
+  for (std::size_t attempt = 0U; attempt < 4096U; ++attempt) {
+    const auto epoch_before =
+        g_process_thread_ledger_mutation_epoch.load(std::memory_order_acquire);
+    if (g_process_thread_ledger_mutations_inflight.load(
+            std::memory_order_acquire) != 0U) {
+      std::this_thread::yield();
+      continue;
+    }
+    out.managed =
+        g_process_physical_thread_permits.load(std::memory_order_acquire);
+    out.external = g_process_external_runtime_thread_permits.load(
+        std::memory_order_acquire);
+    out.total = g_process_total_thread_permits.load(std::memory_order_acquire);
+    // Close the optimistic snapshot with an acquire/release RMW. The release
+    // half keeps every preceding subledger load before this linearization
+    // point; the acquire half observes a writer's published epoch. A zero
+    // increment leaves the generation unchanged while remaining visible to
+    // ThreadSanitizer, whose GCC runtime cannot model a standalone fence.
+    const auto epoch_after = g_process_thread_ledger_mutation_epoch.fetch_add(
+        0U, std::memory_order_acq_rel);
+    if (g_process_thread_ledger_mutations_inflight.load(
+            std::memory_order_acquire) == 0U &&
+        epoch_before == epoch_after &&
+        out.managed <= std::numeric_limits<std::size_t>::max() - out.external &&
+        out.total == out.managed + out.external) {
+      out.stable = true;
+      return out;
+    }
+    std::this_thread::yield();
+  }
+  return out;
+}
 } // namespace
+
+std::uint64_t process_thread_stack_reservation_bytes() noexcept {
+  return ThreadStackReservationBytes();
+}
+
+std::optional<std::size_t> process_physical_thread_count() noexcept {
+  return ProcessPhysicalThreadCount();
+}
+
+std::size_t
+acquire_process_physical_thread_permits(std::size_t desired,
+                                        std::size_t minimum) noexcept {
+  return TryAcquireProcessPhysicalThreadPermitsUpTo(desired, minimum);
+}
+
+void release_process_physical_thread_permits(std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  BeginThreadPermitLedgerMutation();
+  const auto removed =
+      TakePermitDomainOrQuarantine(g_process_physical_thread_permits, amount,
+                                   g_process_thread_permit_corrupted);
+  if (removed != 0U) {
+    static_cast<void>(
+        TakePermitDomainOrQuarantine(g_process_total_thread_permits, removed,
+                                     g_process_thread_permit_corrupted));
+  }
+  EndThreadPermitLedgerMutation();
+}
+
+std::size_t
+acquire_process_external_runtime_thread_permits(std::size_t desired,
+                                                std::size_t minimum) noexcept {
+  return TryAcquireProcessExternalRuntimeThreadPermitsUpTo(desired, minimum);
+}
+
+void release_process_external_runtime_thread_permits(
+    std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  BeginThreadPermitLedgerMutation();
+  const auto removed =
+      TakePermitDomainOrQuarantine(g_process_external_runtime_thread_permits,
+                                   amount, g_process_thread_permit_corrupted);
+  if (removed != 0U) {
+    static_cast<void>(
+        TakePermitDomainOrQuarantine(g_process_total_thread_permits, removed,
+                                     g_process_thread_permit_corrupted));
+  }
+  EndThreadPermitLedgerMutation();
+}
+
+void add_process_external_runtime_resident_threads(
+    std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  constexpr std::size_t kSaneSingleObservation = 65536U;
+  if (amount > kSaneSingleObservation || !ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  ExternalRuntimeResidencyWriterGuard writer;
+  if (!ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  BeginThreadPermitLedgerMutation();
+  auto current = g_process_external_runtime_resident_threads.load(
+      std::memory_order_relaxed);
+  const auto debt = g_process_external_runtime_stack_debt_threads.load(
+      std::memory_order_relaxed);
+  const auto max_size = std::numeric_limits<std::size_t>::max();
+  if (amount > max_size - current) {
+    QuarantineExternalRuntimeResidency();
+    EndThreadPermitLedgerMutation();
+    return;
+  }
+  const auto target = current + amount;
+  if (target > debt) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    EndThreadPermitLedgerMutation();
+    return;
+  }
+  // Retain a CAS publication even under the writer gate: source-contract tests
+  // assert that resident identity never regressed to unchecked fetch_add.
+  while (!g_process_external_runtime_resident_threads.compare_exchange_weak(
+      current, target, std::memory_order_release, std::memory_order_relaxed)) {
+    // The writer gate excludes competing stores; only a permitted spurious weak
+    // CAS failure can retry here.
+  }
+  EndThreadPermitLedgerMutation();
+}
+
+void release_process_external_runtime_resident_threads(
+    std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  if (!ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  ExternalRuntimeResidencyWriterGuard writer;
+  if (!ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  BeginThreadPermitLedgerMutation();
+  const auto current = g_process_external_runtime_resident_threads.load(
+      std::memory_order_relaxed);
+  if (amount > current) {
+    QuarantineExternalRuntimeResidency();
+    EndThreadPermitLedgerMutation();
+    return;
+  }
+  g_process_external_runtime_resident_threads.store(current - amount,
+                                                    std::memory_order_release);
+  EndThreadPermitLedgerMutation();
+}
+
+void add_process_external_runtime_stack_debt_threads(
+    std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  constexpr std::size_t kSaneSingleObservation = 65536U;
+  if (amount > kSaneSingleObservation || !ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  ExternalRuntimeResidencyWriterGuard writer;
+  if (!ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  BeginThreadPermitLedgerMutation();
+  auto current = g_process_external_runtime_stack_debt_threads.load(
+      std::memory_order_relaxed);
+  const auto max_size = std::numeric_limits<std::size_t>::max();
+  if (amount > max_size - current) {
+    QuarantineExternalRuntimeResidency();
+    EndThreadPermitLedgerMutation();
+    return;
+  }
+  const auto target = current + amount;
+  while (!g_process_external_runtime_stack_debt_threads.compare_exchange_weak(
+      current, target, std::memory_order_release, std::memory_order_relaxed)) {
+    // Writer exclusivity means a retry only handles a spurious weak-CAS
+    // failure.
+  }
+  EndThreadPermitLedgerMutation();
+}
+
+void release_process_external_runtime_stack_debt_threads(
+    std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  if (!ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  ExternalRuntimeResidencyWriterGuard writer;
+  if (!ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  BeginThreadPermitLedgerMutation();
+  const auto debt = g_process_external_runtime_stack_debt_threads.load(
+      std::memory_order_relaxed);
+  const auto identity = g_process_external_runtime_resident_threads.load(
+      std::memory_order_relaxed);
+  if (amount > debt || debt - amount < identity) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    EndThreadPermitLedgerMutation();
+    return;
+  }
+  g_process_external_runtime_stack_debt_threads.store(
+      debt - amount, std::memory_order_release);
+  EndThreadPermitLedgerMutation();
+}
+
+void update_process_external_runtime_residency(
+    std::int64_t identity_delta, std::int64_t stack_debt_delta) noexcept {
+  if (!runtime_owner_process()) {
+    return;
+  }
+  constexpr std::uint64_t kSaneDelta = 65536U;
+  const auto magnitude = [](std::int64_t value) noexcept -> std::uint64_t {
+    if (value >= 0) {
+      return static_cast<std::uint64_t>(value);
+    }
+    return static_cast<std::uint64_t>(-(value + 1)) + 1U;
+  };
+  if (magnitude(identity_delta) > kSaneDelta ||
+      magnitude(stack_debt_delta) > kSaneDelta ||
+      !ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  const auto apply_delta = [](std::size_t current, std::int64_t delta,
+                              std::size_t *target) noexcept -> bool {
+    if (delta >= 0) {
+      const auto amount = static_cast<std::uint64_t>(delta);
+      if (amount > std::numeric_limits<std::size_t>::max() - current) {
+        return false;
+      }
+      *target = current + static_cast<std::size_t>(amount);
+      return true;
+    }
+    const auto amount = static_cast<std::uint64_t>(-(delta + 1)) + 1U;
+    if (amount > current) {
+      return false;
+    }
+    *target = current - static_cast<std::size_t>(amount);
+    return true;
+  };
+
+  ExternalRuntimeResidencyWriterGuard writer;
+  if (!ExternalRuntimeResidencyHealthy()) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    return;
+  }
+  BeginThreadPermitLedgerMutation();
+  // Validation occurs after exclusive writer authority is held and therefore
+  // applies to the exact state that will be published.
+  const auto current_identity =
+      g_process_external_runtime_resident_threads.load(
+          std::memory_order_relaxed);
+  const auto current_debt = g_process_external_runtime_stack_debt_threads.load(
+      std::memory_order_relaxed);
+  std::size_t target_identity = 0U;
+  std::size_t target_debt = 0U;
+  if (!apply_delta(current_identity, identity_delta, &target_identity) ||
+      !apply_delta(current_debt, stack_debt_delta, &target_debt) ||
+      target_debt < target_identity) {
+    g_external_runtime_resident_protocol_violations.fetch_add(
+        1U, std::memory_order_relaxed);
+    EndThreadPermitLedgerMutation();
+    return;
+  }
+  // Publish in invariant-preserving order so lock-free single-field readers are
+  // conservative even during the short transaction window.
+  if (target_debt > current_debt) {
+    g_process_external_runtime_stack_debt_threads.store(
+        target_debt, std::memory_order_release);
+  }
+  if (target_identity < current_identity) {
+    g_process_external_runtime_resident_threads.store(
+        target_identity, std::memory_order_release);
+  }
+  if (target_identity > current_identity) {
+    g_process_external_runtime_resident_threads.store(
+        target_identity, std::memory_order_release);
+  }
+  if (target_debt < current_debt) {
+    g_process_external_runtime_stack_debt_threads.store(
+        target_debt, std::memory_order_release);
+  }
+  EndThreadPermitLedgerMutation();
+}
+
+std::size_t
+acquire_process_file_descriptor_permits(std::size_t desired,
+                                        std::size_t minimum) noexcept {
+  const auto granted = TryAcquireProcessFdPermitsUpTo(desired, minimum);
+  if (granted == 0U) {
+    g_process_file_descriptor_rejections.fetch_add(1U,
+                                                   std::memory_order_relaxed);
+  }
+  return granted;
+}
+
+void SkipCancelledFdTicketsLocked() noexcept {
+  for (;;) {
+    const auto serving =
+        g_process_fd_serving_ticket.load(std::memory_order_acquire);
+    auto &slot = g_process_fd_cancelled_tickets[static_cast<std::size_t>(
+        serving % kProcessFdTicketSlots)];
+    const auto encoded = slot.load(std::memory_order_acquire);
+    if (encoded != serving + 1U) {
+      return;
+    }
+    slot.store(0U, std::memory_order_release);
+    g_process_fd_serving_ticket.store(serving + 1U, std::memory_order_release);
+  }
+}
+
+void RetireFdTicketLocked(std::uint64_t ticket) noexcept {
+  const auto serving =
+      g_process_fd_serving_ticket.load(std::memory_order_acquire);
+  if (serving == ticket) {
+    g_process_fd_serving_ticket.store(ticket + 1U, std::memory_order_release);
+    SkipCancelledFdTicketsLocked();
+    return;
+  }
+  g_process_fd_cancelled_tickets[static_cast<std::size_t>(
+                                     ticket % kProcessFdTicketSlots)]
+      .store(ticket + 1U, std::memory_order_release);
+}
+
+bool TryReserveFdTicket(std::uint64_t *ticket_out) noexcept {
+  if (ticket_out == nullptr) {
+    return false;
+  }
+  auto next = g_process_fd_next_ticket.load(std::memory_order_acquire);
+  for (;;) {
+    const auto serving =
+        g_process_fd_serving_ticket.load(std::memory_order_acquire);
+    if (next < serving) {
+      // Ticket wrap is never allowed while a generation is live.
+      return false;
+    }
+    const auto backlog = next - serving;
+    if (backlog >= static_cast<std::uint64_t>(kProcessFdTicketSlots - 1U) ||
+        next == std::numeric_limits<std::uint64_t>::max()) {
+      return false;
+    }
+    if (g_process_fd_next_ticket.compare_exchange_weak(
+            next, next + 1U, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      *ticket_out = next;
+      return true;
+    }
+  }
+}
+
+std::size_t acquire_process_file_descriptor_permits_wait(
+    std::size_t desired, std::size_t minimum,
+    std::uint64_t timeout_millis) noexcept {
+  if (!runtime_owner_process()) {
+    g_process_file_descriptor_rejections.fetch_add(1U,
+                                                   std::memory_order_relaxed);
+    return 0U;
+  }
+  if (timeout_millis == 0U) {
+    const auto granted = TryAcquireProcessFdPermitsUpTo(desired, minimum);
+    if (granted == 0U) {
+      g_process_file_descriptor_rejections.fetch_add(1U,
+                                                     std::memory_order_relaxed);
+    }
+    return granted;
+  }
+  std::uint64_t ticket = 0U;
+  // Admission is bounded by unresolved ticket distance, not by the number of
+  // currently live waiter threads. Timed-out followers leave tombstones until
+  // serving reaches them, so waiter-count admission could otherwise reuse a
+  // ring slot and erase an unconsumed cancellation generation.
+  if (!TryReserveFdTicket(&ticket)) {
+    g_process_file_descriptor_rejections.fetch_add(1U,
+                                                   std::memory_order_relaxed);
+    return 0U;
+  }
+  struct WaiterGuard final {
+    WaiterGuard() noexcept {
+      g_process_fd_waiters.fetch_add(1U, std::memory_order_acq_rel);
+    }
+    ~WaiterGuard() {
+      g_process_fd_waiters.fetch_sub(1U, std::memory_order_release);
+    }
+  } waiter_guard;
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_millis);
+  constexpr auto kExternalObservationPoll = std::chrono::milliseconds(50);
+  std::unique_lock<std::mutex> lock(g_process_fd_wait_mutex);
+  for (;;) {
+    SkipCancelledFdTicketsLocked();
+    if (!runtime_owner_process() ||
+        g_process_file_descriptor_permit_corrupted.load(
+            std::memory_order_acquire)) {
+      RetireFdTicketLocked(ticket);
+      g_process_fd_wait_cv.notify_all();
+      g_process_file_descriptor_rejections.fetch_add(1U,
+                                                     std::memory_order_relaxed);
+      return 0U;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      RetireFdTicketLocked(ticket);
+      g_process_fd_wait_cv.notify_all();
+      g_process_file_descriptor_rejections.fetch_add(1U,
+                                                     std::memory_order_relaxed);
+      return 0U;
+    }
+    if (g_process_fd_serving_ticket.load(std::memory_order_acquire) == ticket) {
+      lock.unlock();
+      const auto granted =
+          TryAcquireProcessFdPermitsUpTo(desired, minimum, true);
+      lock.lock();
+      if (granted != 0U) {
+        RetireFdTicketLocked(ticket);
+        g_process_fd_wait_cv.notify_all();
+        return granted;
+      }
+    }
+    // Poll at a small bounded interval as well as on governor epochs so closing
+    // an unrelated external FD (which cannot notify us) is still observed.
+    const auto wake = std::min(deadline, std::chrono::steady_clock::now() +
+                                             kExternalObservationPoll);
+    const auto epoch = g_process_fd_epoch.load(std::memory_order_acquire);
+    g_process_fd_wait_cv.wait_until(lock, wake, [&] {
+      return g_process_fd_epoch.load(std::memory_order_acquire) != epoch ||
+             g_process_fd_serving_ticket.load(std::memory_order_acquire) ==
+                 ticket ||
+             !runtime_owner_process() ||
+             g_process_file_descriptor_permit_corrupted.load(
+                 std::memory_order_acquire);
+    });
+  }
+}
+
+void release_process_file_descriptor_permits(std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  static_cast<void>(TakePermitDomainOrQuarantine(
+      g_process_file_descriptor_permits, amount,
+      g_process_file_descriptor_permit_corrupted,
+      &g_process_file_descriptor_protocol_violations));
+  {
+    std::lock_guard<std::mutex> lock(g_process_fd_wait_mutex);
+    g_process_fd_epoch.fetch_add(1U, std::memory_order_acq_rel);
+  }
+  g_process_fd_wait_cv.notify_all();
+}
+
+void mark_process_file_descriptors_opened(std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  const auto reserved =
+      g_process_file_descriptor_permits.load(std::memory_order_acquire);
+  auto opened =
+      g_process_file_descriptors_opened.load(std::memory_order_acquire);
+  while (opened < reserved) {
+    const auto available = reserved - opened;
+    const auto delta = std::min(amount, available);
+    if (delta == 0U) {
+      break;
+    }
+    if (g_process_file_descriptors_opened.compare_exchange_weak(
+            opened, opened + delta, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      break;
+    }
+  }
+}
+
+void mark_process_file_descriptors_closed(std::size_t amount) noexcept {
+  if (!runtime_owner_process() || amount == 0U) {
+    return;
+  }
+  SaturatingAtomicSubtract(g_process_file_descriptors_opened, amount);
+  {
+    std::lock_guard<std::mutex> lock(g_process_fd_wait_mutex);
+    g_process_fd_epoch.fetch_add(1U, std::memory_order_acq_rel);
+  }
+  g_process_fd_wait_cv.notify_all();
+}
+
+std::size_t process_file_descriptor_permits_in_use() noexcept {
+  return g_process_file_descriptor_permits.load(std::memory_order_acquire);
+}
+
+std::size_t process_file_descriptors_opened() noexcept {
+  return g_process_file_descriptors_opened.load(std::memory_order_acquire);
+}
+
+std::optional<std::size_t> process_file_descriptor_count() noexcept {
+  return ProcessFileDescriptorCount();
+}
+
+std::size_t process_file_descriptor_rejections() noexcept {
+  return g_process_file_descriptor_rejections.load(std::memory_order_acquire);
+}
+
+void record_process_file_descriptor_protocol_violation() noexcept {
+  g_process_file_descriptor_protocol_violations.fetch_add(
+      1U, std::memory_order_relaxed);
+}
+
+void record_process_file_descriptor_uncertain_close_debt(
+    std::size_t amount) noexcept {
+  if (amount != 0U) {
+    g_process_file_descriptor_uncertain_close_debts.fetch_add(
+        amount, std::memory_order_relaxed);
+  }
+}
+
+std::size_t process_file_descriptor_protocol_violations() noexcept {
+  return g_process_file_descriptor_protocol_violations.load(
+      std::memory_order_acquire);
+}
+
+std::size_t process_file_descriptor_uncertain_close_debts() noexcept {
+  return g_process_file_descriptor_uncertain_close_debts.load(
+      std::memory_order_acquire);
+}
+
+std::size_t process_file_descriptor_capacity() noexcept {
+  return ConfiguredProcessFdCapacity();
+}
+
+void mark_process_physical_thread_running() noexcept {
+  g_managed_running_threads.fetch_add(1U, std::memory_order_acq_rel);
+}
+
+void mark_process_physical_thread_stopped() noexcept {
+  SaturatingAtomicSubtract(g_managed_running_threads, 1U);
+}
 
 struct OperationTaskArena::DetachedMetrics final {
   explicit DetachedMetrics(std::size_t worker_count)
@@ -133,6 +1515,20 @@ namespace {
 constexpr auto kArenaShutdownDrain = std::chrono::seconds(2);
 std::atomic<std::uint64_t> g_arena_generation{0};
 
+[[nodiscard]] std::uint64_t NextArenaGeneration() noexcept {
+  auto current = g_arena_generation.load(std::memory_order_relaxed);
+  for (;;) {
+    if (current == std::numeric_limits<std::uint64_t>::max()) {
+      return 0U;
+    }
+    if (g_arena_generation.compare_exchange_weak(current, current + 1U,
+                                                 std::memory_order_relaxed,
+                                                 std::memory_order_relaxed)) {
+      return current + 1U;
+    }
+  }
+}
+
 class ArenaWorkerThread final {
 public:
   struct Completion final {
@@ -146,9 +1542,10 @@ public:
 
   template <class Function>
   explicit ArenaWorkerThread(Function &&function)
-      : stop_source_(), completion_(std::make_shared<Completion>()),
-        thread_([token = stop_source_.get_token(), completion = completion_,
-                 function = std::forward<Function>(function)]() mutable {
+      : stop_source_(), completion_(std::make_shared<Completion>()) {
+    thread_ = StartGovernedNativeThread(
+        [token = stop_source_.get_token(), completion = completion_,
+         function = std::forward<Function>(function)]() mutable {
           try {
             std::invoke(function, token);
           } catch (...) {
@@ -167,7 +1564,8 @@ public:
           if (metrics) {
             metrics->Complete(detached_id);
           }
-        }) {}
+        });
+  }
 
   ArenaWorkerThread(const ArenaWorkerThread &) = delete;
   ArenaWorkerThread &operator=(const ArenaWorkerThread &) = delete;
@@ -279,11 +1677,41 @@ struct OperationTaskArena::State final {
     }
     // Queued closures are only one consumer of the operation budget. Retain
     // headroom for active tasks, result reordering, parser buffers, and output.
-    // A larger operation budget must not inflate the worker-derived queue: the
-    // budget is an upper bound, not a queue-sizing target.
-    return std::min(task_bound,
-                    std::max<std::size_t>(kDefaultCharge, memory_limit / 4U));
+    // Task-count capacity and retained-byte capacity are independent bounds:
+    // explicitly charged packets can be hundreds of KiB even when only two
+    // workers are active. Deriving the byte ceiling from the 256-byte default
+    // metadata charge makes two legitimate explicit packets mutually exclusive
+    // (for two workers it capped the whole arena at 256 KiB). The operation
+    // memory budget remains the authoritative physical ceiling, while this
+    // independent quarter-budget is a conservative retained-ownership
+    // backpressure envelope.
+    return std::max<std::size_t>(kDefaultCharge, memory_limit / 4U);
   }
+  static std::size_t ProducerWaiterCapacity(
+      std::size_t count,
+      const std::shared_ptr<PerformanceTelemetry> &telemetry) noexcept {
+    constexpr std::size_t kMinWaiters = 64U;
+    constexpr std::size_t kMaxWaiters = 2048U;
+    const auto scaled = count > kMaxWaiters / 32U
+                            ? kMaxWaiters
+                            : std::max(kMinWaiters, count * 32U);
+    if (!telemetry || telemetry->memory_limit_bytes() <= 0) {
+      return std::min(kMaxWaiters, scaled);
+    }
+    constexpr std::size_t kEstimatedTicketBytes = 64U;
+    const auto memory_bound = std::max<std::size_t>(
+        1U, static_cast<std::size_t>(telemetry->memory_limit_bytes()) /
+                (64U * kEstimatedTicketBytes));
+    return std::max<std::size_t>(1U,
+                                 std::min({kMaxWaiters, scaled, memory_bound}));
+  }
+  struct BackpressureWaitTicket final {
+    bool active = false;
+    std::uint64_t sequence = 0U;
+    std::size_t requested_bytes = 0U;
+    std::size_t bypasses = 0U;
+    std::int64_t waiting_since_ns = 0;
+  };
   struct alignas(64) QueueVisibilityShard final {
     // Global worker bits are split into bounded eight-worker publication
     // domains above eight workers. Narrow lanes therefore avoid contending on
@@ -344,13 +1772,16 @@ struct OperationTaskArena::State final {
         : tasks(resource), abandoned_tasks(resource) {}
   };
   explicit State(std::size_t count,
-                 std::shared_ptr<PerformanceTelemetry> telemetry_owner)
-      : generation(g_arena_generation.fetch_add(1, std::memory_order_relaxed) +
-                   1U),
-        worker_count(count), scalable_scan(count > 32U),
+                 std::shared_ptr<PerformanceTelemetry> telemetry_owner,
+                 std::uint64_t generation_value)
+      : generation(generation_value), worker_count(count),
+        scalable_scan(count > 32U),
         queue_capacity(QueueCapacity(count, telemetry_owner)),
         queue_byte_capacity(QueueByteCapacity(queue_capacity, telemetry_owner)),
-        cpu_registration(process_cpu_governor().MakeRegistration(count > 1U)),
+        producer_waiter_capacity(
+            ProducerWaiterCapacity(count, telemetry_owner)),
+        backpressure_tickets(producer_waiter_capacity),
+        cpu_registration(process_cpu_governor().MakeRegistration(count)),
         telemetry(std::move(telemetry_owner)),
         operation_resource(std::make_shared<PoolResource>(
             telemetry ? std::static_pointer_cast<void>(telemetry->memory_pool())
@@ -366,6 +1797,8 @@ struct OperationTaskArena::State final {
   const bool scalable_scan;
   const std::size_t queue_capacity;
   const std::size_t queue_byte_capacity;
+  const std::size_t producer_waiter_capacity;
+  std::vector<BackpressureWaitTicket> backpressure_tickets;
   ProcessCpuGovernor::Registration cpu_registration;
   // The historical publication domain remains the sole 1-8-worker line and
   // the first high-core shard. Three additional aligned shards cover workers
@@ -389,6 +1822,15 @@ struct OperationTaskArena::State final {
   alignas(64) std::atomic<std::size_t> output_cursor{0};
   alignas(64) std::atomic<std::size_t> all_cursor{0};
   alignas(64) std::atomic<bool> stopping{false};
+  std::atomic<bool> cancel_requested{false};
+  // Per-saturation timeout and optional absolute operation deadline. Both are
+  // allocation-free atomics; every wait recomputes their effective minimum so
+  // runtime shortening takes effect after the setter wakes waiters.
+  std::atomic<std::int64_t> backpressure_timeout_ns{
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::seconds(30))
+          .count()};
+  std::atomic<std::int64_t> backpressure_deadline_ns{0};
   std::mutex inline_mutex;
   std::condition_variable inline_ready;
   std::atomic<std::size_t> inline_active{0};
@@ -400,13 +1842,48 @@ struct OperationTaskArena::State final {
   alignas(64) std::atomic<std::size_t> queued_total{0};
   std::atomic<std::size_t> peak_queued{0};
   std::atomic<std::size_t> rejected_submissions{0};
+  std::atomic<std::size_t> output_preference_bypasses{0};
   std::atomic<std::size_t> queued_bytes{0};
   std::atomic<std::size_t> active_bytes{0};
   std::atomic<std::size_t> retained_bytes_total{0};
+  // Versioned retained-byte availability plus a preallocated condition variable
+  // provide deadline-bounded producer backpressure. Every release/shutdown
+  // advances the epoch before notifying both legacy atomic observers and timed
+  // waiters; no waiter holds a worker queue mutex while blocked.
+  std::atomic<std::uint64_t> retained_epoch{0};
+  std::mutex retained_wait_mutex;
+  std::condition_variable retained_ready;
+  void NotifyRetainedAvailability(bool wake_all = false) noexcept {
+    // Serialize the epoch transition with the CV waiter's final recheck so a
+    // release cannot land between that recheck and the atomic unlock+sleep.
+    // This closes the classic lost-wakeup window while keeping queue mutexes
+    // completely out of the backpressure wait path.
+    {
+      std::lock_guard retained_lock(retained_wait_mutex);
+      retained_epoch.fetch_add(1U, std::memory_order_release);
+    }
+    (void)wake_all;
+    // Waiters can request different byte charges. A single arbitrary wake can
+    // select a request that still does not fit while a smaller request remains
+    // asleep despite available credit. Wake the bounded waiter set and let the
+    // authoritative CAS choose requests that fit.
+    // Pass58 compatibility breadcrumb: retained_ready.notify_one() was used
+    // here.
+    retained_epoch.notify_all();
+    retained_ready.notify_all();
+  }
   std::atomic<std::size_t> peak_queued_bytes{0};
   std::atomic<std::size_t> peak_active_bytes{0};
   std::atomic<std::size_t> peak_retained_bytes_total{0};
   std::atomic<std::size_t> rejected_byte_submissions{0};
+  std::atomic<std::size_t> backpressure_timeouts{0};
+  std::atomic<std::size_t> logical_backpressure_timeouts{0};
+  std::atomic<std::size_t> backpressure_waiters{0};
+  std::atomic<std::size_t> peak_backpressure_waiters{0};
+  std::atomic<std::size_t> rejected_backpressure_waiters{0};
+  std::atomic<std::size_t> backpressure_bypasses{0};
+  std::atomic<std::size_t> starvation_preventions{0};
+  std::uint64_t backpressure_ticket_sequence = 0U; // retained_wait_mutex owned
   std::atomic<std::size_t> unknown_charge_submissions{0};
   std::atomic<std::size_t> inline_submitted{0};
   std::atomic<std::size_t> abandoned_queued_tasks{0};
@@ -417,12 +1894,262 @@ struct OperationTaskArena::State final {
   std::shared_ptr<State> reaper_self;
   std::shared_ptr<DetachedMetrics> reaper_metrics;
   std::size_t reaper_bytes = 0U;
-  std::size_t reaper_reserved_bytes = 0U;
+  std::atomic<std::size_t> reaper_reserved_bytes{0U};
   bool reaper_reserved = false;
   std::int64_t reaper_parked_since_ns = 0;
 };
 
 namespace {
+
+inline void UpdateEarlyPeak(std::atomic<std::size_t> &peak,
+                            std::size_t value) noexcept {
+  auto current = peak.load(std::memory_order_relaxed);
+  while (current < value &&
+         !peak.compare_exchange_weak(current, value, std::memory_order_relaxed,
+                                     std::memory_order_relaxed)) {
+  }
+}
+
+sanitize::Status AcquireRetainedSubmitCredit(
+    const std::shared_ptr<OperationTaskArena::State> &state,
+    std::size_t retained_bytes) {
+  constexpr auto kRetainedBackpressureDeadline = std::chrono::seconds(30);
+  constexpr std::size_t kMaxOldestBypasses = 4U;
+  constexpr std::size_t kNoTicket = std::numeric_limits<std::size_t>::max();
+  const auto backpressure_started_at = std::chrono::steady_clock::now();
+  const auto hard_wait_deadline =
+      backpressure_started_at + kRetainedBackpressureDeadline;
+  std::size_t ticket_index = kNoTicket;
+
+  const auto retire_ticket_locked = [&]() noexcept {
+    if (ticket_index == kNoTicket ||
+        ticket_index >= state->backpressure_tickets.size()) {
+      return;
+    }
+    auto &ticket = state->backpressure_tickets[ticket_index];
+    if (!ticket.active) {
+      ticket_index = kNoTicket;
+      return;
+    }
+    ticket = OperationTaskArena::State::BackpressureWaitTicket{};
+    SaturatingAtomicSubtract(state->backpressure_waiters, 1U);
+    ticket_index = kNoTicket;
+    state->retained_epoch.fetch_add(1U, std::memory_order_release);
+  };
+
+  const auto retire_ticket = [&]() noexcept {
+    bool wake = false;
+    {
+      std::lock_guard lock(state->retained_wait_mutex);
+      wake = ticket_index != kNoTicket;
+      retire_ticket_locked();
+    }
+    if (wake) {
+      state->retained_epoch.notify_all();
+      state->retained_ready.notify_all();
+    }
+  };
+
+  const auto register_ticket = [&]() -> bool {
+    std::lock_guard lock(state->retained_wait_mutex);
+    if (ticket_index != kNoTicket) {
+      return true;
+    }
+    std::size_t free_index = kNoTicket;
+    for (std::size_t index = 0U; index < state->backpressure_tickets.size();
+         ++index) {
+      if (!state->backpressure_tickets[index].active) {
+        free_index = index;
+        break;
+      }
+    }
+    if (free_index == kNoTicket) {
+      state->rejected_backpressure_waiters.fetch_add(1U,
+                                                     std::memory_order_relaxed);
+      return false;
+    }
+    auto next_sequence = state->backpressure_ticket_sequence + 1U;
+    if (next_sequence == 0U) {
+      next_sequence = 1U;
+    }
+    state->backpressure_ticket_sequence = next_sequence;
+    auto &ticket = state->backpressure_tickets[free_index];
+    ticket.active = true;
+    ticket.sequence = next_sequence;
+    ticket.requested_bytes = retained_bytes;
+    ticket.bypasses = 0U;
+    ticket.waiting_since_ns = PerformanceTelemetry::NowNs();
+    ticket_index = free_index;
+    const auto waiters =
+        state->backpressure_waiters.fetch_add(1U, std::memory_order_acq_rel) +
+        1U;
+    UpdateEarlyPeak(state->peak_backpressure_waiters, waiters);
+    return true;
+  };
+
+  const auto try_admit = [&]() -> bool {
+    std::lock_guard lock(state->retained_wait_mutex);
+    if (ticket_index == kNoTicket) {
+      // A new producer never leapfrogs an existing waiter. This is what turns
+      // the bounded-bypass rule into a persistent fairness guarantee.
+      if (state->backpressure_waiters.load(std::memory_order_acquire) != 0U) {
+        return false;
+      }
+      auto retained_total =
+          state->retained_bytes_total.load(std::memory_order_acquire);
+      while (retained_total <= state->queue_byte_capacity - retained_bytes) {
+        if (state->retained_bytes_total.compare_exchange_weak(
+                retained_total, retained_total + retained_bytes,
+                std::memory_order_acq_rel, std::memory_order_relaxed)) {
+          UpdateEarlyPeak(state->peak_retained_bytes_total,
+                          retained_total + retained_bytes);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    std::size_t oldest_index = kNoTicket;
+    std::uint64_t oldest_sequence = std::numeric_limits<std::uint64_t>::max();
+    for (std::size_t index = 0U; index < state->backpressure_tickets.size();
+         ++index) {
+      const auto &candidate = state->backpressure_tickets[index];
+      if (candidate.active && candidate.sequence < oldest_sequence) {
+        oldest_sequence = candidate.sequence;
+        oldest_index = index;
+      }
+    }
+    if (oldest_index == kNoTicket ||
+        ticket_index >= state->backpressure_tickets.size() ||
+        !state->backpressure_tickets[ticket_index].active) {
+      return false;
+    }
+    auto &oldest = state->backpressure_tickets[oldest_index];
+    if (ticket_index != oldest_index && oldest.bypasses >= kMaxOldestBypasses) {
+      state->starvation_preventions.fetch_add(1U, std::memory_order_relaxed);
+      return false;
+    }
+
+    auto retained_total =
+        state->retained_bytes_total.load(std::memory_order_acquire);
+    while (retained_total <= state->queue_byte_capacity - retained_bytes) {
+      if (state->retained_bytes_total.compare_exchange_weak(
+              retained_total, retained_total + retained_bytes,
+              std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        if (ticket_index != oldest_index) {
+          ++oldest.bypasses;
+          state->backpressure_bypasses.fetch_add(1U, std::memory_order_relaxed);
+        }
+        UpdateEarlyPeak(state->peak_retained_bytes_total,
+                        retained_total + retained_bytes);
+        retire_ticket_locked();
+        return true;
+      }
+    }
+    return false;
+  };
+
+  while (true) {
+    if (state->stopping.load(std::memory_order_acquire) ||
+        state->cancel_requested.load(std::memory_order_acquire)) {
+      retire_ticket();
+      return sanitize::Status::Cancelled(
+          "OperationTaskArena::Submit: cancelled during byte backpressure");
+    }
+    if (try_admit()) {
+      if (ticket_index == kNoTicket) {
+        state->retained_ready.notify_all();
+      }
+      return sanitize::Status::OK();
+    }
+
+    const auto retained_total =
+        state->retained_bytes_total.load(std::memory_order_acquire);
+    const auto queued_bytes =
+        state->queued_bytes.load(std::memory_order_acquire);
+    const auto active_bytes =
+        state->active_bytes.load(std::memory_order_acquire);
+    if (queued_bytes == 0U && active_bytes == 0U) {
+      retire_ticket();
+      state->rejected_byte_submissions.fetch_add(1U, std::memory_order_relaxed);
+      return sanitize::Status::OutOfMemory(
+          "OperationTaskArena::Submit: retained byte capacity exhausted by "
+          "completion ownership (retained=",
+          retained_total, ", requested=", retained_bytes,
+          ", capacity=", state->queue_byte_capacity, ")");
+    }
+
+    if (!register_ticket()) {
+      state->rejected_byte_submissions.fetch_add(1U, std::memory_order_relaxed);
+      return sanitize::Status::OutOfMemory(
+          "OperationTaskArena::Submit: producer backpressure waiter capacity "
+          "exhausted");
+    }
+
+    bool availability_changed = false;
+    bool logical_deadline_is_effective = false;
+    std::uint64_t epoch = 0U;
+    {
+      auto retained_wait_deadline = hard_wait_deadline;
+      const auto timeout_ns =
+          state->backpressure_timeout_ns.load(std::memory_order_acquire);
+      if (timeout_ns > 0) {
+        retained_wait_deadline = std::min(
+            retained_wait_deadline,
+            backpressure_started_at + std::chrono::nanoseconds(timeout_ns));
+      }
+      const auto logical_deadline_ns =
+          state->backpressure_deadline_ns.load(std::memory_order_acquire);
+      if (logical_deadline_ns > 0) {
+        const auto logical_deadline = std::chrono::steady_clock::time_point(
+            std::chrono::nanoseconds(logical_deadline_ns));
+        if (logical_deadline < retained_wait_deadline) {
+          retained_wait_deadline = logical_deadline;
+          logical_deadline_is_effective = true;
+        }
+      }
+      std::unique_lock retained_lock(state->retained_wait_mutex);
+      epoch = state->retained_epoch.load(std::memory_order_acquire);
+      if (state->stopping.load(std::memory_order_acquire) ||
+          state->cancel_requested.load(std::memory_order_acquire)) {
+        availability_changed = true;
+      } else {
+        const auto wait_status = state->retained_ready.wait_until(
+            retained_lock, retained_wait_deadline);
+        availability_changed =
+            wait_status != std::cv_status::timeout ||
+            state->stopping.load(std::memory_order_acquire) ||
+            state->cancel_requested.load(std::memory_order_acquire) ||
+            state->retained_epoch.load(std::memory_order_acquire) != epoch;
+      }
+    }
+
+    if (state->stopping.load(std::memory_order_acquire) ||
+        state->cancel_requested.load(std::memory_order_acquire)) {
+      retire_ticket();
+      return sanitize::Status::Cancelled(
+          "OperationTaskArena::Submit: cancelled during byte backpressure");
+    }
+    if (!availability_changed &&
+        state->retained_epoch.load(std::memory_order_acquire) == epoch) {
+      retire_ticket();
+      state->rejected_byte_submissions.fetch_add(1U, std::memory_order_relaxed);
+      state->backpressure_timeouts.fetch_add(1U, std::memory_order_relaxed);
+      if (logical_deadline_is_effective) {
+        state->logical_backpressure_timeouts.fetch_add(
+            1U, std::memory_order_relaxed);
+        return sanitize::Status::Cancelled(
+            "OperationTaskArena::Submit: operation backpressure deadline "
+            "exceeded");
+      }
+      return sanitize::Status::OutOfMemory(
+          "OperationTaskArena::Submit: retained byte backpressure hard "
+          "deadline "
+          "exceeded");
+    }
+  }
+}
+
 class ArenaCleanupReaper final {
 public:
   static ArenaCleanupReaper &Instance() noexcept {
@@ -443,7 +2170,7 @@ public:
 
   [[nodiscard]] bool
   Reserve(const std::shared_ptr<OperationTaskArena::State> &state,
-          std::size_t bytes) noexcept {
+          std::size_t /*maximum_bytes*/) noexcept {
     if (!enabled_ || !state) {
       over_capacity_.fetch_add(1U, std::memory_order_relaxed);
       return false;
@@ -464,21 +2191,53 @@ public:
     auto &lane = lanes_[index];
     {
       std::lock_guard lock(lane.mutex);
-      if (lane.stopping || lane.reserved_states >= kMaxQueuedStates ||
-          bytes > kMaxQueuedBytes - lane.reserved_bytes) {
+      if (lane.stopping || lane.reserved_states >= kMaxQueuedStates) {
         over_capacity_.fetch_add(1U, std::memory_order_relaxed);
         return false;
       }
       ++lane.reserved_states;
-      lane.reserved_bytes += bytes;
       state->reaper_reserved = true;
-      state->reaper_reserved_bytes = bytes;
+      state->reaper_reserved_bytes.store(0U, std::memory_order_release);
     }
     // Reservation is deliberately passive. Most arenas shut down cleanly and
     // never need a reaper; starting its lanes here would add process threads to
     // every single-threaded operation. Enqueue/Park start a lane only after a
     // bounded shutdown actually leaves work behind.
     return true;
+  }
+
+  [[nodiscard]] bool
+  ReserveQueuedBytes(const std::shared_ptr<OperationTaskArena::State> &state,
+                     std::size_t bytes) noexcept {
+    if (!enabled_ || !state || !state->reaper_reserved || bytes == 0U) {
+      return bytes == 0U;
+    }
+    auto &reserved = lanes_[LaneIndex(state.get())].reserved_bytes;
+    auto current = reserved.load(std::memory_order_acquire);
+    for (;;) {
+      if (bytes > kMaxQueuedBytes || current > kMaxQueuedBytes - bytes) {
+        over_capacity_.fetch_add(1U, std::memory_order_relaxed);
+        return false;
+      }
+      if (reserved.compare_exchange_weak(current, current + bytes,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire)) {
+        state->reaper_reserved_bytes.fetch_add(bytes,
+                                               std::memory_order_acq_rel);
+        return true;
+      }
+    }
+  }
+
+  void
+  ReleaseQueuedBytes(const std::shared_ptr<OperationTaskArena::State> &state,
+                     std::size_t bytes) noexcept {
+    if (!state || bytes == 0U) {
+      return;
+    }
+    SaturatingAtomicSubtract(lanes_[LaneIndex(state.get())].reserved_bytes,
+                             bytes);
+    SaturatingAtomicSubtract(state->reaper_reserved_bytes, bytes);
   }
 
   void ReleaseReservation(
@@ -488,15 +2247,15 @@ public:
     }
     const auto index = LaneIndex(state.get());
     auto &lane = lanes_[index];
+    const auto bytes =
+        state->reaper_reserved_bytes.exchange(0U, std::memory_order_acq_rel);
+    if (bytes != 0U) {
+      SaturatingAtomicSubtract(lane.reserved_bytes, bytes);
+    }
     std::lock_guard lock(lane.mutex);
     lane.reserved_states =
         lane.reserved_states > 0U ? lane.reserved_states - 1U : 0U;
-    lane.reserved_bytes =
-        lane.reserved_bytes >= state->reaper_reserved_bytes
-            ? lane.reserved_bytes - state->reaper_reserved_bytes
-            : 0U;
     state->reaper_reserved = false;
-    state->reaper_reserved_bytes = 0U;
   }
 
   [[nodiscard]] bool EnsureLaneStarted(std::size_t index) noexcept {
@@ -514,7 +2273,7 @@ public:
     lane.thread_permit = true;
     try {
       lane.stopped = false;
-      lane.worker = std::thread([this, index] { Run(index); });
+      lane.worker = StartGovernedNativeThread([this, index] { Run(index); });
       lane.started = true;
       g_reaper_workers.fetch_add(1U, std::memory_order_relaxed);
       return true;
@@ -532,8 +2291,9 @@ public:
     if (!state) {
       return true;
     }
-    if (!state->reaper_reserved ||
-        state->reaper_bytes > state->reaper_reserved_bytes ||
+    const auto reserved_bytes =
+        state->reaper_reserved_bytes.load(std::memory_order_acquire);
+    if (!state->reaper_reserved || state->reaper_bytes > reserved_bytes ||
         !EnsureLaneStarted(LaneIndex(state.get()))) {
       return false;
     }
@@ -541,14 +2301,15 @@ public:
     auto &lane = lanes_[index];
     {
       std::lock_guard lock(lane.mutex);
-      if (lane.stopping || lane.reserved_states == 0U ||
-          lane.reserved_bytes < state->reaper_reserved_bytes) {
+      if (lane.stopping || lane.reserved_states == 0U) {
         return false;
       }
       --lane.reserved_states;
-      lane.reserved_bytes -= state->reaper_reserved_bytes;
+      if (reserved_bytes != 0U) {
+        SaturatingAtomicSubtract(lane.reserved_bytes, reserved_bytes);
+      }
       state->reaper_reserved = false;
-      state->reaper_reserved_bytes = 0U;
+      state->reaper_reserved_bytes.store(0U, std::memory_order_release);
       state->reaper_self = state;
       state->reaper_next = nullptr;
       if (state->reaper_metrics) {
@@ -716,6 +2477,28 @@ public:
         g_reaper_thread_permits.load(std::memory_order_acquire);
     out.reaper_thread_start_failures =
         g_reaper_thread_start_failures.load(std::memory_order_acquire);
+    const auto permit_ledger = ReadThreadPermitLedgerSnapshot();
+    out.native_physical_threads = permit_ledger.managed;
+    out.native_physical_thread_capacity = NativePhysicalThreadCapacity();
+    out.native_physical_thread_rejections =
+        g_native_physical_thread_rejections.load(std::memory_order_acquire);
+    out.external_runtime_thread_permits = permit_ledger.external;
+    out.total_physical_thread_permits = permit_ledger.total;
+    out.thread_permit_snapshot_stable = permit_ledger.stable;
+    {
+      ExternalRuntimeResidencyWriterGuard residency_reader;
+      out.external_runtime_resident_threads =
+          g_process_external_runtime_resident_threads.load(
+              std::memory_order_relaxed);
+      out.external_runtime_stack_debt_threads =
+          g_process_external_runtime_stack_debt_threads.load(
+              std::memory_order_relaxed);
+    }
+    out.external_runtime_resident_protocol_violations =
+        g_external_runtime_resident_protocol_violations.load(
+            std::memory_order_acquire);
+    out.completion_memory_protocol_violations =
+        g_completion_memory_protocol_violations.load(std::memory_order_acquire);
     out.reaper_over_capacity = over_capacity_.load(std::memory_order_acquire);
     out.reaper_terminal_states =
         terminal_states_.load(std::memory_order_acquire);
@@ -747,7 +2530,8 @@ public:
       out.reaper_active_states += lane.active_states;
       out.reaper_queued_bytes += lane.queued_bytes;
       out.reaper_active_bytes += lane.active_bytes;
-      out.reaper_reserved_bytes += lane.reserved_bytes;
+      out.reaper_reserved_bytes +=
+          lane.reserved_bytes.load(std::memory_order_acquire);
       out.reaper_stopping_lanes += static_cast<std::size_t>(lane.stopping);
     }
     return out;
@@ -771,7 +2555,7 @@ private:
     std::size_t queued_states = 0U;
     std::size_t queued_bytes = 0U;
     std::size_t reserved_states = 0U;
-    std::size_t reserved_bytes = 0U;
+    std::atomic<std::size_t> reserved_bytes{0U};
     std::size_t active_states = 0U;
     std::size_t active_bytes = 0U;
     bool started = false;
@@ -858,6 +2642,7 @@ private:
       if (bytes > 0U) {
         SaturatingSubtract(state->retained_bytes_total, bytes,
                            retained_underflows_);
+        state->NotifyRetainedAvailability();
       }
       state->reaper_bytes = 0U;
       if (metrics) {
@@ -1026,11 +2811,17 @@ sanitize::Result<std::shared_ptr<OperationTaskArena>>
 OperationTaskArena::Make(std::size_t worker_count,
                          std::shared_ptr<PerformanceTelemetry> telemetry) {
   const auto normalized = std::max<std::size_t>(1, worker_count);
+  const auto arena_generation = NextArenaGeneration();
+  if (arena_generation == 0U) {
+    return sanitize::Status::OutOfMemory(
+        "OperationTaskArena::Make: generation namespace exhausted");
+  }
   std::shared_ptr<State> state;
   std::shared_ptr<DetachedMetrics> metrics;
   try {
     metrics = std::make_shared<DetachedMetrics>(normalized);
-    state = std::make_shared<State>(normalized, std::move(telemetry));
+    state = std::make_shared<State>(normalized, std::move(telemetry),
+                                    arena_generation);
     state->reaper_metrics = metrics;
     state->slots.reserve(normalized);
     for (std::size_t index = 0; index < normalized; ++index) {
@@ -1197,7 +2988,8 @@ sanitize::Status OperationTaskArena::SubmitCharged(
   // already-stopping arenas do not advance the shared lane cursor.
   const auto state = state_.load(std::memory_order_acquire);
   if (!task || !state || state->worker_count <= 1U ||
-      state->stopping.load(std::memory_order_acquire)) {
+      state->stopping.load(std::memory_order_acquire) ||
+      state->cancel_requested.load(std::memory_order_acquire)) {
     return SubmitCharged(std::move(task), plan, 0U, charge, telemetry_kind);
   }
   const auto ticket = ReserveSubmissionTicket(plan);
@@ -1267,6 +3059,10 @@ sanitize::Status OperationTaskArena::SubmitCharged(
     return sanitize::Status::Invalid(
         "OperationTaskArena::Submit: invalid or stale submission plan");
   }
+  if (state->cancel_requested.load(std::memory_order_acquire)) {
+    return sanitize::Status::Cancelled(
+        "OperationTaskArena::Submit: operation cancellation requested");
+  }
   if (!charge.explicit_charge) {
     state->unknown_charge_submissions.fetch_add(1U, std::memory_order_relaxed);
     const auto retained =
@@ -1286,9 +3082,10 @@ sanitize::Status OperationTaskArena::SubmitCharged(
           "OperationTaskArena::Submit: task memory charge exceeds active "
           "capacity");
     }
-    if (state->stopping.load(std::memory_order_acquire)) {
+    if (state->stopping.load(std::memory_order_acquire) ||
+        state->cancel_requested.load(std::memory_order_acquire)) {
       return sanitize::Status::Cancelled(
-          "OperationTaskArena::Submit: arena is stopping");
+          "OperationTaskArena::Submit: arena is stopping or cancelled");
     }
     auto retained_total =
         state->retained_bytes_total.load(std::memory_order_relaxed);
@@ -1307,17 +3104,16 @@ sanitize::Status OperationTaskArena::SubmitCharged(
         break;
       }
     }
-    state->active_bytes.fetch_add(retained_bytes, std::memory_order_acq_rel);
-    (void)update_peak(&state->peak_active_bytes,
-                      state->active_bytes.load(std::memory_order_relaxed));
+    // Retained total was admitted above. The scope publishes active-byte
+    // diagnostics and can atomically transfer that credit to a completion.
+    ActiveRetainedCharge retained_charge(state, retained_bytes, &task);
     state->inline_active.fetch_add(1U, std::memory_order_acq_rel);
-    if (state->stopping.load(std::memory_order_acquire)) {
-      SaturatingAtomicSubtract(state->active_bytes, retained_bytes);
-      SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
+    if (state->stopping.load(std::memory_order_acquire) ||
+        state->cancel_requested.load(std::memory_order_acquire)) {
       SaturatingAtomicSubtract(state->inline_active, 1U);
       state->inline_ready.notify_all();
       return sanitize::Status::Cancelled(
-          "OperationTaskArena::Submit: arena is stopping");
+          "OperationTaskArena::Submit: arena is stopping or cancelled");
     }
     const auto started_ns =
         state->telemetry ? PerformanceTelemetry::NowNs() : std::int64_t{0};
@@ -1330,8 +3126,6 @@ sanitize::Status OperationTaskArena::SubmitCharged(
       task(0, {});
     } catch (...) {
       SaturatingAtomicSubtract(state->inline_active, 1U);
-      SaturatingAtomicSubtract(state->active_bytes, retained_bytes);
-      SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
       state->inline_ready.notify_all();
       throw;
     }
@@ -1340,16 +3134,14 @@ sanitize::Status OperationTaskArena::SubmitCharged(
           telemetry_kind, PerformanceTelemetry::NowNs() - started_ns);
     }
     state->inline_submitted.fetch_add(1, std::memory_order_relaxed);
-    task = Task{};
     SaturatingAtomicSubtract(state->inline_active, 1U);
-    SaturatingAtomicSubtract(state->active_bytes, retained_bytes);
-    SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
     state->inline_ready.notify_all();
     return sanitize::Status::OK();
   }
-  if (state->stopping.load(std::memory_order_acquire)) {
+  if (state->stopping.load(std::memory_order_acquire) ||
+      state->cancel_requested.load(std::memory_order_acquire)) {
     return sanitize::Status::Cancelled(
-        "OperationTaskArena::Submit: arena is stopping");
+        "OperationTaskArena::Submit: arena is stopping or cancelled");
   }
   if (retained_bytes > state->queue_byte_capacity) {
     state->rejected_byte_submissions.fetch_add(1U, std::memory_order_relaxed);
@@ -1357,6 +3149,23 @@ sanitize::Status OperationTaskArena::SubmitCharged(
         "OperationTaskArena::Submit: task memory charge exceeds queue "
         "capacity");
   }
+  // Memory is the first scarce resource for multi-worker submission. Producers
+  // waiting on retained-byte credit consume only the separately bounded waiter
+  // bank: they do not occupy queue slots and do not start physical workers.
+  const auto retained_status =
+      AcquireRetainedSubmitCredit(state, retained_bytes);
+  if (!retained_status.ok()) {
+    return retained_status;
+  }
+  bool retained_credit_owned = true;
+  const auto release_retained_credit = [&]() noexcept {
+    if (!retained_credit_owned) {
+      return;
+    }
+    retained_credit_owned = false;
+    SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
+    state->NotifyRetainedAvailability();
+  };
   const auto lane_begin = plan.lane_begin_;
   const auto lane_end = plan.lane_end_;
   const auto width = plan.width_;
@@ -1419,14 +3228,38 @@ sanitize::Status OperationTaskArena::SubmitCharged(
       state->slots[physical]->first_task_pending.store(
           false, std::memory_order_release);
     }
+    release_retained_credit();
     return startup_status;
   }
 
   auto &slot = *state->slots[physical];
   std::size_t queued_before = 0;
   bool target_running = false;
+  bool queue_slot_reserved = false;
+  bool reaper_bytes_reserved = false;
+  bool queued_bytes_published = false;
+  const auto rollback_publication = [&]() noexcept {
+    if (queue_slot_reserved) {
+      SaturatingAtomicSubtract(state->queued_total, 1U);
+      queue_slot_reserved = false;
+    }
+    if (queued_bytes_published) {
+      SaturatingAtomicSubtract(state->queued_bytes, retained_bytes);
+      queued_bytes_published = false;
+    }
+    if (retained_credit_owned) {
+      release_retained_credit();
+    } else if (reaper_bytes_reserved) {
+      SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
+      state->NotifyRetainedAvailability();
+    }
+    if (reaper_bytes_reserved) {
+      ArenaCleanupReaper::Instance().ReleaseQueuedBytes(state, retained_bytes);
+      reaper_bytes_reserved = false;
+    }
+  };
   try {
-    std::lock_guard lock(slot.mutex);
+    std::unique_lock lock(slot.mutex);
     if (state->stopping.load(std::memory_order_acquire)) {
       if (reserved_worker) {
         slot.first_task_pending.store(false, std::memory_order_release);
@@ -1440,8 +3273,9 @@ sanitize::Status OperationTaskArena::SubmitCharged(
         slot.wake_epoch.fetch_add(1, std::memory_order_release);
         slot.ready.notify_one();
       }
+      release_retained_credit();
       return sanitize::Status::Cancelled(
-          "OperationTaskArena::Submit: arena is stopping");
+          "OperationTaskArena::Submit: arena is stopping or cancelled");
     }
     target_running = slot.running.load(std::memory_order_acquire);
     auto queued_total = state->queued_total.load(std::memory_order_relaxed);
@@ -1460,6 +3294,7 @@ sanitize::Status OperationTaskArena::SubmitCharged(
           slot.wake_epoch.fetch_add(1, std::memory_order_release);
           slot.ready.notify_one();
         }
+        release_retained_credit();
         return sanitize::Status::OutOfMemory(
             "OperationTaskArena::Submit: bounded queue capacity exhausted");
       }
@@ -1467,42 +3302,37 @@ sanitize::Status OperationTaskArena::SubmitCharged(
               queued_total, queued_total + 1U, std::memory_order_acq_rel,
               std::memory_order_relaxed)) {
         (void)update_peak(&state->peak_queued, queued_total + 1U);
+        queue_slot_reserved = true;
         break;
       }
     }
-    auto retained_total =
-        state->retained_bytes_total.load(std::memory_order_relaxed);
-    while (true) {
-      if (retained_total > state->queue_byte_capacity - retained_bytes) {
-        SaturatingAtomicSubtract(state->queued_total, 1U);
-        state->rejected_byte_submissions.fetch_add(1U,
-                                                   std::memory_order_relaxed);
-        if (reserved_worker) {
-          slot.first_task_pending.store(false, std::memory_order_release);
-          slot.initialized.store(true, std::memory_order_release);
-          if (state->scalable_scan) {
-            state->initialized_dynamic.Set(physical);
-          } else {
-            state->initialized_mask.fetch_or(worker_bit(physical),
-                                             std::memory_order_release);
-          }
-          slot.wake_epoch.fetch_add(1, std::memory_order_release);
-          slot.ready.notify_one();
+    if (!ArenaCleanupReaper::Instance().ReserveQueuedBytes(state,
+                                                           retained_bytes)) {
+      SaturatingAtomicSubtract(state->queued_total, 1U);
+      release_retained_credit();
+      state->rejected_byte_submissions.fetch_add(1U, std::memory_order_relaxed);
+      if (reserved_worker) {
+        slot.first_task_pending.store(false, std::memory_order_release);
+        slot.initialized.store(true, std::memory_order_release);
+        if (state->scalable_scan) {
+          state->initialized_dynamic.Set(physical);
+        } else {
+          state->initialized_mask.fetch_or(worker_bit(physical),
+                                           std::memory_order_release);
         }
-        return sanitize::Status::OutOfMemory(
-            "OperationTaskArena::Submit: retained byte capacity exhausted");
+        slot.wake_epoch.fetch_add(1, std::memory_order_release);
+        slot.ready.notify_one();
       }
-      if (state->retained_bytes_total.compare_exchange_weak(
-              retained_total, retained_total + retained_bytes,
-              std::memory_order_acq_rel, std::memory_order_relaxed)) {
-        (void)update_peak(&state->peak_retained_bytes_total,
-                          retained_total + retained_bytes);
-        break;
-      }
+      return sanitize::Status::OutOfMemory(
+          "OperationTaskArena::Submit: teardown byte capacity exhausted");
     }
+    reaper_bytes_reserved = true;
+    // Queue/reaper ownership now carries the admitted retained-byte credit.
+    retained_credit_owned = false;
     const auto queued_bytes = state->queued_bytes.fetch_add(
                                   retained_bytes, std::memory_order_acq_rel) +
                               retained_bytes;
+    queued_bytes_published = true;
     (void)update_peak(&state->peak_queued_bytes, queued_bytes);
     slot.tasks.push_back(State::QueuedTask{
         .task = std::move(task),
@@ -1538,9 +3368,7 @@ sanitize::Status OperationTaskArena::SubmitCharged(
       mark_nonempty(state, physical);
     }
   } catch (const std::bad_alloc &) {
-    SaturatingAtomicSubtract(state->queued_total, 1U);
-    SaturatingAtomicSubtract(state->queued_bytes, retained_bytes);
-    SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
+    rollback_publication();
     if (reserved_worker) {
       slot.first_task_pending.store(false, std::memory_order_release);
       slot.initialized.store(true, std::memory_order_release);
@@ -1556,9 +3384,7 @@ sanitize::Status OperationTaskArena::SubmitCharged(
     return sanitize::Status::OutOfMemory(
         "OperationTaskArena::Submit: queue allocation failed");
   } catch (const std::exception &error) {
-    SaturatingAtomicSubtract(state->queued_total, 1U);
-    SaturatingAtomicSubtract(state->queued_bytes, retained_bytes);
-    SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
+    rollback_publication();
     if (reserved_worker) {
       slot.first_task_pending.store(false, std::memory_order_release);
       slot.initialized.store(true, std::memory_order_release);
@@ -1574,9 +3400,7 @@ sanitize::Status OperationTaskArena::SubmitCharged(
     return sanitize::Status::Invalid(
         "OperationTaskArena::Submit: queue publication failed: ", error.what());
   } catch (...) {
-    SaturatingAtomicSubtract(state->queued_total, 1U);
-    SaturatingAtomicSubtract(state->queued_bytes, retained_bytes);
-    SaturatingAtomicSubtract(state->retained_bytes_total, retained_bytes);
+    rollback_publication();
     if (reserved_worker) {
       slot.first_task_pending.store(false, std::memory_order_release);
       slot.initialized.store(true, std::memory_order_release);
@@ -1657,6 +3481,12 @@ std::size_t OperationTaskArena::stolen_tasks() const noexcept {
   }
   return total;
 }
+std::size_t OperationTaskArena::output_preference_bypasses() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state
+             ? state->output_preference_bypasses.load(std::memory_order_relaxed)
+             : 0U;
+}
 std::size_t OperationTaskArena::queued_tasks() const noexcept {
   const auto state = state_.load(std::memory_order_acquire);
   return state ? state->queued_total.load(std::memory_order_acquire) : 0U;
@@ -1700,6 +3530,77 @@ std::size_t OperationTaskArena::queue_byte_capacity() const noexcept {
   const auto state = state_.load(std::memory_order_acquire);
   return state ? state->queue_byte_capacity : 0U;
 }
+// Compatibility note: OperationTaskArena::RetainCompletionBytes was removed
+// because it could bypass queue_byte_capacity; all ownership transfer now uses
+// the single transactional method below.
+bool OperationTaskArena::TryTransferActiveToCompletion(
+    std::size_t active_credit, std::size_t completion_bytes,
+    CompletionMemoryLease *completion_lease) noexcept {
+  if (completion_lease == nullptr || static_cast<bool>(*completion_lease)) {
+    return false;
+  }
+  const auto state = state_.load(std::memory_order_acquire);
+  if (!state) {
+    return completion_bytes == 0U;
+  }
+  auto *scope = g_active_retained_charge;
+  if (scope == nullptr ||
+      !scope->TryTransfer(state.get(), active_credit, completion_bytes)) {
+    return false;
+  }
+  if (completion_bytes != 0U) {
+    *completion_lease = CompletionMemoryLease(state, completion_bytes);
+  }
+  return true;
+}
+
+CompletionMemoryLease::CompletionMemoryLease(
+    CompletionMemoryLease &&other) noexcept
+    : state_(std::move(other.state_)),
+      retained_bytes_(std::exchange(other.retained_bytes_, 0U)) {}
+
+CompletionMemoryLease &
+CompletionMemoryLease::operator=(CompletionMemoryLease &&other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  reset();
+  state_ = std::move(other.state_);
+  retained_bytes_ = std::exchange(other.retained_bytes_, 0U);
+  return *this;
+}
+
+CompletionMemoryLease::~CompletionMemoryLease() noexcept { reset(); }
+
+void CompletionMemoryLease::reset() noexcept {
+  auto state = std::move(state_);
+  const auto retained = std::exchange(retained_bytes_, 0U);
+  if (!state || retained == 0U) {
+    return;
+  }
+  auto current = state->retained_bytes_total.load(std::memory_order_acquire);
+  for (;;) {
+    if (current < retained) {
+      // CompletionMemoryLease is move-only/exactly-once. Reaching this branch
+      // therefore means protocol corruption rather than a benign duplicate
+      // quantity release. Preserve noexcept cleanup while surfacing the fault.
+      g_completion_memory_protocol_violations.fetch_add(
+          1U, std::memory_order_relaxed);
+      if (state->retained_bytes_total.compare_exchange_weak(
+              current, 0U, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        break;
+      }
+      continue;
+    }
+    if (state->retained_bytes_total.compare_exchange_weak(
+            current, current - retained, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      break;
+    }
+  }
+  state->NotifyRetainedAvailability();
+}
 std::size_t OperationTaskArena::rejected_submissions() const noexcept {
   const auto state = state_.load(std::memory_order_acquire);
   return state ? state->rejected_submissions.load(std::memory_order_relaxed)
@@ -1711,6 +3612,78 @@ std::size_t OperationTaskArena::rejected_byte_submissions() const noexcept {
              ? state->rejected_byte_submissions.load(std::memory_order_relaxed)
              : 0U;
 }
+std::size_t OperationTaskArena::backpressure_timeouts() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state ? state->backpressure_timeouts.load(std::memory_order_relaxed)
+               : 0U;
+}
+std::size_t OperationTaskArena::logical_backpressure_timeouts() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state ? state->logical_backpressure_timeouts.load(
+                     std::memory_order_relaxed)
+               : 0U;
+}
+std::size_t OperationTaskArena::backpressure_waiters() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state ? state->backpressure_waiters.load(std::memory_order_relaxed)
+               : 0U;
+}
+
+std::size_t OperationTaskArena::producer_waiter_capacity() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state ? state->producer_waiter_capacity : 0U;
+}
+
+std::size_t OperationTaskArena::peak_backpressure_waiters() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state
+             ? state->peak_backpressure_waiters.load(std::memory_order_relaxed)
+             : 0U;
+}
+
+std::size_t OperationTaskArena::rejected_backpressure_waiters() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state ? state->rejected_backpressure_waiters.load(
+                     std::memory_order_relaxed)
+               : 0U;
+}
+
+std::size_t OperationTaskArena::backpressure_bypasses() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state ? state->backpressure_bypasses.load(std::memory_order_relaxed)
+               : 0U;
+}
+
+std::size_t OperationTaskArena::starvation_preventions() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  return state ? state->starvation_preventions.load(std::memory_order_relaxed)
+               : 0U;
+}
+
+std::uint64_t
+OperationTaskArena::oldest_backpressure_waiter_age_millis() const noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  if (!state) {
+    return 0U;
+  }
+  std::int64_t oldest = 0;
+  {
+    std::lock_guard lock(state->retained_wait_mutex);
+    for (const auto &ticket : state->backpressure_tickets) {
+      if (ticket.active && ticket.waiting_since_ns > 0 &&
+          (oldest == 0 || ticket.waiting_since_ns < oldest)) {
+        oldest = ticket.waiting_since_ns;
+      }
+    }
+  }
+  if (oldest <= 0) {
+    return 0U;
+  }
+  const auto now = PerformanceTelemetry::NowNs();
+  return now > oldest ? static_cast<std::uint64_t>((now - oldest) / 1'000'000)
+                      : 0U;
+}
+
 std::size_t OperationTaskArena::unknown_charge_submissions() const noexcept {
   const auto state = state_.load(std::memory_order_acquire);
   return state
@@ -1807,6 +3780,66 @@ OperationTaskArena::memory_resource() const noexcept {
                      state->operation_resource)
                : nullptr;
 }
+void OperationTaskArena::RequestCancellation() noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  if (!state) {
+    return;
+  }
+  state->cancel_requested.store(true, std::memory_order_release);
+  state->NotifyRetainedAvailability(true);
+  state->inline_ready.notify_all();
+  for (auto &slot : state->slots) {
+    if (slot && slot->worker) {
+      slot->worker->request_stop();
+    }
+    if (slot) {
+      slot->ready.notify_all();
+    }
+  }
+}
+
+void OperationTaskArena::SetBackpressureTimeoutMillis(
+    std::uint64_t timeout_millis) noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  if (!state) {
+    return;
+  }
+  const auto bounded = std::min<std::uint64_t>(timeout_millis, 30'000U);
+  const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::milliseconds(bounded))
+                            .count();
+  state->backpressure_timeout_ns.store(
+      timeout_millis == 0U ? 0 : static_cast<std::int64_t>(duration),
+      std::memory_order_release);
+  state->NotifyRetainedAvailability(true);
+}
+
+void OperationTaskArena::SetBackpressureDeadlineMillis(
+    std::uint64_t timeout_millis) noexcept {
+  const auto state = state_.load(std::memory_order_acquire);
+  if (!state) {
+    return;
+  }
+  if (timeout_millis == 0U) {
+    state->backpressure_deadline_ns.store(0, std::memory_order_release);
+  } else {
+    // Keep conversion well inside signed chrono nanoseconds even for an
+    // accidentally enormous caller value. The arena's independent hard wait
+    // ceiling remains 30 seconds per saturation episode.
+    constexpr std::uint64_t kMaxLogicalDeadlineMillis = 86'400'000U;
+    const auto bounded =
+        std::min<std::uint64_t>(timeout_millis, kMaxLogicalDeadlineMillis);
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const auto delta = std::chrono::milliseconds(bounded);
+    const auto deadline =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now + delta)
+            .count();
+    state->backpressure_deadline_ns.store(static_cast<std::int64_t>(deadline),
+                                          std::memory_order_release);
+  }
+  state->NotifyRetainedAvailability(true);
+}
+
 void OperationTaskArena::Shutdown() noexcept {
   auto state = state_.exchange(nullptr, std::memory_order_acq_rel);
   if (!state) {
@@ -1814,6 +3847,7 @@ void OperationTaskArena::Shutdown() noexcept {
   }
   SaturatingAtomicSubtract(g_live_arena_states, 1U);
   state->stopping.store(true, std::memory_order_release);
+  state->NotifyRetainedAvailability(true);
   const auto deadline = std::chrono::steady_clock::now() + kArenaShutdownDrain;
   {
     std::unique_lock inline_lock(state->inline_mutex);

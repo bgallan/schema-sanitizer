@@ -183,6 +183,31 @@ PyObject *py_process_resident_memory_stats(PyObject *, PyObject *) {
   return out;
 }
 
+PyObject *py_allocation_registry_stats(PyObject *, PyObject *) {
+  const auto stats = sanitize::internal::allocation_registry_stats();
+  PyObject *out = PyTuple_New(8);
+  if (!out ||
+      !tuple_set_item_steal(out, 0,
+                            PyLong_FromLongLong(stats.metadata_bytes)) ||
+      !tuple_set_item_steal(out, 1,
+                            PyLong_FromLongLong(stats.peak_metadata_bytes)) ||
+      !tuple_set_item_steal(out, 2,
+                            PyLong_FromLongLong(stats.capacity_records)) ||
+      !tuple_set_item_steal(out, 3, PyLong_FromLongLong(stats.live_entries)) ||
+      !tuple_set_item_steal(
+          out, 4, PyLong_FromUnsignedLongLong(stats.rejected_registrations)) ||
+      !tuple_set_item_steal(
+          out, 5, PyLong_FromUnsignedLongLong(stats.secondary_probes)) ||
+      !tuple_set_item_steal(
+          out, 6, PyLong_FromUnsignedLongLong(stats.collision_rejections)) ||
+      !tuple_set_item_steal(out, 7,
+                            PyLong_FromLongLong(stats.max_shard_occupancy))) {
+    Py_XDECREF(out);
+    return nullptr;
+  }
+  return out;
+}
+
 PyObject *py_execution_policy(PyObject *, PyObject *args) {
   int mode_value = 0;
   long long requested = -1;

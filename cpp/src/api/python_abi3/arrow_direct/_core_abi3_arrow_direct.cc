@@ -22,6 +22,7 @@
 
 #include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
+#include "internal/memory/memory_budget.hh"
 #include "internal/planning/plan_compile.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "internal/runtime/operation_task_arena.hh"
@@ -273,6 +274,12 @@ sanitize::Result<sanitize::IngestStream> ingest_direct_arrow_stream(
                           static_cast<std::size_t>(std::max<std::int64_t>(
                               1, policy.effective_workers)),
                           prepared.telemetry));
+  const auto arena_budget = sanitize::internal::memory_budget_from_limit(
+      opts->spec.memory_limit_bytes);
+  prepared.task_arena->SetBackpressureTimeoutMillis(
+      sanitize::internal::backpressure_timeout_millis_from(arena_budget));
+  prepared.task_arena->SetBackpressureDeadlineMillis(
+      sanitize::internal::backpressure_deadline_millis_from(arena_budget));
   prepared.plan = plan;
   prepared.opts = std::move(opts);
   prepared.diagnostics = diag;

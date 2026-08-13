@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from meta.ci.check_detect_secrets_report import check_report, filter_findings
+from meta.ci.quality.check_detect_secrets_report import check_report, filter_findings
 
 PUBLIC_DIGEST = "ab" * 32
 
@@ -39,6 +39,48 @@ def test_public_benchmark_sha256_is_not_treated_as_a_secret(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    "line",
+    [
+        f'EXPECTED_TREE_SHA256 = "{PUBLIC_DIGEST}"',
+        f'    "csv/unterminated.csv": "{PUBLIC_DIGEST}",',
+    ],
+)
+def test_fuzz_manifest_sha256_is_not_treated_as_a_secret(tmp_path: Path, line: str) -> None:
+    """Fuzz-tree integrity digests remain scanned but are not credentials."""
+    manifest = tmp_path / "meta/ci/fuzz/check_fuzz_corpus.py"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(line + "\n", encoding="utf-8")
+    report = {"results": {"meta/ci/fuzz/check_fuzz_corpus.py": [_finding(1)]}}
+
+    assert filter_findings(report, tmp_path) == {}
+
+
+def test_pinned_pre_commit_revision_is_not_treated_as_a_secret(tmp_path: Path) -> None:
+    """A commented immutable public Git revision is supply-chain metadata."""
+    config = tmp_path / ".pre-commit-config.yaml"
+    config.write_text(
+        f"    rev: {'ab' * 20}  # v1.2.3\n",
+        encoding="utf-8",
+    )
+    report = {"results": {config.name: [_finding(1)]}}
+
+    assert filter_findings(report, tmp_path) == {}
+
+
+def test_public_reader_reference_commit_is_not_treated_as_a_secret(tmp_path: Path) -> None:
+    """The reviewed Git commit anchoring the latency policy is public metadata."""
+    budget = tmp_path / "benchmarks/readers/linear_scaling_budget.json"
+    budget.parent.mkdir(parents=True)
+    budget.write_text(
+        json.dumps({"commit_sha": "ab" * 20}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    report = {"results": {"benchmarks/readers/linear_scaling_budget.json": [_finding(2)]}}
+
+    assert filter_findings(report, tmp_path) == {}
+
+
+@pytest.mark.parametrize(
     ("filename", "line", "kind"),
     [
         (
@@ -55,6 +97,31 @@ def test_public_benchmark_sha256_is_not_treated_as_a_secret(tmp_path: Path) -> N
             "benchmarks/evidence.json",
             f'"artifact_sha256": "{PUBLIC_DIGEST}"',
             "Secret Keyword",
+        ),
+        (
+            "src/config.py",
+            f'EXPECTED_TREE_SHA256 = "{PUBLIC_DIGEST}"',
+            "Hex High Entropy String",
+        ),
+        (
+            ".pre-commit-config.yaml",
+            f"    rev: {PUBLIC_DIGEST[:40]}",
+            "Hex High Entropy String",
+        ),
+        (
+            ".pre-commit-config.yaml",
+            f"    token: {PUBLIC_DIGEST[:40]}  # v1.2.3",
+            "Hex High Entropy String",
+        ),
+        (
+            "benchmarks/readers/other.json",
+            f'"commit_sha": "{PUBLIC_DIGEST[:40]}"',
+            "Hex High Entropy String",
+        ),
+        (
+            "benchmarks/readers/linear_scaling_budget.json",
+            f'"token": "{PUBLIC_DIGEST[:40]}"',
+            "Hex High Entropy String",
         ),
     ],
 )

@@ -383,7 +383,7 @@ def test_repository_tools_use_current_internal_owners() -> None:
     root = Path(__file__).resolve().parents[2]
     checked = [
         *sorted((root / ".github" / "workflows").glob("*.yml")),
-        *sorted((root / "benchmarks").glob("*.py")),
+        *sorted((root / "benchmarks").rglob("*.py")),
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in checked)
     for removed_name in (

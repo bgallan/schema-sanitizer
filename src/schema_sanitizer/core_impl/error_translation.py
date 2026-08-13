@@ -86,6 +86,9 @@ def call_core(
 ) -> _ResultT:
     """Call one core function and translate any raised exception."""
     try:
+        from .concurrency_contracts import observe_runtime_concurrency_contract_noexcept
+
+        observe_runtime_concurrency_contract_noexcept("native_payload_core_call")
         return fn(*args, **kwargs)
     except Exception as exc:
         raise translate_core_error(exc, error_context=error_context) from exc
@@ -171,3 +174,10 @@ def _memory_limit_detail(message: str, lowered: str) -> dict[str, Any]:
     if "; file: " in message:
         detail["file"] = message.rsplit("; file: ", 1)[1]
     return detail
+
+
+from .concurrency_contracts import (  # noqa: E402
+    register_runtime_concurrency_contract as _register_runtime_concurrency_contract,
+)
+
+_register_runtime_concurrency_contract("native_payload_core_call", call_core)

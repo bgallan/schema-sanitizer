@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from _support.parquet_runtime import pa
+from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
 from conftest import require_native
-from parquet_runtime_shared import pa
-from parquet_runtime_shared import requires_pyarrow as _requires_pyarrow
 
 
 @_requires_pyarrow

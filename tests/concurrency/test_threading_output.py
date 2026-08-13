@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 pa = pytest.importorskip("pyarrow")
-from threading_golden import semantic_stats
+from _support.threading_goldens import semantic_stats
 
 from schema_sanitizer.adapters.pyarrow.csv_sink import write_csv_stream
 from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream

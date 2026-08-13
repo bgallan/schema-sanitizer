@@ -1,73 +1,95 @@
 ---
-name: Publish
+name: Publish to PyPI
 on:
-  # The only manual workflow with release side effects. Check-only runs the
-  # complete PR/main validation without uploading anything.
   workflow_dispatch:
     inputs:
-      repository:
-        description: Publish target
-        required: true
-        default: check-only
-        type: choice
-        options: [check-only, testpypi, pypi]
       release_tag:
-        description: Optional release tag to validate, for example v0.3.8
-        required: false
-        default: ''
+        description: Existing tag for meta/VERSION, for example v0.4.2
+        required: true
         type: string
       confirm_publish:
-        description: Type "publish schema-sanitizer" to allow an upload
-        required: false
-        default: ''
+        description: Type "publish schema-sanitizer"
+        required: true
         type: string
 permissions:
   contents: read
+concurrency:
+  group: pypi-${{ inputs.release_tag }}
+  cancel-in-progress: false
 jobs:
-  validate-request:
-    name: validate publish request
-    runs-on: ubuntu-latest
+  # Fail before the expensive validation if the immutable release identity is
+  # incomplete. This job has no package-index authority.
+  preflight:
+    name: release request preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - uses: actions/checkout@v5
-      - name: Require main and validate the package version
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate branch, version, tag, and explicit confirmation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
-            echo "Publish must run from the main branch, got ${GITHUB_REF}" >&2
+            echo "Publish must run from main, got ${GITHUB_REF}" >&2
             exit 1
           fi
-          python meta/ci/validate_release_version.py --github-event "${GITHUB_EVENT_PATH}"
+          python meta/ci/release/validate_release_version.py \
+            --github-event "${GITHUB_EVENT_PATH}" \
+            --require-release-tag \
+            --require-publish-confirmation
+          TAG_TYPE=$(git cat-file -t "refs/tags/${RELEASE_TAG}")
+          if [[ "${TAG_TYPE}" != "tag" ]]; then
+            echo "${RELEASE_TAG} must be an annotated tag, got ${TAG_TYPE}" >&2
+            exit 1
+          fi
+          TAG_SHA=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          if [[ "${TAG_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "${RELEASE_TAG} points to ${TAG_SHA}, not dispatch SHA ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          MAIN_SHA=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          if [[ "${MAIN_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "main moved to ${MAIN_SHA}; start a new release from that commit" >&2
+            exit 1
+          fi
+          python meta/ci/release/check_pypi_version.py
+          python meta/ci/release/check_github_release_environment.py
+
+  # A local reusable workflow is resolved from this same immutable commit.
   validation:
     name: canonical release validation
-    needs: [validate-request]
+    needs: [preflight]
     uses: ./.github/workflows/ci.yml
+
+  # Keep the OIDC trust boundary code-free: only retrieve the validated,
+  # digest-checked artifact and invoke PyPI's maintained publisher action.
   publish:
-    name: publish
-    needs: [validation]
-    if: inputs.repository != 'check-only'
-    runs-on: ubuntu-latest
+    name: publish validated distributions
+    needs: [preflight, validation]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/schema-sanitizer
     permissions:
-      contents: read
-      id-token: write  # OIDC / Trusted Publishing
+      id-token: write
     steps:
-      - uses: actions/checkout@v5
-      - name: Confirm upload
-        run: >-
-          python meta/ci/validate_release_version.py
-          --github-event "${GITHUB_EVENT_PATH}"
-          --require-publish-confirmation
-      - uses: actions/download-artifact@v7
+      - name: Download the exact validated release set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: dist
-          pattern: dist-*
-          merge-multiple: true
+          name: release-distributions
+          path: release
       - name: Publish to PyPI with Trusted Publishing
-        if: inputs.repository == 'pypi'
-        uses: pypa/gh-action-pypi-publish@release/v1
-      - name: Publish to TestPyPI with Trusted Publishing
-        if: inputs.repository == 'testpypi'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
-          repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
+          packages-dir: release/packages/
+          attestations: true

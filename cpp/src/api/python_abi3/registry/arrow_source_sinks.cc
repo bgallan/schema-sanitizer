@@ -26,6 +26,7 @@
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
+#include "internal/memory/memory_budget.hh"
 #include "internal/planning/options_schema_serialization.hh"
 #include "internal/runtime/execution_policy.hh"
 #include "internal/runtime/operation_task_arena.hh"
@@ -76,6 +77,12 @@ ensure_operation_task_arena(NativeArrowSourcesStreamState *state) {
                           static_cast<std::size_t>(std::max<std::int64_t>(
                               1, policy.effective_workers)),
                           state->telemetry));
+  const auto arena_budget = sanitize::internal::memory_budget_from_limit(
+      state->prepared->spec.memory_limit_bytes);
+  state->task_arena->SetBackpressureTimeoutMillis(
+      sanitize::internal::backpressure_timeout_millis_from(arena_budget));
+  state->task_arena->SetBackpressureDeadlineMillis(
+      sanitize::internal::backpressure_deadline_millis_from(arena_budget));
   return sanitize::Status::OK();
 }
 

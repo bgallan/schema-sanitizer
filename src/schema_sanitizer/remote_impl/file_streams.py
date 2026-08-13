@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 from ..core_impl.cancellation import check_operation_cancelled
 from ..core_impl.memory_budget import acquire_operation_memory
-from ..core_impl.process_resources import reserve_file_descriptors
 from ..core_impl.temporary_storage import StreamingStorageReservation
+from .io_footprint import open_remote_local_file
 
 
 async def write_async_reader_to_file(
@@ -24,24 +23,23 @@ async def write_async_reader_to_file(
     if storage_reservation is not None:
         storage_reservation.reset_after_truncate()
     written = 0
-    with reserve_file_descriptors(label="remote_download_file"):
-        with Path(local_path).open("wb") as file_handle:
-            while True:
-                check_operation_cancelled(stage=stage)
-                lease = acquire_operation_memory(chunk_bytes, stage=stage)
-                try:
-                    chunk = await reader(chunk_bytes)
-                    if not chunk:
-                        break
-                    if lease is not None and len(chunk) > chunk_bytes:
-                        lease.resize(len(chunk))
-                    if storage_reservation is not None:
-                        storage_reservation.before_write(len(chunk))
-                    file_handle.write(chunk)
-                    written += len(chunk)
-                finally:
-                    if lease is not None:
-                        lease.release()
+    with open_remote_local_file(local_path, "wb", label="remote_download_file") as file_handle:
+        while True:
+            check_operation_cancelled(stage=stage)
+            lease = acquire_operation_memory(chunk_bytes, stage=stage)
+            try:
+                chunk = await reader(chunk_bytes)
+                if not chunk:
+                    break
+                if lease is not None and len(chunk) > chunk_bytes:
+                    lease.resize(len(chunk))
+                if storage_reservation is not None:
+                    storage_reservation.before_write(len(chunk))
+                file_handle.write(chunk)
+                written += len(chunk)
+            finally:
+                if lease is not None:
+                    lease.release()
     if storage_reservation is not None:
         storage_reservation.finalize(written)
     return written
@@ -59,24 +57,23 @@ def write_sync_reader_to_file(
     if storage_reservation is not None:
         storage_reservation.reset_after_truncate()
     written = 0
-    with reserve_file_descriptors(label="remote_download_file"):
-        with Path(local_path).open("wb") as file_handle:
-            while True:
-                check_operation_cancelled(stage=stage)
-                lease = acquire_operation_memory(chunk_bytes, stage=stage)
-                try:
-                    chunk = reader(chunk_bytes)
-                    if not chunk:
-                        break
-                    if lease is not None and len(chunk) > chunk_bytes:
-                        lease.resize(len(chunk))
-                    if storage_reservation is not None:
-                        storage_reservation.before_write(len(chunk))
-                    file_handle.write(chunk)
-                    written += len(chunk)
-                finally:
-                    if lease is not None:
-                        lease.release()
+    with open_remote_local_file(local_path, "wb", label="remote_download_file") as file_handle:
+        while True:
+            check_operation_cancelled(stage=stage)
+            lease = acquire_operation_memory(chunk_bytes, stage=stage)
+            try:
+                chunk = reader(chunk_bytes)
+                if not chunk:
+                    break
+                if lease is not None and len(chunk) > chunk_bytes:
+                    lease.resize(len(chunk))
+                if storage_reservation is not None:
+                    storage_reservation.before_write(len(chunk))
+                file_handle.write(chunk)
+                written += len(chunk)
+            finally:
+                if lease is not None:
+                    lease.release()
     if storage_reservation is not None:
         storage_reservation.finalize(written)
     return written

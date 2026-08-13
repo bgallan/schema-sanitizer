@@ -64,6 +64,16 @@ option(SCHEMA_SANITIZER_ENABLE_WARNINGS
        "Enable compiler warnings for schema-sanitizer targets" ON)
 option(SCHEMA_SANITIZER_REPRODUCIBLE
        "Enable reproducible build flags (path mapping where supported)" ON)
+set(SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES
+    "4"
+    CACHE STRING
+          "Maximum concurrent MSVC compiler processes for project targets")
+if(NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES MATCHES "^[1-9][0-9]*$")
+  message(
+    FATAL_ERROR
+      "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES must be a positive integer (got '${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}')"
+  )
+endif()
 
 # Build hygiene: warnings are errors by default in every build. Callers may
 # still opt out explicitly through the CMake cache option.
@@ -152,7 +162,7 @@ add_custom_target(
   schema_sanitizer_check_cpp_documentation
   COMMAND
     ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_LIST_DIR}/meta/ci/check_cpp_documentation.py
+    ${CMAKE_CURRENT_LIST_DIR}/meta/ci/native/check_cpp_documentation.py
     --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
   WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
   COMMENT "Checking C/C++ callable documentation with clang-doc"
@@ -190,6 +200,7 @@ foreach(_schema_sanitizer_target sanitize_core
                CXX_SCAN_FOR_MODULES OFF
                POSITION_INDEPENDENT_CODE ON)
   schema_sanitizer_enable_warnings(${_schema_sanitizer_target})
+  schema_sanitizer_enable_msvc_parallel_compile(${_schema_sanitizer_target})
   schema_sanitizer_enable_repro(${_schema_sanitizer_target})
   schema_sanitizer_add_sanitizer(${_schema_sanitizer_target})
   schema_sanitizer_add_coverage(${_schema_sanitizer_target})
@@ -225,6 +236,8 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   target_link_libraries(schema_sanitizer_sanitized_ordered_executor
                         PRIVATE Threads::Threads)
   schema_sanitizer_enable_warnings(schema_sanitizer_sanitized_ordered_executor)
+  schema_sanitizer_enable_msvc_parallel_compile(
+    schema_sanitizer_sanitized_ordered_executor)
   schema_sanitizer_enable_repro(schema_sanitizer_sanitized_ordered_executor)
   schema_sanitizer_add_sanitizer(schema_sanitizer_sanitized_ordered_executor)
   set(_schema_sanitizer_sanitized_executor_rounds 100)
@@ -293,6 +306,7 @@ if(SCHEMA_SANITIZER_BUILD_FUZZERS)
     target_include_directories(${target} PRIVATE cpp/src cpp/thirdparty)
     target_link_libraries(${target} PRIVATE sanitize_core)
     schema_sanitizer_enable_warnings(${target})
+    schema_sanitizer_enable_msvc_parallel_compile(${target})
     schema_sanitizer_enable_repro(${target})
     schema_sanitizer_add_sanitizer(${target})
     if(_schema_sanitizer_fuzz_engine STREQUAL "libfuzzer")

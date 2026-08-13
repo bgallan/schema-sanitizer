@@ -5,6 +5,17 @@ from __future__ import annotations
 import argparse
 
 
+def _positive_int(raw: str) -> int:
+    """Parse a strictly positive integer CLI value."""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {raw!r}") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return value
+
+
 def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
     """Add schema-sanitizer conversion arguments."""
     parser.add_argument(
@@ -90,12 +101,21 @@ def add_sanitizer_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--parse-iso-times", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--memory-limit-bytes",
-        type=int,
+        type=_positive_int,
         default=None,
         help=(
             "Total memory/resource budget passed to schema_sanitizer. The native "
             "extension derives its chunk, batch, staging, Arrow, and Parquet budgets "
             "from this value. Default: automatic safe sizing from available memory."
+        ),
+    )
+    parser.add_argument(
+        "--multi-threading",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable the bounded project-wide concurrency model for discovery, "
+            "warm-up, conversion, and one-partition lookahead. Default: false."
         ),
     )
     parser.add_argument("--arrow-max-depth", type=int, default=32)

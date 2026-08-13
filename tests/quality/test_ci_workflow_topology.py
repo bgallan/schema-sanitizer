@@ -2,19 +2,35 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github/workflows"
+ACTIONS = ROOT / ".github/actions"
+VALIDATION_ACTIONS = (
+    "quality-validation",
+    "source-distribution",
+    "native-llvm-coverage",
+    "thread-sanitizer",
+    "platform-sanitizer",
+)
 
 
 def _workflow(name: str) -> str:
     """Read one workflow definition."""
     return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def _action(name: str) -> str:
+    """Read one repository-owned composite action."""
+    return (ACTIONS / name / "action.yml").read_text(encoding="utf-8")
 
 
 def _job_ids(workflow: str) -> set[str]:
@@ -30,46 +46,277 @@ def _job_body(workflow: str, job_id: str) -> str:
     return body[: next_job.start()] if next_job else body
 
 
-def test_workflow_entry_points_are_explicit() -> None:
-    """Only validation and publication are user-facing."""
+def _workflow_preamble(workflow: str) -> str:
+    """Return workflow-level configuration before the jobs."""
+    return workflow.split("\njobs:\n", 1)[0]
+
+
+def _matrix_includes(workflow: str, job_id: str) -> tuple[dict[str, str], ...]:
+    """Return the scalar rows from one job's include-only matrix."""
+    body = _job_body(workflow, job_id)
+    matrix = body.split("      matrix:\n        include:\n", 1)[1].split("    steps:\n", 1)[0]
+    rows = re.split(r"^          - ", matrix, flags=re.MULTILINE)[1:]
+    return tuple(
+        {
+            key: value.strip().strip("'\"")
+            for key, value in re.findall(r"^\s*([a-z-]+):\s*([^#\n]+?)\s*$", row, re.MULTILINE)
+        }
+        for row in rows
+    )
+
+
+def _step_bodies(workflow: str) -> tuple[str, ...]:
+    """Return top-level step bodies without requiring a YAML dependency."""
+    starts = tuple(re.finditer(r"^(?: {4}| {6})- (?:name|uses):", workflow, re.MULTILINE))
+    return tuple(
+        workflow[match.start() : starts[index + 1].start() if index + 1 < len(starts) else None]
+        for index, match in enumerate(starts)
+    )
+
+
+def _with_value(step: str, key: str) -> str:
+    """Read a scalar from an action step's ``with`` mapping."""
+    match = re.search(rf"^\s+{re.escape(key)}:\s*([^#\n]+)", step, re.MULTILINE)
+    assert match is not None, f"missing {key!r} in action step:\n{step}"
+    return match.group(1).strip().strip("'\"")
+
+
+def test_only_publish_is_a_manual_entry_point() -> None:
+    """PR/main validation is automatic; publishing is the sole manual action."""
+    workflows = tuple(
+        path for path in WORKFLOWS.iterdir() if path.is_file() and path.suffix in {".yml", ".yaml"}
+    )
+    contents = {path.name: path.read_text(encoding="utf-8") for path in workflows}
     dispatched = {
-        path.name
-        for path in WORKFLOWS.glob("*.yml")
-        if re.search(r"^  workflow_dispatch:", path.read_text(encoding="utf-8"), re.MULTILINE)
+        name
+        for name, workflow in contents.items()
+        if re.search(r"^  workflow_dispatch:", _workflow_preamble(workflow), re.MULTILINE)
     }
 
-    assert dispatched == {"ci.yml", "publish.yml"}
+    assert set(contents) == {"ci.yml", "publish.yml"}
+    assert dispatched == {"publish.yml"}
+    assert all("  schedule:" not in _workflow_preamble(workflow) for workflow in contents.values())
 
 
-def test_actions_sidebar_has_only_two_purposeful_workflows() -> None:
-    """Validation and publication remain the only CI/CD entry points."""
-    workflows = tuple(WORKFLOWS.glob("*.yml"))
+def test_ci_has_only_safe_pr_main_and_reusable_triggers() -> None:
+    """The canonical workflow covers PRs/main and remains callable by release."""
+    preamble = _workflow_preamble(_workflow("ci.yml"))
 
-    assert {path.name for path in workflows} == {"ci.yml", "publish.yml"}
-    assert all("  schedule:" not in path.read_text(encoding="utf-8") for path in workflows)
+    for trigger in ("workflow_call:", "push:", "pull_request:"):
+        assert f"  {trigger}" in preamble
+    assert preamble.count("branches: [main]") == 2
+    assert "workflow_dispatch:" not in preamble
+    assert "pull_request_target:" not in preamble
 
 
-def test_pr_main_manual_and_publish_share_canonical_validation() -> None:
-    """PR, post-merge, manual sanity, and publish must use one validation owner."""
-    ci = _workflow("ci.yml")
+def test_workflow_defaults_are_read_only() -> None:
+    """Source and validation jobs inherit only repository read access."""
+    for name in ("ci.yml", "publish.yml"):
+        preamble = _workflow_preamble(_workflow(name))
+        assert re.search(r"^permissions:\n  contents: read$", preamble, re.MULTILINE)
+        assert not re.search(r"^  [a-z-]+: write$", preamble, re.MULTILINE)
+
+
+def test_manual_publish_wraps_canonical_validation_once() -> None:
+    """Release adds preflight and publication around the exact CI workflow."""
     publish = _workflow("publish.yml")
+    preamble = _workflow_preamble(publish)
 
-    for trigger in ("workflow_call:", "push:", "pull_request:", "workflow_dispatch:"):
-        assert f"  {trigger}" in ci
-    assert "branches: [main]" in ci
-    assert "uses: ./.github/workflows/ci.yml" in publish
-    assert "needs: [validation]" in publish
+    assert _job_ids(publish) == {"preflight", "validation", "publish"}
+    assert "  workflow_dispatch:" in preamble
+    for forbidden_trigger in ("workflow_call:", "push:", "pull_request:"):
+        assert f"  {forbidden_trigger}" not in preamble
+    assert publish.count("uses: ./.github/workflows/ci.yml") == 1
+    assert "needs: [preflight]" in _job_body(publish, "validation")
+    assert "needs: [preflight, validation]" in _job_body(publish, "publish")
     assert "python -m cibuildwheel" not in publish
     assert "python -m build" not in publish
-    assert "pattern: dist-*" in publish
-    assert "id-token: write" in publish
-    assert ci.count("python meta/ci/validate_release_version.py") == 1
-    assert publish.count("python meta/ci/validate_release_version.py") == 2
+    assert (
+        _action("source-distribution").count("python meta/ci/release/validate_release_version.py")
+        == 1
+    )
+
+
+def test_publish_request_is_explicit_and_always_targets_pypi() -> None:
+    """A manual release cannot silently become a dry-run or TestPyPI run."""
+    publish = _workflow("publish.yml")
+    preamble = _workflow_preamble(publish)
+    preflight = _job_body(publish, "preflight")
+    publisher = _job_body(publish, "publish")
+
+    assert set(re.findall(r"^      ([a-z0-9_]+):$", preamble, re.MULTILINE)) == {
+        "release_tag",
+        "confirm_publish",
+    }
+    for input_name in ("release_tag", "confirm_publish"):
+        input_body = preamble.split(f"      {input_name}:\n", 1)[1]
+        next_input = re.search(r"^      [a-z0-9_]+:$", input_body, re.MULTILINE)
+        if next_input is not None:
+            input_body = input_body[: next_input.start()]
+        assert "required: true" in input_body
+    for obsolete_mode in ("repository:", "check-only", "testpypi", "repository-url"):
+        assert obsolete_mode not in publish.lower()
+    assert "--require-release-tag" in preflight
+    assert "--require-publish-confirmation" in preflight
+    assert "python meta/ci/release/check_pypi_version.py" in preflight
+    assert "python meta/ci/release/check_github_release_environment.py" in preflight
+    assert 'git cat-file -t "refs/tags/${RELEASE_TAG}"' in preflight
+    assert '[[ "${TAG_TYPE}" != "tag" ]]' in preflight
+    assert "refs/tags/${RELEASE_TAG}^{commit}" in preflight
+    assert "git ls-remote origin refs/heads/main" in preflight
+    assert publish.count("pypa/gh-action-pypi-publish@") == 1
+    assert "skip-existing:" not in publisher
+    assert "if:" not in publisher
+
+
+def test_oidc_publisher_is_a_code_free_least_privilege_boundary() -> None:
+    """Only the final artifact crosses the isolated PyPI trust boundary."""
+    publisher = _job_body(_workflow("publish.yml"), "publish")
+
+    assert re.search(r"^    environment:(?: pypi|\n      name: pypi)$", publisher, re.MULTILINE)
+    assert "id-token: write" in publisher
+    for unnecessary_permission in ("contents: read", "contents: write", "actions: write"):
+        assert unnecessary_permission not in publisher
+    assert "actions/download-artifact@" in publisher
+    assert "name: release-distributions" in publisher
+    assert "pattern:" not in publisher
+    assert "packages-dir: release/packages/" in publisher
+    assert "actions/checkout@" not in publisher
+    assert "actions/setup-python@" not in publisher
+    assert not re.search(r"^      - run:", publisher, re.MULTILINE)
+    assert "python " not in publisher
+
+
+def test_release_preflight_has_only_the_read_permissions_it_uses() -> None:
+    """Environment inspection and tag validation cannot mutate repository state."""
+    preflight = _job_body(_workflow("publish.yml"), "preflight")
+    permissions = preflight.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0]
+
+    assert permissions == "      actions: read\n      contents: read\n"
+    assert "id-token:" not in preflight
+
+
+def test_external_actions_are_pinned_to_immutable_commits() -> None:
+    """Every third-party action uses a full commit SHA; local reuse is exempt."""
+    workflows = (
+        _workflow("ci.yml"),
+        _workflow("publish.yml"),
+        _action("build-platform-wheel"),
+        _action("test-platform-wheel"),
+        *(_action(name) for name in VALIDATION_ACTIONS),
+    )
+    refs = [
+        ref
+        for workflow in workflows
+        for ref in re.findall(r"^\s*(?:-\s+)?uses:\s*([^\s#]+)", workflow, re.MULTILINE)
+    ]
+
+    assert refs
+    local_refs = [ref for ref in refs if ref.startswith("./")]
+    assert local_refs.count("./.github/workflows/ci.yml") == 1
+    assert local_refs.count("./.github/actions/build-platform-wheel") == 1
+    assert local_refs.count("./.github/actions/test-platform-wheel") == 1
+    for name in VALIDATION_ACTIONS:
+        assert local_refs.count(f"./.github/actions/{name}") == 1
+    assert set(local_refs) == {
+        "./.github/workflows/ci.yml",
+        "./.github/actions/build-platform-wheel",
+        "./.github/actions/test-platform-wheel",
+        *(f"./.github/actions/{name}" for name in VALIDATION_ACTIONS),
+    }
+    external_refs = [ref for ref in refs if not ref.startswith("./")]
+    assert external_refs
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref) for ref in external_refs)
+    assert set(external_refs) == {
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
+    }
+
+    checkout_steps = [
+        step
+        for workflow in workflows
+        for step in _step_bodies(workflow)
+        if "actions/checkout@" in step
+    ]
+    assert checkout_steps
+    assert all(_with_value(step, "persist-credentials") == "false" for step in checkout_steps)
+
+
+def test_action_pins_have_automated_review_and_semantic_security_gates() -> None:
+    """Immutable Actions remain maintainable and workflow-aware tooling blocks drift."""
+    dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
+    precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+
+    assert "package-ecosystem: github-actions" in dependabot
+    assert "interval: weekly" in dependabot
+    assert "id: actionlint" in precommit
+    assert "actionlint-py==1.7.12.24" in precommit
+    assert "id: zizmor" in precommit
+    assert "zizmor==1.29.0" in precommit
+    assert r"files: ^\.github/workflows/.*\.ya?ml$" in precommit
+    assert r"files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$" in precommit
+
+    remote_hooks = dict(
+        re.findall(
+            r"^  - repo: (https://[^\n]+)\n    rev: ([^\s#]+)",
+            precommit,
+            re.MULTILINE,
+        )
+    )
+    assert set(remote_hooks) == {
+        "https://github.com/pre-commit/pre-commit-hooks",
+        "https://github.com/pre-commit/mirrors-clang-format",
+        "https://github.com/astral-sh/ruff-pre-commit",
+        "https://github.com/executablebooks/mdformat",
+    }
+    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in remote_hooks.values())
+
+
+def test_shell_tools_use_isolated_prebuilt_wheels_without_remote_build_hooks() -> None:
+    """Cold shell checks must not require system tools or release-asset downloads."""
+    precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    install_step = next(
+        step
+        for step in _step_bodies(_action("quality-validation"))
+        if "name: Install development and audit tools" in step
+    )
+
+    for requirement in ("shellcheck-py==0.11.0.1", "shfmt-py==4.0.0"):
+        assert requirement not in pyproject["project"]["optional-dependencies"]["dev"]
+        assert f"--only-binary={requirement.split('==', 1)[0]}" not in install_step
+
+    assert "github.com/shellcheck-py/shellcheck-py" not in precommit
+    assert "github.com/scop/pre-commit-shfmt" not in precommit
+    assert re.search(
+        r"^      - id: shellcheck\n"
+        r"        name: shellcheck\n"
+        r"        entry: shellcheck\n"
+        r"        language: python\n"
+        r"        additional_dependencies: \[shellcheck-py==0\.11\.0\.1\]\n"
+        r"        files: \\.sh\$$",
+        precommit,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^      - id: shfmt\n"
+        r"        name: shfmt\n"
+        r"        entry: shfmt\n"
+        r"        language: python\n"
+        r"        additional_dependencies: \[shfmt-py==4\.0\.0\]\n"
+        r"        files: \\.sh\$\n"
+        r"        args: \[-w, -i, '2', -ci\]$",
+        precommit,
+        re.MULTILINE,
+    )
 
 
 def test_ci_shell_entry_points_are_executable() -> None:
     """Scripts invoked directly by Actions must retain their executable bit."""
-    scripts = tuple((ROOT / "meta/ci").glob("*.sh"))
+    scripts = tuple((ROOT / "meta/ci").rglob("*.sh"))
 
     assert scripts
     for script in scripts:
@@ -80,42 +327,83 @@ def test_ci_shell_entry_points_are_executable() -> None:
 
 def test_secret_scan_uses_the_tested_report_checker() -> None:
     """Secret exclusions stay narrow and outside the workflow YAML."""
-    ci = _workflow("ci.yml")
+    quality = _action("quality-validation")
 
-    assert "python meta/ci/check_detect_secrets_report.py .detect-secrets.ci.json" in ci
-    assert "_is_notebook_cell_id" not in ci
+    assert (
+        "python meta/ci/quality/check_detect_secrets_report.py .detect-secrets.ci.json" in quality
+    )
+    assert "_is_notebook_cell_id" not in quality
 
 
-def test_validation_has_six_consolidated_job_owners() -> None:
-    """Related gates share environments without dropping their coverage."""
+def test_static_security_scan_covers_release_automation() -> None:
+    """Code with release authority receives the same Bandit gate as runtime code."""
+    quality = _action("quality-validation")
+
+    assert "bandit -r src meta/ci -ll" in quality
+
+
+def test_dependency_audit_includes_pinned_ci_executables() -> None:
+    """Security tools executed by CI are also inputs to its dependency audit."""
+    quality = _action("quality-validation")
+
+    for requirement in (
+        "abi3audit==0.0.26",
+        "actionlint-py==1.7.12.24",
+        "bandit==1.9.4",
+        "build==1.5.0",
+        "cibuildwheel==4.2.0",
+        "cmakelang==0.6.13",
+        "coverage==7.15.4",
+        "detect-secrets==1.5.0",
+        "mypy==1.19.1",
+        "packaging==26.3",
+        "pip-audit==2.10.1",
+        "shellcheck-py==0.11.0.1",
+        "shfmt-py==4.0.0",
+        "toml-sort==0.24.3",
+        "twine==7.0.0",
+        "yamlfix==1.18.0",
+        "zizmor==1.29.0",
+    ):
+        assert f'"{requirement}"' in quality
+
+
+def test_wheel_build_runs_the_stable_abi_audit_explicitly() -> None:
+    """The ABI gate stays strict without cibuildwheel's hidden venv download."""
+    build_action = _action("build-platform-wheel")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    cibuildwheel = pyproject["tool"]["cibuildwheel"]
+    install = next(
+        step for step in _step_bodies(build_action) if "name: Install wheel tooling" in step
+    )
+    audit = next(
+        step for step in _step_bodies(build_action) if "name: Audit the CPython stable ABI" in step
+    )
+
+    assert cibuildwheel["audit-command"] == ""
+    assert "abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1" in install
+    assert "shell: bash" in audit
+    assert "python -m abi3audit --strict --report wheelhouse/*.whl" in audit
+    assert (
+        build_action.index("python -m cibuildwheel")
+        < build_action.index("python -m abi3audit")
+        < build_action.index("name: Install the built wheel")
+    )
+
+
+def test_validation_has_three_matrices_and_one_terminal_gate() -> None:
+    """All validation work belongs to three matrices and one stable final job."""
     ci = _workflow("ci.yml")
     assert _job_ids(ci) == {
-        "checks",
-        "platform-wheels",
-        "distribution",
-        "coverage-native",
-        "platform-sanitizers",
-        "thread-sanitizer",
+        "platform-wheel-builds",
+        "platform-tests",
+        "validation-matrix",
+        "validation-gate",
     }
-    for removed_job in (
-        "core-only:",
-        "remote-http-fault-injection:",
-        "benchmark-matrix-smoke:",
-        "abi3-runtime-compat:",
-        "adapters:",
-        "validate-release-version:",
-        "wheels:",
-        "validate-artifacts:",
-        "wheel-smoke:",
-        "downstream-wheel:",
-        "downstream-extras:",
-    ):
-        assert f"  {removed_job}" not in ci
-    platform_matrix = _job_body(ci, "platform-wheels").split("    steps:", 1)[0]
-    sanitizer_matrix = _job_body(ci, "platform-sanitizers").split("    steps:", 1)[0]
-    assert len(re.findall(r"^          - name:", platform_matrix, re.MULTILINE)) == 4
-    assert len(re.findall(r"^          - name:", sanitizer_matrix, re.MULTILINE)) == 4
-    assert ci.count("      matrix:") == 2
+    gate = _job_body(ci, "validation-gate")
+    assert "if: always()" in gate or "if: ${{ always() }}" in gate
+    assert "needs: [platform-wheel-builds, platform-tests, validation-matrix]" in gate
+    assert ci.count("      matrix:") == 3
     assert "python-version: [" not in ci
     assert "uses: ./.github/workflows/" not in ci
 
@@ -127,26 +415,431 @@ def test_validation_has_six_consolidated_job_owners() -> None:
     assert "test_cloud_real_services.py" not in ci
 
 
+def test_validation_matrix_has_eight_exact_workloads_and_safe_dispatch() -> None:
+    """The heterogeneous matrix preserves every owner, runner, SLA, and action."""
+    ci = _workflow("ci.yml")
+    validation = _job_body(ci, "validation-matrix")
+    expected_rows = (
+        {
+            "name": "quality, security, and Python coverage",
+            "task": "quality",
+            "runner": "ubuntu-24.04",
+            "python": "3.11",
+            "timeout": "50",
+        },
+        {
+            "name": "source distribution and downstream packaging",
+            "task": "source-distribution",
+            "runner": "ubuntu-24.04",
+            "python": "3.11",
+            "timeout": "90",
+        },
+        {
+            "name": "coverage / native LLVM",
+            "task": "native-llvm-coverage",
+            "runner": "ubuntu-24.04",
+            "python": "3.11",
+            "timeout": "50",
+        },
+        {
+            "name": "sanitizer / Linux GCC ThreadSanitizer",
+            "task": "thread-sanitizer",
+            "runner": "ubuntu-24.04",
+            "python": "3.13",
+            "timeout": "45",
+        },
+        {
+            "name": "sanitizer / linux-x86_64-asan-ubsan",
+            "task": "platform-sanitizer",
+            "runner": "ubuntu-24.04",
+            "python": "3.11",
+            "timeout": "70",
+            "sanitizer": "asan-ubsan",
+            "mode": "linux-full",
+        },
+        {
+            "name": "sanitizer / windows-amd64-asan",
+            "task": "platform-sanitizer",
+            "runner": "windows-2025",
+            "python": "3.11",
+            "timeout": "70",
+            "sanitizer": "asan",
+            "mode": "native",
+        },
+        {
+            "name": "sanitizer / macos-x86_64-asan-ubsan",
+            "task": "platform-sanitizer",
+            "runner": "macos-15-intel",
+            "python": "3.11",
+            "timeout": "70",
+            "sanitizer": "asan-ubsan",
+            "mode": "native",
+        },
+        {
+            "name": "sanitizer / macos-arm64-asan-ubsan",
+            "task": "platform-sanitizer",
+            "runner": "macos-15",
+            "python": "3.11",
+            "timeout": "70",
+            "sanitizer": "asan-ubsan",
+            "mode": "native",
+        },
+    )
+
+    assert _matrix_includes(ci, "validation-matrix") == expected_rows
+    assert "name: validation / ${{ matrix.name }}" in validation
+    assert "runs-on: ${{ matrix.runner }}" in validation
+    assert "timeout-minutes: ${{ matrix.timeout }}" in validation
+    assert "fail-fast: false" in validation
+    assert "python-version: ${{ matrix.python }}" in validation
+    assert "VALIDATION_TASK: ${{ matrix.task }}" in validation
+    assert (
+        "quality|source-distribution|native-llvm-coverage|thread-sanitizer|platform-sanitizer)"
+        in validation
+    )
+    for task in VALIDATION_ACTIONS:
+        assert f"if: matrix.task == '{task.removesuffix('-validation')}'" in validation
+        assert validation.count(f"uses: ./.github/actions/{task}") == 1
+    assert "sanitizer: ${{ matrix.sanitizer }}" in validation
+    assert "mode: ${{ matrix.mode }}" in validation
+
+
 def test_platform_suite_exercises_the_installed_wheel() -> None:
     """The full suite must retain the wheel's platform-specific runtime bootstrap."""
-    platform_job = _job_body(_workflow("ci.yml"), "platform-wheels")
+    test_action = _action("test-platform-wheel")
 
-    assert "pytest -q -o pythonpath=." in platform_job
+    assert "pytest -q -o pythonpath=." in test_action
+    assert "wheelhouse/*.whl" in test_action
+    assert "extension.is_relative_to(checkout)" in test_action
+
+
+def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
+    """All release wheels are compared with the same Python and adapters."""
+    ci = _workflow("ci.yml")
+    build_action = _action("build-platform-wheel")
+    test_action = _action("test-platform-wheel")
+    test_requirements_path = ROOT / "meta/ci/requirements/platform-tests.txt"
+    test_requirements = test_requirements_path.read_text(encoding="utf-8").splitlines()
+    cibuildwheel = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "cibuildwheel"
+    ]
+    dependencies = [
+        step
+        for step in _step_bodies(test_action)
+        if "name: Install the wheel and full-suite dependencies" in step
+    ]
+
+    assert build_action.count("python-version: 3.11.9") == 1
+    assert test_action.count("python-version: 3.11.9") == 1
+    assert build_action.count("python -m cibuildwheel") == 1
+    assert build_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 2
+    assert test_action.count("actions/download-artifact@") == 1
+    assert test_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 1
+    assert "python -m cibuildwheel" not in test_action
+    assert len(dependencies) == 1
+    assert "if:" not in dependencies[0]
+    assert "--retries 10" in dependencies[0]
+    assert "--timeout 60" in dependencies[0]
+    assert "-r meta/ci/requirements/platform-tests.txt" in dependencies[0]
+    assert "cache-dependency-path: meta/ci/requirements/platform-tests.txt" in test_action
+    assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
+    expected_requirements = {
+        "pytest==9.1.1",
+        "aiohttp==3.14.3",
+        "pyarrow==25.0.1",
+        "pandas==3.0.5",
+        "polars==1.43.2",
+        "duckdb==1.5.5",
+    }
+    assert set(test_requirements) == expected_requirements
+    assert len(test_requirements) == len(expected_requirements)
+    assert all(requirement not in dependencies[0] for requirement in expected_requirements)
+    build_platforms = (
+        {
+            "display-name": "Linux x86-64",
+            "runner": "ubuntu-24.04",
+            "platform-name": "linux-x86_64",
+            "artifact": "linux",
+            "arch": "x86_64",
+        },
+        {
+            "display-name": "Windows AMD64",
+            "runner": "windows-2025",
+            "platform-name": "windows-amd64",
+            "artifact": "windows",
+            "arch": "AMD64",
+        },
+        {
+            "display-name": "macOS x86-64",
+            "runner": "macos-15-intel",
+            "platform-name": "macos-x86_64",
+            "artifact": "macos-x86_64",
+            "arch": "x86_64",
+        },
+        {
+            "display-name": "macOS ARM64",
+            "runner": "macos-15",
+            "platform-name": "macos-arm64",
+            "artifact": "macos-arm64",
+            "arch": "arm64",
+        },
+    )
+    test_platforms = tuple(
+        {key: value for key, value in platform.items() if key != "arch"}
+        for platform in build_platforms
+    )
+    build = _job_body(ci, "platform-wheel-builds")
+
+    assert _matrix_includes(ci, "platform-wheel-builds") == build_platforms
+    assert "name: wheel / ${{ matrix['display-name'] }}" in build
+    assert "runs-on: ${{ matrix.runner }}" in build
+    assert "fail-fast: false" in build
+    assert build.count("uses: ./.github/actions/build-platform-wheel") == 1
+    assert "platform-name: ${{ matrix['platform-name'] }}" in build
+    assert "artifact: ${{ matrix.artifact }}" in build
+    assert "arch: ${{ matrix.arch }}" in build
+
+    tests = _job_body(ci, "platform-tests")
+    expected_test_rows = tuple(
+        {**platform, "shard": shard}
+        for shard in ("concurrency", "memory-parquet", "io-pipeline")
+        for platform in test_platforms
+    )
+    assert _matrix_includes(ci, "platform-tests") == expected_test_rows
+    assert "name: tests / ${{ matrix.shard }} / ${{ matrix['display-name'] }}" in tests
+    assert "needs: [platform-wheel-builds]" in tests
+    assert "runs-on: ${{ matrix.runner }}" in tests
+    assert "fail-fast: false" in tests
+    assert tests.count("uses: ./.github/actions/test-platform-wheel") == 1
+    assert "platform-name: ${{ matrix['platform-name'] }}" in tests
+    assert "artifact: ${{ matrix.artifact }}" in tests
+    assert "shard: ${{ matrix.shard }}" in tests
+
+
+def test_native_stress_and_functional_suites_form_an_explicit_partition() -> None:
+    """Every platform runs one heavy case plus the complete functional complement."""
+    test_action = _action("test-platform-wheel")
+    pytest_config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "pytest"
+    ]["ini_options"]
+    stress = next(
+        step
+        for step in _step_bodies(test_action)
+        if "name: Cross-platform native completion stress" in step
+    )
+    functional = next(
+        step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
+    )
+
+    assert pytest_config["markers"] == [
+        "native_stress: high-volume native concurrency coverage run explicitly in CI"
+    ]
+    assert "addopts" not in pytest_config
+    assert "if: inputs.shard == 'concurrency'" in stress
+    assert "-m native_stress" in stress
+    assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
+    assert "-m 'not native_stress'" in functional
+    assert "--ignore" not in stress + functional
+    assert "pytest-native-stress-${PLATFORM_ARTIFACT}.xml" in stress
+    assert "pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log" in stress
+    assert "pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" in functional
+    assert test_action.index("name: Cross-platform native completion stress") < (
+        test_action.index("name: Run functional test shard")
+    )
+
+
+def test_platform_smokes_are_owned_by_their_related_parallel_shards() -> None:
+    """Independent smoke gates run with the functional domain they exercise."""
+    test_action = _action("test-platform-wheel")
+    ownership = {
+        "Compile and certify the Parquet runtime": "memory-parquet",
+        "Cross-platform reader linear-scaling smoke": "io-pipeline",
+        "Cross-platform threading benchmark smoke": "concurrency",
+        "Cross-platform native completion stress": "concurrency",
+    }
+
+    for name, shard in ownership.items():
+        step = next(step for step in _step_bodies(test_action) if f"name: {name}" in step)
+        assert f"if: inputs.shard == '{shard}'" in step
+
+
+def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
+    """Every platform runs the same stable partition of every test directory."""
+    ci = _workflow("ci.yml")
+    test_action = _action("test-platform-wheel")
+    all_test_domains = {
+        path.name
+        for path in (ROOT / "tests").iterdir()
+        if path.is_dir() and not path.name.startswith("_")
+    }
+    shard_domains = {
+        "concurrency": {"concurrency"},
+        "memory-parquet": {
+            "memory",
+            "parquet",
+            "quality",
+            "sinks",
+        },
+        "io-pipeline": {
+            "examples",
+            "io",
+            "pipeline",
+            "remote",
+            "schema",
+        },
+    }
+    functional = next(
+        step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
+    )
+
+    for shard, domains in shard_domains.items():
+        other_domains = set().union(
+            *(candidate for name, candidate in shard_domains.items() if name != shard)
+        )
+        assert domains.isdisjoint(other_domains)
+    assert set().union(*shard_domains.values()) == all_test_domains
+    for domains in shard_domains.values():
+        for domain in domains:
+            assert functional.count(f"tests/{domain}") == 1
+    tests = _job_body(ci, "platform-tests")
+    rows = _matrix_includes(ci, "platform-tests")
+    for shard in shard_domains:
+        assert sum(row["shard"] == shard for row in rows) == 4
+    assert len({(row["platform-name"], row["shard"]) for row in rows}) == 12
+    assert "fail-fast: false" in tests
+
+
+def test_validation_matrix_and_terminal_gate_have_exact_dependencies() -> None:
+    """One test matrix consumes builds and one final job joins every matrix."""
+    ci = _workflow("ci.yml")
+    tests = _job_body(ci, "platform-tests")
+    gate = _job_body(ci, "validation-gate")
+    assert "needs: [platform-wheel-builds]" in tests
+    assert tests.count("needs:") == 1
+    assert "needs: [platform-wheel-builds, platform-tests, validation-matrix]" in gate
+    assert gate.count("needs:") == 1
+    expected_results = {
+        "WHEEL_BUILDS_RESULT": "platform-wheel-builds",
+        "PLATFORM_TESTS_RESULT": "platform-tests",
+        "VALIDATION_MATRIX_RESULT": "validation-matrix",
+    }
+    for variable, job_id in expected_results.items():
+        assert f"{variable}: ${{{{ needs.{job_id}.result }}}}" in gate
+        assert f'"${{{variable}}}"' in gate
+    assert gate.count(".result }}") == len(expected_results)
+    require = gate.index("name: Require every validation matrix to succeed")
+    downloads = gate.index("actions/download-artifact@")
+    assembly = gate.index("name: Assemble the auditable release artifact")
+    assert 'if [[ "${result}" != "success" ]]' in gate
+    assert require < downloads < assembly
+
+
+def test_platform_evidence_records_comparable_cpu_limits() -> None:
+    """Runner timing evidence includes portable CPU and Linux cgroup context."""
+    test_action = _action("test-platform-wheel")
+    helper = (ROOT / "meta/ci/quality/record_runner_environment.py").read_text(encoding="utf-8")
+    evidence = next(
+        step for step in _step_bodies(test_action) if "name: Record runner CPU environment" in step
+    )
+    upload = next(
+        step
+        for step in _step_bodies(test_action)
+        if "name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}" in step
+    )
+
+    assert "if:" not in evidence
+    assert "os.cpu_count()" in helper
+    assert "os.sched_getaffinity(0)" in helper
+    assert '"installed_distributions"' in helper
+    for distribution in (
+        "aiohttp",
+        "duckdb",
+        "pandas",
+        "polars",
+        "pyarrow",
+        "pytest",
+        "schema-sanitizer",
+    ):
+        assert f'"{distribution}"' in helper
+    assert '_optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None' in helper
+    assert '_optional_key_values("/sys/fs/cgroup/cpu.stat") if is_linux else None' in helper
+    assert "runner-cpu-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json" in evidence
+    assert "os." + "environ" not in helper
+    assert "arguments[0]" in helper
+    assert test_action.index("name: Record runner CPU environment") < test_action.index(
+        "name: Cross-platform reader linear-scaling smoke"
+    )
+    assert "path: artifacts/" in upload
+
+
+def test_runner_environment_helper_writes_only_the_owned_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extracted runner evidence remains executable and excludes environment data."""
+    from meta.ci.quality import record_runner_environment
+
+    monkeypatch.setattr(record_runner_environment.metadata, "version", lambda _name: "1.0")
+
+    output = tmp_path / "runner.json"
+    assert record_runner_environment.main([str(output)]) == 0
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+
+    assert set(evidence) == {
+        "schema_version",
+        "python",
+        "installed_distributions",
+        "platform",
+        "cpu",
+    }
+    assert evidence["schema_version"] == 1
+    assert set(evidence["cpu"]) == {
+        "logical_count",
+        "affinity",
+        "affinity_count",
+        "linux_cgroup_v2_cpu_max",
+        "linux_cgroup_v2_cpu_stat",
+    }
+    assert "environment" not in output.read_text(encoding="utf-8").lower()
+
+
+def test_platform_suite_persists_test_timings_on_failure() -> None:
+    """Every wheel runner retains complete and ranked pytest timing evidence."""
+    test_action = _action("test-platform-wheel")
+    full_suite = next(
+        step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
+    )
+    upload = next(
+        step
+        for step in _step_bodies(test_action)
+        if "name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}" in step
+    )
+
+    assert "shell: bash" in full_suite
+    assert "set -euo pipefail" in full_suite
+    assert "--durations=50" in full_suite
+    assert "--durations-min=0.05" in full_suite
+    assert '--junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml"' in full_suite
+    assert 'tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"' in full_suite
+    assert test_action.index("name: Run functional test shard") < test_action.index(
+        "name: Upload platform-shard evidence"
+    )
+    assert "failure() && hashFiles('artifacts/**') != ''" in upload
 
 
 def test_validation_owns_full_extension_tsan_gate() -> None:
     """Linux CI must build and repeatedly exercise the complete TSan extension."""
     ci = _workflow("ci.yml")
+    tsan = _action("thread-sanitizer")
 
-    assert "thread-sanitizer:" in ci
-    assert "SCHEMA_SANITIZER_SANITIZER=tsan" in ci
-    assert "SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled" in ci
-    assert "meta/ci/tsan_python_launcher.cc" in ci
-    assert ci.count("meta/ci/run_tsan_extension_suite.sh") == 1
-    assert "build/tsan ./python-tsan 2" in ci
-    assert "site.getsitepackages()[0]" in ci
+    assert "task: thread-sanitizer" in ci
+    assert "SCHEMA_SANITIZER_SANITIZER=tsan" in tsan
+    assert "SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled" in tsan
+    assert "meta/ci/sanitizers/tsan_python_launcher.cc" in tsan
+    assert tsan.count("meta/ci/sanitizers/run_tsan_extension_suite.sh") == 1
+    assert "build/tsan ./python-tsan 2" in tsan
+    assert "site.getsitepackages()[0]" in tsan
 
-    runner = (ROOT / "meta/ci/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
+    runner = (ROOT / "meta/ci/sanitizers/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
     for domain in (
         "test_threading_native_executor.py",
         "test_threading_inference.py",
@@ -155,7 +848,7 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
         "test_threading_parquet_output.py",
         "test_threading_golden_matrix.py",
         "test_partition_lookahead.py",
-        "test_modified_time_csv_phase5.py",
+        "test_csv_union_projection.py",
     ):
         assert runner.count(domain) == 1
 
@@ -165,44 +858,49 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
 
 
 def test_remote_http_fault_gate_runs_on_every_supported_platform() -> None:
-    """The complete suite, including real-socket faults, runs in each platform task."""
+    """The I/O shard, including real-socket faults, runs on every platform."""
     ci = _workflow("ci.yml")
+    test_action = _action("test-platform-wheel")
 
-    assert "platform-wheels:" in ci
-    assert "Full suite including adapters, HTTP faults, and concurrency" in ci
-    assert "run: pytest -q" in ci
-    assert "--ignore" not in ci
-    for runner in ("ubuntu-latest", "windows-latest", "macos-15-intel", "macos-14"):
+    assert "platform-tests:" in ci
+    assert "tests/remote" in test_action
+    assert "pytest -q -o pythonpath=." in test_action
+    assert "--ignore" not in test_action
+    rows = _matrix_includes(ci, "platform-tests")
+    for shard in ("concurrency", "memory-parquet", "io-pipeline"):
+        assert sum(row["shard"] == shard for row in rows) == 4
+    for runner in ("ubuntu-24.04", "windows-2025", "macos-15-intel", "macos-15"):
         assert runner in ci
+    for floating_or_retired in ("ubuntu-latest", "windows-latest", "macos-14"):
+        assert floating_or_retired not in ci
 
 
 def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     """Native fuzzing must run under TSan and supported platform sanitizers."""
     ci = _workflow("ci.yml")
+    sanitizer = _action("platform-sanitizer")
 
-    assert "platform-sanitizers:" in ci
+    assert ci.count("task: platform-sanitizer") == 4
     assert "windows-amd64-asan" in ci
     assert "macos-x86_64-asan-ubsan" in ci
     assert "macos-arm64-asan-ubsan" in ci
-    assert ci.count("SCHEMA_SANITIZER_BUILD_FUZZERS=ON") >= 3
-    assert ci.count("SCHEMA_SANITIZER_FUZZ_ENGINE=standalone") >= 3
-    assert ci.count("meta/ci/run_fuzz_regressions.py") >= 3
-    assert ci.count("--engine libfuzzer") >= 1
-    assert "--campaign-runs 1000" in ci
-    assert "--campaign-runs 500" in ci
-    assert "schema_sanitizer_sanitized_ordered_executor" in ci
-    assert "--repeat until-fail:2" in ci
-    concurrency_step = ci.split("- name: Run repeated sanitized concurrency probe", 1)[1].split(
-        "- name:", 1
-    )[0]
-    fuzz_step = (
-        _job_body(ci, "platform-sanitizers")
-        .split("- name: Run platform fuzz regressions and mutation campaigns", 1)[1]
-        .split("- name:", 1)[0]
-    )
-    assert "matrix.mode == 'native'" in concurrency_step
+    assert sanitizer.count("SCHEMA_SANITIZER_BUILD_FUZZERS=ON") >= 3
+    assert sanitizer.count("SCHEMA_SANITIZER_FUZZ_ENGINE=standalone") >= 2
+    assert sanitizer.count("meta/ci/fuzz/run_fuzz_regressions.py") == 2
+    assert sanitizer.count("--engine libfuzzer") >= 1
+    assert "--campaign-runs 1000" in sanitizer
+    assert "--campaign-runs 500" in sanitizer
+    assert "schema_sanitizer_sanitized_ordered_executor" in sanitizer
+    assert "--repeat until-fail:2" in sanitizer
+    concurrency_step = sanitizer.split("- name: Run repeated sanitized concurrency probe", 1)[
+        1
+    ].split("- name:", 1)[0]
+    fuzz_step = sanitizer.split("- name: Run platform fuzz regressions and mutation campaigns", 1)[
+        1
+    ].split("- name:", 1)[0]
+    assert "inputs.mode == 'native'" in concurrency_step
     assert "runner.os != 'Windows'" in concurrency_step
-    assert "if: matrix.mode == 'native'" in fuzz_step
+    assert "if: inputs.mode == 'native'" in fuzz_step
 
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "SCHEMA_SANITIZER_FUZZ_ENGINE" in cmake
@@ -223,11 +921,44 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
     assert 'if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))' in cmake
     assert "set(_schema_sanitizer_sanitized_executor_rounds 100)" in cmake
     assert "schema_sanitizer_sanitized_ordered_executor --rounds" in cmake
-    assert 'std::string_view(argv[1]) != "--rounds"' in probe
+    assert 'argc == 3 && std::string_view(argv[1]) == "--rounds"' in probe
+    assert "std::from_chars" in probe
+    assert 'argc == 3 && std::string_view(argv[1]) == "--case"' in probe
     assert "shared arena startup timed out" in probe
+    assert "available_cpu_capacity()" in probe
+    assert "const auto upstream_width = worker_count / 2U" in probe
+    assert "const auto output_width = worker_count - upstream_width" in probe
+    assert "arena->peak_active_tasks() == worker_count" in probe
+    assert "sanitizer probe skipped: case=shared_arena reason=requires" in probe
+    assert "sanitizer probe skipped: case=backlog_admission" in probe
+    assert "sanitizer probe skipped: case=lane_stealing reason=requires" in probe
+    assert probe.count("return true;", probe.index("run_shared_operation_arena_round")) >= 3
     assert "stage cancellation startup timed out" in probe
     assert "cancellation startup timed out" in probe
     assert "sanitizer probe watchdog expired" in probe
+
+
+def test_native_launcher_arguments_preserve_shell_word_boundaries() -> None:
+    """Compiler/linker flags and interpreter paths remain arrays or quoted scalars."""
+    native_actions = _action("platform-sanitizer") + _action("thread-sanitizer")
+
+    assert (
+        native_actions.count(
+            'read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"'
+        )
+        == 2
+    )
+    assert (
+        native_actions.count(
+            'read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"'
+        )
+        == 2
+    )
+    assert native_actions.count('"${python_embed_cflags[@]}"') == 2
+    assert native_actions.count('"${python_embed_ldflags[@]}"') == 2
+    assert "python3-config --embed --cflags --ldflags" not in native_actions
+    assert '-DPython3_EXECUTABLE="$(command -v python)"' in native_actions
+    assert "$(which python)" not in native_actions
 
 
 def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> None:
@@ -285,28 +1016,135 @@ def test_platform_specific_standard_library_boundaries_are_explicit() -> None:
 def test_benchmark_matrix_runs_on_supported_platforms() -> None:
     """Benchmark gates must cover supported OS, shape, and source dimensions."""
     ci = _workflow("ci.yml")
-    platform_job = _job_body(ci, "platform-wheels")
+    test_action = _action("test-platform-wheel")
 
-    assert "benchmarks/bench_threading_matrix.py" in platform_job
-    assert "--profile ci" in platform_job
-    assert "benchmarks/bench_reader_linear_scaling.py" in platform_job
-    assert "--maximum-normalized-growth 8" in platform_job
-    assert "reader-linear-scaling-${{ matrix.artifact }}.json" in platform_job
+    assert "python -m benchmarks.concurrency.threading.matrix" in test_action
+    assert "--profile ci" in test_action
+    assert "python -I benchmarks/readers/linear_scaling.py" in test_action
+    assert "--maximum-normalized-growth 8" in test_action
+    assert "--latency-budget benchmarks/readers/linear_scaling_budget.json" in test_action
+    assert "--wheel wheelhouse/*.whl" in test_action
+    reader_step = next(
+        step
+        for step in _step_bodies(test_action)
+        if "name: Cross-platform reader linear-scaling smoke" in step
+    )
+    assert "shell: bash" in reader_step
+    assert "if: inputs.shard == 'io-pipeline'" in reader_step
+    assert "reader-linear-scaling-${PLATFORM_ARTIFACT}.json" in test_action
+    # Cheap performance gates fail before the expensive full pytest suite.
+    assert test_action.index("name: Cross-platform reader linear-scaling smoke") < (
+        test_action.index("name: Cross-platform threading benchmark smoke")
+    )
+    assert test_action.index("name: Cross-platform threading benchmark smoke") < (
+        test_action.index("name: Run functional test shard")
+    )
+    assert test_action.index("name: Cross-platform reader linear-scaling smoke") < (
+        test_action.index("name: Run functional test shard")
+    )
     for artifact in ("linux", "windows", "macos-x86_64", "macos-arm64"):
         assert f"artifact: {artifact}" in ci
 
 
-def test_release_artifacts_and_downstream_extras_use_two_compact_jobs() -> None:
-    """Packaging keeps all guarantees without one task per Python or extra."""
-    ci = _workflow("ci.yml")
-    downstream = (ROOT / "meta/ci/check_downstream_install.py").read_text(encoding="utf-8")
+def test_python_coverage_has_an_explicit_regression_floor() -> None:
+    """Coverage collection is a gate, not merely a report artifact."""
+    checks = _action("quality-validation")
 
-    assert "python-version: '3.11'" in ci
-    assert "python-version: '3.14'" in ci
-    assert "needs: [platform-wheels]" in ci
-    assert "pattern: dist-wheels-*" in ci
-    assert "name: dist-sdist" in ci
-    assert "check_distribution_contents.py --release-set" in ci
-    assert "check_downstream_install.py" in ci
-    for extra in ("core", "pyarrow", "pandas", "polars", "duckdb", "cloud"):
+    assert checks.count("coverage report --fail-under=44") == 1
+
+
+def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
+    """Missing evidence fails and each artifact has a deliberate lifetime."""
+    sources = (
+        _workflow("ci.yml"),
+        _action("build-platform-wheel"),
+        _action("test-platform-wheel"),
+        _action("quality-validation"),
+        _action("source-distribution"),
+        _action("native-llvm-coverage"),
+    )
+    upload_steps = [
+        step
+        for source in sources
+        for step in _step_bodies(source)
+        if "actions/upload-artifact@" in step
+    ]
+    uploads: dict[str, list[str]] = {}
+    for step in upload_steps:
+        uploads.setdefault(_with_value(step, "name"), []).append(step)
+    retention = {
+        "python-branch-coverage": "14",
+        "dist-wheels-${{ inputs.platform-name }}": "1",
+        "platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}": "14",
+        "source-distribution": "1",
+        "release-distributions": "30",
+        "native-llvm-coverage": "14",
+    }
+
+    assert set(uploads) == set(retention)
+    for name, days in retention.items():
+        assert all(_with_value(step, "retention-days") == days for step in uploads[name])
+        assert all(_with_value(step, "if-no-files-found") == "error" for step in uploads[name])
+    platform_evidence = uploads["platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}"][0]
+    assert "success() || (failure() && hashFiles('artifacts/**') != '')" in platform_evidence
+    assert all(_with_value(step, "path") == "release/" for step in uploads["release-distributions"])
+
+    retried = {
+        "dist-wheels-${{ inputs.platform-name }}",
+        "platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}",
+        "source-distribution",
+        "release-distributions",
+    }
+    assert {name for name, steps in uploads.items() if len(steps) == 2} == retried
+    for name in retried:
+        first, retry = uploads[name]
+        assert "continue-on-error: true" in first
+        assert "outcome == 'failure'" in retry
+        assert _with_value(retry, "overwrite") == "true"
+
+
+def test_release_artifact_is_complete_exact_and_self_describing() -> None:
+    """CI publishes one immutable package set with its audit manifest."""
+    ci = _workflow("ci.yml")
+    source_distribution = _action("source-distribution")
+    distribution = _job_body(ci, "validation-gate")
+    publish = _job_body(_workflow("publish.yml"), "publish")
+    downstream = (ROOT / "meta/ci/release/check_downstream_install.py").read_text(encoding="utf-8")
+
+    build_action = _action("build-platform-wheel")
+    assert "python-version: 3.11.9" in build_action
+    for version in ("3.12", "3.13", "3.14"):
+        assert f"python-version: '{version}'" in build_action
+    assert build_action.count("python -I meta/ci/release/downstream_smoke.py") == 3
+    assert "needs: [platform-wheel-builds, platform-tests, validation-matrix]" in distribution
+    assert "python -m build --sdist --outdir dist" in source_distribution
+    assert "check_downstream_install.py" in source_distribution
+    assert "name: source-distribution" in source_distribution
+    assert "name: source-distribution" in distribution
+    assert "pattern: dist-wheels-*" in distribution
+    assert "check_distribution_contents.py --release-set" in distribution
+    assert "check_downstream_install.py" not in distribution
+    assert "release/packages/" in distribution
+    assert "release/release-manifest.json" in distribution
+    assert "name: release-distributions" in distribution
+    assert "name: dist-sdist" not in ci
+    assert ci.index("Require every validation matrix to succeed") < ci.index(
+        "Assemble the auditable release artifact"
+    )
+    assert "name: release-distributions" in publish
+    assert "packages-dir: release/packages/" in publish
+    assert "release/release-manifest.json" in ci
+    for extra in (
+        "core",
+        "pyarrow",
+        "pandas",
+        "polars",
+        "duckdb",
+        "gcs",
+        "s3",
+        "azure",
+        "bigquery",
+        "cloud",
+        "all",
+    ):
         assert f'"{extra}"' in downstream

@@ -21,26 +21,29 @@ def _create_sibling_temp(target: Path) -> Path:
     for _ in range(_MAX_TEMP_NAME_ATTEMPTS):
         candidate = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
         try:
-            descriptor = os.open(
-                candidate,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o666,
-            )
+            from .process_resources import governed_os_descriptor
+
+            with governed_os_descriptor(
+                lambda: os.open(
+                    candidate,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o666,
+                ),
+                teardown=True,
+                label="atomic-output-staging",
+            ) as descriptor:
+                if existing_mode is not None:
+                    fchmod = getattr(os, "fchmod", None)
+                    if fchmod is not None:
+                        fchmod(descriptor, existing_mode)
+                    else:
+                        os.chmod(candidate, existing_mode)
         except FileExistsError:
             continue
-        try:
-            if existing_mode is not None:
-                fchmod = getattr(os, "fchmod", None)
-                if fchmod is not None:
-                    fchmod(descriptor, existing_mode)
-                else:
-                    os.chmod(candidate, existing_mode)
         except Exception:
-            os.close(descriptor)
             with suppress(OSError):
                 candidate.unlink()
             raise
-        os.close(descriptor)
         return candidate
     raise FileExistsError(f"unable to reserve temporary output beside {target}")
 

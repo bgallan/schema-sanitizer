@@ -5,8 +5,24 @@ sanitize::Status start_workers() {
   try {
     workers_.reserve(worker_count_);
     for (std::size_t index = 0; index < worker_count_; ++index) {
-      workers_.emplace_back([this, index](sanitize::internal::StopToken stop) {
+      ProcessPhysicalThreadPermitLease permit(1U);
+      if (!permit) {
+        throw std::system_error(
+            std::make_error_code(std::errc::resource_unavailable_try_again),
+            "native physical thread capacity exhausted");
+      }
+      workers_.emplace_back([this, index, permit = std::move(permit)](
+                                sanitize::internal::StopToken stop) mutable {
+        mark_process_physical_thread_running();
+        struct PhysicalThreadRunningGuard final {
+          ~PhysicalThreadRunningGuard() noexcept {
+            mark_process_physical_thread_stopped();
+          }
+        } running_guard;
         worker_loop(index, stop);
+        // permit retires after the running marker, including exception-free
+        // early exits. If thread construction fails, the closure destructor
+        // retires it before emplace_back propagates the error.
       });
     }
   } catch (const std::bad_alloc &) {

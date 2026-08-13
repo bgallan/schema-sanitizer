@@ -26,7 +26,7 @@ def load_local_csv_directory_to_polars(
     omit_null_payloads: bool = True,
     csv_delimiter: str = ",",
     csv_escape_char: str | None = "\\",
-    multi_threading: bool = True,
+    multi_threading: bool = False,
     memory_limit_bytes: int | None = None,
 ) -> EventNormalizationResult:
     """Sanitize and normalize every CSV in one local directory into one frame."""
@@ -45,8 +45,12 @@ def load_local_csv_directory_to_polars(
         multi_threading=multi_threading,
         memory_limit_bytes=memory_limit_bytes,
     )
+    try:
+        frame = converted.clean_data
+    finally:
+        converted.close()
     return normalize_event_columns_inferred(
-        converted.clean_data,
+        frame,
         separator=event_separator,
         output_column=event_column,
         omit_null_payloads=omit_null_payloads,

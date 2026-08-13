@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import AbstractSet
 
 import pytest
 
+from schema_sanitizer.core_impl import async_scheduler
 from schema_sanitizer.core_impl.async_scheduler import (
+    drain_ordered_iterable_results,
     ordered_indexed_results,
     retry_async,
     unordered_indexed_results,
@@ -54,7 +57,9 @@ def test_ordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
             return str(index).encode()
 
         with pytest.raises(RuntimeError, match="boom"):
-            async for _index, _payload in ordered_indexed_results(3, fetch, window=3):
+            async for _index, _payload in ordered_indexed_results(
+                3, fetch, window=3, expected_retained_bytes=1024
+            ):
                 raise AssertionError("failed first task should not yield")
 
         assert cancelled == [1, 2]
@@ -90,7 +95,9 @@ def test_unordered_indexed_results_uses_bounded_task_window() -> None:
                 active -= 1
 
         results: list[tuple[int, int]] = []
-        async for index, value in unordered_indexed_results(5, fetch, window=2):
+        async for index, value in unordered_indexed_results(
+            5, fetch, window=2, expected_retained_bytes=256
+        ):
             results.append((index, value))
             if index == 1:
                 release_zero.set()
@@ -122,7 +129,9 @@ def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None
             return index
 
         with pytest.raises(RuntimeError, match="boom"):
-            async for _index, _value in unordered_indexed_results(3, fetch, window=2):
+            async for _index, _value in unordered_indexed_results(
+                3, fetch, window=2, expected_retained_bytes=256
+            ):
                 raise AssertionError("failed task should not yield")
 
         assert cancelled == [1]
@@ -153,9 +162,113 @@ def test_unordered_indexed_results_reuses_fixed_worker_tasks(
             await asyncio.sleep(0)
             return index
 
-        values = [value async for _index, value in unordered_indexed_results(100, fetch, window=4)]
+        values = [
+            value
+            async for _index, value in unordered_indexed_results(
+                100, fetch, window=4, expected_retained_bytes=256
+            )
+        ]
         assert sorted(values) == list(range(100))
         assert created == 4
+
+    asyncio.run(run())
+
+
+def test_completed_worker_pool_stops_without_terminal_debt_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle result-slot waits remain directly cancellable on Python 3.11."""
+
+    original_park = async_scheduler._park_async_terminal_debt
+    park_calls = 0
+    parked_tasks: list[asyncio.Task[None]] = []
+
+    def record_terminal_debt(
+        tasks: AbstractSet[asyncio.Task[None]],
+        admission: async_scheduler._AsyncSchedulerAdmission,
+        result_slots: list[async_scheduler._AsyncWorkerResultSlot] | None,
+        pending_slots: list[async_scheduler._AsyncPendingResultSlot] | None = None,
+        *,
+        reap_completed: bool = True,
+    ) -> bool:
+        """Record a regression, then preserve ownership and make cleanup finite."""
+        nonlocal park_calls
+        park_calls += 1
+        parked_tasks.extend(tasks)
+        # A second cancellation lets an implementation that regresses clean up
+        # its terminal debt instead of contaminating the rest of the test run.
+        for task in tasks:
+            task.cancel()
+        return original_park(
+            tasks,
+            admission,
+            result_slots,
+            pending_slots,
+            reap_completed=reap_completed,
+        )
+
+    monkeypatch.setattr(async_scheduler, "_ASYNC_CANCEL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(async_scheduler, "_park_async_terminal_debt", record_terminal_debt)
+
+    async def run() -> tuple[
+        async_scheduler.AsyncSchedulerSnapshot,
+        async_scheduler.AsyncSchedulerSnapshot,
+    ]:
+        """Complete a pool and capture exact scheduler ownership around shutdown."""
+        before = async_scheduler.async_scheduler_snapshot()
+
+        async def fetch(index: int) -> int:
+            """Produce enough values to recycle every fixed worker repeatedly."""
+            await asyncio.sleep(0)
+            return index
+
+        values = [
+            value
+            async for _index, value in unordered_indexed_results(
+                100, fetch, window=4, expected_retained_bytes=256
+            )
+        ]
+        assert sorted(values) == list(range(100))
+        if parked_tasks:
+            await asyncio.gather(*parked_tasks, return_exceptions=True)
+        return before, async_scheduler.async_scheduler_snapshot()
+
+    before, after = asyncio.run(run())
+    assert park_calls == 0
+    assert after.in_use == before.in_use
+    assert after.active_operations == before.active_operations
+    assert after.terminal_debts == before.terminal_debts
+
+
+def test_bounded_event_wait_propagates_external_task_cancellation() -> None:
+    """An outer cancellation is never converted into a local polling timeout."""
+
+    class ObservedEvent(asyncio.Event):
+        """Record the exact task that owns the underlying Event wait."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_started = asyncio.Event()
+            self.waiting_task: asyncio.Task[object] | None = None
+
+        async def wait(self) -> bool:
+            """Publish waiter ownership before suspending on the real event."""
+            self.waiting_task = asyncio.current_task()
+            self.wait_started.set()
+            return await super().wait()
+
+    async def run() -> None:
+        """Cancel an Event poll while its structured timeout is still armed."""
+        event = ObservedEvent()
+        waiting = asyncio.create_task(
+            async_scheduler._bounded_async_event_wait(event, stage="async_result_slot_test")
+        )
+        await asyncio.wait_for(event.wait_started.wait(), timeout=1)
+        assert event.waiting_task is waiting
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert waiting.cancelled()
 
     asyncio.run(run())
 
@@ -244,7 +357,36 @@ def test_ordered_indexed_results_reports_earliest_ordinal_failure() -> None:
             raise ValueError("earlier")
 
         with pytest.raises(ValueError, match="earlier"):
-            async for _index, _value in ordered_indexed_results(2, fetch, window=2):
+            async for _index, _value in ordered_indexed_results(
+                2, fetch, window=2, expected_retained_bytes=256
+            ):
                 raise AssertionError("failing work must not yield")
+
+    asyncio.run(run())
+
+
+def test_drain_ordered_iterable_results_materializes_only_one_window() -> None:
+    """Large iterables retain only O(window) unconsumed references."""
+
+    async def run() -> None:
+        produced = 0
+        consumed = 0
+        max_ahead = 0
+
+        def values():
+            nonlocal produced, max_ahead
+            for value in range(100):
+                produced += 1
+                max_ahead = max(max_ahead, produced - consumed)
+                yield value
+
+        async def fetch(value: int) -> None:
+            nonlocal consumed
+            await asyncio.sleep(0)
+            consumed += 1
+
+        await drain_ordered_iterable_results(values(), fetch, window=4)
+        assert consumed == 100
+        assert max_ahead <= 4
 
     asyncio.run(run())

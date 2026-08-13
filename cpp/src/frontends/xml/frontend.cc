@@ -15,6 +15,7 @@
 #include <string_view>
 #include <utility>
 
+#include "internal/materialization/batch_sizing.hh"
 #include "internal/memory/memory_budget.hh"
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/ordered_executor.hh"
@@ -169,6 +170,18 @@ sanitize::Result<RowBatch> XmlFrontend::next_batch(int64_t capacity) {
   }
 
   try {
+    // XML rows retain both their parsed tree and the downstream Arrow values
+    // until the batch owner is released.  The generic initial estimate covers
+    // only one materialized representation; cap the frontend batch at half of
+    // that byte target so parser/model ownership cannot crowd out output
+    // buffers under small public limits.
+    if (memory_limit_bytes_ > 0) {
+      const auto xml_row_capacity = std::max<int64_t>(
+          1, internal::memory_budget_from_limit(memory_limit_bytes_)
+                     .batch_target_bytes /
+                 (sanitize::internal::kInitialEstimatedRowBytes * 2));
+      capacity = std::min(capacity, xml_row_capacity);
+    }
     auto storage = std::make_shared<BatchStorage>(
         memory_pool_, xml_resource_,
         static_cast<std::size_t>(std::max<int64_t>(4096, chunk_bytes_)));

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from time import perf_counter, process_time
 from typing import Any
@@ -11,10 +12,22 @@ from ...adapters.parquet.compression import (
     normalize_parquet_compression,
     normalize_parquet_gzip_level,
 )
+from ...core_impl.concurrency_contracts import activate_runtime_concurrency_pair_admission
+from ...core_impl.concurrency_route_evidence import (
+    input_route_profile,
+    output_file_route_profile,
+)
+from ...core_impl.concurrency_stage_evidence import (
+    observe_successful_input_runtime_stage,
+    observe_successful_output_runtime_stage,
+)
+
+# reset_runtime_concurrency_pair is performed by the pair admission scope.
 from ...core_impl.execution_policy import threading_mode_from_multi_threading
 from ...core_impl.generated_metadata import INGESTION_TIMESTAMP_COLUMN, SOURCE_FILE_COLUMN
-from ...core_impl.memory_budget import normalize_memory_limit
+from ...core_impl.memory_budget import memory_budget, normalize_memory_limit
 from ...core_impl.probes import options_for_registry_operation
+from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.schema_registry import current_native_registry_state
 from ...options_impl.call_options import (
     FILE_CONVERSION_HELPER_KEYS,
@@ -39,6 +52,7 @@ from ..registry_output import (
 )
 from ..results import Result
 from ..source_manifest_diagnostics import patch_source_manifest_diagnostics
+from ..streams import patch_diagnostics_values
 from .writers import (
     write_csv_native_first_stream,
     write_jsonl_native_first_stream,
@@ -167,6 +181,8 @@ def convert_file_with_options(
             operation_context.close()
         raise
     file_io_seconds += max(perf_counter() - input_started_at, 0.0)
+    output_contract = feature[3:] if feature.startswith("to_") else feature
+    pair_scope = None
     result: Result | None = None
     all_row_columns = (
         {SOURCE_FILE_COLUMN: prepared_input.source_file}
@@ -179,6 +195,22 @@ def convert_file_with_options(
         else None
     )
     try:
+        pair_scope = activate_runtime_concurrency_pair_admission(
+            prepared_input.public_format or prepared_input.format,
+            output_contract,
+            memory_ledger=operation_context.memory_ledger,
+            desired_payload_slots=max(1, operation_context.policy.effective_workers),
+            payload_window_bytes=max(4096, memory_budget(memory_limit_bytes).io_chunk_bytes),
+            execution_lease=operation_context.execution_lease,
+            route_profiles=(
+                input_route_profile(prepared_input),
+                output_file_route_profile(output_path),
+            ),
+        )
+        pair_scope.transfer_to_output()
+        # Keep the pair identity alive through the complete writer/conversion
+        # path. The structural bootstrap credit was retired at the handoff, so
+        # only real downstream admissions count as pass51 payload evidence.
         if prepared_input.xml_row_tag is not None:
             options = dict(options)
             options["xml_row_tag"] = prepared_input.xml_row_tag
@@ -248,6 +280,13 @@ def convert_file_with_options(
                     field_name_policy=field_name_policy,
                     **resolved_writer_options,
                 )
+            # Evidence is published at the actual combined decode/sink boundary,
+            # not at the public wrapper return. A bypassed writer route therefore
+            # cannot satisfy the release stage gate merely by returning success.
+            observe_successful_input_runtime_stage(
+                prepared_input.public_format or prepared_input.format
+            )
+            observe_successful_output_runtime_stage(output_contract)
             result.conversion_cpu_seconds = max(
                 process_time() - conversion_cpu_started_at,
                 0.0,
@@ -270,12 +309,44 @@ def convert_file_with_options(
             cleanup_output_target(output_target)
             raise
     finally:
+        primary = sys.exc_info()[1]
+        cleanup_error: BaseException | None = None
+
+        def record_cleanup_failure(label: str, exc: BaseException) -> None:
+            nonlocal cleanup_error
+            if primary is not None:
+                add_bounded_note(primary, label, exc)
+            elif cleanup_error is None:
+                cleanup_error = exc
+            else:
+                add_bounded_note(cleanup_error, label, exc)
+
         cleanup_started_at = perf_counter()
-        prepared_input.close()
-        operation_context.close()
+        if pair_scope is not None:
+            try:
+                pair_scope.close()
+                pair_scope = None
+            except BaseException as exc:
+                record_cleanup_failure("runtime-pair admission cleanup also failed", exc)
+        try:
+            prepared_input.close()
+        except BaseException as exc:
+            record_cleanup_failure("prepared input cleanup also failed", exc)
+        try:
+            operation_context.close()
+        except BaseException as exc:
+            record_cleanup_failure("operation context cleanup also failed", exc)
         file_io_seconds += max(perf_counter() - cleanup_started_at, 0.0)
         if result is not None:
             result.file_io_seconds = file_io_seconds
+            if cleanup_error is None:
+                diagnostics = getattr(getattr(result, "_raw", None), "diagnostics", None)
+                patch_diagnostics_values(
+                    diagnostics,
+                    {"current_charged_memory_bytes": 0},
+                )
+        if primary is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def _convert_public_file(

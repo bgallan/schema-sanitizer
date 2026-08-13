@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypeAlias
 from urllib.parse import urlparse
@@ -27,6 +27,7 @@ class RemoteFile:
     metageneration: str | None = None
     etag: str | None = None
     crc32c: str | None = None
+    _metadata_owner: object | None = field(default=None, compare=False, repr=False)
 
     @property
     def content_identity(self) -> tuple[str, str | None]:

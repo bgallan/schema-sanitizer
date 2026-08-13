@@ -11,16 +11,26 @@ from typing import Any, BinaryIO
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    acknowledge_prepared_finalizer_cleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_prepared_finalizer_cleanup,
+    reserve_resource_finalizer_cleanup,
+)
 from ..core_impl.memory_budget import (
     acquire_operation_memory,
     memory_budget,
 )
+from ..core_impl.safe_errors import add_bounded_note
 from ..core_impl.sync_retry import retry_sync
 from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
 from ..sources.models import RemoteFile
 from .file_streams import write_sync_reader_to_file
+from .io_footprint import open_remote_local_file
+from .sync_cleanup_escrow import reserve_sync_cleanup
 
 TRANSFER_CHUNK_BYTES = 1024 * 1024
 _MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
@@ -32,11 +42,21 @@ class _BudgetedBytes(bytes):
     """Response bytes retaining their operation-memory reservation."""
 
     _operation_memory_lease: Any | None
+    _finalizer_ticket: int
+    _finalizer_capsule: PreparedFinalizerCleanup | None
 
     def __new__(cls, value: bytes, lease: object):
-        """Create bytes that retain an operation-memory lease."""
-        obj = super().__new__(cls, value)
+        """Create bytes with a pre-reserved compact lease finalizer."""
+        capsule = reserve_resource_finalizer_cleanup(lease)
+        ticket = capsule.ticket
+        try:
+            obj = super().__new__(cls, value)
+        except BaseException:
+            cancel_prepared_finalizer_cleanup(capsule)
+            raise
         obj._operation_memory_lease = lease
+        obj._finalizer_ticket = ticket
+        obj._finalizer_capsule = capsule
         return obj
 
     def close(self) -> None:
@@ -49,13 +69,23 @@ class _BudgetedBytes(bytes):
         close()
         if getattr(self, "_operation_memory_lease", None) is lease:
             self._operation_memory_lease = None
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                acknowledge_prepared_finalizer_cleanup(capsule)
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
 
     def __del__(self) -> None:
         """Release retained memory unless interpreter teardown has begun."""
         try:
             if runtime_is_finalizing():
                 return
-            self.close()
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None and defer_prepared_finalizer_cleanup(capsule):
+                self._finalizer_ticket = 0
+                self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -94,6 +124,49 @@ def retryable_http_error(exc: Exception) -> bool:
     )
 
 
+class _HttpConnectionOwner:
+    """Retryable owner for one blocking HTTP connection/socket."""
+
+    __slots__ = ("connection",)
+
+    def __init__(self) -> None:
+        self.connection: http.client.HTTPConnection | None = None
+
+    def close(self) -> None:
+        connection = self.connection
+        if connection is None:
+            return
+        connection.close()
+        self.connection = None
+
+
+class _EscrowedHttpConnection:
+    """Expose an HTTPConnection while retaining its terminal escrow slot."""
+
+    __slots__ = ("_owner", "_reservation", "_closed")
+
+    def __init__(self, owner: _HttpConnectionOwner, reservation: Any) -> None:
+        self._owner = owner
+        self._reservation = reservation
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        connection = self._owner.connection
+        if connection is None:
+            raise AttributeError(name)
+        return getattr(connection, name)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._reservation.close_and_commit()
+        except BaseException:
+            self._reservation.abandon_to_escrow()
+            raise
+        self._closed = True
+
+
 def _connection(url: str, timeout: float) -> tuple[http.client.HTTPConnection, str]:
     """Create one same-thread HTTP connection and request target."""
     parsed = urlsplit(url)
@@ -117,17 +190,25 @@ def _request_once(
     body: bytes | BinaryIO | None = None,
     body_length: int | None = None,
     timeout: float,
-) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
-    """Open one request without creating an event loop or helper thread."""
-    connection, target = _connection(url, timeout)
+) -> tuple[_EscrowedHttpConnection, http.client.HTTPResponse]:
+    """Open one request under pre-reserved terminal socket ownership."""
+    owner = _HttpConnectionOwner()
+    reservation = reserve_sync_cleanup(label="sync_http_connection", network_fds=1)
+    reservation.bind_owner(owner)
+    wrapper = _EscrowedHttpConnection(owner, reservation)
     request_headers = dict(headers or {})
     if body_length is not None:
         request_headers["Content-Length"] = str(body_length)
     try:
+        connection, target = _connection(url, timeout)
+        owner.connection = connection
         connection.request(method, target, body=body, headers=request_headers)
-        return connection, connection.getresponse()
-    except BaseException:
-        connection.close()
+        return wrapper, connection.getresponse()
+    except BaseException as primary:
+        try:
+            wrapper.close()
+        except BaseException as cleanup_error:
+            add_bounded_note(primary, "blocking HTTP cleanup retained for retry", cleanup_error)
         raise
 
 
@@ -278,7 +359,7 @@ def upload_file_request(
     """Upload one file from byte zero through a same-thread request."""
     source = Path(local_path)
     size = source.stat().st_size
-    with source.open("rb") as file_handle:
+    with open_remote_local_file(source, "rb", label="http_sync_upload_source") as file_handle:
         connection, response = _request_once(
             method,
             url,

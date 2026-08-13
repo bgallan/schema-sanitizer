@@ -6,8 +6,8 @@ import json
 import threading
 
 import pytest
+from _support.input_contract import *  # noqa: F403
 from conftest import require_native
-from input_contract_shared import *  # noqa: F403
 
 import schema_sanitizer as ss
 

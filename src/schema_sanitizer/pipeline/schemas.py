@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any
 
+from ..core_impl.process_resources import open_governed_file
 from ..core_impl.uris import local_path_from_file_uri, looks_like_file_uri, looks_like_remote_uri
 
 
@@ -30,12 +31,15 @@ def read_parquet_schema(uri: str) -> Any:
     from ..remote_impl.staging import stage_remote_single_file
 
     if looks_like_file_uri(uri):
-        return pq.read_schema(local_path_from_file_uri(uri))
+        with open_governed_file(local_path_from_file_uri(uri), "rb") as handle:
+            return pq.read_schema(handle)
     if not looks_like_remote_uri(uri):
-        return pq.read_schema(uri)
+        with open_governed_file(uri, "rb") as handle:
+            return pq.read_schema(handle)
     staged = stage_remote_single_file(uri, memory_limit_bytes=None)
     try:
-        return pq.read_schema(staged.path)
+        with open_governed_file(staged.path, "rb") as handle:
+            return pq.read_schema(handle)
     finally:
         staged.close()
 

@@ -3,18 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from concurrent.futures import Future, InvalidStateError
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextvars import Context, copy_context
-from threading import Lock, Thread, current_thread
+from threading import Lock, current_thread
 from time import monotonic_ns
 from typing import Any
 
 from ..core_impl.cancellation import bounded_wait_timeout
 from ..core_impl.durations import deadline_ns_from_timeout, remaining_seconds
 from ..core_impl.execution_policy import normalize_threading_mode
+from ..core_impl.finalization import runtime_is_finalizing
+from ..core_impl.finalizer_cleanup import (
+    PreparedFinalizerCleanup,
+    cancel_prepared_finalizer_cleanup,
+    defer_owner_finalizer_cleanup,
+    reserve_owner_finalizer_cleanup,
+)
 from ..core_impl.fork_safety import ensure_runtime_fork_safe
+from ..core_impl.governed_thread import (
+    RetirementAwareThread,
+    defer_governed_thread_retirement,
+    start_governed_runtime_thread,
+)
 from ..core_impl.process_resources import acquire_project_threads
+from ..core_impl.resource_lifecycle import _cleanup_with_note
 from ..core_impl.retry_scheduler import (
     adopt_failed_release,
     cancel_retry,
@@ -24,9 +38,42 @@ from ..core_impl.runtime_registry import reserve_runtime_service
 from ..core_impl.safe_errors import add_bounded_note
 from ..core_impl.terminal_hosts import TerminalHostMarkers
 
+# Compatibility seam for deterministic thread-start fault injection. Production
+# still defaults to the retirement-aware host so successful joins reap deferred
+# permit ownership.
+Thread = RetirementAwareThread
+
 _DEFAULT_ASYNC_BRIDGE_TIMEOUT_SECONDS = 300.0
-_FAILED_BRIDGE_RUNNERS = TerminalHostMarkers(128)
+_FAILED_BRIDGE_RUNNERS = TerminalHostMarkers(128, category="async_bridge_terminal")
 _FAILED_BRIDGE_RUNNERS_LOCK = Lock()
+_FAILED_BRIDGE_RUNNER_OWNERS: dict[int, "_BridgeRunner"] = {}
+_MAX_FAILED_BRIDGE_RUNNER_OWNERS = 128
+
+
+def _retain_failed_bridge_runner(runner: "_BridgeRunner") -> bool:
+    """Retain a bridge strongly while retry callbacks carry only an integer token."""
+    token = id(runner)
+    with _FAILED_BRIDGE_RUNNERS_LOCK:
+        if token not in _FAILED_BRIDGE_RUNNER_OWNERS:
+            if len(_FAILED_BRIDGE_RUNNER_OWNERS) >= _MAX_FAILED_BRIDGE_RUNNER_OWNERS:
+                _FAILED_BRIDGE_RUNNERS.add(runner)
+                return False
+            _FAILED_BRIDGE_RUNNER_OWNERS[token] = runner
+        _FAILED_BRIDGE_RUNNERS.add(runner)
+    return True
+
+
+def _discard_failed_bridge_runner(runner: "_BridgeRunner") -> None:
+    with _FAILED_BRIDGE_RUNNERS_LOCK:
+        _FAILED_BRIDGE_RUNNER_OWNERS.pop(id(runner), None)
+        _FAILED_BRIDGE_RUNNERS.discard(runner)
+
+
+def _retry_failed_bridge_runner_token(token: int) -> None:
+    with _FAILED_BRIDGE_RUNNERS_LOCK:
+        runner = _FAILED_BRIDGE_RUNNER_OWNERS.get(token)
+    if runner is not None:
+        runner._retry_thread_lease()
 
 
 def _close_coroutine(coro: Any) -> None:
@@ -41,6 +88,23 @@ class _BridgeRunner:
 
     def __init__(self, coro: Any, context: Context, lease: Any) -> None:
         """Capture resources before the host thread is started."""
+        try:
+            capsule = reserve_owner_finalizer_cleanup()
+            ticket = capsule.ticket
+        except BaseException as exc:
+            try:
+                _close_coroutine(coro)
+            except BaseException as cleanup_error:
+                add_bounded_note(exc, "async bridge coroutine cleanup also failed", cleanup_error)
+            _cleanup_with_note(
+                exc,
+                lease,
+                label="async bridge thread permit cleanup also failed",
+                method="release",
+            )
+            raise
+        self._finalizer_ticket = ticket
+        self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
         self._coro = coro
         self._context = context
         self._lease = lease
@@ -72,7 +136,16 @@ class _BridgeRunner:
                     self._lease.release()
                 finally:
                     self._lease = None
+            self._retire_finalizer_slot()
             raise
+
+    def _retire_finalizer_slot(self) -> None:
+        ticket = self._finalizer_ticket
+        capsule = self._finalizer_capsule
+        if ticket and capsule is not None:
+            cancel_prepared_finalizer_cleanup(capsule)
+            self._finalizer_ticket = 0
+            self._finalizer_capsule = None
 
     @property
     def result(self) -> Future[Any]:
@@ -85,24 +158,18 @@ class _BridgeRunner:
         started = False
         try:
             registration = self._runtime_registration
-            if registration is not None:
-                start_thread = getattr(registration, "start_thread", None)
-                if callable(start_thread):
-                    start_thread(self._thread)
-                    started = True
-                else:  # compatibility for narrow test/control doubles
-                    self._thread.start()
-                    started = True
-                    registration.activate()
-            else:
-                self._thread.start()
-                started = True
+            start_governed_runtime_thread(registration, self._thread)
+            started = True
         except BaseException as exc:
+            if not started:
+                try:
+                    started = bool(self._thread.is_alive())
+                except BaseException:
+                    started = False
             if started:
                 # The thread owns the coroutine and permit now. Keep both visible
                 # through the reserved registry entry until its terminal finally.
-                with _FAILED_BRIDGE_RUNNERS_LOCK:
-                    _FAILED_BRIDGE_RUNNERS.add(self)
+                _retain_failed_bridge_runner(self)
                 try:
                     self.cancel()
                 except BaseException as cancel_error:
@@ -170,8 +237,7 @@ class _BridgeRunner:
             lease = self._lease
         if lease is None:
             cancel_retry(("async-bridge-thread-lease", id(self)))
-            with _FAILED_BRIDGE_RUNNERS_LOCK:
-                _FAILED_BRIDGE_RUNNERS.discard(self)
+            _discard_failed_bridge_runner(self)
             return True
         try:
             lease.release()
@@ -188,17 +254,20 @@ class _BridgeRunner:
                         self._lease = None
                     self._lease_retry_attempt = 0
                 cancel_retry(("async-bridge-thread-lease", id(self)))
-                with _FAILED_BRIDGE_RUNNERS_LOCK:
-                    _FAILED_BRIDGE_RUNNERS.discard(self)
+                _discard_failed_bridge_runner(self)
                 return False
             with self._lock:
                 self._lease_retry_attempt += 1
                 attempt = self._lease_retry_attempt
-            with _FAILED_BRIDGE_RUNNERS_LOCK:
-                _FAILED_BRIDGE_RUNNERS.add(self)
+            token = id(self)
+            _retain_failed_bridge_runner(self)
+
+            def retry_runner(token: int = token) -> None:
+                _retry_failed_bridge_runner_token(token)
+
             scheduled = schedule_retry(
-                ("async-bridge-thread-lease", id(self)),
-                self._retry_thread_lease,
+                ("async-bridge-thread-lease", token),
+                retry_runner,
                 delay_seconds=min(30.0, 0.05 * (2 ** min(attempt, 10))),
                 retained_bytes=512,
                 jitter_fraction=0.2,
@@ -214,8 +283,7 @@ class _BridgeRunner:
                 self._lease = None
             self._lease_retry_attempt = 0
         cancel_retry(("async-bridge-thread-lease", id(self)))
-        with _FAILED_BRIDGE_RUNNERS_LOCK:
-            _FAILED_BRIDGE_RUNNERS.discard(self)
+        _discard_failed_bridge_runner(self)
         return True
 
     def _retry_thread_lease(self) -> None:
@@ -322,8 +390,7 @@ class _BridgeRunner:
                             self._terminal_loop = loop
                             self._terminal_tasks = pending_after_deadline
                             self._terminal_non_cooperative = True
-                        with _FAILED_BRIDGE_RUNNERS_LOCK:
-                            _FAILED_BRIDGE_RUNNERS.add(self)
+                        _retain_failed_bridge_runner(self)
                     else:
                         loop.close()
             finally:
@@ -331,9 +398,27 @@ class _BridgeRunner:
                     self._task = None
                     self._loop = None
                     terminal = self._terminal_non_cooperative
-                self._release_thread_lease()
+                lease = self._lease
                 registration = self._runtime_registration
-                if registration is not None and not terminal:
+                if lease is not None:
+                    try:
+                        retired = defer_governed_thread_retirement(
+                            self._thread,
+                            lease.release,
+                            registration=None if terminal else registration,
+                        )
+                    except BaseException:
+                        retired = False
+                    if retired:
+                        with self._lock:
+                            if self._lease is lease:
+                                self._lease = None
+                            if not terminal and self._runtime_registration is registration:
+                                self._runtime_registration = None
+                        cancel_retry(("async-bridge-thread-lease", id(self)))
+                    else:
+                        _retain_failed_bridge_runner(self)
+                elif registration is not None and not terminal:
                     try:
                         registration.close()
                     except BaseException:
@@ -366,12 +451,20 @@ class _BridgeRunner:
             self._runtime_registration = None
             if registration is not None:
                 registration.close()
+            self._retire_finalizer_slot()
         return stopped
 
     def __del__(self) -> None:
-        """Retry a failed logical thread-permit release during normal GC."""
+        """Transfer bridge shutdown without joins or permit locks during GC."""
         try:
-            self._release_thread_lease()
+            if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
+                return
+            ticket = getattr(self, "_finalizer_ticket", 0)
+            capsule = getattr(self, "_finalizer_capsule", None)
+            if ticket and capsule is not None:
+                if defer_owner_finalizer_cleanup(self, capsule):
+                    self._finalizer_ticket = 0
+                    self._finalizer_capsule = None
         except BaseException:
             pass
 
@@ -403,6 +496,43 @@ def run_sync(coro: Any, *, threading_mode: str = "single") -> Any:
         raise TimeoutError(
             "async bridge exceeded its bounded wait or the operation deadline"
         ) from None
+    finally:
+        # A completed result can be published a few instructions before the
+        # host thread reaches its terminal retirement path. Because this is the
+        # synchronous bridge, join that already-terminal host before returning
+        # to the caller so the physical-thread permit and runtime registration
+        # are observably retired exactly once. A timed-out/non-cooperative host
+        # remains retained by the existing fail-closed terminal path.
+        if runner.result.done():
+            try:
+                runner.close(deadline_seconds=5.0)
+            except BaseException:
+                pass
+
+
+def _failed_bridge_runner_snapshot() -> object:
+    return _FAILED_BRIDGE_RUNNERS.snapshot()
+
+
+from ..core_impl.shutdown_observers import (  # noqa: E402
+    register_shutdown_observer as _register_shutdown_observer,
+)
+
+_register_shutdown_observer("failed_bridge_runners", _failed_bridge_runner_snapshot)
 
 
 __all__ = ["run_sync"]
+
+
+def _reset_failed_bridge_registry_after_fork() -> None:
+    global _FAILED_BRIDGE_RUNNERS_LOCK, _FAILED_BRIDGE_RUNNER_OWNERS
+    _FAILED_BRIDGE_RUNNERS_LOCK = Lock()
+    _FAILED_BRIDGE_RUNNER_OWNERS = {}
+
+
+try:
+    from ..core_impl.fork_manager import register_fork_handler as _register_fork_handler
+
+    _register_fork_handler("async-bridge", mode="quarantine_only")
+except BaseException:
+    pass

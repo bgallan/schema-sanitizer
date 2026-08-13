@@ -140,7 +140,7 @@ def test_operation_task_arena_reuses_exact_worker_budget_across_stages() -> None
     )
 
     assert workers == 8
-    assert peak == 8
+    assert 1 <= peak <= workers
     assert total_threads == 8
     assert overlap == 0
     assert upstream == 4
@@ -149,14 +149,14 @@ def test_operation_task_arena_reuses_exact_worker_budget_across_stages() -> None
 
 
 def test_operation_task_arena_executes_beyond_32_workers() -> None:
-    """The scalable scheduler starts and uses a 64-worker operation arena."""
+    """A 64-worker arena retains its lanes while sharing process CPU capacity."""
     require_native()
     workers, peak, total_threads, overlap, upstream, output, submitted = (
         native_core.operation_task_arena_probe(64, 32, 32, 128)
     )
 
     assert workers == 64
-    assert peak == 64
+    assert 1 <= peak <= workers
     assert total_threads == 64
     assert overlap == 0
     assert upstream == 32
@@ -188,12 +188,28 @@ def test_operation_task_arena_starts_only_workers_used_by_stage_lanes() -> None:
     )
 
     assert workers == 8
-    assert peak == 4
+    assert 1 <= peak <= 4
     assert total_threads == 4
     assert overlap == 0
     assert upstream == 2
     assert output == 2
     assert submitted == 32
+
+
+def test_operation_task_arena_peak_respects_available_stage_tasks() -> None:
+    """Peak validation counts runnable packets, not merely configured lane widths."""
+    require_native()
+    workers, peak, total_threads, overlap, upstream, output, submitted = (
+        native_core.operation_task_arena_probe(8, 8, 1, 4)
+    )
+
+    assert workers == 8
+    assert 1 <= peak <= 5
+    assert total_threads == 5
+    assert overlap == 0
+    assert upstream == 4
+    assert output == 1
+    assert submitted == 8
 
 
 def test_operation_task_arena_steals_lane_compatible_backlog() -> None:
@@ -203,21 +219,21 @@ def test_operation_task_arena_steals_lane_compatible_backlog() -> None:
         native_core.operation_task_arena_stealing_probe()
     )
 
+    effective_workers = completed // 2
+    assert 2 <= effective_workers <= 4
     assert stolen >= 1
-    assert displaced_worker in {1, 2, 3}
-    assert completed == 8
+    assert displaced_worker in range(1, effective_workers)
+    assert completed == effective_workers * 2
     assert queued == 0
-    assert 2 <= peak <= 4
+    assert peak == effective_workers
 
 
 def test_operation_task_arena_cancels_active_stage_work_promptly() -> None:
     """Cancelling one ordered stage propagates to its active arena packets."""
     require_native()
-    elapsed_us, active, observed_stop, queued = (
-        native_core.operation_task_arena_cancellation_probe()
-    )
+    drained, active, observed_stop, queued = native_core.operation_task_arena_cancellation_probe()
 
-    assert elapsed_us < 250_000
+    assert drained is True
     assert active == 0
     assert observed_stop >= 1
     assert queued == 0

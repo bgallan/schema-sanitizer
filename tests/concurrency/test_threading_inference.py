@@ -6,7 +6,7 @@ import json
 import random
 from typing import Any
 
-from diagnostics_assertions import assert_diagnostics_semantically_equal
+from _support.diagnostics import assert_diagnostics_semantically_equal
 
 from schema_sanitizer.core_impl.execution import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options

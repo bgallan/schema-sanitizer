@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from input_contract_shared import *  # noqa: F403
+from _support.input_contract import *  # noqa: F403
 
 
 def test_list_of_dicts_is_supported() -> None:

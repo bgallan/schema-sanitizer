@@ -1,0 +1,22 @@
+{
+  "additional_functional_tests_passed": 59,
+  "additional_functional_tests_skipped": 47,
+  "cancellation_stress_runs": 50,
+  "host_note": "x86 host; no universal end-to-end percentage claimed",
+  "internal_in_flight_relaxed_call_sites": 5,
+  "mixed_lane_stress_runs": 30,
+  "ordered_stress_runs": 100,
+  "post_mutex_state_revalidation_order": "memory_order_relaxed",
+  "public_in_flight_acquire_loads": 1,
+  "removed_dead_field": "completed_count_",
+  "removed_dead_write_sites": 3,
+  "selected_concurrency_tests_passed": 348,
+  "selected_concurrency_tests_skipped": 4,
+  "slot_claim_success_order": "memory_order_acquire",
+  "stage": "mutex_owned_memory_order_tightening",
+  "baseline_abi3_bytes": 4065856,
+  "baseline_abi3_sha256": "ddbc987235a7610f275c73705e1540922f9c77fcf3f8713bede1999eed333d24",
+  "candidate_abi3_bytes": 4065856,
+  "candidate_abi3_sha256": "7556de1d30b8de874fe0fbc39ef8e3c712ec265160e86166c8eb9dda514e10f6",
+  "version": "0.3.58"
+}

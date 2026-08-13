@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 from typing import Any
 
 from schema_sanitizer.integrations.bigquery.advanced import (
@@ -20,14 +19,14 @@ from schema_sanitizer.integrations.bigquery.advanced import (
     normalize_external_format as _normalize_external_format,
 )
 from schema_sanitizer.integrations.bigquery.advanced import parse_table_ref as _parse_table_ref
+from schema_sanitizer.pipeline import PartitionRunResult as DateRunResult
+from schema_sanitizer.pipeline import SchemaRegistryState
 from schema_sanitizer.pipeline.advanced import (
     build_hive_range_plan_from_namespace,
     build_warm_up_hive_range_plan_from_namespace,
     read_parquet_schema,
     run_partitioned_to_parquet_registry_state,
 )
-from schema_sanitizer.pipeline.types import PartitionRunResult as DateRunResult
-from schema_sanitizer.pipeline.types import SchemaRegistryState
 
 try:
     from examples.example_07.cli import build_parser
@@ -46,6 +45,7 @@ try:
         _build_to_parquet_kwargs,
         _filter_available_date_plans,
         _infer_warm_up_schema_registry_state,
+        _run_result_for_reporting,
         _schema_warm_up_plan_for_run,
         _schema_warm_up_requested,
     )
@@ -66,6 +66,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         _build_to_parquet_kwargs,
         _filter_available_date_plans,
         _infer_warm_up_schema_registry_state,
+        _run_result_for_reporting,
         _schema_warm_up_plan_for_run,
         _schema_warm_up_requested,
     )
@@ -151,14 +152,7 @@ def main() -> int:
     else:
         LOGGER.info("Existing embedded schema_registry canonical schema is not available")
 
-    current_schema_registry_json = json.dumps(
-        initial_schema_registry,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    current_schema_registry_state = SchemaRegistryState(
-        schema_registry_json=current_schema_registry_json,
-    )
+    current_schema_registry_state = SchemaRegistryState(initial_schema_registry)
     schema_warm_up_plan = _schema_warm_up_plan_for_run(warm_up_plan)
     warm_up_drift_runs: list[DateRunResult] | None = [] if schema_warm_up_plan else None
     if schema_warm_up_plan:
@@ -171,13 +165,14 @@ def main() -> int:
                 current_schema_registry_state,
                 warm_up_drift_runs=warm_up_drift_runs,
             )
-            current_schema_registry_json = current_schema_registry_state.schema_registry_json
-        if registry_has_canonical_schema(json.loads(current_schema_registry_json or "{}")):
+        if registry_has_canonical_schema(current_schema_registry_state.schema_registry):
             LOGGER.info("Schema warm-up produced an embedded canonical schema")
         else:
             LOGGER.warning("Schema warm-up finished without an embedded canonical schema")
 
     total_runs = len(run_plan)
+    completed_runs: list[DateRunResult] = []
+    final_schema: Any | None = None
 
     def after_partition(
         index: int,
@@ -188,6 +183,7 @@ def main() -> int:
         registry_updated: bool,
     ) -> None:
         """Log one completed partition run."""
+        nonlocal final_schema
         if enable_parquet_schema_drift_logging and previous_output_schema is not None:
             log_schema_drift_from_namespace(args, previous_output_schema, run_result.output_schema)
         if not registry_updated:
@@ -204,19 +200,21 @@ def main() -> int:
             run_result=run_result,
             run_seconds=run_seconds,
         )
+        final_schema = run_result.output_schema
+        completed_runs.append(_run_result_for_reporting(run_result))
 
     with _timed_step(f"writing {total_runs} selected Parquet file(s)"):
-        pipeline_result = run_partitioned_to_parquet_registry_state(
+        run_partitioned_to_parquet_registry_state(
             run_plan,
             initial_schema_registry_state=current_schema_registry_state,
             to_parquet_kwargs=_build_to_parquet_kwargs(args),
             read_output_schema=read_parquet_schema,
             after_partition=after_partition,
+            result_retention="streaming",
         )
 
-    completed_runs = pipeline_result.completed_runs
-
-    final_schema = completed_runs[-1].output_schema
+    if final_schema is None:
+        raise RuntimeError("Partition pipeline completed without an output schema")
 
     with _timed_step("creating or replacing BigQuery external table from final schema"):
         create_or_replace_external_bigquery_table_from_namespace(

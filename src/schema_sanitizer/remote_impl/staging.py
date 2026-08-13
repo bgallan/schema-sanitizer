@@ -26,6 +26,7 @@ from ..core_impl.uris import (
 from ..sources.models import RemoteFile
 from . import routing, sync_backend
 from .directory_downloads import RemoteDirectoryDownloadSession, download_files_to_directory
+from .io_footprint import RemoteIoFootprint
 from .transfer_dispatch import download_single_file, upload_file
 from .transport import check_download_size, run_sync
 
@@ -117,7 +118,11 @@ def stage_remote_single_file(
             if operation_context is None:
                 operation_sync()
             else:
-                operation_context.run_remote_sync(operation_sync)
+                operation_context.run_remote_sync(
+                    operation_sync,
+                    permit_label="remote_single_file_download",
+                    footprint=RemoteIoFootprint(local_file_fds=1),
+                )
         else:
 
             def operation():
@@ -137,6 +142,8 @@ def stage_remote_single_file(
                     operation,
                     estimated_bytes=estimate,
                     permit_label="remote_single_file_download",
+                    network_fds=0,
+                    local_file_fds=1,
                 )
         check_download_size(uri, Path(temp.path).stat().st_size, memory_limit_bytes)
         temp.reserve_actual_size(pool, label=f"remote input {uri!r}")
@@ -153,7 +160,7 @@ def stage_remote_files_to_directory_sync(
     storage_lease: TemporaryStorageLease | None = None,
 ) -> StagedPath:
     """Stage selected files through the strict blocking provider backend."""
-    selected = list(files)
+    selected = files
     if not selected:
         raise ValueError("remote directory input found no matching files")
     temp_dir = (
@@ -185,7 +192,7 @@ async def stage_remote_files_to_directory_async(
     storage_lease: TemporaryStorageLease | None = None,
 ) -> StagedPath:
     """Download selected remote files into one owned temporary directory."""
-    selected = list(files)
+    selected = files
     if not selected:
         raise ValueError("remote directory input found no matching files")
     temp_dir = (
@@ -229,7 +236,7 @@ def stage_remote_files_to_directory(
     storage_lease: TemporaryStorageLease | None = None,
 ) -> StagedPath:
     """Synchronously stage selected remote files into one temporary directory."""
-    selected = list(files)
+    selected = files
     budget = memory_budget(memory_limit_bytes)
     estimated_bytes = sum(
         file.size if isinstance(file.size, int) and file.size >= 0 else budget.io_chunk_bytes
@@ -262,7 +269,11 @@ def stage_remote_files_to_directory(
 
             if operation_context is None:
                 return operation_sync()
-            return operation_context.run_remote_sync(operation_sync)
+            return operation_context.run_remote_sync(
+                operation_sync,
+                permit_label="remote_directory_download",
+                footprint=RemoteIoFootprint(local_file_fds=1),
+            )
 
         def operation():
             """Stage selected files on the operation-owned event loop."""
@@ -275,10 +286,13 @@ def stage_remote_files_to_directory(
 
         if operation_context is None:
             return run_sync(operation(), threading_mode=threading_mode)
+        transfer_fds = max(1, min(operation_context.policy.async_concurrency, len(selected)))
         return operation_context.run_remote_transfer(
             operation,
             estimated_bytes=estimated_bytes,
             permit_label="remote_directory_download",
+            network_fds=0,
+            local_file_fds=transfer_fds,
         )
     except BaseException as exc:
         _cleanup_with_note(
@@ -413,7 +427,11 @@ def finalize_output_target(
                 if target.operation_context is None:
                     operation_sync()
                 else:
-                    target.operation_context.run_remote_sync(operation_sync)
+                    target.operation_context.run_remote_sync(
+                        operation_sync,
+                        permit_label="remote_output_upload",
+                        footprint=RemoteIoFootprint(local_file_fds=1),
+                    )
             else:
 
                 def operation():
@@ -433,6 +451,8 @@ def finalize_output_target(
                         operation,
                         estimated_bytes=output_size,
                         permit_label="remote_output_upload",
+                        network_fds=0,
+                        local_file_fds=1,
                     )
     except BaseException as exc:
         _cleanup_with_note(exc, target, label="remote output cleanup also failed")

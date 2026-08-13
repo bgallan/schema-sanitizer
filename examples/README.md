@@ -57,13 +57,20 @@ This folder contains end-to-end tutorial notebooks and scripts for
    - Replaces the Hive-partitioned BigQuery external table only after all
      requested publications succeed
    - See
-     [`docs/flat-prefix-modified-time-csv.md`](../docs/flat-prefix-modified-time-csv.md)
+     [`docs/guides/flat-prefix-modified-time-csv.md`](../docs/guides/flat-prefix-modified-time-csv.md)
      for generation consistency, late-arrival limitations, reruns, and
      analytical memory risk
 
-   Run `example_08/08_local_csv_directory_to_polars.py debug/csv` to validate
-   the same reconciliation and event normalization locally, without cloud
-   infrastructure or a target-table schema.
+   Run the local validator to exercise the same reconciliation and event
+   normalization without cloud infrastructure or a target-table schema:
+
+   ```bash
+   python examples/example_08/08_local_csv_directory_to_polars.py \
+     /path/to/csv-directory \
+     --memory-limit-bytes 268435456 \
+     --multi-threading \
+     --output-parquet artifacts/example-08-local.parquet
+   ```
 
 The examples use the public API surface described in the
 [documentation guide](../docs/README.md):
@@ -91,8 +98,8 @@ Notebook-generated files are written under `examples/files`, organized by notebo
 Run from repo root after installing dependencies:
 
 ```bash
-pip install -e .[dev]
-# Optional adapter extras (already included by [dev] in many setups):
+pip install -e ".[dev]"
+# Optional adapter extras (all are already included by [dev]):
 pip install pandas polars duckdb pyarrow
 jupyter lab
 ```
@@ -104,7 +111,7 @@ Run the GCS/BigQuery registry CLI example with Google ADC configured for GCS
 and BigQuery ADBC:
 
 ```bash
-pip install "schema-sanitizer[pyarrow,cloud]" adbc-driver-bigquery[dbapi]
+pip install "schema-sanitizer[gcs,bigquery]"
 
 python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --source-jsonl-prefix gs://raw-bucket/events/rt \
@@ -118,13 +125,16 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
   --field-name-policy lower_snake \
   --timestamp-precision TIMESTAMP_MICROS \
   --on-error emit_null_row \
+  --multi-threading \
   --memory-limit-bytes 67108864 \
   --bigquery-registry-sidecar-table project_id.dataset_id.external_events_registry_state
 ```
 
-`--memory-limit-bytes` is the example's only resource-control option. It is
-passed directly to `schema_sanitizer`, which derives its read, batch, staging,
-Arrow, and Parquet sub-budgets from that one operation-wide limit.
+`--memory-limit-bytes` supplies the one operation-wide resource budget from
+which `schema_sanitizer` derives read, batch, staging, Arrow, and Parquet
+sub-budgets. The example defaults to serial execution; pass `--multi-threading`
+to enable the same bounded project-wide concurrency policy for discovery,
+warm-up, partition lookahead, and conversion.
 
 `--bigquery-registry-sidecar-table` is optional. When set, the example creates
 or updates a native BigQuery table with two columns, `external_table_name` and
@@ -298,7 +308,7 @@ python examples/example_07/07_gcs_jsonl_to_silver_parquet_range_prefix.py \
 Run with Google ADC configured for GCS and BigQuery ADBC:
 
 ```bash
-pip install "schema-sanitizer[polars,pyarrow,cloud]" adbc-driver-bigquery[dbapi]
+pip install "schema-sanitizer[polars,gcs,bigquery]"
 
 python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
   --source-csv-prefix gs://raw-bucket/records \
@@ -309,7 +319,8 @@ python examples/example_08/08_gcs_csv_modified_window_to_polars_parquet.py \
   --partition-timestamp-column event_timestamp \
   --parquet-file-prefix records \
   --omit-null-payloads \
-  --memory-limit-bytes 268435456
+  --memory-limit-bytes 268435456 \
+  --multi-threading
 ```
 
 Both dates are inclusive UTC calendar dates; each internal day is

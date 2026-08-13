@@ -2,10 +2,12 @@
 
 #include "internal/memory/memory_pool.hh"
 #include "internal/memory/memory_budget.hh"
+#include "internal/runtime/cgroup_view.hh"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -18,7 +20,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 #include "sanitize/core/status.hh"
@@ -37,10 +38,23 @@ sanitize::Status OperationMemoryLedger::ReserveLocal(int64_t bytes,
         "operation memory reservation is negative");
   }
   if (bytes == 0) {
+    const auto state = state_.load(std::memory_order_acquire);
+    if ((state & kCorruptedBit) != 0) {
+      return sanitize::Status::OutOfMemory(
+          "operation memory ledger admission closed after accounting "
+          "corruption");
+    }
     return sanitize::Status::OK();
   }
-  auto current = bytes_reserved_.load(std::memory_order_relaxed);
+
+  auto state = state_.load(std::memory_order_relaxed);
   for (;;) {
+    if ((state & kCorruptedBit) != 0) {
+      return sanitize::Status::OutOfMemory(
+          "operation memory ledger admission closed after accounting "
+          "corruption");
+    }
+    const auto current = static_cast<int64_t>(state & kBytesMask);
     if (current > std::numeric_limits<int64_t>::max() - bytes) {
       return sanitize::Status::OutOfMemory(
           "memory_limit_bytes accounting overflow");
@@ -56,9 +70,10 @@ sanitize::Status OperationMemoryLedger::ReserveLocal(int64_t bytes,
           "memory_limit_bytes limit exceeded during ", stage, ": ", next,
           " bytes > ", limit_bytes_, " bytes");
     }
-    if (bytes_reserved_.compare_exchange_weak(current, next,
-                                              std::memory_order_relaxed,
-                                              std::memory_order_relaxed)) {
+    const auto next_state = static_cast<std::uint64_t>(next);
+    if (state_.compare_exchange_weak(state, next_state,
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_relaxed)) {
       auto peak = peak_bytes_reserved_.load(std::memory_order_relaxed);
       while (next > peak && !peak_bytes_reserved_.compare_exchange_weak(
                                 peak, next, std::memory_order_relaxed,
@@ -73,18 +88,24 @@ int64_t OperationMemoryLedger::ReleaseLocal(int64_t bytes) noexcept {
   if (bytes <= 0) {
     return 0;
   }
-  auto current = bytes_reserved_.load(std::memory_order_relaxed);
+  auto state = state_.load(std::memory_order_relaxed);
   for (;;) {
-    const auto next = std::max<int64_t>(0, current - bytes);
-    if (bytes_reserved_.compare_exchange_weak(current, next,
-                                              std::memory_order_relaxed,
-                                              std::memory_order_relaxed)) {
-      if (bytes > current) {
+    const auto current = static_cast<int64_t>(state & kBytesMask);
+    const bool was_corrupted = (state & kCorruptedBit) != 0;
+    const bool over_release = bytes > current;
+    const auto next_bytes = over_release ? int64_t{0} : current - bytes;
+    const auto next_state =
+        (was_corrupted || over_release ? kCorruptedBit : std::uint64_t{0}) |
+        static_cast<std::uint64_t>(next_bytes);
+    if (state_.compare_exchange_weak(state, next_state,
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_relaxed)) {
+      if (over_release) {
         over_release_count_.fetch_add(1, std::memory_order_relaxed);
         over_release_bytes_.fetch_add(bytes - current,
                                       std::memory_order_relaxed);
       }
-      return current - next;
+      return current - next_bytes;
     }
   }
 }
@@ -126,7 +147,8 @@ int64_t OperationMemoryLedger::limit_bytes() const noexcept {
 }
 
 int64_t OperationMemoryLedger::bytes_reserved() const noexcept {
-  return bytes_reserved_.load(std::memory_order_relaxed);
+  return static_cast<int64_t>(state_.load(std::memory_order_relaxed) &
+                              kBytesMask);
 }
 
 int64_t OperationMemoryLedger::peak_bytes_reserved() const noexcept {
@@ -139,6 +161,10 @@ int64_t OperationMemoryLedger::over_release_count() const noexcept {
 
 int64_t OperationMemoryLedger::over_release_bytes() const noexcept {
   return over_release_bytes_.load(std::memory_order_relaxed);
+}
+
+bool OperationMemoryLedger::corrupted() const noexcept {
+  return (state_.load(std::memory_order_acquire) & kCorruptedBit) != 0;
 }
 
 std::shared_ptr<OperationMemoryLedger>
@@ -613,10 +639,10 @@ std::shared_ptr<MemoryPool> shared_default_memory_pool() {
 
 std::shared_ptr<MemoryPool>
 shared_process_memory_pool(int64_t process_capacity) {
-  static const auto pool = make_tracking_memory_pool(
+  static const auto pool = std::make_shared<TrackingMemoryPool>(
       shared_default_memory_pool(),
       std::max<int64_t>(1, automatic_memory_limit_bytes()),
-      "schema_sanitizer::ProcessMemoryPool");
+      "schema_sanitizer::ProcessMemoryPool", true, nullptr, true);
   if (process_capacity > 0) {
     pool->SetLimit(std::max<int64_t>(1, process_capacity));
   }
@@ -654,10 +680,27 @@ ProcessMemoryGovernorStats process_memory_governor_stats() noexcept {
 
 ProcessResidentMemoryStats process_resident_memory_stats() noexcept {
   const auto pool = shared_process_memory_pool(0);
-  return ProcessResidentMemoryStats{.capacity_bytes = pool->limit_bytes(),
-                                    .reserved_bytes = pool->resident_bytes(),
-                                    .peak_reserved_bytes =
-                                        pool->peak_resident_bytes()};
+  const auto metadata_bank = std::max<int64_t>(
+      std::max<int64_t>(0, live_allocation_registry_metadata_capacity_bytes()),
+      std::max<int64_t>(0, live_allocation_registry_metadata_bytes()));
+  return ProcessResidentMemoryStats{
+      .capacity_bytes =
+          std::max<int64_t>(1, pool->limit_bytes() - metadata_bank),
+      .reserved_bytes = pool->resident_bytes(),
+      .peak_reserved_bytes = pool->peak_resident_bytes()};
+}
+
+AllocationRegistryStats allocation_registry_stats() noexcept {
+  return AllocationRegistryStats{
+      .metadata_bytes = live_allocation_registry_metadata_bytes(),
+      .peak_metadata_bytes = peak_live_allocation_registry_metadata_bytes(),
+      .capacity_records = live_allocation_registry_capacity_records(),
+      .live_entries = live_allocation_registry_entries(),
+      .rejected_registrations = live_allocation_registry_rejections(),
+      .secondary_probes = live_allocation_registry_secondary_probes(),
+      .collision_rejections = live_allocation_registry_collision_rejections(),
+      .max_shard_occupancy = live_allocation_registry_max_shard_occupancy(),
+  };
 }
 
 } // namespace sanitize::internal

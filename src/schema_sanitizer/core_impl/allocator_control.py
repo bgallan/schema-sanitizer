@@ -57,8 +57,9 @@ def reset_after_fork() -> None:
     _LAST_TRIM = 0.0
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=reset_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler("allocator-control", mode="quarantine_only")
 
 
 __all__ = ["maybe_trim_allocator"]

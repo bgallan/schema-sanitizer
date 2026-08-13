@@ -1,60 +1,61 @@
 # schema-sanitizer documentation
 
-The main [README](../README.md) is a short introduction. This directory contains
-the detailed guides and contracts.
+The main [README](../README.md) is a short introduction. The documentation is
+organized by task so public guides, operational contracts, and implementation
+invariants remain easy to distinguish.
 
 ## Index
 
-- [Start here](#start-here)
-- [Data and schemas](#data-and-schemas)
+- [Guides](#guides)
+- [Reference](#reference)
 - [Operations](#operations)
-- [Security and compatibility](#security-and-compatibility)
+- [Internals](#internals)
 - [Project](#project)
 
-## [Start here](#index)
+## [Guides](#index)
 
-- [Getting started](getting-started.md): installation, a first conversion, and
-  choosing an output.
-- [Python API](python-api.md): functions, reusable configuration, results,
-  streaming, cancellation, and analytical helpers.
-- [Options](options.md): complete parameter and default-value reference.
+- [Getting started](guides/getting-started.md): installation, a first conversion,
+  and choosing an output.
+- [Partitioned pipelines](guides/partitioned-pipelines.md): high-level pipelines,
+  planning, ordering, and lookahead.
+- [Modification-time CSV](guides/flat-prefix-modified-time-csv.md): immutable GCS
+  selections and UTC windows over a flat prefix.
 
-## [Data and schemas](#index)
+## [Reference](#index)
 
-- [Inputs and filesystems](inputs-and-filesystems.md): formats, directories,
-  cloud providers, staging, and publication.
-- [Heuristics](heuristics.md): inference, names, types, depth, evolution,
-  registries, drift records, and adaptive execution.
-- [CSV header modes](csv-header-modes.md): `exact` and `union` contracts.
-- [Source manifests](source-manifests.md): immutable remote selections.
-- [Final analytical schemas](analytical-schema-finalization.md): separating wide
-  ingress schemas from normalized outputs.
+- [Python API](reference/python-api.md): functions, reusable configuration,
+  results, streaming, cancellation, and analytical helpers.
+- [Options](reference/options.md): parameters, defaults, and configured API
+  mappings.
+- [Inputs and filesystems](reference/inputs-and-filesystems.md): formats,
+  directories, cloud providers, staging, and publication.
+- [Schemas and registries](reference/schema-and-registry.md): inference, CSV
+  headers, manifests, final schemas, evolution, and drift records.
+- [BigQuery](reference/bigquery.md): external-table DDL, registries, and sidecars.
+- [Compatibility](reference/compatibility.md): platforms, public APIs, formats,
+  and serialized state.
 
 ## [Operations](#index)
 
-- [Partitioned pipelines](pipelines.md): the high-level API and advanced
-  primitives.
-- [Modification-time CSV](flat-prefix-modified-time-csv.md): UTC windows over a
-  flat GCS prefix.
-- [CI/CD pipeline](ci-cd.md): shared validation gates, artifacts, and
-  publication.
-- [BigQuery](bigquery.md): external-table DDL, registries, and sidecars.
-- [Concurrency and memory](concurrency-memory-hardening.md): budgets, workers,
-  cancellation, and shutdown.
-- [Reader memory accounting](reader-memory-accounting.md): what the global
-  limit owns.
+- [Resources and concurrency](operations/resources-and-concurrency.md): memory,
+  temporary storage, workers, cancellation, and shutdown.
+- [Reader security limits](operations/reader-security-limits.md): per-format
+  ceilings and the threat model.
+- [Reader complexity](operations/reader-complexity.md): algorithmic guarantees
+  and scaling evidence.
 
-## [Security and compatibility](#index)
+## [Internals](#index)
 
-- [Reader security limits](reader-security-limits.md): per-format limits and the
-  threat model.
-- [Reader complexity](reader-complexity.md): algorithmic guarantees.
-- [Compatibility](compatibility.md): platforms, public APIs, formats, and
-  serialized state.
+- [Concurrency lifecycle](internals/concurrency-lifecycle.md): stable ownership,
+  admission, publication, retirement, and teardown invariants.
+- [Execution heuristics](internals/execution-heuristics.md): adaptive task arenas,
+  packet sizing, output routes, and remote staging.
+
+Modules ending in `_impl` and native implementation details are not public API,
+even when an internal document explains their invariants for auditing purposes.
 
 ## [Project](#index)
 
-- [Development](development.md): environment, tests, builds, benchmarks, and CI.
-
-Modules ending in `_impl` and native implementation details are not public API,
-even when a document explains their invariants for auditing purposes.
+- [Development](project/development.md): environment, tests, native builds, and
+  benchmarks.
+- [CI/CD](project/ci-cd.md): validation gates, artifacts, and publication.

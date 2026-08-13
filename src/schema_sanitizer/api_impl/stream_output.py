@@ -89,9 +89,11 @@ def _is_internal_native_stream(raw: Any) -> bool:
     return isinstance(raw, NativeSinkOutput)
 
 
-def _make_parquet_replay(raw: Any, *, feature: str) -> Any:
+def _make_parquet_replay(raw: Any, *, feature: str, memory_limit_bytes: int | None = None) -> Any:
     """Create a replay only when fallback may need a fresh stream."""
-    return make_replayable_parquet_stream(raw, feature=feature)
+    return make_replayable_parquet_stream(
+        raw, feature=feature, memory_limit_bytes=memory_limit_bytes
+    )
 
 
 def write_raw_stream_to_file(
@@ -118,7 +120,9 @@ def write_raw_stream_to_file(
     try:
         raw_for_native = raw
         if writer is write_parquet_native_first_stream and not internal_parquet:
-            replay = _make_parquet_replay(raw, feature=feature)
+            replay = _make_parquet_replay(
+                raw, feature=feature, memory_limit_bytes=memory_limit_bytes
+            )
             raw_for_native = replay.reader()
         native_stats = try_write_raw_native_file_output(
             raw_for_native,
@@ -140,7 +144,9 @@ def write_raw_stream_to_file(
             return result
 
         if internal_parquet:
-            replay = _make_parquet_replay(raw, feature=feature)
+            replay = _make_parquet_replay(
+                raw, feature=feature, memory_limit_bytes=memory_limit_bytes
+            )
         stream = replay.reader() if replay is not None else Stream(raw)
         native_stats = writer(
             stream,

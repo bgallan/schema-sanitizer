@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "description": "Dated reader-hardening validation records. Counts describe the recorded environments and are not claims about the current tree.",
+  "records": [
+    {
+      "recorded_at": "2026-08-01",
+      "scope": "reader budgets, scaling, sanitizers, and release A/B",
+      "todo": {
+        "completed": 110,
+        "open": 3,
+        "open_items": [
+          "one atomic cross-language resident ledger for every Python and native stage",
+          "periodic limit review using real production telemetry",
+          "pre-commit run -a and the hosted consolidated CI workflow"
+        ]
+      },
+      "asan_ubsan": {
+        "canonical_regression_inputs": 10,
+        "compiler": "clang 17",
+        "mutation_runs_per_reader": 1000,
+        "mutation_runs_total": 4000,
+        "post_final_initialization_regression_inputs": 10,
+        "result": "passed",
+        "sanitizer_findings": 0,
+        "targets": [
+          "csv",
+          "json",
+          "xml",
+          "parquet"
+        ]
+      },
+      "budget_propagation_fix": {
+        "concurrent_conversions_total": 144,
+        "conversions_per_campaign": 48,
+        "derived_metadata_limit_bytes": 1024,
+        "low_budget_bytes": 8192,
+        "pressure_campaigns": 3,
+        "pressure_memory_limit_bytes": 67108864,
+        "public_atomic_destination_cleanup": "passed",
+        "regression_tests": 4,
+        "result": "passed",
+        "source_kinds": [
+          "path",
+          "stream",
+          "text"
+        ],
+        "summary": "Explicit memory_limit_bytes is forwarded to registry metadata wrappers for path, Python stream, and in-memory text sources."
+      },
+      "environment_limitations": {
+        "pre_commit": "not installed; hook dependencies are also unavailable in this environment",
+        "production_telemetry": "not available; periodic production-based limit review remains open",
+        "pyarrow": "not installed; optional analytical and integration tests were not executed",
+        "remote_ci": "workflow topology is tested locally, but hosted CI was not executed from this environment"
+      },
+      "linear_scaling": {
+        "contract": "docs/operations/reader-complexity.md",
+        "report": "benchmarks/evidence/readers/linear-scaling.json",
+        "result": "passed"
+      },
+      "pytest": {
+        "full_suite_maxfail_1": {
+          "failing_test": "tests/remote/test_bigquery_integration.py::test_bigquery_integration_builds_external_table_ddl",
+          "failure": "pyarrow is not installed",
+          "passed_before_failure": 19,
+          "result": "blocked_by_optional_dependency",
+          "skipped_before_failure": 12
+        },
+        "targeted_reader_remote_ci_matrix": {
+          "deselected_optional": 1,
+          "passed": 344,
+          "result": "passed",
+          "skipped_optional": 52
+        }
+      },
+      "release_ab": {
+        "comparisons": {
+          "csv_multi": 1.2131662745657186,
+          "csv_single": 1.3023604385734846,
+          "jsonl_multi": 1.3675900820775668,
+          "jsonl_single": 1.4545809777434975,
+          "parquet_preflight": 0.9797648482143382,
+          "xml_multi": 0.9602039608910146,
+          "xml_single": 1.024709240211649
+        },
+        "performance_budget": "benchmarks/evidence/readers/performance-budget.json",
+        "report": "benchmarks/evidence/readers/hardening-ab.json",
+        "result": "within_reviewed_performance_envelope"
+      },
+      "tsan": {
+        "compiler": "gcc 14",
+        "result": "passed",
+        "rounds": 100,
+        "sanitizer_findings": 0,
+        "target": "schema_sanitizer_sanitized_ordered_executor"
+      }
+    },
+    {
+      "recorded_at": "2026-08-02",
+      "scope": "shared operation ledger and release validation",
+      "todo": {
+        "completed": 111,
+        "open": 2,
+        "open_items": [
+          "Revisit reader limits periodically using production telemetry and fuzzing evidence.",
+          "Run pre-commit -a and the complete hosted consolidated CI workflow."
+        ]
+      },
+      "shared_operation_ledger": {
+        "result": "passed",
+        "single_atomic_counter_across_python_and_cpp": true,
+        "native_allocator_charges_actual_upstream_bytes": true,
+        "domains": [
+          "native reader and materializer pools",
+          "materialized text and bytes input lifetime",
+          "local and remote discovery metadata",
+          "retained HTTP control response bodies",
+          "remote transfer windows",
+          "registry warm-up child operations",
+          "inference, materialization, writers, and concurrent workers"
+        ],
+        "focused_regressions": 5,
+        "tsan_contention_shape": {
+          "rounds": 100,
+          "threads_per_round": 32,
+          "reservations_per_thread": 200
+        }
+      },
+      "release_validation": {
+        "critical_matrix": {
+          "passed": 500,
+          "skipped_optional": 4,
+          "note": "Reader hardening, memory, diagnostics, concurrency, registry, and maintenance tests."
+        },
+        "source_layout_contracts": {
+          "passed": 332,
+          "module_limits": {
+            "src/schema_sanitizer/api_impl/execution_context.py": 477,
+            "src/schema_sanitizer/pipeline/source_discovery.py": 499,
+            "cpp/src/frontends/json/text_frontend.cc": 550
+          }
+        },
+        "source_hygiene": {
+          "python_ast_files": 543,
+          "json_configuration_and_evidence_files": 38,
+          "toml_files": 1,
+          "intentional_malformed_fuzz_json_excluded": true,
+          "trailing_whitespace_and_final_newline": "passed"
+        },
+        "counting_note": "The critical and maintenance matrices overlap and must not be summed.",
+        "final_local_smoke": {
+          "passed": 337,
+          "selection": "tests/memory/test_operation_memory_ledger.py plus the thematic source-layout contract suite",
+          "result": "passed"
+        }
+      },
+      "sanitizers": {
+        "asan_ubsan": {
+          "result": "passed",
+          "canonical_corpus_entries": 10,
+          "mutations": {
+            "csv": 1000,
+            "json": 1000,
+            "xml": 1000,
+            "parquet": 1000,
+            "total": 4000
+          },
+          "findings": 0
+        },
+        "tsan": {
+          "result": "passed",
+          "rounds": 100,
+          "findings": 0
+        }
+      },
+      "environment_limitations": {
+        "production_telemetry": "Unavailable; periodic production-driven limit review remains open.",
+        "pre_commit": "Python module is not installed in this environment.",
+        "pyarrow": "Not installed; tests whose result materialization inherently requires PyArrow remain optional/skipped.",
+        "hosted_ci": "Cannot be executed from the local container; workflow topology and locally executable jobs are tested."
+      },
+      "architecture_refactors": [
+        "Operation input lifetime and ledger ownership moved to api_impl/input_lifetime.py.",
+        "Analytical adapter materialization moved to api_impl/table_adapter_sink.py.",
+        "Discovery ledger context moved to pipeline/source_discovery_budget.py.",
+        "Parquet page scratch and budgeting moved to footer_reader_page_scratch.cc.inc.",
+        "JSON frontend factories compacted within their existing owner."
+      ]
+    }
+  ]
+}

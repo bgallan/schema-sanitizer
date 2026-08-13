@@ -21,6 +21,7 @@ class PreparedPublicInput:
     source_file: str | None = None
     source_file_spans: Any = None
     source_manifest: SourceManifest | None = None
+    public_format: str | None = None
 
     def close(self) -> None:
         """Close any generated reader."""

@@ -138,7 +138,9 @@ def write_parquet_native_first_stream(
 ) -> None:
     """Write Parquet using direct native output or the PyArrow sink path."""
     set_last_parquet_stream_route("none")
-    replay = make_replayable_parquet_stream(stream, feature=feature)
+    replay = make_replayable_parquet_stream(
+        stream, feature=feature, memory_limit_bytes=memory_limit_bytes
+    )
     try:
         try:
             native_written = _native_output.try_write_parquet_direct_native(

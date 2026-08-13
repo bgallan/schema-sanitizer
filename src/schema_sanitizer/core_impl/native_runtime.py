@@ -201,7 +201,16 @@ class _MissingNative:
     """Raise the original import failure on native attribute access."""
 
     def __init__(self, error: Exception):
-        """Store a native import failure."""
+        """Store a native import failure without retaining import traceback frames."""
+        # Import failures may originate while large runtime owners are being
+        # constructed. Retaining the traceback would keep those constructor
+        # frames -- and their partially-built object graphs -- alive forever.
+        try:
+            error = error.with_traceback(None)
+            error.__context__ = None
+            error.__cause__ = None
+        except BaseException:
+            pass
         self._error = error
         self._message = (
             "Failed to import schema_sanitizer native core module "

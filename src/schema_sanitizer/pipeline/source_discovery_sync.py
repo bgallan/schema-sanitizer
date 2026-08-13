@@ -20,9 +20,8 @@ from .source_discovery import (
     _partition_plans,
     _record_discovered_inputs,
     _source_extensions,
-    _source_summary,
-    _unique_source_locations,
 )
+from .source_discovery_memory import precharge_source_locations, source_summary
 from .types import PartitionRunPlan, SourcePlanDiscovery
 
 
@@ -107,7 +106,7 @@ def _discover_source_sync(
                 if remote_files
                 else None
             )
-            return bool(remote_files), discovered, *_source_summary(discovered)
+            return bool(remote_files), discovered, *source_summary(discovered)
         remote_file = sync_backend.remote_file_metadata(
             uri,
             memory_limit_bytes=memory_limit_bytes,
@@ -131,7 +130,7 @@ def _discover_source_sync(
             if local_files
             else None
         )
-        return bool(local_files), discovered, *_source_summary(discovered)
+        return bool(local_files), discovered, *source_summary(discovered)
     path = _local_path(uri, kind)
     if not path.is_file():
         return False, None, None, None
@@ -157,7 +156,9 @@ def _discover_existing_source_plans_sync_impl(
         raise ValueError("input_mode must be 'single_file' or 'directory'")
 
     extensions = _source_extensions(input_format, source_file_extension)
-    source_locations = _unique_source_locations(plans)
+    metadata_budget, source_locations, metadata_owner = precharge_source_locations(
+        plans, memory_limit_bytes=memory_limit_bytes
+    )
     exists_by_uri: dict[str, bool] = {}
     discovered_by_uri: dict[str, DiscoveredDirectoryInput] = {}
     discovery_seconds_by_uri: dict[str, float] = {}
@@ -198,6 +199,7 @@ def _discover_existing_source_plans_sync_impl(
 
     return _partition_plans(
         plans,
+        metadata_owner=metadata_owner,
         exists_by_uri=exists_by_uri,
         discovered_by_uri=discovered_by_uri,
         discovery_seconds_by_uri=discovery_seconds_by_uri,

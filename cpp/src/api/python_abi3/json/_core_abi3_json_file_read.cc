@@ -1,6 +1,7 @@
 // Local file byte reading helper for Python ABI3 JSON utilities.
 
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
+#include "internal/runtime/process_fd_governor.hh"
 
 #include <array>
 #include <fstream>
@@ -27,6 +28,11 @@ bool read_local_file_bytes(PyObject *path_obj, long long memory_limit_bytes,
     return false;
   }
 
+  sanitize::internal::ProcessFdPermitLease fd_lease(1U);
+  if (!fd_lease) {
+    PyErr_SetString(PyExc_OSError, "native file-descriptor capacity exhausted");
+    return false;
+  }
   std::ifstream file(
       std::string(path_data, static_cast<std::size_t>(path_size)),
       std::ios::binary);
@@ -34,6 +40,9 @@ bool read_local_file_bytes(PyObject *path_obj, long long memory_limit_bytes,
     PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, path_obj);
     return false;
   }
+  fd_lease.mark_opened();
+  sanitize::internal::ProcessFdStreamCloseGuard<std::ifstream> close_guard(
+      file, fd_lease);
 
   raw->clear();
   constexpr std::size_t kChunkBytes = 1024 * 1024;

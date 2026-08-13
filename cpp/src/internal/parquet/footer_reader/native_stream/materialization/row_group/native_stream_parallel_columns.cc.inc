@@ -71,11 +71,21 @@ ensure_native_parquet_worker_file(NativeParquetColumnWorkerState *worker_state,
         "native Parquet reader: column worker state is null");
   }
   if (!worker_state->file.is_open()) {
+    if (!worker_state->file_fd_lease) {
+      worker_state->file_fd_lease =
+          sanitize::internal::ProcessFdPermitLease::TryAcquireUpTo(1U, 1U);
+    }
+    if (!worker_state->file_fd_lease) {
+      return sanitize::Status::IOError(
+          "native Parquet reader: file-descriptor admission exhausted");
+    }
     worker_state->file.open(path, std::ios::binary);
     if (!worker_state->file) {
+      worker_state->file_fd_lease.reset();
       return sanitize::Status::IOError(
           "native Parquet reader: failed opening parallel input");
     }
+    worker_state->file_fd_lease.mark_opened();
   }
   worker_state->file.clear();
   return {};
@@ -403,10 +413,46 @@ sanitize::Status materialize_native_row_group_columns_parallel(
     return sanitize::Status::Invalid(
         "native Parquet reader: parallel column arena is unavailable");
   }
+
+  // Pre-admit every descriptor that the selected worker envelope can need.
+  // This turns FD pressure into deterministic parallelism degradation instead
+  // of letting worker tasks block independently after the arena is running.
+  std::size_t already_admitted = 0U;
+  const auto existing_workers = stream->parallel_column_workers.size();
+  for (std::size_t index = 0; index < std::min(worker_count, existing_workers);
+       ++index) {
+    const auto &worker = stream->parallel_column_workers[index];
+    if (worker.file.is_open() || worker.file_fd_lease) {
+      ++already_admitted;
+    }
+  }
+  const auto needed =
+      worker_count > already_admitted ? worker_count - already_admitted : 0U;
+  auto fd_bundle =
+      needed == 0U ? sanitize::internal::ProcessFdPermitLease{}
+                   : sanitize::internal::ProcessFdPermitLease::TryAcquireUpTo(
+                         needed, 1U);
+  const auto effective_workers =
+      std::min(worker_count, already_admitted + fd_bundle.amount());
+  if (effective_workers < 2U) {
+    for (std::size_t i = 0; i < row_group.columns.size(); ++i) {
+      SAN_RETURN_NOT_OK(materialize_native_row_group_column(
+          stream->file, row_group.columns[i], window, &stream->page_scratch,
+          &state->columns[i]));
+      SAN_RETURN_NOT_OK(enforce_native_array_retained_budget(
+          *state, stream->max_buffer_bytes));
+    }
+    return {};
+  }
+  worker_count = effective_workers;
   if (stream->parallel_column_workers.size() < worker_count) {
     stream->parallel_column_workers.resize(worker_count);
   }
   for (std::size_t index = 0; index < worker_count; ++index) {
+    auto &worker = stream->parallel_column_workers[index];
+    if (!worker.file.is_open() && !worker.file_fd_lease && fd_bundle) {
+      worker.file_fd_lease = fd_bundle.split(1U);
+    }
     stream->parallel_column_workers[index].page_scratch.max_page_bytes =
         static_cast<std::size_t>(
             std::max<std::int64_t>(1, stream->max_page_bytes));

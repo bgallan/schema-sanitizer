@@ -2,25 +2,20 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 from conftest import require_native
 
+from benchmarks.readers import hardening_ab
+
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "benchmarks" / "bench_reader_hardening_ab.py"
 
 
 def test_reader_hardening_ab_benchmark_runs_isolated_trees() -> None:
     """A tiny same-tree comparison validates all four valid-reader probes."""
     require_native()
-    spec = importlib.util.spec_from_file_location("bench_reader_hardening_ab", SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    report = module.compare(ROOT, ROOT, rows=16, width=2, repeats=1)
+    report = hardening_ab.compare(ROOT, ROOT, rows=16, width=2, repeats=1)
     names = {item["name"] for item in report["comparisons"]}
     assert names == {
         "jsonl_single",
@@ -37,10 +32,12 @@ def test_reader_hardening_ab_benchmark_runs_isolated_trees() -> None:
 def test_recorded_reader_hardening_release_benchmark_stays_within_reviewed_budget() -> None:
     """The matched Release A/B evidence must remain inside the reviewed envelope."""
     report = json.loads(
-        (ROOT / "benchmarks" / "reader_hardening_pass4_ab.json").read_text(encoding="utf-8")
+        (ROOT / "benchmarks" / "evidence" / "readers" / "hardening-ab.json").read_text(
+            encoding="utf-8"
+        )
     )
     policy = json.loads(
-        (ROOT / "benchmarks" / "reader_hardening_performance_budget.json").read_text(
+        (ROOT / "benchmarks" / "evidence" / "readers" / "performance-budget.json").read_text(
             encoding="utf-8"
         )
     )["maximum_candidate_to_baseline_ratio"]

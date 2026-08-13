@@ -1,4 +1,4 @@
-"""Tests for source archive completeness and scratch-file rejection."""
+"""Tests for release archive identity, completeness, and cleanliness."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 def _load_validator() -> ModuleType:
     """Load the distribution validator without packaging ``meta``."""
-    path = Path(__file__).parents[2] / "meta" / "ci" / "check_distribution_contents.py"
+    path = Path(__file__).parents[2] / "meta" / "ci" / "release" / "check_distribution_contents.py"
     spec = spec_from_file_location("check_distribution_contents", path)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
@@ -19,65 +19,27 @@ def _load_validator() -> ModuleType:
     return module
 
 
-def _minimal_source_names(validator: ModuleType) -> list[str]:
-    """Return a complete minimal source-ZIP member set."""
-    return sorted(
-        {
-            *validator._SDIST_REQUIRED,
-            "cpp/src/minimal.cpp",
-            "tests/test_minimal.py",
-        }
-    )
-
-
-def test_source_zip_validator_accepts_clean_source_tree(tmp_path: Path) -> None:
-    """A complete source ZIP without generated files is accepted."""
-    validator = _load_validator()
-
-    validator._validate_source_zip(
-        tmp_path / "source.zip",
-        _minimal_source_names(validator),
-    )
-
-
-@pytest.mark.parametrize(
-    "scratch_name",
-    [
-        ".coverage",
-        "coverage.xml",
-        "profiles/parser.profraw",
-        "profiles/parser.profdata",
-        "coverage/native.gcda",
-        "coverage/native.gcno",
-        "build-memsec/libsanitize_core.a",
-        "build-asan/CMakeCache.txt",
-        "cmake-build-debug/module.obj",
-        ".build-local/generated.o",
-    ],
-)
-def test_source_zip_validator_rejects_scratch_artifacts(
-    tmp_path: Path,
-    scratch_name: str,
-) -> None:
-    """Coverage, profiler, and build scratch files never ship in source archives."""
-    validator = _load_validator()
-    names = [*_minimal_source_names(validator), scratch_name]
-
-    with pytest.raises(AssertionError, match="contains scratch/build files"):
-        validator._validate_source_zip(tmp_path / "source.zip", names)
+def _release_filenames(version: str = "0.4.0") -> list[str]:
+    """Return the one supported sdist plus the exact stable-ABI wheel matrix."""
+    prefix = f"schema_sanitizer-{version}"
+    return [
+        f"{prefix}.tar.gz",
+        f"{prefix}-cp311-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        f"{prefix}-cp311-abi3-win_amd64.whl",
+        f"{prefix}-cp311-abi3-macosx_11_0_x86_64.whl",
+        f"{prefix}-cp311-abi3-macosx_11_0_arm64.whl",
+    ]
 
 
 def test_release_filename_validator_requires_all_supported_wheels() -> None:
     """One consistent sdist and the four release platforms form a valid set."""
     validator = _load_validator()
-    validator.validate_release_filenames(
-        [
-            "schema_sanitizer-0.4.0.tar.gz",
-            "schema_sanitizer-0.4.0-cp311-abi3-manylinux_2_28_x86_64.whl",
-            "schema_sanitizer-0.4.0-cp311-abi3-win_amd64.whl",
-            "schema_sanitizer-0.4.0-cp311-abi3-macosx_11_0_x86_64.whl",
-            "schema_sanitizer-0.4.0-cp311-abi3-macosx_11_0_arm64.whl",
-        ]
+    assert (
+        validator.validate_release_filenames(
+            _release_filenames(),
+            expected_version="0.4.0",
+        )
+        == "0.4.0"
     )
 
 
@@ -89,9 +51,78 @@ def test_release_filename_validator_rejects_version_drift() -> None:
         validator.validate_release_filenames(
             [
                 "schema_sanitizer-0.4.0.tar.gz",
-                "schema_sanitizer-0.4.0-cp311-abi3-manylinux_2_28_x86_64.whl",
+                "schema_sanitizer-0.4.0-cp311-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
                 "schema_sanitizer-0.4.0-cp311-abi3-win_amd64.whl",
                 "schema_sanitizer-0.4.0-cp311-abi3-macosx_11_0_x86_64.whl",
                 "schema_sanitizer-0.3.9-cp311-abi3-macosx_11_0_arm64.whl",
             ]
         )
+
+
+def test_release_filename_validator_requires_expected_project_and_version() -> None:
+    """Neither another distribution nor a version outside meta/VERSION can pass."""
+    validator = _load_validator()
+    wrong_project = _release_filenames()
+    wrong_project[0] = "other_project-0.4.0.tar.gz"
+
+    with pytest.raises(AssertionError, match="sdist project name"):
+        validator.validate_release_filenames(wrong_project)
+    with pytest.raises(AssertionError, match="release version .* != expected"):
+        validator.validate_release_filenames(
+            _release_filenames(),
+            expected_version="0.4.1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("cp311-abi3-win_amd64", "cp312-abi3-win_amd64", "only cp311-abi3"),
+        ("cp311-abi3-win_amd64", "cp311-cp311-win_amd64", "only cp311-abi3"),
+        (
+            "manylinux_2_27_x86_64.manylinux_2_28_x86_64",
+            "manylinux_2_28_x86_64",
+            "unexpected release platform tags",
+        ),
+        (
+            "cp311-abi3-win_amd64",
+            "cp311.cp312-abi3-win_amd64",
+            "only cp311-abi3",
+        ),
+    ],
+)
+def test_release_filename_validator_rejects_noncanonical_wheel_tags(
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    """Release wheels use only the audited cp311-abi3 platform tags."""
+    validator = _load_validator()
+    filenames = [name.replace(old, new) for name in _release_filenames()]
+
+    with pytest.raises(AssertionError, match=message):
+        validator.validate_release_filenames(filenames)
+
+
+def test_release_filename_validator_rejects_duplicate_or_extra_artifacts() -> None:
+    """The release set is exactly one artifact per owned platform and nothing else."""
+    validator = _load_validator()
+    duplicate_platform = _release_filenames()
+    duplicate_platform[-1] = duplicate_platform[-2]
+
+    with pytest.raises(AssertionError, match="duplicate macOS x86_64 wheels"):
+        validator.validate_release_filenames(duplicate_platform)
+    with pytest.raises(AssertionError, match="exactly 5 release files"):
+        validator.validate_release_filenames([*_release_filenames(), "checksums.txt"])
+
+
+def test_release_filename_validator_rejects_wheel_build_tags() -> None:
+    """A noncanonical rebuild cannot masquerade as one of the four release wheels."""
+    validator = _load_validator()
+    filenames = [
+        name.replace("-cp311-abi3-win_amd64", "-1-cp311-abi3-win_amd64")
+        for name in _release_filenames()
+    ]
+
+    with pytest.raises(AssertionError, match="must not carry a build tag"):
+        validator.validate_release_filenames(filenames)

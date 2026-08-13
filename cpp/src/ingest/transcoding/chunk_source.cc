@@ -3,6 +3,7 @@
 #include "ingest/chunk_source_detail.hh"
 #include "ingest/transcoding/decoder.hh"
 #include "internal/memory/memory_budget.hh"
+#include "internal/runtime/process_fd_governor.hh"
 
 #include <fstream>
 #include <ios>
@@ -43,8 +44,17 @@ public:
             internal::memory_budget_from_limit(memory_limit_bytes)
                 .materialized_input_bytes)) {}
 
+  ~TranscodingFileChunkSource() override {
+    internal::close_stream_and_commit(input_, fd_lease_);
+  }
+
   sanitize::Status Reset() override {
-    input_.close();
+    internal::close_stream_and_commit(input_, fd_lease_);
+    if (input_.is_open()) {
+      return sanitize::Status::IOError(
+          "TranscodingFileChunkSource: failed closing input");
+    }
+    fd_lease_.reset();
     input_.clear();
     utf8_pos_ = 0;
     eof_ = false;
@@ -78,7 +88,8 @@ public:
       SAN_ASSIGN_OR_RAISE(auto transcoded, decoder_.Decode(raw, final));
       if (final) {
         eof_ = true;
-        input_.close();
+        internal::close_stream_and_commit(input_, fd_lease_);
+        fd_lease_.reset();
       }
       if (!transcoded.empty()) {
         pending_utf8_ = std::make_shared<std::string>(std::move(transcoded));
@@ -153,17 +164,26 @@ private:
     if (input_.is_open()) {
       return {};
     }
+    fd_lease_ = internal::ProcessFdPermitLease(1U);
+    if (!fd_lease_) {
+      return sanitize::Status::IOError("TranscodingFileChunkSource: file "
+                                       "descriptor capacity exhausted for '",
+                                       path_, "'");
+    }
     input_.open(path_, std::ios::binary);
     if (!input_.good()) {
+      fd_lease_.reset();
       return sanitize::Status::Invalid(
           "TranscodingFileChunkSource: failed to open '", path_, "'");
     }
+    fd_lease_.mark_opened();
     return {};
   }
 
   std::string path_;
   internal::TranscodingDecoder decoder_;
   std::uint64_t materialized_limit_ = 0;
+  internal::ProcessFdPermitLease fd_lease_;
   std::ifstream input_;
   std::size_t utf8_pos_ = 0;
   bool eof_ = false;

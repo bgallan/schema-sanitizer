@@ -15,6 +15,7 @@ PyObject *py_options_catalog(PyObject *, PyObject *);
 PyObject *py_memory_budget(PyObject *, PyObject *);
 PyObject *py_process_memory_governor_stats(PyObject *, PyObject *);
 PyObject *py_process_resident_memory_stats(PyObject *, PyObject *);
+PyObject *py_allocation_registry_stats(PyObject *, PyObject *);
 PyObject *py_process_cpu_governor_probe(PyObject *, PyObject *);
 PyObject *py_execution_policy(PyObject *, PyObject *);
 PyObject *py_ordered_executor_probe(PyObject *, PyObject *);
@@ -22,6 +23,53 @@ PyObject *py_ordered_executor_arena_completion_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_reaper_shutdown(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_runtime_snapshot(PyObject *, PyObject *);
+PyObject *py_process_physical_thread_count(PyObject *, PyObject *);
+PyObject *py_process_physical_thread_permits_acquire(PyObject *, PyObject *);
+PyObject *py_process_physical_thread_permits_release(PyObject *, PyObject *);
+PyObject *py_process_external_runtime_thread_permit_lease_acquire(PyObject *,
+                                                                  PyObject *);
+PyObject *py_process_external_runtime_thread_permit_lease_resize(PyObject *,
+                                                                 PyObject *);
+PyObject *py_process_external_runtime_thread_permit_lease_metadata(PyObject *,
+                                                                   PyObject *);
+PyObject *py_process_external_runtime_thread_permit_lease_amount(PyObject *,
+                                                                 PyObject *);
+PyObject *py_process_external_runtime_thread_permits_acquire(PyObject *,
+                                                             PyObject *);
+PyObject *py_process_external_runtime_thread_permits_release(PyObject *,
+                                                             PyObject *);
+PyObject *py_process_external_runtime_resident_threads_add(PyObject *,
+                                                           PyObject *);
+PyObject *py_process_external_runtime_resident_threads_release(PyObject *,
+                                                               PyObject *);
+PyObject *py_process_external_runtime_stack_debt_threads_add(PyObject *,
+                                                             PyObject *);
+PyObject *py_process_external_runtime_stack_debt_threads_release(PyObject *,
+                                                                 PyObject *);
+PyObject *py_process_external_runtime_residency_update(PyObject *, PyObject *);
+PyObject *py_process_thread_stack_reservation_bytes(PyObject *, PyObject *);
+PyObject *py_process_file_descriptor_permits_acquire(PyObject *, PyObject *);
+PyObject *py_process_file_descriptor_permits_acquire_wait(PyObject *,
+                                                          PyObject *);
+PyObject *py_process_file_descriptor_permit_lease_acquire_wait(PyObject *,
+                                                               PyObject *);
+PyObject *py_process_file_descriptor_permit_lease_resize(PyObject *,
+                                                         PyObject *);
+PyObject *py_process_file_descriptor_permit_lease_metadata(PyObject *,
+                                                           PyObject *);
+PyObject *py_process_file_descriptor_permit_lease_mark_opened(PyObject *,
+                                                              PyObject *);
+PyObject *py_process_file_descriptor_permit_lease_mark_closed(PyObject *,
+                                                              PyObject *);
+PyObject *py_process_file_descriptor_permit_lease_amount(PyObject *,
+                                                         PyObject *);
+PyObject *py_process_file_descriptor_mark_opened(PyObject *, PyObject *);
+PyObject *py_process_file_descriptor_mark_closed(PyObject *, PyObject *);
+PyObject *py_process_file_descriptor_permits_release(PyObject *, PyObject *);
+PyObject *py_process_file_descriptor_permits_snapshot(PyObject *, PyObject *);
+PyObject *py_process_file_descriptor_count(PyObject *, PyObject *);
+PyObject *py_process_physical_thread_mark_running(PyObject *, PyObject *);
+PyObject *py_process_physical_thread_mark_stopped(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *);
 PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
@@ -36,10 +84,23 @@ PyObject *py_options_prepare_bytes(PyObject *, PyObject *);
 PyObject *py_options_with_detected_at(PyObject *, PyObject *);
 PyObject *py_options_with_operation_context(PyObject *, PyObject *);
 PyObject *py_operation_memory_ledger_create(PyObject *, PyObject *);
+PyObject *py_operation_memory_reservation_create(PyObject *, PyObject *);
+PyObject *py_operation_memory_reservation_resize(PyObject *, PyObject *);
+PyObject *py_operation_memory_reservation_release(PyObject *, PyObject *);
+PyObject *py_operation_memory_reservation_metadata(PyObject *, PyObject *);
+PyObject *py_operation_memory_reservation_bytes(PyObject *, PyObject *);
 PyObject *py_operation_memory_ledger_reserve(PyObject *, PyObject *);
+PyObject *py_operation_memory_ledger_reserve_snapshot(PyObject *, PyObject *);
 PyObject *py_operation_memory_ledger_release(PyObject *, PyObject *);
 PyObject *py_operation_memory_ledger_snapshot(PyObject *, PyObject *);
 PyObject *py_operation_memory_ledger_diagnostics(PyObject *, PyObject *);
+PyObject *py_atomic_epoch_create(PyObject *, PyObject *);
+PyObject *py_atomic_epoch_increment(PyObject *, PyObject *);
+PyObject *py_atomic_epoch_decrement(PyObject *, PyObject *);
+PyObject *py_atomic_epoch_value(PyObject *, PyObject *);
+PyObject *py_atomic_epoch_write_le(PyObject *, PyObject *);
+PyObject *py_atomic_epoch_write_activity(PyObject *, PyObject *);
+PyObject *py_atomic_epoch_reset(PyObject *, PyObject *);
 
 // Logical-schema payloads.
 PyObject *py_logical_schema_payload_validate(PyObject *, PyObject *);

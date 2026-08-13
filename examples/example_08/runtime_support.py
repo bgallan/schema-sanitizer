@@ -135,8 +135,17 @@ class Example08Config:
             raise ValueError("example 08 requires field_name_policy='preserve'")
         if self.on_error not in {"stop", "skip_row", "emit_null_row"}:
             raise ValueError("on_error must be stop, skip_row, or emit_null_row")
-        if self.memory_limit_bytes is not None and self.memory_limit_bytes <= 0:
-            raise ValueError("memory_limit_bytes must be greater than zero")
+        # Reuse the public validator so this example cannot drift from the
+        # library's concurrency and operation-wide memory contract.
+        _ = self.resources
+
+    @property
+    def resources(self) -> ss.ResourceOptions:
+        """Return the public resource configuration shared by every stage."""
+        return ss.ResourceOptions(
+            multi_threading=self.multi_threading,
+            memory_limit_bytes=self.memory_limit_bytes,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,17 +179,27 @@ class Example08RunResult:
 class NativeGcsWorkflowClient:
     """GCS adapter backed by schema-sanitizer's generation-safe transport."""
 
+    def __init__(self, *, resources: ss.ResourceOptions | None = None) -> None:
+        """Retain immutable resource options for deterministic GCS listing."""
+        self._resources = resources or ss.ResourceOptions()
+
     def list_csv_objects(
         self,
         source_prefix: str,
         *,
         memory_limit_bytes: int | None,
     ) -> Sequence[RemoteFile]:
-        """List one prefix once through the strict synchronous backend."""
+        """List one prefix once with the workflow's public resource policy."""
+        resources = self._resources
+        if resources.memory_limit_bytes != memory_limit_bytes:
+            resources = ss.ResourceOptions(
+                multi_threading=resources.multi_threading,
+                memory_limit_bytes=memory_limit_bytes,
+            )
         return ss.sources.list_objects(
             source_prefix,
             suffixes=("csv",),
-            memory_limit_bytes=memory_limit_bytes,
+            resources=resources,
         )
 
     def schema_sanitizer_download_scope(self) -> AbstractContextManager[None]:
@@ -313,7 +332,12 @@ def _run_one_day(
         memory_limit_bytes=config.memory_limit_bytes,
         schema_registry=ingress_registry,
     )
-    frame = converted.clean_data
+    try:
+        frame = converted.clean_data
+    finally:
+        # The materialized DataFrame is caller-owned. Close the Result at the
+        # handoff so native owners and finalizer capacity are retired promptly.
+        converted.close()
     conversion_seconds = max(perf_counter() - conversion_started, 0.0)
 
     normalization_started = perf_counter()
@@ -330,14 +354,15 @@ def _run_one_day(
         final_schema,
         field_name_policy=config.field_name_policy,
     )
-    validation = ss.validate_analytical_result(finalized.clean_data, final_schema)
+    final_table = finalized.clean_data
+    validation = ss.validate_analytical_result(final_table, final_schema)
     normalization_seconds = max(perf_counter() - normalization_started, 0.0)
 
     with TemporaryDirectory(prefix="schema-sanitizer-example08-") as directory:
         local_root = Path(directory) / "hive"
         parquet_started = perf_counter()
         parquet_files = write_hive_parquet_dataset(
-            finalized.clean_data,
+            final_table,
             final_schema,
             local_root,
             file_prefix=config.parquet_file_prefix,

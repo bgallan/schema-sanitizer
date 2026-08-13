@@ -33,10 +33,11 @@ async def run_async_discovery_with_budget(
         normalized_limit,
         operation_memory_ledger=ledger,
     )
+    retained = False
     try:
         with activate_operation_memory_ledger(ledger):
             with directory_metadata_budget_scope(normalized_limit, budget=metadata_budget):
-                return await discover(
+                result = await discover(
                     plans,
                     input_mode=input_mode,
                     input_format=input_format,
@@ -44,8 +45,12 @@ async def run_async_discovery_with_budget(
                     memory_limit_bytes=normalized_limit,
                     threading_mode=threading_mode,
                 )
+        metadata_budget.retain()
+        retained = True
+        return result
     finally:
-        metadata_budget.close()
+        if not retained:
+            metadata_budget.close()
         ledger.close()
 
 
@@ -65,18 +70,23 @@ def run_sync_discovery_with_budget(
         normalized_limit,
         operation_memory_ledger=ledger,
     )
+    retained = False
     try:
         with activate_operation_memory_ledger(ledger):
             with directory_metadata_budget_scope(normalized_limit, budget=metadata_budget):
-                return discover(
+                result = discover(
                     plans,
                     input_mode=input_mode,
                     input_format=input_format,
                     source_file_extension=source_file_extension,
                     memory_limit_bytes=normalized_limit,
                 )
+        metadata_budget.retain()
+        retained = True
+        return result
     finally:
-        metadata_budget.close()
+        if not retained:
+            metadata_budget.close()
         ledger.close()
 
 

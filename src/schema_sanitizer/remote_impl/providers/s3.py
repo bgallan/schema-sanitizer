@@ -10,11 +10,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...core_impl.async_scheduler import (
-    drain_ordered_indexed_results,
+    drain_ordered_iterable_results,
     ordered_indexed_results,
     retry_async,
 )
 from ...core_impl.execution_policy import execution_policy
+from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.temporary_storage import StreamingStorageReservation
@@ -27,9 +28,11 @@ from ...input_impl.directory_inputs import (
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_async_reader_to_file
+from ..io_footprint import open_remote_local_file
 from ..provider_session_pool import current_provider_session_pool
-from ..transport import TRANSFER_CHUNK_BYTES
+from ..transport import TRANSFER_CHUNK_BYTES, read_bounded_async_reader_bytes
 from ..upload_policy import (
+    acquire_s3_multipart_manifest,
     read_upload_part,
     release_upload_payload,
     remote_upload_policy,
@@ -75,13 +78,15 @@ async def open_client() -> Any:
     return await pool.borrow_manager(("s3",), _open_client_unpooled)
 
 
-async def download_bytes(client: Any, file: RemoteFile) -> bytes:
-    """Download one S3 object into bytes using a shared client."""
+async def download_bytes(client: Any, file: RemoteFile, *, maximum_bytes: int) -> bytes:
+    """Download one S3 object only under an explicit materialization ceiling."""
     ref = parse_uri(file.uri)
     response = await client.get_object(Bucket=ref.bucket, Key=ref.key)
     body = response["Body"]
     async with body:
-        return await body.read()
+        return await read_bounded_async_reader_bytes(
+            body.read, maximum_bytes=maximum_bytes, stage="s3_download_bytes"
+        )
 
 
 async def file_exists(
@@ -220,8 +225,9 @@ async def _upload_file_multipart(
 
     retries = memory_budget(memory_limit_bytes).async_retries
     parts: list[dict[str, Any]] = []
+    manifest = None
 
-    async def upload_part(index: int) -> dict[str, Any]:
+    async def upload_part(index: int) -> tuple[str, int]:
         """Read and upload one immutable local-file part."""
         payload = read_upload_part(local_path, index, tuning.part_bytes, tuning.file_size)
         part_number = index + 1
@@ -246,17 +252,20 @@ async def _upload_file_multipart(
             etag = response.get("ETag") if isinstance(response, dict) else None
             if not isinstance(etag, str) or not etag:
                 raise RuntimeError(f"S3 multipart part {part_number} did not return an ETag")
-            return {"ETag": etag, "PartNumber": part_number}
+            return etag, part_number
         finally:
             release_upload_payload(payload)
 
     try:
+        manifest = acquire_s3_multipart_manifest(tuning.part_count)
         async for _index, completed in ordered_indexed_results(
             tuning.part_count,
             upload_part,
             window=tuning.concurrency,
+            expected_retained_bytes=512,
         ):
-            parts.append(completed)
+            etag, part_number = completed
+            manifest.append_part(parts, etag, part_number)
         final_stat = source.stat()
         if (final_stat.st_size, final_stat.st_mtime_ns) != (
             initial_stat.st_size,
@@ -279,6 +288,9 @@ async def _upload_file_multipart(
         except BaseException as abort_exc:
             add_bounded_note(exc, "S3 multipart abort also failed", abort_exc)
         raise
+    finally:
+        if manifest is not None:
+            manifest.close()
 
 
 async def upload_file(
@@ -306,7 +318,7 @@ async def upload_file(
                 threading_mode=threading_mode,
             )
             return
-        with Path(local_path).open("rb") as file_handle:
+        with open_remote_local_file(local_path, "rb", label="s3_upload_source") as file_handle:
             await client.put_object(Bucket=ref.bucket, Key=ref.key, Body=file_handle)
 
 
@@ -343,7 +355,7 @@ async def list_files(
                     continue
                 size = item.get("Size") if isinstance(item.get("Size"), int) else None
                 remote_file = RemoteFile(f"s3://{ref.bucket}/{key}", relative, size)
-                metadata_budget.charge_file(remote_file)
+                metadata_budget.charge_file(remote_file, associations=4)
                 files.append(remote_file)
             if not payload.get("IsTruncated"):
                 break
@@ -352,7 +364,7 @@ async def list_files(
                 raise RuntimeError(
                     f"S3 list for {uri!r} was truncated without a continuation token"
                 )
-    files.sort(key=lambda file: file.name)
+    governed_sort(files, key=lambda file: file.name, stage="remote_discovery_sort")
     return files
 
 
@@ -365,9 +377,10 @@ async def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Return whether S3 directories contain a direct child matching suffixes."""
     accepted = normalize_extensions(suffixes)
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
         uris,
-        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+        metadata_budget=metadata_budget,
     )
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
     for uri in uris:
@@ -377,7 +390,10 @@ async def directories_containing_files(
             continue
         parent_prefix, child = parsed
         bucket = ref.bucket
-        groups.setdefault((bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+        # pass63 proof anchor: metadata_budget.charge_group_associations()
+        discovery.publish_group_association(
+            lambda: groups.setdefault((bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+        )
 
     if not groups:
         return discovery.finish()
@@ -428,16 +444,15 @@ async def directories_containing_files(
                         "without a continuation token"
                     )
 
-    grouped = list(groups.items())
+    async def scan_key(key: tuple[str, str]) -> None:
+        """Scan one S3 parent group without materialising all group keys."""
+        bucket, parent = key
+        await scan_group(bucket, parent, groups[key])
 
-    async def scan_index(index: int) -> None:
-        """Scan one canonically ordered S3 parent group."""
-        (bucket, parent), children = grouped[index]
-        await scan_group(bucket, parent, children)
-
-    await drain_ordered_indexed_results(
-        len(grouped),
-        scan_index,
+    await drain_ordered_iterable_results(
+        groups,
+        scan_key,
         window=concurrency,
+        expected_retained_bytes=64,
     )
     return discovery.finish()

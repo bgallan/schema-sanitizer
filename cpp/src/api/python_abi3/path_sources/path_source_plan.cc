@@ -2,6 +2,7 @@
 
 #include "api/python_abi3/path_sources/path_sources.hh"
 
+#include "internal/runtime/process_fd_governor.hh"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -96,10 +97,18 @@ validate_path_source_sizes(const std::vector<PathSourceSpec> &sources,
     return sanitize::Status::OK();
   }
   for (const PathSourceSpec &source : sources) {
+    sanitize::internal::ProcessFdPermitLease fd_lease(1U);
+    if (!fd_lease) {
+      return sanitize::Status::IOError(
+          "native file-descriptor capacity exhausted");
+    }
     std::ifstream input(source.path, std::ios::binary | std::ios::ate);
     if (!input) {
       continue;
     }
+    fd_lease.mark_opened();
+    sanitize::internal::ProcessFdStreamCloseGuard<std::ifstream> close_guard(
+        input, fd_lease);
     const auto end = input.tellg();
     if (end == std::ifstream::pos_type(-1)) {
       continue;

@@ -12,6 +12,8 @@
 #include <functional>
 #include <memory>
 #include <memory_resource>
+#include <optional>
+#include <utility>
 #if defined(__APPLE__)
 #include <mutex>
 #endif
@@ -24,6 +26,123 @@ enum class TaskArenaLane : unsigned char {
   kOutput,
   kAll,
 };
+
+[[nodiscard]] std::optional<std::size_t>
+process_physical_thread_count() noexcept;
+[[nodiscard]] std::size_t
+acquire_process_physical_thread_permits(std::size_t desired,
+                                        std::size_t minimum) noexcept;
+void release_process_physical_thread_permits(std::size_t amount) noexcept;
+
+class ProcessPhysicalThreadPermitLease final {
+public:
+  ProcessPhysicalThreadPermitLease() noexcept = default;
+  explicit ProcessPhysicalThreadPermitLease(std::size_t amount) noexcept
+      : amount_(acquire_process_physical_thread_permits(amount, amount)) {}
+  ProcessPhysicalThreadPermitLease(const ProcessPhysicalThreadPermitLease &) =
+      delete;
+  ProcessPhysicalThreadPermitLease &
+  operator=(const ProcessPhysicalThreadPermitLease &) = delete;
+  ProcessPhysicalThreadPermitLease(
+      ProcessPhysicalThreadPermitLease &&other) noexcept
+      : amount_(std::exchange(other.amount_, 0U)) {}
+  ProcessPhysicalThreadPermitLease &
+  operator=(ProcessPhysicalThreadPermitLease &&other) noexcept {
+    if (this != &other) {
+      reset();
+      amount_ = std::exchange(other.amount_, 0U);
+    }
+    return *this;
+  }
+  ~ProcessPhysicalThreadPermitLease() noexcept { reset(); }
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return amount_ != 0U;
+  }
+  [[nodiscard]] std::size_t amount() const noexcept { return amount_; }
+  void reset() noexcept {
+    if (amount_ != 0U) {
+      const auto amount = std::exchange(amount_, 0U);
+      release_process_physical_thread_permits(amount);
+    }
+  }
+
+private:
+  std::size_t amount_ = 0U;
+};
+// External runtime pools (PyArrow/Polars/etc.) are process-global resources,
+// not pending managed thread starts. Active reservations remain a distinct
+// ownership subledger; they are never treated as OS-thread identity evidence.
+[[nodiscard]] std::size_t
+acquire_process_external_runtime_thread_permits(std::size_t desired,
+                                                std::size_t minimum) noexcept;
+void release_process_external_runtime_thread_permits(
+    std::size_t amount) noexcept;
+
+class ProcessExternalRuntimeThreadPermitLease final {
+public:
+  ProcessExternalRuntimeThreadPermitLease() noexcept = default;
+  ProcessExternalRuntimeThreadPermitLease(std::size_t desired,
+                                          std::size_t minimum) noexcept
+      : amount_(acquire_process_external_runtime_thread_permits(desired,
+                                                                minimum)) {}
+  ProcessExternalRuntimeThreadPermitLease(
+      const ProcessExternalRuntimeThreadPermitLease &) = delete;
+  ProcessExternalRuntimeThreadPermitLease &
+  operator=(const ProcessExternalRuntimeThreadPermitLease &) = delete;
+  ProcessExternalRuntimeThreadPermitLease(
+      ProcessExternalRuntimeThreadPermitLease &&other) noexcept
+      : amount_(std::exchange(other.amount_, 0U)) {}
+  ProcessExternalRuntimeThreadPermitLease &
+  operator=(ProcessExternalRuntimeThreadPermitLease &&other) noexcept {
+    if (this != &other) {
+      reset();
+      amount_ = std::exchange(other.amount_, 0U);
+    }
+    return *this;
+  }
+  ~ProcessExternalRuntimeThreadPermitLease() noexcept { reset(); }
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return amount_ != 0U;
+  }
+  [[nodiscard]] std::size_t amount() const noexcept { return amount_; }
+  [[nodiscard]] bool shrink(std::size_t target) noexcept {
+    if (target > amount_) {
+      return false;
+    }
+    if (target < amount_) {
+      const auto returned = amount_ - target;
+      // Publish reduced owner authority before returning aggregate capacity.
+      amount_ = target;
+      release_process_external_runtime_thread_permits(returned);
+    }
+    return true;
+  }
+  void reset() noexcept {
+    const auto amount = std::exchange(amount_, 0U);
+    if (amount != 0U) {
+      release_process_external_runtime_thread_permits(amount);
+    }
+  }
+
+private:
+  std::size_t amount_ = 0U;
+};
+// Runtime-observed resident pool width is identity evidence only; it does not
+// reserve active execution capacity. Keep it separate from operation claims.
+void add_process_external_runtime_resident_threads(std::size_t amount) noexcept;
+void release_process_external_runtime_resident_threads(
+    std::size_t amount) noexcept;
+void add_process_external_runtime_stack_debt_threads(
+    std::size_t amount) noexcept;
+void release_process_external_runtime_stack_debt_threads(
+    std::size_t amount) noexcept;
+void update_process_external_runtime_residency(
+    std::int64_t identity_delta, std::int64_t stack_debt_delta) noexcept;
+[[nodiscard]] std::uint64_t process_thread_stack_reservation_bytes() noexcept;
+void mark_process_physical_thread_running() noexcept;
+void mark_process_physical_thread_stopped() noexcept;
 
 struct OperationTaskArenaRuntimeSnapshot final {
   std::size_t live_arenas = 0U;
@@ -41,6 +160,16 @@ struct OperationTaskArenaRuntimeSnapshot final {
   std::int64_t oldest_parked_since_ns = 0;
   std::size_t reaper_thread_permits = 0U;
   std::size_t reaper_thread_start_failures = 0U;
+  std::size_t native_physical_threads = 0U;
+  std::size_t native_physical_thread_capacity = 0U;
+  std::size_t native_physical_thread_rejections = 0U;
+  std::size_t external_runtime_thread_permits = 0U;
+  std::size_t completion_memory_protocol_violations = 0U;
+  std::size_t total_physical_thread_permits = 0U;
+  std::size_t external_runtime_resident_threads = 0U;
+  std::size_t external_runtime_stack_debt_threads = 0U;
+  bool thread_permit_snapshot_stable = false;
+  std::size_t external_runtime_resident_protocol_violations = 0U;
   std::size_t reaper_over_capacity = 0U;
   std::size_t reaper_terminal_states = 0U;
   std::size_t reaper_terminal_bytes = 0U;
@@ -48,6 +177,10 @@ struct OperationTaskArenaRuntimeSnapshot final {
   std::size_t reaper_stopping_lanes = 0U;
 };
 
+// Queue-retention accounting only.  This charge limits how much ownership the
+// arena may pin while queued/active; it never reserves bytes from the operation
+// memory ledger and therefore may safely describe buffers already charged by a
+// PMR resource or OperationMemoryLease without double physical accounting.
 struct TaskMemoryCharge final {
   constexpr TaskMemoryCharge() noexcept = default;
   explicit constexpr TaskMemoryCharge(std::size_t bytes) noexcept
@@ -161,6 +294,8 @@ private:
   TaskArenaLane cursor_lane_ = TaskArenaLane::kAll;
 };
 
+class CompletionMemoryLease;
+
 class OperationTaskArena final {
 public:
   using Task = sanitize::internal::MoveOnlyFunction<void(
@@ -219,6 +354,7 @@ public:
   [[nodiscard]] std::size_t active_tasks() const noexcept;
   [[nodiscard]] std::size_t submitted_tasks() const noexcept;
   [[nodiscard]] std::size_t stolen_tasks() const noexcept;
+  [[nodiscard]] std::size_t output_preference_bypasses() const noexcept;
   [[nodiscard]] std::size_t queued_tasks() const noexcept;
   [[nodiscard]] std::size_t peak_queued_tasks() const noexcept;
   [[nodiscard]] std::size_t queue_capacity() const noexcept;
@@ -229,8 +365,27 @@ public:
   [[nodiscard]] std::size_t peak_active_retained_bytes() const noexcept;
   [[nodiscard]] std::size_t peak_retained_bytes() const noexcept;
   [[nodiscard]] std::size_t queue_byte_capacity() const noexcept;
+  // Completion/result ownership outlives the worker callback. These methods
+  // transfer retained-byte backpressure from an active task into an external
+  // completion slot without double-charging the operation memory ledger.
+  // Atomically replace one currently-active task credit with completion/result
+  // ownership. This is the authoritative check+commit; callers must never split
+  // the capacity test from the retained-total update.
+  [[nodiscard]] bool TryTransferActiveToCompletion(
+      std::size_t active_credit, std::size_t completion_bytes,
+      CompletionMemoryLease *completion_lease) noexcept;
   [[nodiscard]] std::size_t rejected_submissions() const noexcept;
   [[nodiscard]] std::size_t rejected_byte_submissions() const noexcept;
+  [[nodiscard]] std::size_t backpressure_timeouts() const noexcept;
+  [[nodiscard]] std::size_t logical_backpressure_timeouts() const noexcept;
+  [[nodiscard]] std::size_t backpressure_waiters() const noexcept;
+  [[nodiscard]] std::size_t producer_waiter_capacity() const noexcept;
+  [[nodiscard]] std::size_t peak_backpressure_waiters() const noexcept;
+  [[nodiscard]] std::size_t rejected_backpressure_waiters() const noexcept;
+  [[nodiscard]] std::size_t backpressure_bypasses() const noexcept;
+  [[nodiscard]] std::size_t starvation_preventions() const noexcept;
+  [[nodiscard]] std::uint64_t
+  oldest_backpressure_waiter_age_millis() const noexcept;
   [[nodiscard]] std::size_t unknown_charge_submissions() const noexcept;
   [[nodiscard]] std::size_t detached_workers() const noexcept;
   [[nodiscard]] std::size_t total_detached_workers() const noexcept;
@@ -250,6 +405,15 @@ public:
   [[nodiscard]] std::shared_ptr<std::pmr::memory_resource>
   memory_resource() const noexcept;
 
+  // Cooperative operation cancellation is distinct from destructive shutdown:
+  // it rejects new submissions, wakes retained-byte backpressure and requests
+  // stop on active worker tokens while preserving bounded cleanup ownership.
+  void RequestCancellation() noexcept;
+  // Relative producer-wait timeout. This is safe for long-lived arenas because
+  // it is measured from the start of each saturation episode.
+  void SetBackpressureTimeoutMillis(std::uint64_t timeout_millis) noexcept;
+  // Optional absolute operation deadline published by an external owner.
+  void SetBackpressureDeadlineMillis(std::uint64_t timeout_millis) noexcept;
   void Shutdown() noexcept;
   [[nodiscard]] static bool
   ShutdownCleanupReaper(std::uint64_t timeout_millis) noexcept;
@@ -261,6 +425,7 @@ public:
   struct DetachedMetrics;
 
 private:
+  friend class CompletionMemoryLease;
   explicit OperationTaskArena(
       std::shared_ptr<State> state,
       std::shared_ptr<DetachedMetrics> metrics) noexcept;
@@ -272,6 +437,33 @@ private:
   std::atomic<std::size_t> shutdown_timeouts_{0};
   std::atomic<std::size_t> abandoned_queued_tasks_{0};
   std::atomic<std::size_t> abandoned_queued_bytes_{0};
+};
+
+class CompletionMemoryLease final {
+public:
+  CompletionMemoryLease() noexcept = default;
+  CompletionMemoryLease(const CompletionMemoryLease &) = delete;
+  CompletionMemoryLease &operator=(const CompletionMemoryLease &) = delete;
+  CompletionMemoryLease(CompletionMemoryLease &&other) noexcept;
+  CompletionMemoryLease &operator=(CompletionMemoryLease &&other) noexcept;
+  ~CompletionMemoryLease() noexcept;
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return static_cast<bool>(state_) && retained_bytes_ != 0U;
+  }
+  [[nodiscard]] std::size_t retained_bytes() const noexcept {
+    return retained_bytes_;
+  }
+  void reset() noexcept;
+
+private:
+  friend class OperationTaskArena;
+  CompletionMemoryLease(std::shared_ptr<OperationTaskArena::State> state,
+                        std::size_t retained_bytes) noexcept
+      : state_(std::move(state)), retained_bytes_(retained_bytes) {}
+
+  std::shared_ptr<OperationTaskArena::State> state_;
+  std::size_t retained_bytes_ = 0U;
 };
 
 } // namespace sanitize::internal

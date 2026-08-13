@@ -117,39 +117,46 @@ def coordination_file_lock(
 
 
 def open_coordination_file(path: Path) -> BinaryIO:
-    """Open one predictable lock file without following attacker-controlled links."""
+    """Open one predictable lock file under the teardown FD authority."""
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError as exc:
-        raise OSError("coordination state cannot be opened safely") from exc
-    try:
-        _validate_owned_regular(os.fstat(descriptor), "coordination state")
-        os.fchmod(descriptor, 0o600)
-        handle = os.fdopen(descriptor, "r+b", closefd=True)
+
+    def _opener():
         descriptor = -1
-        return handle
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+            _validate_owned_regular(os.fstat(descriptor), "coordination state")
+            os.fchmod(descriptor, 0o600)
+            handle = os.fdopen(descriptor, "r+b", closefd=True)
+            descriptor = -1
+            return handle
+        except OSError as exc:
+            raise OSError("coordination state cannot be opened safely") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    from .process_resources import open_governed_stream
+
+    return open_governed_stream(_opener, teardown=True)  # type: ignore[return-value]
 
 
 def _directory_fsync(path: Path) -> None:
-    """Durably publish directory-entry changes on POSIX filesystems."""
+    """Durably publish directory-entry changes under teardown FD admission."""
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
-    descriptor = os.open(path, flags)
-    try:
+    from .process_resources import governed_os_descriptor
+
+    with governed_os_descriptor(
+        lambda: os.open(path, flags), teardown=True, label="coordination-directory"
+    ) as descriptor:
         os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _encode_header(record: _JournalRecord, max_payload_bytes: int) -> bytes:
@@ -189,17 +196,29 @@ def _publish_record_mode(
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(temporary, flags, 0o600)
-    except OSError as exc:
-        raise OSError("coordination journal staging file cannot be opened safely") from exc
-    try:
-        _validate_owned_regular(os.fstat(descriptor), "coordination journal staging file")
-        os.fchmod(descriptor, 0o600)
-        os.ftruncate(descriptor, 0)
-        handle = os.fdopen(descriptor, "wb", closefd=True)
+
+    def _opener():
         descriptor = -1
-        with handle:
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+            _validate_owned_regular(os.fstat(descriptor), "coordination journal staging file")
+            os.fchmod(descriptor, 0o600)
+            os.ftruncate(descriptor, 0)
+            handle = os.fdopen(descriptor, "wb", closefd=True)
+            descriptor = -1
+            return handle
+        except OSError as exc:
+            raise OSError(
+                f"coordination journal staging file cannot be opened safely: {exc}"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    try:
+        from .process_resources import open_governed_stream
+
+        with open_governed_stream(_opener, teardown=True) as handle:
             handle.write(header)
             handle.write(b"\n")
             handle.write(record.before)
@@ -215,8 +234,6 @@ def _publish_record_mode(
                 if require_directory_sync:
                     raise
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
@@ -257,6 +274,21 @@ def _publish_record_relaxed(
     )
 
 
+class _ReadRecordStreamAdapter:
+    """Expose a journal stream while retaining its validated stat metadata."""
+
+    __slots__ = ("handle", "metadata")
+
+    def __init__(self, pair):
+        self.handle, self.metadata = pair
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def close(self):
+        return self.handle.close()
+
+
 def _read_record(path: Path, max_payload_bytes: int) -> _JournalRecord | None:
     """Read and validate a journal without following a hostile symlink."""
     journal = _journal_path(path)
@@ -265,57 +297,67 @@ def _read_record(path: Path, max_payload_bytes: int) -> _JournalRecord | None:
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+
+    def _opener():
+        descriptor = -1
+        try:
+            descriptor = os.open(journal, flags)
+            metadata = os.fstat(descriptor)
+            _validate_owned_regular(metadata, "coordination journal")
+            maximum = _MAX_HEADER_BYTES + 1 + 2 * max_payload_bytes
+            if metadata.st_size > maximum:
+                raise OSError("coordination journal exceeds its bounded size")
+            handle = os.fdopen(descriptor, "rb", closefd=True)
+            descriptor = -1
+            return handle, metadata
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
     try:
-        descriptor = os.open(journal, flags)
+        from .process_resources import open_governed_stream
+
+        pair = open_governed_stream(lambda: _ReadRecordStreamAdapter(_opener()), teardown=True)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise OSError("coordination journal cannot be opened safely") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        _validate_owned_regular(metadata, "coordination journal")
-        maximum = _MAX_HEADER_BYTES + 1 + 2 * max_payload_bytes
-        if metadata.st_size > maximum:
-            raise OSError("coordination journal exceeds its bounded size")
-        handle = os.fdopen(descriptor, "rb", closefd=True)
-        descriptor = -1
-        with handle:
-            header_line = handle.readline(_MAX_HEADER_BYTES + 2)
-            if not header_line.endswith(b"\n") or len(header_line) > _MAX_HEADER_BYTES + 1:
-                raise OSError("coordination journal is corrupt")
-            header_raw = header_line[:-1]
-            try:
-                header = json.loads(header_raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise OSError("coordination journal is corrupt") from exc
-            if not isinstance(header, dict) or header.get("version") != _JOURNAL_VERSION:
-                raise OSError("coordination journal has an unsupported version")
-            phase = header.get("phase")
-            if phase not in {_PHASE_PREPARED, _PHASE_COMMITTED}:
-                raise OSError("coordination journal has an invalid phase")
-            try:
-                pid = int(header.get("pid", -1))
-                start = str(header.get("start", "unknown"))
-                before_length = int(header.get("before_length", -1))
-                after_length = int(header.get("after_length", -1))
-            except (TypeError, ValueError) as exc:
-                raise OSError("coordination journal is corrupt") from exc
-            if (
-                pid <= 0
-                or before_length < 0
-                or after_length < 0
-                or before_length > max_payload_bytes
-                or after_length > max_payload_bytes
-                or metadata.st_size != len(header_line) + before_length + after_length
-            ):
-                raise OSError("coordination journal is corrupt")
-            before = handle.read(before_length)
-            after = handle.read(after_length)
-            if len(before) != before_length or len(after) != after_length or handle.read(1):
-                raise OSError("coordination journal is corrupt")
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+    with pair as adapter:
+        handle = adapter.handle
+        metadata = adapter.metadata
+        header_line = handle.readline(_MAX_HEADER_BYTES + 2)
+        if not header_line.endswith(b"\n") or len(header_line) > _MAX_HEADER_BYTES + 1:
+            raise OSError("coordination journal is corrupt")
+        header_raw = header_line[:-1]
+        try:
+            header = json.loads(header_raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OSError("coordination journal is corrupt") from exc
+        if not isinstance(header, dict) or header.get("version") != _JOURNAL_VERSION:
+            raise OSError("coordination journal has an unsupported version")
+        phase = header.get("phase")
+        if phase not in {_PHASE_PREPARED, _PHASE_COMMITTED}:
+            raise OSError("coordination journal has an invalid phase")
+        try:
+            pid = int(header.get("pid", -1))
+            start = str(header.get("start", "unknown"))
+            before_length = int(header.get("before_length", -1))
+            after_length = int(header.get("after_length", -1))
+        except (TypeError, ValueError) as exc:
+            raise OSError("coordination journal is corrupt") from exc
+        if (
+            pid <= 0
+            or before_length < 0
+            or after_length < 0
+            or before_length > max_payload_bytes
+            or after_length > max_payload_bytes
+            or metadata.st_size != len(header_line) + before_length + after_length
+        ):
+            raise OSError("coordination journal is corrupt")
+        before = handle.read(before_length)
+        after = handle.read(after_length)
+        if len(before) != before_length or len(after) != after_length or handle.read(1):
+            raise OSError("coordination journal is corrupt")
     if header.get("before_sha256") != _digest(before) or header.get("after_sha256") != _digest(
         after
     ):

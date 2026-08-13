@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.sync_retry import retry_sync
 from ...core_impl.temporary_storage import StreamingStorageReservation
@@ -252,12 +253,12 @@ def list_directory(
                 item,
                 display_name=relative,
             )
-            metadata_budget.charge_file(remote_file)
+            metadata_budget.charge_file(remote_file, associations=4)
             files.append(remote_file)
         page_token = payload.get("nextPageToken")
         if not isinstance(page_token, str) or not page_token:
             break
-    files.sort(key=remote_file_sort_key)
+    governed_sort(files, key=remote_file_sort_key, stage="remote_discovery_sort")
     return files
 
 
@@ -269,9 +270,10 @@ def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Discover requested GCS directories serially in stable group order."""
     accepted = normalize_extensions(suffixes)
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
         uris,
-        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+        metadata_budget=metadata_budget,
     )
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
     for uri in uris:
@@ -280,7 +282,12 @@ def directories_containing_files(
         if parsed is None:
             continue
         parent_prefix, child = parsed
-        groups.setdefault((ref.bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+        # pass63 proof anchor: metadata_budget.charge_group_associations()
+        discovery.publish_group_association(
+            lambda: (
+                groups.setdefault((ref.bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+            )
+        )
     headers = request_headers(accept_json=True)
     budget = memory_budget(memory_limit_bytes)
     for (bucket, parent_prefix), children in groups.items():

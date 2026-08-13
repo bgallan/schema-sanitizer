@@ -8,6 +8,7 @@ from importlib import import_module
 from types import SimpleNamespace
 from typing import Any
 
+from ..core_impl.process_resources import open_governed_file
 from .results import Result
 from .streams import patch_diagnostics_values
 
@@ -139,7 +140,7 @@ def _patch_native_record_file_diagnostics(
 def _patch_jsonl_file_diagnostics(result: Result, path: Any) -> None:
     """Patch JSONL diagnostics by streaming output records."""
     try:
-        with open(path, "rb") as handle:
+        with open_governed_file(path, "rb") as handle:
             row_count = sum(1 for line in handle if line.strip())
     except Exception:
         return
@@ -149,7 +150,7 @@ def _patch_jsonl_file_diagnostics(result: Result, path: Any) -> None:
 def _patch_csv_file_diagnostics(result: Result, path: Any) -> None:
     """Patch CSV diagnostics by streaming logical records."""
     try:
-        with open(path, newline="", encoding="utf-8") as handle:
+        with open_governed_file(path, "r", newline="", encoding="utf-8") as handle:
             record_count = sum(1 for _row in csv.reader(handle))
     except Exception:
         return
@@ -197,9 +198,10 @@ def _patch_parquet_file_diagnostics(result: Result, path: Any) -> None:
     try:
         pq = import_module("pyarrow.parquet")
 
-        parquet_file = pq.ParquetFile(path)
-        metadata = parquet_file.metadata
-        arrow_schema = parquet_file.schema_arrow
+        with open_governed_file(path, "rb") as handle:
+            parquet_file = pq.ParquetFile(handle)
+            metadata = parquet_file.metadata
+            arrow_schema = parquet_file.schema_arrow
     except Exception:
         return
 

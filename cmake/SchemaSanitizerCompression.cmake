@@ -62,10 +62,17 @@ function(schema_sanitizer_resolve_zlib out_target out_provider)
 
     FetchContent_Declare(
       schema_sanitizer_zlib
-      URL https://github.com/madler/zlib/releases/download/v1.3.2/zlib132.zip
+      # Keep two independently hosted, byte-identical official archives. CMake
+      # tries URLs in order, so a transient outage of either zlib.net or GitHub
+      # cannot make an otherwise reproducible wheel build fail.
+      URL https://zlib.net/zlib132.zip
+          https://github.com/madler/zlib/releases/download/v1.3.2/zlib132.zip
       URL_HASH
         SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE EXCLUDE_FROM_ALL)
+      # Bound a stalled origin so every wheel can advance to the verified
+      # byte-identical mirror instead of waiting for the network default.
+      TIMEOUT 30
+      INACTIVITY_TIMEOUT 15 DOWNLOAD_EXTRACT_TIMESTAMP TRUE EXCLUDE_FROM_ALL)
     FetchContent_MakeAvailable(schema_sanitizer_zlib)
 
     if(TARGET zlibstatic)

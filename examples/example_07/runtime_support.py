@@ -10,9 +10,11 @@ from typing import Any
 import schema_sanitizer as ss
 from schema_sanitizer.integrations.bigquery.advanced import (
     log_schema_drift_from_namespace,
-    new_schema_registry_from_namespace,
     registry_has_canonical_schema,
 )
+from schema_sanitizer.pipeline import PartitionRunPlan as DateRunPlan
+from schema_sanitizer.pipeline import PartitionRunResult as DateRunResult
+from schema_sanitizer.pipeline import SchemaRegistryState
 from schema_sanitizer.pipeline.advanced import (
     discover_existing_source_plans,
     infer_warm_up_schema_registry,
@@ -20,9 +22,6 @@ from schema_sanitizer.pipeline.advanced import (
     infer_warm_up_schema_registry_state,
     read_parquet_schema,
 )
-from schema_sanitizer.pipeline.types import PartitionRunPlan as DateRunPlan
-from schema_sanitizer.pipeline.types import PartitionRunResult as DateRunResult
-from schema_sanitizer.pipeline.types import SchemaRegistryState
 
 try:
     from examples.example_07.runtime_reporting import (
@@ -40,7 +39,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
 
 def _new_schema_registry() -> dict[str, Any]:
     """Return a fresh embedded schema-registry document."""
-    return new_schema_registry_from_namespace(argparse.Namespace(field_name_policy="lower_snake"))
+    return ss.new_schema_registry(field_name_policy="lower_snake")
 
 
 def _build_to_parquet_kwargs(
@@ -64,6 +63,7 @@ def _build_to_parquet_kwargs(
         "parse_iso_dates": args.parse_iso_dates,
         "parse_iso_times": args.parse_iso_times,
         "on_error": args.on_error,
+        "multi_threading": getattr(args, "multi_threading", False),
         "memory_limit_bytes": args.memory_limit_bytes,
         "arrow_max_depth": args.arrow_max_depth,
         "parquet_max_depth": args.parquet_max_depth,
@@ -93,6 +93,33 @@ def _schema_warm_up_plan_for_run(
         seen_sources.add(plan.source_uri)
         unique.append(plan)
     return unique
+
+
+def _run_result_for_reporting(run_result: DateRunResult) -> DateRunResult:
+    """Retain compact reporting metadata without native or discovery owners."""
+    plan = run_result.plan
+    reporting_plan = DateRunPlan(
+        plan.logical_date,
+        plan.source_uri,
+        plan.output_uri,
+        plan.logical_hour,
+        discovery_seconds=plan.discovery_seconds,
+        source_file_count=plan.source_file_count,
+        source_bytes=plan.source_bytes,
+        source_earliest_update=plan.source_earliest_update,
+        source_latest_update=plan.source_latest_update,
+        source_window=plan.source_window,
+    )
+    return DateRunResult(
+        plan=reporting_plan,
+        output_schema=None,
+        stats=run_result.stats,
+        schema_drifts=run_result.schema_drifts,
+        schema_drifts_json=run_result.schema_drifts_json,
+        wall_seconds=run_result.wall_seconds,
+        cpu_seconds=run_result.cpu_seconds,
+        io_wait_seconds=run_result.io_wait_seconds,
+    )
 
 
 def _schema_warm_up_requested(args: argparse.Namespace) -> bool:
@@ -252,6 +279,7 @@ def _filter_available_date_plans(
         input_format=args.input_format,
         source_file_extension=args.source_file_extension,
         memory_limit_bytes=args.memory_limit_bytes,
+        threading_mode="multi" if getattr(args, "multi_threading", False) else "single",
     )
 
     LOGGER.info(

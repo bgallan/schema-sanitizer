@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
@@ -361,5 +360,6 @@ def _reset_after_fork() -> None:
     _STATE = ParquetReaderTelemetryState()
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_after_fork)
+from ...core_impl.fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler("parquet-telemetry", mode="quarantine_only")

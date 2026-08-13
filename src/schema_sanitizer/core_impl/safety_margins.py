@@ -180,7 +180,11 @@ def record_resource_telemetry(
             samples = raw if isinstance(raw, list) else []
             samples.append(sample)
             profile["samples"] = samples[-_MAX_SAMPLES:]
-    except Exception:
+    except BaseException:
+        # Telemetry is advisory and often runs after an ownership/resource
+        # commit. No exception, including asynchronous BaseException subclasses,
+        # may turn observation into a failed resource transaction. Cancellation
+        # remains authoritative at explicit operation safe points instead.
         return
 
 
@@ -239,8 +243,9 @@ def _reset_after_fork() -> None:
     _WRITES_SINCE_FSYNC = 0
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler("safety-margins", mode="quarantine_only")
 
 
 __all__ = [

@@ -1,0 +1,145 @@
+---
+name: Run one platform sanitizer workload
+description: Exercise native concurrency and fuzz targets under platform sanitizers.
+inputs:
+  sanitizer:
+    description: Sanitizer selector passed to CMake.
+    required: true
+  mode:
+    description: Sanitizer workload mode (linux-full or native).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      run: >-
+        python -m pip install -U pip ninja 'cmake>=4.3,<4.4'
+        scikit-build-core==0.11.6 pytest pyarrow
+    - name: Build and install the Linux instrumented extension
+      if: inputs.mode == 'linux-full'
+      shell: bash
+      run: >-
+        python -m pip install -v --no-build-isolation
+        --config-settings=cmake.define.CMAKE_C_COMPILER=clang
+        --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++
+        --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF
+        --config-settings=cmake.define.SCHEMA_SANITIZER_SANITIZER=asan-ubsan
+        --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+        --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON
+        .
+    - name: Build the Linux sanitizer-first CPython launcher
+      if: inputs.mode == 'linux-full'
+      shell: bash
+      run: |
+        set -euo pipefail
+        read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
+        read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
+        clang++ -std=c++17 -fsanitize=address,undefined \
+          -fno-omit-frame-pointer -fno-sanitize-recover=all \
+          "${python_embed_cflags[@]}" \
+          meta/ci/sanitizers/asan_python_launcher.cc \
+          -o python-asan \
+          "${python_embed_ldflags[@]}"
+    - name: Exercise malformed input, lifecycle, and nested Parquet
+      if: inputs.mode == 'linux-full'
+      shell: bash
+      run: >-
+        ./python-asan -m pytest -q
+        tests/io/test_input_python_and_local.py
+        tests/schema/test_options_bytes.py
+        tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py
+        tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py
+        tests/concurrency/test_runtime_resource_close_and_finalization.py
+        tests/parquet/test_parquet_direct_nested_projection.py
+        tests/parquet/test_parquet_native_nested_list_map_combinators.py
+        tests/parquet/test_parquet_native_recursive_adversarial_shapes.py
+        tests/parquet/test_parquet_native_recursive_extreme_runtime.py
+        tests/pipeline/test_csv_union_projection.py
+    - name: Configure Linux ASan/UBSan
+      if: inputs.mode == 'linux-full'
+      env:
+        SANITIZER: ${{ inputs.sanitizer }}
+      shell: bash
+      run: >-
+        cmake -S . -B build/platform-sanitizer -G Ninja
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        -DCMAKE_C_COMPILER=clang
+        -DCMAKE_CXX_COMPILER=clang++
+        -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+        -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
+        -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+        -DSCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer
+        -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
+        -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+        -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+    - name: Configure Windows ASan
+      if: runner.os == 'Windows'
+      env:
+        SANITIZER: ${{ inputs.sanitizer }}
+      shell: bash
+      run: >-
+        cmake -S . -B build/platform-sanitizer
+        -A x64
+        -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+        -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
+        -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+        -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
+        -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
+        -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+        -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+    - name: Configure macOS ASan/UBSan
+      if: runner.os == 'macOS'
+      env:
+        SANITIZER: ${{ inputs.sanitizer }}
+      shell: bash
+      run: >-
+        cmake -S . -B build/platform-sanitizer -G Ninja
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+        -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
+        -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
+        -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
+        -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
+        -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
+        -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+    - name: Build native concurrency and fuzz targets
+      shell: bash
+      run: >-
+        cmake --build build/platform-sanitizer
+        --config RelWithDebInfo
+        --target schema_sanitizer_sanitized_ordered_executor
+        schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
+        schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
+        --parallel 4
+    - name: Run repeated sanitized concurrency probe
+      # MSVC ASan can hang outside the probe watchdog. Windows still builds
+      # the probe and executes all four native fuzzers below; Linux TSan owns
+      # the repeated race-sensitive concurrency gate.
+      if: inputs.mode == 'native' && runner.os != 'Windows'
+      shell: bash
+      run: >-
+        ctest --test-dir build/platform-sanitizer
+        -C RelWithDebInfo
+        -R schema_sanitizer_sanitized_ordered_executor
+        --repeat until-fail:2
+        --output-on-failure
+    - name: Run platform fuzz regressions and mutation campaigns
+      if: inputs.mode == 'native'
+      shell: bash
+      run: >-
+        python meta/ci/fuzz/run_fuzz_regressions.py
+        --build-root build/platform-sanitizer/fuzz
+        --campaign-runs 500
+        --seed 15172026
+        --max-len 262144
+    - name: Run Linux ASan/UBSan fuzz regressions and mutation campaigns
+      if: inputs.mode == 'linux-full'
+      shell: bash
+      run: >-
+        python meta/ci/fuzz/run_fuzz_regressions.py
+        --build-root build/platform-sanitizer/fuzz
+        --engine libfuzzer
+        --campaign-runs 1000
+        --seed 15172026
+        --max-len 262144

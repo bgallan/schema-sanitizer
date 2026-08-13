@@ -56,6 +56,7 @@ template <bool HighCore> sanitize::Result<Outcome> take_next_arena() {
       if (!invalid_outcome) {
         outcome.emplace(std::move(*slot.outcome));
         slot.outcome.reset();
+        slot.retained_lease.reset();
         slot.state.store(ArenaSlotState::kEmpty, std::memory_order_release);
       }
     }

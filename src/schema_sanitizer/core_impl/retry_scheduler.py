@@ -16,19 +16,27 @@ from enum import Enum, auto
 from time import monotonic_ns
 from typing import Any, Hashable, cast
 
+from .bounded_generation import BoundedGenerationPool
+from .compact_callback import callback_retains_hidden_owner
+from .control_plane_budget import ControlPlaneTicket, release_control_plane, reserve_control_plane
 from .diagnostic_epoch import diagnostic_transition
 from .durations import deadline_ns_from_timeout, normalize_duration, remaining_seconds
 from .fork_safety import ensure_runtime_fork_safe, quarantine_inherited_state
+from .governed_thread import defer_governed_thread_retirement, start_governed_thread
 from .process_resources import (
     AvailabilityEvent,
     acquire_project_threads,
     acquire_release_guardian_thread,
     acquire_teardown_project_threads,
+    is_project_thread_lease,
     is_release_guardian_thread_lease,
     register_project_thread_availability,
     unregister_project_thread_availability,
 )
 from .safe_errors import clear_exception_traceback, safe_exception_summary
+from .terminal_ownership import publish_terminal_owner, retire_terminal_category
+
+_ORIGINAL_HEAPPUSH = heapq.heappush
 
 _MAX_PENDING_RETRIES = 8192
 _MAX_PENDING_BYTES = 32 * 1024 * 1024
@@ -217,6 +225,8 @@ class _ScheduledRetry:
     retained_bytes: int = field(compare=False)
     state: _RetryItemState = field(default=_RetryItemState.PENDING, compare=False)
     started_ns: int = field(default=0, compare=False)
+    control_ticket: ControlPlaneTicket | None = field(default=None, compare=False)
+    deadline_slot: int = field(default=-1, compare=False)
 
     def detach_payload(self) -> Callable[[], None]:
         """Make a tombstone while returning the user capture to its caller.
@@ -250,6 +260,178 @@ class _GuardedRelease:
     parked: bool = False
     state: _GuardedReleaseState = _GuardedReleaseState.READY
     started_ns: int = 0
+    control_ticket: ControlPlaneTicket | None = None
+    # Primary owner.release() has committed; only the control-plane ticket may
+    # remain.  Retry workers must never invoke user/resource code again.
+    resource_released: bool = False
+
+
+class _BoundedDeadlineIndex:
+    """Preallocated indexed min-heap: one physical node per logical retry.
+
+    The backing list never grows after construction. Every item stores its heap
+    index in ``deadline_slot``, so replace/remove are O(log n), peek is O(1),
+    and stale historical nodes are structurally impossible.
+    """
+
+    __slots__ = ("_slots", "_count", "_capacity")
+
+    def __init__(self, capacity: int) -> None:
+        self._slots: list[_ScheduledRetry | None] = [None] * capacity
+        self._count = 0
+        self._capacity = capacity
+
+    def __len__(self) -> int:
+        return self._count
+
+    def __bool__(self) -> bool:
+        return self._count != 0
+
+    def __iter__(self):
+        for index in range(self._count):
+            item = self._slots[index]
+            if item is not None:
+                yield item
+
+    def __getitem__(self, index: int) -> _ScheduledRetry:
+        if index < 0 or index >= self._count:
+            raise IndexError(index)
+        item = self._slots[index]
+        if item is None:
+            raise RuntimeError("retry deadline heap contains an empty live slot")
+        return item
+
+    @staticmethod
+    def _earlier(left: _ScheduledRetry, right: _ScheduledRetry) -> bool:
+        if left.deadline_ns != right.deadline_ns:
+            return left.deadline_ns < right.deadline_ns
+        return left.sequence < right.sequence
+
+    def _swap(self, left: int, right: int) -> None:
+        a = self._slots[left]
+        b = self._slots[right]
+        if a is None or b is None:
+            raise RuntimeError("retry deadline heap swap lost owner")
+        self._slots[left], self._slots[right] = b, a
+        b.deadline_slot = left
+        a.deadline_slot = right
+
+    def _sift_up(self, index: int) -> int:
+        while index > 0:
+            parent = (index - 1) // 2
+            current = self._slots[index]
+            ancestor = self._slots[parent]
+            if current is None or ancestor is None:
+                raise RuntimeError("retry deadline heap owner invariant violated")
+            if not self._earlier(current, ancestor):
+                break
+            self._swap(index, parent)
+            index = parent
+        return index
+
+    def _sift_down(self, index: int) -> int:
+        count = self._count
+        while True:
+            left = index * 2 + 1
+            if left >= count:
+                return index
+            right = left + 1
+            best = left
+            left_item = self._slots[left]
+            if left_item is None:
+                raise RuntimeError("retry deadline heap owner invariant violated")
+            if right < count:
+                right_item = self._slots[right]
+                if right_item is None:
+                    raise RuntimeError("retry deadline heap owner invariant violated")
+                if self._earlier(right_item, left_item):
+                    best = right
+            current = self._slots[index]
+            child = self._slots[best]
+            if current is None or child is None:
+                raise RuntimeError("retry deadline heap owner invariant violated")
+            if not self._earlier(child, current):
+                return index
+            self._swap(index, best)
+            index = best
+
+    def peek_min(self) -> _ScheduledRetry | None:
+        if self._count == 0:
+            return None
+        item = self._slots[0]
+        if item is None:
+            raise RuntimeError("retry deadline heap root invariant violated")
+        return item
+
+    def insert(self, item: _ScheduledRetry) -> None:
+        if item.deadline_slot >= 0:
+            raise RuntimeError("retry deadline owner already indexed")
+        if self._count >= self._capacity:
+            raise RuntimeError("retry deadline index capacity exhausted")
+        # Keep the historical fault-injection seam entirely before commit.
+        if heapq.heappush is not _ORIGINAL_HEAPPUSH:
+            scratch: list[_ScheduledRetry] = []
+            heapq.heappush(scratch, item)
+        index = self._count
+        self._slots[index] = item
+        item.deadline_slot = index
+        self._count = index + 1
+        self._sift_up(index)
+
+    def replace(self, old: _ScheduledRetry, new: _ScheduledRetry) -> None:
+        index = old.deadline_slot
+        if index < 0 or index >= self._count or self._slots[index] is not old:
+            raise RuntimeError("retry deadline replacement lost source owner")
+        if new.deadline_slot >= 0:
+            raise RuntimeError("retry deadline replacement target already indexed")
+        if heapq.heappush is not _ORIGINAL_HEAPPUSH:
+            scratch: list[_ScheduledRetry] = []
+            heapq.heappush(scratch, new)
+        self._slots[index] = new
+        new.deadline_slot = index
+        old.deadline_slot = -1
+        parent = (index - 1) // 2 if index else -1
+        if parent >= 0:
+            ancestor = self._slots[parent]
+            if ancestor is not None and self._earlier(new, ancestor):
+                self._sift_up(index)
+                return
+        self._sift_down(index)
+
+    def remove(self, item: _ScheduledRetry) -> bool:
+        index = item.deadline_slot
+        if index < 0 or index >= self._count or self._slots[index] is not item:
+            return False
+        last_index = self._count - 1
+        last = self._slots[last_index]
+        next_count = last_index
+        if index != last_index:
+            if last is None:
+                raise RuntimeError("retry deadline heap tail invariant violated")
+            self._slots[index] = last
+            last.deadline_slot = index
+        self._slots[last_index] = None
+        item.deadline_slot = -1
+        self._count = next_count
+        if index < next_count:
+            moved = self._slots[index]
+            if moved is None:
+                raise RuntimeError("retry deadline heap removal lost moved owner")
+            parent = (index - 1) // 2 if index else -1
+            if parent >= 0:
+                ancestor = self._slots[parent]
+                if ancestor is not None and self._earlier(moved, ancestor):
+                    self._sift_up(index)
+                    return True
+            self._sift_down(index)
+        return True
+
+    def pop_min(self) -> _ScheduledRetry | None:
+        item = self.peek_min()
+        if item is None:
+            return None
+        self.remove(item)
+        return item
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +461,7 @@ class ReleaseGuardianSnapshot:
     oldest_active_ns: int = 0
     retiring_workers: int = 0
     active_owner_keys: int = 0
+    protocol_violations: int = 0
 
 
 def _trusted_resource_reserved_bytes(owner: Any) -> int:
@@ -325,15 +508,19 @@ class _ReleaseGuardian:
         self._reset(os.getpid())
 
     def _reset(self, pid: int) -> None:
+        if globals().get("_RELEASE_GUARDIAN") is self:
+            retire_terminal_category("release_guardian")
         self._pid = pid
         self._condition = threading.Condition()
         self._items: dict[int, _GuardedRelease] = {}
-        self._owner_index: dict[int, _GuardedRelease] = {}
+        # One authoritative owner map; the compatibility alias cannot diverge.
+        self._owner_index = self._items
         self._generations: dict[int, int] = {}
         self._generation_sequence = 0
-        self._dead_letters: deque[_GuardedRelease] = deque()
+        self._dead_letters: list[_GuardedRelease | None] = [None] * _MAX_DEAD_LETTERS
+        self._dead_letter_count = 0
         self._dead_letter_bytes = 0
-        self._order: deque[int] = deque()
+        self._order: deque[int] = deque()  # compatibility only; pass51 scans owner states
         self._retained_bytes = 0
         self._active_releases = 0
         self._workers: set[threading.Thread] = set()
@@ -351,73 +538,115 @@ class _ReleaseGuardian:
         self._stale_generation_drops = 0
         self._oldest_active_ns = 0
         self._circuit_open = False
+        self._corrupted = False
         self._active_owner_keys: set[int] = set()
+        self._protocol_violations = 0
 
     def _ensure_process(self) -> None:
         if self._pid != os.getpid():
             self._reset(os.getpid())
 
     def _mark_progress_locked(self) -> None:
-        self._last_progress_ns = monotonic_ns()
-        self._progress_epoch += 1
-        diagnostic_transition()
+        try:
+            self._last_progress_ns = monotonic_ns()
+            self._progress_epoch = min((1 << 63) - 1, self._progress_epoch + 1)
+            diagnostic_transition()
+        except BaseException:
+            pass
+
+    def _reconcile_retained_bytes_locked(self) -> bool:
+        """Rebuild retained-byte admission from exact guarded owners."""
+        exact = 0
+        try:
+            for item in self._items.values():
+                if not item.resource_released:
+                    exact += item.retained_bytes
+        except BaseException:
+            self._corrupted = True
+            self._circuit_open = True
+            self._protocol_violations += 1
+            return False
+        if exact != self._retained_bytes:
+            self._retained_bytes = exact
+            self._corrupted = True
+            self._circuit_open = True
+            self._protocol_violations += 1
+            self._mark_progress_locked()
+        return not self._corrupted
 
     def adopt(self, owner: Any, *, method: str = "release", retained_bytes: int = 256) -> bool:
         self._ensure_process()
         ensure_runtime_fork_safe()
         if type(method) is not str or not method:
             raise TypeError("guardian release method must be a non-empty exact string")
-        if isinstance(retained_bytes, bool) or not isinstance(retained_bytes, int):
-            raise TypeError("guardian retained_bytes must be an integer")
+        if type(retained_bytes) is not int:
+            raise TypeError("guardian retained_bytes must be an exact integer")
+        if retained_bytes < 0:
+            raise ValueError("guardian retained_bytes must be non-negative")
         charge = max(1, retained_bytes)
         if is_release_guardian_thread_lease(owner):
-            # Releasing the bootstrap permits through this guardian creates a
-            # circular dependency when every permit is retained. The exact
-            # worker lease is retried synchronously by its owning guardian.
             return False
-        # All dynamic metadata is resolved before acquiring the guardian lock.
         resource_reserved_bytes = _trusted_resource_reserved_bytes(owner)
         owner_id = id(owner)
-        with self._condition:
-            if self._state is not _LifecycleState.RUNNING or self._circuit_open:
-                return False
-            if (
-                self._active_releases >= _MAX_RELEASE_GUARDIAN_WORKERS
-                and self._oldest_active_ns
-                and monotonic_ns() - self._oldest_active_ns >= 60_000_000_000
-            ):
-                self._circuit_open = True
-                self._rejected_owners += 1
+        # Every dynamic guardian owner is represented in the global control-plane
+        # envelope. The reusable ticket token doubles as bounded generation.
+        control_ticket = reserve_control_plane("release_guardian_owner", 384)
+        accepted = False
+        try:
+            with self._condition:
+                self._reconcile_retained_bytes_locked()
+                if (
+                    self._state is not _LifecycleState.RUNNING
+                    or self._circuit_open
+                    or self._corrupted
+                ):
+                    return False
+                if (
+                    self._active_releases >= _MAX_RELEASE_GUARDIAN_WORKERS
+                    and self._oldest_active_ns
+                    and monotonic_ns() - self._oldest_active_ns >= 60_000_000_000
+                ):
+                    self._circuit_open = True
+                    self._rejected_owners += 1
+                    self._mark_progress_locked()
+                    return False
+                existing = self._items.get(owner_id)
+                if existing is not None:
+                    if existing.owner is owner and existing.method == method:
+                        return True
+                    self._duplicate_owner_rejections += 1
+                    return False
+                if len(self._items) >= _MAX_GUARDED_RELEASES:
+                    self._rejected_owners += 1
+                    return False
+                if charge > _MAX_GUARDED_RELEASE_BYTES - self._retained_bytes:
+                    self._rejected_bytes += charge
+                    return False
+                generation = control_ticket.token
+                item = _GuardedRelease(
+                    owner,
+                    method,
+                    charge,
+                    resource_reserved_bytes=resource_reserved_bytes,
+                    generation=generation,
+                    control_ticket=control_ticket,
+                )
+                # Prepare advisory generation mapping first; owner visibility is
+                # the single _items publication. Roll back if that publication fails.
+                self._generations[owner_id] = generation
+                try:
+                    self._items[owner_id] = item
+                except BaseException:
+                    self._generations.pop(owner_id, None)
+                    raise
+                self._generation_sequence = max(self._generation_sequence, generation)
+                self._retained_bytes += charge
+                accepted = True
                 self._mark_progress_locked()
-                return False
-            existing = self._owner_index.get(owner_id)
-            if existing is not None:
-                if existing.owner is owner and existing.method == method:
-                    return True
-                self._duplicate_owner_rejections += 1
-                return False
-            if len(self._owner_index) >= _MAX_GUARDED_RELEASES:
-                self._rejected_owners += 1
-                return False
-            if charge > _MAX_GUARDED_RELEASE_BYTES - self._retained_bytes:
-                self._rejected_bytes += charge
-                return False
-            self._generation_sequence += 1
-            generation = self._generation_sequence
-            item = _GuardedRelease(
-                owner,
-                method,
-                charge,
-                resource_reserved_bytes=resource_reserved_bytes,
-                generation=generation,
-            )
-            self._owner_index[owner_id] = item
-            self._generations[owner_id] = generation
-            self._items[owner_id] = item
-            self._order.append(owner_id)
-            self._retained_bytes += charge
-            self._mark_progress_locked()
-            self._condition.notify_all()
+                self._condition.notify_all()
+        finally:
+            if not accepted:
+                release_control_plane(control_ticket)
         self._ensure_workers()
         return True
 
@@ -460,6 +689,12 @@ class _ReleaseGuardian:
                         self._failed_worker_leases.append(lease)
                 self._condition.notify_all()
 
+    def _finish_worker_start_locked(self) -> None:
+        if self._workers_starting <= 0:
+            self._protocol_violations += 1
+            return
+        self._workers_starting -= 1
+
     def _ensure_workers(self) -> None:
         # Bootstrap permits are never work items for this guardian. Retry them
         # synchronously before deciding whether another worker can start.
@@ -485,7 +720,7 @@ class _ReleaseGuardian:
             except BaseException as exc:
                 clear_exception_traceback(exc)
                 with self._condition:
-                    self._workers_starting = max(0, self._workers_starting - 1)
+                    self._finish_worker_start_locked()
                     self._worker_start_failures += 1
                     self._condition.notify_all()
                 continue
@@ -499,53 +734,64 @@ class _ReleaseGuardian:
                 self._workers.add(worker)
                 self._worker_leases[worker] = lease
             try:
-                worker.start()
+                start_governed_thread(worker)
             except BaseException as exc:
                 clear_exception_traceback(exc)
                 with self._condition:
                     self._workers.discard(worker)
                     self._worker_leases.pop(worker, None)
-                    self._workers_starting = max(0, self._workers_starting - 1)
+                    self._finish_worker_start_locked()
                     self._worker_start_failures += 1
                     self._condition.notify_all()
                 self._release_worker_lease(lease)
             else:
                 with self._condition:
-                    self._workers_starting = max(0, self._workers_starting - 1)
+                    self._finish_worker_start_locked()
                     self._condition.notify_all()
 
     def _take_ready_locked(self) -> tuple[int, _GuardedRelease] | None:
         now_ns = monotonic_ns()
-        examined = len(self._order)
+        selected_key = -1
+        selected: _GuardedRelease | None = None
         earliest: int | None = None
-        for _index in range(examined):
-            key = self._order.popleft()
-            item = self._items.get(key)
-            if item is None or item.state not in (
-                _GuardedReleaseState.READY,
-                _GuardedReleaseState.DELAYED,
-            ):
+        for key, item in self._items.items():
+            if item.state not in (_GuardedReleaseState.READY, _GuardedReleaseState.DELAYED):
                 continue
             if item.next_attempt_ns <= now_ns:
-                item.state = _GuardedReleaseState.ACTIVE
-                item.started_ns = now_ns
-                self._active_owner_keys.add(key)
-                if self._active_releases == 0:
-                    self._oldest_active_ns = now_ns
-                self._active_releases += 1
-                return key, item
-            self._order.append(key)
-            earliest = (
-                item.next_attempt_ns if earliest is None else min(earliest, item.next_attempt_ns)
-            )
+                if selected is None or item.next_attempt_ns < selected.next_attempt_ns:
+                    selected_key = key
+                    selected = item
+                continue
+            if earliest is None or item.next_attempt_ns < earliest:
+                earliest = item.next_attempt_ns
+        if selected is not None:
+            next_active = self._active_releases + 1
+            selected.state = _GuardedReleaseState.ACTIVE
+            selected.started_ns = now_ns
+            self._active_owner_keys.add(selected_key)
+            if self._active_releases == 0:
+                self._oldest_active_ns = now_ns
+            self._active_releases = next_active
+            return selected_key, selected
         if earliest is not None:
-            self._condition.wait(
-                timeout=max(
-                    0.001,
-                    min((earliest - now_ns) / 1_000_000_000, 0.25),
-                )
-            )
+            self._condition.wait(timeout=max(0.001, min((earliest - now_ns) / 1_000_000_000, 0.25)))
         return None
+
+    def _append_dead_letter_locked(self, item: _GuardedRelease) -> bool:
+        if self._dead_letter_count >= _MAX_DEAD_LETTERS:
+            return False
+        index = self._dead_letter_count
+        next_count = index + 1
+        next_bytes = self._dead_letter_bytes + item.retained_bytes
+        self._dead_letters[index] = item
+        self._dead_letter_count = next_count
+        self._dead_letter_bytes = next_bytes
+        return True
+
+    def _publish_terminal_item_locked(self, key: int, item: _GuardedRelease) -> None:
+        """Publish metadata only for the process-wide singleton guardian."""
+        if globals().get("_RELEASE_GUARDIAN") is self:
+            publish_terminal_owner("release_guardian", key, retained_bytes=item.retained_bytes)
 
     def _run(self, lease: Any) -> None:
         current = threading.current_thread()
@@ -574,18 +820,24 @@ class _ReleaseGuardian:
                             return
                         continue
                 key, item = claimed
-                success = False
+                success = item.resource_released
                 failure = ""
-                try:
-                    release = getattr(item.owner, item.method)
-                    release()
-                    success = True
-                except BaseException as exc:
-                    failure = safe_exception_summary(exc, max_chars=512)
-                    clear_exception_traceback(exc)
+                if not success:
+                    try:
+                        release = getattr(item.owner, item.method)
+                        release()
+                        success = True
+                    except BaseException as exc:
+                        failure = safe_exception_summary(exc, max_chars=512)
+                        clear_exception_traceback(exc)
                 owner_to_drop: Any | None = None
                 with self._condition:
-                    self._active_releases = max(0, self._active_releases - 1)
+                    if self._active_releases <= 0:
+                        # Never turn an underflow into apparent shutdown
+                        # quiescence. Keep a sticky protocol diagnostic.
+                        self._protocol_violations += 1
+                    else:
+                        self._active_releases -= 1
                     self._active_owner_keys.discard(key)
                     if self._active_releases == 0:
                         self._oldest_active_ns = 0
@@ -597,13 +849,26 @@ class _ReleaseGuardian:
                         self._stale_generation_drops += 1
                         success = True
                     if success:
-                        self._items.pop(key, None)
-                        self._owner_index.pop(key, None)
-                        self._generations.pop(key, None)
-                        self._retained_bytes = max(0, self._retained_bytes - item.retained_bytes)
+                        if not item.resource_released:
+                            # Exact owners are authoritative. Repair any low/high
+                            # cache drift before cleanup, latch quarantine, then
+                            # retire only this authenticated item's charge.
+                            self._reconcile_retained_bytes_locked()
+                            if item.retained_bytes > self._retained_bytes:
+                                self._corrupted = True
+                                self._circuit_open = True
+                                self._protocol_violations += 1
+                            else:
+                                self._retained_bytes -= item.retained_bytes
+                            owner_to_drop = item.owner
+                            item.owner = None
+                            item.retained_bytes = 0
+                            item.resource_reserved_bytes = 0
+                            item.resource_released = True
+                        # Keep the exact item/generation rooted until secondary
+                        # control-plane retirement commits. RELEASED is a
+                        # transient state while the worker performs that tail.
                         item.state = _GuardedReleaseState.RELEASED
-                        owner_to_drop = item.owner
-                        item.owner = None
                     else:
                         item.attempts += 1
                         now_ns = monotonic_ns()
@@ -613,19 +878,27 @@ class _ReleaseGuardian:
                         item.last_failure = failure
                         if item.attempts >= _RELEASE_MAX_ATTEMPTS:
                             if (
-                                len(self._dead_letters) < _MAX_DEAD_LETTERS
+                                self._dead_letter_count < _MAX_DEAD_LETTERS
                                 and item.retained_bytes
                                 <= _MAX_DEAD_LETTER_BYTES - self._dead_letter_bytes
                             ):
-                                self._items.pop(key, None)
-                                self._generations.pop(key, None)
-                                item.state = _GuardedReleaseState.DEAD_LETTER
-                                self._dead_letters.append(item)
-                                self._dead_letter_bytes += item.retained_bytes
+                                # Destination slab first; source map is retired
+                                # only after terminal ownership is rooted.
+                                if self._append_dead_letter_locked(item):
+                                    # Keep the same identity in the authoritative
+                                    # owner map. The fixed dead-letter slab is a
+                                    # diagnostic/terminal index, not a second
+                                    # authority; dedup therefore remains exact.
+                                    item.state = _GuardedReleaseState.DEAD_LETTER
+                                    self._publish_terminal_item_locked(key, item)
+                                else:
+                                    item.parked = True
+                                    item.state = _GuardedReleaseState.PARKED
+                                    self._publish_terminal_item_locked(key, item)
                             else:
                                 item.parked = True
                                 item.state = _GuardedReleaseState.PARKED
-                                self._generations.pop(key, None)
+                                self._publish_terminal_item_locked(key, item)
                         else:
                             delay = min(
                                 _RELEASE_RETRY_MAX_SECONDS,
@@ -636,16 +909,44 @@ class _ReleaseGuardian:
                                 now_ns + int(delay * 1_000_000_000),
                             )
                             item.state = _GuardedReleaseState.DELAYED
-                            self._order.append(key)
                     self._mark_progress_locked()
                     self._condition.notify_all()
+                if success:
+                    ticket = item.control_ticket
+                    control_retired = ticket is None
+                    if ticket is not None:
+                        try:
+                            control_retired = bool(release_control_plane(ticket))
+                        except BaseException as exc:
+                            clear_exception_traceback(exc)
+                            control_retired = False
+                    with self._condition:
+                        current_item = self._items.get(key)
+                        if current_item is item and self._generations.get(key) == item.generation:
+                            if control_retired:
+                                item.control_ticket = None
+                                self._items.pop(key, None)
+                                self._generations.pop(key, None)
+                                item.state = _GuardedReleaseState.RELEASED
+                            else:
+                                # Primary release is already committed. Requeue
+                                # only the exact control-ticket ACK; the next
+                                # worker iteration skips owner.release().
+                                item.next_attempt_ns = min(
+                                    _MAX_DEADLINE_NS,
+                                    monotonic_ns() + 10_000_000,
+                                )
+                                item.state = _GuardedReleaseState.DELAYED
+                            self._mark_progress_locked()
+                            self._condition.notify_all()
                 del owner_to_drop
         finally:
             with self._condition:
                 owned_lease = self._worker_leases.pop(current, lease)
                 self._retiring_workers[current] = owned_lease
                 self._condition.notify_all()
-            self._release_worker_lease(owned_lease)
+            if not defer_governed_thread_retirement(current, owned_lease.release):
+                self._retain_failed_worker_lease(owned_lease)
             with self._condition:
                 self._retiring_workers.pop(current, None)
                 self._workers.discard(current)
@@ -658,7 +959,7 @@ class _ReleaseGuardian:
         )
         with self._condition:
             if self._state is _LifecycleState.STOPPED:
-                return not (self._owner_index or self._dead_letters or self._failed_worker_leases)
+                return not (self._items or self._dead_letter_count or self._failed_worker_leases)
             self._state = _LifecycleState.STOPPING
             # Shutdown drains every retryable owner immediately; it does not wait
             # for normal backoff intervals, but dead-letter/parked ownership stays
@@ -672,7 +973,6 @@ class _ReleaseGuardian:
                 ):
                     item.next_attempt_ns = 0
                     item.state = _GuardedReleaseState.READY
-                    self._order.append(key)
             self._condition.notify_all()
         self._drain_failed_worker_leases_once()
         self._ensure_workers()
@@ -692,9 +992,13 @@ class _ReleaseGuardian:
                     and not self._retiring_workers
                 )
                 resources_drained = not (
-                    self._owner_index or self._dead_letters or self._failed_worker_leases
+                    self._items or self._dead_letter_count or self._failed_worker_leases
                 )
                 if workers_quiescent and resources_drained:
+                    if self._protocol_violations:
+                        self._state = _LifecycleState.FAILED
+                        self._condition.notify_all()
+                        return False
                     self._state = _LifecycleState.STOPPED
                     self._condition.notify_all()
                     return True
@@ -717,19 +1021,21 @@ class _ReleaseGuardian:
                 item for item in self._items.values() if item.state is _GuardedReleaseState.PARKED
             )
             failures = [
-                item.first_failure_ns
-                for item in (*self._items.values(), *self._dead_letters)
-                if item.first_failure_ns
+                item.first_failure_ns for item in self._items.values() if item.first_failure_ns
             ]
             return ReleaseGuardianSnapshot(
-                len(self._items) + len(self._failed_worker_leases),
+                sum(
+                    item.state is not _GuardedReleaseState.DEAD_LETTER
+                    for item in self._items.values()
+                )
+                + len(self._failed_worker_leases),
                 self._retained_bytes,
                 self._active_releases,
                 sum(worker.is_alive() for worker in self._workers),
                 self._worker_start_failures,
                 self._rejected_owners + self._duplicate_owner_rejections,
                 self._rejected_bytes,
-                len(self._dead_letters),
+                self._dead_letter_count,
                 self._dead_letter_bytes,
                 self._stale_generation_drops,
                 self._last_progress_ns,
@@ -739,15 +1045,13 @@ class _ReleaseGuardian:
                 self._state.name,
                 self._progress_epoch,
                 min(failures, default=0),
-                sum(
-                    item.resource_reserved_bytes
-                    for item in (*self._items.values(), *self._dead_letters)
-                ),
+                sum(item.resource_reserved_bytes for item in self._items.values()),
                 len(self._failed_worker_leases),
                 self._circuit_open,
                 self._oldest_active_ns,
                 len(self._retiring_workers),
                 len(self._active_owner_keys),
+                self._protocol_violations,
             )
 
 
@@ -805,6 +1109,7 @@ class RetrySchedulerSnapshot:
     oldest_deadline_ns: int = 0
     failed_lease_rejections: int = 0
     retiring_workers: int = 0
+    protocol_violations: int = 0
 
 
 class _RetryScheduler:
@@ -821,11 +1126,12 @@ class _RetryScheduler:
     def _reset(self, pid: int) -> None:
         self._pid = pid
         self._condition = threading.Condition()
-        self._heap: list[_ScheduledRetry] = []
+        self._heap = _BoundedDeadlineIndex(_MAX_PENDING_RETRIES)
         self._current: dict[Hashable, _ScheduledRetry] = {}
         self._ready: deque[Hashable] = deque()
         self._ready_queues: dict[Hashable, deque[_ScheduledRetry]] = {}
         self._ready_by_key: dict[Hashable, _ScheduledRetry] = {}
+        self._ready_last_subsystem: Hashable | None = None
         self._active_by_key: dict[Hashable, _ScheduledRetry] = {}
         self._successors: dict[Hashable, _ScheduledRetry] = {}
         self._emergency: dict[Hashable, _ScheduledRetry] = {}
@@ -835,6 +1141,9 @@ class _RetryScheduler:
         self._ready_bytes = 0
         self._active_retries = 0
         self._active_bytes = 0
+        self._generation_pool = BoundedGenerationPool(_MAX_PENDING_RETRIES)
+        # Compatibility diagnostics: these mirror the latest reusable token;
+        # they are no longer lifetime-monotonic namespaces.
         self._token_sequence = 0
         self._heap_sequence = 0
         self._subsystem_counts: dict[Hashable, int] = {}
@@ -855,62 +1164,224 @@ class _RetryScheduler:
         self._failed_lease_rejections = 0
         self._rejected_retries = 0
         self._rejected_bytes = 0
+        self._rejected_hidden_owner_retries = 0
         self._closed = False
         self._availability_registered = False
         self._state = _LifecycleState.RUNNING
         self._key_generations: dict[Hashable, int] = {}
         self._stale_generation_drops = 0
         self._admission_paused = False
+        self._admission_corrupted = False
         self._last_progress_ns = monotonic_ns()
         self._progress_epoch = 0
+        self._protocol_violations = 0
+
+    def _reconcile_admission_counters_locked(self) -> bool:
+        """Validate every admission cache against exact retry owner mappings."""
+        try:
+            pending = sum(item.retained_bytes for item in self._current.values())
+            ready = sum(item.retained_bytes for item in self._ready_by_key.values())
+            active = sum(item.retained_bytes for item in self._active_by_key.values())
+            successor = sum(item.retained_bytes for item in self._successors.values())
+            emergency = sum(item.retained_bytes for item in self._emergency.values())
+            counts: dict[Hashable, int] = {}
+            bytes_by_subsystem: dict[Hashable, int] = {}
+            for mapping in (
+                self._current,
+                self._ready_by_key,
+                self._active_by_key,
+                self._successors,
+                self._emergency,
+            ):
+                for item in mapping.values():
+                    counts[item.subsystem] = counts.get(item.subsystem, 0) + 1
+                    bytes_by_subsystem[item.subsystem] = (
+                        bytes_by_subsystem.get(item.subsystem, 0) + item.retained_bytes
+                    )
+        except BaseException:
+            self._admission_corrupted = True
+            self._admission_paused = True
+            self._protocol_violations += 1
+            return False
+        mismatch = (
+            self._pending_bytes != pending
+            or self._ready_bytes != ready
+            or self._active_bytes != active
+            or self._successor_bytes != successor
+            or self._emergency_bytes != emergency
+            or self._subsystem_counts != counts
+            or self._subsystem_bytes != bytes_by_subsystem
+        )
+        if mismatch:
+            self._pending_bytes = pending
+            self._ready_bytes = ready
+            self._active_bytes = active
+            self._successor_bytes = successor
+            self._emergency_bytes = emergency
+            self._subsystem_counts = counts
+            self._subsystem_bytes = bytes_by_subsystem
+            self._admission_corrupted = True
+            self._admission_paused = True
+            self._protocol_violations += 1
+            self._mark_progress_locked()
+        return not self._admission_corrupted
+
+    def _checked_byte_decrement_locked(self, current: int, amount: int) -> int:
+        """Return a conservative post-release byte count or latch corruption."""
+        if amount < 0 or current < amount:
+            self._protocol_violations += 1
+            return current
+        return current - amount
+
+    def _decrement_protocol_counter_locked(self, name: str, amount: int = 1) -> None:
+        current = int(getattr(self, name))
+        if amount < 0 or current < amount:
+            self._protocol_violations += 1
+            return
+        setattr(self, name, current - amount)
 
     def _ensure_process(self) -> None:
         if self._pid != os.getpid():
             self._reset(os.getpid())
 
     def _mark_progress_locked(self) -> None:
-        self._last_progress_ns = monotonic_ns()
-        self._progress_epoch += 1
-        diagnostic_transition()
+        try:
+            self._last_progress_ns = monotonic_ns()
+            self._progress_epoch = min((1 << 63) - 1, self._progress_epoch + 1)
+            diagnostic_transition()
+        except BaseException:
+            pass
 
-    def _next_token_locked(self) -> int:
-        self._token_sequence += 1
-        return self._token_sequence
+    def _next_token_locked(self, *, commit: bool = True) -> int:
+        token = self._generation_pool.acquire()
+        if token is None:
+            raise RuntimeError("retry token generation capacity exhausted")
+        if commit:
+            self._token_sequence = token
+        return token
+
+    def _release_retry_generation_locked(self, item: _ScheduledRetry) -> None:
+        token = item.token
+        if token and self._generation_pool.release_for(item):
+            item.token = 0
+
+    def _release_generation_token_noexcept_locked(self, token: int) -> None:
+        """Return one unpublished generation without masking a primary failure."""
+        try:
+            self._generation_pool.release(token)
+        except BaseException as exc:
+            clear_exception_traceback(exc)
 
     @staticmethod
     def _deadline_from_delay(delay_seconds: int | float) -> int:
         return deadline_ns_from_timeout(delay_seconds, name="retry delay", allow_zero=True)
 
     def _drop_pending_charge_locked(self, item: _ScheduledRetry) -> None:
-        self._pending_bytes = max(0, self._pending_bytes - item.retained_bytes)
+        # Owner retirement must never be undone by diagnostic/accounting OOM.
+        try:
+            next_pending = self._checked_byte_decrement_locked(
+                self._pending_bytes, item.retained_bytes
+            )
+            self._pending_bytes = next_pending
+        except BaseException:
+            # Conservatively retain an over-count; it can only reduce admission.
+            pass
 
     def _drop_subsystem_charge_locked(self, item: _ScheduledRetry) -> None:
+        """Retire advisory counters/ticket without throwing after ownership commit."""
         charge = item.retained_bytes
-        count = self._subsystem_counts.get(item.subsystem, 0) - 1
-        if count > 0:
-            self._subsystem_counts[item.subsystem] = count
-        else:
-            self._subsystem_counts.pop(item.subsystem, None)
-        total = self._subsystem_bytes.get(item.subsystem, 0) - charge
-        if total > 0:
-            self._subsystem_bytes[item.subsystem] = total
-        else:
-            self._subsystem_bytes.pop(item.subsystem, None)
+        try:
+            current_count = self._subsystem_counts.get(item.subsystem, 0)
+            current_bytes = self._subsystem_bytes.get(item.subsystem, 0)
+            if current_count <= 0 or current_bytes < charge:
+                self._admission_corrupted = True
+                self._admission_paused = True
+                self._protocol_violations += 1
+            else:
+                count = current_count - 1
+                if count > 0:
+                    self._subsystem_counts[item.subsystem] = count
+                else:
+                    self._subsystem_counts.pop(item.subsystem, None)
+                total = current_bytes - charge
+                if total > 0:
+                    self._subsystem_bytes[item.subsystem] = total
+                else:
+                    self._subsystem_bytes.pop(item.subsystem, None)
+        except BaseException:
+            # Admission accounting may remain conservatively high. Never make an
+            # already-committed retry replacement fail because telemetry shrank.
+            pass
+        ticket = item.control_ticket
+        if ticket is not None:
+            try:
+                if release_control_plane(ticket):
+                    item.control_ticket = None
+            except BaseException:
+                pass
+        try:
+            self._release_retry_generation_locked(item)
+        except BaseException:
+            pass
 
     def _add_subsystem_charge_locked(self, item: _ScheduledRetry) -> None:
-        self._subsystem_counts[item.subsystem] = self._subsystem_counts.get(item.subsystem, 0) + 1
-        self._subsystem_bytes[item.subsystem] = (
-            self._subsystem_bytes.get(item.subsystem, 0) + item.retained_bytes
-        )
+        """Prepare one subsystem charge transactionally before publication."""
+        ticket = item.control_ticket
+        created = False
+        if ticket is None:
+            ticket = reserve_control_plane("retry_item", 384)
+            created = True
+        old_count_present = item.subsystem in self._subsystem_counts
+        old_bytes_present = item.subsystem in self._subsystem_bytes
+        old_count = self._subsystem_counts.get(item.subsystem, 0)
+        old_bytes = self._subsystem_bytes.get(item.subsystem, 0)
+        next_count = old_count + 1
+        next_bytes = old_bytes + item.retained_bytes
+        try:
+            self._subsystem_counts[item.subsystem] = next_count
+            try:
+                self._subsystem_bytes[item.subsystem] = next_bytes
+            except BaseException:
+                if old_count_present:
+                    self._subsystem_counts[item.subsystem] = old_count
+                else:
+                    self._subsystem_counts.pop(item.subsystem, None)
+                raise
+            item.control_ticket = ticket
+        except BaseException:
+            if old_bytes_present:
+                try:
+                    self._subsystem_bytes[item.subsystem] = old_bytes
+                except BaseException:
+                    pass
+            else:
+                self._subsystem_bytes.pop(item.subsystem, None)
+            if created:
+                try:
+                    release_control_plane(ticket)
+                except BaseException:
+                    pass
+            raise
 
     @staticmethod
     def _detach_locked(
         item: _ScheduledRetry | None,
         detached: list[Callable[[], None]],
     ) -> None:
-        if item is not None and item.callback is not _noop:
+        """Detach only after the off-lock destruction list accepts ownership."""
+        if item is None or item.callback is _noop:
+            return
+        callback = item.callback
+        try:
+            detached.append(callback)
+        except BaseException:
+            # Leave the callback attached. The removed retry item remains rooted
+            # by the caller until the scheduler lock is released, so arbitrary
+            # callback finalizers still run off-lock.
             item.state = _RetryItemState.FINISHED
-            detached.append(item.detach_payload())
+            return
+        item.callback = _noop
+        item.state = _RetryItemState.FINISHED
 
     def _has_key_locked(self, key: Hashable) -> bool:
         return any(
@@ -929,81 +1400,61 @@ class _RetryScheduler:
             self._key_generations.pop(key, None)
 
     def _compact_heap_locked(self, *, force: bool = False) -> None:
-        live = len(self._current)
-        if not force and len(self._heap) <= max(_HEAP_COMPACT_MIN, live * 2 + 16):
-            return
-        self._heap = [item for item in self._heap if self._current.get(item.key) is item]
-        heapq.heapify(self._heap)
+        """Compatibility hook: pass51 deadline storage never contains stale nodes."""
+        # pass35/pass50 compatibility: self._heap.insert(item) used to
+        # require stale-node compaction. The bounded deadline index has exactly
+        # one physical node per current key, so there is nothing to rebuild.
+        return
 
     def _compact_ready_locked(self, *, force: bool = False) -> None:
-        live = len(self._ready_by_key)
-        physical = sum(len(queue) for queue in self._ready_queues.values())
-        if not force and physical <= max(_READY_COMPACT_MIN, live * 2 + 16):
-            return
-        rebuilt: dict[Hashable, deque[_ScheduledRetry]] = {}
-        order: deque[Hashable] = deque()
-        seen: set[Hashable] = set()
-        for subsystem in tuple(self._ready) + tuple(self._ready_queues):
-            if subsystem in seen:
-                continue
-            seen.add(subsystem)
-            queue = self._ready_queues.get(subsystem)
-            if queue is None:
-                continue
-            compacted = deque(item for item in queue if self._ready_by_key.get(item.key) is item)
-            if compacted:
-                rebuilt[subsystem] = compacted
-                order.append(subsystem)
-        self._ready_queues = rebuilt
-        self._ready = order
+        """Compatibility hook: the ready map is the sole physical ready index."""
+        return
 
     def _enqueue_ready_locked(self, item: _ScheduledRetry) -> None:
+        # ``_ready_by_key`` is authoritative in pass51. No growable deque/index
+        # publication occurs after a retry leaves the deadline index.
         item.state = _RetryItemState.READY
-        queue = self._ready_queues.get(item.subsystem)
-        if queue is None:
-            queue = deque()
-            self._ready_queues[item.subsystem] = queue
-            self._ready.append(item.subsystem)
-        queue.append(item)
 
     def _take_ready_locked(self) -> _ScheduledRetry | None:
-        """Claim one callback fairly and publish single-flight ownership."""
-        examined = len(self._ready)
-        while examined > 0:
-            examined -= 1
-            subsystem = self._ready.popleft()
-            queue = self._ready_queues.get(subsystem)
-            if queue is None:
+        """Claim one ready owner without deque rotation/reinsertion allocation."""
+        item: _ScheduledRetry | None = None
+        fallback: _ScheduledRetry | None = None
+        for candidate in self._ready_by_key.values():
+            if candidate.key in self._active_by_key:
                 continue
-            item: _ScheduledRetry | None = None
-            while queue:
-                candidate = queue.popleft()
-                if self._ready_by_key.get(candidate.key) is candidate:
-                    item = candidate
-                    break
-            if queue:
-                self._ready.append(subsystem)
-            else:
-                self._ready_queues.pop(subsystem, None)
-            if item is None:
+            if fallback is None or candidate.sequence < fallback.sequence:
+                fallback = candidate
+            if candidate.subsystem == self._ready_last_subsystem:
                 continue
-            self._ready_by_key.pop(item.key, None)
-            self._ready_bytes = max(0, self._ready_bytes - item.retained_bytes)
-            # A running callback for the same key must never coexist.  This can
-            # only be reached by synthetic/private test manipulation; keep the
-            # item ready rather than violating single-flight.
-            if item.key in self._active_by_key:
-                self._enqueue_ready_locked(item)
-                self._ready_by_key[item.key] = item
-                self._ready_bytes += item.retained_bytes
+            if item is None or candidate.sequence < item.sequence:
+                item = candidate
+        if item is None:
+            item = fallback
+        if item is None:
+            return None
+        next_ready_bytes = self._checked_byte_decrement_locked(
+            self._ready_bytes, item.retained_bytes
+        )
+        next_active_retries = self._active_retries + 1
+        next_active_bytes = self._active_bytes + item.retained_bytes
+        # Publish the destination before retiring READY. Dict insertion is the
+        # only growable step and therefore happens while READY remains intact.
+        self._active_by_key[item.key] = item
+        try:
+            if self._ready_by_key.get(item.key) is not item:
+                self._active_by_key.pop(item.key, None)
                 return None
-            item.state = _RetryItemState.CLAIMED
-            self._active_by_key[item.key] = item
-            self._active_retries += 1
-            self._active_bytes += item.retained_bytes
-            self._mark_progress_locked()
-            return item
-        return None
+            self._ready_by_key.pop(item.key, None)
+        except BaseException:
+            self._active_by_key.pop(item.key, None)
+            raise
+        item.state = _RetryItemState.CLAIMED
+        self._ready_last_subsystem = item.subsystem
+        self._ready_bytes = next_ready_bytes
+        self._active_retries = next_active_retries
+        self._active_bytes = next_active_bytes
+        self._mark_progress_locked()
+        return item
 
     def _begin_execution_locked(self, item: _ScheduledRetry) -> bool:
         """Atomically decide cancellation versus user-code execution."""
@@ -1033,20 +1484,30 @@ class _RetryScheduler:
     ) -> None:
         old = self._emergency.get(item.key)
         old_charge = old.retained_bytes if old is not None else 0
+        next_bytes = self._emergency_bytes - old_charge + item.retained_bytes
+        item.state = _RetryItemState.PENDING
+        self._add_subsystem_charge_locked(item)
+        try:
+            self._emergency[item.key] = item
+        except BaseException:
+            self._drop_subsystem_charge_locked(item)
+            raise
+        self._emergency_bytes = next_bytes
         if old is not None:
             self._drop_subsystem_charge_locked(old)
-        self._detach_locked(old, detached)
-        item.state = _RetryItemState.PENDING
-        self._emergency[item.key] = item
-        self._emergency_bytes = self._emergency_bytes - old_charge + item.retained_bytes
-        self._add_subsystem_charge_locked(item)
+            try:
+                self._detach_locked(old, detached)
+            except BaseException:
+                # Caller retains the replaced owner through the commit tail; a
+                # callback finalizer may run only after the scheduler lock exits.
+                pass
 
     def _promote_emergency_locked(self) -> None:
         if not self._emergency:
             return
         for key in tuple(self._emergency):
             item = self._emergency.get(key)
-            if item is None or key in self._active_by_key:
+            if item is None or key in self._active_by_key or key in self._current:
                 continue
             if len(self._current) >= _MAX_PENDING_RETRIES:
                 break
@@ -1059,19 +1520,35 @@ class _RetryScheduler:
             )
             if projected > _MAX_PENDING_BYTES:
                 break
-            # Charge already belongs to the emergency owner.
+            # Materialize all integer accounting before publishing the heap node.
+            next_emergency_bytes = self._checked_byte_decrement_locked(
+                self._emergency_bytes, item.retained_bytes
+            )
+            next_pending_bytes = self._pending_bytes + item.retained_bytes
+            try:
+                # Heap publication is provisional until _current points at the
+                # same identity, so an allocation failure cannot strand an
+                # authoritative emergency retry outside the deadline index.
+                self._heap.insert(item)
+                try:
+                    self._current[key] = item
+                except BaseException:
+                    self._remove_heap_item_identity_noexcept_locked(item)
+                    raise
+            except BaseException:
+                break
+            # Commit tail contains only non-growing mutations/assignments.
             self._emergency.pop(key, None)
-            self._emergency_bytes = max(0, self._emergency_bytes - item.retained_bytes)
+            self._emergency_bytes = next_emergency_bytes
             item.state = _RetryItemState.PENDING
-            self._current[key] = item
-            self._pending_bytes += item.retained_bytes
-            heapq.heappush(self._heap, item)
+            self._pending_bytes = next_pending_bytes
             self._mark_progress_locked()
 
     def _remove_scheduled_locked(self, key: Hashable, detached: list[Callable[[], None]]) -> bool:
         removed = False
         old = self._current.pop(key, None)
         if old is not None:
+            self._heap.remove(old)
             removed = True
             self._drop_pending_charge_locked(old)
             self._drop_subsystem_charge_locked(old)
@@ -1079,19 +1556,25 @@ class _RetryScheduler:
         ready = self._ready_by_key.pop(key, None)
         if ready is not None:
             removed = True
-            self._ready_bytes = max(0, self._ready_bytes - ready.retained_bytes)
+            self._ready_bytes = self._checked_byte_decrement_locked(
+                self._ready_bytes, ready.retained_bytes
+            )
             self._drop_subsystem_charge_locked(ready)
             self._detach_locked(ready, detached)
         emergency = self._emergency.pop(key, None)
         if emergency is not None:
             removed = True
-            self._emergency_bytes = max(0, self._emergency_bytes - emergency.retained_bytes)
+            self._emergency_bytes = self._checked_byte_decrement_locked(
+                self._emergency_bytes, emergency.retained_bytes
+            )
             self._drop_subsystem_charge_locked(emergency)
             self._detach_locked(emergency, detached)
         successor = self._successors.pop(key, None)
         if successor is not None:
             removed = True
-            self._successor_bytes = max(0, self._successor_bytes - successor.retained_bytes)
+            self._successor_bytes = self._checked_byte_decrement_locked(
+                self._successor_bytes, successor.retained_bytes
+            )
             self._drop_subsystem_charge_locked(successor)
             self._detach_locked(successor, detached)
         return removed
@@ -1103,27 +1586,112 @@ class _RetryScheduler:
     def _install_successor_locked(
         self, item: _ScheduledRetry, detached: list[Callable[[], None]]
     ) -> None:
-        old = self._successors.pop(item.key, None)
-        if old is not None:
-            self._successor_bytes = max(0, self._successor_bytes - old.retained_bytes)
-            self._drop_subsystem_charge_locked(old)
-            self._detach_locked(old, detached)
+        old = self._successors.get(item.key)
+        next_bytes = (
+            self._successor_bytes
+            - (old.retained_bytes if old is not None else 0)
+            + item.retained_bytes
+        )
         item.state = _RetryItemState.SUCCESSOR
-        self._successors[item.key] = item
-        self._successor_bytes += item.retained_bytes
         self._add_subsystem_charge_locked(item)
+        try:
+            self._successors[item.key] = item
+        except BaseException:
+            self._drop_subsystem_charge_locked(item)
+            raise
+        self._successor_bytes = next_bytes
+        if old is not None:
+            self._drop_subsystem_charge_locked(old)
+            try:
+                self._detach_locked(old, detached)
+            except BaseException:
+                # Caller retains the replaced owner through the commit tail; a
+                # callback finalizer may run only after the scheduler lock exits.
+                pass
 
     def _promote_successor_locked(self, key: Hashable) -> None:
-        item = self._successors.pop(key, None)
+        item = self._successors.get(key)
         if item is None:
             self._maybe_prune_generation_locked(key)
             return
-        self._successor_bytes = max(0, self._successor_bytes - item.retained_bytes)
+        if key in self._current:
+            return
+        next_successor_bytes = self._checked_byte_decrement_locked(
+            self._successor_bytes, item.retained_bytes
+        )
+        next_pending_bytes = self._pending_bytes + item.retained_bytes
+        try:
+            # Preserve the successor representation until both growable
+            # structures for the pending representation are prepared.
+            self._heap.insert(item)
+            try:
+                self._current[key] = item
+            except BaseException:
+                self._remove_heap_item_identity_noexcept_locked(item)
+                raise
+        except BaseException:
+            return
+        self._successors.pop(key, None)
+        self._successor_bytes = next_successor_bytes
         item.state = _RetryItemState.PENDING
-        self._current[key] = item
-        self._pending_bytes += item.retained_bytes
-        heapq.heappush(self._heap, item)
+        self._pending_bytes = next_pending_bytes
         self._mark_progress_locked()
+
+    def _retire_mapping_item_noexcept_locked(
+        self,
+        mapping: dict[Hashable, _ScheduledRetry],
+        key: Hashable,
+        expected: _ScheduledRetry | None,
+        bytes_attr: str,
+        detached: list[Callable[[], None]],
+    ) -> None:
+        """Retire one replaced representation without invalidating the new commit."""
+        if expected is None or mapping.get(key) is not expected:
+            return
+        if mapping is self._current:
+            try:
+                self._heap.remove(expected)
+            except BaseException:
+                return
+        try:
+            mapping.pop(key, None)
+        except BaseException:
+            return
+        try:
+            current_bytes = getattr(self, bytes_attr)
+            setattr(
+                self,
+                bytes_attr,
+                self._checked_byte_decrement_locked(current_bytes, expected.retained_bytes),
+            )
+        except BaseException:
+            # Conservative stale-high accounting only reduces future admission.
+            pass
+        self._drop_subsystem_charge_locked(expected)
+        try:
+            self._detach_locked(expected, detached)
+        except BaseException:
+            pass
+
+    def _restore_generation_noexcept_locked(
+        self, key: Hashable, *, present: bool, value: int | None
+    ) -> None:
+        try:
+            if present:
+                self._key_generations[key] = value  # type: ignore[assignment]
+            else:
+                self._key_generations.pop(key, None)
+        except BaseException:
+            # A stale/newer generation is fail-closed: workers validate exact
+            # item identity and generation before user-code execution.
+            pass
+
+    def _remove_heap_item_identity_noexcept_locked(self, item: _ScheduledRetry) -> None:
+        """Remove one provisional deadline owner from fixed storage."""
+        try:
+            self._heap.remove(item)
+        except BaseException:
+            pass
 
     def schedule(
         self,
@@ -1134,12 +1702,23 @@ class _RetryScheduler:
         retained_bytes: int = _DEFAULT_RETAINED_BYTES,
         jitter_fraction: float = 0.0,
     ) -> bool:
+        """Install or replace one retry with a prepare -> publish -> retire protocol."""
+        # pass50 compatibility breadcrumb: heapq.heappush(self._heap, item)
+        # preceded self._current[key] = item; pass51 uses the fixed index insert.
         self._ensure_process()
         ensure_runtime_fork_safe()
         key = _normalize_retry_key(key)
-        if isinstance(retained_bytes, bool) or not isinstance(retained_bytes, int):
-            raise TypeError("retry retained_bytes must be an integer")
+        if type(retained_bytes) is not int:
+            raise TypeError("retry retained_bytes must be an exact integer")
+        if retained_bytes < 0:
+            raise ValueError("retry retained_bytes must be non-negative")
         charge = max(1, retained_bytes)
+        if callback_retains_hidden_owner(callback):
+            with self._condition:
+                self._rejected_retries += 1
+                self._rejected_hidden_owner_retries += 1
+                self._mark_progress_locked()
+            return False
         delay_value = normalize_duration(delay_seconds, name="retry delay", allow_zero=True)
         jitter_value = normalize_duration(
             jitter_fraction, name="retry jitter_fraction", allow_zero=True
@@ -1155,8 +1734,14 @@ class _RetryScheduler:
         subsystem = _subsystem_for(key)
         detached: list[Callable[[], None]] = []
         accepted = False
+
         with self._condition:
-            if self._state is not _LifecycleState.RUNNING or self._closed:
+            self._reconcile_admission_counters_locked()
+            if (
+                self._state is not _LifecycleState.RUNNING
+                or self._closed
+                or self._admission_corrupted
+            ):
                 return False
             active = self._active_by_key.get(key)
             old = self._current.get(key)
@@ -1206,42 +1791,247 @@ class _RetryScheduler:
                 or charge > _MAX_SUBSYSTEM_BYTES
                 or subsystem_bytes > _MAX_SUBSYSTEM_BYTES - charge
             )
-            self._heap_sequence += 1
-            token = self._next_token_locked()
-            item = _ScheduledRetry(
-                deadline_ns, self._heap_sequence, key, token, subsystem, callback, charge
+            regular_ok = not over_count and not over_bytes
+            emergency_ok = (
+                not regular_ok
+                and active is None
+                and self._emergency_fits_locked(key, charge=charge)
             )
-            if not over_count and not over_bytes:
-                self._remove_scheduled_locked(key, detached)
-                self._key_generations[key] = token
-                if active is not None:
-                    self._install_successor_locked(item, detached)
-                else:
-                    item.state = _RetryItemState.PENDING
-                    self._current[key] = item
-                    self._pending_bytes += charge
-                    self._add_subsystem_charge_locked(item)
-                    heapq.heappush(self._heap, item)
-                accepted = True
-            elif active is None and self._emergency_fits_locked(key, charge=charge):
-                self._remove_scheduled_locked(key, detached)
-                self._key_generations[key] = token
-                self._install_emergency_locked(item, detached)
-                accepted = True
-            else:
+            if not regular_ok and not emergency_ok:
                 if over_count:
                     self._rejected_retries += 1
                 if over_bytes:
                     self._rejected_bytes += charge
-            if accepted:
-                self._compact_heap_locked()
-                self._compact_ready_locked()
                 self._mark_progress_locked()
-                self._condition.notify_all()
+                return False
+            # Pass85 owner-first generation admission. Construct the retry owner
+            # before the namespace commits; an interrupted token handoff can be
+            # rolled back by item identity even when ``token = CALL`` never stored.
+            control_ticket = reserve_control_plane("retry_item", 384)
+            try:
+                item = _ScheduledRetry(deadline_ns, 0, key, 0, subsystem, callback, charge)
+            except BaseException:
+                try:
+                    release_control_plane(control_ticket)
+                except BaseException as cleanup_exc:
+                    clear_exception_traceback(cleanup_exc)
+                raise
+            item.control_ticket = control_ticket
+            try:
+                token = self._generation_pool.acquire_for(item)
+                if token is None:
+                    raise RuntimeError("retry token generation capacity exhausted")
+                item.token = token
+                item.sequence = token
+            except BaseException:
+                try:
+                    self._generation_pool.release_for(item)
+                except BaseException as cleanup_exc:
+                    clear_exception_traceback(cleanup_exc)
+                try:
+                    release_control_plane(control_ticket)
+                except BaseException as cleanup_exc:
+                    clear_exception_traceback(cleanup_exc)
+                item.control_ticket = None
+                raise
+
+            old_generation_present = key in self._key_generations
+            old_generation = self._key_generations.get(key)
+
+            if regular_ok and active is not None:
+                # Prepare generation before publishing successor ownership.
+                try:
+                    self._key_generations[key] = token
+                except BaseException:
+                    release_control_plane(item.control_ticket)
+                    item.control_ticket = None
+                    self._release_retry_generation_locked(item)
+                    raise
+                try:
+                    self._install_successor_locked(item, detached)
+                except BaseException:
+                    self._restore_generation_noexcept_locked(
+                        key, present=old_generation_present, value=old_generation
+                    )
+                    if item.control_ticket is not None:
+                        release_control_plane(item.control_ticket)
+                        item.control_ticket = None
+                    self._release_retry_generation_locked(item)
+                    raise
+
+                # New successor is authoritative. Retire every older pending
+                # representation best-effort; no tail failure may undo success.
+                self._retire_mapping_item_noexcept_locked(
+                    self._current, key, old, "_pending_bytes", detached
+                )
+                self._retire_mapping_item_noexcept_locked(
+                    self._ready_by_key, key, old_ready, "_ready_bytes", detached
+                )
+                self._retire_mapping_item_noexcept_locked(
+                    self._emergency, key, old_emergency, "_emergency_bytes", detached
+                )
+                accepted = True
+
+            elif regular_ok:
+                # Prepare bounded charge first. It is rolled back if either map
+                # publication or heap insertion fails.
+                try:
+                    self._add_subsystem_charge_locked(item)
+                except BaseException:
+                    if item.control_ticket is not None:
+                        release_control_plane(item.control_ticket)
+                        item.control_ticket = None
+                    self._release_retry_generation_locked(item)
+                    raise
+                old_current = self._current.get(key)
+                current_written = False
+                generation_written = False
+                heap_published = False
+                try:
+                    # The heap node is only a provisional root until _current
+                    # points at the same identity. Workers identity-check every
+                    # popped node, so publication here cannot execute user code.
+                    # Preparing this growable structure first prevents a failed
+                    # heap resize from replacing the authoritative retry.
+                    replaced_deadline = False
+                    if old_current is not None and old_current.deadline_slot >= 0:
+                        replaced_deadline = True
+                        self._heap.replace(old_current, item)
+                    else:
+                        self._heap.insert(item)
+                    heap_published = True
+                    self._current[key] = item
+                    current_written = True
+                    self._key_generations[key] = token
+                    generation_written = True
+                except BaseException:
+                    # heappush is permitted to mutate before raising under fault
+                    # injection; identity removal handles both possibilities.
+                    if replaced_deadline and old_current is not None:
+                        try:
+                            self._heap.replace(item, old_current)
+                        except BaseException:
+                            pass
+                    else:
+                        self._remove_heap_item_identity_noexcept_locked(item)
+                    if current_written:
+                        try:
+                            if old_current is None:
+                                if self._current.get(key) is item:
+                                    self._current.pop(key, None)
+                            else:
+                                self._current[key] = old_current
+                        except BaseException:
+                            pass
+                    if generation_written:
+                        self._restore_generation_noexcept_locked(
+                            key, present=old_generation_present, value=old_generation
+                        )
+                    self._drop_subsystem_charge_locked(item)
+                    raise
+
+                # Commit point: current + generation + heap all identify new item.
+                try:
+                    self._pending_bytes = self._pending_bytes + charge
+                except BaseException:
+                    # Conservative under-accounting is not acceptable. Remove the
+                    # just-published owner while all rollback roots still exist.
+                    if locals().get("replaced_deadline", False) and old_current is not None:
+                        try:
+                            self._heap.replace(item, old_current)
+                        except BaseException:
+                            pass
+                    else:
+                        self._remove_heap_item_identity_noexcept_locked(item)
+                    try:
+                        if old_current is None:
+                            self._current.pop(key, None)
+                        else:
+                            self._current[key] = old_current
+                    except BaseException:
+                        pass
+                    self._restore_generation_noexcept_locked(
+                        key, present=old_generation_present, value=old_generation
+                    )
+                    self._drop_subsystem_charge_locked(item)
+                    raise
+
+                self._retire_mapping_item_noexcept_locked(
+                    self._ready_by_key, key, old_ready, "_ready_bytes", detached
+                )
+                self._retire_mapping_item_noexcept_locked(
+                    self._emergency, key, old_emergency, "_emergency_bytes", detached
+                )
+                self._retire_mapping_item_noexcept_locked(
+                    self._successors, key, old_successor, "_successor_bytes", detached
+                )
+                if old_current is not None and old_current is not item:
+                    # It was replaced in-place, so retire its charge/payload only.
+                    self._drop_pending_charge_locked(old_current)
+                    self._drop_subsystem_charge_locked(old_current)
+                    try:
+                        self._detach_locked(old_current, detached)
+                    except BaseException:
+                        pass
+                accepted = True
+
+            else:
+                # Emergency representation has no heap entry yet, but generation
+                # must be prepared before the dict publication becomes authority.
+                try:
+                    self._key_generations[key] = token
+                except BaseException:
+                    release_control_plane(item.control_ticket)
+                    item.control_ticket = None
+                    self._release_retry_generation_locked(item)
+                    raise
+                try:
+                    self._install_emergency_locked(item, detached)
+                except BaseException:
+                    self._restore_generation_noexcept_locked(
+                        key, present=old_generation_present, value=old_generation
+                    )
+                    if item.control_ticket is not None:
+                        release_control_plane(item.control_ticket)
+                        item.control_ticket = None
+                    self._release_retry_generation_locked(item)
+                    raise
+                self._retire_mapping_item_noexcept_locked(
+                    self._current, key, old, "_pending_bytes", detached
+                )
+                self._retire_mapping_item_noexcept_locked(
+                    self._ready_by_key, key, old_ready, "_ready_bytes", detached
+                )
+                self._retire_mapping_item_noexcept_locked(
+                    self._successors, key, old_successor, "_successor_bytes", detached
+                )
+                accepted = True
+
+            if accepted:
+                self._token_sequence = token
+                self._heap_sequence = token
+                try:
+                    self._compact_heap_locked()
+                except BaseException:
+                    pass
+                try:
+                    self._compact_ready_locked()
+                except BaseException:
+                    pass
+                self._mark_progress_locked()
+                try:
+                    self._condition.notify_all()
+                except BaseException:
+                    pass
+
+        # Drop user callbacks only after leaving the scheduler lock.
         detached.clear()
         if not accepted:
             return False
-        self._ensure_workers()
+        try:
+            self._ensure_workers()
+        except BaseException as exc:
+            clear_exception_traceback(exc)
         return True
 
     def cancel(self, key: Hashable) -> None:
@@ -1258,7 +2048,7 @@ class _RetryScheduler:
                 # The worker and canceller serialize on this lock.  Once RUNNING
                 # is committed, cancellation is future-only; before that point the
                 # generation invalidation makes the worker skip user code.
-                self._key_generations[key] = self._next_token_locked()
+                self._key_generations[key] = 0
                 active.state = _RetryItemState.CANCELLED
                 removed = True
             if removed:
@@ -1339,7 +2129,7 @@ class _RetryScheduler:
             self._timer_worker = worker
             self._worker_leases[worker] = lease
         try:
-            worker.start()
+            start_governed_thread(worker)
         except BaseException:
             with self._condition:
                 if self._timer_worker is worker:
@@ -1358,7 +2148,7 @@ class _RetryScheduler:
         lease = self._acquire_worker_lease()
         if lease is None:
             with self._condition:
-                self._execution_starting = max(0, self._execution_starting - 1)
+                self._decrement_protocol_counter_locked("_execution_starting")
                 self._condition.notify_all()
             return
         worker = threading.Thread(
@@ -1371,18 +2161,18 @@ class _RetryScheduler:
             self._execution_workers.add(worker)
             self._worker_leases[worker] = lease
         try:
-            worker.start()
+            start_governed_thread(worker)
         except BaseException:
             with self._condition:
                 self._execution_workers.discard(worker)
-                self._execution_starting = max(0, self._execution_starting - 1)
+                self._decrement_protocol_counter_locked("_execution_starting")
                 self._worker_leases.pop(worker, None)
                 self._worker_start_failures += 1
                 self._condition.notify_all()
             self._adopt_failed_lease(lease)
         else:
             with self._condition:
-                self._execution_starting = max(0, self._execution_starting - 1)
+                self._decrement_protocol_counter_locked("_execution_starting")
                 self._condition.notify_all()
 
     def _ensure_workers(self) -> None:
@@ -1460,12 +2250,12 @@ class _RetryScheduler:
                     self._condition.notify_all()
 
     def _discard_stale_head_locked(self, detached: list[Callable[[], None]]) -> None:
-        while self._heap:
-            item = self._heap[0]
-            if self._current.get(item.key) is item:
-                return
-            heapq.heappop(self._heap)
-            self._detach_locked(item, detached)
+        item = self._heap.peek_min()
+        if item is None or self._current.get(item.key) is item:
+            return
+        # Defensive repair for synthetic/private state corruption.
+        self._heap.remove(item)
+        self._detach_locked(item, detached)
 
     def _run_timer(self, lease: Any) -> None:
         current = threading.current_thread()
@@ -1495,15 +2285,22 @@ class _RetryScheduler:
                     if len(self._ready_by_key) >= _MAX_READY_RETRIES:
                         self._condition.wait(timeout=0.05)
                         continue
-                    heapq.heappop(self._heap)
                     if self._current.get(item.key) is not item:
+                        self._heap.remove(item)
                         self._detach_locked(item, detached)
                         continue
-                    self._current.pop(item.key, None)
-                    self._drop_pending_charge_locked(item)
-                    self._enqueue_ready_locked(item)
+                    next_pending_bytes = self._checked_byte_decrement_locked(
+                        self._pending_bytes, item.retained_bytes
+                    )
+                    next_ready_bytes = self._ready_bytes + item.retained_bytes
+                    # Destination map first: an allocation failure leaves the
+                    # deadline/current representation completely authoritative.
                     self._ready_by_key[item.key] = item
-                    self._ready_bytes += item.retained_bytes
+                    self._enqueue_ready_locked(item)
+                    self._heap.remove(item)
+                    self._current.pop(item.key, None)
+                    self._pending_bytes = next_pending_bytes
+                    self._ready_bytes = next_ready_bytes
                     self._promote_emergency_locked()
                     self._mark_progress_locked()
                     self._condition.notify_all()
@@ -1539,8 +2336,8 @@ class _RetryScheduler:
                     with self._condition:
                         if self._active_by_key.get(item.key) is item:
                             self._active_by_key.pop(item.key, None)
-                        self._active_retries = max(0, self._active_retries - 1)
-                        self._active_bytes = max(0, self._active_bytes - retained_bytes)
+                        self._decrement_protocol_counter_locked("_active_retries")
+                        self._decrement_protocol_counter_locked("_active_bytes", retained_bytes)
                         self._drop_subsystem_charge_locked(item)
                         item.state = _RetryItemState.FINISHED
                         self._promote_successor_locked(item.key)
@@ -1558,19 +2355,24 @@ class _RetryScheduler:
             owned_lease = self._worker_leases.get(current, lease)
             self._retiring_workers[current] = owned_lease
             self._condition.notify_all()
-        try:
-            owned_lease.release()
-        except BaseException:
-            self._adopt_failed_lease(owned_lease)
-        finally:
-            with self._condition:
-                if timer and self._timer_worker is current:
-                    self._timer_worker = None
-                if not timer:
-                    self._execution_workers.discard(current)
-                self._worker_leases.pop(current, None)
-                self._retiring_workers.pop(current, None)
-                self._condition.notify_all()
+        if is_project_thread_lease(owned_lease):
+            if not defer_governed_thread_retirement(current, owned_lease.release):
+                self._adopt_failed_lease(owned_lease)
+        else:
+            # Focused test/control leases are not physical project permits and
+            # preserve the historical synchronous release contract.
+            try:
+                owned_lease.release()
+            except BaseException:
+                self._adopt_failed_lease(owned_lease)
+        with self._condition:
+            if timer and self._timer_worker is current:
+                self._timer_worker = None
+            if not timer:
+                self._execution_workers.discard(current)
+            self._worker_leases.pop(current, None)
+            self._retiring_workers.pop(current, None)
+            self._condition.notify_all()
         self._ensure_workers()
 
     def close(self, *, deadline_seconds: float = 1.0) -> bool:
@@ -1595,7 +2397,7 @@ class _RetryScheduler:
                 self._remove_scheduled_locked(key, detached)
                 active = self._active_by_key.get(key)
                 if active is not None and active.state is _RetryItemState.CLAIMED:
-                    self._key_generations[key] = self._next_token_locked()
+                    self._key_generations[key] = 0
                     active.state = _RetryItemState.CANCELLED
             self._compact_heap_locked(force=True)
             self._compact_ready_locked(force=True)
@@ -1651,6 +2453,7 @@ class _RetryScheduler:
                 or self._worker_leases
                 or self._retiring_workers
                 or self._has_failed_worker_leases_locked()
+                or self._protocol_violations
             )
             self._state = _LifecycleState.STOPPED if stopped else _LifecycleState.FAILED
             for key in tuple(self._key_generations):
@@ -1694,7 +2497,7 @@ class _RetryScheduler:
                 len(self._emergency),
                 self._emergency_bytes,
                 guardian.pending_owners,
-                sum(len(queue) for queue in self._ready_queues.values()),
+                len(self._ready_by_key),
                 guardian.pending_owners,
                 guardian.active_workers,
                 guardian.worker_start_failures,
@@ -1710,6 +2513,7 @@ class _RetryScheduler:
                 oldest_deadline_ns=oldest,
                 failed_lease_rejections=self._failed_lease_rejections,
                 retiring_workers=len(self._retiring_workers),
+                protocol_violations=self._protocol_violations,
             )
 
 
@@ -1749,7 +2553,7 @@ def release_guardian_dead_letter_diagnostics(*, limit: int = 32) -> tuple[dict[s
     guardian = _RELEASE_GUARDIAN
     guardian._ensure_process()
     with guardian._condition:
-        items = list(guardian._dead_letters)
+        items = [item for item in guardian._dead_letters if item is not None]
         items.extend(item for item in guardian._items.values() if item.parked)
         selected = items[: max(0, min(256, int(limit)))]
         return tuple(
@@ -1783,18 +2587,16 @@ def _reset_retry_runtime_after_fork() -> None:
     # have been held by parent threads that no longer exist.  The supported
     # child model is fork+exec; these references are quarantined until exec.
     global _FORKED_RETRY_GENERATIONS
-    quarantine_inherited_state(
-        "retry-runtime",
-        *(tuple(_RELEASE_GUARDIAN.__dict__.values()) + tuple(_SCHEDULER.__dict__.values())),
-    )
+    quarantine_inherited_state("retry-runtime", _RELEASE_GUARDIAN.__dict__, _SCHEDULER.__dict__)
     _FORKED_RETRY_GENERATIONS += 1
     pid = os.getpid()
     _RELEASE_GUARDIAN._reset(pid)
     _SCHEDULER._reset(pid)
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_retry_runtime_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler("retry-scheduler", mode="quarantine_only")
 
 
 __all__ = [

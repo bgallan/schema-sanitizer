@@ -20,6 +20,7 @@
 #include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "frontends/builtin_frontends.hh"
 #include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/runtime/process_fd_governor.hh"
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/registry/registry.hh"
 
@@ -74,10 +75,18 @@ bool is_json_lines_path_source(const PathSourceSpec &source) {
 
 sanitize::Result<std::optional<char>>
 first_non_ws_byte(const std::string &path) {
+  sanitize::internal::ProcessFdPermitLease fd_lease(1U);
+  if (!fd_lease) {
+    return sanitize::Status::IOError(
+        "native file-descriptor capacity exhausted");
+  }
   std::ifstream in(path, std::ios::binary);
   if (!in.good()) {
     return sanitize::Status::Invalid("failed to open JSON source '", path, "'");
   }
+  fd_lease.mark_opened();
+  sanitize::internal::ProcessFdStreamCloseGuard<std::ifstream> close_guard(
+      in, fd_lease);
   char ch = '\0';
   while (in.get(ch)) {
     const unsigned char c = static_cast<unsigned char>(ch);
@@ -90,10 +99,18 @@ first_non_ws_byte(const std::string &path) {
 
 sanitize::Result<std::optional<char>>
 first_non_ws_byte_after_json_array_start(const std::string &path) {
+  sanitize::internal::ProcessFdPermitLease fd_lease(1U);
+  if (!fd_lease) {
+    return sanitize::Status::IOError(
+        "native file-descriptor capacity exhausted");
+  }
   std::ifstream in(path, std::ios::binary);
   if (!in.good()) {
     return sanitize::Status::Invalid("failed to open JSON source '", path, "'");
   }
+  fd_lease.mark_opened();
+  sanitize::internal::ProcessFdStreamCloseGuard<std::ifstream> close_guard(
+      in, fd_lease);
   char ch = '\0';
   bool saw_array_start = false;
   while (in.get(ch)) {

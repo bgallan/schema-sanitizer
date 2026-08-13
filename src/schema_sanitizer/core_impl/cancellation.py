@@ -12,6 +12,7 @@ from typing import Iterator, Protocol
 
 from ..errors import SchemaSanitizerCancelledError
 from .durations import normalize_duration
+from .fork_safety import quarantine_inherited_state
 
 
 class _EventLike(Protocol):
@@ -136,13 +137,50 @@ def activate_operation_cancellation_token(
             _CURRENT_TOKEN.set(None)
 
 
+_FORK_CURRENT_TOKEN_BANKS: tuple[ContextVar[OperationCancellationToken | None], ...] = (
+    ContextVar[OperationCancellationToken | None](
+        "schema_sanitizer_cancellation_token_child_0", default=None
+    ),
+    ContextVar[OperationCancellationToken | None](
+        "schema_sanitizer_cancellation_token_child_1", default=None
+    ),
+)
+_FORK_CURRENT_TOKEN_BANK_INDEX = 0
+_FORK_PREPARED_CURRENT_TOKEN: ContextVar[OperationCancellationToken | None] | None = None
+
+
+def _prepare_cancellation_token_for_fork() -> None:
+    global _FORK_PREPARED_CURRENT_TOKEN
+    _FORK_PREPARED_CURRENT_TOKEN = _FORK_CURRENT_TOKEN_BANKS[_FORK_CURRENT_TOKEN_BANK_INDEX]
+
+
+def _clear_cancellation_token_fork_preparation() -> None:
+    global _FORK_PREPARED_CURRENT_TOKEN
+    _FORK_PREPARED_CURRENT_TOKEN = None
+
+
 def _reset_current_token_after_fork() -> None:
-    """Drop inherited operation cancellation graphs in the forked child."""
-    _CURRENT_TOKEN.set(None)
+    """Swap to a preallocated empty child ContextVar without decrefing owners."""
+    global _CURRENT_TOKEN, _FORK_PREPARED_CURRENT_TOKEN, _FORK_CURRENT_TOKEN_BANK_INDEX
+    prepared = _FORK_PREPARED_CURRENT_TOKEN
+    if prepared is None:
+        return
+    inherited = _CURRENT_TOKEN.get()
+    if inherited is not None:
+        quarantine_inherited_state("cancellation-token", inherited, _CURRENT_TOKEN)
+    _CURRENT_TOKEN = prepared
+    _FORK_PREPARED_CURRENT_TOKEN = None
+    _FORK_CURRENT_TOKEN_BANK_INDEX = 1 - _FORK_CURRENT_TOKEN_BANK_INDEX
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_current_token_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler(
+    "cancellation-token",
+    before=_prepare_cancellation_token_for_fork,
+    after_in_parent=_clear_cancellation_token_fork_preparation,
+    after_in_child=_reset_current_token_after_fork,
+)
 
 
 def current_operation_cancellation_token() -> OperationCancellationToken | None:
@@ -151,10 +189,25 @@ def current_operation_cancellation_token() -> OperationCancellationToken | None:
 
 
 def check_operation_cancelled(*, stage: str) -> None:
-    """Raise when the active operation has been cancelled."""
+    """Raise when cancelled and publish that a real cancellation checkpoint ran."""
     token = _CURRENT_TOKEN.get()
     if token is not None:
         token.raise_if_cancelled(stage=stage)
+    try:
+        from .concurrency_contracts import observe_runtime_concurrency_contract_noexcept
+
+        observe_runtime_concurrency_contract_noexcept("operation_cancellation_checkpoint")
+    except BaseException:
+        pass
+
+
+from .concurrency_contracts import (  # noqa: E402
+    register_runtime_concurrency_contract as _register_runtime_concurrency_contract,
+)
+
+_register_runtime_concurrency_contract(
+    "operation_cancellation_checkpoint", check_operation_cancelled
+)
 
 
 async def cancellable_async_sleep(seconds: float, *, stage: str) -> None:
@@ -196,6 +249,38 @@ def cancellable_sleep(seconds: float, *, stage: str) -> None:
     check_operation_cancelled(stage=stage)
 
 
+async def await_cancellable_future(future, *, stage: str, poll_seconds: float = 0.05, on_poll=None):
+    """Await one Future while deadlines/events remain able to wake the waiter.
+
+    ``Future`` completion alone cannot wake a task when the operation deadline
+    expires or an external cancellation event fires.  Poll only the cancellation
+    token at a short bounded cadence without cancelling the underlying Future;
+    the caller retains authoritative rollback of any queued/granted resource.
+    """
+    import asyncio
+
+    token = _CURRENT_TOKEN.get()
+    if token is None and on_poll is None:
+        return await future
+    while True:
+        if token is not None:
+            token.raise_if_cancelled(stage=stage)
+        if on_poll is not None:
+            on_poll()
+        if future.done():
+            return await future
+        remaining = None if token is None else token.remaining_seconds(poll_seconds)
+        if remaining is not None and remaining <= 0:
+            assert token is not None
+            token.raise_if_cancelled(stage=stage)
+        timeout = poll_seconds if remaining is None else max(0.001, remaining)
+        done, _pending = await asyncio.wait(
+            (future,), timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        if done:
+            return await future
+
+
 def bounded_wait_timeout(default_seconds: float | None) -> float | None:
     """Clamp one validated wait timeout to the active operation deadline."""
     normalized = normalize_duration(
@@ -214,6 +299,7 @@ def bounded_wait_timeout(default_seconds: float | None) -> float | None:
 __all__ = [
     "OperationCancellationToken",
     "activate_operation_cancellation_token",
+    "await_cancellable_future",
     "bounded_wait_timeout",
     "cancellable_async_sleep",
     "cancellable_sleep",

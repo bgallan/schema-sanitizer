@@ -96,10 +96,11 @@ def test_internal_parquet_replay_is_created_only_after_safe_decline(
         events.append("native-decline")
         return False
 
-    def fake_replay(raw_arg: Any, *, feature: str) -> _Replay:
+    def fake_replay(raw_arg: Any, *, feature: str, memory_limit_bytes: int | None) -> _Replay:
         """Create and record the fallback replay."""
         assert raw_arg is raw
         assert feature == "internal fallback Parquet"
+        assert memory_limit_bytes is None
         events.append("replay-create")
         return _Replay(events)
 

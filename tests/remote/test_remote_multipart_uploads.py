@@ -40,6 +40,8 @@ class _Response:
         self.status = status
         self.headers = headers or {}
         self._body = body
+        self._offset = 0
+        self.content = self
         self._enter_error = enter_error
 
     async def __aenter__(self) -> _Response:
@@ -51,13 +53,16 @@ class _Response:
     async def __aexit__(self, *_exc: object) -> None:
         """Leave the fake response context."""
 
-    async def read(self) -> bytes:
-        """Return the configured body."""
-        return self._body
+    async def read(self, size: int) -> bytes:
+        """Return at most ``size`` bytes through the bounded reader API."""
+        end = min(len(self._body), self._offset + size)
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
 
-    async def text(self) -> str:
-        """Decode the configured body for error messages."""
-        return self._body.decode("utf-8", errors="replace")
+    def at_eof(self) -> bool:
+        """Report whether the configured body has been consumed."""
+        return self._offset == len(self._body)
 
 
 def _sparse_file(path: Path, size: int) -> None:
@@ -114,6 +119,9 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
             self.peak_active = 0
             self.completed_parts: list[dict[str, Any]] | None = None
             self.aborted = False
+            self.part_one_started = asyncio.Event()
+            self.part_two_completed = asyncio.Event()
+            self.completion_order: list[int] = []
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
             """Start one fake upload."""
@@ -125,7 +133,14 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
             self.active += 1
             self.peak_active = max(self.peak_active, self.active)
             try:
-                await asyncio.sleep((6 - part) * 0.001)
+                if part == 1:
+                    self.part_one_started.set()
+                    await asyncio.wait_for(self.part_two_completed.wait(), timeout=5)
+                elif part == 2:
+                    await asyncio.wait_for(self.part_one_started.wait(), timeout=5)
+                self.completion_order.append(part)
+                if part == 2:
+                    self.part_two_completed.set()
                 return {"ETag": f'"etag-{part}"'}
             finally:
                 self.active -= 1
@@ -156,6 +171,7 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
 
     assert client.peak_active > 1
     assert client.aborted is False
+    assert client.completion_order.index(2) < client.completion_order.index(1)
     assert client.completed_parts is not None
     assert [part["PartNumber"] for part in client.completed_parts] == [1, 2, 3, 4, 5]
 
@@ -429,11 +445,11 @@ def test_gcs_resumable_nonretryable_failure_aborts(
     assert session.aborted is True
 
 
-def test_azure_upload_uses_memory_bounded_sdk_concurrency(
+def test_azure_upload_serializes_ungoverned_sdk_concurrency(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Azure's SDK chunking consumes the shared operation-derived window."""
+    """Azure SDK fanout stays serial; governed operations own parallelism."""
     require_native()
     from schema_sanitizer.remote_impl.providers import azure
 
@@ -486,7 +502,7 @@ def test_azure_upload_uses_memory_bounded_sdk_concurrency(
     assert service.closed is True
     assert service.blob.kwargs is not None
     assert service.blob.kwargs["length"] == 80 << 20
-    assert 1 < service.blob.kwargs["max_concurrency"] <= 8
+    assert service.blob.kwargs["max_concurrency"] == 1
 
 
 def test_s3_multipart_reports_earliest_failing_part(
@@ -506,6 +522,8 @@ def test_s3_multipart_reports_earliest_failing_part(
         def __init__(self) -> None:
             """Initialize the fake provider state."""
             self.aborted = False
+            self.part_two_started = asyncio.Event()
+            self.part_three_failed = asyncio.Event()
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
             """Start one fake upload."""
@@ -515,9 +533,12 @@ def test_s3_multipart_reports_earliest_failing_part(
             """Fail the later ordinal first in wall-clock time."""
             part = int(kwargs["PartNumber"])
             if part == 2:
-                await asyncio.sleep(0.02)
+                self.part_two_started.set()
+                await asyncio.wait_for(self.part_three_failed.wait(), timeout=5)
                 raise ValueError("canonical part 2 failure")
             if part == 3:
+                await asyncio.wait_for(self.part_two_started.wait(), timeout=5)
+                self.part_three_failed.set()
                 raise ValueError("later part 3 failure")
             await asyncio.sleep(0)
             return {"ETag": f'"etag-{part}"'}

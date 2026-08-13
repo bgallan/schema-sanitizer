@@ -1,0 +1,128 @@
+---
+name: Run quality, security, and Python coverage
+description: Execute source-only quality, security, audit, and coverage checks.
+runs:
+  using: composite
+  steps:
+    - name: Install development and audit tools
+      shell: bash
+      run: >-
+        python -m pip install -U pip '.[dev]'
+        coverage==7.15.4 pip-audit==2.10.1 bandit==1.9.4
+        tomli==2.4.1
+    - name: Lint, format, and static typing
+      shell: bash
+      run: pre-commit run --all-files
+    - name: Build dependency inputs and audit them
+      shell: bash
+      run: |
+        python - <<'PY'
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
+        from pathlib import Path
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        project = pyproject.get("project", {})
+        runtime = list(project.get("dependencies", []))
+        build = list(pyproject.get("build-system", {}).get("requires", []))
+        extras = [
+            requirement
+            for values in project.get("optional-dependencies", {}).values()
+            for requirement in values
+        ]
+        ci_tools = [
+            "abi3audit==0.0.26",
+            "actionlint-py==1.7.12.24",
+            "bandit==1.9.4",
+            "build==1.5.0",
+            "cibuildwheel==4.2.0",
+            "cmakelang==0.6.13",
+            "coverage==7.15.4",
+            "detect-secrets==1.5.0",
+            "mypy==1.19.1",
+            "packaging==26.3",
+            "pip-audit==2.10.1",
+            "shellcheck-py==0.11.0.1",
+            "shfmt-py==4.0.0",
+            "toml-sort==0.24.3",
+            "twine==7.0.0",
+            "yamlfix==1.18.0",
+            "zizmor==1.29.0",
+        ]
+        for name, requirements in (
+            ("runtime-requirements.txt", runtime),
+            ("full-requirements.txt", runtime + build + extras + ci_tools),
+        ):
+            Path(name).write_text(
+                "\n".join(dict.fromkeys(requirements)) + "\n",
+                encoding="utf-8",
+            )
+        PY
+        pip-audit -r runtime-requirements.txt --progress-spinner off
+        pip-audit -r full-requirements.txt --progress-spinner off
+    - name: Static Python security scan
+      shell: bash
+      run: bandit -r src meta/ci -ll
+    - name: Secret scan
+      shell: bash
+      run: |
+        detect-secrets scan \
+          --no-verify \
+          --exclude-files '^(\.git/|build/|dist/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|fuzz/(corpus|regressions)/(csv|json|parquet|xml)/)' \
+          > .detect-secrets.ci.json
+        python meta/ci/quality/check_detect_secrets_report.py .detect-secrets.ci.json
+    - name: Benchmark harness smoke
+      shell: bash
+      run: python -m benchmarks.ingestion.cli --rows 8 --width 2 --repeats 1
+    - name: Collect contextual Python branch coverage
+      shell: bash
+      run: |
+        coverage erase
+        coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=regular -m pytest -q \
+          tests/io/test_api.py \
+          tests/io/test_input_python_and_local.py \
+          tests/io/test_input_xml_and_public_api.py \
+          tests/sinks/test_sinks_csv_jsonl.py \
+          tests/pipeline/test_modified_time_csv_discovery.py \
+          tests/pipeline/test_modified_time_csv_planning.py \
+          tests/pipeline/test_source_manifest_inputs.py \
+          tests/pipeline/test_csv_header_modes.py \
+          tests/pipeline/test_csv_union_projection.py \
+          tests/pipeline/test_modified_time_csv_schema.py \
+          tests/pipeline/test_modified_time_csv_contracts.py
+        coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=adversarial -m pytest -q \
+          tests/io/test_contracts.py \
+          tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py \
+          tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py \
+          tests/concurrency/test_runtime_resource_close_and_finalization.py \
+          tests/sinks/test_streaming_writer_lifecycle.py \
+          tests/remote/test_async_remote_scheduler.py \
+          tests/quality/test_high_risk_coverage_gaps.py \
+          tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
+        coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=integration -m pytest -q \
+          tests/io/test_input_remote_file_and_directory_staging.py \
+          tests/io/test_input_remote_directory_discovery.py \
+          tests/io/test_input_remote_lazy_json_plans.py \
+          tests/remote/test_cloud_emulator_configuration.py \
+          tests/remote/test_bigquery_integration.py \
+          tests/pipeline/test_example_08_orchestration.py \
+          tests/pipeline/test_example_08_fake_cloud.py
+        coverage combine
+        coverage report --fail-under=44
+        coverage html --show-contexts -d coverage-python-html
+        coverage xml -o coverage-python.xml
+        coverage json -o coverage-python.json
+        python meta/ci/quality/report_risk_coverage.py coverage-python.json \
+          --output coverage-python-risk-gaps.txt
+    - name: Upload Python branch coverage
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: python-branch-coverage
+        path: |
+          coverage-python-html/
+          coverage-python.xml
+          coverage-python.json
+          coverage-python-risk-gaps.txt
+        if-no-files-found: error
+        retention-days: 14

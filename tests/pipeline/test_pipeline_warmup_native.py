@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from pipeline_shared import *  # noqa: F403
+from _support.pipeline import *  # noqa: F403
 
 
 def test_pipeline_warm_up_prefers_native_auto_registry_stream(

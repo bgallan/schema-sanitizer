@@ -221,8 +221,9 @@ def _reset_native_registry_state_after_fork() -> None:
     _NATIVE_REGISTRY_STATE.set(None)
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_native_registry_state_after_fork)
+from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
+
+_register_fork_handler("schema-registry", mode="quarantine_only")
 
 
 def current_native_registry_state() -> Any | None:

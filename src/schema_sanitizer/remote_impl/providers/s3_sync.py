@@ -7,6 +7,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Iterator
 
+from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.sync_retry import retry_sync
@@ -20,8 +21,11 @@ from ...input_impl.directory_inputs import (
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_sync_reader_to_file
+from ..io_footprint import open_remote_local_file
+from ..sync_cleanup_escrow import reserve_sync_cleanup
 from ..sync_http import TRANSFER_CHUNK_BYTES
 from ..upload_policy import (
+    acquire_s3_multipart_manifest,
     read_upload_part,
     release_upload_payload,
     remote_upload_policy,
@@ -40,17 +44,47 @@ def _client_options() -> dict[str, Any]:
     }
 
 
-@contextmanager
-def open_client() -> Iterator[Any]:
-    """Open one blocking S3 client and close it on the caller thread."""
-    session_module = import_module("botocore.session")
-    client = session_module.get_session().create_client("s3", **_client_options())
-    try:
-        yield client
-    finally:
+class _S3ClientOwner:
+    """Retryable physical owner for one synchronous Botocore client."""
+
+    def __init__(self) -> None:
+        self.client: Any | None = None
+
+    def close(self) -> None:
+        client = self.client
+        if client is None:
+            return
         close = getattr(client, "close", None)
         if close is not None:
             close()
+        self.client = None
+
+
+@contextmanager
+def open_client() -> Iterator[Any]:
+    """Open S3 under pre-reserved terminal cleanup + network-FD ownership."""
+    owner = _S3ClientOwner()
+    reservation = reserve_sync_cleanup(label="s3_sync_client", network_fds=1)
+    reservation.bind_owner(owner)
+    primary: BaseException | None = None
+    try:
+        session_module = import_module("botocore.session")
+        owner.client = session_module.get_session().create_client("s3", **_client_options())
+        yield owner.client
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try:
+            reservation.close_and_commit()
+        except BaseException as cleanup_error:
+            reservation.abandon_to_escrow()
+            if primary is not None:
+                add_bounded_note(
+                    primary, "S3 synchronous cleanup retained for retry", cleanup_error
+                )
+            else:
+                raise
 
 
 def _error_identity(exc: Exception) -> tuple[Any, Any]:
@@ -183,7 +217,9 @@ def _multipart_upload(
         raise RuntimeError("S3 multipart upload did not return an upload id")
     retries = memory_budget(memory_limit_bytes).async_retries
     parts: list[dict[str, Any]] = []
+    manifest = None
     try:
+        manifest = acquire_s3_multipart_manifest(tuning.part_count)
         for index in range(tuning.part_count):
             payload = read_upload_part(local_path, index, tuning.part_bytes, tuning.file_size)
             part_number = index + 1
@@ -205,7 +241,7 @@ def _multipart_upload(
                 etag = response.get("ETag") if isinstance(response, dict) else None
                 if not isinstance(etag, str) or not etag:
                     raise RuntimeError(f"S3 multipart part {part_number} did not return an ETag")
-                parts.append({"ETag": etag, "PartNumber": part_number})
+                manifest.append_part(parts, etag, part_number)
             finally:
                 release_upload_payload(payload)
         final_stat = source.stat()
@@ -230,6 +266,9 @@ def _multipart_upload(
         except BaseException as abort_exc:
             add_bounded_note(exc, "S3 multipart abort also failed", abort_exc)
         raise
+    finally:
+        if manifest is not None:
+            manifest.close()
 
 
 def upload_file(
@@ -254,7 +293,9 @@ def upload_file(
 
         def request() -> None:
             """Reopen the complete spool for each direct PUT attempt."""
-            with Path(local_path).open("rb") as file_handle:
+            with open_remote_local_file(
+                local_path, "rb", label="s3_sync_upload_source"
+            ) as file_handle:
                 client.put_object(Bucket=ref.bucket, Key=ref.key, Body=file_handle)
 
         retry_sync(request, retries=retries, should_retry=_retryable, throttle_key="s3")
@@ -303,14 +344,14 @@ def list_files(
                     continue
                 size = item.get("Size") if isinstance(item.get("Size"), int) else None
                 remote_file = RemoteFile(f"s3://{ref.bucket}/{key}", relative, size)
-                metadata_budget.charge_file(remote_file)
+                metadata_budget.charge_file(remote_file, associations=4)
                 files.append(remote_file)
             if not payload.get("IsTruncated"):
                 break
             token = payload.get("NextContinuationToken")
             if not isinstance(token, str) or not token:
                 raise RuntimeError(f"S3 list for {uri!r} was truncated without a token")
-    files.sort(key=lambda file: file.name)
+    governed_sort(files, key=lambda file: file.name, stage="remote_discovery_sort")
     return files
 
 
@@ -322,9 +363,10 @@ def directories_containing_files(
 ) -> DirectoryDiscovery[RemoteFile]:
     """Discover requested S3 child directories serially in canonical order."""
     accepted = normalize_extensions(suffixes)
+    metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     discovery = DirectoryDiscoveryBuilder[RemoteFile].from_uris(
         uris,
-        metadata_budget=current_directory_metadata_budget(memory_limit_bytes),
+        metadata_budget=metadata_budget,
     )
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
     for uri in uris:
@@ -333,7 +375,12 @@ def directories_containing_files(
         if parsed is None:
             continue
         parent_prefix, child = parsed
-        groups.setdefault((ref.bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+        # pass63 proof anchor: metadata_budget.charge_group_associations()
+        discovery.publish_group_association(
+            lambda: (
+                groups.setdefault((ref.bucket, parent_prefix), {}).setdefault(child, []).append(uri)
+            )
+        )
     retries = memory_budget(memory_limit_bytes).async_retries
     with open_client() as client:
         for (bucket, parent_prefix), children in groups.items():

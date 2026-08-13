@@ -10,6 +10,7 @@ from ...core_impl.atomic_output import atomic_local_output
 from ...core_impl.dependencies import ensure_optional_dependency, ensure_pyarrow
 from ...core_impl.execution_policy import normalize_threading_mode
 from ...core_impl.native_symbols import COALESCING_STREAM_WRAP
+from ...core_impl.process_resources import open_governed_file
 from ...core_impl.uris import local_output_path_or_reject_remote
 from ..pyarrow.file_metadata import prepare_file_output_metadata_stream
 from ..pyarrow.metadata_native import CapsuleArrowStream
@@ -121,10 +122,15 @@ def write_parquet_stream(
 
     try:
         with output_context as target:
+            governed_target = None
+            sink_target = target
+            if isinstance(target, (str, os.PathLike)):
+                governed_target = open_governed_file(target, "wb")
+                sink_target = governed_target
             writer: Any | None = None
             try:
                 writer = pq.ParquetWriter(
-                    target,
+                    sink_target,
                     metadata.schema,
                     **pyarrow_parquet_writer_options(
                         parquet_compression=parquet_compression,
@@ -139,7 +145,11 @@ def write_parquet_stream(
                     memory_limit_bytes=memory_limit_bytes,
                 )
             finally:
-                if writer is not None:
-                    writer.close()
+                try:
+                    if writer is not None:
+                        writer.close()
+                finally:
+                    if governed_target is not None:
+                        governed_target.close()
     finally:
         metadata.close()

@@ -275,7 +275,7 @@ write_stream(ArrowArrayStream *stream, Output &out_file,
   const auto output_worker_ceiling =
       scale_wide_fixed_output ? wide_fixed_worker_ceiling_for(
                                     operation_workers, root.children.size())
-      : wide_flat ? kMinimumWideFlatJsonlWorkers
+      : wide_flat             ? kMinimumWideFlatJsonlWorkers
                   : ordered_text_output::kDefaultOutputWorkerCeiling;
   const auto reclaim_wide_variable_packet_window =
       wide_flat && !wide_fixed_flat;

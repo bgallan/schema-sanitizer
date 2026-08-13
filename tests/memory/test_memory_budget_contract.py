@@ -140,8 +140,15 @@ def test_public_none_budget_is_fixed_in_the_operation_policy(
     )
     expected = native_core.execution_policy(1, automatic)
     assert result.execution_policy is not None
-    assert result.execution_policy["worker_arena_bytes"] == expected[5]
-    assert result.execution_policy["effective_workers"] == expected[2]
+    # The process-global physical-thread governor may legitimately narrow the
+    # operation after the native sizing pass. Worker-arena bytes are redistributed
+    # across the granted workers, so compare the preserved aggregate arena rather
+    # than requiring the ungovened worker count byte-for-byte.
+    granted_workers = int(result.execution_policy["effective_workers"])
+    assert 1 <= granted_workers <= int(expected[2])
+    granted = native_core.execution_policy(1, automatic, granted_workers)
+    assert int(result.execution_policy["worker_arena_bytes"]) == int(granted[5])
+    assert result.execution_policy["temporary_storage_limit_bytes"] == automatic
 
 
 def test_file_output_streams_input_larger_than_global_budget(tmp_path: Path) -> None:
@@ -184,14 +191,19 @@ def test_invalid_memory_limits_fail_before_native_execution() -> None:
 
 
 def test_repository_environment_access_is_limited_to_resource_hardening() -> None:
-    """Only documented resource-hardening owners inspect process environment."""
+    """Only documented resource owners and the release preflight inspect the environment."""
     root = Path(__file__).resolve().parents[2]
-    ignored = {".git", "build-pass14", "__pycache__", ".pytest_cache"}
+    ignored = {".git", "__pycache__", ".pytest_cache"}
     offenders: list[str] = []
     for path in root.rglob("*"):
         if path == Path(__file__).resolve():
             continue
-        if not path.is_file() or any(part in ignored for part in path.parts):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root)
+        if any(part in ignored or part == "build" for part in relative.parts) or (
+            relative.parts and relative.parts[0].startswith("build-")
+        ):
             continue
         if (
             path.suffix
@@ -214,6 +226,8 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         if any(token in text for token in _ENV_ACCESS_TOKENS):
             offenders.append(path.relative_to(root).as_posix())
     allowed_environment_files = {
+        "cpp/src/internal/runtime/operation_task_arena.cc",
+        "meta/ci/release/check_github_release_environment.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
         "src/schema_sanitizer/core_impl/cross_process_storage.py",
@@ -221,11 +235,17 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         "src/schema_sanitizer/core_impl/path_identity.py",
         "src/schema_sanitizer/core_impl/safety_margins.py",
         "src/schema_sanitizer/core_impl/temporary_janitor.py",
-        "tests/concurrency/test_concurrency_memory_hardening_pass4.py",
-        "tests/concurrency/test_concurrency_memory_hardening_pass5.py",
-        "tests/memory/test_memory_safety_pass31.py",
-        "tests/memory/test_memory_safety_pass35.py",
-        "tests/memory/test_memory_safety_pass36.py",
-        "tests/memory/test_memory_safety_pass41.py",
+        "tests/concurrency/test_concurrency_cross_process_telemetry_tuning.py",
+        "tests/concurrency/test_concurrency_cancellation_and_resource_lifecycle.py",
+        "tests/examples/test_example_entrypoints.py",
+        "tests/memory/test_memory_cancelled_bridge_retains_submission_until_real_task_terminal.py",
+        "tests/memory/test_memory_external_claim_is_published_atomically.py",
+        "tests/memory/test_memory_rejected_retry_replacement_keeps_previous_owner.py",
+        "tests/memory/test_memory_external_admission_closes_before_internal_teardown_reserve.py",
+        "tests/memory/test_memory_native_cpu_admission_precedes_dequeue_commit.py",
+        "tests/memory/test_memory_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure.py",
+        "tests/memory/test_memory_resident_zero_is_authoritative_on_public_acquire.py",
+        "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
+        "cpp/tests/ordered_executor_tsan.cc",
     }
     assert set(offenders) <= allowed_environment_files

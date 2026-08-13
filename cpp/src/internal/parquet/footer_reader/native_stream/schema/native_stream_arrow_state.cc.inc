@@ -253,13 +253,49 @@ struct NativeParquetPageScratch {
 };
 
 struct NativeParquetColumnWorkerState {
+  sanitize::internal::ProcessFdPermitLease file_fd_lease;
   std::ifstream file;
   NativeParquetPageScratch page_scratch;
+
+  NativeParquetColumnWorkerState() = default;
+  NativeParquetColumnWorkerState(const NativeParquetColumnWorkerState &) =
+      delete;
+  NativeParquetColumnWorkerState &
+  operator=(const NativeParquetColumnWorkerState &) = delete;
+
+  NativeParquetColumnWorkerState(
+      NativeParquetColumnWorkerState &&other) noexcept
+      : file_fd_lease(std::move(other.file_fd_lease)),
+        file(std::move(other.file)),
+        page_scratch(std::move(other.page_scratch)) {}
+
+  NativeParquetColumnWorkerState &
+  operator=(NativeParquetColumnWorkerState &&other) noexcept {
+    if (this != &other) {
+      // A vector move-assignment may target a live worker. Close/commit its
+      // physical file before its logical lease can be overwritten.
+      sanitize::internal::close_stream_and_commit(file, file_fd_lease);
+      file_fd_lease.reset();
+      file = std::move(other.file);
+      page_scratch = std::move(other.page_scratch);
+      file_fd_lease = std::move(other.file_fd_lease);
+    }
+    return *this;
+  }
+
+  ~NativeParquetColumnWorkerState() noexcept {
+    sanitize::internal::close_stream_and_commit(file, file_fd_lease);
+  }
 };
 
 struct NativeParquetStreamState {
   std::string path;
+  sanitize::internal::ProcessFdPermitLease file_fd_lease;
   std::ifstream file;
+
+  ~NativeParquetStreamState() noexcept {
+    sanitize::internal::close_stream_and_commit(file, file_fd_lease);
+  }
   std::int64_t max_buffer_bytes = 0;
   std::int64_t max_batch_rows = 0;
   std::int64_t max_page_bytes = 0;

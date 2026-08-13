@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <type_traits>
 
 namespace sanitize::internal {
 
@@ -73,12 +72,36 @@ struct MemoryBudget {
   std::int64_t source_discovery_concurrency = 64;
 };
 
+[[nodiscard]] inline std::uint64_t
+backpressure_timeout_millis_from(const MemoryBudget &budget) noexcept {
+  if (!(budget.async_timeout_seconds > 0.0)) {
+    return 1'000U;
+  }
+  const auto millis = budget.async_timeout_seconds * 1000.0;
+  return static_cast<std::uint64_t>(
+      std::min(30'000.0, std::max(1'000.0, millis)));
+}
+
+[[nodiscard]] inline std::uint64_t
+backpressure_deadline_millis_from(const MemoryBudget &budget) noexcept {
+  // The per-saturation timeout is deliberately capped at 30s, but the logical
+  // operation deadline must preserve the caller's wider async timeout. Keeping
+  // these two concepts separate prevents a 120s operation from becoming
+  // terminally expired 30s after arena construction.
+  if (!(budget.async_timeout_seconds > 0.0)) {
+    return 1'000U;
+  }
+  const auto millis = budget.async_timeout_seconds * 1000.0;
+  return static_cast<std::uint64_t>(
+      std::min(86'400'000.0, std::max(1'000.0, millis)));
+}
+
 [[nodiscard]] constexpr std::int64_t
 normalize_memory_limit_bytes(std::int64_t requested) noexcept {
   if (requested <= 0) {
-    if (std::is_constant_evaluated()) {
-      return kDefaultMemoryLimitBytes;
-    }
+    // Automatic sizing is inherently a runtime operation. Calling the
+    // non-constexpr platform probe here deliberately prevents a literal
+    // sentinel from being trial-constant-evaluated to the fallback default.
     return automatic_memory_limit_bytes();
   }
   return std::min(requested, kHardMaxMemoryLimitBytes);
