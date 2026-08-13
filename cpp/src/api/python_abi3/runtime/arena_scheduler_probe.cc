@@ -391,6 +391,56 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
     return nullptr;
   }
   auto arena = std::move(arena_result).ValueOrDie();
+
+  // The low-core contract reports the complete physical worker budget, while
+  // production startup intentionally remains demand-driven. Prewarm each
+  // low-core slot behind a probe-only gate before arranging the measured
+  // queues, so short callbacks cannot finish soon enough for their slot to be
+  // reused while another physical worker is still unstarted.
+  if (workers <= 8U) {
+    struct PrewarmState {
+      std::atomic<std::size_t> finished{0};
+      std::atomic<bool> release{false};
+    };
+    auto prewarm = std::make_shared<PrewarmState>();
+    const auto all_plan =
+        arena->PrepareSubmissionPlan(workers, TaskArenaLane::kAll);
+    for (std::size_t ordinal = 0; ordinal < workers; ++ordinal) {
+      auto status = arena->Submit(
+          [prewarm](std::size_t, sanitize::internal::StopToken stop) {
+            (void)wait_gate_or_stop(&prewarm->release, stop);
+            prewarm->finished.fetch_add(1, std::memory_order_release);
+          },
+          all_plan, ordinal);
+      if (!status.ok()) {
+        release_gate(&prewarm->release);
+        PyErr_SetString(PyExc_RuntimeError, status.ToString().c_str());
+        return nullptr;
+      }
+    }
+    if (arena->started_workers() != workers) {
+      release_gate(&prewarm->release);
+      PyErr_SetString(PyExc_RuntimeError,
+                      "output preference probe did not prewarm every worker");
+      return nullptr;
+    }
+    release_gate(&prewarm->release);
+    const auto prewarm_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto prewarm_drained =
+        wait_until(prewarm->finished, workers, prewarm_deadline);
+    while ((arena->queued_tasks() != 0U || arena->active_tasks() != 0U) &&
+           std::chrono::steady_clock::now() < prewarm_deadline) {
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    if (!prewarm_drained || arena->queued_tasks() != 0U ||
+        arena->active_tasks() != 0U) {
+      PyErr_SetString(PyExc_RuntimeError,
+                      "output preference probe prewarm did not drain");
+      return nullptr;
+    }
+  }
+
   std::atomic<std::size_t> blockers_started{0};
   std::atomic<std::size_t> high_outputs_finished{0};
   std::atomic<std::size_t> broad_finished{0};

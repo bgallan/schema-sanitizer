@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,28 @@ def test_process_cpu_governor_bounds_two_concurrent_registrations() -> None:
     assert completed == 256
     if capacity < completed:
         assert waits > 0
+
+
+def test_process_cpu_governor_observes_live_affinity_changes() -> None:
+    """Caching cgroup discovery must not cache a stale process affinity."""
+    require_native()
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        pytest.skip("process CPU affinity is unavailable")
+    original_affinity = os.sched_getaffinity(0)
+    if len(original_affinity) < 2:
+        pytest.skip("host exposes only one CPU")
+
+    selected = {min(original_affinity)}
+    try:
+        os.sched_setaffinity(0, selected)
+        capacity, peak, waits, completed = native_core.process_cpu_governor_probe(32)
+    finally:
+        os.sched_setaffinity(0, original_affinity)
+
+    assert capacity == 1
+    assert peak == 1
+    assert waits > 0
+    assert completed == 32
 
 
 def test_text_output_uses_worker_local_governed_scratch() -> None:

@@ -267,13 +267,42 @@ def test_native_physical_thread_envelope_counts_external_and_pending_threads() -
     assert "StartGovernedNativeThread" in source
 
 
-def test_process_cpu_governor_reads_live_cpu_capacity_for_each_admission() -> None:
+def test_process_cpu_governor_refreshes_capacity_outside_admission_mutex() -> None:
     source = (ROOT / "cpp/src/internal/runtime/process_cpu_governor.hh").read_text()
-    assert "return std::max<std::int64_t>(1, available_cpu_capacity());" in source
-    assert "const capacity_" not in source
     acquire = source[source.index("AcquireTask(") : source.index("void ReleaseTask")]
-    assert "active_tasks_ >= capacity()" in acquire
-    assert "active_tasks_ < capacity()" in acquire
+    lock = acquire.index("std::unique_lock lock(mutex_)")
+    assert acquire.index("const auto current_capacity = RefreshCapacity();") < lock
+    assert "available_cpu_capacity()" not in acquire[lock:]
+    assert "active_tasks_ >= CachedCapacity()" in acquire
+    assert "active_tasks_ < CachedCapacity()" in acquire
+    assert "std::atomic<std::int64_t> cached_capacity_{1};" in source
+
+    capacity = (ROOT / "cpp/src/internal/runtime/cpu_capacity.hh").read_text()
+    assert "kCgroupCapacityRefreshPeriodNs = 250'000'000LL" in capacity
+    assert "inline constinit CgroupCapacityCache" in capacity
+    assert "inline constinit std::atomic<std::int64_t> g_hardware_count{0};" in capacity
+    assert "std::atomic<std::uint64_t> owner_pid" in capacity
+    assert "compare_exchange_strong" in capacity
+    assert "std::mutex" not in capacity
+    assert "cached_cgroup_capacity()" in capacity
+    platform_start = capacity.index("std::int64_t platform_count()")
+    platform_count = capacity[
+        platform_start : capacity.index("#elif defined(_WIN32)", platform_start)
+    ]
+    assert "affinity_count()" in platform_count
+    assert "cached_cgroup_capacity()" in platform_count
+    assert "return 1;" in capacity[capacity.index("sample_cgroup_capacity") :]
+    assert "ready_.wait_until(lock, refresh_at)" in source
+    timeout_refresh = acquire[
+        acquire.index("if (ready_.wait_until(lock, refresh_at)") : acquire.index(
+            "refresh_at =", acquire.index("if (ready_.wait_until(lock, refresh_at)")
+        )
+    ]
+    assert (
+        timeout_refresh.index("lock.unlock();")
+        < timeout_refresh.index("(void)RefreshCapacity();")
+        < timeout_refresh.index("lock.lock();")
+    )
 
 
 def test_native_registry_has_dynamic_global_budget_and_two_choice_sharding() -> None:

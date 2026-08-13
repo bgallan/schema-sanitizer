@@ -4,10 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
-
-from schema_sanitizer.core_impl.native_runtime import native_core
-
 ROOT = Path(__file__).resolve().parents[2]
 RING = ROOT / "cpp/src/internal/runtime/ordered_executor_completion_ring.hh"
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
@@ -54,19 +50,3 @@ def test_packet_and_outcome_aggregate_layouts_remain_unchanged() -> None:
     assert "completion_slot" not in outcome
     assert "Payload payload;" in packet
     assert "sanitize::Result<Value> result;" in outcome
-
-
-def test_native_completion_ring_preserves_exact_order_and_counts() -> None:
-    """The cursor implementation preserves the bounded native completion contract."""
-    require_native()
-    elapsed, completed, checksum, started, peak, queued, submitted = (
-        native_core.ordered_executor_arena_completion_probe(4, 20_000, 0)
-    )
-
-    assert elapsed > 0
-    assert completed == 20_000
-    assert checksum >= 0
-    assert started == 4
-    assert 1 <= peak <= 4
-    assert queued == 0
-    assert submitted == 20_000

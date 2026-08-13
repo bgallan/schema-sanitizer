@@ -4,10 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
-
-from schema_sanitizer.core_impl.native_runtime import native_core
-
 ROOT = Path(__file__).resolve().parents[2]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
@@ -40,19 +36,3 @@ def test_local_pool_keeps_ring_outcome_validation() -> None:
     assert "std::vector<std::optional<Outcome>> completed_;" in executor
     assert "slot->ordinal == next_take_ordinal_" in executor
     assert "store_outcome_locked" in executor
-
-
-def test_native_completion_preserves_order_for_two_and_four_workers() -> None:
-    """Both measured worker counts retain exact native completion invariants."""
-    require_native()
-    for workers in (2, 4):
-        elapsed, completed, checksum, started, peak, queued, submitted = (
-            native_core.ordered_executor_arena_completion_probe(workers, 20_000, 0)
-        )
-        assert elapsed > 0
-        assert completed == 20_000
-        assert checksum >= 0
-        assert started == workers
-        assert 1 <= peak <= workers
-        assert queued == 0
-        assert submitted == 20_000

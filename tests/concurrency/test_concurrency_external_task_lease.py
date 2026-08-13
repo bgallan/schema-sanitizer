@@ -69,20 +69,8 @@ def test_lease_has_typed_owner_and_member_policy():
     assert "void *owner_" not in s
 
 
-def test_native_order_cancel_drain():
-    """Verify the named concurrency regression contract."""
+def test_native_cancellation_drains_exactly():
+    """Cancelling an arena leaves no active or queued native tasks."""
     require_native()
-    for w in (2, 4, 5, 8, 16):
-        e, c, _, started, peak, q, submitted = native_core.ordered_executor_arena_completion_probe(
-            w, 4000, 0
-        )
-        assert (
-            e > 0
-            and c == 4000
-            and 1 <= started <= w
-            and 1 <= peak <= w
-            and q == 0
-            and submitted == 4000
-        )
     _, active, observed, q = native_core.operation_task_arena_cancellation_probe()
     assert active == 0 and observed >= 1 and q == 0

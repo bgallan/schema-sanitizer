@@ -181,13 +181,15 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.11'
+          # Use one exact patch with official binaries on all four runners so
+          # platform comparisons do not mix different CPython maintenance releases.
+          python-version: 3.11.9
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install wheel tooling
         run: >-
           python -m pip install -U pip
-          abi3audit==0.0.26 cibuildwheel==4.2.0 pytest
+          abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
       - name: Assert the build environment has no PyArrow
         run: >-
           python -c
@@ -236,7 +238,8 @@ jobs:
       - name: Install full-suite dependencies
         run: >-
           python -m pip install -U
-          pytest aiohttp pyarrow pandas polars duckdb
+          pytest==9.1.1 aiohttp==3.14.3 pyarrow==25.0.1
+          pandas==3.0.5 polars==1.43.2 duckdb==1.5.5
       - name: Compile and certify the Parquet runtime
         shell: bash
         run: |
@@ -245,6 +248,81 @@ jobs:
           mkdir -p artifacts
           python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
             --certificate-output artifacts/parquet-contract-runtime-certificate.json
+      - name: Record runner CPU environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "artifacts/runner-cpu-${{ matrix.artifact }}.json" <<'PY'
+          import json
+          import os
+          import platform
+          import sys
+          from importlib import metadata
+          from pathlib import Path
+          def optional_text(path: str) -> str | None:
+              try:
+                  return Path(path).read_text(encoding="utf-8").strip()
+              except (OSError, UnicodeError):
+                  return None
+          def optional_key_values(path: str) -> dict[str, int] | None:
+              text = optional_text(path)
+              if text is None:
+                  return None
+              values: dict[str, int] = {}
+              try:
+                  for line in text.splitlines():
+                      key, value = line.split()
+                      values[key] = int(value)
+              except (TypeError, ValueError):
+                  return None
+              return values
+          affinity: list[int] | None = None
+          if hasattr(os, "sched_getaffinity"):
+              try:
+                  affinity = sorted(os.sched_getaffinity(0))
+              except OSError:
+                  pass
+          is_linux = sys.platform.startswith("linux")
+          evidence = {
+              "schema_version": 1,
+              "python": {
+                  "implementation": platform.python_implementation(),
+                  "version": platform.python_version(),
+              },
+              "installed_distributions": {
+                  name: metadata.version(name)
+                  for name in (
+                      "aiohttp",
+                      "duckdb",
+                      "pandas",
+                      "polars",
+                      "pyarrow",
+                      "pytest",
+                      "schema-sanitizer",
+                  )
+              },
+              "platform": {
+                  "system": platform.system(),
+                  "release": platform.release(),
+                  "machine": platform.machine(),
+              },
+              "cpu": {
+                  "logical_count": os.cpu_count(),
+                  "affinity": affinity,
+                  "affinity_count": len(affinity) if affinity is not None else None,
+                  "linux_cgroup_v2_cpu_max": (
+                      optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None
+                  ),
+                  "linux_cgroup_v2_cpu_stat": (
+                      optional_key_values("/sys/fs/cgroup/cpu.stat") if is_linux else None
+                  ),
+              },
+          }
+          output = Path(sys.argv[1])
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          print(output.read_text(encoding="utf-8"), end="")
+          PY
       - name: Cross-platform reader linear-scaling smoke
         shell: bash
         run: >-
@@ -264,6 +342,17 @@ jobs:
           --repeats 1
           --only parquet
           --output artifacts/threading-matrix-${{ matrix.artifact }}.json
+      - name: Cross-platform native completion stress
+        shell: bash
+        run: |
+          set -euo pipefail
+          pytest -q -o pythonpath=. \
+            -m native_stress \
+            --durations=10 \
+            --durations-min=0.05 \
+            --junitxml="artifacts/pytest-native-stress-${{ matrix.artifact }}.xml" \
+            tests/concurrency/test_ordered_executor_completion_probe.py \
+            2>&1 | tee "artifacts/pytest-native-stress-durations-${{ matrix.artifact }}.log"
       - name: Full suite including adapters, HTTP faults, and concurrency
         # Do not prepend src/: on Windows that bypasses the wheel's repaired DLL
         # bootstrap while still loading its native extension.
@@ -271,6 +360,7 @@ jobs:
         run: |
           set -euo pipefail
           pytest -q -o pythonpath=. \
+            -m 'not native_stress' \
             --durations=50 \
             --durations-min=0.05 \
             --junitxml="artifacts/pytest-${{ matrix.artifact }}.xml" \

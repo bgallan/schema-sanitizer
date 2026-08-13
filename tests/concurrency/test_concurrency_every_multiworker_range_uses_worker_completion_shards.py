@@ -5,10 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import require_native
-
-from schema_sanitizer.core_impl.native_runtime import native_core
-
 ROOT = Path(__file__).resolve().parents[2]
 ARENA_TELEMETRY = ROOT / "cpp/src/internal/runtime/operation_task_telemetry.cc.inc"
 EVIDENCE = ROOT / "benchmarks/evidence/concurrency/telemetry/completion-shards.json"
@@ -52,19 +48,3 @@ def test_evidence_covers_mid_and_high_worker_policies() -> None:
     for item in scenarios.values():
         assert item["candidate_wins"] == evidence["pair_count"] == 15
         assert item["paired_median_reduction_percent"] > 85.0
-
-
-def test_native_completion_drains_exactly_across_shard_boundaries() -> None:
-    """Verify the named concurrency regression contract."""
-    require_native()
-    for workers in (2, 4, 5, 8, 16):
-        elapsed, completed, checksum, started, peak, queued, submitted = (
-            native_core.ordered_executor_arena_completion_probe(workers, 20_000, 0)
-        )
-        assert elapsed > 0
-        assert completed == 20_000
-        assert checksum >= 0
-        assert 1 <= started <= workers
-        assert 1 <= peak <= workers
-        assert queued == 0
-        assert submitted == 20_000

@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <utility>
 
 namespace sanitize::internal {
 
@@ -109,9 +110,7 @@ public:
   MakeRegistration(std::size_t worker_count) noexcept {
     return Registration(this, worker_count);
   }
-  [[nodiscard]] std::int64_t capacity() const noexcept {
-    return std::max<std::int64_t>(1, available_cpu_capacity());
-  }
+  [[nodiscard]] std::int64_t capacity() noexcept { return RefreshCapacity(); }
 
 private:
   struct Waiter final {
@@ -119,6 +118,27 @@ private:
   };
 
   ProcessCpuGovernor() = default;
+
+  static constexpr auto kCapacityRefreshPeriod = std::chrono::milliseconds(250);
+
+  [[nodiscard]] std::int64_t CachedCapacity() const noexcept {
+    return std::max<std::int64_t>(
+        1, cached_capacity_.load(std::memory_order_acquire));
+  }
+
+  [[nodiscard]] std::int64_t RefreshCapacity() noexcept {
+    // available_cpu_capacity() may inspect affinity and, periodically, the
+    // cgroup hierarchy. Always sample before acquiring mutex_ so OS I/O cannot
+    // stall task release or FIFO admission. Wait predicates consume only the
+    // published atomic value.
+    const auto detected = std::max<std::int64_t>(1, available_cpu_capacity());
+    const auto previous =
+        cached_capacity_.exchange(detected, std::memory_order_acq_rel);
+    if (previous != detected) {
+      ready_.notify_all();
+    }
+    return detected;
+  }
 
   void Register() noexcept {
     registered_arenas_.fetch_add(1, std::memory_order_acq_rel);
@@ -162,7 +182,7 @@ private:
 
   [[nodiscard]] TaskLease AcquireTask(sanitize::internal::StopToken stop,
                                       std::size_t arena_width) noexcept {
-    const auto current_capacity = capacity();
+    const auto current_capacity = RefreshCapacity();
     if (registered_arenas_.load(std::memory_order_acquire) <= 1 &&
         static_cast<std::int64_t>(arena_width) <= current_capacity) {
       return {};
@@ -172,16 +192,45 @@ private:
     std::unique_lock lock(mutex_);
     const auto can_bypass = [&] {
       return registered_arenas_.load(std::memory_order_acquire) <= 1 &&
-             static_cast<std::int64_t>(arena_width) <= capacity();
+             static_cast<std::int64_t>(arena_width) <= CachedCapacity();
     };
     if (can_bypass()) {
       return {};
     }
     Enqueue(&waiter);
-    const bool contended = head_ != &waiter || active_tasks_ >= capacity();
-    const auto admitted = WaitWithStop(ready_, lock, stop, [&] {
-      return can_bypass() || (head_ == &waiter && active_tasks_ < capacity());
-    });
+    const bool contended =
+        head_ != &waiter || active_tasks_ >= CachedCapacity();
+    const auto can_admit = [&] {
+      return can_bypass() ||
+             (head_ == &waiter && active_tasks_ < CachedCapacity());
+    };
+    bool admitted = false;
+    auto wake_waiter = [this] { ready_.notify_all(); };
+    {
+      StopCallback<decltype(wake_waiter)> stop_callback(stop,
+                                                        std::move(wake_waiter));
+      auto refresh_at =
+          std::chrono::steady_clock::now() + kCapacityRefreshPeriod;
+      for (;;) {
+        if (stop.stop_requested()) {
+          break;
+        }
+        if (can_admit()) {
+          admitted = true;
+          break;
+        }
+        if (ready_.wait_until(lock, refresh_at) == std::cv_status::timeout) {
+          // Refresh affinity and the TTL-bound cgroup cache without mutex_. A
+          // quota increase therefore wakes an otherwise idle FIFO, while a
+          // decrease prevents further admission after existing leases drain.
+          lock.unlock();
+          (void)RefreshCapacity();
+          lock.lock();
+          refresh_at =
+              std::chrono::steady_clock::now() + kCapacityRefreshPeriod;
+        }
+      }
+    }
     const bool bypass = can_bypass();
     Remove(&waiter);
     if (!admitted || bypass) {
@@ -206,6 +255,7 @@ private:
     ready_.notify_all();
   }
 
+  std::atomic<std::int64_t> cached_capacity_{1};
   std::atomic<std::int64_t> registered_arenas_{0};
   std::mutex mutex_;
   std::condition_variable_any ready_;

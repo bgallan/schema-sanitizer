@@ -296,7 +296,8 @@ def test_cpu_governor_rechecks_dynamic_capacity_even_for_single_arena() -> None:
     acquire = source[source.index("AcquireTask(") : source.index("void ReleaseTask")]
     assert "arena_width" in acquire
     assert "arena_width) <= current_capacity" in acquire
-    assert "arena_width) <= capacity()" in acquire
+    assert "arena_width) <= CachedCapacity()" in acquire
+    assert "cached_capacity_.exchange(detected" in source
 
 
 def test_allocation_registry_uses_one_process_global_slab_with_shrink_only_admission() -> None:

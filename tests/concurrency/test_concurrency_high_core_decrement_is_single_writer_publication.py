@@ -47,22 +47,6 @@ def test_high_core_submission_rollback_matches_publication_strategy():
     assert "decrement_high_core_in_flight_locked();" in rollback
 
 
-def test_native_order_worker_bounds_and_drain():
-    """Both sides of the 8-worker boundary preserve exact ordered execution."""
-    require_native()
-    for workers in (2, 4, 5, 8, 16):
-        elapsed, completed, checksum, started, peak, queued, submitted = (
-            native_core.ordered_executor_arena_completion_probe(workers, 8000, 0)
-        )
-        assert elapsed > 0
-        assert completed == 8000
-        assert checksum >= 0
-        assert 1 <= started <= workers
-        assert 1 <= peak <= workers
-        assert queued == 0
-        assert submitted == 8000
-
-
 def test_native_cancellation_still_drains():
     """Terminalization does not leave active or queued arena tasks behind."""
     require_native()

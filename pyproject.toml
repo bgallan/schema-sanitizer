@@ -109,7 +109,7 @@ Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 audit-command = ""
 build = "cp311-*"
 build-verbosity = 1
-test-requires = ["pyarrow"]
+test-requires = ["pyarrow==25.0.1"]
 test-command = "python {project}/meta/ci/parquet/check_parquet_compression_matrix.py"
 
 [tool.cibuildwheel.linux]
@@ -133,6 +133,9 @@ show_error_codes = true
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "tests"]
+markers = [
+  "native_stress: high-volume native concurrency coverage run explicitly in CI"
+]
 
 [tool.ruff]
 line-length = 100

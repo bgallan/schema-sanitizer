@@ -43,21 +43,9 @@ def test_four_plus_hot_path_has_no_dynamic_global_stop_reload() -> None:
     assert "admission and park wakeup" in source
 
 
-def test_native_order_drain_and_cancellation_remain_exact() -> None:
-    """Verify the named concurrency regression contract."""
+def test_native_cancellation_remains_exact() -> None:
+    """The distinct worker loops preserve exact cancellation drain."""
     require_native()
-    for workers in (2, 4, 5, 8, 16):
-        elapsed, completed, checksum, started, peak, queued, submitted = (
-            native_core.ordered_executor_arena_completion_probe(workers, 8_000, 0)
-        )
-        assert elapsed > 0
-        assert completed == 8_000
-        assert checksum >= 0
-        assert 1 <= started <= workers
-        assert 1 <= peak <= workers
-        assert queued == 0
-        assert submitted == 8_000
-
     elapsed, active, observed_stop, queued = native_core.operation_task_arena_cancellation_probe()
     assert elapsed >= 0
     assert active == 0

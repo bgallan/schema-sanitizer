@@ -125,10 +125,21 @@ artifact, rather than an import from `src/`, on:
 | macOS 15 / ARM64 | `macosx_11_0_arm64` | Full wheel suite, ASan/UBSan parser fuzzing, and repeated concurrency probes. |
 
 Each wheel is built for CPython 3.11 with the stable ABI (`cp311-abi3`). The
-complete suite runs on 3.11 on every platform; Linux additionally executes the
-installed public conversion smoke on 3.12, 3.13, and 3.14, and every platform
-loads it on 3.14. Matrix jobs use `fail-fast: false`, preserving evidence from
-the other platforms when one fails.
+complete suite runs on the same CPython 3.11 patch and the same pinned direct
+adapter versions on all four platforms, so timing and behavior comparisons do
+not silently mix dependency or interpreter upgrades. Linux additionally
+executes the installed public conversion smoke on 3.12, 3.13, and 3.14, and
+every platform loads it on 3.14. Matrix jobs use `fail-fast: false`, preserving
+evidence from the other platforms when one fails.
+
+Ordered-executor completion has one canonical functional matrix and one
+high-volume native stress case. Every platform runs both profiles against its
+installed wheel. The normal suite excludes only the explicitly marked stress
+case, while a preceding step runs that case once and writes its own JUnit and
+duration reports. This keeps the workload identical across the four release
+targets without multiplying the same 16-worker probe through unrelated source
+contract tests. Local pytest runs still include both profiles unless a marker
+expression is supplied.
 
 Every full-suite invocation also emits a JUnit XML report with the duration of
 each test and a terminal log ranking the 50 slowest phases above 50 ms. Both
@@ -136,6 +147,14 @@ files identify their matrix platform and are retained in that platform's
 evidence artifact. The log is piped through `tee` with `pipefail`, so pytest's
 exit status remains authoritative; when pytest fails, the evidence upload still
 runs and preserves the partial diagnostics produced before the failure.
+
+Each matrix entry also records a runner manifest with the exact Python and
+installed package versions, operating-system and architecture identifiers,
+logical CPU count, and process affinity where supported. Linux adds its cgroup
+CPU quota and throttling counters. Hardware supplied by hosted runners is not
+identical across architectures, so this manifest distinguishes an environment
+difference from a product regression while the software and test workload stay
+fixed.
 
 Before the full suite, each installed wheel runs the reader performance gate.
 It enforces both normalized growth and the versioned absolute-latency policy in
@@ -188,7 +207,7 @@ retention periods:
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 30 days | Manual publication and external audit. |
 | `python-branch-coverage` | Contextual HTML, XML, JSON, and high-risk gap report. | 14 days | Maintainers and auditors. |
 | `native-llvm-coverage` | LLVM profiles, summaries, and contextual HTML. | 14 days | Maintainers and auditors. |
-| `platform-evidence-${{ matrix.artifact }}` | Pytest JUnit timings and slowest-phase log, Parquet certificate, and bounded benchmark results. | 14 days | Maintainers and auditors. |
+| `platform-evidence-${{ matrix.artifact }}` | Functional and native-stress JUnit timings, slowest-phase logs, runner/dependency manifest, Parquet certificate, and bounded benchmark results. | 14 days | Maintainers and auditors. |
 
 `distribution` downloads the four intermediate wheels, builds the sdist, and
 validates the five files as one set. It then creates a canonical

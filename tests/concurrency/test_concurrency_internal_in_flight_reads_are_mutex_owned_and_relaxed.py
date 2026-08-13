@@ -32,20 +32,9 @@ def test_dead_completed_counter_is_removed():
     assert "completed_count_" not in source
 
 
-def test_native_order_cancel_and_drain():
-    """Native order, cancellation, worker bounds, and final drain stay exact."""
+def test_native_cancellation_drain_stays_exact():
+    """Native cancellation leaves no active or queued arena work."""
     require_native()
-    for workers in (2, 4, 5, 8, 16):
-        elapsed, completed, checksum, started, peak, queued, submitted = (
-            native_core.ordered_executor_arena_completion_probe(workers, 6000, 0)
-        )
-        assert elapsed > 0
-        assert completed == 6000
-        assert checksum >= 0
-        assert 1 <= started <= workers
-        assert 1 <= peak <= workers
-        assert queued == 0
-        assert submitted == 6000
     _, active, observed, queued = native_core.operation_task_arena_cancellation_probe()
     assert active == 0
     assert observed >= 1

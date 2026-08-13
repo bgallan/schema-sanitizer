@@ -155,6 +155,16 @@ capacity separately considers CPU availability, affinity, and cgroup CPU
 limits. External runtime pools are charged without assuming that a configured
 width is proof of a matching resident thread identity.
 
+CPU admission keeps process affinity live while amortizing Linux cgroup
+hierarchy discovery over a bounded 250 ms sampling interval. Refreshed capacity
+is published before the governor admission mutex is acquired, so procfs and
+cgroup file reads never sit inside the per-task FIFO critical section. Waiting
+admissions periodically refresh the sample: quota increases wake progress and
+quota reductions stop new leases after already admitted work drains. The cache
+itself contains no process-shared lock and invalidates inherited observations
+by process identity. This is defensive containment only; the initialized
+runtime remains unsupported after `fork()` as described below.
+
 File-descriptor admission covers local inputs and outputs, remote sockets,
 provider sessions, temporary files, coordination journals, directory scans,
 and native readers and writers. Reservations and physically open descriptors

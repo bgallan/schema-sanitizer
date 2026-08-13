@@ -35,19 +35,9 @@ def test_low_core_and_consumption_paths_retain_atomic_rmw():
     assert "decrement_arena_in_flight_locked" not in header + completion
 
 
-def test_native_order_rollback_cancel_and_drain():
-    """Verify the named concurrency regression contract."""
+def test_native_cancellation_drains_after_publication() -> None:
+    """Cancellation after publication leaves no active or queued tasks."""
     require_native()
-    for workers in (2, 4, 5, 8, 16):
-        elapsed, completed, _, started, peak, queued, submitted = (
-            native_core.ordered_executor_arena_completion_probe(workers, 5000, 0)
-        )
-        assert elapsed > 0
-        assert completed == 5000
-        assert 1 <= started <= workers
-        assert 1 <= peak <= workers
-        assert queued == 0
-        assert submitted == 5000
     _, active, observed, queued = native_core.operation_task_arena_cancellation_probe()
     assert active == 0
     assert observed >= 1

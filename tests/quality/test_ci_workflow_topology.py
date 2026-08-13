@@ -325,7 +325,7 @@ def test_wheel_build_runs_the_stable_abi_audit_explicitly() -> None:
     audit = next(step for step in _step_bodies(ci) if "name: Audit the CPython stable ABI" in step)
 
     assert cibuildwheel["audit-command"] == ""
-    assert "abi3audit==0.0.26 cibuildwheel==4.2.0 pytest" in install
+    assert "abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1" in install
     assert "shell: bash" in audit
     assert "python -m abi3audit --strict --report wheelhouse/*.whl" in audit
     assert (
@@ -372,6 +372,109 @@ def test_platform_suite_exercises_the_installed_wheel() -> None:
     platform_job = _job_body(_workflow("ci.yml"), "platform-wheels")
 
     assert "pytest -q -o pythonpath=." in platform_job
+
+
+def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
+    """All release wheels are compared with the same Python and adapters."""
+    ci = _workflow("ci.yml")
+    platform_job = _job_body(ci, "platform-wheels")
+    cibuildwheel = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "cibuildwheel"
+    ]
+    before_tooling = platform_job.split("      - name: Install wheel tooling", 1)[0]
+    dependencies = [
+        step for step in _step_bodies(ci) if "name: Install full-suite dependencies" in step
+    ]
+
+    assert before_tooling.count("actions/setup-python@") == 1
+    assert before_tooling.count("python-version: 3.11.9") == 1
+    assert "different CPython maintenance releases" in before_tooling
+    assert len(dependencies) == 1
+    assert "if:" not in dependencies[0]
+    assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
+    for requirement in (
+        "pytest==9.1.1",
+        "aiohttp==3.14.3",
+        "pyarrow==25.0.1",
+        "pandas==3.0.5",
+        "polars==1.43.2",
+        "duckdb==1.5.5",
+    ):
+        assert dependencies[0].count(requirement) == 1
+    for artifact in ("linux", "windows", "macos-x86_64", "macos-arm64"):
+        assert platform_job.count(f"artifact: {artifact}") == 1
+
+
+def test_native_stress_and_functional_suites_form_an_explicit_partition() -> None:
+    """Every platform runs one heavy case plus the complete functional complement."""
+    ci = _workflow("ci.yml")
+    platform_job = _job_body(ci, "platform-wheels")
+    pytest_config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "pytest"
+    ]["ini_options"]
+    stress = next(
+        step for step in _step_bodies(ci) if "name: Cross-platform native completion stress" in step
+    )
+    functional = next(
+        step
+        for step in _step_bodies(ci)
+        if "name: Full suite including adapters, HTTP faults, and concurrency" in step
+    )
+
+    assert pytest_config["markers"] == [
+        "native_stress: high-volume native concurrency coverage run explicitly in CI"
+    ]
+    assert "addopts" not in pytest_config
+    assert "if:" not in stress
+    assert "-m native_stress" in stress
+    assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
+    assert "-m 'not native_stress'" in functional
+    assert "--ignore" not in stress + functional
+    assert "pytest-native-stress-${{ matrix.artifact }}.xml" in stress
+    assert "pytest-native-stress-durations-${{ matrix.artifact }}.log" in stress
+    assert "pytest-${{ matrix.artifact }}.xml" in functional
+    assert platform_job.index("name: Cross-platform native completion stress") < (
+        platform_job.index("name: Full suite")
+    )
+
+
+def test_platform_evidence_records_comparable_cpu_limits() -> None:
+    """Runner timing evidence includes portable CPU and Linux cgroup context."""
+    ci = _workflow("ci.yml")
+    platform_job = _job_body(ci, "platform-wheels")
+    evidence = next(
+        step for step in _step_bodies(ci) if "name: Record runner CPU environment" in step
+    )
+    upload = next(
+        step
+        for step in _step_bodies(ci)
+        if "name: platform-evidence-${{ matrix.artifact }}" in step
+    )
+
+    assert "if:" not in evidence
+    assert "os.cpu_count()" in evidence
+    assert "os.sched_getaffinity(0)" in evidence
+    assert '"installed_distributions"' in evidence
+    for distribution in (
+        "aiohttp",
+        "duckdb",
+        "pandas",
+        "polars",
+        "pyarrow",
+        "pytest",
+        "schema-sanitizer",
+    ):
+        assert f'"{distribution}"' in evidence
+    assert 'optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None' in evidence
+    assert 'optional_key_values("/sys/fs/cgroup/cpu.stat") if is_linux else None' in evidence
+    assert "runner-cpu-${{ matrix.artifact }}.json" in evidence
+    assert "env:" not in evidence
+    assert "os." + "environ" not in evidence
+    assert "output = Path(sys.argv[1])" in evidence
+    assert platform_job.index("name: Record runner CPU environment") < platform_job.index(
+        "name: Cross-platform reader linear-scaling smoke"
+    )
+    assert "path: artifacts/" in upload
 
 
 def test_platform_suite_persists_test_timings_on_failure() -> None:

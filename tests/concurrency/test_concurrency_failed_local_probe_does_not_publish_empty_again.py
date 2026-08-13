@@ -77,21 +77,9 @@ def test_visibility_transitions_keep_existing_ordering() -> None:
     assert "nonempty_mask.load(std::memory_order_relaxed)" not in runtime
 
 
-def test_native_exact_drain_and_direct_producers() -> None:
-    """Verify the named concurrency regression contract."""
+def test_native_direct_producers_finish_exactly() -> None:
+    """Concurrent direct producers leave no queued arena tasks."""
     require_native()
-    for workers in (2, 4, 5, 8, 16):
-        elapsed, completed, checksum, started, peak, queued, submitted = (
-            native_core.ordered_executor_arena_completion_probe(workers, 20_000, 1)
-        )
-        assert elapsed > 0
-        assert completed == 20_000
-        assert checksum >= 0
-        assert 1 <= started <= workers
-        assert 1 <= peak <= workers
-        assert queued == 0
-        assert submitted == 20_000
-
     for workers in (2, 4, 8, 16):
         elapsed, submitted, finished, queued, started, peak = (
             native_core.operation_task_arena_concurrent_submit_probe(workers, 2, 1_500)

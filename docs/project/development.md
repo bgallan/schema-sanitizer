@@ -47,6 +47,19 @@ pytest -q tests/parquet
 pytest -q tests/remote
 ```
 
+The ordered-executor completion contract has one bounded functional matrix and
+one explicitly marked high-volume case. A normal local run includes both. To
+mirror the two CI phases independently, use:
+
+```bash
+pytest -q -m "not native_stress"
+pytest -q -m native_stress tests/concurrency/test_ordered_executor_completion_probe.py
+```
+
+Keep high-volume native workloads in that canonical owner. Source-contract
+tests may inspect the implementation they name, but should not each repeat the
+same native stress probe.
+
 Do not remove deterministic single-threaded coverage when adding a parallel
 path. Concurrency tests should compare logical output, diagnostics, ordering,
 and error selection across both modes.
@@ -108,7 +121,10 @@ owned helper map under [`meta/ci/`](../../meta/ci/README.md) are the source of t
 - remote fault handling and Parquet contracts.
 
 Keep jobs broad enough to catch platform-specific native failures while
-avoiding duplicate jobs that exercise the same contract.
+avoiding duplicate jobs that exercise the same contract. The four wheel jobs
+use one pinned CPython patch, one pinned direct adapter set, and identical
+functional/stress selections; platform-specific skips should be limited to
+capabilities that genuinely do not exist on that operating system.
 
 ## [Documentation changes](#index)
 

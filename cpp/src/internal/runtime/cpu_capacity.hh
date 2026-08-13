@@ -3,9 +3,11 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -16,6 +18,7 @@
 
 #if defined(__linux__)
 #include <sched.h>
+#include <unistd.h>
 #elif defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -29,9 +32,20 @@
 namespace sanitize::internal {
 namespace cpu_capacity_detail {
 
+inline constinit std::atomic<std::int64_t> g_hardware_count{0};
+
 [[nodiscard]] inline std::int64_t hardware_count() noexcept {
+  const auto cached = g_hardware_count.load(std::memory_order_acquire);
+  if (cached > 0) {
+    return cached;
+  }
   const auto detected = std::thread::hardware_concurrency();
-  return detected == 0U ? 1 : static_cast<std::int64_t>(detected);
+  const auto normalized =
+      detected == 0U ? std::int64_t{1} : static_cast<std::int64_t>(detected);
+  std::int64_t empty = 0;
+  (void)g_hardware_count.compare_exchange_strong(
+      empty, normalized, std::memory_order_release, std::memory_order_relaxed);
+  return empty > 0 ? empty : normalized;
 }
 
 #if defined(__linux__)
@@ -98,9 +112,6 @@ namespace cpu_capacity_detail {
 }
 
 [[nodiscard]] inline std::int64_t cgroup_v2_capacity() noexcept {
-  if (cgroup_view_detail::current_version("cpu") != 2) {
-    return std::numeric_limits<std::int64_t>::max();
-  }
   char current[4096]{};
   char mountpoint[4096]{};
   if (!cgroup_view_detail::resolve_directory("cpu", current, sizeof(current),
@@ -162,9 +173,6 @@ namespace cpu_capacity_detail {
 }
 
 [[nodiscard]] inline std::int64_t cgroup_v1_capacity() noexcept {
-  if (cgroup_view_detail::current_version("cpu") != 1) {
-    return std::numeric_limits<std::int64_t>::max();
-  }
   char current[4096]{};
   char mountpoint[4096]{};
   if (!cgroup_view_detail::resolve_directory("cpu", current, sizeof(current),
@@ -208,10 +216,89 @@ namespace cpu_capacity_detail {
   return effective;
 }
 
+constexpr std::int64_t kCgroupCapacityRefreshPeriodNs = 250'000'000LL;
+
+[[nodiscard]] inline std::int64_t monotonic_now_ns() noexcept {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+[[nodiscard]] constexpr std::int64_t
+next_cgroup_refresh_after(std::int64_t now) noexcept {
+  const auto maximum = std::numeric_limits<std::int64_t>::max();
+  return now > maximum - kCgroupCapacityRefreshPeriodNs
+             ? maximum
+             : now + kCgroupCapacityRefreshPeriodNs;
+}
+
+[[nodiscard]] inline std::int64_t sample_cgroup_capacity() noexcept {
+  const auto version = cgroup_view_detail::current_version("cpu");
+  if (version == 2) {
+    return cgroup_v2_capacity();
+  }
+  if (version == 1) {
+    return cgroup_v1_capacity();
+  }
+  // An unreadable or unrecognized Linux controller view is not proof that
+  // the process is unrestricted. Keep discovery failures fail-closed.
+  return 1;
+}
+
+struct CgroupCapacityCache final {
+  std::atomic<std::int64_t> capacity{1};
+  std::atomic<std::int64_t> next_refresh_ns{
+      std::numeric_limits<std::int64_t>::min()};
+  std::atomic<std::uint64_t> owner_pid{0U};
+};
+static_assert(std::atomic<std::int64_t>::is_always_lock_free &&
+                  std::atomic<std::uint64_t>::is_always_lock_free,
+              "the fork-safe CPU capacity cache requires lock-free atomics");
+
+// Constant initialization avoids a function-local static guard that could be
+// inherited in its locked state if another thread forks during first use.
+inline constinit CgroupCapacityCache g_cgroup_capacity_cache{};
+
+[[nodiscard]] inline std::int64_t cached_cgroup_capacity() noexcept {
+  auto &cache = g_cgroup_capacity_cache;
+  const auto now = monotonic_now_ns();
+  const auto owner_pid = static_cast<std::uint64_t>(::getpid());
+  if (cache.owner_pid.load(std::memory_order_acquire) != owner_pid) {
+    // A post-fork child must never wait for a refresh claimed by a vanished
+    // parent thread or trust the parent's cgroup membership. Multiple first
+    // callers may sample concurrently, but all remain fail-closed on error and
+    // publish the owner last so later readers observe a complete sample.
+    const auto sampled = sample_cgroup_capacity();
+    cache.capacity.store(sampled, std::memory_order_release);
+    cache.next_refresh_ns.store(next_cgroup_refresh_after(now),
+                                std::memory_order_release);
+    cache.owner_pid.store(owner_pid, std::memory_order_release);
+    return sampled;
+  }
+
+  auto next = cache.next_refresh_ns.load(std::memory_order_acquire);
+  if (now < next) {
+    return cache.capacity.load(std::memory_order_acquire);
+  }
+
+  const auto claimed_next = next_cgroup_refresh_after(now);
+  if (!cache.next_refresh_ns.compare_exchange_strong(
+          next, claimed_next, std::memory_order_acq_rel,
+          std::memory_order_acquire)) {
+    // Another caller owns this refresh. The last complete sample remains a
+    // safe immutable fallback, and the refresher will publish within the same
+    // bounded interval without making hot-path callers wait.
+    return cache.capacity.load(std::memory_order_acquire);
+  }
+
+  const auto sampled = sample_cgroup_capacity();
+  cache.capacity.store(sampled, std::memory_order_release);
+  return sampled;
+}
+
 [[nodiscard]] inline std::int64_t platform_count() noexcept {
-  return std::max<std::int64_t>(
-      1, std::min({hardware_count(), affinity_count(), cgroup_v2_capacity(),
-                   cgroup_v1_capacity()}));
+  return std::max<std::int64_t>(1, std::min({hardware_count(), affinity_count(),
+                                             cached_cgroup_capacity()}));
 }
 
 #elif defined(_WIN32)
