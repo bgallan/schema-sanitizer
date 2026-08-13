@@ -34,10 +34,15 @@ flowchart LR
     CI --> VALIDATION[Canonical validation graph]
     REUSE --> VALIDATION
     VALIDATION --> OTHER[Checks and native owners]
-    VALIDATION --> BUILDS[Four independent wheel builds]
-    VALIDATION --> SOURCE[source-distribution]
-    BUILDS --> SHARDS[Three test shards per platform]
-    SHARDS --> PLATFORM[platform-wheels owner]
+    VALIDATION --> BUILDS[platform-wheel-builds<br/>four-platform matrix]
+    VALIDATION --> SOURCE[source-distribution<br/>independent parallel job]
+    BUILDS --> BARRIER[All four wheels complete<br/>slowest-build barrier]
+    BARRIER --> CONCURRENCY[platform-tests-concurrency<br/>four-platform matrix]
+    BARRIER --> MEMORY[platform-tests-memory-parquet<br/>four-platform matrix]
+    BARRIER --> IO[platform-tests-io-pipeline<br/>four-platform matrix]
+    CONCURRENCY --> PLATFORM[platform-wheels owner]
+    MEMORY --> PLATFORM
+    IO --> PLATFORM
     SOURCE --> ASSEMBLE[distribution assembly]
     PLATFORM --> ASSEMBLE
     OTHER --> GATE[validation-gate]
@@ -56,6 +61,19 @@ flowchart LR
 |---|---|---|---|
 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) | `pull_request`, `push` to `main`, and `workflow_call` | Defines all build, test, security, coverage, packaging, and evidence jobs. | Uploads GitHub run artifacts only. |
 | [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) | `workflow_dispatch` only | Rejects an invalid release request, calls `ci.yml` once, and publishes its final artifact. | Always targets production PyPI after approval. |
+
+The platform path is represented by four thematic matrices:
+
+| Job | Matrix entries | Dependency | Shared contract |
+|---|---:|---|---|
+| `platform-wheel-builds` | 4 platforms | None | Build, audit, smoke, and upload one wheel for each release target. |
+| `platform-tests-concurrency` | 4 platforms | Complete wheel matrix | Concurrency suite, threading smoke, and `native_stress`. |
+| `platform-tests-memory-parquet` | 4 platforms | Complete wheel matrix | Memory, Parquet, quality, and sink suites plus Parquet certification. |
+| `platform-tests-io-pipeline` | 4 platforms | Complete wheel matrix | Example, I/O, pipeline, remote, and schema suites plus reader scaling. |
+
+`source-distribution` has no dependency on these matrices. It builds and
+validates the sdist in parallel while wheel and test work proceeds; only final
+`distribution` assembly joins both paths.
 
 There is no independent manual mode in `ci.yml`, no schedule, no TestPyPI
 branch, and no check-only publication mode. A safe dry run is a pull request or
@@ -85,7 +103,7 @@ owner succeeds:
 | Owner | Contract |
 |---|---|
 | `checks` | Pre-commit, Actionlint, Zizmor, static typing, dependency and source security scans, secret scan, benchmark smoke, contextual Python branch coverage, and enforced high-risk floors. |
-| `platform-wheels` | Aggregates four independent wheel builds and the identical three-shard functional fanout for every platform; each wheel is built once and feeds all three of its platform's shards. |
+| `platform-wheels` | Aggregates one four-platform wheel matrix and three thematic four-platform test matrices. Each wheel is built once and feeds the matching platform entry in every test matrix. |
 | `distribution` | Owns a parallel source-packaging stage that builds and exercises the sdist, then combines that validated sdist with the four wheels, validates the exact release set, and emits the final release artifact. |
 | `coverage-native` | Produces LLVM line and branch reports from regular, adversarial, and integration native-extension suites. |
 | `platform-sanitizers` | Runs focused Linux extension tests under ASan/UBSan, parser fuzz campaigns on all four platforms, and repeated sanitized concurrency probes on macOS. |
@@ -142,10 +160,28 @@ live in `meta/ci/requirements/platform-tests.txt`, which is also the setup-Pytho
 cache key, so changing the environment invalidates the cache deterministically.
 Linux additionally
 executes the installed public conversion smoke on 3.12, 3.13, and 3.14, and
-every platform loads it on 3.14. Each platform build has its own three-job test
-fanout, so Linux or ARM tests can start as soon as their wheel is ready instead
-of waiting for the slower Windows build. All fanouts use `fail-fast: false`,
-preserving evidence from the companion shards when one fails.
+every platform loads it on 3.14. `platform-wheel-builds` defines the runner,
+release platform, cibuildwheel architecture, and wheel and evidence artifact
+identifiers once for each of the four targets. The three test jobs are organized
+by workload rather than by runner: `platform-tests-concurrency`,
+`platform-tests-memory-parquet`, and `platform-tests-io-pipeline` each expand to
+the same four platform entries. Every matrix uses `fail-fast: false`, preserving
+evidence from companion platforms when one entry fails.
+
+GitHub Actions resolves `needs` at job granularity, not separately for each
+matrix entry. Consequently, all three thematic test matrices start only after
+all entries in `platform-wheel-builds` finish. Any platform build that finishes
+early therefore waits at an explicit slowest-build barrier instead of starting
+its tests as soon as its own artifact exists. This scheduling cost is accepted
+deliberately: the workflow has one build contract and one job per test theme,
+and the Actions UI groups comparable cross-platform results together. Workload
+behavior is located in one thematic job, while the shared actions and topology
+contracts keep the repeated platform entries aligned. The test matrices still
+run concurrently with one another after the barrier.
+If any wheel entry fails, GitHub skips all three dependent test matrices rather
+than running entries for the successful platforms. The always-run
+`platform-wheels` owner observes that skipped state and fails, so the stable
+gate cannot accidentally pass.
 
 The functional suite has the same exhaustive, disjoint three-way split on all
 four platforms:
@@ -165,11 +201,12 @@ oversubscribing a single runner's native concurrency tests. Three shards incur
 one more checkout, Python setup, dependency installation, and hosted runner per
 platform than the previous two-way split, but reduce the slowest functional
 path and run the normal suite concurrently with the benchmark and certificate
-workloads. Each fanout still depends only on its own platform wheel; the four
-wheel jobs intentionally remain independent instead of adding a slowest-build
-barrier for visual grouping.
+workloads. Each test matrix downloads only the wheel selected by its own
+platform entry. The shared dependency on `platform-wheel-builds` intentionally
+introduces the slowest-build barrier described above; it does not serialize the
+three workload matrices after they become runnable.
 
-Ordered-executor completion has one canonical functional matrix and one
+Ordered-executor completion has one canonical functional profile and one
 high-volume native stress case. Every platform runs both profiles against its
 installed wheel. The normal suite excludes only the explicitly marked stress
 case, while the `concurrency` shard runs that case once and writes its own JUnit
@@ -248,7 +285,7 @@ and final-release uploads retry once; the retry is still a blocking failure.
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
-| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 1 day | Its three functional shards and `distribution`. |
+| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 1 day | The matching entry of each thematic test matrix and `distribution`. |
 | `source-distribution` | One validated intermediate sdist. | 1 day | `distribution`. |
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 30 days | Manual publication and external audit. |
 | `python-branch-coverage` | Contextual HTML, XML, JSON, and high-risk gap report. | 14 days | Maintainers and auditors. |
@@ -500,8 +537,10 @@ configuration because the toolchains and runners are platform-specific.
 - Build every release file once. Publication must download
   `release-distributions` by exact name and must not rebuild, mutate, or
   wildcard-select packages.
-- Keep the three test shards disjoint and exhaustive, use the same selection on
-  every platform, and make each fanout depend only on its own platform build.
+- Keep the three thematic test matrices disjoint and exhaustive, and preserve
+  the same four platform entries in the wheel matrix and every test matrix.
+  Their job-level dependency on the complete wheel matrix is an intentional
+  slowest-build barrier; reassess its runtime cost before changing the topology.
 - Treat 44 percent as a baseline. Extend contextual risk tests and raise the
   floor when coverage improves; do not optimize the metric by excluding
   relevant production modules.

@@ -44,6 +44,16 @@ def _workflow_preamble(workflow: str) -> str:
     return workflow.split("\njobs:\n", 1)[0]
 
 
+def _matrix_includes(workflow: str, job_id: str) -> tuple[dict[str, str], ...]:
+    """Return the scalar rows from one job's include-only matrix."""
+    body = _job_body(workflow, job_id)
+    matrix = body.split("      matrix:\n        include:\n", 1)[1].split("    steps:\n", 1)[0]
+    rows = re.split(r"^          - ", matrix, flags=re.MULTILINE)[1:]
+    return tuple(
+        dict(re.findall(r"^\s*([a-z-]+):\s*([^#\n]+?)\s*$", row, re.MULTILINE)) for row in rows
+    )
+
+
 def _step_bodies(workflow: str) -> tuple[str, ...]:
     """Return top-level step bodies without requiring a YAML dependency."""
     starts = tuple(re.finditer(r"^(?: {4}| {6})- (?:name|uses):", workflow, re.MULTILINE))
@@ -190,8 +200,8 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
     assert refs
     local_refs = [ref for ref in refs if ref.startswith("./")]
     assert local_refs.count("./.github/workflows/ci.yml") == 1
-    assert local_refs.count("./.github/actions/build-platform-wheel") == 4
-    assert local_refs.count("./.github/actions/test-platform-wheel") == 4
+    assert local_refs.count("./.github/actions/build-platform-wheel") == 1
+    assert local_refs.count("./.github/actions/test-platform-wheel") == 3
     assert set(local_refs) == {
         "./.github/workflows/ci.yml",
         "./.github/actions/build-platform-wheel",
@@ -363,7 +373,7 @@ def test_wheel_build_runs_the_stable_abi_audit_explicitly() -> None:
 
 
 def test_validation_has_six_job_owners_and_one_stable_gate() -> None:
-    """Six domain owners plus parallel workers feed one stable result."""
+    """Six domain owners plus thematic matrix workers feed one stable result."""
     ci = _workflow("ci.yml")
     owners = {
         "checks",
@@ -374,14 +384,10 @@ def test_validation_has_six_job_owners_and_one_stable_gate() -> None:
         "thread-sanitizer",
     }
     parallel_workers = {
-        "platform-wheel-linux",
-        "platform-wheel-windows",
-        "platform-wheel-macos-x86-64",
-        "platform-wheel-macos-arm64",
-        "platform-tests-linux",
-        "platform-tests-windows",
-        "platform-tests-macos-x86-64",
-        "platform-tests-macos-arm64",
+        "platform-wheel-builds",
+        "platform-tests-concurrency",
+        "platform-tests-memory-parquet",
+        "platform-tests-io-pipeline",
         "source-distribution",
     }
     assert _job_ids(ci) == owners | parallel_workers | {"validation-gate"}
@@ -453,20 +459,64 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert set(test_requirements) == expected_requirements
     assert len(test_requirements) == len(expected_requirements)
     assert all(requirement not in dependencies[0] for requirement in expected_requirements)
-    for job, platform, artifact in (
-        ("linux", "linux-x86_64", "linux"),
-        ("windows", "windows-amd64", "windows"),
-        ("macos-x86-64", "macos-x86_64", "macos-x86_64"),
-        ("macos-arm64", "macos-arm64", "macos-arm64"),
-    ):
-        build = _job_body(ci, f"platform-wheel-{job}")
-        tests = _job_body(ci, f"platform-tests-{job}")
-        assert build.count("uses: ./.github/actions/build-platform-wheel") == 1
+    build_platforms = (
+        {
+            "display-name": "Linux x86-64",
+            "runner": "ubuntu-24.04",
+            "platform-name": "linux-x86_64",
+            "artifact": "linux",
+            "arch": "x86_64",
+        },
+        {
+            "display-name": "Windows AMD64",
+            "runner": "windows-2025",
+            "platform-name": "windows-amd64",
+            "artifact": "windows",
+            "arch": "AMD64",
+        },
+        {
+            "display-name": "macOS x86-64",
+            "runner": "macos-15-intel",
+            "platform-name": "macos-x86_64",
+            "artifact": "macos-x86_64",
+            "arch": "x86_64",
+        },
+        {
+            "display-name": "macOS ARM64",
+            "runner": "macos-15",
+            "platform-name": "macos-arm64",
+            "artifact": "macos-arm64",
+            "arch": "arm64",
+        },
+    )
+    test_platforms = tuple(
+        {key: value for key, value in platform.items() if key != "arch"}
+        for platform in build_platforms
+    )
+    build = _job_body(ci, "platform-wheel-builds")
+
+    assert _matrix_includes(ci, "platform-wheel-builds") == build_platforms
+    assert "name: wheel / ${{ matrix['display-name'] }}" in build
+    assert "runs-on: ${{ matrix.runner }}" in build
+    assert "fail-fast: false" in build
+    assert build.count("uses: ./.github/actions/build-platform-wheel") == 1
+    assert "platform-name: ${{ matrix['platform-name'] }}" in build
+    assert "artifact: ${{ matrix.artifact }}" in build
+    assert "arch: ${{ matrix.arch }}" in build
+
+    for shard in ("concurrency", "memory-parquet", "io-pipeline"):
+        job_id = f"platform-tests-{shard}"
+        tests = _job_body(ci, job_id)
+
+        assert _matrix_includes(ci, job_id) == test_platforms
+        assert f"name: tests / {shard} / ${{{{ matrix['display-name'] }}}}" in tests
+        assert "needs: [platform-wheel-builds]" in tests
+        assert "runs-on: ${{ matrix.runner }}" in tests
+        assert "fail-fast: false" in tests
         assert tests.count("uses: ./.github/actions/test-platform-wheel") == 1
-        assert f"platform-name: {platform}" in build
-        assert f"platform-name: {platform}" in tests
-        assert f"artifact: {artifact}" in build
-        assert f"artifact: {artifact}" in tests
+        assert "platform-name: ${{ matrix['platform-name'] }}" in tests
+        assert "artifact: ${{ matrix.artifact }}" in tests
+        assert f"shard: {shard}" in tests
 
 
 def test_native_stress_and_functional_suites_form_an_explicit_partition() -> None:
@@ -554,30 +604,40 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
     for domains in shard_domains.values():
         for domain in domains:
             assert functional.count(f"tests/{domain}") == 1
-    for job in (
-        "platform-tests-linux",
-        "platform-tests-windows",
-        "platform-tests-macos-x86-64",
-        "platform-tests-macos-arm64",
-    ):
-        body = _job_body(ci, job)
-        assert "shard: [concurrency, memory-parquet, io-pipeline]" in body
-        assert "shard: ${{ matrix.shard }}" in body
+    for shard in shard_domains:
+        body = _job_body(ci, f"platform-tests-{shard}")
+        assert f"shard: {shard}" in body
+        assert body.count("shard:") == 1
         assert "fail-fast: false" in body
 
 
-def test_each_platform_test_fanout_waits_only_for_its_own_wheel() -> None:
-    """Fast platform shards do not wait for an unrelated slow wheel build."""
+def test_thematic_test_matrices_and_platform_owner_have_exact_dependencies() -> None:
+    """Every test theme consumes the build matrix and one owner joins the results."""
     ci = _workflow("ci.yml")
-    for suffix in ("linux", "windows", "macos-x86-64", "macos-arm64"):
-        body = _job_body(ci, f"platform-tests-{suffix}")
-        assert f"needs: [platform-wheel-{suffix}]" in body
+    workers = (
+        "platform-wheel-builds",
+        "platform-tests-concurrency",
+        "platform-tests-memory-parquet",
+        "platform-tests-io-pipeline",
+    )
+    for job_id in workers[1:]:
+        body = _job_body(ci, job_id)
+        assert "needs: [platform-wheel-builds]" in body
         assert body.count("needs:") == 1
 
     owner = _job_body(ci, "platform-wheels")
-    for prefix in ("platform-wheel-", "platform-tests-"):
-        for suffix in ("linux", "windows", "macos-x86-64", "macos-arm64"):
-            assert f"- {prefix}{suffix}" in owner
+    needs = owner.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    assert tuple(re.findall(r"^      - ([a-z0-9-]+)$", needs, re.MULTILINE)) == workers
+    expected_results = {
+        "WHEEL_BUILDS_RESULT": "platform-wheel-builds",
+        "TESTS_CONCURRENCY_RESULT": "platform-tests-concurrency",
+        "TESTS_MEMORY_PARQUET_RESULT": "platform-tests-memory-parquet",
+        "TESTS_IO_PIPELINE_RESULT": "platform-tests-io-pipeline",
+    }
+    for variable, job_id in expected_results.items():
+        assert f"{variable}: ${{{{ needs.{job_id}.result }}}}" in owner
+        assert f'"${{{variable}}}"' in owner
+    assert owner.count(".result }}") == len(expected_results)
 
 
 def test_platform_evidence_records_comparable_cpu_limits() -> None:
@@ -711,13 +771,10 @@ def test_remote_http_fault_gate_runs_on_every_supported_platform() -> None:
     assert "tests/remote" in test_action
     assert "pytest -q -o pythonpath=." in test_action
     assert "--ignore" not in test_action
-    for job in (
-        "platform-tests-linux",
-        "platform-tests-windows",
-        "platform-tests-macos-x86-64",
-        "platform-tests-macos-arm64",
-    ):
-        assert "shard: [concurrency, memory-parquet, io-pipeline]" in _job_body(ci, job)
+    for shard in ("concurrency", "memory-parquet", "io-pipeline"):
+        body = _job_body(ci, f"platform-tests-{shard}")
+        assert f"shard: {shard}" in body
+        assert len(_matrix_includes(ci, f"platform-tests-{shard}")) == 4
     for runner in ("ubuntu-24.04", "windows-2025", "macos-15-intel", "macos-15"):
         assert runner in ci
     for floating_or_retired in ("ubuntu-latest", "windows-latest", "macos-14"):
