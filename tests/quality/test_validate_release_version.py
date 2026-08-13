@@ -22,17 +22,17 @@ def _validator() -> Any:
     return module
 
 
-def test_validate_release_version_accepts_matching_optional_tag(tmp_path: Path) -> None:
-    """Canonical versions accept either no tag or their matching v-prefixed tag."""
+def test_validate_release_version_accepts_matching_optional_version(tmp_path: Path) -> None:
+    """Canonical versions accept either no request or their exact release value."""
     version_file = tmp_path / "VERSION"
     version_file.write_text("0.3.8\n", encoding="utf-8")
 
     assert _validator().validate_release_version(version_file) == "0.3.8"
-    assert _validator().validate_release_version(version_file, "v0.3.8") == "0.3.8"
+    assert _validator().validate_release_version(version_file, "0.3.8") == "0.3.8"
 
 
-def test_validate_release_version_rejects_invalid_version_or_tag(tmp_path: Path) -> None:
-    """Malformed versions and mismatched release tags must fail closed."""
+def test_validate_release_version_rejects_invalid_or_mismatched_version(tmp_path: Path) -> None:
+    """Malformed versions and mismatched release requests must fail closed."""
     version_file = tmp_path / "VERSION"
     version_file.write_text("release-0.3.8\n", encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid"):
@@ -40,19 +40,19 @@ def test_validate_release_version_rejects_invalid_version_or_tag(tmp_path: Path)
 
     version_file.write_text("0.3.8\n", encoding="utf-8")
     with pytest.raises(ValueError, match="does not match"):
-        _validator().validate_release_version(version_file, "v0.3.7")
+        _validator().validate_release_version(version_file, "0.3.7")
 
 
-def test_release_tag_is_read_from_manual_workflow_event(tmp_path: Path) -> None:
+def test_release_version_is_read_from_manual_workflow_event(tmp_path: Path) -> None:
     """Publish validation reads dispatch inputs without shell interpolation."""
     event_file = tmp_path / "event.json"
-    event_file.write_text('{"inputs":{"release_tag":"v0.3.8"}}', encoding="utf-8")
+    event_file.write_text('{"inputs":{"release_version":"0.3.8"}}', encoding="utf-8")
 
-    assert _validator().release_tag_from_event(event_file) == "v0.3.8"
+    assert _validator().release_version_from_event(event_file) == "0.3.8"
 
 
-def test_required_release_tag_fails_closed_in_cli(tmp_path: Path) -> None:
-    """The release CLI must reject a dispatch that omits its explicit tag."""
+def test_required_release_version_fails_closed_in_cli(tmp_path: Path) -> None:
+    """The release CLI must reject a dispatch that omits its explicit version."""
     version_file = tmp_path / "VERSION"
     version_file.write_text("0.3.8\n", encoding="utf-8")
     event_file = tmp_path / "event.json"
@@ -65,14 +65,14 @@ def test_required_release_tag_fails_closed_in_cli(tmp_path: Path) -> None:
         str(version_file),
         "--github-event",
         str(event_file),
-        "--require-release-tag",
+        "--require-release-version",
     ]
 
     rejected = subprocess.run(command, check=False, capture_output=True, text=True)
     assert rejected.returncode != 0
-    assert "release_tag is required" in rejected.stderr
+    assert "release_version is required" in rejected.stderr
 
-    event_file.write_text('{"inputs":{"release_tag":"v0.3.8"}}', encoding="utf-8")
+    event_file.write_text('{"inputs":{"release_version":"0.3.8"}}', encoding="utf-8")
     accepted = subprocess.run(command, check=False, capture_output=True, text=True)
     assert accepted.returncode == 0
     assert accepted.stdout == "package-version=0.3.8\n"
@@ -91,3 +91,12 @@ def test_publish_confirmation_is_read_from_manual_workflow_event(tmp_path: Path)
     event_file.write_text('{"inputs":{"confirm_publish":"no"}}', encoding="utf-8")
     with pytest.raises(ValueError, match="Refusing upload"):
         validator.require_publish_confirmation(event_file)
+
+
+def test_tag_shaped_release_version_is_rejected(tmp_path: Path) -> None:
+    """The manual input is a package version, not a Git reference."""
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("0.3.8\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match"):
+        _validator().validate_release_version(version_file, "v0.3.8")

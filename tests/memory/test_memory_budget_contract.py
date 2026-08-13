@@ -228,7 +228,7 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
     allowed_environment_files = {
         "cpp/src/internal/runtime/operation_task_arena.cc",
         "meta/ci/release/check_distribution_contents.py",
-        "meta/ci/release/check_github_release_environment.py",
+        "meta/ci/release/check_github_release_state.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
         "src/schema_sanitizer/core_impl/cross_process_storage.py",

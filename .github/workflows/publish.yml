@@ -3,8 +3,8 @@ name: Publish to PyPI
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Existing tag for meta/VERSION, for example v0.4.2
+      release_version:
+        description: Exact meta/VERSION value, for example 0.4.2
         required: true
         type: string
       confirm_publish:
@@ -14,7 +14,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: pypi-${{ inputs.release_tag }}
+  # PyPI accepts only one production publication at a time. A constant group
+  # also prevents two differently typed version inputs from racing each other.
+  group: pypi-production
   cancel-in-progress: false
 jobs:
   # Fail before the expensive validation if the immutable release identity is
@@ -24,20 +26,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      actions: read
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: 3.11.9
-      - name: Validate branch, version, tag, and explicit confirmation
+      - name: Validate branch, version, availability, and explicit confirmation
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -47,20 +46,10 @@ jobs:
           fi
           python meta/ci/release/validate_release_version.py \
             --github-event "${GITHUB_EVENT_PATH}" \
-            --require-release-tag \
+            --require-release-version \
             --require-publish-confirmation
-          TAG_TYPE=$(git cat-file -t "refs/tags/${RELEASE_TAG}")
-          if [[ "${TAG_TYPE}" != "tag" ]]; then
-            echo "${RELEASE_TAG} must be an annotated tag, got ${TAG_TYPE}" >&2
-            exit 1
-          fi
-          TAG_SHA=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
-          if [[ "${TAG_SHA}" != "${GITHUB_SHA}" ]]; then
-            echo "${RELEASE_TAG} points to ${TAG_SHA}, not dispatch SHA ${GITHUB_SHA}" >&2
-            exit 1
-          fi
           python meta/ci/release/check_pypi_version.py
-          python meta/ci/release/check_github_release_environment.py \
+          python meta/ci/release/check_github_release_state.py \
             --expected-main-sha "${GITHUB_SHA}"
 
   # A local reusable workflow is resolved from this same immutable commit.
@@ -77,9 +66,6 @@ jobs:
     needs: [preflight, validation]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment:
-      name: pypi
-      url: https://pypi.org/p/schema-sanitizer
     permissions:
       id-token: write
     steps:

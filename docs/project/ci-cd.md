@@ -45,14 +45,13 @@ flowchart LR
     GATE --> ARTIFACT[release-distributions]
     GATE --> PUBLISH[Manual wrapper continues]
     ARTIFACT --> PUBLISH
-    PUBLISH --> ENV[Protected pypi environment]
-    ENV --> PYPI[PyPI + PEP 740 attestations]
+    PUBLISH --> PYPI[PyPI through OIDC<br/>+ PEP 740 attestations]
 ```
 
 | Workflow | Entry points | Role | External side effects |
 |---|---|---|---|
 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) | `pull_request`, `push` to `main`, and `workflow_call` | Defines all build, test, security, coverage, packaging, and evidence jobs. | Uploads GitHub run artifacts only. |
-| [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) | `workflow_dispatch` only | Rejects an invalid release request, calls `ci.yml` once, and publishes its final artifact. | Always targets production PyPI after approval. |
+| [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) | `workflow_dispatch` only | Rejects an invalid release request, calls `ci.yml` once, and publishes its final artifact. | Always targets production PyPI after canonical validation. |
 
 The canonical graph has three matrices and one terminal job:
 
@@ -95,8 +94,10 @@ Draft pull requests are not excluded: `opened`, `synchronize`, and `reopened`
 events can validate a draft, and `ready_for_review` starts validation when its
 state changes. Superseded pull-request runs are cancelled by their concurrency
 group. `main` and publication validation runs are not cancelled automatically.
-Manual publication runs for the same `release_tag` share a concurrency group,
-so an active attempt is not cancelled by another dispatch for that tag.
+All manual publication runs share the constant `pypi-production` concurrency
+group, regardless of their `release_version`. PyPI production publication is
+therefore globally serialized, and a newer dispatch never cancels an active
+attempt.
 
 Three matrix jobs own all validation work. The single terminal
 `validation-gate` has direct `needs` edges to all three, rejects every aggregate
@@ -342,9 +343,9 @@ authority:
 
 | Phase | Repository code | Effective authority |
 |---|---|---|
-| `preflight` | Checks out the selected commit and validates branch, version, tag, tag target, unused PyPI version, protected GitHub environment, and confirmation. | Read-only Actions metadata and contents; no OIDC token. |
+| `preflight` | Checks out the selected commit and validates the `main` ref and remote SHA, the requested version against `meta/VERSION`, the unused PyPI version, and the explicit confirmation. | Read-only Actions metadata and contents; no OIDC token. |
 | reusable `validation` | Executes the same `ci.yml` used by PRs and `main`. | Read-only contents and GitHub artifact writes; no OIDC token. |
-| `publish` | Has no checkout, Python setup, or repository-code execution. It downloads `release-distributions` by exact name, and its sole fixed shell step removes only `release/` before a transport retry. It then invokes the PyPI action. | `id-token: write` only, scoped to the protected `pypi` environment. |
+| `publish` | Has no checkout, Python setup, or repository-code execution. It downloads `release-distributions` by exact name, and its sole fixed shell step removes only `release/` before a transport retry. It then invokes the PyPI action. | `id-token: write` only. No GitHub Environment is currently attached. |
 
 Every external action used by workflows or repository-owned composite actions,
 and every remote pre-commit hook, including GitHub-maintained actions, is pinned
@@ -382,108 +383,105 @@ security model:
 1. Protect `main` with a GitHub branch rule or ruleset that requires pull
    requests and the `CI / validation gate` status, restricts direct updates, and
    does not permit routine bypasses.
-1. Protect `v*` tags against deletion or movement. The workflow validates the
-   tag target, but a repository rule provides continuing immutability.
-1. Create a GitHub environment named exactly `pypi`. Require an independent
-   reviewer, prevent self-review where the plan permits it, and restrict
-   deployments to `main`.
 1. Configure the `schema-sanitizer` project on PyPI with a Trusted Publisher
-   whose owner, repository, workflow filename (`publish.yml`), and environment
-   (`pypi`) exactly match GitHub. Do not add a PyPI token secret as a fallback.
-1. Restrict workflow-setting and environment-setting changes to repository
-   administrators, and include changes to `.github/`, `meta/ci/`, packaging
-   metadata, and this document in ownership review.
+   whose owner, repository, and workflow filename (`publish.yml`) exactly match
+   the current workflow identity. Leave its optional environment unset
+   (`environment: null`): the workflow does not currently use a GitHub
+   Environment. Do not add a PyPI token secret as a fallback.
+1. Restrict workflow-setting changes to repository administrators, and include
+   changes to `.github/`, `meta/ci/`, packaging metadata, and this document in
+   ownership review.
 
-The preflight reads the GitHub Environment API and fails unless `pypi` has a
-reviewer, prevents self-review and administrator bypass, and permits only the
-`main` branch through a custom deployment policy. The environment name forms
-part of the OIDC trust claim. A missing or mismatched GitHub environment or PyPI
-Trusted Publisher must make publication fail; it must not be worked around by
-granting a broader token. PyPI and GitHub API reads make at most three attempts.
-GitHub API transport errors, HTTP 429, and 5xx responses use short bounded
-backoff. HTTP 403 retries only when GitHub supplies `Retry-After` or reports
+PyPI and GitHub API reads make at most three attempts. GitHub API transport
+errors, HTTP 429, and 5xx responses use short bounded backoff. HTTP 403 retries
+only when GitHub supplies `Retry-After` or reports
 `X-RateLimit-Remaining: 0`; official retry/reset timing is honored up to 30
 seconds per attempt, with a short fallback when no reset is supplied. Other 4xx
-responses and malformed data fail immediately. The exact remote
-`main` SHA is read through that authenticated, retrying API path as well.
+responses and malformed data fail immediately. The exact remote `main` SHA is
+read through that authenticated, retrying API path as well.
+
+A protected GitHub Environment with required reviewers would add a useful
+human approval boundary. Introduce it only as one atomic administration and
+workflow change: create and protect the environment, add it to the final
+`publish` job, and update the PyPI Trusted Publisher to require the same exact
+environment name. Configuring only one side breaks OIDC publication; weakening
+permissions or adding a long-lived token is not an acceptable workaround.
 
 ## [Publication runbook](#index)
 
-### Prepare the immutable candidate
+### Prepare the candidate
 
 1. Merge the version change to `main` and wait for its `CI / validation gate`
    status to succeed.
 
-1. From an up-to-date local `main`, create and push a real annotated tag whose
-   value is `v` followed by the exact contents of `meta/VERSION`:
+1. Confirm that the version on `main` is the intended release and is not already
+   present on PyPI:
 
    ```bash
-   git fetch origin main --tags
+   git fetch origin main
    git switch main
    git pull --ff-only origin main
    python meta/ci/release/check_pypi_version.py
    VERSION=$(tr -d '\r\n' < meta/VERSION)
-   git tag -a "v${VERSION}" -m "schema-sanitizer ${VERSION}"
-   git push origin "v${VERSION}"
    ```
 
-1. Keep `main` at that SHA until preflight succeeds. It refuses a tag that does
-   not resolve to the exact dispatch SHA or a remote `main` that has moved;
-   never move an existing release tag to follow a later commit. Keeping `main`
+1. Keep `main` at that SHA until preflight succeeds. It refuses a dispatch whose
+   checked-out SHA is no longer the remote head of `main`. Keeping `main`
    unchanged until publication finishes also preserves the option of starting
    a clean replacement run after a validation failure.
 
-### Dispatch and approve
+### Dispatch and publish
 
 Start `publish.yml` from the `main` ref in the Actions UI, or run:
 
 ```bash
 gh workflow run publish.yml \
   --ref main \
-  -f release_tag="v${VERSION}" \
+  -f release_version="${VERSION}" \
   -f confirm_publish='publish schema-sanitizer'
 ```
 
 Both inputs are required. Preflight fails unless the selected ref is `main`,
-`meta/VERSION` is valid and absent from PyPI, `release_tag` is exactly
-`vVERSION`, the real tag points to the dispatch SHA, `main` has not moved, the
-protected `pypi` environment passes its API audit, and the confirmation phrase
-is exact. Preflight has no publication credentials and runs before the
-expensive reusable validation.
+`release_version` exactly matches the valid `meta/VERSION`, that version is
+absent from PyPI, `main` has not moved, and the confirmation phrase is exact.
+The input is a package version, not a Git tag. Preflight has no publication
+credentials and runs before the expensive reusable validation.
 
-After the three matrices and `validation-gate` succeed, the `publish` job waits
-for the `pypi` environment approval. Before approving, the reviewer should check:
+After preflight, the workflow invokes the complete reusable `ci.yml`: the same
+three matrices and terminal `validation-gate` used by pull requests and pushes
+to `main`. When that gate succeeds, the final job publishes immediately; there
+is currently no GitHub Environment approval pause. Before dispatching, the
+operator should retain and audit after the run:
 
-- the dispatch actor, commit, real tag, run ID, and attempt;
+- the dispatch actor, commit, requested version, run ID, and attempt;
 - all three aggregate matrix results and the final `validation-gate` result;
 - that `release-distributions` contains five packages and one manifest;
 - that the manifest project, version, commit, run provenance, filenames, sizes,
   and SHA-256 digests match the candidate.
 
-Approval always sends `release/packages/` to production PyPI. There is no target
-selector and `skip-existing` is intentionally disabled. Retain the workflow run
-URL, downloaded manifest, PyPI release URL, and PyPI attestation records as the
-release audit record.
+The final job always sends `release/packages/` to production PyPI. There is no
+target selector and `skip-existing` is intentionally disabled. Retain the
+workflow run URL, downloaded manifest, PyPI release URL, and PyPI attestation
+records as the release audit record.
 
 ## [Failures and recovery](#index)
 
 - For a PR or `main` run, a rerun can diagnose a transient runner failure; the
   GitHub attempt number remains part of the record.
-- For a manual release that has not entered `publish`, reject or cancel the
-  environment deployment. If `main` still points at the tagged candidate, start
-  a new complete manual run; if `main` moved, prepare a new version and tag on
-  its current head. Do not move the old tag or rewind `main`. Prefer a complete
-  new run over “re-run failed jobs” so all artifacts, their manifest, approval,
-  run ID, and attempt form one obvious evidence chain.
+- For a manual release that has not entered `publish`, cancel the run. If
+  `main` still points at the candidate, start a new complete manual run; if
+  `main` moved, validate the version on its current head. Prefer a complete new
+  run over “re-run failed jobs” so all artifacts, their manifest, run ID, and
+  attempt form one obvious evidence chain.
 - Once `publish` starts, do not rerun it blindly. PyPI uploads are not an atomic
   five-file transaction and published filenames cannot be overwritten.
 - If no file reached PyPI, investigate the OIDC or service failure. Start a new
   complete run of the same candidate only while it is still the head of `main`;
-  otherwise use a new version and tag on the current head.
+  otherwise use a new version on the current head.
 - If only part of the set reached PyPI, compare every PyPI filename and digest
-  with `release-manifest.json`. Do not enable `skip-existing`, overwrite files,
-  or move the tag. Yank the incomplete release, increment `meta/VERSION`, create
-  a new tag at the corrected `main` commit, and pass the complete pipeline again.
+  with `release-manifest.json`. Do not enable `skip-existing` or overwrite files.
+  Yank the incomplete release, increment `meta/VERSION`,
+  and pass the complete pipeline again from the corrected `main` commit.
 
 Yanking does not erase the historical release. Record the failed run, manifest,
 observed PyPI state, decision, and replacement version so the recovery remains
@@ -560,7 +558,7 @@ configuration because the toolchains and runners are platform-specific.
 - Keep all three matrices as direct dependencies of `validation-gate`, and keep
   its visible `CI / validation gate` status as the required `main` check.
 - Do not use `pull_request_target` for repository code from forks and do not
-  grant `id-token: write` outside the final environment-protected job.
+  grant `id-token: write` outside the final publication job.
 - Keep Actionlint and Zizmor as blocking pre-commit checks for workflow schema,
   expressions, permissions, and security regressions.
 - Build every release file once. Publication must download
