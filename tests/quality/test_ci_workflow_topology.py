@@ -252,12 +252,14 @@ def test_action_pins_have_automated_review_and_semantic_security_gates() -> None
 
     assert "package-ecosystem: github-actions" in dependabot
     assert "interval: weekly" in dependabot
+    assert re.search(r'^      time: "07:00"$', dependabot, re.MULTILINE)
     assert "id: actionlint" in precommit
     assert "actionlint-py==1.7.12.24" in precommit
     assert "id: zizmor" in precommit
     assert "zizmor==1.29.0" in precommit
     assert r"files: ^\.github/workflows/.*\.ya?ml$" in precommit
     assert r"files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$" in precommit
+    assert r"exclude: ^\.github/dependabot\.yml$" in precommit
 
     remote_hooks = dict(
         re.findall(

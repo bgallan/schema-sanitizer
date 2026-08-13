@@ -123,6 +123,7 @@ repos:
         language: python
         additional_dependencies: [yamlfix==1.18.0]
         files: \.(yaml|yml)$
+        exclude: ^\.github/dependabot\.yml$
       - id: toml-sort
         name: toml-sort
         entry: toml-sort
