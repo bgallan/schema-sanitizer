@@ -205,7 +205,7 @@ jobs:
           artifact: macos-arm64
           arch: arm64
 
-  # The same exhaustive two-way split runs against each platform's one wheel.
+  # The same exhaustive three-way split runs against each platform's one wheel.
   # Separate runners avoid oversubscribing the native concurrency tests.
   platform-tests-linux:
     name: tests / Linux x86-64 / ${{ matrix.shard }}
@@ -215,7 +215,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [concurrency-memory, remaining]
+        shard: [concurrency, memory-parquet, io-pipeline]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -233,7 +233,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [concurrency-memory, remaining]
+        shard: [concurrency, memory-parquet, io-pipeline]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -251,7 +251,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [concurrency-memory, remaining]
+        shard: [concurrency, memory-parquet, io-pipeline]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -269,7 +269,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [concurrency-memory, remaining]
+        shard: [concurrency, memory-parquet, io-pipeline]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -324,11 +324,10 @@ jobs:
             fi
           done
 
-  # Build the sdist once, combine it with the platform wheels, then validate
-  # exactly the artifact set consumed by the publish workflow.
-  distribution:
-    name: release artifacts and downstream packaging
-    needs: [platform-wheels]
+  # Source packaging is independent of every platform wheel. Run it from the
+  # start so its rebuild and downstream-install checks leave the critical path.
+  source-distribution:
+    name: source distribution and downstream packaging
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -348,6 +347,57 @@ jobs:
           python -m build --sdist --outdir dist
           python -m twine check dist/*.tar.gz
           python meta/ci/release/check_distribution_contents.py dist/*.tar.gz
+      - name: Rebuild and test as an isolated downstream consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p downstream-wheel
+          python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
+          python meta/ci/release/check_distribution_contents.py downstream-wheel/*.whl
+          WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
+          python meta/ci/release/check_downstream_install.py "${WHEEL}" \
+            --work-root "${{ runner.temp }}/downstream-checks"
+      - name: Upload the validated source distribution
+        id: upload-source-distribution
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: source-distribution
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Retry the source-distribution upload after a transport failure
+        if: steps.upload-source-distribution.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: source-distribution
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
+  # Once every platform test and the independent source checks succeed, combine
+  # their immutable artifacts and validate exactly what publication consumes.
+  distribution:
+    name: release artifact assembly
+    needs: [platform-wheels, source-distribution]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: source-distribution
+          path: dist
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           path: dist
@@ -359,16 +409,6 @@ jobs:
           python -m pip install -U pip twine==7.0.0 packaging==26.3
           python -m twine check dist/*
           python meta/ci/release/check_distribution_contents.py --release-set dist/*
-      - name: Rebuild and test as an isolated downstream consumer
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p downstream-wheel
-          python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
-          python meta/ci/release/check_distribution_contents.py downstream-wheel/*.whl
-          WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
-          python meta/ci/release/check_downstream_install.py "${WHEEL}" \
-            --work-root "${{ runner.temp }}/downstream-checks"
       - name: Assemble the auditable release artifact
         shell: bash
         run: |
@@ -382,6 +422,8 @@ jobs:
             --github-run-attempt "${GITHUB_RUN_ATTEMPT}" \
             release/packages/*
       - name: Upload the only publishable release set
+        id: upload-release-distributions
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: release-distributions
@@ -389,6 +431,16 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+      - name: Retry the publishable release-set upload after a transport failure
+        if: steps.upload-release-distributions.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-distributions
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: true
   coverage-native:
     name: coverage / native LLVM
     runs-on: ubuntu-24.04

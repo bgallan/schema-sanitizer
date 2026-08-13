@@ -15,6 +15,7 @@ workflow or configuration file.
 | [`fuzz/`](fuzz/) | Corpus integrity and bounded regression campaigns | `check_fuzz_corpus.py`, `run_fuzz_regressions.py` |
 | [`sanitizers/`](sanitizers/) | ASan/UBSan/TSan process launch and orchestration | CPython launchers and the TSan extension suite |
 | [`release/`](release/) | Distribution identity, downstream installation, provenance, and PyPI preflight | archive checker, release manifest, isolated consumer checks, environment/version checks |
+| [`requirements/`](requirements/) | Reproducible CI-only dependency sets and their cache identity | pinned platform-test adapters and pytest |
 
 The reader-limit evidence aggregator is a benchmark analysis tool rather than
 a CI gate and therefore lives at

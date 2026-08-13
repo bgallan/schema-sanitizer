@@ -363,7 +363,7 @@ def test_wheel_build_runs_the_stable_abi_audit_explicitly() -> None:
 
 
 def test_validation_has_six_job_owners_and_one_stable_gate() -> None:
-    """Six domain owners plus platform workers feed one stable result."""
+    """Six domain owners plus parallel workers feed one stable result."""
     ci = _workflow("ci.yml")
     owners = {
         "checks",
@@ -373,7 +373,7 @@ def test_validation_has_six_job_owners_and_one_stable_gate() -> None:
         "platform-sanitizers",
         "thread-sanitizer",
     }
-    platform_workers = {
+    parallel_workers = {
         "platform-wheel-linux",
         "platform-wheel-windows",
         "platform-wheel-macos-x86-64",
@@ -382,8 +382,9 @@ def test_validation_has_six_job_owners_and_one_stable_gate() -> None:
         "platform-tests-windows",
         "platform-tests-macos-x86-64",
         "platform-tests-macos-arm64",
+        "source-distribution",
     }
-    assert _job_ids(ci) == owners | platform_workers | {"validation-gate"}
+    assert _job_ids(ci) == owners | parallel_workers | {"validation-gate"}
     gate = _job_body(ci, "validation-gate")
     assert "if: always()" in gate or "if: ${{ always() }}" in gate
     assert all(owner in gate for owner in owners)
@@ -416,6 +417,8 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     ci = _workflow("ci.yml")
     build_action = _action("build-platform-wheel")
     test_action = _action("test-platform-wheel")
+    test_requirements_path = ROOT / "meta/ci/requirements/platform-tests.txt"
+    test_requirements = test_requirements_path.read_text(encoding="utf-8").splitlines()
     cibuildwheel = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
         "cibuildwheel"
     ]
@@ -428,22 +431,28 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert build_action.count("python-version: 3.11.9") == 1
     assert test_action.count("python-version: 3.11.9") == 1
     assert build_action.count("python -m cibuildwheel") == 1
-    assert build_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 1
+    assert build_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 2
     assert test_action.count("actions/download-artifact@") == 1
     assert test_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 1
     assert "python -m cibuildwheel" not in test_action
     assert len(dependencies) == 1
     assert "if:" not in dependencies[0]
+    assert "--retries 10" in dependencies[0]
+    assert "--timeout 60" in dependencies[0]
+    assert "-r meta/ci/requirements/platform-tests.txt" in dependencies[0]
+    assert "cache-dependency-path: meta/ci/requirements/platform-tests.txt" in test_action
     assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
-    for requirement in (
+    expected_requirements = {
         "pytest==9.1.1",
         "aiohttp==3.14.3",
         "pyarrow==25.0.1",
         "pandas==3.0.5",
         "polars==1.43.2",
         "duckdb==1.5.5",
-    ):
-        assert dependencies[0].count(requirement) == 1
+    }
+    assert set(test_requirements) == expected_requirements
+    assert len(test_requirements) == len(expected_requirements)
+    assert all(requirement not in dependencies[0] for requirement in expected_requirements)
     for job, platform, artifact in (
         ("linux", "linux-x86_64", "linux"),
         ("windows", "windows-amd64", "windows"),
@@ -479,7 +488,7 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
         "native_stress: high-volume native concurrency coverage run explicitly in CI"
     ]
     assert "addopts" not in pytest_config
-    assert "if: inputs.shard == 'concurrency-memory'" in stress
+    assert "if: inputs.shard == 'concurrency'" in stress
     assert "-m native_stress" in stress
     assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
     assert "-m 'not native_stress'" in functional
@@ -492,6 +501,21 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
     )
 
 
+def test_platform_smokes_are_owned_by_their_related_parallel_shards() -> None:
+    """Independent smoke gates run with the functional domain they exercise."""
+    test_action = _action("test-platform-wheel")
+    ownership = {
+        "Compile and certify the Parquet runtime": "memory-parquet",
+        "Cross-platform reader linear-scaling smoke": "io-pipeline",
+        "Cross-platform threading benchmark smoke": "concurrency",
+        "Cross-platform native completion stress": "concurrency",
+    }
+
+    for name, shard in ownership.items():
+        step = next(step for step in _step_bodies(test_action) if f"name: {name}" in step)
+        assert f"if: inputs.shard == '{shard}'" in step
+
+
 def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
     """Every platform runs the same stable partition of every test directory."""
     ci = _workflow("ci.yml")
@@ -502,23 +526,30 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
         if path.is_dir() and not path.name.startswith("_")
     }
     shard_domains = {
-        "concurrency-memory": {"concurrency", "memory"},
-        "remaining": {
+        "concurrency": {"concurrency"},
+        "memory-parquet": {
+            "memory",
+            "parquet",
+            "quality",
+            "sinks",
+        },
+        "io-pipeline": {
             "examples",
             "io",
-            "parquet",
             "pipeline",
-            "quality",
             "remote",
             "schema",
-            "sinks",
         },
     }
     functional = next(
         step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
     )
 
-    assert shard_domains["concurrency-memory"].isdisjoint(shard_domains["remaining"])
+    for shard, domains in shard_domains.items():
+        other_domains = set().union(
+            *(candidate for name, candidate in shard_domains.items() if name != shard)
+        )
+        assert domains.isdisjoint(other_domains)
     assert set().union(*shard_domains.values()) == all_test_domains
     for domains in shard_domains.values():
         for domain in domains:
@@ -530,7 +561,7 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
         "platform-tests-macos-arm64",
     ):
         body = _job_body(ci, job)
-        assert "shard: [concurrency-memory, remaining]" in body
+        assert "shard: [concurrency, memory-parquet, io-pipeline]" in body
         assert "shard: ${{ matrix.shard }}" in body
         assert "fail-fast: false" in body
 
@@ -672,7 +703,7 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
 
 
 def test_remote_http_fault_gate_runs_on_every_supported_platform() -> None:
-    """The remaining shard, including real-socket faults, runs on every platform."""
+    """The I/O shard, including real-socket faults, runs on every platform."""
     ci = _workflow("ci.yml")
     test_action = _action("test-platform-wheel")
 
@@ -686,7 +717,7 @@ def test_remote_http_fault_gate_runs_on_every_supported_platform() -> None:
         "platform-tests-macos-x86-64",
         "platform-tests-macos-arm64",
     ):
-        assert "shard: [concurrency-memory, remaining]" in _job_body(ci, job)
+        assert "shard: [concurrency, memory-parquet, io-pipeline]" in _job_body(ci, job)
     for runner in ("ubuntu-24.04", "windows-2025", "macos-15-intel", "macos-15"):
         assert runner in ci
     for floating_or_retired in ("ubuntu-latest", "windows-latest", "macos-14"):
@@ -841,7 +872,7 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
         if "name: Cross-platform reader linear-scaling smoke" in step
     )
     assert "shell: bash" in reader_step
-    assert "if: inputs.shard == 'concurrency-memory'" in reader_step
+    assert "if: inputs.shard == 'io-pipeline'" in reader_step
     assert "reader-linear-scaling-${PLATFORM_ARTIFACT}.json" in test_action
     # Cheap performance gates fail before the expensive full pytest suite.
     assert test_action.index("name: Cross-platform reader linear-scaling smoke") < (
@@ -871,32 +902,50 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
         _action("build-platform-wheel"),
         _action("test-platform-wheel"),
     )
-    uploads = {
-        _with_value(step, "name"): step
+    upload_steps = [
+        step
         for source in sources
         for step in _step_bodies(source)
         if "actions/upload-artifact@" in step
-    }
+    ]
+    uploads: dict[str, list[str]] = {}
+    for step in upload_steps:
+        uploads.setdefault(_with_value(step, "name"), []).append(step)
     retention = {
         "python-branch-coverage": "14",
         "dist-wheels-${{ inputs.platform-name }}": "1",
         "platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}": "14",
+        "source-distribution": "1",
         "release-distributions": "30",
         "native-llvm-coverage": "14",
     }
 
     assert set(uploads) == set(retention)
     for name, days in retention.items():
-        assert _with_value(uploads[name], "retention-days") == days
-        assert _with_value(uploads[name], "if-no-files-found") == "error"
-    platform_evidence = uploads["platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}"]
+        assert all(_with_value(step, "retention-days") == days for step in uploads[name])
+        assert all(_with_value(step, "if-no-files-found") == "error" for step in uploads[name])
+    platform_evidence = uploads["platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}"][0]
     assert "success() || (failure() && hashFiles('artifacts/**') != '')" in platform_evidence
-    assert _with_value(uploads["release-distributions"], "path") == "release/"
+    assert all(_with_value(step, "path") == "release/" for step in uploads["release-distributions"])
+
+    retried = {
+        "dist-wheels-${{ inputs.platform-name }}",
+        "platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}",
+        "source-distribution",
+        "release-distributions",
+    }
+    assert {name for name, steps in uploads.items() if len(steps) == 2} == retried
+    for name in retried:
+        first, retry = uploads[name]
+        assert "continue-on-error: true" in first
+        assert "outcome == 'failure'" in retry
+        assert _with_value(retry, "overwrite") == "true"
 
 
 def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     """CI publishes one immutable package set with its audit manifest."""
     ci = _workflow("ci.yml")
+    source_distribution = _job_body(ci, "source-distribution")
     distribution = _job_body(ci, "distribution")
     publish = _job_body(_workflow("publish.yml"), "publish")
     downstream = (ROOT / "meta/ci/release/check_downstream_install.py").read_text(encoding="utf-8")
@@ -906,10 +955,15 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     for version in ("3.12", "3.13", "3.14"):
         assert f"python-version: '{version}'" in build_action
     assert build_action.count("python -I meta/ci/release/downstream_smoke.py") == 3
-    assert "needs: [platform-wheels]" in distribution
+    assert "needs:" not in source_distribution.split("    steps:", 1)[0]
+    assert "needs: [platform-wheels, source-distribution]" in distribution
+    assert "python -m build --sdist --outdir dist" in source_distribution
+    assert "check_downstream_install.py" in source_distribution
+    assert "name: source-distribution" in source_distribution
+    assert "name: source-distribution" in distribution
     assert "pattern: dist-wheels-*" in distribution
     assert "check_distribution_contents.py --release-set" in distribution
-    assert "check_downstream_install.py" in distribution
+    assert "check_downstream_install.py" not in distribution
     assert "release/packages/" in distribution
     assert "release/release-manifest.json" in distribution
     assert "name: release-distributions" in distribution

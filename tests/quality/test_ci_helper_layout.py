@@ -53,6 +53,7 @@ def test_ci_helpers_are_grouped_by_owner() -> None:
         "parquet",
         "quality",
         "release",
+        "requirements",
         "sanitizers",
     }
 

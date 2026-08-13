@@ -82,6 +82,7 @@ _SDIST_REQUIRED = {
     "meta/ci/quality/check_detect_secrets_report.py",
     "meta/ci/quality/check_primary_cleanup.py",
     "meta/ci/quality/report_risk_coverage.py",
+    "meta/ci/requirements/platform-tests.txt",
     "meta/ci/release/check_distribution_contents.py",
     "meta/ci/release/check_downstream_install.py",
     "meta/ci/release/check_github_release_environment.py",

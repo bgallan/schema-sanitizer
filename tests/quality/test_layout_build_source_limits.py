@@ -95,6 +95,8 @@ def test_release_wheels_share_one_bundled_zlib_provider() -> None:
         "URL_HASH "
         "SHA256=e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28" in compact_cmake
     )
+    assert "TIMEOUT 30" in cmake
+    assert "INACTIVITY_TIMEOUT 15" in cmake
     assert 'set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)' in compact_cmake
     assert 'set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)' in compact_cmake
     assert "ZLIB::ZLIBSTATIC" in cmake

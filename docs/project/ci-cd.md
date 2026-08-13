@@ -31,18 +31,24 @@ flowchart LR
     MANUAL[Manual publish.yml] --> PREFLIGHT[preflight]
     PREFLIGHT --> REUSE[ci.yml through workflow_call]
 
-    CI --> OWNERS[Six validation owners]
-    REUSE --> OWNERS2[The same six owners]
-    OWNERS --> BUILDS[Four independent wheel builds]
-    OWNERS2 --> BUILDS2[Four independent wheel builds]
-    BUILDS --> SHARDS[Two test shards per platform]
-    BUILDS2 --> SHARDS2[Two test shards per platform]
-    OWNERS --> GATE[validation-gate]
-    OWNERS2 --> GATE2[validation-gate]
+    CI --> VALIDATION[Canonical validation graph]
+    REUSE --> VALIDATION
+    VALIDATION --> OTHER[Checks and native owners]
+    VALIDATION --> BUILDS[Four independent wheel builds]
+    VALIDATION --> SOURCE[source-distribution]
+    BUILDS --> SHARDS[Three test shards per platform]
+    SHARDS --> PLATFORM[platform-wheels owner]
+    SOURCE --> ASSEMBLE[distribution assembly]
+    PLATFORM --> ASSEMBLE
+    OTHER --> GATE[validation-gate]
+    PLATFORM --> GATE
+    ASSEMBLE --> GATE
 
     GATE --> CHECK[CI / validation gate]
-    GATE2 --> ARTIFACT[release-distributions]
-    ARTIFACT --> ENV[Protected pypi environment]
+    ASSEMBLE --> ARTIFACT[release-distributions]
+    GATE --> PUBLISH[Manual wrapper continues]
+    ARTIFACT --> PUBLISH
+    PUBLISH --> ENV[Protected pypi environment]
     ENV --> PYPI[PyPI + PEP 740 attestations]
 ```
 
@@ -79,8 +85,8 @@ owner succeeds:
 | Owner | Contract |
 |---|---|
 | `checks` | Pre-commit, Actionlint, Zizmor, static typing, dependency and source security scans, secret scan, benchmark smoke, contextual Python branch coverage, and enforced high-risk floors. |
-| `platform-wheels` | Aggregates four independent wheel builds and the identical two-shard functional fanout for every platform; each wheel is built once and feeds both of its platform's shards. |
-| `distribution` | Builds the sdist, combines it with the four wheels, validates the exact release set, tests downstream installation profiles, and emits the final release artifact. |
+| `platform-wheels` | Aggregates four independent wheel builds and the identical three-shard functional fanout for every platform; each wheel is built once and feeds all three of its platform's shards. |
+| `distribution` | Owns a parallel source-packaging stage that builds and exercises the sdist, then combines that validated sdist with the four wheels, validates the exact release set, and emits the final release artifact. |
 | `coverage-native` | Produces LLVM line and branch reports from regular, adversarial, and integration native-extension suites. |
 | `platform-sanitizers` | Runs focused Linux extension tests under ASan/UBSan, parser fuzz campaigns on all four platforms, and repeated sanitized concurrency probes on macOS. |
 | `thread-sanitizer` | Runs the native concurrency probes, fuzzing, and full-extension concurrency domains under GCC ThreadSanitizer. |
@@ -131,32 +137,46 @@ artifact, rather than an import from `src/`, on:
 Each wheel is built for CPython 3.11 with the stable ABI (`cp311-abi3`). The
 complete suite runs on the same CPython 3.11 patch and the same pinned direct
 adapter versions on all four platforms, so timing and behavior comparisons do
-not silently mix dependency or interpreter upgrades. Linux additionally
+not silently mix dependency or interpreter upgrades. Those direct test pins
+live in `meta/ci/requirements/platform-tests.txt`, which is also the setup-Python
+cache key, so changing the environment invalidates the cache deterministically.
+Linux additionally
 executes the installed public conversion smoke on 3.12, 3.13, and 3.14, and
-every platform loads it on 3.14. Each platform build has its own two-job test
+every platform loads it on 3.14. Each platform build has its own three-job test
 fanout, so Linux or ARM tests can start as soon as their wheel is ready instead
 of waiting for the slower Windows build. All fanouts use `fail-fast: false`,
-preserving evidence from the companion shard when one fails.
+preserving evidence from the companion shards when one fails.
 
-The functional suite has the same exhaustive, disjoint split on all four
-platforms. `concurrency-memory` owns `tests/concurrency` and `tests/memory`;
-`remaining` owns `tests/examples`, `tests/io`, `tests/parquet`, `tests/pipeline`,
-`tests/quality`, `tests/remote`, `tests/schema`, and `tests/sinks`. The topology
-contract derives the repository's test directories and fails if a new one is
-not assigned exactly once. Separate hosted runners provide real parallelism
-without oversubscribing a single runner's native concurrency tests. The cost is
-one additional checkout, Python setup, dependency installation, and runner per
-platform; two shards deliberately limit that overhead while roughly halving the
-long functional phase on slower platforms.
+The functional suite has the same exhaustive, disjoint three-way split on all
+four platforms:
+
+| Shard | Test directories | Co-located gates |
+|---|---|---|
+| `concurrency` | `tests/concurrency` | Threading smoke and the single `native_stress` invocation. |
+| `memory-parquet` | `tests/memory`, `tests/parquet`, `tests/quality`, and `tests/sinks` | Compiled-wheel Parquet certification. |
+| `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | Reader linear-scaling benchmark. |
+
+The former `remaining` label meant all directories outside `concurrency` and
+`memory`; it was not a lower-priority or optional test class. The explicit new
+names make every workload's ownership visible. The topology contract derives
+the repository's test directories and fails if a new one is not assigned
+exactly once. Separate hosted runners provide real parallelism without
+oversubscribing a single runner's native concurrency tests. Three shards incur
+one more checkout, Python setup, dependency installation, and hosted runner per
+platform than the previous two-way split, but reduce the slowest functional
+path and run the normal suite concurrently with the benchmark and certificate
+workloads. Each fanout still depends only on its own platform wheel; the four
+wheel jobs intentionally remain independent instead of adding a slowest-build
+barrier for visual grouping.
 
 Ordered-executor completion has one canonical functional matrix and one
 high-volume native stress case. Every platform runs both profiles against its
 installed wheel. The normal suite excludes only the explicitly marked stress
-case, while a preceding step runs that case once and writes its own JUnit and
-duration reports. This keeps the workload identical across the four release
-targets without multiplying the same 16-worker probe through unrelated source
-contract tests. Local pytest runs still include both profiles unless a marker
-expression is supplied.
+case, while the `concurrency` shard runs that case once and writes its own JUnit
+and duration reports. This keeps the workload identical across the four
+release targets without multiplying the same 16-worker probe through unrelated
+source contract tests. Local pytest runs still include both profiles unless a
+marker expression is supplied.
 
 Every functional-shard invocation emits a JUnit XML report with the duration of
 each test and a terminal log ranking the 50 slowest phases above 50 ms. Both
@@ -173,8 +193,8 @@ identical across architectures, so this manifest distinguishes an environment
 difference from a product regression while the software and test workload stay
 fixed.
 
-Before the functional tests, the `concurrency-memory` shard runs the reader
-performance gate once for each installed wheel.
+In parallel with the other two shards, `io-pipeline` runs the reader
+performance gate once for each installed wheel before its functional tests.
 It enforces both normalized growth and the versioned absolute-latency policy in
 `benchmarks/readers/linear_scaling_budget.json`; a reader that remains linear
 but becomes uniformly slower therefore fails. The static policy identifies its
@@ -184,9 +204,10 @@ package version, and SHA-256 of the native extension. CI runs the
 benchmark in isolated Python mode and verifies that the loaded extension's
 bytes match the extension inside the declared wheel, preventing a checkout or
 stale build from satisfying the gate. The reader and threading smokes run
-before pytest so a performance regression fails quickly without spending tens
-of minutes on the full suite; successful runs retain the same checks and
-coverage.
+before pytest in `io-pipeline` and `concurrency`, respectively, while
+`memory-parquet` performs the Parquet certificate. A regression therefore
+fails early in its owning shard without serializing unrelated functional
+suites; successful runs retain the same checks and coverage.
 
 The shared build action pins cibuildwheel and abi3audit. After cibuildwheel emits each
 repaired wheel, CI runs `abi3audit --strict` explicitly as a blocking gate. This
@@ -196,9 +217,14 @@ download of `virtualenv.pyz` from release hosting.
 ### Packaging, dependencies, and security
 
 The distribution gate requires exactly one sdist and four ABI3 wheels with one
-version, the expected project name, and the four exact platform tags. It checks
-archive cleanliness and required content, rebuilds from the sdist, and validates
-an isolated downstream consumer.
+version, the expected project name, and the four exact platform tags.
+`source-distribution` starts independently of the wheel builds: it checks the
+source archive, rebuilds a wheel from it, and validates an isolated downstream
+consumer. The final `distribution` assembly waits for that source evidence and
+for all platform wheels and tests, then validates the five-file release set and
+creates the publication manifest. Moving source-only work off the platform
+critical path changes scheduling, not the release gate: a failed source check
+still prevents assembly and makes `validation-gate` fail.
 
 Downstream installation exercises `core` and every published runtime extra:
 `pyarrow`, `pandas`, `polars`, `duckdb`, `gcs`, `s3`, `azure`, `bigquery`,
@@ -217,18 +243,21 @@ release gate.
 ## [Release evidence](#index)
 
 All artifact uploads fail if their expected files are absent and have explicit
-retention periods:
+retention periods. Transport-sensitive wheel, source-distribution, evidence,
+and final-release uploads retry once; the retry is still a blocking failure.
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
-| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 1 day | Its two functional shards and `distribution`. |
+| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 1 day | Its three functional shards and `distribution`. |
+| `source-distribution` | One validated intermediate sdist. | 1 day | `distribution`. |
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 30 days | Manual publication and external audit. |
 | `python-branch-coverage` | Contextual HTML, XML, JSON, and high-risk gap report. | 14 days | Maintainers and auditors. |
 | `native-llvm-coverage` | LLVM profiles, summaries, and contextual HTML. | 14 days | Maintainers and auditors. |
-| `platform-evidence-PLATFORM-SHARD` | Functional JUnit timings, slowest-phase log, and runner/dependency manifest; the `concurrency-memory` artifact also contains native stress, Parquet certificate, and benchmark evidence. | 14 days | Maintainers and auditors. |
+| `platform-evidence-PLATFORM-SHARD` | Functional JUnit timings, slowest-phase log, and runner/dependency manifest; the three owning shards also retain native-stress/threading, Parquet-certificate, or reader-benchmark evidence. | 14 days | Maintainers and auditors. |
 
-`distribution` downloads the four intermediate wheels, builds the sdist, and
-validates the five files as one set. It then creates a canonical
+`source-distribution` builds and exercises the sdist while platform work is in
+flight. `distribution` downloads that immutable source artifact and the four
+intermediate wheels, then validates the five files as one set. It creates a canonical
 `release-manifest.json` containing:
 
 - format identifier, project, and version;
@@ -439,6 +468,7 @@ python meta/ci/release/check_distribution_contents.py dist/* wheelhouse/*
 ```
 
 A developer machine cannot certify the four-platform release set. In CI,
+`source-distribution` performs the source rebuild and downstream checks while
 `distribution` adds `--release-set`, requires the exact five artifacts, and
 generates the manifest. An auditor who downloads `release-distributions` and
 checks out its recorded commit can revalidate it with the recorded run values:
@@ -470,7 +500,7 @@ configuration because the toolchains and runners are platform-specific.
 - Build every release file once. Publication must download
   `release-distributions` by exact name and must not rebuild, mutate, or
   wildcard-select packages.
-- Keep the two test shards disjoint and exhaustive, use the same selection on
+- Keep the three test shards disjoint and exhaustive, use the same selection on
   every platform, and make each fanout depend only on its own platform build.
 - Treat 44 percent as a baseline. Extend contextual risk tests and raise the
   floor when coverage improves; do not optimize the metric by excluding
