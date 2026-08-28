@@ -1,4 +1,8 @@
-"""Neutral construction, normalization, and rolling of Hive-style URIs."""
+"""Construct, normalize, and roll Hive-style partition URIs.
+
+Extensions and prefixes are validated before partition directories and filenames are rendered,
+including explicit placeholders and extraction of anchor dates or hours from existing paths.
+"""
 
 from __future__ import annotations
 

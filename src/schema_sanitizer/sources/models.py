@@ -1,4 +1,8 @@
-"""Public immutable models for exact remote object selections."""
+"""Define immutable public models for exact remote object selections.
+
+Remote files and source manifests validate canonical provider URIs, deterministic ordering, exact
+membership, and stable selection metadata at construction time.
+"""
 
 from __future__ import annotations
 

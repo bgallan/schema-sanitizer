@@ -1,4 +1,8 @@
-"""Deadline-aware task and provider shutdown for remote I/O loops."""
+"""Deadline-aware task and provider shutdown for remote I/O loops.
+
+It cancels outstanding tasks to a deadline, closes provider owners and the loop, and
+retains failed cleanup under one retryable owner.
+"""
 
 from __future__ import annotations
 
@@ -19,11 +23,13 @@ class RemoteIoCleanupOwner:
     __slots__ = ("task", "manager", "generation")
 
     def __init__(self) -> None:
+        """Start without a retained provider-exit task or manager generation."""
         self.task: asyncio.Task[Any] | None = None
         self.manager: Any | None = None
         self.generation = 0
 
     async def close(self, manager: Any, *, deadline: float) -> None:
+        """Start or resume the exact provider-exit task within the shared shutdown deadline."""
         loop = asyncio.get_running_loop()
         task = self.task
         if task is not None and self.manager is not manager:

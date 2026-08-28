@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources define direct rows and lazy segment state."""
+"""Define direct-row ownership and lazily materialized segment state for JSONL sources.
+
+Raw rows must preserve CRLF and a missing final newline, while records crossing chunk boundaries
+retain their exact owner, byte offsets, and eventual output.
+"""
 
 from __future__ import annotations
 

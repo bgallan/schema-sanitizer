@@ -1,4 +1,8 @@
-"""Reusable cross-mode golden comparison helpers."""
+"""Compare single-threaded and multi-threaded results against stable logical goldens.
+
+The helpers canonicalize generated values, schemas, diagnostics, and output files without
+discarding meaningful metadata.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Canonical local-path and remote-URI classification helpers."""
+"""Classify and normalize local paths, file URIs, and supported remote URIs.
+
+Windows drive paths are distinguished from URI schemes before locations, extensions, suffixes,
+and content types are normalized for routing.
+"""
 
 from __future__ import annotations
 

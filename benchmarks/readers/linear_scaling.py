@@ -1,4 +1,8 @@
-"""Measure valid hostile-pattern reader scaling without optional dependencies."""
+"""Measure valid hostile-pattern reader scaling without optional dependencies.
+
+It generates hostile-pattern fixtures, rotates measurements to control noise, evaluates
+latency budgets, and records source provenance.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ _CaseKey = TypeVar("_CaseKey")
 
 
 def _write_fixtures(root: Path, rows: int) -> dict[str, Path]:
+    """Generate deterministic source fixtures for every reader benchmark case."""
     fixtures: dict[str, Path] = {}
     csv = root / f"valid-hostile-{rows}.csv"
     with csv.open("w", encoding="utf-8", newline="\n") as stream:
@@ -118,6 +123,7 @@ def run(
                         benchmark_source: Path = source,
                         benchmark_multi_threading: bool = multi_threading,
                     ) -> None:
+                        """Read one generated fixture through its public JSONL conversion route."""
                         output = fixture_root / (
                             f"{benchmark_name}-{benchmark_rows}-{ordinal}.jsonl"
                         )
@@ -329,6 +335,7 @@ def evaluate_report(
 
 
 def _git_commit(root: Path) -> str | None:
+    """Return the current source revision when Git metadata is available."""
     try:
         completed = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -348,6 +355,7 @@ def _git_commit(root: Path) -> str | None:
 
 
 def _file_identity(path: Path) -> dict[str, Any]:
+    """Hash a source file and record its stable identity metadata."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
@@ -435,6 +443,7 @@ def collect_provenance(root: Path, wheel: Path | None = None) -> dict[str, Any]:
 
 
 def main() -> None:
+    """Measure reader scaling, evaluate the latency budget, and emit the report."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--sizes", default="500,1000,2000")

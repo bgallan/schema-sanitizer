@@ -1,4 +1,8 @@
-"""Apply eager memory guards to already-materialized input payloads."""
+"""Apply eager memory guards to already-materialized input payloads.
+
+It estimates the retained size of materialized rows and byte payloads and rejects them
+before preparation can exceed the operation budget.
+"""
 
 from __future__ import annotations
 

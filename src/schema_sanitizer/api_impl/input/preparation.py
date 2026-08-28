@@ -1,4 +1,8 @@
-"""Public input validation and native payload preparation."""
+"""Public input validation and native payload preparation.
+
+It validates public input types and formats, encodes Python rows, and prepares paths,
+payloads, manifests, or staged inputs for execution.
+"""
 
 from __future__ import annotations
 

@@ -42,6 +42,7 @@ class ControlPlaneBudgetSnapshot:
 
     @property
     def governed_bytes(self) -> int:
+        """Return the governed bytes."""
         return self.static_baseline_bytes + self.reserved_bytes
 
 
@@ -57,6 +58,7 @@ class _ControlPlaneCapability:
     __slots__ = ("pid", "token", "released", "retire_requested")
 
     def __init__(self, pid: int) -> None:
+        """Initialize the control plane capability and its owned runtime state."""
         self.pid = int(pid)
         self.token = 0
         self.released = False
@@ -87,6 +89,7 @@ class ControlPlaneTicket:
         retire_requested: bool = False,
         capability: object | None = None,
     ) -> None:
+        """Initialize the control plane ticket and its owned runtime state."""
         self.amount = amount
         self.kind = kind
         self.pid = pid
@@ -103,6 +106,7 @@ class ControlPlaneTicket:
 
     @property
     def released(self) -> bool:
+        """Return whether the resource has been released."""
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
             return bool(capability.released)
@@ -110,6 +114,7 @@ class ControlPlaneTicket:
 
     @released.setter
     def released(self, value: bool) -> None:
+        """Set whether this ticket has released its control-plane capability."""
         self._released_mirror = bool(value)
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
@@ -117,6 +122,7 @@ class ControlPlaneTicket:
 
     @property
     def retire_requested(self) -> bool:
+        """Return whether terminal retirement was requested."""
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
             return bool(capability.retire_requested)
@@ -124,6 +130,7 @@ class ControlPlaneTicket:
 
     @retire_requested.setter
     def retire_requested(self, value: bool) -> None:
+        """Set whether terminal retirement was requested."""
         self._retire_requested_mirror = bool(value)
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
@@ -152,6 +159,7 @@ class _ControlPlaneOwnerEntry:
     def __init__(
         self, ticket: ControlPlaneTicket, capability: _ControlPlaneCapability, amount: int
     ) -> None:
+        """Initialize the control plane owner entry and its owned runtime state."""
         self.capability = capability
         self.amount = amount
         self.ticket_ref = weakref.ref(ticket)
@@ -159,6 +167,7 @@ class _ControlPlaneOwnerEntry:
 
 class _ProcessControlPlaneBudget:
     def __init__(self, *, include_static_baseline: bool = False) -> None:
+        """Initialize the process control plane budget and its owned runtime state."""
         self._lock = Lock()
         self._include_static_baseline = include_static_baseline
         self._pid = os.getpid()
@@ -200,6 +209,7 @@ class _ProcessControlPlaneBudget:
         self._native_shadow_dirty = False
 
     def _ensure_process_locked(self) -> None:
+        """Ensure the owner belongs to the active process while holding its lock."""
         pid = os.getpid()
         if self._pid == pid:
             return
@@ -232,6 +242,7 @@ class _ProcessControlPlaneBudget:
         self._fork_fresh_owners = owners
 
     def clear_fork_preparation(self) -> None:
+        """Clear state established while preparing for a fork."""
         self._fork_fresh_lock = None
         self._fork_fresh_init_lock = None
         self._fork_fresh_owners = None
@@ -320,6 +331,7 @@ class _ProcessControlPlaneBudget:
         return not self._corrupted
 
     def _static_baseline_bytes_locked(self) -> int:
+        """Return static control-plane bytes while holding the budget lock."""
         if not self._include_static_baseline:
             return 0
         from .static_control_plane import static_control_plane_bytes
@@ -406,6 +418,7 @@ class _ProcessControlPlaneBudget:
             return active, self._native_shadow_bytes if active else 0
 
     def configure(self, capacity_bytes: int) -> None:
+        """Configure this process control plane budget from the active operation limits."""
         if type(capacity_bytes) is not int:
             raise TypeError("control-plane capacity must be an exact integer")
         if capacity_bytes <= 0 or capacity_bytes > _MAX_CAPACITY_BYTES:
@@ -425,6 +438,7 @@ class _ProcessControlPlaneBudget:
             self._capacity = capacity_bytes
 
     def reserve(self, kind: str, amount: int) -> ControlPlaneTicket:
+        """Reserve governed capacity through this process control plane budget."""
         if type(kind) is not str or type(amount) is not int:
             raise TypeError("control-plane reservation metadata must be exact")
         if amount < _MIN_TICKET_BYTES:
@@ -579,6 +593,7 @@ class _ProcessControlPlaneBudget:
         return ticket
 
     def _release_capability(self, capability: _ControlPlaneCapability, token: int) -> bool:
+        """Release one exact control-plane ticket capability."""
         if capability.released:
             return True
         if capability.pid != os.getpid():
@@ -729,6 +744,7 @@ class _ProcessControlPlaneBudget:
         return progressed
 
     def snapshot(self) -> ControlPlaneBudgetSnapshot:
+        """Return a bounded snapshot of the current process control plane budget."""
         with self._lock:
             self._ensure_process_locked()
             self._reconcile_counters_locked()
@@ -805,10 +821,12 @@ def defer_control_plane_release(ticket: ControlPlaneTicket | None) -> bool:
 
 
 def drain_deferred_control_plane_releases(*, limit: int = 256) -> int:
+    """Drain deferred control plane releases."""
     return _PROCESS_CONTROL_PLANE_BUDGET.drain_requested_retirements(limit=limit)
 
 
 def _synchronize_control_plane_native_shadow_under_admission_lock() -> tuple[bool, int]:
+    """Synchronize native control-plane accounting under the admission lock."""
     return _PROCESS_CONTROL_PLANE_BUDGET.ensure_native_shadow_under_admission_lock()
 
 
@@ -855,18 +873,21 @@ _FORK_FRESH_ADMISSION_LOCK: Lock | None = None
 
 
 def _prepare_control_plane_for_fork() -> None:
+    """Prepare control plane for fork."""
     global _FORK_FRESH_ADMISSION_LOCK
     _FORK_FRESH_ADMISSION_LOCK = _FORK_ADMISSION_LOCK_BANK[_FORK_ADMISSION_LOCK_BANK_INDEX]
     _PROCESS_CONTROL_PLANE_BUDGET.prepare_for_fork()
 
 
 def _clear_control_plane_fork_preparation() -> None:
+    """Clear control plane fork preparation."""
     global _FORK_FRESH_ADMISSION_LOCK
     _FORK_FRESH_ADMISSION_LOCK = None
     _PROCESS_CONTROL_PLANE_BUDGET.clear_fork_preparation()
 
 
 def _reset_control_plane_after_fork() -> None:
+    """Reset control plane after fork."""
     global \
         _GOVERNED_MEMORY_ADMISSION_LOCK, \
         _FORK_FRESH_ADMISSION_LOCK, \

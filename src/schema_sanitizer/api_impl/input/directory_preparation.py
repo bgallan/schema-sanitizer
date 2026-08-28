@@ -1,4 +1,8 @@
-"""Local and remote public directory-input preparation."""
+"""Local and remote public directory-input preparation.
+
+It discovers local or remote children, creates lazy native directory manifests, and
+preserves per-source tracking and cleanup ownership.
+"""
 
 from __future__ import annotations
 
@@ -152,7 +156,7 @@ def _effective_native_xml_row_tag(
     xml_row_tag: str | None,
     memory_limit_bytes: int | None,
 ) -> str | None:
-    """Resolve the row tag only when the native XML frontend needs detection."""
+    """Resolve the row tag only when native XML detection is required."""
     if input_format != "xml" or xml_row_tag:
         return xml_row_tag
     return _detect_native_xml_row_tag(

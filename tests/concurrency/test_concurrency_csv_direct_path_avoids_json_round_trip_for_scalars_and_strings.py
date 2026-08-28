@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency csv direct path avoids json round trip for scalars and strings."""
+"""Define CSV direct-encoding contracts for scalar cells and packet estimation.
+
+The cases avoid JSON round trips, retain conservative interleave margins, and require
+byte-identical single, multi, and stream-adapter output.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""BigQuery workflows and client configuration derived from namespaces."""
+"""BigQuery workflows and client configuration derived from namespaces.
+
+It translates command namespaces into credentials and connection settings, then runs
+external-table operations through a bounded ADBC client.
+"""
 
 from __future__ import annotations
 

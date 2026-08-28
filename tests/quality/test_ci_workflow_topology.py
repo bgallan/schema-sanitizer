@@ -1,4 +1,8 @@
-"""Protect the compact CI/CD topology and its shared release validation."""
+"""Protect the compact CI/CD topology and its shared release validation.
+
+It protects workflow triggers, permissions, pinned dependencies, job matrices, artifact
+contracts, release gates, and fail-closed publication topology.
+"""
 
 from __future__ import annotations
 

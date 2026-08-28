@@ -1,8 +1,7 @@
-"""Tiny process-wide seqlock epoch for cross-service diagnostics.
+"""Provide a tiny process-wide seqlock epoch for cross-service diagnostics.
 
-Completed transitions leave an even epoch.  Writers that need to expose a
-multi-step mutation can use :func:`diagnostic_write` so readers reject the odd
-in-flight epoch. One-shot transitions advance by two and remain completed writes.
+Writers expose multi-step mutations through odd in-flight epochs, while completed
+transitions and one-shot updates leave an even epoch that readers can accept.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ _ACTIVE_WRITERS = 0
 
 
 def _ensure_process() -> None:
+    """Ensure the owner still belongs to the active process."""
     global _PID, _EPOCH, _ACTIVE_WRITERS, _LOCK
     pid = os.getpid()
     if pid != _PID:

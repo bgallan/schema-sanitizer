@@ -1,4 +1,8 @@
-"""Bounded local-file writers shared by synchronous and asynchronous providers."""
+"""Bounded local-file writers shared by synchronous and asynchronous providers.
+
+It copies synchronous or asynchronous readers into governed local files, enforces
+declared lengths, and removes partial output on failure.
+"""
 
 from __future__ import annotations
 
@@ -89,7 +93,7 @@ async def write_async_iterator_to_file(
     """Write an async chunk iterator with the same memory and disk admission."""
 
     async def read(_size: int) -> bytes:
-        """Provide a deterministic test or worker helper."""
+        """Return the next asynchronous chunk, or empty bytes after iterator exhaustion."""
         try:
             return await anext(iterator)
         except StopAsyncIteration:

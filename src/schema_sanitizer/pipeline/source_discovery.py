@@ -1,4 +1,8 @@
-"""Discover local and remote inputs for partitioned pipeline plans."""
+"""Discover local and remote inputs for partitioned pipeline plans.
+
+It lists or probes local and remote sources, filters missing inputs, and builds
+deterministic manifests with discovery timing and transfer evidence.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Validate installed-wheel Parquet compression parity across all codecs in CI."""
+"""Validate installed-wheel Parquet compression parity across all codecs in CI.
+
+It writes one representative table with every supported codec and compares
+installed-wheel metadata and round-trip values.
+"""
 
 from __future__ import annotations
 

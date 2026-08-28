@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency route release gate."""
+"""Run the concurrency release gate through the real public 8-by-7 format matrix.
+
+Each pair must execute its declared route, Parquet-to-pandas must share the governed PyArrow pool,
+and the global proof still requires orthogonal transport and lifetime profiles.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ def _require_release_adapters() -> None:
 
 
 def _prepare_sources(root: Path) -> dict[str, tuple[Any, dict[str, Any], int]]:
+    """Prepare the path and Arrow sources used by the release-gate checks."""
     csv_path = root / "input.csv"
     csv_path.write_text("a,b\n1,x\n2,y\n", encoding="utf-8")
 
@@ -79,6 +84,7 @@ def _run_pair(
     input_kwargs: dict[str, Any],
     expected_rows: int,
 ) -> None:
+    """Run the input/output pair through the controlled execution path."""
     common: dict[str, Any] = {
         "input_format": input_name,
         "multi_threading": True,

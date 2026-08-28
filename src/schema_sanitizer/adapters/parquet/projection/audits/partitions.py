@@ -1,4 +1,8 @@
-"""Partition audits for native Parquet recursive projection layouts."""
+"""Partition audits for native Parquet recursive projection layouts.
+
+It verifies that projection partitions are disjoint, contract-compatible, and together
+reproduce the full recursive layout.
+"""
 
 from __future__ import annotations
 

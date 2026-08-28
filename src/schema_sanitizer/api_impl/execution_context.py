@@ -1,4 +1,8 @@
-"""High-level execution context, sink routing, and process-local pooling."""
+"""High-level execution context, sink routing, and process-local pooling.
+
+It stores reusable options, merges per-call overrides, routes table and file sinks, and
+manages process-local operation resources.
+"""
 
 from __future__ import annotations
 

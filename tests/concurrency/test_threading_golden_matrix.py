@@ -1,4 +1,9 @@
-"""Fixed-clock single-versus-multi golden matrix."""
+"""Compare single- and multi-worker behavior under a fixed operation clock.
+
+Analytical and file frontends, directory and Parquet fallbacks, error policies, registry
+generation and strict preconditions, reused native state, nested schemas, and partition warm-up
+must all produce equivalent golden results.
+"""
 
 from __future__ import annotations
 

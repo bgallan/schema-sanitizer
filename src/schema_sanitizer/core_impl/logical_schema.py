@@ -1,4 +1,8 @@
-"""Native logical-schema payload validation and Arrow conversion."""
+"""Validate native logical-schema payloads and convert them to and from Arrow.
+
+The module checks the JSON wire shape and bridges PyArrow schemas through Arrow C schema
+providers without exposing native capsule details to callers.
+"""
 
 from __future__ import annotations
 

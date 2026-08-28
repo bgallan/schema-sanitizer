@@ -1,4 +1,7 @@
-"""Regression coverage for memory async corruption closes admission but exact cleanup capability survives."""
+"""Exercises quarantine after asynchronous bookkeeping corruption across terminal slots,
+stage brokers, native operation ledgers, and static control-plane totals. Nested-fork
+cases confirm that admission stays closed while preallocated cleanup capability remains
+available and generation banks are not recycled early."""
 
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ CPP = ROOT / "cpp" / "src"
 def test_async_corruption_closes_admission_but_exact_cleanup_capability_survives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async corruption closes admission but exact cleanup capability survives."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -50,6 +54,7 @@ def test_async_corruption_closes_admission_but_exact_cleanup_capability_survives
 def test_stage_broker_keeps_partial_async_domain_rooted_for_cleanup_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify stage broker keeps partial async domain rooted for cleanup retry."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
     from schema_sanitizer.core_impl.memory_budget import StageConcurrencyAdmission
 
@@ -75,6 +80,7 @@ def test_stage_broker_keeps_partial_async_domain_rooted_for_cleanup_retry(
 
 
 def test_terminal_slots_are_authority_and_corruption_quarantines_publication() -> None:
+    """Verify terminal slots are authority and corruption quarantines publication."""
     from schema_sanitizer.core_impl.terminal_ownership import TerminalOwnershipLedger
 
     ledger = TerminalOwnershipLedger(capacity=1)
@@ -100,6 +106,7 @@ def test_terminal_slots_are_authority_and_corruption_quarantines_publication() -
 def test_static_control_plane_recomputes_authoritative_total_and_stays_quarantined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify static control plane recomputes authoritative total and stays quarantined."""
     from schema_sanitizer.core_impl import static_control_plane as static
 
     monkeypatch.setattr(static, "_ENTRIES", {"a": 10, "b": 10})
@@ -123,6 +130,7 @@ def test_static_control_plane_recomputes_authoritative_total_and_stays_quarantin
 
 
 def test_native_operation_ledger_overrelease_has_irreversible_admission_latch() -> None:
+    """Verify native operation ledger overrelease has irreversible admission latch."""
     source = (CPP / "internal" / "memory" / "memory_pool.cc").read_text(encoding="utf-8")
     header = (CPP / "internal" / "memory" / "memory_pool.hh").read_text(encoding="utf-8")
     reserve = source[
@@ -148,6 +156,7 @@ def test_native_operation_ledger_overrelease_has_irreversible_admission_latch() 
 
 
 def test_native_operation_ledger_runtime_rejects_reserve_after_overrelease_if_built() -> None:
+    """Verify native operation ledger runtime rejects reserve after overrelease if built."""
     try:
         from schema_sanitizer import _core_abi3 as native
     except ImportError:
@@ -168,6 +177,7 @@ def test_native_operation_ledger_runtime_rejects_reserve_after_overrelease_if_bu
 def test_fork_safety_bootstrap_does_not_recycle_bank_on_third_nested_fork(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fork safety bootstrap does not recycle bank on third nested fork."""
     from schema_sanitizer.core_impl import fork_safety
 
     monkeypatch.setattr(fork_safety, "_FORK_GENERATION", 2)
@@ -180,6 +190,7 @@ def test_fork_safety_bootstrap_does_not_recycle_bank_on_third_nested_fork(
 def test_fork_manager_blocks_third_nested_prepared_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fork manager blocks third nested prepared generation."""
     from schema_sanitizer.core_impl import fork_manager, fork_safety
 
     called: list[str] = []
@@ -208,6 +219,7 @@ def test_fork_manager_blocks_third_nested_prepared_generation(
 
 
 def test_before_fork_callbacks_only_select_preallocated_state() -> None:
+    """Verify before fork callbacks only select preallocated state."""
     partition = (SRC / "api_impl" / "partition_resources.py").read_text(encoding="utf-8")
     sessions = (SRC / "remote_impl" / "provider_session_pool.py").read_text(encoding="utf-8")
     contracts = (SRC / "core_impl" / "concurrency_contracts.py").read_text(encoding="utf-8")
@@ -230,6 +242,7 @@ def test_before_fork_callbacks_only_select_preallocated_state() -> None:
 
 
 def test_fork_manager_contains_global_one_shot_bank_guard() -> None:
+    """Verify fork manager contains global one shot bank guard."""
     source = (SRC / "core_impl" / "fork_manager.py").read_text(encoding="utf-8")
     block = source[source.index("def _before()") : source.index("\ndef _parent()")]
     assert "fork_quarantine_generation() > 1" in block

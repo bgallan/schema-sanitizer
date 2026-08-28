@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate a built wheel from isolated downstream environments."""
+"""Validate a built wheel from isolated downstream environments.
+
+It creates isolated environments and validates base, typed, and optional-extra consumer
+profiles against the built wheel.
+"""
 
 from __future__ import annotations
 

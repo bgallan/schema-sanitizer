@@ -1,4 +1,8 @@
-"""Governed process-wide delayed retries without one thread per timer."""
+"""Schedule governed process-wide retries without one thread per timer.
+
+Shared timer and execution workers preserve exact release ownership across generations,
+emergency slots, cancellation, dead letters, fork recovery, and shutdown.
+"""
 
 from __future__ import annotations
 
@@ -91,6 +95,7 @@ class _GuardedReleaseState(Enum):
 
 
 def _noop() -> None:
+    """Accept the callback without performing additional work."""
     return None
 
 
@@ -100,14 +105,17 @@ class _StrongIdentityRetryKey:
     __slots__ = ("owner", "owner_id", "_hash")
 
     def __init__(self, owner: object) -> None:
+        """Initialize the strong identity retry key and its owned runtime state."""
         self.owner = owner
         self.owner_id = id(owner)
         self._hash = hash(("builtin-object-identity", self.owner_id))
 
     def __hash__(self) -> int:
+        """Return the cached strong-identity hash."""
         return self._hash
 
     def __eq__(self, other: object) -> bool:
+        """Return whether this value equals the other value."""
         return isinstance(other, _StrongIdentityRetryKey) and self.owner is other.owner
 
 
@@ -117,6 +125,7 @@ class _IdentityRetryKey:
     __slots__ = ("owner_ref", "owner_id", "type_id", "_hash")
 
     def __init__(self, owner: object) -> None:
+        """Initialize the identity retry key and its owned runtime state."""
         try:
             owner_ref = weakref.ref(owner)
         except TypeError as exc:
@@ -129,9 +138,11 @@ class _IdentityRetryKey:
         self._hash = hash(("identity", self.owner_id, self.type_id))
 
     def __hash__(self) -> int:
+        """Return the cached weak-identity hash."""
         return self._hash
 
     def __eq__(self, other: object) -> bool:
+        """Return whether this value equals the other value."""
         if not isinstance(other, _IdentityRetryKey):
             return False
         left = self.owner_ref()
@@ -202,6 +213,7 @@ def _normalize_retry_key(
 
 
 def _subsystem_for(key: Hashable) -> Hashable:
+    """Derive the bounded subsystem identity represented by a retry key."""
     if isinstance(key, tuple) and len(key) == 2 and key[0] == "tuple":
         parts = key[1]
         if isinstance(parts, tuple) and parts:
@@ -269,23 +281,28 @@ class _BoundedDeadlineIndex:
     __slots__ = ("_slots", "_count", "_capacity")
 
     def __init__(self, capacity: int) -> None:
+        """Initialize the bounded deadline index and its owned runtime state."""
         self._slots: list[_ScheduledRetry | None] = [None] * capacity
         self._count = 0
         self._capacity = capacity
 
     def __len__(self) -> int:
+        """Return the number of retained values."""
         return self._count
 
     def __bool__(self) -> bool:
+        """Return whether the instance currently carries a value."""
         return self._count != 0
 
     def __iter__(self):
+        """Iterate over the retained values."""
         for index in range(self._count):
             item = self._slots[index]
             if item is not None:
                 yield item
 
     def __getitem__(self, index: int) -> _ScheduledRetry:
+        """Return the value associated with the requested key."""
         if index < 0 or index >= self._count:
             raise IndexError(index)
         item = self._slots[index]
@@ -295,11 +312,13 @@ class _BoundedDeadlineIndex:
 
     @staticmethod
     def _earlier(left: _ScheduledRetry, right: _ScheduledRetry) -> bool:
+        """Return whether the left deadline precedes the right deadline."""
         if left.deadline_ns != right.deadline_ns:
             return left.deadline_ns < right.deadline_ns
         return left.sequence < right.sequence
 
     def _swap(self, left: int, right: int) -> None:
+        """Swap two entries in the indexed expiry heap."""
         a = self._slots[left]
         b = self._slots[right]
         if a is None or b is None:
@@ -309,6 +328,7 @@ class _BoundedDeadlineIndex:
         a.deadline_slot = right
 
     def _sift_up(self, index: int) -> int:
+        """Restore heap order toward the root."""
         while index > 0:
             parent = (index - 1) // 2
             current = self._slots[index]
@@ -322,6 +342,7 @@ class _BoundedDeadlineIndex:
         return index
 
     def _sift_down(self, index: int) -> int:
+        """Restore heap order toward the leaves."""
         count = self._count
         while True:
             left = index * 2 + 1
@@ -348,6 +369,7 @@ class _BoundedDeadlineIndex:
             index = best
 
     def peek_min(self) -> _ScheduledRetry | None:
+        """Return the earliest indexed deadline without removing it."""
         if self._count == 0:
             return None
         item = self._slots[0]
@@ -356,6 +378,7 @@ class _BoundedDeadlineIndex:
         return item
 
     def insert(self, item: _ScheduledRetry) -> None:
+        """Insert a keyed deadline into the bounded index."""
         if item.deadline_slot >= 0:
             raise RuntimeError("retry deadline owner already indexed")
         if self._count >= self._capacity:
@@ -367,6 +390,7 @@ class _BoundedDeadlineIndex:
         self._sift_up(index)
 
     def replace(self, old: _ScheduledRetry, new: _ScheduledRetry) -> None:
+        """Replace the deadline associated with an indexed key."""
         index = old.deadline_slot
         if index < 0 or index >= self._count or self._slots[index] is not old:
             raise RuntimeError("retry deadline replacement lost source owner")
@@ -384,6 +408,7 @@ class _BoundedDeadlineIndex:
         self._sift_down(index)
 
     def remove(self, item: _ScheduledRetry) -> bool:
+        """Remove a retained entry."""
         index = item.deadline_slot
         if index < 0 or index >= self._count or self._slots[index] is not item:
             return False
@@ -412,6 +437,7 @@ class _BoundedDeadlineIndex:
         return True
 
     def pop_min(self) -> _ScheduledRetry | None:
+        """Remove and return the earliest indexed deadline."""
         item = self.peek_min()
         if item is None:
             return None
@@ -490,9 +516,11 @@ class _ReleaseGuardian:
     """Bounded, governed and lifecycle-deduplicated failed-release owner."""
 
     def __init__(self) -> None:
+        """Initialize the release guardian and its owned runtime state."""
         self._reset(os.getpid())
 
     def _reset(self, pid: int) -> None:
+        """Reset process-local state owned by this release guardian."""
         if globals().get("_RELEASE_GUARDIAN") is self:
             retire_terminal_category("release_guardian")
         self._pid = pid
@@ -524,10 +552,12 @@ class _ReleaseGuardian:
         self._protocol_violations = 0
 
     def _ensure_process(self) -> None:
+        """Ensure the owner still belongs to the active process."""
         if self._pid != os.getpid():
             self._reset(os.getpid())
 
     def _mark_progress_locked(self) -> None:
+        """Mark progress while holding the governing lock."""
         try:
             self._last_progress_ns = monotonic_ns()
             self._progress_epoch = min((1 << 63) - 1, self._progress_epoch + 1)
@@ -556,6 +586,7 @@ class _ReleaseGuardian:
         return not self._corrupted
 
     def adopt(self, owner: Any, *, method: str = "release", retained_bytes: int = 256) -> bool:
+        """Adopt a failed worker lease for governed retry."""
         self._ensure_process()
         ensure_runtime_fork_safe()
         if type(method) is not str or not method:
@@ -631,6 +662,7 @@ class _ReleaseGuardian:
         return True
 
     def _retain_failed_worker_lease(self, lease: Any) -> None:
+        """Retain a failed worker lease for a later governed retry."""
         with self._condition:
             if any(existing is lease for existing in self._failed_worker_leases):
                 return
@@ -670,6 +702,7 @@ class _ReleaseGuardian:
                 self._condition.notify_all()
 
     def _finish_worker_start_locked(self) -> None:
+        """Finish worker start while holding the governing lock."""
         if self._workers_starting <= 0:
             self._protocol_violations += 1
             return
@@ -678,6 +711,7 @@ class _ReleaseGuardian:
     def _ensure_workers(self) -> None:
         # Bootstrap permits are never work items for this guardian. Retry them
         # synchronously before deciding whether another worker can start.
+        """Ensure this release guardian owns its configured governed workers."""
         self._drain_failed_worker_leases_once()
         starts = 0
         with self._condition:
@@ -730,6 +764,7 @@ class _ReleaseGuardian:
                     self._condition.notify_all()
 
     def _take_ready_locked(self) -> tuple[int, _GuardedRelease] | None:
+        """Remove and return the next ready release while holding the guardian lock."""
         now_ns = monotonic_ns()
         selected_key = -1
         selected: _GuardedRelease | None = None
@@ -758,6 +793,7 @@ class _ReleaseGuardian:
         return None
 
     def _append_dead_letter_locked(self, item: _GuardedRelease) -> bool:
+        """Append dead letter while holding the governing lock."""
         if self._dead_letter_count >= _MAX_DEAD_LETTERS:
             return False
         index = self._dead_letter_count
@@ -774,6 +810,7 @@ class _ReleaseGuardian:
             publish_terminal_owner("release_guardian", key, retained_bytes=item.retained_bytes)
 
     def _run(self, lease: Any) -> None:
+        """Run the background worker loop for this release guardian."""
         current = threading.current_thread()
         try:
             while True:
@@ -934,6 +971,7 @@ class _ReleaseGuardian:
             self._ensure_workers()
 
     def close(self, *, deadline_seconds: float = 1.0) -> bool:
+        """Release resources owned by this release guardian."""
         deadline = deadline_ns_from_timeout(
             deadline_seconds, name="release guardian shutdown deadline"
         )
@@ -995,6 +1033,7 @@ class _ReleaseGuardian:
                 )
 
     def snapshot(self) -> ReleaseGuardianSnapshot:
+        """Return a bounded snapshot of the current release guardian."""
         self._ensure_process()
         with self._condition:
             parked = tuple(
@@ -1101,9 +1140,11 @@ class _RetryScheduler:
     """
 
     def __init__(self) -> None:
+        """Initialize the retry scheduler and its owned runtime state."""
         self._reset(os.getpid())
 
     def _reset(self, pid: int) -> None:
+        """Reset process-local state owned by this retry scheduler."""
         self._pid = pid
         self._condition = threading.Condition()
         self._heap = _BoundedDeadlineIndex(_MAX_PENDING_RETRIES)
@@ -1210,6 +1251,7 @@ class _RetryScheduler:
         return current - amount
 
     def _decrement_protocol_counter_locked(self, name: str, amount: int = 1) -> None:
+        """Decrement one protocol counter while holding the scheduler lock."""
         current = int(getattr(self, name))
         if amount < 0 or current < amount:
             self._protocol_violations += 1
@@ -1217,10 +1259,12 @@ class _RetryScheduler:
         setattr(self, name, current - amount)
 
     def _ensure_process(self) -> None:
+        """Ensure the owner still belongs to the active process."""
         if self._pid != os.getpid():
             self._reset(os.getpid())
 
     def _mark_progress_locked(self) -> None:
+        """Mark progress while holding the governing lock."""
         try:
             self._last_progress_ns = monotonic_ns()
             self._progress_epoch = min((1 << 63) - 1, self._progress_epoch + 1)
@@ -1229,16 +1273,19 @@ class _RetryScheduler:
             pass
 
     def _release_retry_generation_locked(self, item: _ScheduledRetry) -> None:
+        """Release retry generation while holding the governing lock."""
         token = item.token
         if token and self._generation_pool.release_for(item):
             item.token = 0
 
     @staticmethod
     def _deadline_from_delay(delay_seconds: int | float) -> int:
+        """Convert a relative retry delay into a monotonic deadline."""
         return deadline_ns_from_timeout(delay_seconds, name="retry delay", allow_zero=True)
 
     def _drop_pending_charge_locked(self, item: _ScheduledRetry) -> None:
         # Owner retirement must never be undone by diagnostic/accounting OOM.
+        """Release a pending retry's control-plane charge while holding the scheduler lock."""
         try:
             next_pending = self._checked_byte_decrement_locked(
                 self._pending_bytes, item.retained_bytes
@@ -1345,6 +1392,7 @@ class _RetryScheduler:
         item.state = _RetryItemState.FINISHED
 
     def _has_key_locked(self, key: Hashable) -> bool:
+        """Return whether the scheduler retains a key while holding its lock."""
         return any(
             key in mapping
             for mapping in (
@@ -1357,15 +1405,17 @@ class _RetryScheduler:
         )
 
     def _maybe_prune_generation_locked(self, key: Hashable) -> None:
+        """Prune an inactive retry generation while holding the scheduler lock."""
         if not self._has_key_locked(key):
             self._key_generations.pop(key, None)
 
     def _enqueue_ready_locked(self, item: _ScheduledRetry) -> None:
         # No growable queue is published after a retry leaves the deadline index.
+        """Move a due retry into the ready queue while holding the scheduler lock."""
         item.state = _RetryItemState.READY
 
     def _take_ready_locked(self) -> _ScheduledRetry | None:
-        """Claim one ready owner without deque rotation/reinsertion allocation."""
+        """Claim one ready owner without deque rotation or reinsertion allocation."""
         item: _ScheduledRetry | None = None
         fallback: _ScheduledRetry | None = None
         for candidate in self._ready_by_key.values():
@@ -1422,6 +1472,7 @@ class _RetryScheduler:
         return True
 
     def _emergency_fits_locked(self, key: Hashable, *, charge: int) -> bool:
+        """Return whether an emergency retry fits while holding the scheduler lock."""
         old = self._emergency.get(key)
         old_charge = old.retained_bytes if old is not None else 0
         if old is None and len(self._emergency) >= _MAX_EMERGENCY_RETRIES:
@@ -1431,6 +1482,7 @@ class _RetryScheduler:
     def _install_emergency_locked(
         self, item: _ScheduledRetry, detached: list[Callable[[], None]]
     ) -> None:
+        """Install the bounded emergency retry while holding the scheduler lock."""
         old = self._emergency.get(item.key)
         old_charge = old.retained_bytes if old is not None else 0
         next_bytes = self._emergency_bytes - old_charge + item.retained_bytes
@@ -1452,6 +1504,7 @@ class _RetryScheduler:
                 pass
 
     def _promote_emergency_locked(self) -> None:
+        """Promote the emergency retry to normal ownership while holding the scheduler lock."""
         if not self._emergency:
             return
         for key in tuple(self._emergency):
@@ -1494,6 +1547,7 @@ class _RetryScheduler:
             self._mark_progress_locked()
 
     def _remove_scheduled_locked(self, key: Hashable, detached: list[Callable[[], None]]) -> bool:
+        """Remove scheduled while holding the governing lock."""
         removed = False
         old = self._current.pop(key, None)
         if old is not None:
@@ -1531,6 +1585,7 @@ class _RetryScheduler:
     def _install_successor_locked(
         self, item: _ScheduledRetry, detached: list[Callable[[], None]]
     ) -> None:
+        """Install a successor retry while holding the scheduler lock."""
         old = self._successors.get(item.key)
         next_bytes = (
             self._successor_bytes
@@ -1555,6 +1610,7 @@ class _RetryScheduler:
                 pass
 
     def _promote_successor_locked(self, key: Hashable) -> None:
+        """Promote a successor retry to authoritative ownership while holding the scheduler lock."""
         item = self._successors.get(key)
         if item is None:
             self._maybe_prune_generation_locked(key)
@@ -1621,6 +1677,7 @@ class _RetryScheduler:
     def _restore_generation_noexcept_locked(
         self, key: Hashable, *, present: bool, value: int | None
     ) -> None:
+        """Restore generation accounting without raising while holding the scheduler lock."""
         try:
             if present:
                 self._key_generations[key] = value  # type: ignore[assignment]
@@ -1968,6 +2025,7 @@ class _RetryScheduler:
         return True
 
     def cancel(self, key: Hashable) -> None:
+        """Cancel pending work owned by this retry scheduler."""
         self._ensure_process()
         ensure_runtime_fork_safe()
         key = _normalize_retry_key(key)
@@ -1991,20 +2049,24 @@ class _RetryScheduler:
         detached.clear()
 
     def _register_availability_locked(self) -> None:
+        """Register availability while holding the governing lock."""
         if not self._availability_registered:
             self._availability_registered = bool(
                 register_project_thread_availability(AvailabilityEvent.RETRY_SCHEDULER)
             )
 
     def _unregister_availability_locked(self) -> None:
+        """Unregister availability while holding the governing lock."""
         if self._availability_registered:
             unregister_project_thread_availability(AvailabilityEvent.RETRY_SCHEDULER)
             self._availability_registered = False
 
     def _has_failed_worker_leases_locked(self) -> bool:
+        """Return whether failed worker leases remain while holding the governing lock."""
         return bool(self._failed_worker_leases or self._terminal_failed_worker_lease is not None)
 
     def _acquire_worker_lease(self) -> Any | None:
+        """Acquire one governed thread lease for retry execution."""
         with self._condition:
             if self._has_failed_worker_leases_locked():
                 self._register_availability_locked()
@@ -2022,6 +2084,7 @@ class _RetryScheduler:
             return None
 
     def _adopt_failed_lease(self, lease: Any) -> None:
+        """Adopt a failed scheduler lease for governed cleanup."""
         if adopt_failed_release(lease, retained_bytes=256):
             return
         with self._condition:
@@ -2047,6 +2110,7 @@ class _RetryScheduler:
             self._condition.notify_all()
 
     def _start_timer_worker(self) -> None:
+        """Start the governed worker that waits for retry deadlines."""
         lease = self._acquire_worker_lease()
         if lease is None:
             with self._condition:
@@ -2076,6 +2140,7 @@ class _RetryScheduler:
                 self._condition.notify_all()
 
     def _start_execution_worker(self) -> None:
+        """Start a governed worker that executes ready retries."""
         lease = self._acquire_worker_lease()
         if lease is None:
             with self._condition:
@@ -2107,6 +2172,7 @@ class _RetryScheduler:
                 self._condition.notify_all()
 
     def _ensure_workers(self) -> None:
+        """Ensure this retry scheduler owns its configured governed workers."""
         self._ensure_process()
         start_timer = False
         execution_count = 0
@@ -2181,6 +2247,7 @@ class _RetryScheduler:
                     self._condition.notify_all()
 
     def _discard_stale_head_locked(self, detached: list[Callable[[], None]]) -> None:
+        """Discard stale head while holding the governing lock."""
         item = self._heap.peek_min()
         if item is None or self._current.get(item.key) is item:
             return
@@ -2189,6 +2256,7 @@ class _RetryScheduler:
         self._detach_locked(item, detached)
 
     def _run_timer(self, lease: Any) -> None:
+        """Run the retry timer worker until shutdown."""
         current = threading.current_thread()
         try:
             while True:
@@ -2241,6 +2309,7 @@ class _RetryScheduler:
             self._finish_worker(current, lease, timer=True)
 
     def _run_execution(self, lease: Any) -> None:
+        """Run one retry execution worker until shutdown."""
         current = threading.current_thread()
         try:
             while True:
@@ -2282,6 +2351,7 @@ class _RetryScheduler:
             self._finish_worker(current, lease, timer=False)
 
     def _finish_worker(self, current: threading.Thread, lease: Any, *, timer: bool) -> None:
+        """Retire a completed retry worker and its thread lease."""
         with self._condition:
             owned_lease = self._worker_leases.get(current, lease)
             self._retiring_workers[current] = owned_lease
@@ -2391,6 +2461,7 @@ class _RetryScheduler:
             return stopped
 
     def snapshot(self) -> RetrySchedulerSnapshot:
+        """Return a bounded snapshot of the current retry scheduler."""
         self._ensure_process()
         guardian = release_guardian_snapshot()
         with self._condition:
@@ -2507,6 +2578,7 @@ def shutdown_retry_runtime(*, deadline_seconds: float = 1.0) -> bool:
 
 
 def _reset_retry_runtime_after_fork() -> None:
+    """Reset retry runtime after fork."""
     from .fork_safety import fork_quarantine_generation
 
     if fork_quarantine_generation() > 1:

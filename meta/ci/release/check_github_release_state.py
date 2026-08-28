@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify that a manual release still targets the current main commit."""
+"""Verify that a manual release still targets the current main commit.
+
+It queries GitHub with bounded retry handling and confirms that main still points at the
+intended release commit.
+"""
 
 from __future__ import annotations
 

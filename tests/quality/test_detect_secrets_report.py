@@ -1,4 +1,8 @@
-"""Tests for narrow detect-secrets false-positive exclusions."""
+"""Tests for narrow detect-secrets false-positive exclusions.
+
+It permits only reviewed public digests and revisions while preserving every actionable
+secret-scanner finding and failure message.
+"""
 
 from __future__ import annotations
 

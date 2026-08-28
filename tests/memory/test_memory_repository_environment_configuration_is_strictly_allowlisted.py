@@ -1,4 +1,7 @@
-"""Regression coverage for strictly allowlisted repository environment access."""
+"""Audits repository environment access against a strict allowlist and checks direct
+frontend scratch ownership. Chunk and source owners are deduplicated independently,
+while CSV or JSON scratch retires after every attempt without invalidating decoded
+values."""
 
 from __future__ import annotations
 

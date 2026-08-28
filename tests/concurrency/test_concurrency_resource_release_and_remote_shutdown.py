@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency resource release and remote shutdown."""
+"""Verify serialized resource release and ownership-aware remote shutdown.
+
+Memory and storage leases must withstand concurrent release and resize, while close deadlines,
+owned-thread rejection, secondary close callers, late provider clients, and abandoned prefetch
+results all retire their resources without deadlock.
+"""
 
 from __future__ import annotations
 
@@ -246,9 +251,11 @@ class _ClosingClient:
     """Track cleanup of a client created during pool shutdown."""
 
     def __init__(self) -> None:
+        """Initialize the closing client test double."""
         self.close_calls = 0
 
     async def close(self) -> None:
+        """Close the resources owned by the closing client test double."""
         self.close_calls += 1
 
 
@@ -256,14 +263,17 @@ class _ClosingManager:
     """Track entry and exit of a manager created during pool shutdown."""
 
     def __init__(self) -> None:
+        """Initialize the closing manager test double."""
         self.enter_calls = 0
         self.exit_calls = 0
 
     async def __aenter__(self) -> object:
+        """Enter the asynchronous context managed by the closing manager test double."""
         self.enter_calls += 1
         return object()
 
     async def __aexit__(self, *_exc: object) -> None:
+        """Exit the asynchronous context managed by the closing manager test double and run cleanup."""
         self.exit_calls += 1
 
 
@@ -341,15 +351,18 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
         """Record cleanup of one staging result completed after abandonment."""
 
         def close(self) -> None:
+            """Close the resources owned by the staged test double."""
             staged_closed.set()
 
     class Session:
         """Provide a lightweight shared staging session."""
 
         async def __aenter__(self) -> Session:
+            """Enter the asynchronous context managed by the session test double."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             pass
 
     from schema_sanitizer.api_impl.input.directory_preparation import (
@@ -359,15 +372,18 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             pass
 
     class Manifest(RemoteNativeDirectorySourceManifest):
         """Expose one cancellation-resistant remote chunk."""
 
         def open_staging_session(self) -> Session:
+            """Open the controlled staging session for the sink."""
             return Session()
 
         def try_acquire_storage_lease(self, _start: int) -> Lease:
+            """Attempt to acquire the manifest storage lease."""
             return Lease()
 
         async def stage_chunk_async(
@@ -376,6 +392,7 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
             _session: Session,
             storage_lease: object | None = None,
         ) -> Staged:
+            """Stage one chunk through the controlled asynchronous session."""
             assert storage_lease is not None
             started.set()
             while not release.is_set():

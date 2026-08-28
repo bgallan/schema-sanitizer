@@ -1,4 +1,8 @@
-"""Typed objects returned by the native ABI."""
+"""Normalize typed results returned by the native ABI.
+
+Wrappers decode ingestion, probe, and sink results together with diagnostics JSON, logical schema
+payloads, and capsule ownership into stable Python values.
+"""
 
 from __future__ import annotations
 
@@ -331,7 +335,7 @@ class SinkOutput:
 
     @property
     def diagnostics(self) -> IngestDiagnostics:
-        """Return sink diagnostics."""
+        """Return diagnostics reported by the native sink result."""
         diagnostics = self._diagnostics
         if diagnostics is None:
             raise RuntimeError("sink diagnostics have already been detached")

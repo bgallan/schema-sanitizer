@@ -1,4 +1,8 @@
-"""Native-first stream-to-file execution."""
+"""Native-first stream-to-file execution.
+
+It drives an owned stream into a sink or raw writer, snapshots final diagnostics, and
+closes every layer without masking the primary exception.
+"""
 
 from __future__ import annotations
 

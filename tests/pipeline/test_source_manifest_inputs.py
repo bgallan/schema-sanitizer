@@ -1,4 +1,8 @@
-"""Public immutable ``SourceManifest`` input contracts."""
+"""Public immutable ``SourceManifest`` input contracts.
+
+It validates the public immutable manifest type, suffix and emptiness rules, converter
+acceptance, source identity, and diagnostic attachment.
+"""
 
 from __future__ import annotations
 
@@ -131,9 +135,11 @@ def test_parquet_manifest_reuses_staging_and_cleanup_lifecycle(
         """Record closure of one staged or prepared resource."""
 
         def __init__(self, name: str) -> None:
+            """Initialize keepalive state for name."""
             self.name = name
 
         def close(self) -> None:
+            """Close the keepalive and release its retained resources."""
             closed.append(self.name)
 
     staged = SimpleNamespace(

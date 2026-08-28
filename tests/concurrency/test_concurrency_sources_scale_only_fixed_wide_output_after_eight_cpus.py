@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources scale only fixed wide output after eight cpus."""
+"""Pin source-side high-core scaling to eligible fixed-wide output.
+
+A synthetic sixteen-worker arena must form distinct input and output lanes, while machines below
+nine CPUs keep deferred admission instead of paying the high-width scheduling cost.
+"""
 
 from __future__ import annotations
 

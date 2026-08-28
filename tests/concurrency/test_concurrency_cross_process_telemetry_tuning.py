@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency cross process telemetry tuning."""
+"""Verify that cross-process resource evidence can tune admission without weakening limits.
+
+Combined reservations must reject overcommit and stale owners must be reclaimed, while opt-in,
+bounded percentile telemetry adjusts concurrency reserves without changing static defaults.
+"""
 
 from __future__ import annotations
 

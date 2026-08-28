@@ -1,4 +1,8 @@
-"""Regression coverage for memory native thread domains commit through one atomic total."""
+"""Validates one atomic total for native thread domains across external-runtime claims,
+resident widths, stage rollback, protocol validation, route evidence, Parquet fork
+identity, and keepalive tombstones. Reported width is not mistaken for OS-thread
+identity; failed release remains retryable and transport-specific ownership stays
+verifiable."""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ CPP = ROOT / "cpp" / "src"
 
 
 def test_native_thread_domains_commit_through_one_atomic_total() -> None:
+    """Verify native thread domains commit through one atomic total."""
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     header = (CPP / "internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
     probe = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
@@ -29,6 +34,7 @@ def test_native_thread_domains_commit_through_one_atomic_total() -> None:
 
 
 def test_external_runtime_claims_are_not_os_thread_identity_evidence() -> None:
+    """Verify external runtime claims are not OS thread identity evidence."""
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     resources = (SRC / "core_impl/process_resources.py").read_text(encoding="utf-8")
 
@@ -47,6 +53,7 @@ def test_external_runtime_claims_are_not_os_thread_identity_evidence() -> None:
 def test_runtime_reported_resident_width_survives_active_claim_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify runtime reported resident width survives active claim generation."""
     from schema_sanitizer.core_impl import process_resources as module
 
     with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
@@ -67,6 +74,7 @@ def test_runtime_reported_resident_width_survives_active_claim_generation(
     class Runtime:
         @staticmethod
         def schema_sanitizer_resident_thread_count() -> int:
+            """Return the controlled resident-thread count."""
             return 3
 
     class Native:
@@ -75,11 +83,13 @@ def test_runtime_reported_resident_width_survives_active_claim_generation(
         supports_atomic_residency_update = True
 
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.leases: dict[object, int] = {}
 
         def acquire_exact_permit_lease(
             self, desired: int, minimum: int
         ) -> tuple[object, int] | None:
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             assert minimum <= desired
             events.append(("claim-acquire", desired))
             receipt = object()
@@ -87,9 +97,11 @@ def test_runtime_reported_resident_width_survives_active_claim_generation(
             return receipt, desired
 
         def exact_permit_lease_amount(self, receipt: object) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return self.leases[receipt]
 
         def resize_exact_permit_lease(self, receipt: object, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             current = self.leases[receipt]
             if current > target:
                 events.append(("claim-release", current - target))
@@ -99,6 +111,7 @@ def test_runtime_reported_resident_width_survives_active_claim_generation(
         def external_runtime_residency_update(
             self, identity_delta: int, _stack_debt_delta: int
         ) -> None:
+            """Record resident-thread additions or releases."""
             if identity_delta > 0:
                 events.append(("resident-add", identity_delta))
             elif identity_delta < 0:
@@ -133,6 +146,7 @@ def test_runtime_reported_resident_width_survives_active_claim_generation(
 def test_stage_domain_rollback_keeps_failed_release_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify stage domain rollback keeps failed release retryable."""
     from schema_sanitizer.core_impl import memory_budget as module
 
     base = module.StageConcurrencyAdmission(slots=2, per_slot_bytes=64)
@@ -140,9 +154,11 @@ def test_stage_domain_rollback_keeps_failed_release_retryable(
 
     class RetryLease:
         def __init__(self) -> None:
+            """Initialize the retry lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the retry lease test double."""
             self.releases += 1
             if self.releases == 1:
                 raise RuntimeError("transient release failure")
@@ -150,6 +166,7 @@ def test_stage_domain_rollback_keeps_failed_release_retryable(
     lease = RetryLease()
 
     def fail_second(_slots: int) -> object:
+        """Raise the deliberate failure during second."""
         raise RuntimeError("second domain acquisition failed")
 
     with pytest.raises(RuntimeError, match="second domain acquisition failed"):
@@ -173,6 +190,7 @@ def test_stage_domain_rollback_keeps_failed_release_retryable(
 def test_release_native_protocol_validation_is_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify release native protocol validation is fail closed."""
     from schema_sanitizer.core_impl import concurrency_coverage as coverage
     from schema_sanitizer.core_impl import runtime_diagnostics
 
@@ -212,6 +230,7 @@ def test_release_native_protocol_validation_is_fail_closed(
 
 
 def test_route_profiles_require_transport_specific_runtime_evidence() -> None:
+    """Verify route profiles require transport specific runtime evidence."""
     from schema_sanitizer.core_impl.concurrency_route_evidence import (
         INPUT_ROUTE_PROFILE_REQUIREMENTS,
         OUTPUT_ROUTE_PROFILE_REQUIREMENTS,
@@ -234,6 +253,7 @@ def test_route_profiles_require_transport_specific_runtime_evidence() -> None:
 def test_parquet_stream_owner_has_real_fork_identity_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet stream owner has real fork identity guard."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     owner = module._ParquetStreamKeepaliveOwner()
@@ -252,6 +272,7 @@ def test_parquet_stream_owner_has_real_fork_identity_guard(
 
 
 def test_parquet_keepalive_compacts_dead_weakref_tombstones() -> None:
+    """Verify Parquet keepalive compacts dead weakref tombstones."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     class WeakOwner:

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise a release wheel without importing anything from the repository."""
+"""Exercise a release wheel without importing anything from the repository.
+
+The program performs a public conversion and validates rows, metadata, and imports from
+only the installed distribution.
+"""
 
 from __future__ import annotations
 

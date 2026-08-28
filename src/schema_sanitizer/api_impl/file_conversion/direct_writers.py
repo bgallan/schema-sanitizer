@@ -1,4 +1,8 @@
-"""Direct native file-output implementations and error translation."""
+"""Direct native file-output implementations and error translation.
+
+It attempts atomic native path writers, translates native statuses into typed outcomes,
+and distinguishes safe decline from terminal failure.
+"""
 
 from __future__ import annotations
 

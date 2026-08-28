@@ -1,4 +1,8 @@
-"""Cross-mode contracts for the native concurrent Parquet writer."""
+"""Compare native Parquet writing across single- and multi-worker modes.
+
+Wide scalar and nested columns must remain logically equivalent after round-trip, while strict
+single mode must not create any host worker thread.
+"""
 
 from __future__ import annotations
 

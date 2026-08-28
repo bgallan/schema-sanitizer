@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency cancellation and resource lifecycle."""
+"""Exercise cancellation and resource ownership across local and remote concurrency services.
+
+The tests connect writer reservations, nested deadlines, governor queues, cross-process memory,
+provider throttling, diagnostics, fork safety, staged paths, janitor cleanup, and retry teardown.
+They verify that interruption preserves progress and that ownership ends only after real cleanup.
+"""
 
 from __future__ import annotations
 
@@ -81,15 +86,19 @@ class _StorageReservationSpy:
     """Record disk-admission calls made by a streamed writer."""
 
     def __init__(self) -> None:
+        """Initialize the storage reservation spy test double."""
         self.events: list[tuple[str, int]] = []
 
     def reset_after_truncate(self) -> None:
+        """Reset the storage reservation after output truncation."""
         self.events.append(("reset", 0))
 
     def before_write(self, chunk_bytes: int) -> None:
+        """Record the byte reservation requested before a streamed write."""
         self.events.append(("reserve", chunk_bytes))
 
     def finalize(self, actual_size_bytes: int) -> None:
+        """Record the final on-disk size reported by the writer."""
         self.events.append(("finalize", actual_size_bytes))
 
 
@@ -195,14 +204,14 @@ def test_cancelled_governor_ticket_does_not_block_followers(
     monkeypatch.setattr(governor._condition, "wait", observe_wait)  # noqa: SLF001
 
     def timeout_waiter() -> None:
-        """Provide a deterministic test or worker helper."""
+        """Attempt the permit acquisition expected to time out."""
         try:
             governor.acquire(timeout_seconds=0.05)
         except SchemaSanitizerResourceError:
             timed_out.set()
 
     def follower() -> None:
-        """Provide a deterministic test or worker helper."""
+        """Acquire and release the permit after the cancelled waiter."""
         lease = governor.acquire(timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
         follower_acquired.set()
         lease.release()
@@ -325,6 +334,7 @@ def test_operation_diagnostics_separate_live_and_completed_operations() -> None:
         """Expose a bound-method snapshot without global retention."""
 
         def snapshot(self) -> dict[str, object]:
+            """Return a snapshot of the state recorded by the test double."""
             return {"operation_id": operation_id, "state": "running", "workers": 2}
 
     owner = Owner()
@@ -394,20 +404,22 @@ def test_staged_path_retains_lease_when_cleanup_fails(
         """Track whether capacity was returned prematurely."""
 
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     lease = Lease()
     captured: dict[str, object] = {}
 
     def fail_delete(_path: Path) -> None:
-        """Provide a deterministic test or worker helper."""
+        """Raise the cleanup failure injected before staged lease release."""
         raise OSError("busy")
 
     def capture(path: Path, *, is_dir: bool, lease: object, expected_identity: object) -> bool:
-        """Provide a deterministic test or worker helper."""
+        """Capture the staged path retained after cleanup failure."""
         captured.update(
             path=path,
             is_dir=is_dir,
@@ -445,9 +457,11 @@ def test_temporary_janitor_releases_only_after_actual_deletion(tmp_path: Path) -
         """Count exact lease releases."""
 
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     lease = Lease()

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency high core mixed lanes drain without extra workers."""
+"""Exercise mixed input and output lanes at high worker counts without spare threads.
+
+The arena must drain both lanes using its existing workers, and output priority must survive
+wake-event coalescing without starving queued work.
+"""
 
 from __future__ import annotations
 

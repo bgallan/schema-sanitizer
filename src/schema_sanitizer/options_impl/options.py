@@ -1,4 +1,8 @@
-"""Grouped wrapper around the native C++ options catalog."""
+"""Wrap the flat native options catalog in typed Python groups.
+
+CSV modes and escapes, enums, lists, and scalar values are normalized consistently while aliases,
+unknown names, and invalid cross-field combinations are rejected.
+"""
 
 from __future__ import annotations
 

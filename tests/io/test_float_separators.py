@@ -1,4 +1,8 @@
-"""Regional decimal and thousands separator parsing tests."""
+"""Regional decimal and thousands separator parsing tests.
+
+It covers default and regional separators, quoted CSV values, malformed grouping, JSON
+numeric tokens, and invalid option combinations.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,7 @@ from conftest import read_test_csv, read_test_jsonl, read_test_python
 
 
 def test_default_float_separators_parse_grouped_strings(require_native: None) -> None:
+    """Verify default float separators parse grouped strings."""
     result = read_test_python(
         [{"value": "1,234.56"}, {"value": "12.5e2"}],
         parse_floats=True,
@@ -16,6 +21,7 @@ def test_default_float_separators_parse_grouped_strings(require_native: None) ->
 
 
 def test_custom_float_separators_parse_european_strings(require_native: None) -> None:
+    """Verify custom float separators parse european strings."""
     result = read_test_python(
         [
             {"value": "1.234,56"},
@@ -35,6 +41,7 @@ def test_custom_float_separators_parse_european_strings(require_native: None) ->
 
 
 def test_comma_decimal_csv_value_is_parsed_when_quoted(tmp_path, require_native: None) -> None:
+    """Verify comma decimal CSV value is parsed when quoted."""
     path = tmp_path / "prices.csv"
     path.write_text('value\n"1.234,56"\n', encoding="utf-8")
 
@@ -58,12 +65,14 @@ def test_comma_decimal_csv_value_is_parsed_when_quoted(tmp_path, require_native:
     ),
 )
 def test_malformed_float_grouping_remains_string(value: str, require_native: None) -> None:
+    """Verify malformed float grouping remains string."""
     result = read_test_python([{"value": value}], parse_floats=True)
 
     assert result.clean_data.to_pylist() == [{"value": value}]
 
 
 def test_json_number_tokens_ignore_string_float_separators(tmp_path, require_native: None) -> None:
+    """Verify JSON number tokens ignore string float separators."""
     path = tmp_path / "rows.jsonl"
     path.write_text('{"value":1.5}\n', encoding="utf-8")
 
@@ -89,6 +98,7 @@ def test_json_number_tokens_ignore_string_float_separators(tmp_path, require_nat
     ),
 )
 def test_invalid_float_separators_are_rejected(decimal: str, thousands: str) -> None:
+    """Verify invalid float separators are rejected."""
     with pytest.raises((TypeError, ValueError), match="parse_float"):
         read_test_python(
             [{"value": "1.0"}],

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources use one shared batch and disjoint row spans."""
+"""Require source workers to share one batch through disjoint row spans.
+
+Zero-copy packets must partition work without overlapping ownership and reproduce the exact
+single-worker oracle when their results are joined.
+"""
 
 from __future__ import annotations
 

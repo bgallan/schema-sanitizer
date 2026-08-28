@@ -1,4 +1,8 @@
-"""Whole-operation concurrency context propagation tests."""
+"""Whole-operation concurrency context propagation tests.
+
+It proves one operation context spans input through output and that partial context
+construction releases already-acquired resources.
+"""
 
 from __future__ import annotations
 
@@ -83,6 +87,7 @@ def test_context_construction_releases_resources_when_clock_capture_fails(
         """Minimal resource-domain double recording final release."""
 
         def release(self) -> None:
+            """Mark the resources resource as released."""
             released.append(True)
 
     resources = Resources()

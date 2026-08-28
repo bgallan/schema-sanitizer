@@ -1,4 +1,8 @@
-"""Tests for release archive identity, completeness, and cleanliness."""
+"""Tests for release archive identity, completeness, and cleanliness.
+
+It checks release filenames, wheel and source contents, deterministic timestamps,
+metadata identity, scratch-file rejection, and manifest verification.
+"""
 
 from __future__ import annotations
 
@@ -183,6 +187,7 @@ def test_archive_timestamp_check_rejects_runner_clock_drift(
 
 
 def _add_tar_file(archive: tarfile.TarFile, name: str, content: bytes = b"fixture\n") -> None:
+    """Add a deterministic regular file member to the test archive."""
     member = tarfile.TarInfo(name)
     member.size = len(content)
     member.mtime = 0
@@ -236,6 +241,7 @@ def _release_artifacts(
 
 
 def test_release_manifest_is_canonical_complete_and_verifiable(tmp_path: Path) -> None:
+    """Verify release manifest is canonical complete and verifiable."""
     helper = _load_validator("release_manifest")
     artifacts = _release_artifacts(tmp_path)
     version = tmp_path / "VERSION"
@@ -269,6 +275,7 @@ def test_release_manifest_is_canonical_complete_and_verifiable(tmp_path: Path) -
 
 
 def test_release_manifest_verification_rejects_tampering(tmp_path: Path) -> None:
+    """Verify release manifest verification rejects tampering."""
     helper = _load_validator("release_manifest")
     artifacts = _release_artifacts(tmp_path)
     version = tmp_path / "VERSION"
@@ -296,6 +303,7 @@ def test_release_manifest_verification_rejects_tampering(tmp_path: Path) -> None
 
 
 def test_release_validation_rejects_filename_metadata_drift(tmp_path: Path) -> None:
+    """Verify release validation rejects filename metadata drift."""
     artifacts = _release_artifacts(tmp_path, metadata_version="0.3.9")
     with pytest.raises(AssertionError, match="metadata version"):
         _load_validator().validate_release_set(artifacts, expected_version="0.4.0")
@@ -317,12 +325,14 @@ def test_release_validation_rejects_filename_metadata_drift(tmp_path: Path) -> N
 def test_release_validation_rejects_core_metadata_drift(
     tmp_path: Path, options: dict[str, str], message: str
 ) -> None:
+    """Verify release validation rejects core metadata drift."""
     artifacts = _release_artifacts(tmp_path, **options)
     with pytest.raises(AssertionError, match=message):
         _load_validator().validate_release_set(artifacts, expected_version="0.4.0")
 
 
 def test_release_manifest_cli_creates_and_rechecks_the_same_contract(tmp_path: Path) -> None:
+    """Verify release manifest CLI creates and rechecks the same contract."""
     artifacts = _release_artifacts(tmp_path)
     version = tmp_path / "VERSION"
     version.write_text("0.4.0\n", encoding="utf-8")

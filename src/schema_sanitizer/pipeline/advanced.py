@@ -1,4 +1,8 @@
-"""Advanced pipeline primitives retained for custom orchestration."""
+"""Advanced pipeline primitives retained for custom orchestration.
+
+This namespace re-exports Hive planning, source discovery, schema drift, observability, and
+registry warm-up operations from their focused implementation modules.
+"""
 
 # ruff: noqa: F401 - re-exports are the purpose of this namespace
 

@@ -1,4 +1,8 @@
-"""Contracts for atomic publication of native local outputs."""
+"""Contracts for atomic publication of native local outputs.
+
+It verifies publication occurs only after success, destination contents and modes
+survive failure, and native writers use atomic staging.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Fixed-width runtime counters with an ABI-backed atomic fast path."""
+"""Fixed-width runtime counters with an ABI-backed atomic fast path.
+
+AtomicEpoch uses a native capsule when available and a locked saturating uint64 fallback while
+preserving the same success semantics.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ class AtomicEpoch:
     __slots__ = ("_capsule", "_value", "_lock", "_inc", "_dec", "_read", "_reset", "_write")
 
     def __init__(self) -> None:
+        """Initialize the atomic epoch and its owned runtime state."""
         self._capsule = None
         self._value = 0
         self._lock = Lock()
@@ -49,6 +54,7 @@ class AtomicEpoch:
             self._capsule = None
 
     def increment(self) -> bool:
+        """Increment the epoch and return whether saturation was avoided."""
         capsule = self._capsule
         inc = self._inc
         if capsule is not None and inc is not None:
@@ -63,6 +69,7 @@ class AtomicEpoch:
             return True
 
     def decrement(self) -> bool:
+        """Decrement the epoch and return whether underflow was avoided."""
         capsule = self._capsule
         dec = self._dec
         if capsule is not None and dec is not None:
@@ -77,6 +84,7 @@ class AtomicEpoch:
             return True
 
     def value(self) -> int:
+        """Return the current atomic epoch value."""
         capsule = self._capsule
         read = self._read
         if capsule is not None and read is not None:
@@ -103,9 +111,11 @@ class AtomicEpoch:
 
     @property
     def native_capsule(self) -> object | None:
+        """Return the native capsule."""
         return self._capsule
 
     def reset_after_fork(self) -> None:
+        """Reset process-local state inherited across a fork."""
         self._lock = Lock()
         capsule = self._capsule
         reset = self._reset

@@ -1,4 +1,9 @@
-"""Structural and native contracts for the shared operation arena."""
+"""Protect structural, atomic, and cancellation contracts of the shared operation arena.
+
+Bounded high-core batching, snapshot ownership, lane cursors, admission rollback, publication
+orders, completion-ring wrapping, reserved slots, aggregate layouts, external leases, stop paths,
+and native cancellation are checked against the exact low- and high-core strategies they require.
+"""
 
 from __future__ import annotations
 

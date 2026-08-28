@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency wide fixed jsonl matches single oracle."""
+"""Hold fixed-wide parallel JSONL processing to a strict single-stage oracle.
+
+Row, column, parse, validation, and conversion failures must keep canonical precedence through
+nested fallbacks and empty containers; low-budget replay also proves Arrow ownership, bounded
+reordering, and exact packet reparenting.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency generic evidence uses bounded compact indices."""
+"""Define bounded generic-inference evidence contracts for compact node and row indices.
+
+The cases combine adaptive statistics validation with exact nested single/multi semantics
+without allowing evidence structures to grow unbounded.
+"""
 
 from __future__ import annotations
 

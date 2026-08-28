@@ -1,4 +1,8 @@
-"""Immutable CSV union-projection contracts."""
+"""Immutable CSV union-projection contracts.
+
+It covers reordered, missing, additive, duplicate, colliding, short, and all-null
+columns while preserving single and multi parity.
+"""
 
 from __future__ import annotations
 

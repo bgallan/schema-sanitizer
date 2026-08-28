@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fail the release gate when the selected version already exists on PyPI."""
+"""Fail the release gate when the selected version already exists on PyPI.
+
+It queries the PyPI JSON API with bounded failure handling and rejects versions that
+have already been published.
+"""
 
 from __future__ import annotations
 

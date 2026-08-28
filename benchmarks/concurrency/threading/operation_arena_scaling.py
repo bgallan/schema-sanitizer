@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Measure whole-pipeline scaling while preserving one operation worker budget."""
+"""Measure whole-pipeline scaling while preserving one operation worker budget.
+
+It parses worker-count sweeps, executes isolated operation cases, and summarizes
+throughput and scaling efficiency.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Public streaming file-conversion orchestration and entry points."""
+"""Public streaming file-conversion orchestration and entry points.
+
+It normalizes file requests, selects direct or source-plan routes, applies registry
+fallbacks, and returns final diagnostics with the published result.
+"""
 
 from __future__ import annotations
 
@@ -313,6 +317,7 @@ def convert_file_with_options(
         cleanup_error: BaseException | None = None
 
         def record_cleanup_failure(label: str, exc: BaseException) -> None:
+            """Record one bounded cleanup failure in result diagnostics."""
             nonlocal cleanup_error
             if primary is not None:
                 add_bounded_note(primary, label, exc)

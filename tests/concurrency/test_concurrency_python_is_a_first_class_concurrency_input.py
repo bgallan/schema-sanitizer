@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency python is a first class concurrency input."""
+"""Treat Python sequences and one-shot iterables as complete concurrency inputs.
+
+Native batching, replay, ordinal errors, CSV detection, and single-versus-multi parity are checked
+across every file and analytical output, including high-width progress and adapter-free routes.
+"""
 
 from __future__ import annotations
 
@@ -300,10 +304,12 @@ def test_python_input_reaches_every_analytical_output_without_adapter_import(
 
             class Relation:
                 def __eq__(self, other: object) -> bool:
+                    """Compare mutable-hash identities for the retry-key test."""
                     return other == "duckdb"
 
             class Connection:
                 def close(self) -> None:
+                    """Close the resources owned by the connection test double."""
                     pass
 
             return Result(

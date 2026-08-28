@@ -1,4 +1,7 @@
-"""Regression coverage for exact finalizer capsule authority."""
+"""Defines capsule-only finalizer authority across temporary storage, remote I/O, external
+runtimes, file-descriptor queues, fork generations, and sealed pool identity. Tickets
+and process capabilities are exact and non-replayable; reentrancy, allocation faults,
+and retirement preserve conservative accounting without global scans."""
 
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ CPP = Path(__file__).resolve().parents[2] / "cpp" / "src"
 
 
 def test_production_finalizer_callsites_use_capsule_as_single_authority() -> None:
+    """Verify production finalizer callsites use capsule as single authority."""
     violations: list[str] = []
     for path in SRC.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -38,6 +42,7 @@ def test_production_finalizer_callsites_use_capsule_as_single_authority() -> Non
 
 
 def test_reserved_finalizer_escrow_uses_predecoded_exact_ticket_metadata() -> None:
+    """Verify reserved finalizer escrow uses predecoded exact ticket metadata."""
     from schema_sanitizer.core_impl import finalizer_escrow as module
 
     publish = inspect.getsource(module.ReservedFinalizerEscrow.publish_reserved)
@@ -51,6 +56,7 @@ def test_reserved_finalizer_escrow_uses_predecoded_exact_ticket_metadata() -> No
 
 
 def test_process_temporary_storage_capability_is_exact_and_non_replayable() -> None:
+    """Verify process temporary storage capability is exact and non replayable."""
     from schema_sanitizer.core_impl.temporary_storage_governor import (
         ProcessTemporaryStorageCapability,
         _ProcessTemporaryStorageGovernor,
@@ -81,6 +87,7 @@ def test_process_temporary_storage_capability_is_exact_and_non_replayable() -> N
 
 
 def test_temporary_storage_production_paths_use_exact_process_capabilities() -> None:
+    """Verify temporary storage production paths use exact process capabilities."""
     source = (SRC / "core_impl/temporary_storage.py").read_text(encoding="utf-8")
     governor = (SRC / "core_impl/temporary_storage_governor.py").read_text(encoding="utf-8")
     assert "reserve_capability(" in source
@@ -96,6 +103,7 @@ def test_temporary_storage_production_paths_use_exact_process_capabilities() -> 
 
 
 def test_remote_io_release_precomputes_critical_accounting_before_owner_pop() -> None:
+    """Verify remote I/O release precomputes critical accounting before owner pop."""
     from schema_sanitizer.remote_impl import io_permits as module
 
     source = inspect.getsource(module.RemoteIoPermitGovernor._release_permit_capability)
@@ -105,6 +113,7 @@ def test_remote_io_release_precomputes_critical_accounting_before_owner_pop() ->
 
 
 def test_fake_pyarrow_name_cannot_inherit_sealed_pool_identity() -> None:
+    """Verify fake PyArrow name cannot inherit sealed pool identity."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Fake:
@@ -120,6 +129,7 @@ def test_fake_pyarrow_name_cannot_inherit_sealed_pool_identity() -> None:
 
 
 def test_canonical_runtime_integration_uses_configured_width_as_stack_debt_only() -> None:
+    """Verify canonical runtime integration uses configured width as stack debt only."""
     from schema_sanitizer.core_impl import process_resources as module
 
     canonical = types.ModuleType("pyarrow")
@@ -140,6 +150,7 @@ def test_canonical_runtime_integration_uses_configured_width_as_stack_debt_only(
 
 
 def test_external_residency_fallback_order_is_always_memory_conservative() -> None:
+    """Verify external residency fallback order is always memory conservative."""
     from schema_sanitizer.core_impl import process_resources as module
 
     events: list[tuple[str, int]] = []
@@ -150,15 +161,19 @@ def test_external_residency_fallback_order_is_always_memory_conservative() -> No
         supports_atomic_residency_update = False
 
         def external_runtime_stack_debt_threads_add(self, amount: int) -> None:
+            """Record an increase in external-runtime stack debt."""
             events.append(("debt-add", amount))
 
         def external_runtime_stack_debt_threads_release(self, amount: int) -> None:
+            """Record a release from external-runtime stack debt."""
             events.append(("debt-release", amount))
 
         def external_runtime_resident_threads_add(self, amount: int) -> None:
+            """Record an increase in known resident runtime threads."""
             events.append(("identity-add", amount))
 
         def external_runtime_resident_threads_release(self, amount: int) -> None:
+            """Record a release from known resident runtime threads."""
             events.append(("identity-release", amount))
 
     entry = module._ExternalRuntimePoolCoordinatorEntry(runtime=object())
@@ -170,6 +185,7 @@ def test_external_residency_fallback_order_is_always_memory_conservative() -> No
 
 
 def test_external_runtime_configuration_reentrancy_fails_closed_without_deadlock() -> None:
+    """Verify external runtime configuration reentrancy fails closed without deadlock."""
     from schema_sanitizer.core_impl import process_resources as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -179,6 +195,7 @@ def test_external_runtime_configuration_reentrancy_fails_closed_without_deadlock
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Reenter runtime-pool configuration once before returning the CPU count."""
             if not cls.entered:
                 cls.entered = True
                 module.constrain_external_runtime_worker_pool(cls, 2)
@@ -186,6 +203,7 @@ def test_external_runtime_configuration_reentrancy_fails_closed_without_deadlock
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             cls.value = value
 
     with pytest.raises(SchemaSanitizerResourceError):
@@ -196,6 +214,7 @@ def test_external_runtime_configuration_reentrancy_fails_closed_without_deadlock
 
 
 def test_external_runtime_claim_totals_are_o1_not_global_scan() -> None:
+    """Verify external runtime claim totals are o1 not global scan."""
     from schema_sanitizer.core_impl import process_resources as module
 
     source = inspect.getsource(module._external_runtime_total_claims_locked)
@@ -206,6 +225,7 @@ def test_external_runtime_claim_totals_are_o1_not_global_scan() -> None:
 
 
 def test_native_fd_fifo_capacity_is_ticket_backlog_bounded() -> None:
+    """Verify native FD fifo capacity is ticket backlog bounded."""
     source = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     assert "bool TryReserveFdTicket" in source
     assert "const auto backlog = next - serving" in source
@@ -214,6 +234,7 @@ def test_native_fd_fifo_capacity_is_ticket_backlog_bounded() -> None:
 
 
 def test_native_external_residency_has_joint_epoch_update() -> None:
+    """Verify native external residency has joint epoch update."""
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     abi = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
     assert "update_process_external_runtime_residency" in arena
@@ -225,6 +246,7 @@ def test_native_external_residency_has_joint_epoch_update() -> None:
 
 
 def test_linux_rlimit_nproc_uses_same_uid_thread_headroom() -> None:
+    """Verify Linux rlimit nproc uses same uid thread headroom."""
     source = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     assert "ProcessRlimitThreadHeadroom" in source
     assert '::opendir("/proc")' in source
@@ -236,6 +258,7 @@ def test_linux_rlimit_nproc_uses_same_uid_thread_headroom() -> None:
 def test_remote_io_fault_before_commit_preserves_authoritative_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote I/O fault before commit preserves authoritative owner."""
     from schema_sanitizer.remote_impl import io_permits as module
 
     governor = module.RemoteIoPermitGovernor(2)
@@ -244,6 +267,7 @@ def test_remote_io_fault_before_commit_preserves_authoritative_owner(
     governor._in_use = 1
 
     def fail_max(*_args: object, **_kwargs: object) -> int:
+        """Raise the deliberate failure during max."""
         raise MemoryError("exact-finalizer-capsule-authority injected precommit OOM")
 
     monkeypatch.setattr(module, "max", fail_max, raising=False)
@@ -258,6 +282,7 @@ def test_remote_io_fault_before_commit_preserves_authoritative_owner(
 
 
 def test_process_temporary_storage_capabilities_are_quarantined_across_fork_generation() -> None:
+    """Verify process temporary storage capabilities are quarantined across fork generation."""
     from schema_sanitizer.core_impl.temporary_storage_governor import (
         _ProcessTemporaryStorageGovernor,
     )
@@ -277,6 +302,7 @@ def test_process_temporary_storage_capabilities_are_quarantined_across_fork_gene
 def test_external_runtime_explicit_retirement_clears_known_stack_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external runtime explicit retirement clears known stack debt."""
     from schema_sanitizer.core_impl import process_resources as module
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
 
@@ -285,6 +311,7 @@ def test_external_runtime_explicit_retirement_clears_known_stack_debt(
     class Runtime:
         @staticmethod
         def schema_sanitizer_resident_thread_count() -> int:
+            """Return the controlled resident-thread count."""
             return 2
 
     class Native:
@@ -293,11 +320,13 @@ def test_external_runtime_explicit_retirement_clears_known_stack_debt(
         supports_atomic_residency_update = False
 
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             assert desired >= minimum
             return SimpleNamespace(amount=desired), desired
 
         @staticmethod
         def resize_exact_permit_lease(lease: object, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             previous = lease.amount  # type: ignore[attr-defined]
             lease.amount = target  # type: ignore[attr-defined]
             events.append(("claim-release", previous - target))
@@ -305,18 +334,23 @@ def test_external_runtime_explicit_retirement_clears_known_stack_debt(
 
         @staticmethod
         def exact_permit_lease_amount(lease: object) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return int(lease.amount)  # type: ignore[attr-defined]
 
         def external_runtime_stack_debt_threads_add(self, amount: int) -> None:
+            """Record an increase in external-runtime stack debt."""
             events.append(("debt-add", amount))
 
         def external_runtime_stack_debt_threads_release(self, amount: int) -> None:
+            """Record a release from external-runtime stack debt."""
             events.append(("debt-release", amount))
 
         def external_runtime_resident_threads_add(self, amount: int) -> None:
+            """Record an increase in known resident runtime threads."""
             events.append(("identity-add", amount))
 
         def external_runtime_resident_threads_release(self, amount: int) -> None:
+            """Record a release from known resident runtime threads."""
             events.append(("identity-release", amount))
 
     native = Native()
@@ -350,6 +384,7 @@ def test_external_runtime_explicit_retirement_clears_known_stack_debt(
 def test_temporary_storage_borrow_state_oom_does_not_strand_capability_inflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify temporary storage borrow state OOM does not strand capability inflight."""
     from schema_sanitizer.core_impl.temporary_storage_governor import (
         _ProcessTemporaryStorageGovernor,
     )
@@ -363,6 +398,7 @@ def test_temporary_storage_borrow_state_oom_does_not_strand_capability_inflight(
     original = governor._borrow_state
 
     def fail_borrow(*_args: object, **_kwargs: object) -> object:
+        """Raise the deliberate failure during borrow."""
         raise MemoryError("exact-finalizer-capsule-authority borrow-state OOM")
 
     monkeypatch.setattr(governor, "_borrow_state", fail_borrow)

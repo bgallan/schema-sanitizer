@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency generic evidence uses compact packet local key indices."""
+"""Define packet-local key-index contracts for generic nested inference.
+
+The cases deduplicate repeated keys, bound high-cardinality evidence per packet, and preserve
+exact single/multi schemas and values.
+"""
 
 from __future__ import annotations
 

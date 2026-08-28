@@ -1,4 +1,8 @@
-"""Example-08 orchestration and event-header contracts."""
+"""Example-08 orchestration and event-header contracts.
+
+It covers CLI configuration, event-header normalization, Hive schema and paths, per-day
+execution, and external-table publication ordering.
+"""
 
 from __future__ import annotations
 
@@ -50,6 +54,7 @@ class FakeListingClient:
     """Minimal fake GCS client used before optional analytical dependencies."""
 
     def __init__(self, files: tuple[RemoteFile, ...]) -> None:
+        """Initialize fake listing client state for files and list calls."""
         self.files = files
         self.list_calls = 0
 
@@ -59,11 +64,13 @@ class FakeListingClient:
         *,
         memory_limit_bytes: int | None,
     ) -> tuple[RemoteFile, ...]:
+        """Return the configured CSV object listing for the requested window."""
         del memory_limit_bytes
         self.list_calls += 1
         return self.files
 
     def schema_sanitizer_download_scope(self):
+        """Open the fake provider download scope for schema-sanitizer."""
         return nullcontext()
 
     def publish_file_atomic(
@@ -73,6 +80,7 @@ class FakeListingClient:
         *,
         memory_limit_bytes: int | None,
     ) -> int:
+        """Record an atomic publication without writing to cloud storage."""
         del memory_limit_bytes
         raise AssertionError("stubbed day execution must not publish")
 
@@ -81,10 +89,12 @@ class FakeBigQueryClient:
     """Minimal fake target service with observable replacement calls."""
 
     def __init__(self) -> None:
+        """Initialize fake BigQuery client state for read calls and replace calls."""
         self.read_calls = 0
         self.replace_calls: list[dict[str, Any]] = []
 
     def read_target_schema(self, _target_table: str) -> object:
+        """Return the in-memory target schema while recording the lookup when needed."""
         self.read_calls += 1
         return SimpleNamespace(
             names=[
@@ -98,6 +108,7 @@ class FakeBigQueryClient:
         )
 
     def replace_external_table(self, target_table: str, **kwargs: Any) -> None:
+        """Record the requested external-table replacement."""
         self.replace_calls.append({"target_table": target_table, **kwargs})
 
 

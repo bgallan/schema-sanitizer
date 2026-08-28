@@ -1,4 +1,8 @@
-"""Blocking GCS resumable upload with committed-offset reconciliation."""
+"""Blocking GCS resumable upload with committed-offset reconciliation.
+
+It performs the same range and offset protocol on the caller thread, including retry
+reconciliation and terminal session deletion.
+"""
 
 from __future__ import annotations
 

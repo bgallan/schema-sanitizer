@@ -1,4 +1,8 @@
-"""Open one prepared analytical input as a native registry stream."""
+"""Open one prepared analytical input as a native registry stream.
+
+It selects the direct, single-source, or multi-source registry route and returns one
+owned stream with complete diagnostics.
+"""
 
 from __future__ import annotations
 

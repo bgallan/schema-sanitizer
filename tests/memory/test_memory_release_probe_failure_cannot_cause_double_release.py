@@ -1,4 +1,8 @@
-"""Regression coverage for memory release probe failure cannot cause double release."""
+"""Collects no-double-release lifecycle cases for directory discovery, partition lookahead,
+remote coordinator startup or shutdown, queued-waiter exceptions, native diagnostics,
+and generated or stream finalizers. Every worker slot and capsule has one terminal
+owner; bounded joins and shutdown-aware finalizers avoid replaying native cleanup or
+secure wiping."""
 
 from __future__ import annotations
 
@@ -39,9 +43,11 @@ class _ThreadLeaseDouble:
     amount = 1
 
     def __init__(self) -> None:
+        """Initialize the thread lease double test double."""
         self.released = Event()
 
     def release(self) -> None:
+        """Release the resource held by the thread lease double test double."""
         self.released.set()
 
 
@@ -150,6 +156,7 @@ def test_native_diagnostics_close_freezes_json_and_releases_capsule(
 
         @staticmethod
         def diagnostics_json(_capsule: object) -> str:
+            """Return the controlled native diagnostics payload."""
             return '{"batches":3}'
 
     monkeypatch.setattr(module, "_native", Native())
@@ -260,9 +267,11 @@ def test_stream_finalizer_skips_native_cleanup_during_shutdown(
         """Track whether finalizer cleanup reached the backend."""
 
         def __init__(self) -> None:
+            """Initialize the raw test double."""
             self.closed = 0
 
         def close_main_stream(self) -> None:
+            """Close the primary stream while recording lifecycle calls."""
             self.closed += 1
 
     raw = Raw()
@@ -283,12 +292,15 @@ def test_remote_coordinator_startup_error_join_is_bounded() -> None:
         """Record the requested timeout while remaining alive."""
 
         def __init__(self) -> None:
+            """Initialize the thread double test double."""
             self.timeout: float | None = None
 
         def join(self, timeout: float | None = None) -> None:
+            """Wait for the thread double test double to finish."""
             self.timeout = timeout
 
         def is_alive(self) -> bool:
+            """Report whether the thread double test double is active."""
             return True
 
     coordinator = object.__new__(RemoteIoCoordinator)

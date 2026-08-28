@@ -1,4 +1,8 @@
-"""Composite remote-I/O resource footprints shared by sync and async paths."""
+"""Composite remote-I/O resource footprints shared by sync and async paths.
+
+It acquires memory, external, request, and descriptor capabilities as one unit and
+releases or rolls them back in authoritative order.
+"""
 
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ class RemoteIoFootprint:
     local_file_fds: int = 0
 
     def __post_init__(self) -> None:
+        """Validate and normalize the initialized instance state."""
         for name, value, allow_zero in (
             ("remote_weight", self.remote_weight, False),
             ("network_fds", self.network_fds, True),
@@ -49,6 +54,7 @@ class RemoteIoFootprint:
 
     @property
     def total_file_descriptors(self) -> int:
+        """Return the total file descriptors."""
         return self.network_fds + self.local_file_fds
 
 
@@ -58,6 +64,7 @@ class ActiveRemoteIoFootprint:
     __slots__ = ("footprint", "_local_in_use", "_lock", "_descriptor_lease")
 
     def __init__(self, footprint: RemoteIoFootprint, descriptor_lease: Any | None = None) -> None:
+        """Bind the composite descriptor lease and start with no local subcredits borrowed."""
         self.footprint = footprint
         self._local_in_use = 0
         self._lock = threading.Lock()
@@ -94,6 +101,7 @@ class ActiveRemoteIoFootprint:
 
     @contextmanager
     def borrow_local_file_descriptor(self, *, label: str) -> Iterator[None]:
+        """Borrow local file descriptor."""
         borrowed = False
         with self._lock:
             if self._local_in_use < self.footprint.local_file_fds:

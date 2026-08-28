@@ -1,4 +1,8 @@
-"""Read byte-exact fuzz inputs from loose files and deterministic archives."""
+"""Read byte-exact fuzz inputs from loose files and deterministic archives.
+
+It unifies loose and archived corpus entries, preserves byte identity, and rejects
+unsafe or conflicting archive members.
+"""
 
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ def archive_path(role_root: Path, target: str) -> Path:
 
 
 def _sha1(data: bytes) -> str:
+    """Compute the content-addressed SHA-1 name for one fuzz input."""
     return hashlib.sha1(data, usedforsecurity=False).hexdigest()
 
 
@@ -47,6 +52,7 @@ def is_content_addressed_name(name: str) -> bool:
 
 
 def _record_error(errors: list[str] | None, message: str) -> None:
+    """Append a path-qualified corpus validation error."""
     if errors is None:
         raise FuzzInputError(message)
     errors.append(message)
@@ -57,6 +63,7 @@ def _archive_inputs(
     *,
     errors: list[str] | None,
 ) -> list[FuzzInput]:
+    """Read and validate every regular member from a fuzz corpus archive."""
     if not path.exists():
         return []
     if path.is_symlink() or not path.is_file():

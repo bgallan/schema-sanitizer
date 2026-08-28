@@ -1,4 +1,8 @@
-"""Pipeline source discovery tests."""
+"""Pipeline source discovery tests.
+
+It spans Hive planning, local and provider discovery, grouped checks, latency evidence,
+reused listings, and deterministic source-plan deduplication.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ from schema_sanitizer.sources import RemoteFile
 
 
 def test_pipeline_hive_range_plan_renders_hourly_prefixes() -> None:
+    """Verify pipeline hive range plan renders hourly prefixes."""
     plans = build_hive_range_plan(
         HiveRangeConfig(
             source_prefix="gs://raw/events/rt",
@@ -51,6 +56,7 @@ def test_pipeline_hive_range_plan_renders_hourly_prefixes() -> None:
 
 
 def test_pipeline_source_discovery_filters_local_single_files(tmp_path) -> None:
+    """Verify pipeline source discovery filters local single files."""
     existing = tmp_path / "existing.jsonl"
     missing = tmp_path / "missing.jsonl"
     existing.write_text('{"ok": true}\n', encoding="utf-8")
@@ -95,6 +101,7 @@ def test_pipeline_source_discovery_records_per_source_latency(monkeypatch, tmp_p
 
 
 def test_pipeline_source_discovery_filters_local_directories(tmp_path) -> None:
+    """Verify pipeline source discovery filters local directories."""
     populated = tmp_path / "populated"
     empty = tmp_path / "empty"
     populated.mkdir()
@@ -122,6 +129,7 @@ def test_pipeline_runner_reuses_discovered_local_directory_files(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    """Verify pipeline runner reuses discovered local directory files."""
     pq = pytest.importorskip("pyarrow.parquet")
     import schema_sanitizer.api_impl.input.directory_preparation as directory_native
 
@@ -162,6 +170,7 @@ def test_pipeline_runner_reuses_discovered_local_directory_files(
 
 
 def test_pipeline_source_discovery_uses_gcs_bulk_directory_checks(monkeypatch) -> None:
+    """Verify pipeline source discovery uses GCS bulk directory checks."""
     import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
@@ -219,6 +228,7 @@ def test_pipeline_source_discovery_uses_gcs_bulk_directory_checks(monkeypatch) -
 
 
 def test_pipeline_source_discovery_uses_s3_bulk_directory_checks(monkeypatch) -> None:
+    """Verify pipeline source discovery uses S3 bulk directory checks."""
     import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
@@ -276,6 +286,7 @@ def test_pipeline_source_discovery_uses_s3_bulk_directory_checks(monkeypatch) ->
 
 
 def test_pipeline_source_discovery_uses_azure_bulk_directory_checks(monkeypatch) -> None:
+    """Verify pipeline source discovery uses azure bulk directory checks."""
     import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
@@ -336,6 +347,7 @@ def test_pipeline_source_discovery_uses_local_grouped_directory_checks(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    """Verify pipeline source discovery uses local grouped directory checks."""
     import schema_sanitizer.pipeline.source_discovery_sync as source_discovery_mod
 
     plans = [
@@ -379,6 +391,7 @@ def test_pipeline_source_discovery_uses_local_grouped_directory_checks(
 
 
 def test_pipeline_source_discovery_accepts_windows_drive_paths() -> None:
+    """Verify pipeline source discovery accepts windows drive paths."""
     plan = PartitionRunPlan(
         date(2026, 1, 1),
         r"C:\missing\events.jsonl",
@@ -482,6 +495,7 @@ def test_static_partition_kwargs_remain_live(
     )
 
     def fake_to_parquet(*_args: object, **kwargs: object) -> SimpleNamespace:
+        """Record pipeline output options without writing a file."""
         seen_policies.append(str(kwargs["field_name_policy"]))
         return SimpleNamespace(
             stats={},
@@ -491,6 +505,7 @@ def test_static_partition_kwargs_remain_live(
         )
 
     def mutate_options(*_args: object) -> None:
+        """Mutate the received copy to verify caller options remain unchanged."""
         options["field_name_policy"] = "lower_snake"
 
     monkeypatch.setattr(partition_execution, "to_parquet", fake_to_parquet)

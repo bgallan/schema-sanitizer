@@ -1,4 +1,8 @@
-"""Keep project documentation stable, navigable, and internally consistent."""
+"""Keep project documentation stable, navigable, and internally consistent.
+
+It protects the documentation hierarchy, indexes, local links and anchors, public option
+coverage, and the single introductory root README.
+"""
 
 from __future__ import annotations
 

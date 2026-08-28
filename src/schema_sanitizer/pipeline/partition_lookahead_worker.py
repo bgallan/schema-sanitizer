@@ -1,4 +1,8 @@
-"""Bounded daemon worker used by partition source lookahead."""
+"""Bounded daemon worker used by partition source lookahead.
+
+Its one-slot queue and single governed daemon provide speculative preparation with bounded
+backlog, fork rejection, and deadline-aware shutdown.
+"""
 
 from __future__ import annotations
 
@@ -110,6 +114,7 @@ class ThreadPoolExecutor:
             raise
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this thread pool executor."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -165,6 +170,7 @@ class ThreadPoolExecutor:
         deadline_seconds: float,
         cancel_futures: bool,
     ) -> bool:
+        """Close this thread pool executor and release its retained resources."""
         if os.getpid() != getattr(self, "_pid", os.getpid()):
             return False
         ensure_runtime_fork_safe()

@@ -1,4 +1,8 @@
-"""Convert attached directory manifests into canonical native source plans."""
+"""Convert attached directory manifests into canonical native source plans.
+
+It converts attached local or remote directory manifests into native source plans
+without repeating discovery or losing source identity.
+"""
 
 from __future__ import annotations
 

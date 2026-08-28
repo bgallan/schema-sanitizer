@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency telemetry high core evidence."""
+"""Exercise high-core telemetry workloads without depending on optional analytical runtimes.
+
+The Arrow-stream fixture must be fully consumed and released without PyArrow, and the full-output
+workload must retain the same row count through materialization.
+"""
 
 from __future__ import annotations
 

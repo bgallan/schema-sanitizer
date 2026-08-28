@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Create or verify the deterministic CI manifest for one PyPI release set."""
+"""Create or verify the deterministic CI manifest for one PyPI release set.
+
+It inventories release artifacts, hashes their bytes, serializes canonical JSON, and
+verifies a saved manifest without ambiguity.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Bounded lifecycle helpers for shared asynchronous download sessions."""
+"""Bounded lifecycle helpers for shared asynchronous download sessions.
+
+It enters one shared asynchronous download session and registers an idempotent closer
+with operation finalization.
+"""
 
 from __future__ import annotations
 
@@ -47,6 +51,7 @@ class SharedDownloadSessionCloser:
     """Schedule one session exit exactly once and retain it across timeouts."""
 
     def __init__(self, coordinator: Any, download_session: Any, futures: tuple[Any, ...]) -> None:
+        """Bind the coordinator, shared session, and staging futures to one close transaction."""
         self._pid = os.getpid()
         self._coordinator = coordinator
         self._download_session = download_session
@@ -182,6 +187,7 @@ def enter_shared_download_session(
     attempt = _SessionEntryAttempt()
 
     async def enter_session(_context: Any) -> Any:
+        """Enter a provider session and retain its lifecycle owner."""
         entered = False
         try:
             value = await download_session.__aenter__()

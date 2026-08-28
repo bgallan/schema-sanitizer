@@ -1,4 +1,7 @@
-"""Regression coverage for memory parquet writer limits come from the single budget."""
+"""Derives Parquet writer and reader limits from the operation budget across row-group
+estimates, dictionary candidates, delta or page encoding, footer metadata, and streamed
+readability. Collection stops at byte limits, arithmetic saturates, and encoders avoid
+full-page or value-index copies while preserving round trips."""
 
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ def test_parquet_writer_limits_come_from_the_single_budget() -> None:
 
 
 def test_row_group_estimator_stops_collecting_at_the_byte_limit() -> None:
+    """Verify row group estimator stops collecting at the byte limit."""
     collection = (WRITER / "stream_writer_collection.cc.inc").read_text()
     function = collection.split("determine_bounded_row_group_count", 1)[1].split(
         "collect_column_page_data", 1
@@ -41,6 +45,7 @@ def test_row_group_estimator_stops_collecting_at_the_byte_limit() -> None:
 
 
 def test_dictionary_candidate_avoids_per_value_index_scratch() -> None:
+    """Verify dictionary candidate avoids per value index scratch."""
     encodings = (WRITER / "stream_writer_value_encodings.cc.inc").read_text()
     types = (WRITER / "stream_writer_types.cc.inc").read_text()
     assert "std::vector<std::uint32_t> indices" not in encodings
@@ -51,6 +56,7 @@ def test_dictionary_candidate_avoids_per_value_index_scratch() -> None:
 
 
 def test_delta_encoders_do_not_duplicate_full_pages() -> None:
+    """Verify delta encoders do not duplicate full pages."""
     encodings = (WRITER / "stream_writer_value_encodings.cc.inc").read_text()
     assert "signed_delta_values_for_column" not in encodings
     assert "std::vector<std::int64_t> lengths" not in encodings
@@ -59,6 +65,7 @@ def test_delta_encoders_do_not_duplicate_full_pages() -> None:
 
 
 def test_page_size_arithmetic_is_saturating() -> None:
+    """Verify page size arithmetic is saturating."""
     pages = (WRITER / "stream_writer_pages.cc.inc").read_text()
     assert "saturating_size_add" in pages
     assert "saturating_size_multiply" in pages
@@ -66,6 +73,7 @@ def test_page_size_arithmetic_is_saturating() -> None:
 
 
 def test_native_reader_limits_come_from_the_operation_budget() -> None:
+    """Verify native reader limits come from the operation budget."""
     limits = (READER / "runtime/native_buffer_limits.cc.inc").read_text()
     state = (READER / "native_stream/schema/native_stream_arrow_state.cc.inc").read_text()
     assert "memory_budget_from_limit(memory_limit_bytes)" in limits
@@ -79,6 +87,7 @@ def test_native_reader_limits_come_from_the_operation_budget() -> None:
 def test_footer_metadata_budget_rejects_before_retention(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify footer metadata budget rejects before retention."""
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE
 
@@ -97,6 +106,7 @@ def test_footer_metadata_budget_rejects_before_retention(
 def test_streamed_dictionary_and_delta_encodings_remain_readable(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify streamed dictionary and delta encodings remain readable."""
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_runtime import native_core
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE

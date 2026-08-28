@@ -1,4 +1,8 @@
-"""Shared synchronous and HTTP transport primitives for remote providers."""
+"""Shared synchronous and HTTP transport primitives for remote providers.
+
+It centralizes HTTP sessions, retry classification, response cleanup, size checks, and
+bounded reader consumption for provider adapters.
+"""
 
 from __future__ import annotations
 
@@ -58,6 +62,7 @@ class _BudgetedBytes(bytes):
         return obj
 
     def _cancel_finalizer_slot(self) -> None:
+        """Cancel the finalizer escrow slot for a synchronously closed owner."""
         ticket = getattr(self, "_finalizer_ticket", 0)
         capsule = getattr(self, "_finalizer_capsule", None)
         if ticket and capsule is not None:
@@ -66,6 +71,7 @@ class _BudgetedBytes(bytes):
             self._finalizer_capsule = None
 
     def _acknowledge_finalizer_slot(self) -> None:
+        """Acknowledge cleanup and retire the associated finalizer slot."""
         ticket = getattr(self, "_finalizer_ticket", 0)
         capsule = getattr(self, "_finalizer_capsule", None)
         if ticket and capsule is not None:
@@ -127,6 +133,7 @@ class _BudgetedText(str):
         return obj
 
     def _acknowledge_finalizer_slot(self) -> None:
+        """Acknowledge cleanup and retire the associated finalizer slot."""
         ticket = getattr(self, "_finalizer_ticket", 0)
         capsule = getattr(self, "_finalizer_capsule", None)
         if ticket and capsule is not None:

@@ -1,4 +1,8 @@
-"""Atomic local-file publication for native output writers."""
+"""Atomic local-file publication for native output writers.
+
+It reserves a unique sibling file, preserves an existing target's permissions, replaces the
+target only after success, and cleans abandoned staging files.
+"""
 
 from __future__ import annotations
 

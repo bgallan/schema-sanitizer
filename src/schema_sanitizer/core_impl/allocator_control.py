@@ -1,4 +1,8 @@
-"""Best-effort allocator RSS reclamation after large pressured operations."""
+"""Reclaim allocator RSS after large operations when system pressure warrants it.
+
+The module checks Linux support, size and pressure thresholds, environment policy, and cooldown
+before invoking glibc ``malloc_trim``, and resets its synchronization state after a fork.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ _MIN_UNTRACKED_BYTES = 64 << 20
 
 
 def _mode() -> str:
-    """Implement the internal _mode helper."""
+    """Return the configured allocator-reclamation mode."""
     return os.getenv("SCHEMA_SANITIZER_MALLOC_TRIM", "auto").strip().lower()
 
 
@@ -51,7 +55,7 @@ def maybe_trim_allocator(*, peak_bytes: int, untracked_rss_bytes: int | None) ->
 
 
 def reset_after_fork() -> None:
-    """Implement the internal reset_after_fork helper."""
+    """Reset allocator-trimming synchronization in a forked child."""
     global _LOCK, _LAST_TRIM
     _LOCK = Lock()
     _LAST_TRIM = 0.0

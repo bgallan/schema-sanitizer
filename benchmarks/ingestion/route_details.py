@@ -1,4 +1,8 @@
-"""Route-detail helpers for local ingestion benchmarks."""
+"""Route-detail helpers for local ingestion benchmarks.
+
+It extracts native-route, metadata, directory, and stream statistics into compact
+human-readable annotations.
+"""
 
 from __future__ import annotations
 

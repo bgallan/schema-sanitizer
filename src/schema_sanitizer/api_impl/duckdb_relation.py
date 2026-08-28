@@ -1,4 +1,8 @@
-"""Owned DuckDB relations backed by private, bounded connections."""
+"""Owned DuckDB relations backed by private, bounded connections.
+
+It binds each relation to a private bounded DuckDB connection, shares lifetime safely
+across wrappers, and closes the connection exactly once.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ class _DuckDBConnectionOwner:
     __slots__ = ("connection",)
 
     def __init__(self, connection: Any) -> None:
+        """Store the private DuckDB connection for exactly-once relation cleanup."""
         self.connection = connection
 
     def close(self) -> None:
@@ -42,6 +47,7 @@ class _DuckDBSharedLifetime:
     __slots__ = ("_lock", "_owner", "_keepalive", "_references", "_closing", "relation_type")
 
     def __init__(self, owner: _DuckDBConnectionOwner, relation_type: type) -> None:
+        """Create the lock, reference count, and keepalive shared by derived relations."""
         self._lock = Lock()
         self._owner: _DuckDBConnectionOwner | None = owner
         self._keepalive: Any = None
@@ -50,6 +56,7 @@ class _DuckDBSharedLifetime:
         self.relation_type = relation_type
 
     def retain(self) -> None:
+        """Retain one additional shared-lifetime reference."""
         with self._lock:
             if self._closing or self._owner is None:
                 raise RuntimeError("DuckDB relation lifetime is already closing")
@@ -136,16 +143,19 @@ class _OwnedDuckDBRelation:
     """DuckDB relation proxy retaining connection and every derived relation."""
 
     def __init__(self, relation: Any, owner: _DuckDBConnectionOwner) -> None:
+        """Create a shared lifetime around the relation and its private connection owner."""
         lifetime = _DuckDBSharedLifetime(owner, type(relation))
         self._initialize(relation, lifetime)
 
     @classmethod
     def _from_shared(cls, relation: Any, lifetime: _DuckDBSharedLifetime) -> _OwnedDuckDBRelation:
+        """Build an owned DuckDB relation from an existing shared lifetime."""
         wrapper = object.__new__(cls)
         wrapper._initialize(relation, lifetime)
         return wrapper
 
     def _initialize(self, relation: Any, lifetime: _DuckDBSharedLifetime) -> None:
+        """Initialize this owned duck db relation and its shared lifetime."""
         capsule = reserve_finalizer_cleanup(_close_owned_duckdb_relation_capsule)
         state = _OwnedDuckDBRelationState(relation, lifetime)
         capsule.arg0 = state
@@ -166,6 +176,7 @@ class _OwnedDuckDBRelation:
             raise
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unresolved attributes to the wrapped object."""
         relation = self._relation
         if relation is None:
             raise RuntimeError("DuckDB relation is already closed")
@@ -174,6 +185,7 @@ class _OwnedDuckDBRelation:
             return self._wrap_relation_result(attribute)
 
         def delegated(*args: Any, **kwargs: Any) -> Any:
+            """Invoke the wrapped relation operation and preserve ownership."""
             unwrapped_args = tuple(self._unwrap_relation_argument(value) for value in args)
             unwrapped_kwargs = {
                 key: self._unwrap_relation_argument(value) for key, value in kwargs.items()
@@ -183,6 +195,7 @@ class _OwnedDuckDBRelation:
         return delegated
 
     def _unwrap_relation_argument(self, value: Any) -> Any:
+        """Unwrap an owned relation before delegating to DuckDB."""
         if not isinstance(value, _OwnedDuckDBRelation):
             return value
         if value._lifetime is not self._lifetime:
@@ -195,6 +208,7 @@ class _OwnedDuckDBRelation:
         return relation
 
     def _wrap_relation_result(self, value: Any) -> Any:
+        """Wrap a delegated DuckDB relation with shared lifetime ownership."""
         lifetime = self._lifetime
         if lifetime is not None and isinstance(value, lifetime.relation_type):
             if value is self._relation:
@@ -203,54 +217,69 @@ class _OwnedDuckDBRelation:
         return value
 
     def _attach_keepalive(self, keepalive: Any) -> None:
+        """Attach shared lifetime ownership to a delegated DuckDB object."""
         lifetime = self._lifetime
         if lifetime is None:
             raise RuntimeError("DuckDB relation is already closed")
         lifetime.attach_keepalive(keepalive)
 
     def _retains_resources(self, first: object, second: object) -> bool:
+        """Return whether a delegated DuckDB result must retain shared resources."""
         lifetime = self._lifetime
         return lifetime is not None and lifetime.retains(first, second)
 
     def __arrow_c_stream__(self, requested_schema: object | None = None) -> Any:
+        """Export the wrapped relation through the Arrow C Stream interface."""
         return self._relation.__arrow_c_stream__(requested_schema)
 
     def __len__(self) -> int:
+        """Return the number of retained values."""
         return len(self._relation)
 
     def __iter__(self):
         # Keep this proxy (and therefore its private connection) alive for the
         # complete lifetime of any iterator exposed by a DuckDB release.
+        """Iterate over the retained values."""
         yield from self._relation
 
     def __getitem__(self, key: Any) -> Any:
+        """Return the value associated with the requested key."""
         return self._wrap_relation_result(self._relation[key])
 
     def __contains__(self, value: Any) -> bool:
+        """Return whether the requested value is retained."""
         return value in self._relation
 
     def __bool__(self) -> bool:
+        """Return whether the instance currently carries a value."""
         return bool(self._relation)
 
     def __hash__(self) -> int:
+        """Return the wrapped DuckDB relation's hash."""
         return hash(self._relation)
 
     def __eq__(self, other: object) -> bool:
+        """Return whether this value equals the other value."""
         return bool(self._relation == self._unwrap_relation_argument(other))
 
     def __ne__(self, other: object) -> bool:
+        """Return whether this value differs from the other value."""
         return bool(self._relation != self._unwrap_relation_argument(other))
 
     def __dir__(self) -> list[str]:
+        """Return the attributes exposed by the wrapped object."""
         return sorted(set(super().__dir__()) | set(dir(self._relation)))
 
     def __format__(self, format_spec: str) -> str:
+        """Format the wrapped value with the requested specification."""
         return format(self._relation, format_spec)
 
     def __repr__(self) -> str:
+        """Return the wrapped DuckDB relation representation."""
         return repr(self._relation)
 
     def __str__(self) -> str:
+        """Return the wrapped DuckDB relation text."""
         return str(self._relation)
 
     def close(self) -> None:

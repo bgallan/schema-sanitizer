@@ -1,4 +1,8 @@
-"""High-level BigQuery external-table and registry API."""
+"""High-level BigQuery external-table and registry API.
+
+It presents the stable table-reference, external-table, query, and registry surface
+while leaving lower-level workflows in the advanced namespace.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Optional host-wide temporary-storage accounting across worker processes."""
+"""Coordinate optional temporary-storage accounting across worker processes.
+
+A locked coordination document reserves, releases, and reconciles per-process storage accounts
+while removing entries left by stale process identities.
+"""
 
 from __future__ import annotations
 
@@ -318,7 +322,7 @@ def _release_cross_process_raw(
     enabled: bool | None = None,
     coordination_directory: Path | None = None,
 ) -> int:
-    """Release this process host-wide bytes and return the remaining total."""
+    """Release this process's host-wide reservations and return total remaining bytes."""
     if type(device) is not int or type(size_bytes) is not int or type(inode_count) is not int:
         raise TypeError("cross-process storage release values must be exact integers")
     if size_bytes < 0 or inode_count < 0:
@@ -427,6 +431,7 @@ def _reconcile_account_locked(
     enabled: bool | None,
     coordination_directory: Path | None,
 ) -> None:
+    """Reconcile account while holding the governing lock."""
     if not account.reconciliation_pending:
         return
     # The host journal aggregates by process+device, not by local account. Keep
@@ -591,6 +596,7 @@ def cross_process_reserved_bytes(device: int) -> int:
 
 
 def _prepare_storage_accounts_for_fork() -> None:
+    """Prepare storage accounts for fork."""
     global _ACCOUNT_FORK_FRESH_LOCK, _ACCOUNT_FORK_FRESH_ACCOUNTS
     global _STALE_KEY_SCRATCH_FORK_FRESH_LOCK
     _ACCOUNT_FORK_FRESH_LOCK, _ACCOUNT_FORK_FRESH_ACCOUNTS = _ACCOUNT_FORK_BANKS[
@@ -600,6 +606,7 @@ def _prepare_storage_accounts_for_fork() -> None:
 
 
 def _clear_storage_account_fork_preparation() -> None:
+    """Clear storage account fork preparation."""
     global _ACCOUNT_FORK_FRESH_LOCK, _ACCOUNT_FORK_FRESH_ACCOUNTS
     global _STALE_KEY_SCRATCH_FORK_FRESH_LOCK
     _ACCOUNT_FORK_FRESH_LOCK = None
@@ -608,6 +615,7 @@ def _clear_storage_account_fork_preparation() -> None:
 
 
 def _reset_storage_accounts_after_fork() -> None:
+    """Reset storage accounts after fork."""
     global _ACCOUNT_LOCK, _ACCOUNT_SEQUENCE, _ACCOUNTS
     global _ACCOUNT_FORK_FRESH_LOCK, _ACCOUNT_FORK_FRESH_ACCOUNTS
     global _STALE_KEY_SCRATCH_LOCK, _STALE_KEY_SCRATCH_FORK_FRESH_LOCK

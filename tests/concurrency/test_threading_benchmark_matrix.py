@@ -1,4 +1,8 @@
-"""Tests for the multidimensional threading benchmark orchestrator."""
+"""Validate the multidimensional threading benchmark matrix and its compact CI profile.
+
+The standard plan must vary every required local dimension, add CPU-quota cases when supported,
+reject child cross-mode mismatches, and remain small and portable enough for continuous testing.
+"""
 
 from __future__ import annotations
 

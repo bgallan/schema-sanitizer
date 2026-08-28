@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency parquet worker resources live on the stream."""
+"""Tie Parquet worker resources to the lifetime of the returned stream.
+
+Parallel scratch must be released at each row-group boundary, stream closure must retire retained
+workers, and single- and multi-worker conversions must stay byte-identical.
+"""
 
 from __future__ import annotations
 

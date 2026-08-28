@@ -1,4 +1,8 @@
-"""Native lazy multi-source execution for Parquet directory inputs."""
+"""Native lazy multi-source execution for Parquet directory inputs.
+
+It turns directory manifests into lazily opened per-file Arrow sources while preserving
+registry state, source spans, and close ownership.
+"""
 
 from __future__ import annotations
 

@@ -1,8 +1,7 @@
 """Run local ingestion benchmarks against the public Python API.
 
-The harness generates temporary fixtures and reports median/p95 end-to-end
-throughput. Results can also be written as machine-readable JSON for historical
-comparison on stable runners.
+The command generates temporary fixtures, measures median and p95 throughput, and
+optionally writes machine-readable history for stable runners.
 """
 
 from __future__ import annotations

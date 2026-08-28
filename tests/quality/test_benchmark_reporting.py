@@ -1,4 +1,8 @@
-"""Regression tests for the benchmark reporting harness."""
+"""Regression tests for the benchmark reporting harness.
+
+It validates benchmark package ownership, timing records, machine-readable reports,
+comparisons, route details, and privacy-safe limit reviews.
+"""
 
 from __future__ import annotations
 
@@ -117,6 +121,7 @@ def test_write_report_contains_platform_fixture_and_records(tmp_path: Path) -> N
 
 
 def _review_module():
+    """Load the reader-limit review utility directly from its repository path."""
     path = ROOT / "benchmarks/readers/review_limits.py"
     spec = importlib.util.spec_from_file_location("review_reader_limits", path)
     assert spec is not None and spec.loader is not None
@@ -126,6 +131,7 @@ def _review_module():
 
 
 def test_review_waits_for_production_telemetry_without_hiding_clean_fuzzing() -> None:
+    """Verify review waits for production telemetry without hiding clean fuzzing."""
     review = _review_module().build_review(
         {"status": "passed", "sanitizer_findings": 0, "mutation_runs": 40000}, []
     )
@@ -135,6 +141,7 @@ def test_review_waits_for_production_telemetry_without_hiding_clean_fuzzing() ->
 
 
 def test_review_aggregates_only_privacy_safe_resource_counters() -> None:
+    """Verify review aggregates only privacy safe resource counters."""
     review = _review_module().build_review(
         {"status": "passed", "sanitizer_findings": 0},
         [

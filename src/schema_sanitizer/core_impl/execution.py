@@ -1,4 +1,8 @@
-"""Package-owned ABI3 execution context and process-local lifecycle."""
+"""Own the package ABI3 execution context and its process-local lifecycle.
+
+The context wraps native execution methods, while the module creates, reuses, closes, and resets
+the default process context across shutdown and fork boundaries.
+"""
 
 from __future__ import annotations
 

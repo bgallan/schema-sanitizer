@@ -1,4 +1,8 @@
-"""Regression coverage for memory cancelled bridge retains submission until real task terminal."""
+"""Combines cancelled submission bridges with staged-path identity, session
+acknowledgements, remote permits, partition cleanup, provider leases, janitor startup,
+and bounded registry eviction. A submission stays owned until its real task terminates,
+while timeout and release failures revoke or restore exactly the transferred capability
+without deleting public replacements."""
 
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ _NATIVE_STUB_MODULES = (
 
 
 def test_cancelled_bridge_retains_submission_until_real_task_terminal() -> None:
+    """Verify cancelled bridge retains submission until real task terminal."""
     from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 
     started = Event()
@@ -43,6 +48,7 @@ def test_cancelled_bridge_retains_submission_until_real_task_terminal() -> None:
     )
 
     async def operation(_context: Any) -> str:
+        """Run the controlled operation under test."""
         started.set()
         try:
             await asyncio.sleep(60)
@@ -69,6 +75,7 @@ def test_cancelled_bridge_retains_submission_until_real_task_terminal() -> None:
 def test_staged_path_never_deletes_public_replacement_after_rename_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify staged path never deletes public replacement after rename failure."""
     from schema_sanitizer.remote_impl import staging_paths as module
 
     path = tmp_path / "owned"
@@ -78,6 +85,7 @@ def test_staged_path_never_deletes_public_replacement_after_rename_failure(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     lease = Lease()
@@ -85,6 +93,7 @@ def test_staged_path_never_deletes_public_replacement_after_rename_failure(
     real_replace = module.os.replace
 
     def raced_replace(source: Any, target: Any) -> None:
+        """Replace the staged path while cleanup ownership is transferring."""
         if Path(source) == path:
             path.unlink()
             path.write_text("replacement")
@@ -100,6 +109,7 @@ def test_staged_path_never_deletes_public_replacement_after_rename_failure(
 
 
 def test_claim_path_identity_does_not_block_on_fifo(tmp_path: Path) -> None:
+    """Verify claim path identity does not block on fifo."""
     from schema_sanitizer.core_impl.path_identity import (
         claim_path_identity,
         release_path_identity,
@@ -111,6 +121,7 @@ def test_claim_path_identity_does_not_block_on_fifo(tmp_path: Path) -> None:
     errors: list[BaseException] = []
 
     def claim() -> None:
+        """Claim the resource at the controlled publication point."""
         try:
             identities.append(claim_path_identity(fifo))
         except BaseException as exc:
@@ -128,6 +139,7 @@ def test_claim_path_identity_does_not_block_on_fifo(tmp_path: Path) -> None:
 def test_path_identity_uses_exclusive_external_claim_without_xattrs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify path identity uses exclusive external claim without xattrs."""
     from schema_sanitizer.core_impl import path_identity as module
 
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path / "coord"))
@@ -135,6 +147,7 @@ def test_path_identity_uses_exclusive_external_claim_without_xattrs(
     path.symlink_to(tmp_path / "missing")
 
     def unsupported(*_args: Any, **_kwargs: Any) -> Any:
+        """Raise the deliberate failure for the unsupported path."""
         raise OSError(errno.ENOTSUP, "xattrs unsupported")
 
     monkeypatch.setattr(module.os, "setxattr", unsupported, raising=False)
@@ -150,6 +163,7 @@ def test_path_identity_uses_exclusive_external_claim_without_xattrs(
 def test_path_identity_never_installs_owner_marker_by_public_pathname(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify path identity never installs owner marker by public pathname."""
     from schema_sanitizer.core_impl import path_identity as module
 
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path / "coord"))
@@ -158,6 +172,7 @@ def test_path_identity_never_installs_owner_marker_by_public_pathname(
     targets: list[Any] = []
 
     def unsupported(target: Any, _marker: bytes) -> bool:
+        """Raise the unsupported-operation result expected by the test."""
         targets.append(target)
         return False
 
@@ -170,6 +185,7 @@ def test_path_identity_never_installs_owner_marker_by_public_pathname(
 
 
 def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
+    """Verify session entry waits for acceptance acknowledgement."""
     from schema_sanitizer.remote_impl.session_lifecycle import (
         enter_shared_download_session,
     )
@@ -180,6 +196,7 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
     allow_loop = Event()
 
     def run_loop() -> None:
+        """Run the helper event loop until its submitted operation completes."""
         asyncio.set_event_loop(loop)
         loop_started.set()
         loop.run_forever()
@@ -190,14 +207,20 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
 
     class Coordinator:
         def submit(self, operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
+
             async def invoke() -> Any:
+                """Forward the invocation through the controlled coordinator."""
                 return await operation(None)
 
             return asyncio.run_coroutine_threadsafe(invoke(), loop)
 
     class Session:
         async def __aenter__(self) -> "Session":
+            """Enter the asynchronous context managed by the session test double."""
+
             def block() -> None:
+                """Signal session entry and wait until the loop may continue."""
                 block_started.set()
                 allow_loop.wait(SCHEDULER_TIMEOUT_SECONDS)
 
@@ -205,6 +228,7 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             return None
 
     errors: list[BaseException] = []
@@ -227,6 +251,7 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
 
 
 def test_permit_delivery_failure_rolls_back_any_baseexception() -> None:
+    """Verify permit delivery failure rolls back any baseexception."""
     from schema_sanitizer.remote_impl import io_permits as module
 
     governor = module.RemoteIoPermitGovernor(1)
@@ -234,6 +259,7 @@ def test_permit_delivery_failure_rolls_back_any_baseexception() -> None:
 
     class BrokenLoop:
         def call_soon_threadsafe(self, _callback: Any) -> None:
+            """Reject scheduling through the forbidden thread-safe callback."""
             raise MemoryError("delivery failed")
 
     try:
@@ -253,12 +279,14 @@ def test_permit_delivery_failure_rolls_back_any_baseexception() -> None:
 
 
 def test_lookahead_retries_context_only_cleanup(native_stub: None) -> None:
+    """Verify lookahead retries context only cleanup."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
     class Context:
         calls = 0
 
         def close(self) -> None:
+            """Close the resources owned by the context test double."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("retry")
@@ -295,14 +323,17 @@ def test_lookahead_retries_context_only_cleanup(native_stub: None) -> None:
 def test_prepared_partition_attempts_both_cleanups_and_keeps_primary(
     native_stub: None,
 ) -> None:
+    """Verify prepared partition attempts both cleanups and keeps primary."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
     class Prepared:
         def close(self) -> None:
+            """Close the resources owned by the prepared test double."""
             raise ValueError("prepared-primary")
 
     class Context:
         def close(self) -> None:
+            """Close the resources owned by the context test double."""
             raise OSError("context-secondary")
 
     packet = module._PreparedPartition(
@@ -320,6 +351,7 @@ def test_prepared_partition_attempts_both_cleanups_and_keeps_primary(
 def test_provider_lease_restores_active_state_after_release_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify provider lease restores active state after release failure."""
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
     governor = ProviderThrottleGovernor()
@@ -329,6 +361,7 @@ def test_provider_lease_restores_active_state_after_release_failure(
     calls = 0
 
     def release(*args: Any, **kwargs: Any) -> None:
+        """Release the resource at the synchronization point under test."""
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -347,6 +380,7 @@ def test_provider_lease_restores_active_state_after_release_failure(
 def test_janitor_retries_worker_start_without_external_activity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify janitor retries worker start without external activity."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
     source = tmp_path / "source"
@@ -356,15 +390,18 @@ def test_janitor_retries_worker_start_without_external_activity(
         released = Event()
 
         def release(self) -> None:
+            """Release the resource held by the storage lease test double."""
             self.released.set()
 
     class ThreadLease:
         def release(self) -> None:
+            """Release the resource held by the thread lease test double."""
             return None
 
     calls = 0
 
     def acquire(*_args: Any, **_kwargs: Any) -> ThreadLease:
+        """Acquire the resource under the controlled scheduling conditions."""
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -387,6 +424,7 @@ def test_janitor_retries_worker_start_without_external_activity(
 def test_remote_coordinator_construction_runs_outside_resource_lock(
     native_stub: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify remote coordinator construction runs outside resource lock."""
     from schema_sanitizer.api_impl import operation_context as module
 
     entered = Event()
@@ -394,6 +432,7 @@ def test_remote_coordinator_construction_runs_outside_resource_lock(
     sentinel = object()
 
     def construct(*_args: Any, **_kwargs: Any) -> object:
+        """Construct the resource through the controlled failure path."""
         entered.set()
         assert allow.wait(2)
         return sentinel
@@ -422,6 +461,7 @@ def test_remote_coordinator_construction_runs_outside_resource_lock(
 
 
 def test_task_arena_plan_no_longer_owns_runtime_state() -> None:
+    """Verify task arena plan no longer owns runtime state."""
     root = Path(__file__).resolve().parents[2]
     header = (root / "cpp/src/internal/runtime/operation_task_arena.hh").read_text()
     source = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
@@ -441,6 +481,7 @@ def test_task_arena_plan_no_longer_owns_runtime_state() -> None:
 
 
 def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
+    """Verify session ack timeout revokes transfer and self closes."""
     from schema_sanitizer.remote_impl.session_lifecycle import (
         enter_shared_download_session,
     )
@@ -452,6 +493,7 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
     exited = Event()
 
     def run_loop() -> None:
+        """Run the helper event loop until its submitted operation completes."""
         asyncio.set_event_loop(loop)
         loop_started.set()
         loop.run_forever()
@@ -462,14 +504,20 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
 
     class Coordinator:
         def submit(self, operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
+
             async def invoke() -> Any:
+                """Forward the invocation through the controlled coordinator."""
                 return await operation(None)
 
             return asyncio.run_coroutine_threadsafe(invoke(), loop)
 
     class Session:
         async def __aenter__(self) -> "Session":
+            """Enter the asynchronous context managed by the session test double."""
+
             def block() -> None:
+                """Signal session entry and wait up to two seconds for the release gate."""
                 blocker_started.set()
                 allow_loop.wait(2)
 
@@ -477,11 +525,13 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             exited.set()
 
     errors: list[BaseException] = []
 
     def enter() -> None:
+        """Enter the managed resource at the controlled lifecycle point."""
         try:
             enter_shared_download_session(Coordinator(), Session(), timeout_seconds=0.05)
         except BaseException as exc:
@@ -505,6 +555,7 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
 
 
 def test_provider_registry_evicts_inactive_keys_without_full_scan() -> None:
+    """Verify provider registry evicts inactive keys without full scan."""
     from schema_sanitizer.remote_impl.provider_throttle import (
         ProviderThrottleGovernor,
     )
@@ -524,6 +575,7 @@ def test_provider_registry_evicts_inactive_keys_without_full_scan() -> None:
 
 
 def test_remote_permit_restores_ownership_after_release_failure() -> None:
+    """Verify remote permit restores ownership after release failure."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     governor = RemoteIoPermitGovernor(1)
@@ -532,6 +584,7 @@ def test_remote_permit_restores_ownership_after_release_failure() -> None:
     calls = 0
 
     def flaky_release(owner: object) -> None:
+        """Fail the first release attempt and allow the retry to commit."""
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -551,13 +604,16 @@ class _CallbackRejectingCancelledFuture(Future[Any]):
     """Bridge double that rejects callbacks and cancels before coroutine start."""
 
     def __init__(self, coroutine: Any) -> None:
+        """Initialize the callback rejecting cancelled future test double."""
         super().__init__()
         self.coroutine = coroutine
 
     def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+        """Register a completion callback with the callback rejecting cancelled future test double."""
         raise RuntimeError("callback registration failed before start")
 
     def cancel(self) -> bool:
+        """Cancel work retained by the callback rejecting cancelled future test double."""
         self.coroutine.close()
         return super().cancel()
 
@@ -565,23 +621,29 @@ class _CallbackRejectingCancelledFuture(Future[Any]):
 def test_callbackless_cancelled_before_start_releases_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify callbackless cancelled before start releases submission."""
     from schema_sanitizer.remote_impl import io_coordinator as module
 
     class Reservation:
         def __init__(self) -> None:
+            """Initialize the reservation test double."""
             self.release_calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the reservation test double."""
             self.release_calls += 1
 
     class Governor:
         def __init__(self, reservation: Reservation) -> None:
+            """Initialize the governor test double."""
             self.reservation = reservation
 
         def reserve_submission(self) -> Reservation:
+            """Reserve one controlled asynchronous submission."""
             return self.reservation
 
         async def acquire(self, *_args: Any, **_kwargs: Any) -> Any:
+            """Acquire the resource represented by the governor test double."""
             raise AssertionError("cancelled coroutine must never start")
 
     class StoppedLoop:
@@ -590,6 +652,7 @@ def test_callbackless_cancelled_before_start_releases_submission(
     created: list[_CallbackRejectingCancelledFuture] = []
 
     def submit_bridge(coroutine: Any, _loop: Any) -> Future[Any]:
+        """Submit the bridge operation through the controlled executor."""
         future = _CallbackRejectingCancelledFuture(coroutine)
         created.append(future)
         return future
@@ -628,6 +691,7 @@ def test_callbackless_cancelled_before_start_releases_submission(
 def test_lookahead_timed_out_close_auto_resumes_after_last_admission(
     native_stub: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify lookahead timed out close auto resumes after last admission."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
     entered = Event()
@@ -654,6 +718,7 @@ def test_lookahead_timed_out_close_auto_resumes_after_last_admission(
     monkeypatch.setattr(module.PartitionSourceLookahead, "_current_options", lambda self: object())
 
     def prepare(self: Any, _plan: Any, _options: Any) -> object:
+        """Prepare the resource for the failure path under test."""
         entered.set()
         assert allow.wait(SCHEDULER_TIMEOUT_SECONDS)
         return sentinel

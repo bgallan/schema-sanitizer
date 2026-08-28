@@ -1,4 +1,8 @@
-"""Canonical cross-platform coverage for native ordered completion."""
+"""Probe native ordered completion deterministically across worker counts.
+
+The bounded matrix must preserve exact order through many completion-ring generations and keep a
+single dynamic test owner, producing repeatable evidence on every supported platform.
+"""
 
 from __future__ import annotations
 

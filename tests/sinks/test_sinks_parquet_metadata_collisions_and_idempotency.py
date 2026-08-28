@@ -1,4 +1,8 @@
-"""Tests read adapters and file-to-file converters."""
+"""Parquet metadata collision, registry embedding, file-URI, and idempotency contracts.
+
+It covers reserved metadata collisions, generated-column order, registry requirements,
+file URIs, direct sources, and repeated atomic publication.
+"""
 
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ _GENERATED_METADATA_COLUMN_ORDER = (
 
 
 def test_embedded_metadata_uses_fixed_native_source_path_column(tmp_path: Path) -> None:
-
+    """Verify embedded metadata uses fixed native source path column."""
     pa = pytest.importorskip("pyarrow")
     previous_registry = merge_schema_registry(
         inferred_schema=pa.schema([pa.field("a", pa.string())]),
@@ -67,6 +71,7 @@ def test_generated_etl_columns_are_materialized_last_for_grouped_sources(
     column_order: str,
     data_columns: list[str],
 ) -> None:
+    """Verify generated etl columns are materialized last for grouped sources."""
     pq = pytest.importorskip("pyarrow.parquet")
     source = tmp_path / "parts"
     source.mkdir()
@@ -120,7 +125,7 @@ def test_embedded_metadata_rejects_source_column_collisions(
     tmp_path: Path,
     reserved_name: str,
 ) -> None:
-
+    """Verify embedded metadata rejects source column collisions."""
     source = tmp_path / "rows.jsonl"
     source.write_text(json.dumps({reserved_name: "source"}) + "\n", encoding="utf-8")
     out = tmp_path / "out.jsonl"
@@ -131,6 +136,7 @@ def test_embedded_metadata_rejects_source_column_collisions(
 
 
 def test_embedded_metadata_rejects_direct_parquet_source_collision(tmp_path: Path) -> None:
+    """Verify embedded metadata rejects direct Parquet source collision."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -144,7 +150,7 @@ def test_embedded_metadata_rejects_direct_parquet_source_collision(tmp_path: Pat
 
 
 def test_embedded_metadata_allows_nested_reserved_names(tmp_path: Path) -> None:
-
+    """Verify embedded metadata allows nested reserved names."""
     source = tmp_path / "rows.jsonl"
     source.write_text('{"payload":{"source_file":"nested"}}\n', encoding="utf-8")
     out = tmp_path / "out.jsonl"
@@ -157,7 +163,7 @@ def test_embedded_metadata_allows_nested_reserved_names(tmp_path: Path) -> None:
 
 
 def test_embedded_registry_strict_requires_previous_canonical_schema(tmp_path: Path) -> None:
-
+    """Verify embedded registry strict requires previous canonical schema."""
     source = tmp_path / "rows.jsonl"
     source.write_text('{"a":1}\n', encoding="utf-8")
     out = tmp_path / "out.jsonl"
@@ -173,6 +179,7 @@ def test_embedded_registry_strict_requires_previous_canonical_schema(tmp_path: P
 
 
 def test_file_uri_input_metadata_preserves_original_uri(tmp_path: Path) -> None:
+    """Verify file URI input metadata preserves original URI."""
     pytest.importorskip("pyarrow")
 
     source = _write_csv(tmp_path / "rows.csv", "a,b\n1,2\n")
@@ -187,6 +194,7 @@ def test_file_uri_input_metadata_preserves_original_uri(tmp_path: Path) -> None:
 
 
 def test_to_parquet_writes_file_uri(tmp_path: Path) -> None:
+    """Verify to Parquet writes file URI."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     out = tmp_path / "out-uri.parquet"
@@ -203,6 +211,7 @@ def test_to_parquet_writes_file_uri(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("suffix", [".csv", ".jsonl", ".parquet"])
 def test_to_file_idempotent_repeated_runs(tmp_path: Path, suffix: str) -> None:
+    """Verify to file idempotent repeated runs."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     path = _write_csv(tmp_path / "rows.csv")

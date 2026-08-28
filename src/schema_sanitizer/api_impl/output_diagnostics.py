@@ -1,4 +1,8 @@
-"""Diagnostics patching for table and file materialization."""
+"""Diagnostics patching for table and file materialization.
+
+It patches table and file results with final stream, sink, native-route, row, byte, and
+schema diagnostics after materialization.
+"""
 
 from __future__ import annotations
 

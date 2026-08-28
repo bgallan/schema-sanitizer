@@ -1,4 +1,8 @@
-"""Evidence combination and reporting for concurrency telemetry matrices."""
+"""Evidence combination and reporting for concurrency telemetry matrices.
+
+It parses perf and DRAM counters, classifies each run, and builds paired-gain curves and
+reports.
+"""
 
 from __future__ import annotations
 
@@ -234,6 +238,7 @@ def build_curve(runs: dict[str, Any], worker_counts: tuple[int, ...]) -> list[di
 
 
 def _gain(runs: dict[str, Any], low: int, high: int) -> float | None:
+    """Calculate the throughput gain between two worker points."""
     if str(low) not in runs or str(high) not in runs:
         return None
     low_s = float(runs[str(low)]["median_wall_seconds"])
@@ -242,6 +247,7 @@ def _gain(runs: dict[str, Any], low: int, high: int) -> float | None:
 
 
 def _native_diagnosis(runs: dict[str, Any], workers: int) -> dict[str, Any]:
+    """Explain whether hardware counters indicate native multi-worker execution."""
     return runs.get(str(workers), {}).get("representative_native", {}).get("diagnosis", {})
 
 
@@ -383,6 +389,7 @@ def recommend_frontier(workloads: dict[str, Any], worker_counts: tuple[int, ...]
 
 
 def _format_optional(value: Any, *, percent: bool = False) -> str:
+    """Format an optional counter value or return the missing-value marker."""
     if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
         return "n/a"
     return f"{100.0 * value:.1f}%" if percent else f"{value:.3f}"

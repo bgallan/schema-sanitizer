@@ -1,4 +1,8 @@
-"""Tests for the focused high-risk coverage report utility."""
+"""Tests for the focused high-risk coverage report utility.
+
+It requires every declared high-risk module, rejects missing coverage data, enforces
+individual floors, and renders actionable gaps.
+"""
 
 from __future__ import annotations
 

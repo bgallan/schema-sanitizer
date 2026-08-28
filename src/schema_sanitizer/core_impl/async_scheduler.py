@@ -1,4 +1,8 @@
-"""Generic bounded async scheduling and retry helpers."""
+"""Schedule asynchronous work under bounded memory and task admission.
+
+This module coordinates fairness, cancellation, retry and result ownership, terminal debt,
+diagnostics, and orderly shutdown for shared asynchronous execution.
+"""
 
 from __future__ import annotations
 
@@ -94,6 +98,7 @@ class AsyncResultMemoryContract:
 def _contract_estimators(
     memory_contract: AsyncResultMemoryContract | None,
 ) -> tuple[Callable[[Any], int] | None, Callable[[Any], int] | int | None]:
+    """Return the estimators supplied by an asynchronous memory contract."""
     if memory_contract is None:
         return None, None
     if not isinstance(memory_contract.ownership_mode, AsyncResultOwnershipMode):
@@ -155,6 +160,7 @@ class _AsyncTaskDomainLease:
     )
 
     def __init__(self, amount: int, *, counts_operation: bool = True) -> None:
+        """Initialize the async task domain lease and its owned runtime state."""
         self.amount = amount
         self._counts_operation = counts_operation
         self._released = False
@@ -162,6 +168,7 @@ class _AsyncTaskDomainLease:
         self._operation_released = not counts_operation
 
     def release(self) -> None:
+        """Release resources owned by this async task domain lease."""
         global _ASYNC_TASK_SLOTS_IN_USE, _ASYNC_ACTIVE_OPERATIONS
         with _ASYNC_ADMISSION_CONDITION:
             if self._released:
@@ -273,6 +280,7 @@ def _fair_async_candidate(requested: int) -> int:
 def _acquire_async_task_domain_exact(
     slots: int, *, counts_operation: bool = True
 ) -> _AsyncTaskDomainLease:
+    """Acquire async task domain exact."""
     global _ASYNC_TASK_SLOTS_IN_USE, _ASYNC_PEAK_TASK_SLOTS, _ASYNC_ACTIVE_OPERATIONS
     with _ASYNC_ADMISSION_CONDITION:
         if _ASYNC_ADMISSION_CLOSED or _ASYNC_CORRUPTED:
@@ -428,6 +436,7 @@ class _AsyncWorkerResultSlot:
     )
 
     def __init__(self, ready_event: asyncio.Event) -> None:
+        """Initialize the async worker result slot and its owned runtime state."""
         self.index = -1
         self.value: Any = None
         self.error: BaseException | None = None
@@ -438,6 +447,7 @@ class _AsyncWorkerResultSlot:
         self.ready_event = ready_event
 
     async def claim_empty(self) -> None:
+        """Claim the empty result slot for publication."""
         await _bounded_async_event_wait(self.available, stage="async_result_slot")
         self.available.clear()
         if self.state != _ASYNC_RESULT_EMPTY:
@@ -450,6 +460,7 @@ class _AsyncWorkerResultSlot:
         error: BaseException | None,
         retained_lease: object | None,
     ) -> None:
+        """Publish the prepared value."""
         if self.state != _ASYNC_RESULT_EMPTY:
             raise RuntimeError("async worker result slot double publication")
         # Commit state last: a scanner can never observe READY with partially
@@ -462,6 +473,7 @@ class _AsyncWorkerResultSlot:
         self.ready_event.set()
 
     def take(self) -> tuple[int, Any, BaseException | None, object | None]:
+        """Remove and return the retained value."""
         if self.state != _ASYNC_RESULT_READY:
             raise RuntimeError("async worker result slot is not ready")
         index = self.index
@@ -498,12 +510,14 @@ class _AsyncTerminalTaskSlot:
     __slots__ = ("task", "next_index", "group_index", "active")
 
     def __init__(self) -> None:
+        """Initialize the async terminal task slot and its owned runtime state."""
         self.task: asyncio.Task[None] | None = None
         self.next_index = -1
         self.group_index = -1
         self.active = False
 
     def clear(self) -> None:
+        """Clear values and ownership retained by this async terminal task slot."""
         self.task = None
         self.next_index = -1
         self.group_index = -1
@@ -531,6 +545,7 @@ class _AsyncTerminalDebt:
     )
 
     def __init__(self) -> None:
+        """Initialize the async terminal debt and its owned runtime state."""
         self.head_task_slot = -1
         self.task_count = 0
         self.admission: _AsyncSchedulerAdmission | None = None
@@ -543,9 +558,11 @@ class _AsyncTerminalDebt:
 
     @property
     def active(self) -> bool:
+        """Return whether the governed state is active."""
         return self.state != _ASYNC_DEBT_FREE
 
     def all_done(self) -> bool:
+        """Return whether all tracked operations have completed."""
         building = self.building_tasks
         if self.state == _ASYNC_DEBT_BUILDING and building is not None:
             for building_task in building:
@@ -566,6 +583,7 @@ class _AsyncTerminalDebt:
         return seen == self.task_count
 
     def try_claim_reaping(self) -> int | None:
+        """Attempt to claim responsibility for reaping completed work."""
         if self.state not in (_ASYNC_DEBT_BUILDING, _ASYNC_DEBT_ACTIVE, _ASYNC_DEBT_RETRY_PENDING):
             return None
         if not self.all_done():
@@ -574,6 +592,7 @@ class _AsyncTerminalDebt:
         return self.generation
 
     def rollback_reaping(self, generation: int) -> None:
+        """Return reaping responsibility after an interrupted claim."""
         if self.state != _ASYNC_DEBT_CLAIMED or self.generation != generation:
             raise RuntimeError("async terminal debt claim corruption")
         next_retry_count = self.retry_count + 1
@@ -581,6 +600,7 @@ class _AsyncTerminalDebt:
         self.state = _ASYNC_DEBT_RETRY_PENDING
 
     def commit_free(self, generation: int) -> None:
+        """Commit completion and release this terminal-debt slot."""
         if self.state != _ASYNC_DEBT_CLAIMED or self.generation != generation:
             raise RuntimeError("async terminal debt state corruption")
         next_generation = (self.generation + 1) & _ASYNC_DEBT_MAX_GENERATION
@@ -1007,6 +1027,7 @@ def _known_async_result_upper_bound(value: object, *, _depth: int = 0) -> int | 
 
 
 def _preflight_async_result_bytes(index: int, estimator: Callable[[int], int] | int | None) -> int:
+    """Estimate bytes that must be admitted before an asynchronous result runs."""
     if estimator is None:
         return 0
     retained = estimator(index) if callable(estimator) else estimator
@@ -1018,6 +1039,7 @@ def _preflight_async_result_bytes(index: int, estimator: Callable[[int], int] | 
 
 
 def _release_async_result_lease(lease: object | None) -> None:
+    """Release async result lease."""
     if lease is None:
         return
     close = getattr(lease, "close", None)
@@ -1028,6 +1050,7 @@ def _release_async_result_lease(lease: object | None) -> None:
 def _async_result_postflight_bound(
     value: Any, estimator: Callable[[Any], int] | None
 ) -> int | None:
+    """Measure and validate the retained size of an asynchronous result."""
     if estimator is None:
         return _known_async_result_upper_bound(value)
     retained = estimator(value)
@@ -1192,6 +1215,7 @@ class _AsyncPendingResultSlot:
     def store(
         self, index: int, value: Any, error: BaseException | None, retained_lease: object | None
     ) -> None:
+        """Store a value in the bounded result slot."""
         if self.index >= 0:
             raise RuntimeError("async ordered-result ring collision")
         self.value = value
@@ -1200,6 +1224,7 @@ class _AsyncPendingResultSlot:
         self.index = index
 
     def take(self, expected: int) -> tuple[Any, BaseException | None, object | None]:
+        """Remove and return the retained value."""
         if self.index != expected:
             raise RuntimeError("async ordered-result ring ownership mismatch")
         value = self.value
@@ -1437,6 +1462,7 @@ async def drain_ordered_iterable_results(
             return
 
         async def fetch_index(index: int) -> Any:
+            """Fetch and return the result for the indexed batch value."""
             return await fetch(batch[index])
 
         preflight_for_index: Callable[[int], int] | int | None = None
@@ -1444,6 +1470,7 @@ async def drain_ordered_iterable_results(
             estimator = memory_contract.preflight_bytes
 
             def preflight_for_batch_index(index: int) -> int:
+                """Return the preflight memory bound for a scheduled batch."""
                 return estimator(batch[index])
 
             preflight_for_index = preflight_for_batch_index

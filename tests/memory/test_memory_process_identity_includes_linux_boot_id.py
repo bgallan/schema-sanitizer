@@ -1,4 +1,8 @@
-"""Regression coverage for memory process identity includes linux boot id."""
+"""Uses boot ID plus the canonical process token as the basis for janitor, staged-result,
+lookahead, session, prefetch, symlink-quarantine, fork-guard, and worker-permit
+lifecycles. Same-tick process IDs from another boot are rejected; bounded interleavable
+scans and retryable close preserve owned artifacts or resources without touching
+inherited locks."""
 
 from __future__ import annotations
 
@@ -22,11 +26,13 @@ class _FailingClose:
     """Close owner that commits only after a configured number of failures."""
 
     def __init__(self, failures: int = 1) -> None:
+        """Initialize the failing close test double."""
         self.failures = failures
         self.calls = 0
         self.closed = False
 
     def close(self) -> None:
+        """Close the resources owned by the failing close test double."""
         self.calls += 1
         if self.calls <= self.failures:
             raise OSError("transient cleanup failure")
@@ -37,9 +43,11 @@ class _FailingContext:
     """Operation context double with retryable close."""
 
     def __init__(self, failures: int = 1) -> None:
+        """Initialize the failing context test double."""
         self.owner = _FailingClose(failures)
 
     def close(self) -> None:
+        """Close the resources owned by the failing context test double."""
         self.owner.close()
 
 
@@ -93,9 +101,11 @@ def test_janitor_retries_lease_release_after_artifact_deletion() -> None:
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("journal busy")
@@ -177,9 +187,11 @@ def test_partition_lookahead_close_retains_cancelled_context_on_failure() -> Non
 
     class Executor:
         def __init__(self) -> None:
+            """Initialize the executor test double."""
             self.calls = 0
 
         def shutdown(self, **_kwargs: object) -> None:
+            """Shut down the executor represented by the executor test double."""
             self.calls += 1
 
     future: Future[Any] = Future()
@@ -207,6 +219,7 @@ def test_partition_lookahead_late_completion_finishes_close() -> None:
 
     class Executor:
         def shutdown(self, **_kwargs: object) -> None:
+            """Shut down the executor represented by the executor test double."""
             return
 
     prepared = _FailingClose(0)
@@ -255,9 +268,11 @@ def test_shared_session_closer_reuses_one_future_across_timeouts() -> None:
 
     class Coordinator:
         def __init__(self) -> None:
+            """Initialize the coordinator test double."""
             self.submissions = 0
 
         def submit(self, _operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             self.submissions += 1
             return close_future
 
@@ -279,18 +294,22 @@ def test_shared_session_closer_resubmits_after_exit_failure() -> None:
 
     class Session:
         def __init__(self) -> None:
+            """Initialize the session test double."""
             self.calls = 0
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("exit failed")
 
     class Coordinator:
         def __init__(self) -> None:
+            """Initialize the coordinator test double."""
             self.submissions = 0
 
         def submit(self, operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             self.submissions += 1
             future: Future[Any] = Future()
             try:
@@ -350,9 +369,11 @@ def test_remote_prefetch_close_retains_session_across_timeout() -> None:
         shutdown_timeout_seconds = 0.001
 
         def __init__(self) -> None:
+            """Initialize the coordinator test double."""
             self.submissions = 0
 
         def submit(self, _operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             self.submissions += 1
             return close_future
 
@@ -457,6 +478,7 @@ def test_janitor_stale_scan_is_bounded_and_interleavable(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     live_path = tmp_path / "live"
@@ -483,6 +505,7 @@ def test_remote_prefetch_close_start_blocks_new_submissions() -> None:
         chunk_size = 1
 
         def stage_chunk(self, _start: int) -> object:
+            """Stage one chunk through the controlled session."""
             raise AssertionError("close-started iterator submitted new work")
 
     iterator = _bare_remote_iterator(module)
@@ -505,10 +528,12 @@ def test_shared_session_closer_drops_coordinator_after_commit() -> None:
 
     class Session:
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             return None
 
     class Coordinator:
         def submit(self, operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             future: Future[Any] = Future()
             asyncio.run(operation(None))
             future.set_result(None)
@@ -536,6 +561,7 @@ def test_janitor_idle_worker_finishes_all_stale_batches(
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     janitor._thread = __import__("threading").current_thread()
@@ -606,16 +632,20 @@ def test_janitor_new_worker_reopens_completed_shared_scan(
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     class Thread:
         def __init__(self, **_kwargs: object) -> None:
+            """Initialize the thread test double."""
             self.started = False
 
         def is_alive(self) -> bool:
+            """Report whether the thread test double is active."""
             return self.started
 
         def start(self) -> None:
+            """Start the activity represented by the thread test double."""
             self.started = True
 
     janitor = module._TemporaryArtifactJanitor()
@@ -661,9 +691,11 @@ def test_staged_ownership_rejects_post_fork_use_before_lock(
 
     class ForbiddenLock:
         def __enter__(self) -> None:
+            """Enter the context managed by the forbidden lock test double."""
             raise AssertionError("inherited lock was acquired")
 
         def __exit__(self, *_exc: object) -> None:
+            """Exit the context managed by the forbidden lock test double and run cleanup."""
             return None
 
     from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
@@ -685,9 +717,11 @@ def test_shared_session_closer_skips_parent_lock_after_fork(
 
     class ForbiddenLock:
         def __enter__(self) -> None:
+            """Enter the context managed by the forbidden lock test double."""
             raise AssertionError("inherited lock was acquired")
 
         def __exit__(self, *_exc: object) -> None:
+            """Exit the context managed by the forbidden lock test double and run cleanup."""
             return None
 
     closer = module.SharedDownloadSessionCloser(object(), object(), ())
@@ -704,9 +738,11 @@ def test_remote_prefetch_rejects_post_fork_admission_before_lock(
 
     class ForbiddenLock:
         def __enter__(self) -> None:
+            """Enter the context managed by the forbidden lock test double."""
             raise AssertionError("inherited lock was acquired")
 
         def __exit__(self, *_exc: object) -> None:
+            """Exit the context managed by the forbidden lock test double and run cleanup."""
             return None
 
     iterator = _bare_remote_iterator(module)
@@ -724,9 +760,11 @@ def test_lookahead_worker_shutdown_retries_failed_exit_permit() -> None:
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("governor temporarily unavailable")
@@ -750,13 +788,16 @@ def test_lookahead_worker_rejects_post_fork_use_before_lock(
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     class ForbiddenLock:
         def __enter__(self) -> None:
+            """Enter the context managed by the forbidden lock test double."""
             raise AssertionError("inherited lock was acquired")
 
         def __exit__(self, *_exc: object) -> None:
+            """Exit the context managed by the forbidden lock test double and run cleanup."""
             return None
 
     executor = module.ThreadPoolExecutor(
@@ -778,9 +819,11 @@ def test_lookahead_worker_retries_startup_permit_without_thread() -> None:
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
 
     executor = object.__new__(module.ThreadPoolExecutor)

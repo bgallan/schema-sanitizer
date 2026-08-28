@@ -1,4 +1,8 @@
-"""PyArrow Parquet sink for record-batch streams."""
+"""PyArrow Parquet sink for record-batch streams.
+
+It attaches generated metadata, coalesces supported Arrow streams natively, and publishes local
+output atomically through governed descriptors.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Native ingestion planning and binary input routing."""
+"""Native ingestion planning and binary input routing.
+
+It converts bytes, files, and paths into native ingest plans, routes binary formats
+explicitly, and rejects unsupported direct inputs before execution.
+"""
 
 from __future__ import annotations
 

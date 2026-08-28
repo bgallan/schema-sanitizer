@@ -1,4 +1,8 @@
-"""Compact assertions for implementation-level source contracts."""
+"""Evaluate compact implementation-level contracts against repository source files.
+
+Named cases share cached reads while checking required text, forbidden text, exact counts, and
+ordering constraints.
+"""
 
 from __future__ import annotations
 

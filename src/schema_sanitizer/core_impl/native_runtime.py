@@ -1,4 +1,8 @@
-"""Load the package-owned ABI3 extension without scanning arbitrary paths."""
+"""Load the package-owned ABI3 extension without scanning arbitrary paths.
+
+Only package and build candidates are considered; compatibility is verified, Windows DLL search
+directories are registered, and missing-runtime failures include actionable diagnostics.
+"""
 
 from __future__ import annotations
 

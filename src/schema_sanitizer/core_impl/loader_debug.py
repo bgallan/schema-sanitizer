@@ -1,4 +1,8 @@
-"""Collect diagnostics for native extension loading failures."""
+"""Collect diagnostics for native extension loading failures.
+
+It reports Python, platform, package paths, and native-extension candidates without attempting
+another extension import.
+"""
 
 from __future__ import annotations
 

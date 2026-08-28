@@ -1,4 +1,8 @@
-"""Best-effort Linux cgroup and PSI pressure signals for adaptive admission."""
+"""Read Linux cgroup and PSI pressure signals for adaptive admission.
+
+Memory usage, cgroup events, and pressure stalls are cached and translated into scaled admission
+targets, with best-effort fallback and fork-safe reset.
+"""
 
 from __future__ import annotations
 
@@ -212,11 +216,13 @@ _FORK_PREPARED_PRESSURE_STATE: tuple[Lock, SystemPressureSnapshot] | None = None
 
 
 def _prepare_pressure_for_fork() -> None:
+    """Prepare pressure for fork."""
     global _FORK_PREPARED_PRESSURE_STATE
     _FORK_PREPARED_PRESSURE_STATE = _FORK_PRESSURE_BANKS[_FORK_PRESSURE_BANK_INDEX]
 
 
 def _clear_pressure_fork_preparation() -> None:
+    """Clear pressure fork preparation."""
     global _FORK_PREPARED_PRESSURE_STATE
     _FORK_PREPARED_PRESSURE_STATE = None
 

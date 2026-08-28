@@ -1,4 +1,8 @@
-"""Contracts for the configured public facade and source models."""
+"""Contracts for the configured public facade and source models.
+
+It runs configured sanitizers, reuses nested options, builds exact source manifests, and
+delegates safe file publication through public facades.
+"""
 
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ def test_configured_sanitizer_reuses_nested_options(
     captured: dict[str, object] = {}
 
     def convert(input_path: object, **kwargs: object) -> object:
+        """Capture the facade's delegated input and reusable conversion options."""
         captured["input_path"] = input_path
         captured.update(kwargs)
         return SimpleNamespace(clean_data="frame")

@@ -1,4 +1,8 @@
-"""Canonical source plans, native path-source capsules, and sink helpers."""
+"""Build canonical source plans, native path capsules, and registry sinks.
+
+Descriptors and batches flatten path sources into native inputs, open automatic registry streams
+and sinks, and retain every capsule until acquisition-safe cleanup.
+"""
 
 from __future__ import annotations
 
@@ -103,12 +107,14 @@ class NativeSourcePlan:
     )
 
     def __post_init__(self) -> None:
+        """Validate and normalize the initialized instance state."""
         capsule = reserve_finalizer_cleanup(_cleanup_native_source_plan_capsule)
         ticket = capsule.ticket
         self._finalizer_ticket = ticket
         self._finalizer_capsule = capsule
 
     def _retire_finalizer_if_clean(self) -> None:
+        """Retire finalizer if clean."""
         if self.payload is not None or self.close_items or self.native_payload is not None:
             return
         ticket = self._finalizer_ticket

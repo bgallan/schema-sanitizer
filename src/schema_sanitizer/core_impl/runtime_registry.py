@@ -1,4 +1,8 @@
-"""Transactional, phased registry for runtime helpers participating in shutdown."""
+"""Register runtime services transactionally for phased shutdown.
+
+Services are reserved and published through close phases, checked for quiescence, and repaired
+after a fork without exposing partially registered helpers.
+"""
 
 from __future__ import annotations
 
@@ -91,6 +95,7 @@ class _ServiceEntry:
     ) -> None:
         # The registry owns one strong control block until quiescence.  A weak
         # reference alone can make a live host disappear from shutdown.
+        """Initialize the service entry and its owned runtime state."""
         self.owner = owner
         self.close_call = close_call
         self.kind = kind
@@ -110,6 +115,7 @@ class RuntimeServiceRegistration:
     __slots__ = ("_registry", "_token", "_pid", "_lock", "_closed", "_active")
 
     def __init__(self, registry: "_RuntimeServiceRegistry", token: int) -> None:
+        """Initialize the runtime service registration and its owned runtime state."""
         self._registry = registry
         self._token = token
         self._pid = os.getpid()
@@ -118,6 +124,7 @@ class RuntimeServiceRegistration:
         self._active = False
 
     def activate(self) -> None:
+        """Activate the reserved runtime entry."""
         if os.getpid() != self._pid:
             return
         with self._lock:
@@ -137,6 +144,7 @@ class RuntimeServiceRegistration:
             self._active = True
 
     def close(self) -> None:
+        """Release resources owned by this runtime service registration."""
         if os.getpid() != self._pid:
             return
         with self._lock:
@@ -152,9 +160,11 @@ class RuntimeServiceRegistration:
 
 class _RuntimeServiceRegistry:
     def __init__(self) -> None:
+        """Initialize the runtime service registry and its owned runtime state."""
         self._reset(os.getpid())
 
     def _reset(self, pid: int) -> None:
+        """Reset process-local state owned by this runtime service registry."""
         self._pid = pid
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
@@ -170,10 +180,12 @@ class _RuntimeServiceRegistry:
         self._post_commit_failures = 0
 
     def _ensure_process(self) -> None:
+        """Ensure the owner still belongs to the active process."""
         if self._pid != os.getpid():
             self._reset(os.getpid())
 
     def _mark_progress_locked(self) -> None:
+        """Mark progress while holding the governing lock."""
         self._progress_epoch = min((1 << 63) - 1, self._progress_epoch + 1)
         self._last_progress_ns = monotonic_ns()
         diagnostic_transition()
@@ -247,6 +259,7 @@ class _RuntimeServiceRegistry:
 
     @staticmethod
     def _prepare_close(owner: object, close_name: str) -> Callable[[float], object]:
+        """Prepare one runtime service entry for bounded shutdown."""
         try:
             inspect.getattr_static(owner, close_name)
         except AttributeError:
@@ -265,6 +278,7 @@ class _RuntimeServiceRegistry:
             ) from None
 
         def close_with_deadline(remaining: float) -> object:
+            """Close the runtime registry within the supplied deadline."""
             return method(deadline_seconds=remaining)
 
         return close_with_deadline
@@ -278,6 +292,7 @@ class _RuntimeServiceRegistry:
         phase: RuntimeServicePhase = RuntimeServicePhase.PRODUCER,
         priority: int = 0,
     ) -> RuntimeServiceRegistration:
+        """Reserve governed capacity through this runtime service registry."""
         self._ensure_process()
         ensure_runtime_fork_safe()
         if type(kind) is not str or type(close_name) is not str:
@@ -350,6 +365,7 @@ class _RuntimeServiceRegistry:
         phase: RuntimeServicePhase = RuntimeServicePhase.PRODUCER,
         priority: int = 0,
     ) -> RuntimeServiceRegistration:
+        """Register one reserved entry with this runtime service registry."""
         registration = self.reserve(
             owner,
             kind=kind,
@@ -361,6 +377,7 @@ class _RuntimeServiceRegistry:
         return registration
 
     def activate(self, token: int) -> None:
+        """Activate the reserved runtime entry."""
         self._ensure_process()
         if type(token) is not int:
             raise TypeError("runtime service token must be an exact integer")
@@ -425,6 +442,7 @@ class _RuntimeServiceRegistry:
             self._mark_progress_noexcept_locked()
 
     def unregister(self, token: int) -> None:
+        """Remove one registered entry from this runtime service registry."""
         self._ensure_process()
         if type(token) is not int:
             raise TypeError("runtime service token must be an exact integer")
@@ -449,6 +467,7 @@ class _RuntimeServiceRegistry:
             self._mark_progress_noexcept_locked()
 
     def close_admission(self) -> None:
+        """Reject new runtime-service registrations before shutdown."""
         self._ensure_process()
         with self._condition:
             changed = not self._admission_closed
@@ -482,6 +501,7 @@ class _RuntimeServiceRegistry:
                 clear_exception_traceback(exc)
 
     def reopen_admission_for_tests(self) -> None:
+        """Reopen admission for an isolated test run."""
         with self._condition:
             self._admission_closed = False
             if not self._entries:
@@ -490,6 +510,7 @@ class _RuntimeServiceRegistry:
 
     @staticmethod
     def _is_quiescent_result(result: object) -> bool:
+        """Return whether a shutdown result proves runtime quiescence."""
         return result is True or result is RuntimeCloseStatus.QUIESCENT
 
     def close_all(
@@ -562,6 +583,7 @@ class _RuntimeServiceRegistry:
             return closed, remaining_services
 
     def snapshot(self) -> RuntimeServiceSnapshot:
+        """Return a bounded snapshot of the current runtime service registry."""
         self._ensure_process()
         with self._condition:
             self._prune_retiring_threads_locked()
@@ -586,6 +608,7 @@ class _RuntimeServiceRegistry:
             )
 
     def reset_after_fork(self) -> None:
+        """Reset process-local state inherited across a fork."""
         self._reset(os.getpid())
         self._admission_closed = True
 

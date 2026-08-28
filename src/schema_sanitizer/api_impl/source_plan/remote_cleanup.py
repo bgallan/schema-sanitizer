@@ -1,4 +1,8 @@
-"""Retryable cleanup helpers for lazy remote source-plan ownership."""
+"""Retryable cleanup helpers for lazy remote source-plan ownership.
+
+It combines primary and cleanup failures and retries close or abandonment across lazy
+remote owners without losing the authoritative error.
+"""
 
 from __future__ import annotations
 

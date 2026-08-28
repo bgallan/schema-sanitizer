@@ -1,4 +1,8 @@
-"""Tests raw option byte encoding and native payload validation."""
+"""Tests raw option byte encoding and native payload validation.
+
+It corrupts exact payload fields to verify native decoding, type and range validation,
+cache reuse, and schema nullable-byte rejection.
+"""
 
 from __future__ import annotations
 
@@ -41,7 +45,7 @@ def _skip_options_payload_value(mv: memoryview, pos: int, kind: str) -> int:
 
 
 def _corrupt_first_options_bool_byte(payload: bytes) -> bytes:
-    """Corrupt first options bool byte."""
+    """Overwrite the first Boolean option byte to create an invalid payload."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     mv = memoryview(payload)
@@ -56,7 +60,7 @@ def _corrupt_first_options_bool_byte(payload: bytes) -> bytes:
 
 
 def _corrupt_first_options_enum_value(payload: bytes) -> bytes:
-    """Corrupt first options enum value."""
+    """Overwrite the first enum option to create an invalid payload."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     mv = memoryview(payload)
@@ -71,7 +75,7 @@ def _corrupt_first_options_enum_value(payload: bytes) -> bytes:
 
 
 def _corrupt_first_logical_schema_nullable_byte(payload: bytes) -> bytes:
-    """Corrupt first logical schema nullable byte."""
+    """Overwrite the first nullable marker to create an invalid schema payload."""
     name_len = int.from_bytes(payload[4:8], "little")
     nullable_pos = 8 + name_len
     out = bytearray(payload)
@@ -80,6 +84,7 @@ def _corrupt_first_logical_schema_nullable_byte(payload: bytes) -> bytes:
 
 
 def test_options_bytes_encoder_rejects_non_bool_bool_values() -> None:
+    """Verify options bytes encoder rejects non bool bool values."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     opts = _opts_bytes.Options()
@@ -90,6 +95,7 @@ def test_options_bytes_encoder_rejects_non_bool_bool_values() -> None:
 
 
 def test_options_bytes_encoder_rejects_non_int_integer_values() -> None:
+    """Verify options bytes encoder rejects non int integer values."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     for key in ("arrow_max_depth", "parquet_max_depth", "memory_limit_bytes"):
@@ -105,6 +111,7 @@ def test_options_bytes_encoder_rejects_non_int_integer_values() -> None:
 
 
 def test_options_bytes_encoder_rejects_non_string_string_values() -> None:
+    """Verify options bytes encoder rejects non string string values."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     for key in (
@@ -123,6 +130,7 @@ def test_options_bytes_encoder_rejects_non_string_string_values() -> None:
 
 
 def test_options_bytes_encoder_rejects_non_string_vector_items() -> None:
+    """Verify options bytes encoder rejects non string vector items."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     opts = _opts_bytes.Options()
@@ -139,6 +147,7 @@ def test_options_bytes_encoder_rejects_non_string_vector_items() -> None:
 
 
 def test_options_bytes_encoder_rejects_invalid_enum_values() -> None:
+    """Verify options bytes encoder rejects invalid enum values."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     for value in (True, 999):
@@ -149,6 +158,7 @@ def test_options_bytes_encoder_rejects_invalid_enum_values() -> None:
 
 
 def test_options_byte_append_helpers_reject_out_of_range_values() -> None:
+    """Verify options byte append helpers reject out of range values."""
     from schema_sanitizer.core_impl import native_options as _options_codec
 
     cases = (
@@ -167,6 +177,7 @@ def test_options_byte_append_helpers_reject_out_of_range_values() -> None:
 
 
 def test_options_byte_append_helpers_reject_non_int_values() -> None:
+    """Verify options byte append helpers reject non int values."""
     from schema_sanitizer.core_impl import native_options as _options_codec
 
     for fn in (
@@ -181,6 +192,7 @@ def test_options_byte_append_helpers_reject_non_int_values() -> None:
 
 
 def test_logical_schema_payload_rejects_invalid_nullable_byte(require_native: None) -> None:
+    """Verify logical schema payload rejects invalid nullable byte."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.core_impl import logical_schema as _logical_schema
 
@@ -192,6 +204,7 @@ def test_logical_schema_payload_rejects_invalid_nullable_byte(require_native: No
 
 
 def test_raw_options_reject_unknown_attributes() -> None:
+    """Verify raw options reject unknown attributes."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     opts = _opts_bytes.Options()
@@ -200,7 +213,7 @@ def test_raw_options_reject_unknown_attributes() -> None:
 
 
 def test_native_options_prepare_rejects_truncated_payload(require_native: None) -> None:
-
+    """Verify native options prepare rejects truncated payload."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
@@ -211,7 +224,7 @@ def test_native_options_prepare_rejects_truncated_payload(require_native: None) 
 
 
 def test_native_options_prepare_rejects_invalid_bool_values(require_native: None) -> None:
-
+    """Verify native options prepare rejects invalid bool values."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
@@ -224,6 +237,7 @@ def test_native_options_prepare_rejects_invalid_bool_values(require_native: None
 
 
 def test_native_options_prepare_rejects_invalid_schema_nullable_byte(require_native: None) -> None:
+    """Verify native options prepare rejects invalid schema nullable byte."""
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl import logical_schema as _logical_schema
@@ -258,7 +272,7 @@ def test_native_options_prepare_rejects_invalid_schema_nullable_byte(require_nat
 
 
 def test_native_options_prepare_rejects_invalid_enum_values(require_native: None) -> None:
-
+    """Verify native options prepare rejects invalid enum values."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
@@ -273,7 +287,7 @@ def test_native_options_prepare_rejects_invalid_enum_values(require_native: None
 def test_options_capsule_is_reused_until_an_option_changes(
     monkeypatch: pytest.MonkeyPatch, require_native: None
 ) -> None:
-
+    """Verify options capsule is reused until an option changes."""
     from schema_sanitizer.core_impl import native_options as _opts_bytes
 
     original = _opts_bytes._encode_options_bytes

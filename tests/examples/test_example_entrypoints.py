@@ -1,4 +1,8 @@
-"""Smoke contracts for every executable example shipped with the project."""
+"""Smoke contracts for every executable example shipped with the project.
+
+It runs every shipped help entry point offline and keeps the example index, executable
+links, and optional dependency groups synchronized.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Direct native Parquet routing and retry policy."""
+"""Direct native Parquet routing and retry policy.
+
+It attempts eligible native Parquet routes, classifies failures as retryable declines or
+terminal errors, and returns explicit route outcomes.
+"""
 
 from __future__ import annotations
 
@@ -65,6 +69,7 @@ def parquet_direct_stream_factory(
     route = "none"
 
     def record_route(value: str) -> None:
+        """Record the selected direct Parquet execution route."""
         nonlocal route
         route = value
 

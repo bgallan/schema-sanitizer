@@ -1,4 +1,8 @@
-"""Optional cgroup/host-wide resident-memory admission across processes."""
+"""Coordinate optional resident-memory admission across worker processes.
+
+A locked journal and fair coordinator track exact leases, reconcile finalizer releases, remove
+stale process state, and rebuild safe synchronization after a fork.
+"""
 
 from __future__ import annotations
 
@@ -58,13 +62,13 @@ _register_static_control_plane(
 
 
 def _enabled() -> bool:
-    """Implement the internal _enabled helper."""
+    """Return whether cross-process memory coordination is enabled and supported."""
     value = os.getenv(_ENV_ENABLED, "").strip().lower()
     return fcntl is not None and value in {"1", "true", "yes", "on"}
 
 
 def _coordination_path() -> Path:
-    """Implement the internal _coordination_path helper."""
+    """Return the shared resident-memory coordination document path."""
     configured = os.getenv(_ENV_DIRECTORY)
     directory = Path(configured) if configured else Path(tempfile.gettempdir())
     directory.mkdir(parents=True, exist_ok=True)
@@ -204,10 +208,12 @@ class _DirectLeaseRegistration:
     __slots__ = ("lease_id", "capability")
 
     def __init__(self, capability: object) -> None:
+        """Initialize the direct lease registration and its owned runtime state."""
         self.lease_id = 0
         self.capability = capability
 
     def __iter__(self):
+        """Iterate over the retained values."""
         yield self.lease_id
         yield self.capability
 
@@ -216,6 +222,7 @@ class _DirectLeaseEntry:
     __slots__ = ("owner_id", "capability", "reserved", "generation")
 
     def __init__(self, owner_id: int, capability: object, generation: int) -> None:
+        """Initialize the direct lease entry and its owned runtime state."""
         self.owner_id = owner_id
         self.capability = capability
         self.reserved = 0
@@ -249,6 +256,7 @@ def _rebuild_direct_lease_free_locked() -> None:
 
 
 def _register_direct_lease(owner: object) -> _DirectLeaseRegistration:
+    """Register authoritative ownership for a direct memory lease."""
     global _DIRECT_LEASE_FREE_COUNT
     capability = FinalizerReplayCapability()
     result = _DirectLeaseRegistration(capability)
@@ -278,6 +286,7 @@ def _register_direct_lease(owner: object) -> _DirectLeaseRegistration:
 
 
 def _direct_lease_reserved_authority(owner_id: int, lease_id: int, capability: object) -> int:
+    """Return bytes retained by an authenticated direct lease owner."""
     with _DIRECT_LEASE_LOCK:
         entry = _DIRECT_LEASE_LEDGER.get(lease_id)
         if entry is None or entry.owner_id != owner_id or entry.capability is not capability:
@@ -286,12 +295,14 @@ def _direct_lease_reserved_authority(owner_id: int, lease_id: int, capability: o
 
 
 def _direct_lease_reserved(owner: object, lease_id: int, capability: object) -> int:
+    """Return bytes retained by an authoritative direct lease."""
     return _direct_lease_reserved_authority(id(owner), lease_id, capability)
 
 
 def _update_direct_lease_reserved_authority(
     owner_id: int, lease_id: int, capability: object, reserved: int
 ) -> None:
+    """Update bytes retained by an authenticated direct lease owner."""
     global _DIRECT_LEASE_UNKNOWN_RELEASES
     with _DIRECT_LEASE_LOCK:
         entry = _DIRECT_LEASE_LEDGER.get(lease_id)
@@ -304,10 +315,12 @@ def _update_direct_lease_reserved_authority(
 def _update_direct_lease_reserved(
     owner: object, lease_id: int, capability: object, reserved: int
 ) -> None:
+    """Update bytes retained by one authoritative direct memory lease."""
     _update_direct_lease_reserved_authority(id(owner), lease_id, capability, reserved)
 
 
 def _retire_direct_lease_authority(owner_id: int, lease_id: int, capability: object) -> int:
+    """Retire an authenticated direct lease and return its released bytes."""
     global _DIRECT_LEASE_UNKNOWN_RELEASES, _DIRECT_LEASE_FREE_COUNT
     with _DIRECT_LEASE_LOCK:
         entry = _DIRECT_LEASE_LEDGER.get(lease_id)
@@ -335,10 +348,12 @@ def _retire_direct_lease_authority(owner_id: int, lease_id: int, capability: obj
 
 
 def _retire_direct_lease(owner: object, lease_id: int, capability: object) -> int:
+    """Retire authoritative ownership for a direct memory lease."""
     return _retire_direct_lease_authority(id(owner), lease_id, capability)
 
 
 def _direct_lease_snapshot() -> tuple[int, int, int]:
+    """Return active lease count, reserved bytes, and unknown releases."""
     with _DIRECT_LEASE_LOCK:
         return (
             len(_DIRECT_LEASE_LEDGER),
@@ -389,7 +404,7 @@ class CrossProcessMemoryLease:
     """Crash-recoverable host-wide resident-memory admission lease."""
 
     def __init__(self, capacity_bytes: int, initial_bytes: int) -> None:
-        """Initialize this helper."""
+        """Initialize the cross process memory lease and its owned runtime state."""
         if type(capacity_bytes) is not int or type(initial_bytes) is not int:
             raise TypeError("cross-process memory sizes must be exact integers")
         if capacity_bytes <= 0 or initial_bytes < 0:
@@ -517,7 +532,7 @@ class CrossProcessMemoryLease:
 
     @property
     def reserved_bytes(self) -> int:
-        """Implement the internal reserved_bytes helper."""
+        """Return bytes still reserved by this cross-process memory lease."""
         if os.getpid() != self._pid:
             return 0
         with self._lock:
@@ -763,6 +778,7 @@ _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS = 0
 
 
 def _mark_direct_cross_memory_finalizer_overflow(ticket: int) -> None:
+    """Mark direct cross memory finalizer overflow."""
     global _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS
     try:
         _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS += 1
@@ -776,6 +792,7 @@ def drain_direct_cross_process_memory_finalizers() -> int:
     drained = 0
 
     def process(ticket: int, owner: RootedFinalizerAuthority) -> None:
+        """Process one retained work item."""
         nonlocal drained
         owner.run()
         owner.clear()
@@ -822,6 +839,7 @@ _PROCESS_FINALIZER_RELEASE_OVERFLOWED = False
 
 
 def _round_reservation(value: int) -> int:
+    """Round a memory reservation to the coordination quantum."""
     if value <= 0:
         return 0
     slab = _COORDINATOR_SLAB_BYTES
@@ -848,6 +866,7 @@ class _ProcessCrossMemoryFinalizerOwner:
     )
 
     def __init__(self, token: int, owner_id: int, capability: object, ticket: int) -> None:
+        """Initialize the process cross memory finalizer owner and its owned runtime state."""
         self._token = token
         self._owner_id = owner_id
         self._capability = capability
@@ -857,23 +876,28 @@ class _ProcessCrossMemoryFinalizerOwner:
 
     @property
     def ticket(self) -> int:
+        """Return the current ownership ticket."""
         return self._finalizer_ticket
 
     @ticket.setter
     def ticket(self, value: int) -> None:
+        """Replace the ownership ticket mirrored by this finalizer owner."""
         self._finalizer_ticket = int(value)
 
     def arm_for_ticket(self, ticket: int) -> None:
+        """Arm finalizer cleanup for the supplied ownership ticket."""
         exact = int(ticket)
         if exact <= 0:
             raise ValueError("finalizer arm ticket must be positive")
         self._escrow_armed_ticket = exact
 
     def disarm_ticket(self, ticket: int | None = None) -> None:
+        """Disarm cleanup authority for the matching ownership ticket."""
         if ticket is None or self._escrow_armed_ticket == int(ticket):
             self._escrow_armed_ticket = 0
 
     def is_armed_for(self, ticket: int) -> bool:
+        """Return whether cleanup is armed for the supplied ownership ticket."""
         return self._escrow_armed_ticket == int(ticket)
 
 
@@ -899,6 +923,7 @@ class _ProcessCrossMemoryReservation:
         initial: int,
         finalizer_ticket: int,
     ) -> None:
+        """Initialize the process cross memory reservation and its owned runtime state."""
         self._coordinator = coordinator
         self._token = token
         self._finalizer_ticket = finalizer_ticket
@@ -914,13 +939,16 @@ class _ProcessCrossMemoryReservation:
     def _capability(self) -> object:
         # Keep finalizer authentication in the separately rooted authority so
         # stale-capability fault injection remains visible after publication.
+        """Return the authoritative capability retained by this lease."""
         return self._finalizer_owner._capability
 
     @_capability.setter
     def _capability(self, value: object) -> None:
+        """Replace the authoritative capability retained by this lease."""
         self._finalizer_owner._capability = value
 
     def _bind_generation(self, token: int, ticket: int) -> None:
+        """Bind this memory lease to its coordinator generation."""
         token = int(token)
         ticket = int(ticket)
         if token <= 0 or ticket <= 0:
@@ -934,12 +962,14 @@ class _ProcessCrossMemoryReservation:
 
     @property
     def reserved_bytes(self) -> int:
+        """Return bytes still reserved by this cross-process memory lease."""
         if os.getpid() != self._pid:
             return 0
         with self._lock:
             return 0 if self._released else self._reserved
 
     def resize(self, size_bytes: int) -> None:
+        """Resize the retained reservation."""
         if os.getpid() != self._pid:
             raise RuntimeError("cross-process memory reservation cannot be reused after fork")
         if type(size_bytes) is not int:
@@ -953,6 +983,7 @@ class _ProcessCrossMemoryReservation:
             self._reserved = size_bytes
 
     def release(self) -> None:
+        """Release resources owned by this process cross memory reservation."""
         if os.getpid() != self._pid:
             return
         with self._lock:
@@ -987,6 +1018,7 @@ class _ProcessCrossMemoryReservation:
     close = release
 
     def _release_nonblocking(self) -> None:
+        """Publish nonblocking release of this cross-process memory lease."""
         if os.getpid() != self._pid:
             return
         # Never wait for a reservation lock from ``__del__``.  If an explicit
@@ -1017,6 +1049,7 @@ class _ProcessCrossMemoryReservation:
             self._lock.release()
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing():
                 return
@@ -1029,6 +1062,7 @@ class _ProcessCrossMemoryCoordinator:
     """Single process-scoped physical reservation with coalesced shrink I/O."""
 
     def __init__(self, capacity_bytes: int) -> None:
+        """Initialize the process cross memory coordinator and its owned runtime state."""
         self._pid = os.getpid()
         self._capacity = capacity_bytes
         self._lock = Lock()
@@ -1070,21 +1104,26 @@ class _ProcessCrossMemoryCoordinator:
         return self._pid == os.getpid() and self._coordination_signature == signature
 
     def _effective_capacity_locked(self) -> int:
+        """Return effective cross-process capacity while holding the coordinator lock."""
         if self._contribution_capacities:
             return min(self._contribution_capacities.values())
         return self._capacity
 
     def _refresh_effective_capacity_locked(self) -> None:
+        """Refresh effective cross-process capacity while holding the coordinator lock."""
         effective = self._effective_capacity_locked()
         self._physical._set_capacity(effective)
 
     def _logical_total_locked(self) -> int:
+        """Return logical reservations while holding the coordinator lock."""
         return sum(self._contributions.values())
 
     def _drain_finalizer_releases_locked(self) -> None:
+        """Drain finalizer releases while holding the governing lock."""
         removed = False
 
         def process(_ticket: int, owner: _ProcessCrossMemoryFinalizerOwner) -> None:
+            """Process one retained work item."""
             nonlocal removed
             if owner._primary_released:
                 return
@@ -1184,6 +1223,7 @@ class _ProcessCrossMemoryCoordinator:
     def acquire(
         self, initial_bytes: int, capacity_bytes: int | None = None
     ) -> _ProcessCrossMemoryReservation:
+        """Acquire governed capacity through this process cross memory coordinator."""
         owner_capacity = self._capacity if capacity_bytes is None else capacity_bytes
         if type(owner_capacity) is not int or owner_capacity <= 0:
             raise ValueError("cross-process memory owner capacity must be positive")
@@ -1301,6 +1341,7 @@ class _ProcessCrossMemoryCoordinator:
                 raise
 
     def resize(self, token: int, owner_id: int, capability: object, requested: int) -> None:
+        """Resize the retained reservation."""
         with self._lock:
             self._drain_finalizer_releases_locked()
             expected = self._contribution_owners.get(token)
@@ -1339,6 +1380,7 @@ class _ProcessCrossMemoryCoordinator:
         owner_id: int,
         capability: object,
     ) -> None:
+        """Release resources owned by this process cross memory coordinator."""
         with self._lock:
             self._drain_finalizer_releases_locked()
             expected = self._contribution_owners.get(token)
@@ -1378,6 +1420,7 @@ class _ProcessCrossMemoryCoordinator:
                 return
 
     def _schedule_reconcile_locked(self, *, start_worker: bool) -> None:
+        """Schedule reconcile while holding the governing lock."""
         if self._reconcile_scheduled or not self._pending_shrink:
             return
         self._reconcile_scheduled = True
@@ -1396,6 +1439,7 @@ class _ProcessCrossMemoryCoordinator:
             self._reconcile_scheduled = False
 
     def reconcile_pending(self) -> None:
+        """Reconcile deferred cross-process memory journal updates."""
         with self._lock:
             self._drain_finalizer_releases_locked()
             self._reconcile_scheduled = False
@@ -1439,6 +1483,7 @@ class _ProcessCrossMemoryCoordinator:
             return True
 
     def empty(self) -> bool:
+        """Return whether the governed state is empty."""
         with self._lock:
             self._drain_finalizer_releases_locked()
             return not self._contributions
@@ -1452,6 +1497,7 @@ def _reconcile_process_cross_memory() -> None:
 
 
 def _get_process_coordinator(capacity_bytes: int) -> _ProcessCrossMemoryCoordinator:
+    """Return the process-wide cross-memory coordinator."""
     global _PROCESS_COORDINATOR
     with _PROCESS_COORDINATOR_LOCK:
         coordinator = _PROCESS_COORDINATOR
@@ -1575,16 +1621,19 @@ def process_cross_memory_snapshot() -> dict[str, int]:
 
 
 def _prepare_stale_scratch_for_fork() -> None:
+    """Prepare stale scratch for fork."""
     global _STALE_KEY_SCRATCH_FORK_FRESH_LOCK
     _STALE_KEY_SCRATCH_FORK_FRESH_LOCK = _STALE_KEY_SCRATCH_LOCK_BANK[_STALE_KEY_SCRATCH_BANK_INDEX]
 
 
 def _clear_stale_scratch_fork() -> None:
+    """Clear stale scratch fork."""
     global _STALE_KEY_SCRATCH_FORK_FRESH_LOCK
     _STALE_KEY_SCRATCH_FORK_FRESH_LOCK = None
 
 
 def _reset_stale_scratch_after_fork() -> None:
+    """Reset stale scratch after fork."""
     global \
         _STALE_KEY_SCRATCH_LOCK, \
         _STALE_KEY_SCRATCH_FORK_FRESH_LOCK, \

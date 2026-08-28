@@ -1,4 +1,8 @@
-"""Reusable execution support for example 08 and its fake-cloud tests."""
+"""Reusable execution support for example 08 and its fake-cloud tests.
+
+It defines provider protocols and run results, implements the native GCS adapter, and
+orchestrates each daily window safely.
+"""
 
 from __future__ import annotations
 

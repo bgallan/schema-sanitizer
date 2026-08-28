@@ -1,4 +1,8 @@
-"""Check C/C++ function documentation using clang-doc output."""
+"""Check C/C++ function documentation using clang-doc output.
+
+It locates clang-doc inputs, walks documented functions, and reports missing summaries
+for maintained native code.
+"""
 
 from __future__ import annotations
 

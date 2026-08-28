@@ -1,4 +1,8 @@
-"""Tests read adapters and file-to-file converters."""
+"""CSV and JSONL sink encoding, metadata, routing, and failure-path tests.
+
+It checks CSV and JSONL values, nested rendering, metadata, native routing, float
+support, fallback boundaries, and collision rejection.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from schema_sanitizer.adapters.pyarrow.jsonl_sink import _schema_supports_native
 
 
 def test_to_csv_writes_file(tmp_path: Path, require_native: None) -> None:
+    """Verify to CSV writes file."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out.csv"
@@ -43,6 +48,7 @@ def test_to_csv_writes_file(tmp_path: Path, require_native: None) -> None:
 
 
 def test_to_csv_json_stringifies_nested_fields(tmp_path: Path, require_native: None) -> None:
+    """Verify to CSV JSON stringifies nested fields."""
     pytest.importorskip("pyarrow")
 
     data = [
@@ -73,6 +79,7 @@ def test_jsonl_native_file_output_writes_metadata_without_pyarrow_sink(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify JSONL native file output writes metadata without PyArrow sink."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
@@ -105,6 +112,7 @@ def test_csv_native_file_output_writes_metadata_without_pyarrow_sink(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify CSV native file output writes metadata without PyArrow sink."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
@@ -134,6 +142,7 @@ def test_csv_native_file_output_writes_metadata_without_pyarrow_sink(
 
 
 def test_native_jsonl_schema_support_check_uses_native_parser(require_native: None) -> None:
+    """Verify native JSONL schema support check uses native parser."""
     pa = pytest.importorskip("pyarrow")
 
     supported = pa.schema(
@@ -155,6 +164,7 @@ def test_native_jsonl_schema_support_check_uses_native_parser(require_native: No
 
 
 def test_to_jsonl_native_writes_float16(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL native writes float16."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
@@ -176,6 +186,7 @@ def test_to_jsonl_native_writes_float16(tmp_path: Path, require_native: None) ->
 def test_jsonl_stream_does_not_fall_back_after_native_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify JSONL stream does not fall back after native failure."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow import jsonl_sink as pyarrow_jsonl_sink
 
@@ -197,6 +208,7 @@ def test_jsonl_stream_does_not_fall_back_after_native_failure(
 def test_csv_stream_requires_native_nested_renderer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify CSV stream requires native nested renderer."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow import csv_sink as pyarrow_csv_sink
 
@@ -216,6 +228,7 @@ def test_csv_stream_requires_native_nested_renderer(
 
 
 def test_to_jsonl_writes_file(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL writes file."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out.jsonl"
@@ -233,6 +246,7 @@ def test_to_jsonl_writes_file(tmp_path: Path, require_native: None) -> None:
 
 
 def test_to_jsonl_preserves_nested_fields(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL preserves nested fields."""
     pytest.importorskip("pyarrow")
 
     data = [
@@ -254,6 +268,7 @@ def test_to_jsonl_preserves_nested_fields(tmp_path: Path, require_native: None) 
 
 
 def test_to_jsonl_native_temporal_rendering(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL native temporal rendering."""
     pytest.importorskip("pyarrow")
 
     source = tmp_path / "rows.jsonl"
@@ -272,6 +287,7 @@ def test_to_jsonl_native_temporal_rendering(tmp_path: Path, require_native: None
 
 
 def test_to_jsonl_native_float_rendering(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL native float rendering."""
     pytest.importorskip("pyarrow")
 
     source = tmp_path / "rows.jsonl"
@@ -291,6 +307,7 @@ def test_to_jsonl_native_float_rendering(tmp_path: Path, require_native: None) -
 
 
 def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path, require_native: None) -> None:
+    """Verify JSONL writer supports binary and map types."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
@@ -320,6 +337,7 @@ def test_jsonl_writer_supports_decimal_dictionary_duration_and_fixed_list(
     tmp_path: Path,
     require_native: None,
 ) -> None:
+    """Verify JSONL writer supports decimal dictionary duration and fixed list."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
@@ -349,6 +367,7 @@ def test_jsonl_writer_supports_decimal_dictionary_duration_and_fixed_list(
 
 
 def test_to_csv_writes_file_uri(tmp_path: Path, require_native: None) -> None:
+    """Verify to CSV writes file URI."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out-uri.csv"
@@ -364,6 +383,7 @@ def test_to_csv_writes_file_uri(tmp_path: Path, require_native: None) -> None:
 
 
 def test_to_jsonl_writes_file_uri(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL writes file URI."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out-uri.jsonl"
@@ -378,6 +398,7 @@ def test_to_jsonl_writes_file_uri(tmp_path: Path, require_native: None) -> None:
 
 
 def test_jsonl_writer_rejects_existing_schema_metadata_collision(tmp_path: Path) -> None:
+    """Verify JSONL writer rejects existing schema metadata collision."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 

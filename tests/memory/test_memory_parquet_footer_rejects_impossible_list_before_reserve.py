@@ -1,4 +1,7 @@
-"""Regression coverage for memory parquet footer rejects impossible list before reserve."""
+"""Hardens Parquet footer decoding against impossible or unknown lists and maps,
+overflowing varints, stop-typed collections, allocator-header attacks, and retained-byte
+overflow. Validation and ownership claims precede iteration or header access, and
+counters saturate instead of wrapping."""
 
 from __future__ import annotations
 

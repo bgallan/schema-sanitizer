@@ -1,4 +1,8 @@
-"""Schema-registry documents, native state, merge results, and runtime context."""
+"""Manage schema-registry documents, native state, merges, and runtime context.
+
+Documents are normalized and compacted around native registry contexts, with contract inspection,
+schema merging, and fork-safe reset of cached native state.
+"""
 
 from __future__ import annotations
 

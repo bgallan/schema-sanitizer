@@ -1,4 +1,8 @@
-"""Strict, side-effect-free normalization for runtime durations and deadlines."""
+"""Normalize runtime durations and deadlines without side effects.
+
+Boolean, nonfinite, and negative inputs are rejected before timeouts are converted to monotonic
+deadlines and bounded remaining-wait values.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ def _validated_builtin_duration(
     allow_none: bool,
     allow_zero: bool,
 ) -> int | float | None:
+    """Validate and normalize a built-in numeric duration."""
     if value is None:
         if allow_none:
             return None

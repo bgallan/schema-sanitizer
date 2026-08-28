@@ -1,4 +1,8 @@
-"""GCS metadata and generation-safe discovery contracts for CSV window ingestion."""
+"""GCS metadata and generation-safe discovery contracts for CSV window ingestion.
+
+The suite covers timestamp parsing, sync and async listings, generation-pinned
+downloads, deterministic ordering, exact windows, packet plans, and one-listing reuse.
+"""
 
 from __future__ import annotations
 
@@ -100,35 +104,43 @@ def test_async_bucket_root_listing_requests_metadata_and_sorts_by_identity(
         status = 200
 
         def __init__(self, payload: dict[str, object]) -> None:
+            """Initialize response state for body, offset, and content."""
             self._body = json.dumps(payload).encode()
             self._offset = 0
             self.content = self
 
         async def __aenter__(self):
+            """Return the managed response value from context entry."""
             return self
 
         async def __aexit__(self, *_exc: object) -> bool:
+            """Finalize the response context without suppressing exceptions."""
             return False
 
         async def read(self, size: int) -> bytes:
+            """Read data from the in-memory transport at its current offset."""
             end = min(len(self._body), self._offset + size)
             chunk = self._body[self._offset : end]
             self._offset = end
             return chunk
 
         def at_eof(self) -> bool:
+            """Return whether the in-memory response body has been fully consumed."""
             return self._offset == len(self._body)
 
     class Session:
         """Minimal asynchronous client-session double."""
 
         async def __aenter__(self):
+            """Return the managed session value from context entry."""
             return self
 
         async def __aexit__(self, *_exc: object) -> bool:
+            """Finalize the session context without suppressing exceptions."""
             return False
 
         def get(self, _url: str, *, params: dict[str, str]):
+            """Return the configured response for the requested provider object."""
             captured.append(dict(params))
             return Response(pages.pop(0))
 

@@ -1,4 +1,8 @@
-"""Planning and lifecycle for file-output metadata columns."""
+"""Planning and lifecycle for file-output metadata columns.
+
+It validates requested metadata columns and wraps streams so source paths, row spans,
+and generated timestamps are injected with correct ownership.
+"""
 
 from __future__ import annotations
 

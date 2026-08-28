@@ -1,4 +1,8 @@
-"""Regression coverage for memory external runtime construction native exception rolls back standalone claim."""
+"""Exercises external-runtime construction failures, parent and standalone claims,
+alignment escrow, setter observability, generation low-water marks, route profiles,
+Parquet lifetime, and native completion corruption. Construction rolls back both logical
+and physical sides exactly; pool configuration fails conservatively while partial width
+and route identity remain supported."""
 
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ def _reset_external_pool_state(module, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_external_runtime_construction_native_exception_rolls_back_standalone_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external runtime construction native exception rolls back standalone claim."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -47,14 +52,17 @@ def test_external_runtime_construction_native_exception_rolls_back_standalone_cl
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return cls.value
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             cls.value = value
 
     class Native:
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             del minimum
             with governor._condition:
                 logical_lease_ids.extend(
@@ -84,6 +92,7 @@ def test_external_runtime_construction_native_exception_rolls_back_standalone_cl
 def test_external_runtime_construction_native_exception_rolls_back_parent_borrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external runtime construction native exception rolls back parent borrow."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -98,14 +107,17 @@ def test_external_runtime_construction_native_exception_rolls_back_parent_borrow
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return cls.value
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             cls.value = value
 
     class Native:
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             del desired, minimum
             raise RuntimeError("injected borrowed native failure")
 
@@ -130,6 +142,7 @@ def test_external_runtime_construction_native_exception_rolls_back_parent_borrow
 def test_external_runtime_construction_alignment_failure_escrows_both_sides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external runtime construction alignment failure escrows both sides."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -141,19 +154,23 @@ def test_external_runtime_construction_alignment_failure_escrows_both_sides(
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return cls.value
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             cls.value = value
 
     class Logical:
         amount = 8
 
         def shrink(self, amount: int) -> None:
+            """Raise the deliberate failure for the shrink path."""
             raise RuntimeError("injected logical alignment failure")
 
         def release(self) -> None:
+            """Release the resource held by the logical test double."""
             events.append(("logical-release", self.amount))
             self.amount = 0
 
@@ -162,14 +179,17 @@ def test_external_runtime_construction_alignment_failure_escrows_both_sides(
             amount = 4
 
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             del minimum
             events.append(("native-acquire", desired))
             return self.Receipt(), 4
 
         def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return receipt.amount
 
         def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             events.append(("native-release", receipt.amount - target))
             receipt.amount = target
             return target
@@ -190,16 +210,19 @@ def test_external_runtime_construction_alignment_failure_escrows_both_sides(
 
 
 def test_constrain_external_pool_fails_closed_on_unobservable_or_ignored_setter() -> None:
+    """Verify constrain external pool fails closed on unobservable or ignored setter."""
     from schema_sanitizer.core_impl import process_resources as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
     class BrokenGetter:
         @staticmethod
         def cpu_count() -> int:
+            """Raise the deliberate failure for the CPU count path."""
             raise RuntimeError("cannot inspect")
 
         @staticmethod
         def set_cpu_count(value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             pass
 
     with pytest.raises(SchemaSanitizerResourceError, match="could not be observed"):
@@ -210,10 +233,12 @@ def test_constrain_external_pool_fails_closed_on_unobservable_or_ignored_setter(
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return cls.value
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             pass
 
     with pytest.raises(SchemaSanitizerResourceError, match="exceeds admitted physical width"):
@@ -223,6 +248,7 @@ def test_constrain_external_pool_fails_closed_on_unobservable_or_ignored_setter(
 def test_fresh_runtime_generation_can_reexpand_after_prior_low_water_mark(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fresh runtime generation can reexpand after prior low water mark."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -237,25 +263,31 @@ def test_fresh_runtime_generation_can_reexpand_after_prior_low_water_mark(
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return cls.value
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             cls.value = value
 
     class Native:
         class Receipt:
             def __init__(self, amount: int) -> None:
+                """Initialize the receipt test double."""
                 self.amount = amount
 
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             native_calls.append(("acquire", desired, minimum))
             return self.Receipt(desired), desired
 
         def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return receipt.amount
 
         def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             native_calls.append(("release", receipt.amount - target, receipt.amount - target))
             receipt.amount = target
             return target
@@ -297,6 +329,7 @@ def test_fresh_runtime_generation_can_reexpand_after_prior_low_water_mark(
 def test_configurable_standalone_runtime_degrades_partially_not_to_serial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify configurable standalone runtime degrades partially not to serial."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -310,10 +343,12 @@ def test_configurable_standalone_runtime_degrades_partially_not_to_serial(
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return cls.value
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             cls.value = value
 
     class Native:
@@ -321,13 +356,16 @@ def test_configurable_standalone_runtime_degrades_partially_not_to_serial(
             amount = 4
 
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             assert (desired, minimum) == (4, 2)
             return self.Receipt(), 4
 
         def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return receipt.amount
 
         def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             receipt.amount = target
             return target
 
@@ -360,10 +398,12 @@ def test_configurable_standalone_runtime_degrades_partially_not_to_serial(
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork() -> None:
+    """Verify Parquet dataset lifetime lease fails before inherited lock after fork."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     class Capability:
         def close(self) -> None:
+            """Close the resources owned by the capability test double."""
             pass
 
     owner = module._DatasetLifetimeOwner(object(), Capability(), None)
@@ -373,6 +413,7 @@ def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork()
     release = threading.Event()
 
     def hold() -> None:
+        """Hold the synchronization point until the competing path arrives."""
         with lease._lock:
             held.set()
             release.wait(5)
@@ -411,6 +452,7 @@ def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork()
 
 
 def test_route_profiles_are_orthogonal_and_payload_contract_backed() -> None:
+    """Verify route profiles are orthogonal and payload contract backed."""
     from schema_sanitizer.core_impl import concurrency_contracts as contracts
     from schema_sanitizer.core_impl.concurrency_route_evidence import (
         INPUT_ROUTE_PROFILE_REQUIREMENTS,
@@ -452,6 +494,7 @@ def test_route_profiles_are_orthogonal_and_payload_contract_backed() -> None:
 
 
 def test_route_profile_classifier_covers_transport_and_lifetime_shapes() -> None:
+    """Verify route profile classifier covers transport and lifetime shapes."""
     from types import SimpleNamespace
 
     from schema_sanitizer.core_impl.concurrency_route_evidence import (
@@ -504,6 +547,7 @@ def test_route_profile_classifier_covers_transport_and_lifetime_shapes() -> None
 
 
 def test_single_staged_parquet_preserves_remote_route_identity() -> None:
+    """Verify single staged Parquet preserves remote route identity."""
     from schema_sanitizer.api_impl.input.directory_preparation import (
         prepare_single_parquet_file,
     )
@@ -526,6 +570,7 @@ def test_single_staged_parquet_preserves_remote_route_identity() -> None:
 def test_native_runtime_separates_external_pool_permits_and_surfaces_completion_corruption() -> (
     None
 ):
+    """Verify native runtime separates external pool permits and surfaces completion corruption."""
     header = (CPP / "internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     probe = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
@@ -541,6 +586,7 @@ def test_native_runtime_separates_external_pool_permits_and_surfaces_completion_
 
 
 def test_external_runtime_uses_one_coordinator_not_split_logical_physical_ledgers() -> None:
+    """Verify external runtime uses one coordinator not split logical physical ledgers."""
     source = (SRC / "core_impl/process_resources.py").read_text(encoding="utf-8")
     assert "class _ExternalRuntimePoolCoordinatorEntry" in source
     assert "_EXTERNAL_RUNTIME_POOL_COORDINATOR" in source

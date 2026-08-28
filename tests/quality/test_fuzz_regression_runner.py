@@ -1,4 +1,8 @@
-"""Tests for deterministic execution of promoted fuzz crashes."""
+"""Tests for deterministic execution of promoted fuzz crashes.
+
+It validates stable crash discovery, bounded campaign commands, symlink rejection,
+temporary staging, and machine-readable evidence.
+"""
 
 from __future__ import annotations
 

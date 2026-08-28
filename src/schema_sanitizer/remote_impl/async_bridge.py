@@ -1,4 +1,8 @@
-"""Bounded synchronous bridge for coroutines invoked from an active loop."""
+"""Bounded synchronous bridge for coroutines invoked from an active loop.
+
+It runs a coroutine on a bounded bridge runner when the caller already owns an event loop and
+retains failed runners for governed cleanup.
+"""
 
 from __future__ import annotations
 
@@ -59,12 +63,14 @@ def _retain_failed_bridge_runner(runner: "_BridgeRunner") -> bool:
 
 
 def _discard_failed_bridge_runner(runner: "_BridgeRunner") -> None:
+    """Discard failed bridge runner."""
     with _FAILED_BRIDGE_RUNNERS_LOCK:
         _FAILED_BRIDGE_RUNNER_OWNERS.pop(id(runner), None)
         _FAILED_BRIDGE_RUNNERS.discard(runner)
 
 
 def _retry_failed_bridge_runner_token(token: int) -> None:
+    """Retry failed bridge runner token."""
     with _FAILED_BRIDGE_RUNNERS_LOCK:
         runner = _FAILED_BRIDGE_RUNNER_OWNERS.get(token)
     if runner is not None:
@@ -135,6 +141,7 @@ class _BridgeRunner:
             raise
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this bridge runner."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -258,6 +265,7 @@ class _BridgeRunner:
             _retain_failed_bridge_runner(self)
 
             def retry_runner(token: int = token) -> None:
+                """Retry cleanup of a bridge runner that failed to terminate."""
                 _retry_failed_bridge_runner_token(token)
 
             scheduled = schedule_retry(
@@ -506,6 +514,7 @@ def run_sync(coro: Any, *, threading_mode: str = "single") -> Any:
 
 
 def _failed_bridge_runner_snapshot() -> object:
+    """Return a bounded snapshot of failed bridge runner."""
     return _FAILED_BRIDGE_RUNNERS.snapshot()
 
 
@@ -520,6 +529,7 @@ __all__ = ["run_sync"]
 
 
 def _reset_failed_bridge_registry_after_fork() -> None:
+    """Reset failed bridge registry after fork."""
     global _FAILED_BRIDGE_RUNNERS_LOCK, _FAILED_BRIDGE_RUNNER_OWNERS
     _FAILED_BRIDGE_RUNNERS_LOCK = Lock()
     _FAILED_BRIDGE_RUNNER_OWNERS = {}

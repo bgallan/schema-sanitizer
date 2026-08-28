@@ -1,9 +1,7 @@
 """Fail-closed runtime suite for the production Parquet reader contracts.
 
-This gate is intentionally stricter than the normal test run. The normal suite may
-skip PyArrow/native runtime tests when optional dependencies or the compiled
-extension are absent. This script is for CI lanes that *must* prove the production
-Parquet contract and therefore treats any selected skip as a failure.
+It validates the selected contract manifest, rejects skips, executes each required
+group, and emits certificate-ready evidence.
 """
 
 from __future__ import annotations
@@ -87,7 +85,7 @@ class _NoSkipPlugin:
     def pytest_runtest_logreport(
         self, report: Any
     ) -> None:  # pragma: no cover - exercised by pytest
-        """Internal CI helper."""
+        """Capture each selected test's call or skip report for certification."""
         if report.when != "call" and not report.skipped:
             return
         entry: dict[str, Any] = {
@@ -105,17 +103,17 @@ class _NoSkipPlugin:
 
     @property
     def skipped(self) -> list[dict[str, Any]]:
-        """Internal CI helper."""
+        """Return captured reports whose selected tests were skipped."""
         return [report for report in self.reports if report.get("outcome") == "skipped"]
 
     @property
     def passed(self) -> list[dict[str, Any]]:
-        """Internal CI helper."""
+        """Return captured reports whose selected tests passed."""
         return [report for report in self.reports if report.get("outcome") == "passed"]
 
     @property
     def failed(self) -> list[dict[str, Any]]:
-        """Internal CI helper."""
+        """Return captured reports whose selected tests failed."""
         return [report for report in self.reports if report.get("outcome") == "failed"]
 
 
@@ -232,7 +230,7 @@ def _runtime_suite_group_execution_summary(
     failed_by_group: dict[str, list[dict[str, Any]]] = {}
 
     def reports_for(selected: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Internal CI helper."""
+        """Return reports matching one selected node ID or its parameterized cases."""
         return [
             report
             for report in candidates
@@ -421,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     def emit_certificate(certificate: dict[str, Any]) -> None:
-        """Internal CI helper."""
+        """Print the runtime certificate and persist it when an output was requested."""
         print(json.dumps({"runtime_contract_certificate": certificate}, indent=2, sort_keys=True))
         if certificate_output:
             _write_runtime_suite_certificate(certificate_output, certificate)

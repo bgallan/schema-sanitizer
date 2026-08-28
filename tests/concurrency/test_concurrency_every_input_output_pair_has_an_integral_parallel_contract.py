@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency every input output pair has an integral parallel contract."""
+"""Require an integral parallel contract for every public input and output pairing.
+
+Python sequences must be encoded only once across replays, one-shot generators must seek without
+reiteration, and the shared single-encode route must reach every native output format.
+"""
 
 from __future__ import annotations
 

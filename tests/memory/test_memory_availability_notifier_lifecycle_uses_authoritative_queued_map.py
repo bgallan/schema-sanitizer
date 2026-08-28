@@ -1,4 +1,7 @@
-"""Regression coverage for memory availability notifier lifecycle uses authoritative queued map."""
+"""Tests the process-wide availability notifier together with fork callbacks, bounded
+native registries, scheduler fallback, executor shutdown, cleanup dispatch, and stage
+admission. The queued map is authoritative, control-budget work stays outside dispatcher
+locks, and emergency roots and remote scans remain allocation-bounded."""
 
 from __future__ import annotations
 
@@ -12,10 +15,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _source(relative: str) -> str:
+    """Return the production source text inspected by this module."""
     return (ROOT / "src/schema_sanitizer" / relative).read_text(encoding="utf-8")
 
 
 def test_availability_notifier_lifecycle_uses_authoritative_queued_map() -> None:
+    """Verify availability notifier lifecycle uses authoritative queued map."""
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
@@ -31,6 +36,7 @@ def test_availability_notifier_lifecycle_uses_authoritative_queued_map() -> None
 
 
 def test_fork_quarantine_mode_cannot_hide_an_unreachable_child_callback() -> None:
+    """Verify fork quarantine mode cannot hide an unreachable child callback."""
     from schema_sanitizer.core_impl import fork_manager as module
 
     with pytest.raises(ValueError, match="unreachable child callback"):
@@ -42,6 +48,7 @@ def test_fork_quarantine_mode_cannot_hide_an_unreachable_child_callback() -> Non
 
 
 def test_all_unprepared_child_handlers_explicitly_opt_into_child_safe_contract() -> None:
+    """Verify all unprepared child handlers explicitly opt into child safe contract."""
     import ast
 
     offenders: list[str] = []
@@ -64,6 +71,7 @@ def test_all_unprepared_child_handlers_explicitly_opt_into_child_safe_contract()
 
 
 def test_native_allocation_registry_is_flat_bounded_and_resident_accounted() -> None:
+    """Verify native allocation registry is flat bounded and resident accounted."""
     registry = (ROOT / "cpp/src/internal/memory/memory_pool_registry.cc.inc").read_text()
     tracking = (ROOT / "cpp/src/internal/memory/tracking_memory_pool.cc.inc").read_text()
     assert "std::unordered_map" not in registry
@@ -85,6 +93,7 @@ def test_native_allocation_registry_is_flat_bounded_and_resident_accounted() -> 
 def test_environment_thread_and_fd_requests_are_clamped_to_absolute_hard_limits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify environment thread and FD requests are clamped to absolute hard limits."""
     from schema_sanitizer.core_impl import process_resources as module
 
     monkeypatch.setattr(
@@ -105,6 +114,7 @@ def test_environment_thread_and_fd_requests_are_clamped_to_absolute_hard_limits(
 def test_async_scheduler_has_process_global_task_and_control_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async scheduler has process global task and control admission."""
     from schema_sanitizer.core_impl import async_scheduler as module
 
     monkeypatch.setattr(module, "_MAX_PROCESS_ASYNC_TASK_SLOTS", 2)
@@ -123,6 +133,7 @@ def test_async_scheduler_has_process_global_task_and_control_admission(
 def test_async_scheduler_saturation_falls_back_to_inline_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async scheduler saturation falls back to inline progress."""
     from schema_sanitizer.core_impl import async_scheduler as module
 
     blocker = module._AsyncSchedulerAdmission(0)
@@ -134,7 +145,10 @@ def test_async_scheduler_saturation_falls_back_to_inline_progress(
     )
 
     async def run() -> list[tuple[int, int]]:
+        """Collect doubled results through the saturated asynchronous scheduler."""
+
         async def fetch(index: int) -> int:
+            """Return the controlled fetch result used by the asynchronous operation."""
             return index * 2
 
         return [item async for item in module.ordered_indexed_results(4, fetch, window=4)]
@@ -143,6 +157,7 @@ def test_async_scheduler_saturation_falls_back_to_inline_progress(
 
 
 def test_ordered_executor_shutdown_is_notification_driven_not_busy_polled() -> None:
+    """Verify ordered executor shutdown is notification driven not busy polled."""
     source = (ROOT / "cpp/src/internal/runtime/ordered_executor.hh").read_text()
     wait = source[
         source.index("WaitUntil(") : source.index(
@@ -162,6 +177,7 @@ def test_ordered_executor_shutdown_is_notification_driven_not_busy_polled() -> N
 
 
 def test_cleanup_dispatcher_control_budget_calls_are_outside_dispatcher_lock() -> None:
+    """Verify cleanup dispatcher control budget calls are outside dispatcher lock."""
     source = _source("core_impl/cleanup_dispatcher.py")
     uncharge = source[
         source.index("    def _uncharge_owner_locked") : source.index(
@@ -178,12 +194,14 @@ def test_cleanup_dispatcher_control_budget_calls_are_outside_dispatcher_lock() -
 
 
 def test_memory_emergency_finalizer_roots_are_physically_preallocated() -> None:
+    """Verify memory emergency finalizer roots are physically preallocated."""
     memory = _source("core_impl/memory_budget.py")
     assert "[None] * _MAX_ABANDONED_MEMORY_OWNERS" in memory
     assert "_ABANDONED_MEMORY_EMERGENCY.append(" not in memory
 
 
 def test_stage_concurrency_admission_composes_control_plane_with_slots_and_bytes() -> None:
+    """Verify stage concurrency admission composes control plane with slots and bytes."""
     from schema_sanitizer.core_impl import memory_budget as module
 
     assert issubclass(module.StageConcurrencyAdmission, module.CompositeParallelAdmission)
@@ -196,6 +214,7 @@ def test_stage_concurrency_admission_composes_control_plane_with_slots_and_bytes
 
 
 def test_remote_group_scans_do_not_materialize_dict_item_pairs() -> None:
+    """Verify remote group scans do not materialize dict item pairs."""
     for relative in (
         "remote_impl/providers/s3.py",
         "remote_impl/providers/gcs.py",

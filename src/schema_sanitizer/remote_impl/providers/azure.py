@@ -1,4 +1,8 @@
-"""Azure Blob URI, discovery, and object operations."""
+"""Azure Blob URI, discovery, and object operations.
+
+It parses Blob URIs, manages asynchronous credentials and services, lists metadata,
+transfers objects, and rolls back failed client construction.
+"""
 
 from __future__ import annotations
 
@@ -56,6 +60,7 @@ _AZURE_ROLLBACK_SLOTS = [_AzureRollbackSlot() for _ in range(_MAX_AZURE_ROLLBACK
 
 
 def _azure_rollback_token(index: int, generation: int) -> int:
+    """Encode an Azure rollback slot and generation as a nonzero token."""
     return (generation << 8) | index | 1
 
 
@@ -76,6 +81,7 @@ def _reserve_azure_rollback_slot() -> tuple[int, int] | None:
 
 
 def _release_azure_rollback_reservation(reservation: tuple[int, int]) -> None:
+    """Release azure rollback reservation."""
     index, generation = reservation
     with _AZURE_ROLLBACK_LOCK:
         slot = _AZURE_ROLLBACK_SLOTS[index]
@@ -191,6 +197,7 @@ class _AzureServiceOwner:
     """Own one Blob service and credential with retryable per-resource cleanup."""
 
     def __init__(self, service: Any, credential: Any) -> None:
+        """Bind the asynchronous Blob service and credential with independent close state."""
         self._service = service
         self._credential = credential
         self._service_closed = False
@@ -198,9 +205,11 @@ class _AzureServiceOwner:
         self._closed = False
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unresolved attributes to the wrapped object."""
         return getattr(self._service, name)
 
     async def _close_one(self, resource: Any, flag_name: str) -> None:
+        """Close one Azure SDK resource without masking earlier failures."""
         if getattr(self, flag_name):
             return
         close = getattr(resource, "close", None)

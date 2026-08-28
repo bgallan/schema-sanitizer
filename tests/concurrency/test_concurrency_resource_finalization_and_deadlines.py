@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency resource finalization and deadlines."""
+"""Exercise finalizer recovery and hard deadlines across memory, storage, and remote work.
+
+Lease races and close barriers must conserve exact accounting; upload and response buffers remain
+budgeted, while scheduler failures, cancellation-resistant threads, transport timeouts, and late
+staging entries terminate without leaking owners.
+"""
 
 from __future__ import annotations
 
@@ -106,6 +111,7 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
         """Authenticate the close thread's failed non-blocking lock acquisition."""
 
         def __enter__(self) -> bool:
+            """Enter the context managed by the observed close condition test double."""
             if threading.current_thread() is close_thread:
                 acquired_without_wait = self.acquire(blocking=False)
                 contention_observations.append(not acquired_without_wait)
@@ -246,9 +252,11 @@ def test_bounded_response_text_accounts_final_unicode_object() -> None:
         """Return one bounded UTF-8 response body."""
 
         async def read(self, _maximum: int) -> bytes:
+            """Read bounded data from the content test double."""
             return "áβ中".encode() * 64
 
         def at_eof(self) -> bool:
+            """Report whether the controlled response reached end of input."""
             return True
 
     response = SimpleNamespace(content=Content(), charset="utf-8")
@@ -351,6 +359,7 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
         """Async manager whose entry ignores cancellation forever."""
 
         async def __aenter__(self) -> object:
+            """Enter the asynchronous context managed by the context test double."""
             while not release.is_set():
                 try:
                     await asyncio.sleep(0.01)
@@ -358,6 +367,7 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
                     continue
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the context test double and run cleanup."""
             pass
 
     with pytest.raises(RuntimeError, match="startup exceeded its deadline"):
@@ -449,10 +459,12 @@ def test_operation_remote_wait_has_a_hard_transport_deadline(
         """Record the bounded wait and model its exact timeout branch."""
 
         def result(self, *, timeout: float | None = None) -> None:
+            """Return the terminal result retained by the fake future."""
             observed_timeouts.append(timeout)
             raise FutureTimeoutError
 
         def cancel(self) -> bool:
+            """Cancel work retained by the timed out future test double."""
             observed_timeouts.append(-1.0)
             return True
 
@@ -510,6 +522,7 @@ def test_operation_remote_timeout_cancels_a_live_coordinator_coroutine(
         submitted.append(future)
 
         def timeout_after_start(*, timeout: float | None = None) -> None:
+            """Raise the timeout only after the operation has started."""
             assert operation_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             observed_timeouts.append(timeout)
             raise FutureTimeoutError
@@ -547,6 +560,7 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
         """Delay entry beyond the iterator deadline and record cleanup."""
 
         async def __aenter__(self) -> Session:
+            """Enter the asynchronous context managed by the session test double."""
             while not release.is_set():
                 try:
                     await asyncio.sleep(0.005)
@@ -555,6 +569,7 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             exited.set()
 
     class Manifest:
@@ -568,10 +583,12 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
 
         @staticmethod
         def open_staging_session() -> Session:
+            """Open the controlled staging session for the sink."""
             return Session()
 
         @staticmethod
         async def stage_chunk_async(*_args: object, **_kwargs: object) -> None:
+            """Stage one chunk through the controlled asynchronous session."""
             raise AssertionError("staging should not start")
 
     iterator = RemoteChunkPrefetchIterator(Manifest())

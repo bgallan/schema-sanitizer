@@ -1,4 +1,8 @@
-"""Per-call option model, validation, grouping, and normalization."""
+"""Validate, group, and normalize options supplied to one public call.
+
+Caller locals are copied, wrapper-only keys removed, and every remaining option normalized into
+the current native model with detection metadata and a cached default fast path.
+"""
 
 from __future__ import annotations
 

@@ -1,9 +1,7 @@
 """Compare valid-reader throughput between two source trees without PyArrow.
 
-The harness deliberately uses public JSONL sinks for JSON, CSV, and XML and the
-bounded native Parquet preflight for a valid Parquet fixture.  Each implementation
-runs in a fresh subprocess so extension modules from the two trees never share a
-Python process.
+It generates identical public-API workloads and runs each source tree in a fresh
+subprocess so native extensions never mix.
 """
 
 from __future__ import annotations
@@ -95,6 +93,7 @@ print(json.dumps({"label": label, "cases": cases}, sort_keys=True))
 
 
 def _alpha_suffix(index: int) -> str:
+    """Return a deterministic alphabetic suffix for generated fixture keys."""
     value = index
     chars: list[str] = []
     while True:
@@ -108,6 +107,7 @@ def _alpha_suffix(index: int) -> str:
 
 def _write_fixtures(root: Path, rows: int, width: int, candidate_root: Path) -> None:
     # Alpha-only names remain distinct under every supported default name policy.
+    """Generate deterministic source fixtures for every reader benchmark case."""
     keys = [f"field{_alpha_suffix(index)}" for index in range(width)]
     with (root / "valid.jsonl").open("w", encoding="utf-8", newline="\n") as stream:
         for row in range(rows):
@@ -149,6 +149,7 @@ def _write_fixtures(root: Path, rows: int, width: int, candidate_root: Path) -> 
 
 
 def _run_tree(root: Path, fixtures: Path, repeats: int, label: str) -> dict[str, Any]:
+    """Run the benchmark worker in one selected source tree and load its report."""
     completed = subprocess.run(
         [sys.executable, "-c", _WORKER, str(root), str(fixtures), str(repeats), label],
         check=True,
@@ -160,6 +161,7 @@ def _run_tree(root: Path, fixtures: Path, repeats: int, label: str) -> dict[str,
 
 
 def _index(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Index benchmark records by their stable case name."""
     return {case["name"]: case for case in report["cases"]}
 
 
@@ -206,6 +208,7 @@ def compare(
 
 
 def main() -> None:
+    """Compare two source trees and write their isolated reader benchmark report."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-root", type=Path, required=True)
     parser.add_argument("--candidate-root", type=Path, required=True)

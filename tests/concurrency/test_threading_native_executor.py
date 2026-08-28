@@ -1,4 +1,9 @@
-"""Native ordinal executor contracts for inline and bounded pool execution."""
+"""Test native ordinal execution in strict inline and bounded pooled modes.
+
+The pool must hide completion reordering and report the earliest failure, while the shared arena
+honors probe limits, reuses exact budgets across stages, scales beyond 32 workers, starts only
+useful lanes, caps its peak, and steals only compatible work.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Generated metadata helpers for public file conversion APIs."""
+"""Build generated metadata columns for public file-conversion APIs.
+
+The module defines ETL metadata names and types, then delegates source, schema-registry, drift,
+and timestamp values for each file to the native core.
+"""
 
 from __future__ import annotations
 

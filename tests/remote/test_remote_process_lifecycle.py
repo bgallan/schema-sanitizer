@@ -1,4 +1,8 @@
-"""Process-signal and abrupt-shutdown contracts for remote concurrency."""
+"""Process-signal and abrupt-shutdown contracts for remote concurrency.
+
+It proves SIGINT drains an active remote operation and unclosed contexts do not prevent
+interpreter shutdown.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,7 @@
-"""Regression coverage for memory options decoder rejects impossible string count before reserve."""
+"""Checks option and schema decoders plus Parquet writer metadata against impossible string
+counts, physical-byte limits, iterable materialization, row-group budgets, page indexes,
+and validity bitmaps. Cardinality and payload limits are explicit results enforced
+before reserve or duplicate retention."""
 
 from __future__ import annotations
 

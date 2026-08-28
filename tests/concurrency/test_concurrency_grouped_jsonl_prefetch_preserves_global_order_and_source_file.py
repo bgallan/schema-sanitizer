@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency grouped jsonl prefetch preserves global order and source file."""
+"""Check ordering and provenance for grouped JSONL prefetch.
+
+Cross-source packets must retain global row order and source-file metadata, while recycled worker
+buffers must reproduce wide, null-heavy payloads without stale values or ownership drift.
+"""
 
 from __future__ import annotations
 

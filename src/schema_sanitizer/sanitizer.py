@@ -1,4 +1,8 @@
-"""Configured public facade over the functional conversion API."""
+"""Configured public facade over the functional conversion API.
+
+Sanitizer reuses immutable options while delegating analytical, file, and batch conversions with
+fresh per-call schema-registry state.
+"""
 
 from __future__ import annotations
 

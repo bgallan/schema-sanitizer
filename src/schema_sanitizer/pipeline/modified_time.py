@@ -1,4 +1,8 @@
-"""UTC modified-time planning for flat remote prefixes."""
+"""UTC modified-time planning for flat remote prefixes.
+
+It normalizes UTC bounds, creates half-open daily windows, filters versioned remote
+objects by modification time, and builds deterministic manifests.
+"""
 
 from __future__ import annotations
 

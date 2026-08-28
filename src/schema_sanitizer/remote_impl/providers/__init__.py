@@ -1,4 +1,8 @@
-"""Transport-neutral semantics shared by remote object providers."""
+"""Transport-neutral semantics shared by remote object providers.
+
+The helpers derive direct child names consistently across provider listings so routing
+code can share one directory contract.
+"""
 
 from __future__ import annotations
 

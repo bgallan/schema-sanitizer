@@ -1,4 +1,8 @@
-"""Contract verdicts for native Parquet layouts and writer output."""
+"""Contract verdicts for native Parquet layouts and writer output.
+
+It converts footer and recursive-layout evidence into supported, fallback, or rejected
+verdicts with stable diagnostic reasons.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Parquet contract certification, filtering, and runtime-status cases."""
+"""Parquet contract certification, filtering, and runtime-status cases.
+
+Its parameterized cases certify required contract families, filtering behavior,
+readiness status, and expected runtime outcomes.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ def test_parquet_contract_case(
     run_case: object,
     request: pytest.FixtureRequest,
 ) -> None:
+    """Verify Parquet contract case."""
     del case_id
     kwargs = {
         name: request.getfixturevalue(name)

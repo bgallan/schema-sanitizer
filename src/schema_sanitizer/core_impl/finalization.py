@@ -1,4 +1,8 @@
-"""Small guards for cleanup paths executed during interpreter teardown."""
+"""Small guards for cleanup paths executed during interpreter teardown.
+
+It treats a missing or failing interpreter-finalization probe conservatively so teardown code
+avoids unsafe blocking work.
+"""
 
 from __future__ import annotations
 

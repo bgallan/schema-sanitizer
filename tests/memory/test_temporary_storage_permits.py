@@ -1,4 +1,8 @@
-"""Contracts for operation-wide temporary-storage permits."""
+"""Exercises temporary-storage permits for path identity, bounded symlink-safe tree
+measurement, pool reuse or oversize rejection, zero-capability growth, staged resize,
+remote output, and cancelled or failed prefetch. Bytes and files remain charged through
+upload or consumption, then exact permits release on every failure without following
+external links."""
 
 from __future__ import annotations
 
@@ -196,18 +200,22 @@ def test_remote_prefetch_waits_for_temporary_storage_release(require_native: Non
         """Minimal async provider-session context."""
 
         async def __aenter__(self) -> Session:
+            """Enter the asynchronous context managed by the session test double."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             pass
 
     class FakeStaged:
         """Own the packet lease until the source consumer closes it."""
 
         def __init__(self, lease: object) -> None:
+            """Initialize the fake staged test double."""
             self._lease = lease
 
         def close(self) -> None:
+            """Close the resources owned by the fake staged test double."""
             self._lease.release()
 
     class Manifest:
@@ -221,18 +229,22 @@ def test_remote_prefetch_waits_for_temporary_storage_release(require_native: Non
 
         @staticmethod
         def open_staging_session() -> Session:
+            """Open the controlled staging session for the sink."""
             return Session()
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
+            """Return the next byte offset in the staged manifest."""
             return start + 1
 
         @staticmethod
         def estimated_chunk_bytes(_start: int) -> int:
+            """Return the manifest estimate for one staged chunk."""
             return 160 << 20
 
         @staticmethod
         def try_acquire_storage_lease(start: int) -> object | None:
+            """Attempt to acquire the manifest storage lease."""
             return operation.temporary_storage.try_acquire(
                 160 << 20,
                 label=f"packet-{start}",
@@ -245,6 +257,7 @@ def test_remote_prefetch_waits_for_temporary_storage_release(require_native: Non
             *,
             storage_lease: object,
         ) -> FakeStaged:
+            """Stage one chunk through the controlled asynchronous session."""
             starts.append(start)
             await asyncio.sleep(0)
             return FakeStaged(storage_lease)
@@ -280,9 +293,11 @@ def test_remote_prefetch_failure_releases_reserved_packet(require_native: None) 
         """Minimal async provider-session context."""
 
         async def __aenter__(self) -> Session:
+            """Enter the asynchronous context managed by the session test double."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             pass
 
     class Manifest:
@@ -296,18 +311,22 @@ def test_remote_prefetch_failure_releases_reserved_packet(require_native: None) 
 
         @staticmethod
         def open_staging_session() -> Session:
+            """Open the controlled staging session for the sink."""
             return Session()
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
+            """Return the next byte offset in the staged manifest."""
             return start + 1
 
         @staticmethod
         def estimated_chunk_bytes(_start: int) -> int:
+            """Return the manifest estimate for one staged chunk."""
             return 8 << 20
 
         @staticmethod
         def try_acquire_storage_lease(start: int) -> object | None:
+            """Attempt to acquire the manifest storage lease."""
             return operation.temporary_storage.try_acquire(
                 8 << 20,
                 label=f"failing-packet-{start}",
@@ -320,6 +339,7 @@ def test_remote_prefetch_failure_releases_reserved_packet(require_native: None) 
             *,
             storage_lease: object,
         ) -> None:
+            """Stage one chunk through the controlled asynchronous session."""
             try:
                 await asyncio.sleep(0)
                 raise RuntimeError("forced remote stage failure")
@@ -357,6 +377,7 @@ def test_cancelled_prefetch_future_releases_preacquired_permit(require_native: N
 
         @staticmethod
         def submit(_operation: object, **_permit_options: object) -> Future[object]:
+            """Submit work through the coordinator test double."""
             return pending
 
     class Manifest:
@@ -369,10 +390,12 @@ def test_cancelled_prefetch_future_releases_preacquired_permit(require_native: N
 
         @staticmethod
         def estimated_chunk_bytes(_start: int) -> int:
+            """Return the manifest estimate for one staged chunk."""
             return 8 << 20
 
         @staticmethod
         async def stage_chunk_async(*_args: object, **_kwargs: object) -> None:
+            """Stage one chunk through the controlled asynchronous session."""
             raise AssertionError("staging coroutine should not start")
 
     lease = operation.temporary_storage.acquire(8 << 20, label="cancelled packet")

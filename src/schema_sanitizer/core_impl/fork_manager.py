@@ -1,8 +1,7 @@
-"""Single bounded at-fork dispatcher for runtime-owned state.
+"""Dispatch runtime-owned state transitions through one bounded at-fork registry.
 
-Modules register handlers during normal import. Only this module registers with
-``os.register_at_fork``. The fixed registry prevents per-object callback leaks
-and avoids container growth inside fork callbacks.
+Modules register fixed handlers during normal import, while this module alone calls
+``os.register_at_fork`` to prevent callback leaks and fork-time container growth.
 """
 
 from __future__ import annotations

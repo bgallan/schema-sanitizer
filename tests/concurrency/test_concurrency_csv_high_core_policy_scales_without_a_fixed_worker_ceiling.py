@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency csv high core policy scales without a fixed worker ceiling."""
+"""Exercise the high-core CSV policy and its analytical adapter handoffs.
+
+The suite checks uncapped worker scaling, constant-per-row fixed-schema planning, safe Polars
+rechunk behavior and error propagation, all 56 CSV route pairs, and the public wide-CSV hybrid
+plan with parallel output.
+"""
 
 from __future__ import annotations
 
@@ -32,9 +37,11 @@ class _FakeReader:
     num_record_batches = 2
 
     def __init__(self) -> None:
+        """Initialize the fake reader test double."""
         self.closed = False
 
     def close(self) -> None:
+        """Close the resources owned by the fake reader test double."""
         self.closed = True
 
 
@@ -85,10 +92,12 @@ def test_polars_disables_full_frame_rechunk_when_supported(
 
         @staticmethod
         def thread_pool_size() -> int:
+            """Return the configured external thread-pool size."""
             return 1
 
         @staticmethod
         def from_arrow(value: object, **kwargs: object) -> _FakePolarsFrame:
+            """Record the Arrow input and options, then return a fake Polars frame."""
             calls.append((value, dict(kwargs)))
             return _FakePolarsFrame()
 
@@ -126,10 +135,12 @@ def test_polars_does_not_hide_conversion_type_errors(
 
         @staticmethod
         def thread_pool_size() -> int:
+            """Return the configured external thread-pool size."""
             return 1
 
         @staticmethod
         def from_arrow(value: object, **kwargs: object) -> _FakePolarsFrame:
+            """Count the conversion attempt and raise the injected type error."""
             nonlocal calls
             calls += 1
             raise TypeError("cannot convert incompatible Arrow value")

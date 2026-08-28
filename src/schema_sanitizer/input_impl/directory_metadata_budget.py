@@ -1,4 +1,8 @@
-"""Bound retained directory metadata before high-cardinality discovery allocates."""
+"""Bound directory metadata before high-cardinality discovery allocates it.
+
+Transient and retained charges have separate exact owners so publication can transfer capacity
+atomically, roll back failures, and enforce both item and byte ceilings.
+"""
 
 from __future__ import annotations
 
@@ -33,10 +37,12 @@ class RetainedDirectoryMetadata:
     __slots__ = ("_lease", "_lock")
 
     def __init__(self) -> None:
+        """Initialize the retained directory metadata and its owned runtime state."""
         self._lease: OperationMemoryLease | None = None
         self._lock = Lock()
 
     def _adopt(self, lease: OperationMemoryLease | None) -> None:
+        """Adopt retained metadata and its exact memory charge from another owner."""
         if lease is None:
             return
         with self._lock:
@@ -78,11 +84,13 @@ class TransientDirectoryMetadataReservation:
     __slots__ = ("_budget", "_bytes", "_lock")
 
     def __init__(self, budget: "DirectoryMetadataBudget") -> None:
+        """Initialize the transient directory metadata reservation and its owned runtime state."""
         self._budget: DirectoryMetadataBudget | None = budget
         self._bytes = 0
         self._lock = Lock()
 
     def charge_before_publish(self, associations: int = 1) -> None:
+        """Charge metadata growth before publishing it to the retained collection."""
         count = max(0, int(associations))
         amount = count * _DIRECTORY_METADATA_GROUP_ASSOCIATION_BYTES
         if amount == 0:
@@ -101,6 +109,7 @@ class TransientDirectoryMetadataReservation:
             raise
 
     def rollback_publish(self, associations: int = 1) -> None:
+        """Undo metadata charges for a publication that did not commit."""
         count = max(0, int(associations))
         amount = count * _DIRECTORY_METADATA_GROUP_ASSOCIATION_BYTES
         if amount == 0:
@@ -113,6 +122,7 @@ class TransientDirectoryMetadataReservation:
         budget._uncharge(amount)
 
     def close(self) -> None:
+        """Release resources owned by this transient directory metadata reservation."""
         with self._lock:
             budget = self._budget
             amount = self._bytes
@@ -122,9 +132,11 @@ class TransientDirectoryMetadataReservation:
             budget._uncharge(amount)
 
     def __enter__(self) -> "TransientDirectoryMetadataReservation":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
 

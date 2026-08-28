@@ -1,4 +1,8 @@
-"""Native Parquet sink encoding, layout, compression, and routing contracts."""
+"""Native Parquet sink encoding, layout, compression, and routing contracts.
+
+It validates statistics, page indexes, row groups, compression, dictionaries, scalar and
+nested encodings, routing, and native flat-stream output.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ def test_parquet_native_file_output_writes_float_statistics_without_nan_bounds(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes float statistics without nan bounds."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -68,6 +73,7 @@ def test_parquet_native_file_output_skips_column_index_without_page_bounds(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output skips column index without page bounds."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -99,6 +105,7 @@ def test_parquet_native_file_output_splits_large_batches_into_row_groups(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output splits large batches into row groups."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -140,6 +147,7 @@ def test_parquet_native_file_output_respects_uncompressed_override(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output respects uncompressed override."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -166,6 +174,7 @@ def test_parquet_native_snappy_reduces_repeated_payload(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native snappy reduces repeated payload."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -195,6 +204,7 @@ def test_parquet_native_file_output_defaults_to_gzip_when_available(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output defaults to gzip when available."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -225,6 +235,7 @@ def test_parquet_native_file_output_accepts_gzip_level(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output accepts gzip level."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -253,6 +264,7 @@ def test_parquet_native_file_output_rejects_invalid_gzip_level(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output rejects invalid gzip level."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
@@ -278,6 +290,7 @@ def test_parquet_native_file_output_rejects_unknown_compression(
     compression: str,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output rejects unknown compression."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
@@ -296,6 +309,7 @@ def test_parquet_native_file_output_rejects_unknown_compression(
 def test_to_parquet_public_compression_option_writes_uncompressed(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify to Parquet public compression option writes uncompressed."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     source = tmp_path / "rows.jsonl"
@@ -313,6 +327,7 @@ def test_to_parquet_public_compression_option_writes_uncompressed(
 def test_to_parquet_public_gzip_level_option_writes_gzip(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify to Parquet public gzip level option writes gzip."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     source = tmp_path / "rows.jsonl"
@@ -332,6 +347,7 @@ def test_to_parquet_public_gzip_level_option_writes_gzip(
 
 
 def test_to_parquet_public_compression_option_rejects_unknown(tmp_path: Path) -> None:
+    """Verify to Parquet public compression option rejects unknown."""
     source = tmp_path / "rows.jsonl"
     source.write_text('{"text":"same"}\n', encoding="utf-8")
 
@@ -342,6 +358,7 @@ def test_to_parquet_public_compression_option_rejects_unknown(tmp_path: Path) ->
 
 
 def test_to_parquet_public_gzip_level_option_rejects_out_of_range(tmp_path: Path) -> None:
+    """Verify to Parquet public gzip level option rejects out of range."""
     source = tmp_path / "rows.jsonl"
     source.write_text('{"text":"same"}\n', encoding="utf-8")
 
@@ -359,6 +376,7 @@ def test_to_parquet_public_compression_option_reaches_pyarrow_fallback(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify to Parquet public compression option reaches PyArrow fallback."""
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl import stream_output
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
@@ -384,6 +402,7 @@ def test_to_parquet_public_compression_option_reaches_pyarrow_fallback(
 
 
 def test_to_parquet_writes_file(tmp_path: Path, require_native: None) -> None:
+    """Verify to Parquet writes file."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     out = tmp_path / "out.parquet"
@@ -401,6 +420,7 @@ def test_to_parquet_writes_file(tmp_path: Path, require_native: None) -> None:
 def test_parquet_sink_native_coalesces_flat_arrow_batches(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify Parquet sink native coalesces flat arrow batches."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.adapters.parquet.sink import _write_coalesced_batches
@@ -438,6 +458,7 @@ def test_parquet_sink_native_coalesces_flat_arrow_batches(
 def test_parquet_sink_native_coalesces_nested_arrow_batches(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify Parquet sink native coalesces nested arrow batches."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.adapters.parquet.sink import _write_coalesced_batches
@@ -507,6 +528,7 @@ def test_parquet_sink_native_coalesces_dictionary_arrow_batches(
     tmp_path: Path,
     require_native: None,
 ) -> None:
+    """Verify Parquet sink native coalesces dictionary arrow batches."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.adapters.parquet.sink import _write_coalesced_batches
@@ -542,6 +564,7 @@ def test_parquet_sink_native_coalesces_dictionary_arrow_batches(
 def test_parquet_sink_rejects_changed_dictionary_during_native_coalescing(
     require_native: None,
 ) -> None:
+    """Verify Parquet sink rejects changed dictionary during native coalescing."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.parquet.sink import _write_coalesced_batches
 
@@ -574,6 +597,7 @@ def test_parquet_sink_rejects_changed_dictionary_during_native_coalescing(
         wrote = False
 
         def write_batch(self, _batch: object) -> None:
+            """Record an attempted native sink batch write."""
             self.wrote = True
 
     writer = Writer()
@@ -586,6 +610,7 @@ def test_parquet_sink_rejects_changed_dictionary_during_native_coalescing(
 def test_to_parquet_omits_null_and_empty_container_only_fields(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify to Parquet omits null and empty container only fields."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     source = tmp_path / "rows.jsonl"
@@ -612,6 +637,7 @@ def test_to_parquet_omits_null_and_empty_container_only_fields(
 def test_to_parquet_writes_mixed_null_empty_and_populated_values(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify to Parquet writes mixed null empty and populated values."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -638,6 +664,7 @@ def test_to_parquet_writes_mixed_null_empty_and_populated_values(
 def test_registry_keeps_existing_fields_for_empty_containers(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify registry keeps existing fields for empty containers."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -676,6 +703,7 @@ def test_registry_keeps_existing_fields_for_empty_containers(
 def test_empty_first_partition_does_not_destabilize_registry(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify empty first partition does not destabilize registry."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     empty_source = tmp_path / "empty.jsonl"
@@ -738,6 +766,7 @@ def test_parquet_native_file_output_dictionary_encodes_repeated_byte_arrays(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output dictionary encodes repeated byte arrays."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -785,6 +814,7 @@ def test_parquet_native_file_output_preserves_null_dictionary_values(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output preserves null dictionary values."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -827,6 +857,7 @@ def test_parquet_native_file_output_accepts_coalesced_empty_byte_arrays(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output accepts coalesced empty byte arrays."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.adapters.pyarrow.metadata_native import CapsuleArrowStream
@@ -881,6 +912,7 @@ def test_parquet_native_file_output_skips_dictionary_when_payload_is_larger(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output skips dictionary when payload is larger."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -920,6 +952,7 @@ def test_parquet_native_file_output_dictionary_encodes_repeated_fixed_values(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output dictionary encodes repeated fixed values."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -974,6 +1007,7 @@ def test_parquet_native_file_output_writes_dictionary_stream(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes dictionary stream."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1013,6 +1047,7 @@ def test_parquet_native_file_output_writes_integer_width_logical_types(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes integer width logical types."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1069,6 +1104,7 @@ def test_parquet_native_file_output_writes_timestamp_nanos(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes timestamp nanos."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1103,6 +1139,7 @@ def test_parquet_native_file_output_writes_schema_sanitizer_logical_surface(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes schema sanitizer logical surface."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1185,6 +1222,7 @@ def test_parquet_native_file_output_writes_nested_stream(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes nested stream."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1272,6 +1310,7 @@ def test_parquet_native_file_output_writes_map_stream(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes map stream."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1316,6 +1355,7 @@ def test_parquet_native_file_output_writes_fixed_size_list_stream(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes fixed size list stream."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1354,6 +1394,7 @@ def test_parquet_native_file_output_writes_generated_metadata(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes generated metadata."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1392,6 +1433,7 @@ def test_parquet_native_file_output_splits_large_pages_without_dictionary(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output splits large pages without dictionary."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1424,6 +1466,7 @@ def test_parquet_native_file_output_splits_row_groups_by_byte_budget(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output splits row groups by byte budget."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1450,6 +1493,7 @@ def test_parquet_native_file_output_skips_delta_encoding_on_int64_overflow(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output skips delta encoding on int64 overflow."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1481,6 +1525,7 @@ def test_parquet_native_file_output_preserves_sliced_batch_offsets(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output preserves sliced batch offsets."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1547,6 +1592,7 @@ def test_parquet_native_file_output_is_duckdb_readable_across_row_groups(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output is duckdb readable across row groups."""
     duckdb = pytest.importorskip("duckdb")
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1605,6 +1651,7 @@ def test_parquet_native_file_output_uses_native_writer_when_available(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output uses native writer when available."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1647,6 +1694,7 @@ def test_parquet_native_file_output_falls_back_when_gzip_lacks_zlib(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output falls back when gzip lacks zlib."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1693,6 +1741,7 @@ def test_parquet_native_file_output_retries_pyarrow_after_native_failure(
     caplog: pytest.LogCaptureFixture,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output retries PyArrow after native failure."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
@@ -1736,6 +1785,7 @@ def test_raw_parquet_file_output_retries_pyarrow_after_native_failure(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify raw Parquet file output retries PyArrow after native failure."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
@@ -1780,6 +1830,7 @@ def test_parquet_native_file_output_writes_metadata_without_pyarrow_sink(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes metadata without PyArrow sink."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -1843,6 +1894,7 @@ def test_parquet_native_file_output_writes_supported_flat_stream(
     monkeypatch: pytest.MonkeyPatch,
     require_native: None,
 ) -> None:
+    """Verify Parquet native file output writes supported flat stream."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output

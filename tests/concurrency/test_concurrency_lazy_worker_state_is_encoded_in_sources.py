@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency lazy worker state is encoded in sources."""
+"""Keep lazy worker state explicit in native source definitions.
+
+Planned field order must be emitted in place, and repeated low-budget consumption of wide rows
+must reconstruct the same output without hidden mutable state or ordering drift.
+"""
 
 from __future__ import annotations
 

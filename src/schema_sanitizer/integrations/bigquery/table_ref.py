@@ -1,4 +1,8 @@
-"""Validated BigQuery table references."""
+"""Validated BigQuery table references.
+
+It parses project, dataset, and table components into a validated immutable reference
+with safe canonical and quoted forms.
+"""
 
 from __future__ import annotations
 

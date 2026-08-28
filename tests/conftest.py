@@ -1,4 +1,8 @@
-"""Shared pytest helpers."""
+"""Configure shared pytest behavior and public ingestion adapters for the suite.
+
+The fixtures keep clocks, optional runtimes, and native availability deterministic,
+while the compact readers exercise supported inputs through the current analytical API.
+"""
 
 from __future__ import annotations
 
@@ -45,7 +49,7 @@ def fixed_operation_clock(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @lru_cache(maxsize=1)
 def native_available() -> bool:
-    """Return native available for the test."""
+    """Return whether the compiled core can create a context and report memory stats."""
     try:
         from schema_sanitizer.api_impl.execution_context import ExecutionContext
 

@@ -1,4 +1,7 @@
-"""Regression coverage for memory fd native bridge uses exact raii receipt."""
+"""Validates the native descriptor bridge's RAII receipt across release and shrink retries,
+shared-claim rollback, nonshared runtimes, fork provenance, and cleanup authority.
+Receipts reject inherited process state, preserve exact target widths, and make
+post-commit retries idempotent rather than applying stale deltas."""
 
 from __future__ import annotations
 
@@ -8,10 +11,12 @@ import pytest
 
 
 def _root() -> Path:
+    """Return the repository root used by source-contract checks."""
     return Path(__file__).resolve().parents[2]
 
 
 def test_fd_native_bridge_uses_exact_raii_receipt() -> None:
+    """Verify FD native bridge uses exact RAII receipt."""
     header = (_root() / "cpp/src/internal/runtime/process_fd_governor.hh").read_text()
     probe = (_root() / "cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
     catalog = (_root() / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
@@ -27,6 +32,7 @@ def test_fd_native_bridge_uses_exact_raii_receipt() -> None:
 
 class _Receipt:
     def __init__(self, amount: int) -> None:
+        """Initialize the receipt test double."""
         self.receipt_id = id(self)
         self.generation = 1
         self.amount = amount
@@ -35,12 +41,14 @@ class _Receipt:
 
 class _ExactFdNative:
     def __init__(self) -> None:
+        """Initialize the exact FD native test double."""
         self.fail_after_resize = False
         self.receipts: list[_Receipt] = []
 
     def process_file_descriptor_permit_lease_acquire_wait(
         self, desired: int, minimum: int, timeout_ms: int
     ) -> tuple[_Receipt, int] | None:
+        """Retain an exact descriptor receipt when the minimum is satisfied."""
         del timeout_ms
         if desired < minimum:
             return None
@@ -51,11 +59,13 @@ class _ExactFdNative:
     def process_file_descriptor_permit_lease_metadata(
         self, receipt: _Receipt
     ) -> tuple[int, int, int, int]:
+        """Return metadata for the exact FD permit lease."""
         return receipt.receipt_id, receipt.generation, receipt.amount, receipt.opened
 
     def process_file_descriptor_permit_lease_resize(
         self, receipt: _Receipt, target: int, generation: int
     ) -> tuple[int, int, int]:
+        """Shrink an exact descriptor receipt and optionally interrupt after commit."""
         assert generation == receipt.generation
         if target > receipt.amount:
             raise ValueError("cannot grow")
@@ -68,12 +78,14 @@ class _ExactFdNative:
 
 
 def _fresh_fd_governor(module):
+    """Return a fresh FD governor with isolated test state."""
     return module._Governor(16, "test_fds", teardown_reserve=2)
 
 
 def test_fd_release_retry_after_native_commit_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify FD release retry after native commit is idempotent."""
     from schema_sanitizer.core_impl import process_resources as module
 
     native = _ExactFdNative()
@@ -106,6 +118,7 @@ def test_fd_release_retry_after_native_commit_is_idempotent(
 def test_fd_shrink_retry_targets_final_width_not_stale_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify FD shrink retry targets final width not stale delta."""
     from schema_sanitizer.core_impl import process_resources as module
 
     native = _ExactFdNative()
@@ -133,6 +146,7 @@ def test_fd_shrink_retry_targets_final_width_not_stale_delta(
 def test_external_shared_claim_rollback_retires_partial_exact_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external shared claim rollback retires partial exact envelope."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Injected(RuntimeError):
@@ -140,6 +154,7 @@ def test_external_shared_claim_rollback_retires_partial_exact_envelope(
 
     class FailCommitDict(dict[int, int]):
         def __setitem__(self, key: int, value: int) -> None:
+            """Store the requested value in the fail commit dict test double."""
             if int(value) > 0:
                 raise Injected("fault before physical claim commit")
             super().__setitem__(key, value)
@@ -151,23 +166,28 @@ def test_external_shared_claim_rollback_retires_partial_exact_envelope(
         supports_atomic_residency_update = False
 
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.receipt: _Receipt | None = None
 
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             assert desired >= minimum
             self.receipt = _Receipt(desired)
             return self.receipt, desired
 
         def resize_exact_permit_lease(self, lease: _Receipt, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             lease.amount = target
             return target
 
         def exact_permit_lease_amount(self, lease: _Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return lease.amount
 
     original_entry_type = module._ExternalRuntimePoolCoordinatorEntry
 
     def make_entry(*, runtime=None, runtime_key=None, **kwargs):
+        """Create a ledger entry whose physical-claim map fails after publication."""
         return original_entry_type(
             runtime=runtime,
             runtime_key=runtime_key,
@@ -199,23 +219,28 @@ def test_external_shared_claim_rollback_retires_partial_exact_envelope(
 def test_nonshared_external_runtime_path_prefers_exact_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify nonshared external runtime path prefers exact owner."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Native:
         supports_exact_permit_lease = True
 
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.receipt = _Receipt(0)
 
         def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             assert desired == minimum
             self.receipt.amount = desired
             return self.receipt, desired
 
         def resize_exact_permit_lease(self, lease: _Receipt, target: int) -> None:
+            """Resize the fake exact-permit lease to the requested amount."""
             lease.amount = target
 
         def exact_permit_lease_amount(self, lease: _Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return lease.amount
 
     native = Native()
@@ -228,6 +253,7 @@ def test_nonshared_external_runtime_path_prefers_exact_owner(
 
 
 def test_receipt_mutators_reject_inherited_process_and_memory_has_provenance() -> None:
+    """Verify receipt mutators reject inherited process and memory has provenance."""
     prepare = (_root() / "cpp/src/api/python_abi3/options/prepare.cc").read_text()
     probe = (_root() / "cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
 
@@ -242,19 +268,23 @@ def test_receipt_mutators_reject_inherited_process_and_memory_has_provenance() -
 
 
 def test_nonshared_external_runtime_shrink_retry_is_target_idempotent() -> None:
+    """Verify nonshared external runtime shrink retry is target idempotent."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Native:
         supports_exact_permit_lease = True
 
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.receipt = _Receipt(4)
             self.fail_after_resize = True
 
         def exact_permit_lease_amount(self, lease: _Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return lease.amount
 
         def resize_exact_permit_lease(self, lease: _Receipt, target: int) -> None:
+            """Resize the fake exact-permit lease to the requested amount."""
             lease.amount = target
             if self.fail_after_resize:
                 self.fail_after_resize = False
@@ -278,6 +308,7 @@ def test_nonshared_external_runtime_shrink_retry_is_target_idempotent() -> None:
 
 
 def test_external_cleanup_state_uses_owner_object_as_authority() -> None:
+    """Verify external cleanup state uses owner object as authority."""
     resources = (_root() / "src/schema_sanitizer/core_impl/process_resources.py").read_text()
     assert "native: Any | None = None" in resources
     assert "native.resize_physical_thread_permits(0)" in resources

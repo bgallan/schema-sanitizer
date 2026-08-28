@@ -1,4 +1,8 @@
-"""Runtime Arrow stream wrappers and diagnostics helpers."""
+"""Runtime Arrow stream wrappers and diagnostics helpers.
+
+It implements single-use Arrow stream export, public result accessors, diagnostics
+lookup, and deterministic closure of retained resources.
+"""
 
 from __future__ import annotations
 
@@ -73,7 +77,7 @@ def diagnostics_raw_json(raw: Any) -> str:
 
 
 def diagnostics_target(raw: Any) -> Any:
-    """Return the diagnostics object associated with a wrapper."""
+    """Unwrap a diagnostics proxy when present, otherwise return the supplied object."""
     if raw is None:
         return None
     try:
@@ -193,7 +197,7 @@ class ClosableContextManagerMixin:
     """Provide context manager behavior for closable wrappers."""
 
     def close(self) -> None:
-        """Release resources owned by the wrapper."""
+        """Close the concrete wrapper and its retained stream or keepalive resources."""
         raise NotImplementedError
 
     def __enter__(self):

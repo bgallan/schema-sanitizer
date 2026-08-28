@@ -1,4 +1,8 @@
-"""Reusable partition-pipeline data types."""
+"""Reusable partition-pipeline data types.
+
+It defines validated immutable manifests, partition plans, and schema registry state
+shared by planning, discovery, warm-up, and execution.
+"""
 
 from __future__ import annotations
 

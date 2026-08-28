@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency full admission avoids high core executor reconfiguration."""
+"""Ensure full admission does not reconfigure an already governed high-core executor.
+
+Both arena admission and source dispatch must preserve the scaled fixed-wide gate, keeping worker
+capacity stable after the operation has acquired its complete resource envelope.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency shallow local output progress at four workers."""
+"""Verify shallow output workloads make progress with four governed workers.
+
+Successive local waves must restore FIFO fairness, remote output stealing must respect the thread
+budget, and JSONL bytes must remain identical between single- and multi-worker execution.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Directory discovery values, listing, reading, and scoped context."""
+"""Discover directory inputs and open selected files through a scoped context.
+
+Local and remote listings, reader factories, metadata budgets, and pre-discovered selections are
+combined without losing the resource ownership attached to each input.
+"""
 
 from __future__ import annotations
 
@@ -271,6 +275,7 @@ class DiscoveredDirectoryInput:
         # Attach the stable owner before the enclosing discovery scope can
         # transfer its memory lease. All copies sharing this object graph keep
         # the same lifetime charge alive until the final reference disappears.
+        """Validate and normalize the initialized instance state."""
         if self._metadata_owner is None:
             budget = _DIRECTORY_METADATA_BUDGET.get()
             if budget is not None:

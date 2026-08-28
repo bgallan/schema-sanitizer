@@ -1,4 +1,7 @@
-"""Regression coverage for memory exact operation thread borrow is finalizer owned."""
+"""Combines finalizer-owned thread borrows with pool shrink, shutdown-safe finalizers, lazy
+DuckDB and stream handoff, logical or physical claims, file-descriptor receipts, and
+generation-wrap guards. Results outlive temporary wrappers safely, while exact receipts
+and owner tokens drive cleanup and make interrupted or retried releases idempotent."""
 
 from __future__ import annotations
 
@@ -12,10 +15,12 @@ import pytest
 
 
 def _root() -> Path:
+    """Return the repository root used by source-contract checks."""
     return Path(__file__).resolve().parents[2]
 
 
 def _reset_external(module) -> None:
+    """Reset cached external-runtime state between lifecycle checks."""
     module.drain_finalizer_cleanup()
     module._EXTERNAL_RUNTIME_POOL_COORDINATOR.clear()
     module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS = 0
@@ -23,6 +28,7 @@ def _reset_external(module) -> None:
 
 
 def test_exact_operation_thread_borrow_is_finalizer_owned() -> None:
+    """Verify exact operation thread borrow is finalizer owned."""
     from schema_sanitizer.core_impl import process_resources as module
 
     module.drain_finalizer_cleanup()
@@ -91,10 +97,12 @@ def test_result_safe_point_drops_lazy_value_before_operation_keepalive() -> None
 
     class LazyValue:
         def __del__(self) -> None:
+            """Run fallback cleanup when the lazy value test double is collected."""
             released.append(True)
 
     class Keepalive:
         def close(self) -> None:
+            """Close the resources owned by the keepalive test double."""
             if not released:
                 raise RuntimeError("lazy value still owns the upstream reader")
 
@@ -263,6 +271,7 @@ def test_lazy_duckdb_handoff_survives_async_unwind(
     )
 
     def interrupt_after_handoff(*args, **kwargs):
+        """Interrupt the operation immediately after ownership handoff."""
         operation_context = kwargs["operation_context"]
         pair_scope = kwargs["pair_scope"]
         captured.execution_lease = operation_context.execution_lease
@@ -319,6 +328,7 @@ def test_lazy_stream_handoff_survives_async_unwind(
     original = analytical.lazy_stream_from_opened
 
     def interrupt_before_return(*args, **kwargs):
+        """Interrupt the operation before ownership can be returned."""
         stream = original(*args, **kwargs)
         captured_resources.append(stream._keepalive)
         raise KeyboardInterrupt("fault before lazy stream return")
@@ -352,6 +362,7 @@ def test_lazy_stream_handoff_survives_async_unwind(
 def test_logical_pool_rollback_clears_partially_published_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify logical pool rollback clears partially published envelope."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Injected(RuntimeError):
@@ -359,6 +370,7 @@ def test_logical_pool_rollback_clears_partially_published_envelope(
 
     class FailPositiveDict(dict[int, int]):
         def __setitem__(self, key: int, value: int) -> None:
+            """Store the requested value in the fail positive dict test double."""
             if int(value) > 0:
                 raise Injected("fault after logical envelope publication")
             super().__setitem__(key, value)
@@ -368,15 +380,18 @@ def test_logical_pool_rollback_clears_partially_published_envelope(
         _released = False
 
         def release(self) -> None:
+            """Release the resource held by the logical lease test double."""
             self._released = True
             self.amount = 0
 
         def shrink(self, target: int) -> None:
+            """Create a ledger entry whose logical-claim map fails after publication."""
             self.amount = int(target)
 
     original_entry_type = module._ExternalRuntimePoolCoordinatorEntry
 
     def make_entry(*, runtime=None, runtime_key=None, **kwargs):
+        """Set the logical lease to the requested amount."""
         return original_entry_type(
             runtime=runtime,
             runtime_key=runtime_key,
@@ -399,6 +414,7 @@ def test_logical_pool_rollback_clears_partially_published_envelope(
 
 
 def test_shared_physical_claim_dropped_before_handoff_releases_exact_envelope() -> None:
+    """Verify shared physical claim dropped before handoff releases exact envelope."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Receipt:
@@ -408,9 +424,11 @@ def test_shared_physical_claim_dropped_before_handoff_releases_exact_envelope() 
         supports_exact_permit_lease = True
 
         def exact_permit_lease_amount(self, lease: Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return lease.amount
 
         def resize_exact_permit_lease(self, lease: Receipt, target: int) -> None:
+            """Resize the fake exact-permit lease to the requested amount."""
             if target > lease.amount:
                 raise ValueError("grow")
             lease.amount = target
@@ -439,14 +457,17 @@ def test_shared_physical_claim_dropped_before_handoff_releases_exact_envelope() 
 
 
 def test_external_cleanup_uses_exact_owner() -> None:
+    """Verify external cleanup uses exact owner."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Owner:
         def __init__(self) -> None:
+            """Initialize the owner test double."""
             self.amount = 2
             self.targets: list[int] = []
 
         def resize_physical_thread_permits(self, target: int) -> None:
+            """Resize the controlled physical-thread permit allocation."""
             self.targets.append(int(target))
             self.amount = int(target)
 
@@ -461,6 +482,7 @@ def test_external_cleanup_uses_exact_owner() -> None:
 def test_deferred_memory_close_tail_runs_without_second_close_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify deferred memory close tail runs without second close call."""
     from threading import Condition, Lock
 
     from schema_sanitizer.core_impl import memory_budget as module
@@ -481,10 +503,12 @@ def test_deferred_memory_close_tail_runs_without_second_close_call(
 def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify FD exact receipt owns opened state and blocks release."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Receipt:
         def __init__(self, amount: int) -> None:
+            """Initialize the receipt test double."""
             self.receipt_id = 1
             self.generation = 1
             self.amount = amount
@@ -492,18 +516,22 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
 
     class Native:
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.receipt: Receipt | None = None
 
         def process_file_descriptor_permit_lease_acquire_wait(self, desired, minimum, _timeout):
+            """Issue an exact descriptor receipt when the desired count meets the minimum."""
             if desired < minimum:
                 return None
             self.receipt = Receipt(int(desired))
             return self.receipt, int(desired)
 
         def process_file_descriptor_permit_lease_metadata(self, receipt):
+            """Return metadata for the exact FD permit lease."""
             return receipt.receipt_id, receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_resize(self, receipt, target, generation):
+            """Resize a receipt above its opened count and advance its generation."""
             assert generation == receipt.generation
             if target < receipt.opened:
                 raise ValueError("below opened")
@@ -512,6 +540,7 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
             return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_opened(self, receipt, amount, generation):
+            """Increase opened descriptors within the receipt limit and advance its generation."""
             assert generation == receipt.generation
             if receipt.opened + amount > receipt.amount:
                 raise ValueError("open exceeds permits")
@@ -520,6 +549,7 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
             return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_closed(self, receipt, amount, generation):
+            """Decrease opened descriptors without over-closing and advance the generation."""
             assert generation == receipt.generation
             if amount > receipt.opened:
                 raise ValueError("over-close")
@@ -551,6 +581,7 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
 def test_fd_interruption_after_exact_open_commit_is_repaired_after_physical_close(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Verify FD interruption after exact open commit is repaired after physical close."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Receipt:
@@ -561,16 +592,20 @@ def test_fd_interruption_after_exact_open_commit_is_repaired_after_physical_clos
 
     class Native:
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.receipt = Receipt()
             self.fail = True
 
         def process_file_descriptor_permit_lease_acquire_wait(self, *_args):
+            """Acquire the controlled FD permit lease without blocking."""
             return self.receipt, 1
 
         def process_file_descriptor_permit_lease_metadata(self, receipt):
+            """Return metadata for the exact FD permit lease."""
             return receipt.receipt_id, receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_resize(self, receipt, target, generation):
+            """Resize a receipt only when its target covers every opened descriptor."""
             assert generation == receipt.generation
             if target < receipt.opened:
                 raise ValueError("below opened")
@@ -580,6 +615,7 @@ def test_fd_interruption_after_exact_open_commit_is_repaired_after_physical_clos
             return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_opened(self, receipt, amount, generation):
+            """Commit an opened descriptor, then inject the configured interrupt."""
             assert generation == receipt.generation
             receipt.opened += amount
             receipt.generation += 1
@@ -589,6 +625,7 @@ def test_fd_interruption_after_exact_open_commit_is_repaired_after_physical_clos
             return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_closed(self, receipt, amount, generation):
+            """Commit descriptor closure and return the advanced receipt state."""
             assert generation == receipt.generation
             receipt.opened -= amount
             receipt.generation += 1
@@ -618,6 +655,7 @@ def test_fd_interruption_after_exact_open_commit_is_repaired_after_physical_clos
 
 
 def test_external_generation_is_passed_as_optimistic_concurrency_token() -> None:
+    """Verify external generation is passed as optimistic concurrency token."""
     from schema_sanitizer.core_impl import process_resources as module
 
     calls: list[tuple[int, int]] = []
@@ -626,10 +664,12 @@ def test_external_generation_is_passed_as_optimistic_concurrency_token() -> None
     class Core:
         @staticmethod
         def process_external_runtime_thread_permit_lease_metadata(_lease):
+            """Return metadata for the external-runtime thread lease."""
             return 9, 7, 3
 
         @staticmethod
         def process_external_runtime_thread_permit_lease_resize(_lease, target, generation):
+            """Record the external-thread resize and return its next generation."""
             calls.append((target, generation))
             return generation + 1, target
 
@@ -639,6 +679,7 @@ def test_external_generation_is_passed_as_optimistic_concurrency_token() -> None
 
 
 def test_receipt_ids_and_generations_fail_closed_before_wrap() -> None:
+    """Verify receipt ids and generations fail closed before wrap."""
     prepare = (_root() / "cpp/src/api/python_abi3/options/prepare.cc").read_text()
     probe = (_root() / "cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
 
@@ -654,6 +695,7 @@ def test_receipt_ids_and_generations_fail_closed_before_wrap() -> None:
 
 
 def test_exact_owners_drive_resource_cleanup() -> None:
+    """Verify exact owners drive resource cleanup."""
     resources = (_root() / "src/schema_sanitizer/core_impl/process_resources.py").read_text()
     memory = (_root() / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
 
@@ -667,15 +709,18 @@ def test_exact_owners_drive_resource_cleanup() -> None:
 
 
 def test_logical_release_retry_recognizes_underlying_target_zero_commit() -> None:
+    """Verify logical release retry recognizes underlying target zero commit."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class LogicalLease:
         def __init__(self) -> None:
+            """Initialize the logical lease test double."""
             self.amount = 2
             self._released = False
             self.fail = True
 
         def release(self) -> None:
+            """Release the resource held by the logical lease test double."""
             self._released = True
             self.amount = 0
             if self.fail:
@@ -683,6 +728,7 @@ def test_logical_release_retry_recognizes_underlying_target_zero_commit() -> Non
                 raise KeyboardInterrupt("fault after logical governor release commit")
 
         def shrink(self, target: int) -> None:
+            """Set the logical lease to the requested target amount."""
             self.amount = int(target)
 
     _reset_external(module)

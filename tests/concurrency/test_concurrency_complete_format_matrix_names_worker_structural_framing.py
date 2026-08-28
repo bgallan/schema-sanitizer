@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency complete format matrix names worker structural framing."""
+"""Validate worker-owned structural framing across the complete public format matrix.
+
+The scanner must remain bounded and authoritative while object arrays, deep-value fallbacks,
+chunk-split scalars, and malformed arrays retain identical single- and multi-worker outcomes.
+"""
 
 from __future__ import annotations
 

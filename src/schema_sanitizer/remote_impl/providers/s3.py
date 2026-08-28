@@ -1,4 +1,8 @@
-"""Amazon S3 URI, discovery, and object operations."""
+"""Amazon S3 URI, discovery, and object operations.
+
+It parses S3 URIs, pools asynchronous clients, lists and probes objects, streams
+downloads, and publishes through bounded multipart upload.
+"""
 
 from __future__ import annotations
 

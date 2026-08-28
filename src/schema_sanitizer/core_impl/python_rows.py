@@ -1,4 +1,8 @@
-"""Replayable native JSONL encoding for Python row iterables."""
+"""Encode Python row iterables once into replayable native JSONL input.
+
+Native batches are recorded in a bounded memory-or-disk spool that can be replayed safely and
+whose buffers and temporary storage are securely released on close.
+"""
 
 from __future__ import annotations
 

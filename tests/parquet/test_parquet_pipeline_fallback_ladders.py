@@ -1,4 +1,8 @@
-"""Parquet fallback ladder and native-staging runtime tests."""
+"""Parquet fallback ladder and native-staging runtime tests.
+
+It forces failures at dataset, batch, staging, footer, and compression boundaries to
+verify ordered fallback and terminal error behavior.
+"""
 
 from __future__ import annotations
 
@@ -13,15 +17,17 @@ from schema_sanitizer.adapters.parquet import telemetry as recording
 def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet dataset scanner failure ladders to iter batches."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     class FailingDataset:
-        """Internal test helper class."""
+        """Dataset whose scanner always fails to trigger the batch fallback."""
 
         schema = None
 
         def scanner(self, **kwargs: object) -> object:
+            """Raise the configured dataset-scanner failure."""
             raise ValueError("dataset scanner failed")
 
     class DatasetOwner:
@@ -31,18 +37,21 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
 
         @staticmethod
         def acquire() -> object:
+            """Return a closable ownership token for the fake dataset."""
             return SimpleNamespace(close=lambda: None)
 
     class WorkingParquetFile:
-        """Internal test helper class."""
+        """Parquet reader that yields the sentinel fallback batch."""
 
         def iter_batches(self, **kwargs: object) -> object:
+            """Yield or fail the configured Parquet batch sequence."""
             yield "batch"
 
     class WorkingReader:
-        """Internal test helper class."""
+        """Arrow reader that exports the sentinel fallback stream."""
 
         def __arrow_c_stream__(self) -> str:
+            """Export the sentinel Arrow C stream for fallback assertions."""
             return "iter-stream"
 
     def fake_record_batch_reader_from_iterable(
@@ -50,7 +59,7 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
         schema: object,
         batches: object,
     ) -> WorkingReader:
-        """Internal test helper."""
+        """Validate fallback batches and return their fake Arrow reader."""
         assert list(batches) == ["batch"]
         return WorkingReader()
 
@@ -111,6 +120,7 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
 
 
 def test_parquet_dataset_filter_failure_is_observable() -> None:
+    """Verify Parquet dataset filter failure is observable."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
@@ -143,63 +153,71 @@ def test_parquet_dataset_filter_failure_is_observable() -> None:
 def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet local dataset open failure uses iter batches fallback."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as factory_schema
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     class FakePA:
-        """Internal test helper class."""
+        """Minimal PyArrow facade that builds inspectable schema tuples."""
 
         def schema(self, fields: object, metadata: object = None) -> tuple[object, object]:
+            """Construct the fake Arrow schema tuple and its metadata."""
             return (tuple(fields), metadata)
 
     class FakeSchema:
-        """Internal test helper class."""
+        """Projected schema with deterministic fields and source metadata."""
 
         metadata = {b"source": b"fake"}
         _names = ["keep", "drop"]
 
         def get_field_index(self, name: str) -> int:
+            """Resolve a projected field name to its stable fake-schema index."""
             try:
                 return self._names.index(name)
             except ValueError:
                 return -1
 
         def field(self, index: int) -> str:
+            """Return the requested field from the fake projected schema."""
             return f"field:{self._names[index]}"
 
     class FakeDatasetModule:
-        """Internal test helper class."""
+        """Dataset facade that rejects the direct dataset-open route."""
 
         def dataset(self, path: str, *, format: str) -> object:
+            """Validate the dataset request and raise the configured open failure."""
             assert path == "/tmp/fallback.parquet"
             assert format == "parquet"
             raise ValueError("dataset open failed")
 
     class FakeParquetFile:
-        """Internal test helper class."""
+        """Parquet reader that validates projection before yielding a batch."""
 
         schema_arrow = FakeSchema()
 
         def iter_batches(self, **kwargs: object) -> object:
+            """Yield or fail the configured Parquet batch sequence."""
             assert kwargs["columns"] == ["keep"]
             yield "batch"
 
     class FakePQ:
-        """Internal test helper class."""
+        """Parquet facade that returns the configured fallback reader."""
 
         def ParquetFile(self, src: object) -> FakeParquetFile:
+            """Validate the fallback source and return the fake Parquet reader."""
             assert src == "opened-source"
             return FakeParquetFile()
 
     class FakeReader:
-        """Internal test helper class."""
+        """Arrow reader that exports the fallback stream sentinel."""
 
         def __arrow_c_stream__(self) -> str:
+            """Export the sentinel Arrow C stream for fallback assertions."""
             return "iter-stream"
 
     def fake_optional_dependency(name: str, **kwargs: object) -> object:
-        """Internal test helper."""
+        """Resolve the fake PyArrow module requested by the fallback path."""
         if name == "pyarrow.parquet":
             return FakePQ()
         if name == "pyarrow.dataset":
@@ -211,7 +229,7 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
         schema: object,
         batches: object,
     ) -> FakeReader:
-        """Internal test helper."""
+        """Validate fallback batches and return their fake Arrow reader."""
         assert schema == (("field:keep",), {b"source": b"fake"})
         assert list(batches) == ["batch"]
         return FakeReader()
@@ -272,13 +290,15 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
 
 
 def test_parquet_iter_batches_fallback_failure_is_observable() -> None:
+    """Verify Parquet iter batches fallback failure is observable."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     class FailingParquetFile:
-        """Internal test helper class."""
+        """Parquet reader whose batch iterator raises the terminal fallback error."""
 
         def iter_batches(self, **kwargs: object) -> object:
+            """Yield or fail the configured Parquet batch sequence."""
             raise OSError("iter_batches failed")
 
     observability.reset_parquet_stream_factory_observability()
@@ -319,6 +339,7 @@ def test_parquet_iter_batches_fallback_failure_is_observable() -> None:
 
 
 def test_parquet_snappy_compression_option_normalizes_without_pyarrow() -> None:
+    """Verify Parquet snappy compression option normalizes without PyArrow."""
     from schema_sanitizer.adapters.parquet.compression import (
         normalize_parquet_compression,
         pyarrow_parquet_writer_options,
@@ -334,12 +355,13 @@ def test_parquet_snappy_compression_option_normalizes_without_pyarrow() -> None:
 def test_native_parquet_footer_info_forwards_projected_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify native Parquet footer info forwards projected columns."""
     from schema_sanitizer.adapters.parquet import status as parquet_footer
 
     calls: list[tuple[object, ...]] = []
 
     def fake_footer_info_json(*args: object) -> str:
-        """Internal test helper."""
+        """Record projected columns and return an empty footer description."""
         calls.append(args)
         return '{"row_groups": []}'
 
@@ -354,6 +376,7 @@ def test_native_parquet_footer_info_forwards_projected_columns(
 
 
 def test_parquet_bytes_native_staging_lifecycle() -> None:
+    """Verify Parquet bytes native staging lifecycle."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         remove_staged_parquet,
         stage_parquet_buffer,
@@ -373,6 +396,7 @@ def test_parquet_bytes_native_staging_lifecycle() -> None:
 
 
 def test_parquet_stream_native_path_detection(tmp_path: Path) -> None:
+    """Verify Parquet stream native path detection."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import local_stream_path
 
     path = tmp_path / "data.parquet"

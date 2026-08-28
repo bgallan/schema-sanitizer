@@ -1,4 +1,8 @@
-"""Shared transaction helpers for governed runtime thread ownership."""
+"""Manage runtime threads through exact governed ownership transactions.
+
+Threads start only after permit and registry reservations; terminated leases become retryable
+retirement debt until safe reaping commits their release.
+"""
 
 from __future__ import annotations
 
@@ -139,6 +143,7 @@ class RetirementAwareThread(Thread):
     """Thread whose successful join is also a safe retirement-debt reap point."""
 
     def join(self, timeout: float | None = None) -> None:
+        """Wait for the governed thread to finish."""
         super().join(timeout=timeout)
         if not self.is_alive():
             reap_governed_thread_retirements()
@@ -155,6 +160,7 @@ def governed_thread_retirement_snapshot() -> tuple[int, int]:
 
 
 def _reset_governed_thread_retirements_after_fork() -> None:
+    """Reset governed thread retirements after fork."""
     global _RETIREMENT_OVERFLOWS, _RETIREMENT_OVERFLOWED, _RETIREMENT_DEBT_COUNT
     # The module is quarantine-only after fork; do not allocate replacement
     # locks or banks in the child.
@@ -177,6 +183,7 @@ def _native_physical_thread_api() -> Any:
 
 
 def _acquire_native_physical_thread_permit(thread: object) -> Any:
+    """Acquire native physical thread permit."""
     if not isinstance(thread, Thread):
         raise TypeError("governed runtime host must be a threading.Thread")
     native = _native_physical_thread_api()
@@ -195,6 +202,7 @@ def _acquire_native_physical_thread_permit(thread: object) -> Any:
 
 
 def _release_native_physical_thread_permit(native: Any) -> None:
+    """Release native physical thread permit."""
     native.process_physical_thread_permits_release(1)
 
 
@@ -213,6 +221,7 @@ def start_governed_thread(thread: Thread, *, registration: Any = None) -> None:
     start_committed = False
 
     def _run_with_physical_permit() -> Any:
+        """Run with physical permit."""
         running_marked = False
         try:
             try:

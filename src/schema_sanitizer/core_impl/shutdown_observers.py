@@ -36,6 +36,7 @@ _FROZEN_FLAG = False
 
 
 def _same_callable_contract(left: Callable[..., object], right: Callable[..., object]) -> bool:
+    """Return whether two callables have the same stable contract."""
     return callable_contract(left) == callable_contract(right)
 
 
@@ -85,6 +86,7 @@ def shutdown_observers() -> tuple[ShutdownObserver, ...]:
 
 
 def _reset_shutdown_observers_for_tests() -> None:
+    """Reset shutdown observers for an isolated test run."""
     global _FROZEN, _FROZEN_FLAG
     with _LOCK:
         _FROZEN = None
@@ -92,16 +94,19 @@ def _reset_shutdown_observers_for_tests() -> None:
 
 
 def _prepare_fork() -> None:
+    """Prepare registered runtime state before a process fork."""
     global _FORK_FRESH_LOCK
     _FORK_FRESH_LOCK = _FORK_LOCK_BANK[_FORK_LOCK_BANK_INDEX]
 
 
 def _clear_fork() -> None:
+    """Clear state established around a completed process fork."""
     global _FORK_FRESH_LOCK
     _FORK_FRESH_LOCK = None
 
 
 def _reset_fork() -> None:
+    """Reset inherited runtime state in a forked child."""
     global _LOCK, _FORK_FRESH_LOCK, _FORK_LOCK_BANK_INDEX
     prepared = _FORK_FRESH_LOCK
     if prepared is None:

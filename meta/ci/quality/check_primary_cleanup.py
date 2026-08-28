@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reject exception-masking cleanup in hardened ownership boundaries."""
+"""Reject exception-masking cleanup in hardened ownership boundaries.
+
+It inspects Python lifecycle handlers for broad catches, unsafe cleanup, reentrant
+callbacks, and masked primary failures.
+"""
 
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ KNOWN_NON_THROWING_TARGETS = frozenset({"loop.close"})
 
 
 def _catches_broad_exception(handler: ast.ExceptHandler) -> bool:
+    """Return whether the handler catches Exception or BaseException broadly."""
     caught = handler.type
     if caught is None:
         return True
@@ -50,6 +55,7 @@ def _catches_broad_exception(handler: ast.ExceptHandler) -> bool:
 
 
 def _cleanup_call(node: ast.AST) -> ast.Call | None:
+    """Return the cleanup call represented by an AST statement."""
     if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
         return None
     call = node.value
@@ -61,6 +67,7 @@ def _cleanup_call(node: ast.AST) -> ast.Call | None:
 
 
 def _contains_cleanup_helper(node: ast.AST) -> bool:
+    """Return whether the node invokes a recognized cleanup helper."""
     return any(
         isinstance(child, ast.Call)
         and isinstance(child.func, ast.Name)
@@ -70,10 +77,12 @@ def _contains_cleanup_helper(node: ast.AST) -> bool:
 
 
 def _guarded_try(node: ast.Try) -> bool:
+    """Locate the try statement that guards a cleanup operation."""
     return any(_catches_broad_exception(handler) for handler in node.handlers)
 
 
 def _unsafe_handler_calls(statements: list[ast.stmt]) -> list[ast.Call]:
+    """Collect cleanup calls that can mask a primary handler failure."""
     unsafe: list[ast.Call] = []
     for statement in statements:
         cleanup = _cleanup_call(statement)
@@ -136,6 +145,7 @@ def _callback_reenters_lifecycle(call: ast.Call) -> bool:
 
 
 def _reentrant_callbacks_under_lock(tree: ast.AST, path: Path) -> list[str]:
+    """Find lifecycle callbacks invoked while their owning lock is held."""
     errors: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.With, ast.AsyncWith)):
@@ -153,6 +163,7 @@ def _reentrant_callbacks_under_lock(tree: ast.AST, path: Path) -> list[str]:
 
 
 def _unsafe_finally_calls(statements: list[ast.stmt]) -> list[ast.Call]:
+    """Collect unguarded cleanup calls from finally blocks."""
     unsafe: list[ast.Call] = []
     for statement in statements:
         cleanup = _cleanup_call(statement)
@@ -182,12 +193,14 @@ def _unsafe_finally_calls(statements: list[ast.stmt]) -> list[ast.Call]:
 
 
 def _format_call(path: Path, kind: str, call: ast.Call) -> str:
+    """Render one cleanup call with its source line for diagnostics."""
     target = ast.unparse(call.func)
     relative = path.relative_to(ROOT)
     return f"{relative}:{call.lineno}: unsafe {target}() in {kind} cleanup"
 
 
 def check_path(path: Path) -> list[str]:
+    """Analyze one Python source file and return unsafe cleanup findings."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     errors: list[str] = []
     errors.extend(_reentrant_callbacks_under_lock(tree, path))
@@ -208,6 +221,7 @@ def check_path(path: Path) -> list[str]:
 
 
 def main() -> int:
+    """Scan requested ownership modules and report unsafe cleanup branches."""
     errors = [error for relative in CRITICAL_PATHS for error in check_path(ROOT / relative)]
     if errors:
         print("Primary-exception cleanup safety check failed:", file=sys.stderr)

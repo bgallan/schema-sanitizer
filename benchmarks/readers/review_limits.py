@@ -1,4 +1,8 @@
-"""Build a reader-limit review from benchmark, fuzz, and telemetry evidence."""
+"""Build a reader-limit review from benchmark, fuzz, and telemetry evidence.
+
+It combines benchmark, fuzz, and telemetry JSON into a concise recommendation for reader
+safety limits.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Cross-mode malformed-input rejection contracts for hardened readers."""
+"""Cross-mode malformed-input rejection contracts for hardened readers.
+
+It requires malformed inputs to produce the same typed, privacy-safe failure across
+local files, directories, and remote transport modes.
+"""
 
 from __future__ import annotations
 
@@ -23,17 +27,20 @@ def _payload_server(payload: bytes, suffix: str) -> Iterator[str]:
         """Serve deterministic hostile bytes without logging test traffic."""
 
         def do_HEAD(self) -> None:  # noqa: N802
+            """Handle HTTP HEAD requests for the local test server."""
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
+            """Handle HTTP GET requests for the local test server."""
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
 
         def log_message(self, _format: str, *_args: object) -> None:
+            """Suppress routine request logging from the local test server."""
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)

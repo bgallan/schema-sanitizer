@@ -1,4 +1,8 @@
-"""Tests for native schema-registry merge helpers."""
+"""Tests for native schema-registry merge helpers.
+
+It covers scalar promotion and generated variants, collection and struct drift,
+canonical replay, reserved names, and stable native merge results.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 
 def test_new_schema_registry_uses_public_native_shape() -> None:
+    """Verify new schema registry uses public native shape."""
     for policy in ("lower_alpha", "lower_snake", "preserve"):
         registry = new_schema_registry(field_name_policy=policy)
 
@@ -30,6 +35,7 @@ def test_new_schema_registry_uses_public_native_shape() -> None:
 
 
 def test_native_schema_registry_generates_versioned_field(require_native: None) -> None:
+    """Verify native schema registry generates versioned field."""
     pa = pytest.importorskip("pyarrow")
 
     sentence_struct = pa.struct([pa.field("text", pa.string())])
@@ -76,6 +82,7 @@ def test_native_schema_registry_generates_versioned_field(require_native: None) 
 def test_native_schema_registry_names_scalar_versions_by_semantic_type(
     require_native: None,
 ) -> None:
+    """Verify native schema registry names scalar versions by semantic type."""
     pa = pytest.importorskip("pyarrow")
 
     original = merge_schema_registry(
@@ -104,6 +111,7 @@ def test_native_schema_registry_names_scalar_versions_by_semantic_type(
 
 
 def test_native_schema_registry_promotes_integer_field_to_float(require_native: None) -> None:
+    """Verify native schema registry promotes integer field to float."""
     pa = pytest.importorskip("pyarrow")
 
     previous = merge_schema_registry(
@@ -128,6 +136,7 @@ def test_native_schema_registry_promotes_integer_field_to_float(require_native: 
 def test_native_schema_registry_collapses_integer_float_inferred_family(
     require_native: None,
 ) -> None:
+    """Verify native schema registry collapses integer float inferred family."""
     pa = pytest.importorskip("pyarrow")
 
     result = merge_schema_registry(
@@ -145,6 +154,7 @@ def test_native_schema_registry_collapses_integer_float_inferred_family(
 
 
 def test_native_schema_registry_accepts_integer_values_in_float_field(require_native: None) -> None:
+    """Verify native schema registry accepts integer values in float field."""
     pa = pytest.importorskip("pyarrow")
 
     previous = merge_schema_registry(
@@ -166,6 +176,7 @@ def test_native_schema_registry_accepts_integer_values_in_float_field(require_na
 def test_native_schema_registry_reconciles_incoming_generated_string_variant(
     require_native: None,
 ) -> None:
+    """Verify native schema registry reconciles incoming generated string variant."""
     pa = pytest.importorskip("pyarrow")
 
     warm = merge_schema_registry(
@@ -190,6 +201,7 @@ def test_native_schema_registry_reconciles_incoming_generated_string_variant(
 def test_native_schema_registry_reuses_existing_same_type_generated_variant(
     require_native: None,
 ) -> None:
+    """Verify native schema registry reuses existing same type generated variant."""
     pa = pytest.importorskip("pyarrow")
 
     previous = merge_schema_registry(
@@ -216,6 +228,7 @@ def test_registry_schema_contract_uses_native_payload_without_pyarrow_round_trip
     monkeypatch,
     require_native: None,
 ) -> None:
+    """Verify registry schema contract uses native payload without PyArrow round trip."""
     pa = pytest.importorskip("pyarrow")
 
     registry = merge_schema_registry(
@@ -237,6 +250,7 @@ def test_registry_schema_contract_uses_native_payload_without_pyarrow_round_trip
 
 
 def test_native_schema_registry_names_nested_arrays_by_element_type(require_native: None) -> None:
+    """Verify native schema registry names nested arrays by element type."""
     pa = pytest.importorskip("pyarrow")
 
     original = merge_schema_registry(
@@ -251,6 +265,7 @@ def test_native_schema_registry_names_nested_arrays_by_element_type(require_nati
 
 
 def test_native_schema_registry_wraps_singleton_into_existing_list(require_native: None) -> None:
+    """Verify native schema registry wraps singleton into existing list."""
     pa = pytest.importorskip("pyarrow")
 
     sentiment_struct = pa.struct(
@@ -278,6 +293,7 @@ def test_native_schema_registry_wraps_singleton_into_existing_list(require_nativ
 def test_native_schema_registry_wraps_scalar_into_existing_struct_default_key(
     require_native: None,
 ) -> None:
+    """Verify native schema registry wraps scalar into existing struct default key."""
     pa = pytest.importorskip("pyarrow")
 
     previous_schema = pa.schema([pa.field("details", pa.struct([pa.field("code", pa.string())]))])

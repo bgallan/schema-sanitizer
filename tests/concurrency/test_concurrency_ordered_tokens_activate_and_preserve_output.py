@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency ordered tokens activate and preserve output."""
+"""Validate ordered-token activation and its output-order guarantees.
+
+Validated plans certify field order once, while reordered, missing, or escaped keys take the
+correct fallback and still preserve the single-worker output and telemetry contract.
+"""
 
 from __future__ import annotations
 

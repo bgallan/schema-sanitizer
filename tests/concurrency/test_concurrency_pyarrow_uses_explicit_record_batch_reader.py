@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency pyarrow uses explicit record batch reader."""
+"""Require analytical adapters to consume explicit record-batch readers.
+
+PyArrow, pandas, Polars, DuckDB, and internal sinks must avoid full-table or batch-list barriers,
+record their route, close or roll back stream owners, and declare each terminal handoff explicitly.
+"""
 
 from __future__ import annotations
 
@@ -20,9 +24,11 @@ class _FakeTable:
     """Minimal Arrow table used by stream-conversion tests."""
 
     def __init__(self, rows: int = 7) -> None:
+        """Initialize the fake table test double."""
         self.num_rows = rows
 
     def to_batches(self) -> list[object]:
+        """Return the record batches retained by the fake table."""
         return [object(), object(), object()]
 
 
@@ -30,6 +36,7 @@ class _FakePandasFrame:
     """Minimal pandas-like frame exposing a zero-copy row count."""
 
     def __init__(self, rows: int = 7) -> None:
+        """Initialize the fake pandas frame test double."""
         self.index = range(rows)
 
 
@@ -37,6 +44,7 @@ class _FakePolarsFrame:
     """Minimal Polars-like frame exposing its height."""
 
     def __init__(self, rows: int = 7) -> None:
+        """Initialize the fake Polars frame test double."""
         self.height = rows
 
 
@@ -44,6 +52,7 @@ class _FakeBatch:
     """Minimal Arrow record batch preserving row-count metadata."""
 
     def __init__(self, rows: int) -> None:
+        """Initialize the fake batch test double."""
         self.num_rows = rows
 
 
@@ -54,23 +63,28 @@ class _FakeReader:
     schema = "schema"
 
     def __init__(self) -> None:
+        """Initialize the fake reader test double."""
         self.closed = False
         self.read_all_calls = 0
         self.read_pandas_calls: list[dict[str, object]] = []
         self.batches = [_FakeBatch(2), _FakeBatch(2), _FakeBatch(3)]
 
     def read_all(self) -> _FakeTable:
+        """Read all rows through the explicit record-batch reader."""
         self.read_all_calls += 1
         return _FakeTable()
 
     def read_pandas(self, **kwargs: object) -> _FakePandasFrame:
+        """Materialize the controlled reader through the pandas path."""
         self.read_pandas_calls.append(dict(kwargs))
         return _FakePandasFrame()
 
     def __iter__(self):
+        """Iterate over values exposed by the fake reader test double."""
         return iter(self.batches)
 
     def close(self) -> None:
+        """Close the resources owned by the fake reader test double."""
         self.closed = True
 
 
@@ -82,13 +96,16 @@ class _ConfigurableArrowRuntime:
     """PyArrow double exposing a verifiable process-global CPU pool width."""
 
     def __init__(self) -> None:
+        """Initialize the configurable Arrow runtime test double."""
         self._workers = 1
         self.configurations: list[int] = []
 
     def cpu_count(self) -> int:
+        """Return the controlled CPU count reported by the runtime."""
         return self._workers
 
     def set_cpu_count(self, workers: int) -> None:
+        """Record the CPU count selected by the controlled runtime."""
         self._workers = int(workers)
         self.configurations.append(self._workers)
 
@@ -191,10 +208,12 @@ def test_polars_consumes_reader_without_arrow_table(
 
         @staticmethod
         def thread_pool_size() -> int:
+            """Return the configured external thread-pool size."""
             return 1
 
         @staticmethod
         def from_arrow(value: object, *, rechunk: bool) -> _FakePolarsFrame:
+            """Record the reader after asserting that rechunking is disabled."""
             assert rechunk is False
             seen.append(value)
             return _FakePolarsFrame()
@@ -235,15 +254,18 @@ def test_duckdb_binds_reader_directly_without_full_batch_list(
 
     class Connection:
         def from_arrow(self, value: object) -> object:
+            """Record the lazy Arrow reader and return the prepared relation."""
             duckdb_inputs.append(value)
             return relation
 
         def close(self) -> None:
+            """Close the resources owned by the connection test double."""
             pass
 
     class FakeDuckDB:
         @staticmethod
         def connect(*, database: str, config: dict[str, int]) -> Connection:
+            """Record connection options and return a fake DuckDB connection."""
             connect_options.append((database, config))
             return Connection()
 
@@ -332,6 +354,7 @@ def test_materializer_rolls_back_unpublished_adapter_owner(
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the owner test double."""
             self.closed = True
 
     owner = Owner()
@@ -345,6 +368,7 @@ def test_materializer_rolls_back_unpublished_adapter_owner(
     )
 
     def close_opened() -> None:
+        """Close the opened stream while recording ownership order."""
         opened.closed = True
 
     opened.close = close_opened
@@ -363,6 +387,7 @@ def test_materializer_rolls_back_unpublished_adapter_owner(
         pass
 
     def fail_result(*_args, **_kwargs):
+        """Raise the deliberate failure during result."""
         raise Injected("result construction")
 
     monkeypatch.setattr(
@@ -396,11 +421,13 @@ def test_internal_adapter_sink_uses_stream_not_table(
         """Execution-context double exposing stream and forbidden table paths."""
 
         def to_sink(self, data: object, **kwargs: object) -> object:
+            """Assert direct stream routing and return the prepared sink output."""
             assert data == "rows"
             assert kwargs["sink"] == "stream"
             return output
 
         def to_table(self, *_args: object, **_kwargs: object) -> object:
+            """Raise the deliberate failure for the to table path."""
             raise AssertionError("table barrier must not be used")
 
     monkeypatch.setattr(

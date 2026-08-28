@@ -1,4 +1,8 @@
-"""Owned temporary paths used by remote staging and output publication."""
+"""Owned temporary paths used by remote staging and output publication.
+
+It creates governed temporary files or directories and tracks unlink, release, rollback,
+and finalizer ownership through publication.
+"""
 
 from __future__ import annotations
 
@@ -135,7 +139,7 @@ class StagedPath:
         source_file_by_name: dict[str, str] | None = None,
         storage_lease: TemporaryStorageLease | None = None,
     ) -> None:
-        """Initialize this helper."""
+        """Claim the temporary path identity and bind its storage lease and cleanup finalizer."""
         self.path = path
         self._pid = os.getpid()
         self.is_dir = is_dir
@@ -510,7 +514,7 @@ class RemoteOutputTarget:
     operation_context: OperationExecutionContext | None = None
 
     def close(self) -> None:
-        """Implement the internal close helper."""
+        """Close and delete the output target unless publication committed."""
         if self.temp is not None:
             self.temp.close()
             self.temp = None
@@ -524,6 +528,7 @@ def create_temp_file_path(
     with acquire_file_descriptor_capability(1, label="temporary_file_create") as capability:
 
         def create() -> int:
+            """Create a governed temporary file descriptor and record its path."""
             fd, path = tempfile.mkstemp(prefix="schema-sanitizer-", suffix=suffix)
             created_path.append(path)
             return fd

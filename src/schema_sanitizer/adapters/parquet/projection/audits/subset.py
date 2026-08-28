@@ -1,4 +1,8 @@
-"""Subset contract audits for native Parquet recursive projections."""
+"""Subset contract audits for native Parquet recursive projections.
+
+It checks every projected field against the full layout and reports name, type, level,
+and fingerprint mismatches.
+"""
 
 from __future__ import annotations
 

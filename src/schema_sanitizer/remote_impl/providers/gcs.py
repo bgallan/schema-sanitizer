@@ -1,4 +1,8 @@
-"""Google Cloud Storage URI, discovery, and object operations."""
+"""Google Cloud Storage URI, discovery, and object operations.
+
+It handles authentication, JSON API listing and metadata, bounded download, and
+resumable publication for GCS objects.
+"""
 
 from __future__ import annotations
 
@@ -61,7 +65,7 @@ class _TransientGcsError(RuntimeError):
     """A GCS response that is safe to retry with backoff."""
 
     def __init__(self, status: int, message: str, *, headers: Any = None) -> None:
-        """Initialize this helper."""
+        """Initialize a transient GCS error with optional retry guidance."""
         super().__init__(message)
         self.status, self.headers = status, headers
 

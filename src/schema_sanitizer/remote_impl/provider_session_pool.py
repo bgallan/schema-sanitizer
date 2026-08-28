@@ -1,4 +1,8 @@
-"""Operation-owned pooling for loop-affine remote provider clients."""
+"""Operation-owned pooling for loop-affine remote provider clients.
+
+It creates one loop-affine client per compatibility key, single-flights concurrent
+construction, tracks borrowers, and closes clients in order.
+"""
 
 from __future__ import annotations
 
@@ -140,6 +144,7 @@ class _PoolEntry:
     published: bool = False
 
     def reserve(self) -> None:
+        """Reserve governed capacity through this pool entry."""
         if self.kind != "free":
             raise RuntimeError("provider cleanup escrow slot is not free")
         self.kind = "reserved"
@@ -152,12 +157,14 @@ class _PoolEntry:
         self.published = False
 
     def bind_owners(self, *, descriptor_lease: Any, control_lease: Any | None) -> None:
+        """Bind physical client owners to this reserved pool entry."""
         if self.kind != "reserved":
             raise RuntimeError("provider cleanup escrow slot is not reserved")
         self.descriptor_lease = descriptor_lease
         self.control_lease = control_lease
 
     def bind_client(self, value: Any) -> None:
+        """Bind the provider client to this reserved pool entry."""
         if self.kind != "reserved":
             raise RuntimeError("provider cleanup escrow slot is not reserved")
         self.resource = value
@@ -165,17 +172,20 @@ class _PoolEntry:
         self.kind = "client"
 
     def bind_manager(self, manager: AsyncContextManager[Any]) -> None:
+        """Bind the async context manager to this reserved pool entry."""
         if self.kind != "reserved":
             raise RuntimeError("provider cleanup escrow slot is not reserved")
         self.resource = manager
         self.kind = "manager"
 
     def publish_value(self, value: Any) -> None:
+        """Publish the constructed value into its reserved pool entry."""
         if self.kind != "manager":
             raise RuntimeError("provider manager escrow is not bound")
         self.value = value
 
     async def _close_physical(self) -> None:
+        """Close the physical provider resources owned by this pool entry."""
         resource = self.resource
         if resource is None:
             return
@@ -215,6 +225,7 @@ class _PoolEntry:
             raise first_error
 
     def recycle(self) -> None:
+        """Return this entry to its owning pool."""
         if not self.physical_closed and self.resource is not None:
             raise RuntimeError("cannot recycle a physically live provider resource")
         if self.descriptor_lease is not None or self.control_lease is not None:
@@ -733,11 +744,13 @@ _FORK_PREPARED_CURRENT_POOL: ContextVar[RemoteProviderSessionPool | None] | None
 
 
 def _prepare_provider_session_pool_for_fork() -> None:
+    """Prepare provider session pool for fork."""
     global _FORK_PREPARED_CURRENT_POOL
     _FORK_PREPARED_CURRENT_POOL = _FORK_CURRENT_POOL_BANKS[_FORK_CURRENT_POOL_BANK_INDEX]
 
 
 def _clear_provider_session_pool_fork_preparation() -> None:
+    """Clear provider session pool fork preparation."""
     global _FORK_PREPARED_CURRENT_POOL
     _FORK_PREPARED_CURRENT_POOL = None
 

@@ -1,4 +1,8 @@
-"""Operation-scoped remote I/O coordinator contracts."""
+"""Operation-scoped remote I/O coordinator contracts.
+
+It covers loop-thread reuse, startup and close races, global limits, cancellation,
+staging leases, prefetch ownership, and pipeline context sharing.
+"""
 
 from __future__ import annotations
 
@@ -137,11 +141,13 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
         """Track staged-resource cleanup."""
 
         def __init__(self, start: int, lease: object | None = None) -> None:
+            """Initialize fake staged state for start, closed, and lease."""
             self.start = start
             self.closed = False
             self.lease = lease
 
         def close(self) -> None:
+            """Close the fake staged and update closed and lease."""
             self.closed = True
             if self.lease is not None:
                 self.lease.release()
@@ -149,10 +155,11 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
 
     class Lease:
         def release(self) -> None:
+            """Mark the lease resource as released."""
             pass
 
     class Manifest:
-        """Provide an async remote-manifest test double."""
+        """Model three asynchronous chunks sharing one temporary-storage lease."""
 
         files = (object(), object(), object())
         chunk_size = 1
@@ -161,6 +168,7 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
         operation_context = None
 
         def __init__(self) -> None:
+            """Initialize manifest state for entered, exited, and thread ids."""
             self.entered = 0
             self.exited = 0
             self.thread_ids: set[int] = set()
@@ -171,6 +179,7 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
 
         @asynccontextmanager
         async def open_staging_session(self):
+            """Open the configured staging session for remote chunk preparation."""
             self.entered += 1
             try:
                 yield SimpleNamespace()
@@ -179,14 +188,17 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
+            """Return the next configured remote chunk boundary."""
             return start + 1
 
         @staticmethod
         def estimated_chunk_bytes(_start: int) -> int:
+            """Return the estimated bytes for the requested remote chunk."""
             return 1
 
         @staticmethod
         def try_acquire_storage_lease(_start: int) -> Lease:
+            """Return the configured temporary-storage lease when capacity permits."""
             return Lease()
 
         async def stage_chunk_async(
@@ -196,6 +208,7 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
             *,
             storage_lease: object | None = None,
         ) -> FakeStaged:
+            """Stage one remote chunk while retaining the supplied storage lease."""
             self.thread_ids.add(threading.get_ident())
             if start == 0:
                 self.zero_started.set()
@@ -304,6 +317,7 @@ def test_coordinator_cancellation_removes_partial_staging(monkeypatch, tmp_path)
         """Block a staged chunk until coordinator cancellation."""
 
         async def download_files(self, _files, _directory):
+            """Stage the requested remote files into the scenario directory."""
             started.set()
             await asyncio.Event().wait()
 
@@ -375,6 +389,7 @@ def test_single_remote_operation_context_stays_inline(monkeypatch) -> None:
         """Fail if single mode attempts to construct a coordinator."""
 
         def __init__(self, *_args, **_kwargs) -> None:
+            """Fail immediately if single mode constructs a remote coordinator."""
             raise AssertionError("single mode created a remote coordinator")
 
     monkeypatch.setattr(operation_context_module, "RemoteIoCoordinator", ForbiddenCoordinator)
@@ -409,23 +424,28 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
         """Minimal staged result."""
 
         def __init__(self, lease: object) -> None:
+            """Initialize fake staged state for lease."""
             self.lease = lease
 
         def close(self) -> None:
+            """Close the fake staged and release its retained resources."""
             self.lease.release()
 
     class Session:
         """Track one provider-session lifetime."""
 
         def __init__(self) -> None:
+            """Initialize session state for entered and exited."""
             self.entered = 0
             self.exited = 0
 
         async def __aenter__(self):
+            """Return the managed session value from context entry."""
             self.entered += 1
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Finalize the session context without suppressing exceptions."""
             self.exited += 1
 
     operation = OperationExecutionContext(
@@ -445,18 +465,22 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
+            """Return the next configured remote chunk boundary."""
             return start + 1
 
         @staticmethod
         def estimated_chunk_bytes(_start: int) -> int:
+            """Return the estimated bytes for the requested remote chunk."""
             return 1
 
         @staticmethod
         def try_acquire_storage_lease(_start: int) -> object:
+            """Return the configured temporary-storage lease when capacity permits."""
             return operation.temporary_storage.acquire(1, label="test packet")
 
         @staticmethod
         def open_staging_session() -> Session:
+            """Open the configured staging session for remote chunk preparation."""
             return session
 
         @staticmethod
@@ -466,6 +490,7 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
             *,
             storage_lease: object | None = None,
         ) -> FakeStaged:
+            """Stage one remote chunk while retaining the supplied storage lease."""
             assert storage_lease is not None
             return FakeStaged(storage_lease)
 

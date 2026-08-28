@@ -1,4 +1,8 @@
-"""Regression coverage for memory runtime admission cancels reserved activation."""
+"""Exercises cancellation of reserved service activation with deadline close, teardown
+capacity, terminal-host pruning, cleanup-graph charges, cross-memory coalescing,
+adaptive slots, coercion rejection, bounded terminal ledgers, observability, and
+fork-lock reset. Cancelled activation never becomes live; shutdown requires complete
+observable ownership, and inherited or hostile accounting cannot enter stage gates."""
 
 from __future__ import annotations
 
@@ -9,10 +13,12 @@ import pytest
 
 
 def test_runtime_admission_cancels_reserved_activation() -> None:
+    """Verify runtime admission cancels reserved activation."""
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self, *, deadline_seconds: float) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = _RuntimeServiceRegistry()
@@ -28,10 +34,12 @@ def test_runtime_admission_cancels_reserved_activation() -> None:
 
 
 def test_runtime_service_requires_deadline_close_contract() -> None:
+    """Verify runtime service requires deadline close contract."""
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     with pytest.raises(TypeError, match="deadline_seconds"):
@@ -41,6 +49,7 @@ def test_runtime_service_requires_deadline_close_contract() -> None:
 
 
 def test_governor_preserves_physical_teardown_capacity() -> None:
+    """Verify governor preserves physical teardown capacity."""
     from schema_sanitizer.core_impl.process_resources import _Governor
 
     governor = _Governor(
@@ -59,6 +68,7 @@ def test_governor_preserves_physical_teardown_capacity() -> None:
 
 
 def test_terminal_hosts_prune_dead_weakrefs_before_capacity_check() -> None:
+    """Verify terminal hosts prune dead weakrefs before capacity check."""
     from schema_sanitizer.core_impl.terminal_hosts import TerminalHostMarkers
 
     class Host:
@@ -80,6 +90,7 @@ def test_terminal_hosts_prune_dead_weakrefs_before_capacity_check() -> None:
 
 
 def test_cleanup_rejects_floor_charged_bound_owner_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify cleanup rejects floor charged bound owner graph."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
@@ -87,6 +98,7 @@ def test_cleanup_rejects_floor_charged_bound_owner_graph(monkeypatch: pytest.Mon
 
     class Owner:
         def cleanup(self) -> None:
+            """Return the cleanup callback retained by the lifecycle owner."""
             return None
 
     assert not dispatcher.submit(Owner().cleanup, retained_bytes=1024)
@@ -98,12 +110,14 @@ def test_cleanup_rejects_floor_charged_bound_owner_graph(monkeypatch: pytest.Mon
 def test_cleanup_separates_retained_from_already_reserved_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cleanup separates retained from already reserved bytes."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
     monkeypatch.setattr(dispatcher, "_ensure_workers", lambda: None)
 
     def cleanup() -> None:
+        """Return the cleanup task retained by the lifecycle owner."""
         return None
 
     assert dispatcher.submit(cleanup, retained_bytes=2048, reserved_bytes=8 << 20)
@@ -115,18 +129,22 @@ def test_cleanup_separates_retained_from_already_reserved_bytes(
 def test_process_cross_memory_aggregates_growth_and_coalesces_shrink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify process cross memory aggregates growth and coalesces shrink."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     class Physical:
         def __init__(self, _capacity: int, _initial: int) -> None:
+            """Initialize the physical test double."""
             self._coordinated = False
             self._coordination_path = None
             self.calls: list[int] = []
 
         def resize(self, value: int) -> None:
+            """Resize the resource represented by the physical test double."""
             self.calls.append(value)
 
         def _set_capacity(self, _value: int) -> None:
+            """Set the governor capacity for the contention scenario."""
             return
 
     monkeypatch.setattr(module, "CrossProcessMemoryLease", Physical)
@@ -151,6 +169,7 @@ def test_process_cross_memory_aggregates_growth_and_coalesces_shrink(
 def test_adaptive_parallel_slots_can_suppress_all_helper_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify adaptive parallel slots can suppress all helper work."""
     from schema_sanitizer.core_impl import memory_budget as module
     from schema_sanitizer.core_impl import system_pressure
 
@@ -166,6 +185,7 @@ def test_adaptive_parallel_slots_can_suppress_all_helper_work(
 
 
 def test_cross_process_storage_rejects_coercive_accounting_values() -> None:
+    """Verify cross process storage rejects coercive accounting values."""
     from schema_sanitizer.core_impl.cross_process_storage import _reserve_cross_process_raw
 
     with pytest.raises(TypeError, match="exact integers"):
@@ -173,6 +193,7 @@ def test_cross_process_storage_rejects_coercive_accounting_values() -> None:
 
 
 def test_terminal_ownership_ledger_is_metadata_only_and_bounded() -> None:
+    """Verify terminal ownership ledger is metadata only and bounded."""
     from schema_sanitizer.core_impl.terminal_ownership import TerminalOwnershipLedger
 
     ledger = TerminalOwnershipLedger(capacity=2)
@@ -188,6 +209,7 @@ def test_terminal_ownership_ledger_is_metadata_only_and_bounded() -> None:
 
 
 def test_runtime_shutdown_success_requires_complete_observability() -> None:
+    """Verify runtime shutdown success requires complete observability."""
     import inspect
 
     from schema_sanitizer.core_impl import runtime_shutdown
@@ -202,6 +224,7 @@ def test_runtime_shutdown_success_requires_complete_observability() -> None:
 def test_cleanup_publication_can_be_finalizer_safe_without_starting_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cleanup publication can be finalizer safe without starting worker."""
     from schema_sanitizer.core_impl import cleanup_dispatcher as module
 
     dispatcher = module._CleanupDispatcher()
@@ -220,6 +243,7 @@ def test_cleanup_publication_can_be_finalizer_safe_without_starting_worker(
 
 
 def test_cross_process_memory_fork_reset_rebinds_inherited_locks() -> None:
+    """Verify cross process memory fork reset rebinds inherited locks."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     old_process_lock = module._PROCESS_COORDINATOR_LOCK
@@ -232,6 +256,7 @@ def test_cross_process_memory_fork_reset_rebinds_inherited_locks() -> None:
 
 
 def test_operation_memory_fork_reset_rebinds_abandoned_owner_lock() -> None:
+    """Verify operation memory fork reset rebinds abandoned owner lock."""
     from schema_sanitizer.core_impl import memory_budget as module
 
     old_lock = module._ABANDONED_MEMORY_LOCK
@@ -244,6 +269,7 @@ def test_operation_memory_fork_reset_rebinds_abandoned_owner_lock() -> None:
 
 
 def test_operation_memory_stage_rejects_coercive_objects() -> None:
+    """Verify operation memory stage rejects coercive objects."""
     from schema_sanitizer.core_impl.memory_budget import OperationMemoryLedger
 
     ledger = object.__new__(OperationMemoryLedger)

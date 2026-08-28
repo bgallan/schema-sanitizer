@@ -1,4 +1,8 @@
-"""Retryable ownership transfer for asynchronously staged remote results."""
+"""Retryable ownership transfer for asynchronously staged remote results.
+
+StagedResultOwnership serializes publish, consume, and abandon transitions so failed cleanup
+retains one authoritative owner.
+"""
 
 from __future__ import annotations
 

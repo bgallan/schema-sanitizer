@@ -1,4 +1,7 @@
-"""Regression coverage for memory async terminal debt has exactly one concurrent reaper."""
+"""Combines concurrent terminal-debt reaping with poisoned debt, no-throw snapshots, cgroup
+migration samples, multipart manifests, and native backpressure. It verifies one reaper
+per debt, conservative cross-process ownership, bounded retry state, and deadline
+fairness without lost wakeups."""
 
 from __future__ import annotations
 
@@ -14,14 +17,17 @@ CPP_TESTS = ROOT / "cpp" / "tests"
 
 
 def _source(relative: str) -> str:
+    """Return the production source text inspected by this module."""
     return (SRC / relative).read_text(encoding="utf-8")
 
 
 def _cpp_source(relative: str) -> str:
+    """Return the production C++ source inspected by the test."""
     return (CPP / relative).read_text(encoding="utf-8")
 
 
 def test_async_terminal_debt_has_exactly_one_concurrent_reaper() -> None:
+    """Verify async terminal debt has exactly one concurrent reaper."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
 
     scheduler._reap_async_terminal_debts()
@@ -30,14 +36,17 @@ def test_async_terminal_debt_has_exactly_one_concurrent_reaper() -> None:
 
     class DoneTask:
         def done(self) -> bool:
+            """Report whether the done task test double has completed."""
             return True
 
     class BlockingOwner:
         def __init__(self) -> None:
+            """Initialize the blocking owner test double."""
             self.calls = 0
             self.lock = threading.Lock()
 
         def close(self) -> None:
+            """Close the resources owned by the blocking owner test double."""
             with self.lock:
                 self.calls += 1
             entered.set()
@@ -51,6 +60,7 @@ def test_async_terminal_debt_has_exactly_one_concurrent_reaper() -> None:
     errors: list[BaseException] = []
 
     def reap() -> None:
+        """Run one terminal-debt reaping attempt and capture its result or error."""
         try:
             results.append(scheduler._reap_one_async_terminal_debt())
         except BaseException as exc:  # pragma: no cover - assertion below reports it
@@ -77,15 +87,18 @@ def test_async_terminal_debt_has_exactly_one_concurrent_reaper() -> None:
 
 
 def test_poison_terminal_debt_cannot_block_new_debt_publication() -> None:
+    """Verify poison terminal debt cannot block new debt publication."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
 
     scheduler._reap_async_terminal_debts()
 
     class PoisonOwner:
         def __init__(self) -> None:
+            """Initialize the poison owner test double."""
             self.fail = True
 
         def close(self) -> None:
+            """Close the resources owned by the poison owner test double."""
             if self.fail:
                 raise RuntimeError("poison debt")
 
@@ -112,6 +125,7 @@ def test_poison_terminal_debt_cannot_block_new_debt_publication() -> None:
 
 
 def test_async_snapshot_is_no_throw_with_retry_pending_terminal_debt() -> None:
+    """Verify async snapshot is no throw with retry pending terminal debt."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
 
     scheduler._reap_async_terminal_debts()
@@ -120,6 +134,7 @@ def test_async_snapshot_is_no_throw_with_retry_pending_terminal_debt() -> None:
         fail = True
 
         def close(self) -> None:
+            """Close the resources owned by the poison owner test double."""
             if self.fail:
                 raise RuntimeError("snapshot poison")
 
@@ -141,20 +156,24 @@ def test_async_snapshot_is_no_throw_with_retry_pending_terminal_debt() -> None:
 def test_cross_process_shrink_failure_does_not_resurrect_logical_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cross process shrink failure does not resurrect logical owner."""
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
     from schema_sanitizer.core_impl.cross_process_memory import _ProcessCrossMemoryCoordinator
 
     class FakePhysical:
         def __init__(self) -> None:
+            """Initialize the fake physical test double."""
             self.fail_down = False
             self.size = 0
 
         def resize(self, value: int) -> None:
+            """Resize the resource represented by the fake physical test double."""
             if self.fail_down and value < self.size:
                 raise OSError("injected shrink failure")
             self.size = value
 
         def _set_capacity(self, _value: int) -> None:
+            """Set the governor capacity for the contention scenario."""
             return None
 
     coordinator = _ProcessCrossMemoryCoordinator(16 << 20)
@@ -189,6 +208,7 @@ def test_cgroup_effective_read_retries_entire_sample_after_migration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cgroup effective read retries entire sample after migration."""
     from schema_sanitizer.core_impl import cgroup_view
 
     mount_a = tmp_path / "a"
@@ -204,6 +224,7 @@ def test_cgroup_effective_read_retries_entire_sample_after_migration(
     calls = 0
 
     def current(*, refresh: bool = False):
+        """Return the controlled current task used by the reaper test."""
         nonlocal calls
         view = views[min(calls, 1)]
         calls += 1
@@ -224,6 +245,7 @@ def test_incomplete_cgroup_subtree_never_claims_unbounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify incomplete cgroup subtree never claims unbounded."""
     from schema_sanitizer.core_impl import cgroup_view
 
     root = tmp_path / "subtree"
@@ -238,6 +260,7 @@ def test_incomplete_cgroup_subtree_never_claims_unbounded(
 
 
 def test_async_result_memory_contract_is_explicit_for_externally_governed_results() -> None:
+    """Verify async result memory contract is explicit for externally governed results."""
     from schema_sanitizer.core_impl.async_scheduler import (
         AsyncResultMemoryContract,
         AsyncResultOwnershipMode,
@@ -258,6 +281,7 @@ def test_async_result_memory_contract_is_explicit_for_externally_governed_result
 
 
 def test_s3_multipart_manifest_keeps_memory_ownership_until_commit() -> None:
+    """Verify s3 multipart manifest keeps memory ownership until commit."""
     import ast
     import sys
     from typing import Any
@@ -274,16 +298,20 @@ def test_s3_multipart_manifest_keeps_memory_ownership_until_commit() -> None:
 
     class FakeLease:
         def __init__(self, initial: int) -> None:
+            """Initialize the fake lease test double."""
             self.sizes = [initial]
             self.closed = False
 
         def resize(self, value: int) -> None:
+            """Resize the resource represented by the fake lease test double."""
             self.sizes.append(value)
 
         def close(self) -> None:
+            """Close the resources owned by the fake lease test double."""
             self.closed = True
 
     def acquire(amount: int, *, stage: str):
+        """Acquire the resource under the controlled scheduling conditions."""
         assert stage == "s3_multipart_manifest"
         lease = FakeLease(amount)
         leases.append(lease)
@@ -310,6 +338,7 @@ def test_s3_multipart_manifest_keeps_memory_ownership_until_commit() -> None:
 
 
 def test_native_backpressure_has_dynamic_deadline_fairness_and_lost_wakeup_guards() -> None:
+    """Verify native backpressure has dynamic deadline fairness and lost wakeup guards."""
     source = _cpp_source("internal/runtime/operation_task_arena.cc")
     assert "std::lock_guard retained_lock(retained_wait_mutex)" in source
     assert "retained_ready.notify_all()" in source
@@ -331,6 +360,7 @@ def test_native_backpressure_has_dynamic_deadline_fairness_and_lost_wakeup_guard
 
 
 def test_native_cgroup_sample_is_revalidated_after_hierarchy_read() -> None:
+    """Verify native cgroup sample is revalidated after hierarchy read."""
     source = _cpp_source("internal/runtime/cgroup_view.hh")
     assert "membership_after" in source
     assert "hierarchy_complete" in source
@@ -338,6 +368,7 @@ def test_native_cgroup_sample_is_revalidated_after_hierarchy_read() -> None:
 
 
 def test_tsan_probe_covers_dynamic_backpressure_deadline() -> None:
+    """Verify TSan probe covers dynamic backpressure deadline."""
     source = (CPP_TESTS / "ordered_executor_tsan.cc").read_text(encoding="utf-8")
     assert "run_arena_backpressure_deadline_round" in source
     assert "arena_backpressure_deadline" in source

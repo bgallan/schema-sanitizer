@@ -1,4 +1,8 @@
-"""Regression coverage for the reader linear-complexity contract."""
+"""Regression coverage for the reader linear-complexity contract.
+
+It checks recorded evidence, round-robin measurement, noise resistance,
+persistent-regression detection, provenance, and documented native-reader budgets.
+"""
 
 from __future__ import annotations
 
@@ -19,12 +23,15 @@ BUDGET = ROOT / "benchmarks" / "readers" / "linear_scaling_budget.json"
 
 class _ManualClock:
     def __init__(self) -> None:
+        """Initialize manual clock state for now."""
         self.now = 0
 
     def __call__(self) -> int:
+        """Return the current value of the manual benchmark clock."""
         return self.now
 
     def advance(self, duration: int) -> None:
+        """Advance the manual benchmark clock by the requested duration."""
         self.now += duration
 
 
@@ -108,6 +115,7 @@ def test_round_robin_median_rejects_one_shared_runner_noise_epoch() -> None:
     cases = ("csv_single", "csv_multi", "jsonl_single")
 
     def timed_call(ordinal: int) -> None:
+        """Record and return the configured synthetic timing sample."""
         clock.advance(10_000 if ordinal == 0 else 10)
 
     samples = linear_scaling._measure_round_robin(
@@ -128,9 +136,11 @@ def test_round_robin_median_preserves_a_persistent_300x_regression() -> None:
     clock = _ManualClock()
 
     def normal(_: int) -> None:
+        """Return the baseline timing sample."""
         clock.advance(10)
 
     def regressed(_: int) -> None:
+        """Return the intentionally regressed timing sample."""
         clock.advance(3_000)
 
     samples = linear_scaling._measure_round_robin(
@@ -145,6 +155,7 @@ def test_round_robin_median_preserves_a_persistent_300x_regression() -> None:
 
 
 def _synthetic_report(budget: dict[str, object], *, ratios: dict[str, float]) -> dict[str, object]:
+    """Build a deterministic reader-scaling report for latency-gate tests."""
     reference = budget["reference"]
     assert isinstance(reference, dict)
     cases = reference["cases"]

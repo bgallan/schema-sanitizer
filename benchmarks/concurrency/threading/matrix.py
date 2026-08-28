@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run a reproducible multidimensional single-versus-multi benchmark matrix."""
+"""Run a reproducible multidimensional single-versus-multi benchmark matrix.
+
+It expands workload cases, launches each isolated mode, and emits a platform-stamped
+JSON matrix.
+"""
 
 from __future__ import annotations
 

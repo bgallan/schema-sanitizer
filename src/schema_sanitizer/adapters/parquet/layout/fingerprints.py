@@ -1,4 +1,8 @@
-"""Root-level fingerprints for recursive Parquet layouts."""
+"""Root-level fingerprints for recursive Parquet layouts.
+
+It derives canonical root and leaf fingerprints so independently decoded layouts can be
+compared without relying on object identity.
+"""
 
 from __future__ import annotations
 

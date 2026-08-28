@@ -1,4 +1,8 @@
-"""Bounded metadata helpers shared by source-discovery phases."""
+"""Bounded metadata helpers shared by source-discovery phases.
+
+It bounds retained discovery metadata, caches compact source summaries, and accounts for
+memory before large listings are accumulated.
+"""
 
 from __future__ import annotations
 

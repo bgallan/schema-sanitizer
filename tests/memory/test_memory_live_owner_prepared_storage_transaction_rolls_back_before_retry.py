@@ -1,4 +1,8 @@
-"""Regression coverage for memory live owner prepared storage transaction rolls back before retry."""
+"""Stress-tests prepared storage and memory journals through rollback, dead-owner
+completion, cleanup failure, corruption, staging reuse, hard-link or symlink attacks,
+marker failure, janitor duplicates, provider-key compaction, and thread-start failure.
+Live owners roll back before retry, committed journals make success durable, and bounded
+payloads or exact permits are never duplicated or orphaned."""
 
 from __future__ import annotations
 
@@ -109,6 +113,7 @@ def test_empty_or_canonical_prefix_never_discards_prepared_journal(
     assert storage._reserve_cross_process_raw(device, 11, 1024) == 11
 
     def truncate_then_fail(handle: Any, _payload: bytes) -> None:
+        """Truncate the journal before raising the injected commit failure."""
         handle.seek(0)
         handle.truncate()
         handle.write(partial)
@@ -319,6 +324,7 @@ def test_read_only_coordination_query_does_not_publish_a_journal(
     called = False
 
     def fail_commit(*_args: object, **_kwargs: object) -> None:
+        """Inject the commit failure at the controlled test point."""
         nonlocal called
         called = True
         raise AssertionError("read-only query attempted a coordination commit")
@@ -347,6 +353,7 @@ def test_committed_marker_publication_failure_rolls_back_incremental_state(
         max_payload_bytes: int,
         **kwargs: object,
     ) -> None:
+        """Inject the committed failure at the controlled test point."""
         if record.phase == "committed":
             raise OSError("injected committed marker failure")
         publish(path, record, max_payload_bytes, **kwargs)
@@ -370,9 +377,11 @@ def test_janitor_duplicate_path_keeps_original_owner(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.released = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released += 1
 
     janitor = module._TemporaryArtifactJanitor()
@@ -405,18 +414,22 @@ def test_provider_pool_compacts_and_reuses_multi_megabyte_keys() -> None:
 
     class Client:
         def __init__(self) -> None:
+            """Initialize the client test double."""
             self.close_calls = 0
 
         async def close(self) -> None:
+            """Close the resources owned by the client test double."""
             self.close_calls += 1
 
     async def exercise() -> tuple[int, tuple[Any, ...], int]:
+        """Borrow clients across large keys and verify compact-key reuse."""
         pool = RemoteProviderSessionPool()
         await pool.__aenter__()
         client = Client()
         calls = 0
 
         async def factory() -> Client:
+            """Count provider construction and return the reusable client."""
             nonlocal calls
             calls += 1
             return client
@@ -460,16 +473,20 @@ def test_janitor_thread_start_failure_releases_project_thread_permit(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.released = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released += 1
 
     class BrokenThread:
         def __init__(self, **_kwargs: Any) -> None:
+            """Initialize the broken thread test double."""
             pass
 
         def start(self) -> None:
+            """Start the activity represented by the broken thread test double."""
             raise RuntimeError("injected thread start failure")
 
     lease = Lease()

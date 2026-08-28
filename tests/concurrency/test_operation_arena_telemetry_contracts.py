@@ -1,4 +1,9 @@
-"""Exact sharded telemetry contracts for the shared operation arena."""
+"""Certify exact sharded telemetry publication by the shared operation arena.
+
+Completion, active-streak, submission, task, and native-stage counters must remain cache-separated
+and single-writer where promised, use stores instead of contested updates, and aggregate exact
+JSON totals under real concurrent producers.
+"""
 
 from __future__ import annotations
 

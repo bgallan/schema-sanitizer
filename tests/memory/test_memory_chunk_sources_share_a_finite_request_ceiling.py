@@ -1,4 +1,7 @@
-"""Regression coverage for memory chunk sources share a finite request ceiling."""
+"""Applies one finite request ceiling to chunk sources, full materialization, UTF-16
+transcoding, scratch wiping, oversized scalars, and multi-path directory order. Decoding
+avoids a duplicate input copy, slices bounded output, and releases sensitive backing
+storage under the operation budget."""
 
 from __future__ import annotations
 

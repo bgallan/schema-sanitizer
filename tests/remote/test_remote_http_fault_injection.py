@@ -1,4 +1,8 @@
-"""Real-socket fault injection for the generic HTTP remote transport."""
+"""Real-socket fault injection for the generic HTTP remote transport.
+
+It injects truncated reads, disconnected writes, retryable statuses, cancellation,
+metadata failures, and publication cleanup through real sockets.
+"""
 
 from __future__ import annotations
 

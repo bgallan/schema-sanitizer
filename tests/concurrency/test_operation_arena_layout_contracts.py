@@ -1,4 +1,9 @@
-"""Cache-line, queue-visibility, and selection contracts for the operation arena."""
+"""Verify cache-line layout, visibility sharding, and task selection in the operation arena.
+
+Native probes exercise peak bookkeeping, physical domains, writer isolation, wake and running
+publication, compact lane bounds, ordered bit selection, one-shot initialization, and only the
+relevant visibility shards across repeated real park-and-drain cycles.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ SELECTION = "cpp/src/internal/runtime/operation_task_arena_selection.hh"
 
 
 def _compact_probe(path: str) -> tuple[str, str]:
+    """Run the compact native arena probe and return its counters."""
     source = load_probe(path)
     return source, source.replace(" ", "").replace("\n", "")
 

@@ -1,4 +1,8 @@
-"""Read-side benchmark cases for the local ingestion benchmark CLI."""
+"""Read-side benchmark cases for the local ingestion benchmark CLI.
+
+It runs public read and support-route cases while recording input sizes and native route
+details.
+"""
 
 from __future__ import annotations
 

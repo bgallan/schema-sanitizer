@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Pack immutable content-addressed fuzz regressions deterministically."""
+"""Pack immutable content-addressed fuzz regressions deterministically.
+
+The command validates one target corpus and writes its canonical archive without
+timestamps or ordering drift.
+"""
 
 from __future__ import annotations
 

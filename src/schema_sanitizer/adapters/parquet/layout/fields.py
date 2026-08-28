@@ -1,4 +1,8 @@
-"""Recursive Parquet field accumulation, contracts, and fingerprints."""
+"""Recursive Parquet field accumulation, contracts, and fingerprints.
+
+It accumulates flattened field facts, definition and repetition levels, logical types,
+and stable fingerprints while walking nested layouts.
+"""
 
 from __future__ import annotations
 

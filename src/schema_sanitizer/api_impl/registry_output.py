@@ -1,4 +1,8 @@
-"""Registry-backed file output routing and native stream ownership."""
+"""Registry-backed file output routing and native stream ownership.
+
+It routes registry streams to raw or metadata-aware file writers, handles direct native
+paths, and returns diagnostics after authoritative cleanup.
+"""
 
 from __future__ import annotations
 

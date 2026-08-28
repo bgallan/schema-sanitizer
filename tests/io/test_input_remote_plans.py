@@ -1,4 +1,8 @@
-"""Remote discovery, staging, registry, and source-plan contracts."""
+"""Remote discovery, staging, registry, and source-plan contracts.
+
+It spans provider pagination and bulk discovery, lazy staging, registry probes,
+source-plan reuse, memory limits, retry classification, and cleanup ownership.
+"""
 
 from __future__ import annotations
 
@@ -23,10 +27,12 @@ _BULK_OBJECT_NAMES = (
 
 
 def _bulk_directory_uris(base: str) -> list[str]:
+    """Build the three remote directory URIs used by bulk-listing cases."""
     return [f"{base}/hour={hour}" for hour in ("00", "01", "02")]
 
 
 def _assert_bulk_directory_result(result: object, base: str) -> None:
+    """Assert existence results for all three bulk directory URIs."""
     uris = _bulk_directory_uris(base)
     assert result.exists_by_uri == {
         uris[0]: True,
@@ -36,6 +42,7 @@ def _assert_bulk_directory_result(result: object, base: str) -> None:
 
 
 def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
+    """Verify remote GCS directory listing reads all pages."""
     from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import gcs as gcs_listing
     from schema_sanitizer.sources import RemoteFile
@@ -44,6 +51,7 @@ def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
         """Minimal aiohttp-like session with paginated GCS responses."""
 
         def __init__(self):
+            """Initialize fake session state for params and pages."""
             self.params: list[dict[str, str]] = []
             self.pages = [
                 {"items": [{"name": "events/ignore.txt"}], "nextPageToken": "page-2"},
@@ -51,12 +59,15 @@ def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
             ]
 
         async def __aenter__(self):
+            """Return the managed fake session value from context entry."""
             return self
 
         async def __aexit__(self, exc_type, exc, traceback):
+            """Finalize the fake session context without suppressing exceptions."""
             return None
 
         def get(self, _url, *, params):
+            """Return the configured response for the requested provider object."""
             self.params.append(dict(params))
             return FakeResponse(self.pages.pop(0))
 
@@ -79,6 +90,7 @@ def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
 
 
 def test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes(monkeypatch) -> None:
+    """Verify remote GCS bulk directory discovery groups parent prefixes."""
     from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import gcs as gcs_bulk_discovery
 
@@ -86,15 +98,19 @@ def test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes(monkeypatch)
         """Minimal aiohttp-like session with one parent-prefix listing."""
 
         def __init__(self):
+            """Initialize fake session state for params."""
             self.params: list[dict[str, str]] = []
 
         async def __aenter__(self):
+            """Return the managed fake session value from context entry."""
             return self
 
         async def __aexit__(self, exc_type, exc, traceback):
+            """Finalize the fake session context without suppressing exceptions."""
             return None
 
         def get(self, _url, *, params):
+            """Return the configured response for the requested provider object."""
             self.params.append(dict(params))
             return FakeResponse({"items": [{"name": name} for name in _BULK_OBJECT_NAMES]})
 
@@ -121,6 +137,7 @@ def test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes(monkeypatch)
 
 
 def test_remote_s3_bulk_directory_discovery_groups_parent_prefixes(monkeypatch) -> None:
+    """Verify remote S3 bulk directory discovery groups parent prefixes."""
     from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import s3 as s3_discovery
 
@@ -128,15 +145,19 @@ def test_remote_s3_bulk_directory_discovery_groups_parent_prefixes(monkeypatch) 
         """Minimal async S3 client with one parent-prefix listing."""
 
         def __init__(self):
+            """Initialize fake S3 client state for calls."""
             self.calls: list[dict[str, object]] = []
 
         async def __aenter__(self):
+            """Return the managed fake S3 client value from context entry."""
             return self
 
         async def __aexit__(self, exc_type, exc, traceback):
+            """Finalize the fake S3 client context without suppressing exceptions."""
             return None
 
         async def list_objects_v2(self, **kwargs):
+            """Return the configured page of S3 object listings."""
             self.calls.append(dict(kwargs))
             return {
                 "Contents": [{"Key": name} for name in _BULK_OBJECT_NAMES],
@@ -169,6 +190,7 @@ def test_remote_s3_bulk_directory_discovery_groups_parent_prefixes(monkeypatch) 
 
 
 def test_remote_azure_bulk_directory_discovery_groups_parent_prefixes(monkeypatch) -> None:
+    """Verify remote azure bulk directory discovery groups parent prefixes."""
     from types import SimpleNamespace
 
     from schema_sanitizer.remote_impl.async_bridge import run_sync
@@ -178,9 +200,11 @@ def test_remote_azure_bulk_directory_discovery_groups_parent_prefixes(monkeypatc
         """Minimal async Azure container client."""
 
         def __init__(self):
+            """Initialize fake container state for prefixes."""
             self.prefixes: list[str] = []
 
         async def list_blobs(self, *, name_starts_with):
+            """Return the configured Azure blob listing."""
             self.prefixes.append(name_starts_with)
             for name in _BULK_OBJECT_NAMES:
                 yield SimpleNamespace(name=name)
@@ -189,14 +213,17 @@ def test_remote_azure_bulk_directory_discovery_groups_parent_prefixes(monkeypatc
         """Minimal async Azure blob service."""
 
         def __init__(self):
+            """Initialize fake service state for container and closed."""
             self.container = FakeContainer()
             self.closed = False
 
         def get_container_client(self, container_name):
+            """Return the sole container client after validating its name."""
             assert container_name == "container"
             return self.container
 
         async def close(self):
+            """Close the fake service and update closed."""
             self.closed = True
 
     fake_service = FakeService()
@@ -221,6 +248,7 @@ def test_remote_azure_bulk_directory_discovery_groups_parent_prefixes(monkeypatc
 
 
 def test_remote_s3_directory_listing_reads_all_pages(monkeypatch) -> None:
+    """Verify remote S3 directory listing reads all pages."""
     from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import s3 as s3_discovery
     from schema_sanitizer.sources import RemoteFile
@@ -229,15 +257,19 @@ def test_remote_s3_directory_listing_reads_all_pages(monkeypatch) -> None:
         """Minimal async S3 client with paginated list_objects_v2 responses."""
 
         def __init__(self):
+            """Initialize fake S3 client state for calls."""
             self.calls: list[dict[str, object]] = []
 
         async def __aenter__(self):
+            """Return the managed fake S3 client value from context entry."""
             return self
 
         async def __aexit__(self, exc_type, exc, traceback):
+            """Finalize the fake S3 client context without suppressing exceptions."""
             return None
 
         async def list_objects_v2(self, **kwargs):
+            """Return the configured page of S3 object listings."""
             self.calls.append(kwargs)
             if "ContinuationToken" not in kwargs:
                 return {
@@ -271,13 +303,16 @@ class _Stage:
     """Minimal staged-path stand-in that preserves its local file."""
 
     def __init__(self, path: Path):  # noqa: F405
+        """Initialize stage state for path."""
         self.path = str(path)
 
     def close(self) -> None:
+        """Close the stage and release its retained resources."""
         pass
 
 
 def test_uri_input_uses_async_local_staging(monkeypatch, tmp_path, require_native: None) -> None:
+    """Verify URI input uses async local staging."""
     pytest.importorskip("pyarrow")
 
     staged_paths: list[str] = []
@@ -310,6 +345,7 @@ def test_uri_input_uses_async_local_staging(monkeypatch, tmp_path, require_nativ
 def test_uri_input_staging_works_with_converters(
     monkeypatch, tmp_path, require_native: None
 ) -> None:
+    """Verify URI input staging works with converters."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out.jsonl"
@@ -359,6 +395,7 @@ def test_uri_input_staging_works_with_converters(
 def test_uri_input_allows_non_utf8_after_local_staging(
     monkeypatch, tmp_path, require_native: None
 ) -> None:
+    """Verify URI input allows non utf8 after local staging."""
     pytest.importorskip("pyarrow")
 
     def fake_stage(
@@ -384,6 +421,7 @@ def test_uri_input_allows_non_utf8_after_local_staging(
 
 
 def test_remote_parquet_directory_stages_children_synchronously(monkeypatch, tmp_path) -> None:
+    """Verify remote Parquet directory stages children synchronously."""
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.sources import RemoteFile
 
@@ -423,6 +461,7 @@ def test_remote_parquet_directory_public_reader_uses_staged_arrow_path(
     tmp_path,
     require_native: None,
 ) -> None:
+    """Verify remote Parquet directory public reader uses staged arrow path."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.remote_impl import staging as remote_staging
@@ -478,6 +517,7 @@ def test_remote_parquet_single_file_public_reader_uses_staged_arrow_path(
     tmp_path,
     require_native: None,
 ) -> None:
+    """Verify remote Parquet single file public reader uses staged arrow path."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.remote_impl import staging as remote_staging
@@ -540,6 +580,7 @@ def test_remote_parquet_schema_probe_retires_readers_before_staged_cleanup(
         """Assert external readers retire before the staging owner is closed."""
 
         def close(self) -> None:
+            """Close the ordered staged path and release its retained resources."""
             assert deferred_stream_owners == []
             super().close()
 
@@ -584,6 +625,7 @@ def test_remote_parquet_single_file_writer_uses_staged_arrow_path(
     tmp_path,
     require_native: None,
 ) -> None:
+    """Verify remote Parquet single file writer uses staged arrow path."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.remote_impl import staging as remote_staging
@@ -627,6 +669,7 @@ def test_remote_parquet_single_file_writer_uses_staged_arrow_path(
 
 
 def test_remote_text_directory_stages_child_sources_synchronously(monkeypatch) -> None:
+    """Verify remote text directory stages child sources synchronously."""
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.sources import RemoteFile
 
@@ -662,6 +705,7 @@ def test_remote_text_directory_stages_child_sources_synchronously(monkeypatch) -
 def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
     monkeypatch, tmp_path
 ) -> None:
+    """Verify remote JSON directory preparation uses lazy native source stage."""
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.api_impl.source_plan.attached import (
         remote_native_multisource_manifest_from_data,
@@ -748,6 +792,7 @@ def test_remote_json_directory_preparation_uses_lazy_native_source_stage(
 def test_discovered_remote_json_directory_uses_same_lazy_source_plan(
     monkeypatch,
 ) -> None:
+    """Verify discovered remote JSON directory uses same lazy source plan."""
     import schema_sanitizer.input_impl.source_plan as source_plan_model
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.api_impl.input import remote_directory_preparation
@@ -855,6 +900,7 @@ def _fake_staging(events: list[str], label: str):
         """One staged remote source owned by the test context."""
 
         def __init__(self, name: str) -> None:
+            """Initialize fake stage state for name and manifest."""
             self.name = name
             self.manifest = NativeDirectorySourceManifest(
                 PreparedSourceBatch(
@@ -870,16 +916,19 @@ def _fake_staging(events: list[str], label: str):
             )
 
         def close(self) -> None:
+            """Close the fake stage and release its retained resources."""
             events.append(f"close:{self.name}")
 
     class FakeStagedChunks:
         """Context manager yielding deterministic staged chunks."""
 
         def __enter__(self):
+            """Return the managed fake staged chunks value from context entry."""
             events.append(f"enter:{label}")
             return iter([FakeStage(f"{label}-a"), FakeStage(f"{label}-b")])
 
         def __exit__(self, _exc_type, _exc, _tb) -> bool:
+            """Finalize the fake staged chunks context without suppressing exceptions."""
             events.append(f"exit:{label}")
             return False
 
@@ -917,9 +966,11 @@ def test_remote_registry_stream_uses_current_native_auto_provider(monkeypatch) -
         schema_drifts_json = "[]"
 
         def __init__(self, stream_provider) -> None:
+            """Initialize fake raw state for stream provider."""
             self._stream_provider = stream_provider
 
         def close(self) -> None:
+            """Close the fake raw and release its retained resources."""
             events.append("raw-close")
             self._stream_provider.close()
 
@@ -936,6 +987,7 @@ def test_remote_registry_stream_uses_current_native_auto_provider(monkeypatch) -
             call_options,
             **options,
         ):
+            """Validate and open the paired native registry providers."""
             assert sink == "stream"
             assert call_options == "options"
             assert options == {
@@ -1012,6 +1064,7 @@ def test_remote_registry_probe_is_owned_by_native_chunk_provider(monkeypatch) ->
             call_options,
             **options,
         ):
+            """Return the configured source chunk for registry probing."""
             assert call_options == "options"
             assert options["skip_invalid_json_sources"] is True
             while provider.next_sources() is not None:
@@ -1070,6 +1123,7 @@ def test_remote_auto_provider_failure_closes_both_providers(monkeypatch) -> None
             _call_options,
             **_options,
         ):
+            """Open both providers before simulating native failure."""
             assert probe_provider.next_sources() is not None
             assert stream_provider.next_sources() is not None
             raise RuntimeError("native open failed")
@@ -1120,6 +1174,7 @@ def test_remote_probe_prefix_resume_uses_exact_file_offset(monkeypatch) -> None:
         """Own one staged source from the requested manifest suffix."""
 
         def __init__(self, source_index: int) -> None:
+            """Initialize fake stage state for name and manifest."""
             source = manifest.files[source_index]
             self.name = source.name
             self.manifest = NativeDirectorySourceManifest(
@@ -1136,18 +1191,22 @@ def test_remote_probe_prefix_resume_uses_exact_file_offset(monkeypatch) -> None:
             )
 
         def close(self) -> None:
+            """Close the fake stage and release its retained resources."""
             closed.append(self.name)
 
     class FakeStagedChunks:
         """Yield the exact manifest suffix requested by the provider."""
 
         def __init__(self, start: int) -> None:
+            """Initialize fake staged chunks state for start."""
             self.start = start
 
         def __enter__(self):
+            """Return the managed fake staged chunks value from context entry."""
             return iter(FakeStage(index) for index in range(self.start, len(manifest.files)))
 
         def __exit__(self, _exc_type, _exc, _tb) -> bool:
+            """Finalize the fake staged chunks context without suppressing exceptions."""
             return False
 
     def open_chunks(_manifest, *, start=0):
@@ -1190,16 +1249,19 @@ def test_remote_probe_prefix_resume_uses_exact_file_offset(monkeypatch) -> None:
 
 
 def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> None:
+    """Verify remote chunk prefetch iterator stages next chunk and cleans up."""
     from schema_sanitizer.api_impl.source_plan.remote import open_staged_remote_chunks
 
     class FakeStaged:
         """Fake staged chunk with cleanup tracking."""
 
         def __init__(self, start: int):
+            """Initialize fake staged state for start and closed."""
             self.start = start
             self.closed = False
 
         def close(self) -> None:
+            """Close the fake staged and update closed."""
             self.closed = True
 
     class FakeManifest:
@@ -1212,11 +1274,13 @@ def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> Non
         threading_mode = "single"
 
         def __init__(self) -> None:
+            """Initialize fake manifest state for calls, staged, and second started."""
             self.calls: list[int] = []
             self.staged: dict[int, FakeStaged] = {}
             self.second_started = threading.Event()
 
         def stage_chunk(self, start: int) -> FakeStaged:
+            """Record the requested chunk and return its tracked staged value."""
             self.calls.append(start)
             if start == 1:
                 self.second_started.set()
@@ -1226,6 +1290,7 @@ def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> Non
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
+            """Return the next configured remote chunk boundary."""
             return start + 1
 
     manifest = FakeManifest()
@@ -1245,6 +1310,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_registry_staging(
     tmp_path,
     require_native: None,
 ) -> None:
+    """Verify remote JSON directory to JSONL uses bounded registry staging."""
     pytest.importorskip("pyarrow")
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
@@ -1314,6 +1380,7 @@ def test_remote_json_directory_to_pyarrow_uses_bounded_registry_staging(
     tmp_path,
     require_native: None,
 ) -> None:
+    """Verify remote JSON directory to PyArrow uses bounded registry staging."""
     pytest.importorskip("pyarrow")
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
@@ -1381,6 +1448,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
     tmp_path,
     require_native: None,
 ) -> None:
+    """Verify remote JSON directory to JSONL uses bounded staging with registry."""
     pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.source_plan import registry as source_plan_registry_stream
     from schema_sanitizer.remote_impl import staging as remote_staging
@@ -1425,7 +1493,7 @@ def test_remote_json_directory_to_jsonl_uses_bounded_staging_with_registry(
     real_registry_stream = source_plan_registry_stream.open_source_plan_registry_stream
 
     def tracking_registry_stream(*args, **kwargs):
-        """Track native registry stream use while preserving behavior."""
+        """Record registry-stream use before delegating to the real implementation."""
         nonlocal registry_stream_calls
         registry_stream_calls += 1
         return real_registry_stream(*args, **kwargs)
@@ -1492,6 +1560,7 @@ def test_source_plan_sequence_probe_flattens_path_sources_once() -> None:
             field_name_policy,
             schema_mode,
         ):
+            """Return the best-effort source set captured by the registry probe."""
             calls.append(list(sources))
             assert registry_json == "{}"
             assert field_name_policy == "lower_snake"
@@ -1564,6 +1633,7 @@ def test_source_plan_plain_stream_uses_native_path_source_payload() -> None:
             first_row_columns,
             timestamp_columns,
         ):
+            """Capture the native path-source capsule passed to the sink."""
             assert include_source_file is True
             assert first_row_columns == {}
             assert timestamp_columns == ()
@@ -1629,6 +1699,7 @@ def test_remote_source_plan_stream_uses_native_chunk_provider(monkeypatch) -> No
         """Fake staged remote chunk."""
 
         def __init__(self, name: str) -> None:
+            """Initialize fake stage state for name and manifest."""
             self.name = name
             self.manifest = NativeDirectorySourceManifest(
                 PreparedSourceBatch(
@@ -1644,32 +1715,39 @@ def test_remote_source_plan_stream_uses_native_chunk_provider(monkeypatch) -> No
             )
 
         def close(self) -> None:
+            """Close the fake stage and release its retained resources."""
             events.append(f"close:{self.name}")
 
     class FakeStagedChunks:
         """Context manager yielding fake staged chunks."""
 
         def __init__(self, stages: list[FakeStage]) -> None:
+            """Initialize fake staged chunks state for stages."""
             self._stages = stages
 
         def __enter__(self):
+            """Return the managed fake staged chunks value from context entry."""
             events.append("enter")
             return iter(self._stages)
 
         def __exit__(self, _exc_type, _exc, _tb) -> bool:
+            """Finalize the fake staged chunks context without suppressing exceptions."""
             events.append("exit")
             return False
 
         def __iter__(self):
+            """Iterate over the configured values."""
             return iter(self._stages)
 
     class FakeRaw:
         """Fake raw sink that owns the provider like native does."""
 
         def __init__(self, provider) -> None:
+            """Initialize fake raw state for provider."""
             self.provider = provider
 
         def close(self) -> None:
+            """Close the fake raw and release its retained resources."""
             self.provider.close()
             events.append("raw-close")
 
@@ -1686,6 +1764,7 @@ def test_remote_source_plan_stream_uses_native_chunk_provider(monkeypatch) -> No
             first_row_columns,
             timestamp_columns,
         ):
+            """Validate the chunk-provider sink request and retain its provider."""
             assert sink == "stream"
             assert call_options == "options"
             assert include_source_file is True
@@ -1752,6 +1831,7 @@ def test_remote_source_plan_stream_uses_native_chunk_provider(monkeypatch) -> No
 def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
     monkeypatch,
 ) -> None:
+    """Verify remote JSON directory preparation allows native non utf8 directory."""
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.api_impl.source_plan import attached as source_plan_attached
     from schema_sanitizer.remote_impl import staging as remote_staging
@@ -1794,6 +1874,7 @@ def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
 
 
 def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> None:
+    """Verify remote directory staging respects download concurrency."""
     from schema_sanitizer.remote_impl import directory_downloads as remote_downloads
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.sources import RemoteFile
@@ -1864,6 +1945,7 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
 
 
 def test_remote_directory_staging_does_not_retry_memory_limit_failure(monkeypatch) -> None:
+    """Verify remote directory staging does not retry memory limit failure."""
     from contextlib import contextmanager
 
     from schema_sanitizer.errors import SchemaSanitizerResourceError

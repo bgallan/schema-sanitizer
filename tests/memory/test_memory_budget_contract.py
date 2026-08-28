@@ -1,4 +1,7 @@
-"""Contract tests for the single explicit per-operation memory budget."""
+"""Defines the public and native contract for one bounded, monotonic per-operation memory
+control, including the default policy, multi-worker headroom, streamed output, and
+invalid limits. It also checks documentation and environment access so unbudgeted result
+ownership is disclosed and resource hardening remains the only configuration exception."""
 
 from __future__ import annotations
 

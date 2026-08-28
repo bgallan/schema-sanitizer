@@ -1,4 +1,8 @@
-"""Native schema-registry warm-up across partition plans."""
+"""Native schema-registry warm-up across partition plans.
+
+It selects warm-up plans, infers an initial schema registry across their inputs, and
+releases every prepared source after the state is captured.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Ingress/final schema contracts for modified-time CSV analytical workflows."""
+"""Ingress/final schema contracts for modified-time CSV analytical workflows.
+
+It validates ingress projection, final nested schema and registry provenance, event
+cleanup, BigQuery conversion, and embedded-registry preference.
+"""
 
 from __future__ import annotations
 
@@ -168,6 +172,7 @@ def test_bigquery_resolution_prefers_embedded_registry() -> None:
         """Client double that rejects any external-schema fallback."""
 
         def get_table(self, _table: object) -> object:
+            """Reject fallback to external table metadata."""
             raise AssertionError("external schema fallback should not run")
 
     resolved = resolve_bigquery_arrow_schema(

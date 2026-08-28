@@ -1,4 +1,8 @@
-"""Remote source-plan probing and lazy staged-chunk execution."""
+"""Remote source-plan probing and lazy staged-chunk execution.
+
+It stages remote chunks lazily with bounded prefetch, storage leases, registry probing,
+and retryable close or abandonment.
+"""
 
 from __future__ import annotations
 
@@ -45,6 +49,7 @@ class _StorageLeaseRollbackOwner:
     """Exactly-once rollback owner for one pre-acquired staging lease."""
 
     def __init__(self, lease: Any) -> None:
+        """Bind a pre-acquired storage lease to an exactly-once rollback decision."""
         self.lease = lease
         self._lock = Lock()
         self._claimed = False
@@ -190,7 +195,7 @@ class RemoteChunkPrefetchIterator:
         self.close()
 
     def __iter__(self) -> RemoteChunkPrefetchIterator:
-        """Return the iterator."""
+        """Return this remote chunk prefetch iterator."""
         self._assert_owner_process()
         self._ensure_started()
         return self

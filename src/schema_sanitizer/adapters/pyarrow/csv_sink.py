@@ -1,4 +1,8 @@
-"""PyArrow CSV sink for record-batch streams."""
+"""PyArrow CSV sink for record-batch streams.
+
+It consumes Arrow batches as CSV, delegates nested rendering to the native path when
+required, and reports final writer statistics.
+"""
 
 from __future__ import annotations
 

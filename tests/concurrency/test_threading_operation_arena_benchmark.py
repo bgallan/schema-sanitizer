@@ -1,4 +1,8 @@
-"""Contracts for the operation-wide native arena scaling benchmark."""
+"""Validate inputs and baseline selection for the operation-arena scaling benchmark.
+
+Worker counts must be positive, sorted, and unique, and reported speedups must use the
+multi-threading run at one worker as their consistent scaling baseline.
+"""
 
 from __future__ import annotations
 

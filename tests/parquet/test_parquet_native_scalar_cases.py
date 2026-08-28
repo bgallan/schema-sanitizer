@@ -1,4 +1,8 @@
-"""Native scalar, list, page, projection, and staging Parquet cases."""
+"""Native scalar, list, page, projection, and staging Parquet cases.
+
+Its named matrix covers scalar and list types, page encodings, projections, staging, and
+exact native outcomes.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ def test_native_scalar_case(
     run_case,
     request: pytest.FixtureRequest,
 ) -> None:
+    """Verify native scalar case."""
     del case_id
     kwargs = {
         name: request.getfixturevalue(name)

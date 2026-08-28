@@ -1,4 +1,7 @@
-"""Regression coverage for memory generation owner first acquire rolls back after internal interrupt."""
+"""Tests owner-first publication through interrupted acquire, store handoff, post-commit
+release retry, reserved-escrow failures, mirror loss, and production finalizer handoff.
+Ownership is rooted before ticket visibility, rollback restores a publishable owner, and
+exact physical or logical slots retire even when dictionary mirrors disappear."""
 
 from __future__ import annotations
 
@@ -8,23 +11,28 @@ import pytest
 
 
 def _root() -> Path:
+    """Return the repository root used by source-contract checks."""
     return Path(__file__).resolve().parents[2]
 
 
 class _Owner:
     def __init__(self) -> None:
+        """Initialize the owner test double."""
         self.ticket = 0
         self._escrow_armed_ticket = 0
 
     def arm_for_ticket(self, ticket: int) -> None:
+        """Record the finalizer ticket currently armed on this owner."""
         self._escrow_armed_ticket = int(ticket)
 
     def disarm_ticket(self, ticket: int | None = None) -> None:
+        """Clear the armed ticket when it matches the requested ticket."""
         if ticket is None or self._escrow_armed_ticket == int(ticket):
             self._escrow_armed_ticket = 0
 
 
 def test_generation_owner_first_acquire_rolls_back_after_internal_interrupt(monkeypatch) -> None:
+    """Verify generation owner first acquire rolls back after internal interrupt."""
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
 
     pool = BoundedGenerationPool(1)
@@ -33,6 +41,7 @@ def test_generation_owner_first_acquire_rolls_back_after_internal_interrupt(monk
     calls = 0
 
     def flaky(self: BoundedGenerationPool) -> None:
+        """Inject the flaky failure at the controlled test point."""
         nonlocal calls
         calls += 1
         if self is pool and calls == 2:
@@ -51,6 +60,7 @@ def test_generation_owner_first_acquire_rolls_back_after_internal_interrupt(monk
 
 
 def test_generation_owner_identity_closes_return_to_store_handoff_gap() -> None:
+    """Verify generation owner identity closes return to store handoff gap."""
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
 
     pool = BoundedGenerationPool(1)
@@ -71,6 +81,7 @@ def test_generation_owner_identity_closes_return_to_store_handoff_gap() -> None:
 
 
 def test_generation_release_postcommit_is_retry_idempotent(monkeypatch) -> None:
+    """Verify generation release postcommit is retry idempotent."""
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
 
     pool = BoundedGenerationPool(1)
@@ -82,6 +93,7 @@ def test_generation_release_postcommit_is_retry_idempotent(monkeypatch) -> None:
     calls = 0
 
     def flaky(self: BoundedGenerationPool) -> None:
+        """Inject the flaky failure at the controlled test point."""
         nonlocal calls
         calls += 1
         if self is pool and calls == 2:
@@ -102,6 +114,7 @@ def test_generation_release_postcommit_is_retry_idempotent(monkeypatch) -> None:
 def test_reserved_escrow_owner_first_reservation_rolls_back_without_ticket_handoff(
     monkeypatch,
 ) -> None:
+    """Verify reserved escrow owner first reservation rolls back without ticket handoff."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[_Owner] = ReservedFinalizerEscrow(1)
@@ -110,6 +123,7 @@ def test_reserved_escrow_owner_first_reservation_rolls_back_without_ticket_hando
     failed = False
 
     def flaky(self: ReservedFinalizerEscrow[_Owner]) -> None:
+        """Inject the flaky failure at the controlled test point."""
         nonlocal failed
         if self is escrow and not failed:
             failed = True
@@ -126,6 +140,7 @@ def test_reserved_escrow_owner_first_reservation_rolls_back_without_ticket_hando
 
 
 def test_reserved_escrow_claim_failure_restores_publishable_owner() -> None:
+    """Verify reserved escrow claim failure restores publishable owner."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[_Owner] = ReservedFinalizerEscrow(1)
@@ -137,6 +152,7 @@ def test_reserved_escrow_claim_failure_restores_publishable_owner() -> None:
     calls = 0
 
     def interrupt(_ticket: int, value: _Owner) -> None:
+        """Inject the interruption at the controlled handoff point."""
         nonlocal calls
         calls += 1
         assert value is owner
@@ -155,6 +171,7 @@ def test_reserved_escrow_claim_failure_restores_publishable_owner() -> None:
 
 
 def test_reserved_escrow_processed_marker_prevents_callback_replay(monkeypatch) -> None:
+    """Verify reserved escrow processed marker prevents callback replay."""
     import schema_sanitizer.core_impl.finalizer_escrow as module
 
     escrow: module.ReservedFinalizerEscrow[_Owner] = module.ReservedFinalizerEscrow(1)
@@ -168,6 +185,7 @@ def test_reserved_escrow_processed_marker_prevents_callback_replay(monkeypatch) 
     calls = 0
 
     def flaky(self: module.ReservedFinalizerEscrow[_Owner]) -> None:
+        """Inject the flaky failure at the controlled test point."""
         nonlocal failed
         if self is escrow and not failed and module._PROCESSED in self._states:
             failed = True
@@ -177,6 +195,7 @@ def test_reserved_escrow_processed_marker_prevents_callback_replay(monkeypatch) 
         original(self)
 
     def processor(_ticket: int, value: _Owner) -> None:
+        """Process the queued owner through the controlled path."""
         nonlocal calls
         calls += 1
         assert value is owner
@@ -194,6 +213,7 @@ def test_reserved_escrow_processed_marker_prevents_callback_replay(monkeypatch) 
 
 
 def test_physical_claim_target_zero_retires_slot_even_after_dict_mirror_was_lost() -> None:
+    """Verify physical claim target zero retires slot even after dict mirror was lost."""
     from schema_sanitizer.core_impl import process_resources as module
 
     module.drain_finalizer_cleanup()
@@ -214,6 +234,7 @@ def test_physical_claim_target_zero_retires_slot_even_after_dict_mirror_was_lost
 
 
 def test_logical_claim_target_zero_retires_slot_even_after_dict_mirror_was_lost() -> None:
+    """Verify logical claim target zero retires slot even after dict mirror was lost."""
     from schema_sanitizer.core_impl import process_resources as module
 
     module.drain_finalizer_cleanup()
@@ -234,6 +255,7 @@ def test_logical_claim_target_zero_retires_slot_even_after_dict_mirror_was_lost(
 
 
 def test_production_generation_consumers_are_owner_first() -> None:
+    """Verify production generation consumers are owner first."""
     root = _root() / "src/schema_sanitizer"
     expectations = {
         root / "core_impl/process_resources.py": "_EXTERNAL_RUNTIME_CLAIM_SLOTS.acquire_for(",
@@ -254,6 +276,7 @@ def test_production_generation_consumers_are_owner_first() -> None:
 
 
 def test_production_rooted_finalizers_reserve_owner_before_ticket_handoff() -> None:
+    """Verify production rooted finalizers reserve owner before ticket handoff."""
     root = _root() / "src/schema_sanitizer"
     paths = (
         root / "core_impl/memory_budget.py",

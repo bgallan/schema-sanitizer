@@ -1,4 +1,8 @@
-"""Shared fixtures for memory-hardening tests."""
+"""Install controlled native-module stubs for memory-hardening tests.
+
+The fixtures isolate import-time behavior and restore module caches so failure-path tests cannot
+leak state.
+"""
 
 from __future__ import annotations
 
@@ -42,23 +46,29 @@ def native_stub(
         """Minimal native metadata provider."""
 
         def __init__(self) -> None:
+            """Initialize the stub test double."""
             self._memory_ledgers: dict[int, list[int]] = {}
 
         def process_resident_memory_stats(self) -> tuple[int, int, int]:
+            """Return the controlled resident-memory statistics."""
             return (1 << 40, 0, 0)
 
         def process_physical_thread_permits_acquire(self, amount: int, minimum: int) -> int:
+            """Acquire the requested physical-thread permits from the stub."""
             return amount if amount >= minimum else 0
 
         def process_physical_thread_permits_release(self, _amount: int) -> None:
+            """Release physical-thread permits back to the stub."""
             return None
 
         def process_file_descriptor_permits_snapshot(
             self,
         ) -> tuple[int, int, int, int, int, int]:
+            """Return the current FD permit ledger snapshot."""
             return (0, 0, 4096, 0, 0, 0)
 
         def operation_memory_ledger_create(self, limit_bytes: int) -> object:
+            """Create and register an empty in-memory operation ledger."""
             capsule = object()
             self._memory_ledgers[id(capsule)] = [limit_bytes, 0, 0]
             return capsule
@@ -66,21 +76,26 @@ def native_stub(
         def operation_memory_ledger_reserve_snapshot(
             self, capsule: object, amount: int, _stage: str
         ) -> tuple[int, int, int]:
+            """Add reserved bytes, update the peak, and return the ledger snapshot."""
             values = self._memory_ledgers[id(capsule)]
             values[1] += amount
             values[2] = max(values[2], values[1])
             return tuple(values)  # type: ignore[return-value]
 
         def operation_memory_ledger_release(self, capsule: object, amount: int) -> None:
+            """Subtract released bytes from the active ledger reservation."""
             self._memory_ledgers[id(capsule)][1] -= amount
 
         def operation_memory_ledger_snapshot(self, capsule: object) -> tuple[int, int, int]:
+            """Return the current operation-memory ledger snapshot."""
             return tuple(self._memory_ledgers[id(capsule)])  # type: ignore[return-value]
 
         def options_catalog(self) -> tuple[object, ...]:
+            """Return the options catalog exported by the native stub."""
             return ()
 
         def __getattr__(self, _name: str) -> Any:
+            """Return the configured dynamic attribute from the native stub."""
             return lambda *_args, **_kwargs: None
 
     module_names = cast(

@@ -1,7 +1,7 @@
 """Tests for the Parquet runtime contract CI suite.
 
-These tests exercise the CI/certificate harness separately from the large
-public Parquet API test module to keep both files easier to navigate.
+These tests exercise the CI/certificate harness separately from the large public Parquet
+API test module to keep both files easier to navigate.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import pytest
 
 
 def test_parquet_contract_runtime_suite_selects_no_skip_runtime_contract_tests() -> None:
+    """Verify Parquet contract runtime suite selects no skip runtime contract tests."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         PARQUET_CONTRACT_RUNTIME_TESTS,
     )
@@ -34,6 +35,7 @@ def test_parquet_contract_runtime_suite_selects_no_skip_runtime_contract_tests()
 
 
 def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
+    """Verify Parquet contract runtime suite plugin detects selected skips."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import _NoSkipPlugin
 
     plugin = _NoSkipPlugin()
@@ -77,6 +79,7 @@ def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
 def test_parquet_contract_runtime_suite_fails_closed_when_readiness_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet contract runtime suite fails closed when readiness fails."""
     from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
 
     monkeypatch.setattr(
@@ -92,6 +95,7 @@ def test_parquet_contract_runtime_suite_fails_closed_when_readiness_fails(
 
 
 def test_parquet_contract_runtime_suite_manifest_groups_cover_every_contract_family() -> None:
+    """Verify Parquet contract runtime suite manifest groups cover every contract family."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         PARQUET_CONTRACT_RUNTIME_REQUIRED_GROUPS,
         PARQUET_CONTRACT_RUNTIME_TEST_GROUPS,
@@ -122,6 +126,7 @@ def test_parquet_contract_runtime_suite_manifest_groups_cover_every_contract_fam
 
 
 def test_parquet_contract_runtime_suite_selection_detects_missing_group() -> None:
+    """Verify Parquet contract runtime suite selection detects missing group."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _validate_runtime_suite_selection,
     )
@@ -140,6 +145,7 @@ def test_parquet_contract_runtime_suite_selection_detects_missing_group() -> Non
 
 
 def test_parquet_contract_runtime_suite_selection_detects_a_missing_nodeid() -> None:
+    """Verify Parquet contract runtime suite selection detects a missing nodeid."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _validate_runtime_suite_selection,
     )
@@ -160,6 +166,7 @@ def test_parquet_contract_runtime_suite_selection_detects_a_missing_nodeid() -> 
 def test_parquet_contract_runtime_suite_fails_closed_when_selection_is_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet contract runtime suite fails closed when selection is invalid."""
     from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
 
     monkeypatch.setattr(
@@ -177,6 +184,7 @@ def test_parquet_contract_runtime_suite_fails_closed_when_selection_is_invalid(
 
 
 def test_parquet_contract_runtime_suite_group_execution_summary_accepts_group_passes() -> None:
+    """Verify Parquet contract runtime suite group execution summary accepts group passes."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
@@ -217,6 +225,7 @@ def test_parquet_contract_runtime_suite_group_execution_summary_accepts_group_pa
 def test_parquet_contract_runtime_suite_group_execution_summary_detects_missing_group_pass() -> (
     None
 ):
+    """Verify Parquet contract runtime suite group execution summary detects missing group pass."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
@@ -257,6 +266,7 @@ def test_parquet_contract_runtime_suite_group_execution_summary_detects_missing_
 def test_parquet_contract_runtime_suite_group_execution_summary_matches_parametrized_reports() -> (
     None
 ):
+    """Verify Parquet contract runtime suite group execution summary matches parametrized reports."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
@@ -285,6 +295,7 @@ def test_parquet_contract_runtime_suite_group_execution_summary_matches_parametr
 def test_parquet_contract_runtime_suite_group_execution_summary_records_skips_and_failures() -> (
     None
 ):
+    """Verify Parquet contract runtime suite group execution summary records skips and failures."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
@@ -326,6 +337,7 @@ def test_parquet_contract_runtime_suite_group_execution_summary_records_skips_an
 
 
 def test_parquet_contract_runtime_suite_parses_certificate_output_arg() -> None:
+    """Verify Parquet contract runtime suite parses certificate output arg."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import _parse_runtime_suite_args
 
     output, pytest_args = _parse_runtime_suite_args(
@@ -337,6 +349,7 @@ def test_parquet_contract_runtime_suite_parses_certificate_output_arg() -> None:
 
 
 def test_parquet_contract_runtime_suite_certificate_accepts_full_contract() -> None:
+    """Verify Parquet contract runtime suite certificate accepts full contract."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         PARQUET_CONTRACT_RUNTIME_GUARANTEE_GROUPS,
         _runtime_suite_contract_certificate,
@@ -382,6 +395,7 @@ def test_parquet_contract_runtime_suite_certificate_accepts_full_contract() -> N
 
 
 def test_parquet_contract_runtime_suite_certificate_fails_missing_nested_group() -> None:
+    """Verify Parquet contract runtime suite certificate fails missing nested group."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_contract_certificate,
         _runtime_suite_group_execution_summary,
@@ -460,6 +474,7 @@ def test_parquet_contract_runtime_suite_writes_certificate_on_readiness_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify Parquet contract runtime suite writes certificate on readiness failure."""
     from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
 
     output = tmp_path / "parquet-contract-runtime-certificate.json"

@@ -1,4 +1,8 @@
-"""Tests CSV cleaning policy handling and schema stability."""
+"""Tests CSV cleaning policy handling and schema stability.
+
+It applies dirty headers and invalid values to strict CSV schemas across stop, skip-row,
+and emit-null-row policies.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ _CSV_INPUT_CASES = [
 
 
 def _table_signature(table) -> tuple[str, list[dict[str, object]]]:
-    """Return table signature for the test."""
+    """Return comparable schema text and rows from an Arrow table."""
     return (
         table.schema.to_string(show_field_metadata=False, show_schema_metadata=False),
         table.to_pylist(),
@@ -25,7 +29,7 @@ def _table_signature(table) -> tuple[str, list[dict[str, object]]]:
 
 
 def _csv_contract_schema():
-    """Return csv contract schema for the test."""
+    """Build the strict CSV schema shared by policy cases."""
     return pa.schema(
         [
             ("id", pa.int64()),
@@ -36,12 +40,12 @@ def _csv_contract_schema():
 
 
 def _csv_bad_text() -> str:
-    """Return csv bad text for the test."""
+    """Return CSV text containing one deliberate integer violation."""
     return "id,userid,username\n1,10,a\n2,oops,b\n3,30,c\n"
 
 
 def _prepare_csv_input(case: str, tmp_path, *, content: str) -> tuple[object, str]:
-    """Prepare csv input."""
+    """Write the selected CSV fixture and return its path and format mode."""
     if case == "csv_path":
         p = tmp_path / "rows.csv"
         p.write_text(content, encoding="utf-8")
@@ -54,7 +58,7 @@ def _prepare_csv_input(case: str, tmp_path, *, content: str) -> tuple[object, st
 
 
 def _read_csv_result(input_case: str, tmp_path, *, content: str, **options):
-    """Read csv result."""
+    """Read one CSV fixture through the contract or public helper route."""
     data, _fmt = _prepare_csv_input(input_case, tmp_path, content=content)
     schema_contract = options.pop("schema_contract", None)
     if schema_contract is not None:
@@ -71,6 +75,7 @@ def _read_csv_result(input_case: str, tmp_path, *, content: str, **options):
 def test_csv_field_name_policy_matches_dirty_headers_against_strict_schema(
     input_case, tmp_path
 ) -> None:
+    """Verify CSV field name policy matches dirty headers against strict schema."""
     schema = pa.schema(
         [
             ("User-ID", pa.int64()),

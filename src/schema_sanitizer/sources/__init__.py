@@ -1,4 +1,8 @@
-"""Stable remote-source discovery and publication facade."""
+"""Expose a provider-neutral facade for remote discovery and publication.
+
+Public helpers validate UTC filters and resource options before delegating listing, discovery,
+and atomic object publication to the selected storage provider.
+"""
 
 from __future__ import annotations
 

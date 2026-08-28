@@ -1,4 +1,8 @@
-"""Render the CI coverage-gap report for high-risk runtime modules."""
+"""Render the CI coverage-gap report for high-risk runtime modules.
+
+It validates required high-risk modules and coverage floors before rendering concise
+line and branch gaps.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Regression coverage for memory governed file publication failure closes owner before credit release."""
+"""Tests file-publication failure across prearmed path cleanup, external-thread envelopes,
+Parquet routes, replay spools, native reset, transcoding end-of-file, grouping metadata,
+and PyArrow exceptions. Owners close before descriptor credit returns, and every path,
+inode byte, thread, and directory charge is admitted before it becomes externally
+visible."""
 
 from __future__ import annotations
 
@@ -12,12 +16,14 @@ CPP = ROOT / "cpp/src"
 
 
 def _source(relative: str) -> str:
+    """Return the production source text inspected by this module."""
     return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_governed_file_publication_failure_closes_owner_before_credit_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify governed file publication failure closes owner before credit release."""
     from schema_sanitizer.core_impl import process_resources as module
 
     events: list[str] = []
@@ -26,12 +32,14 @@ def test_governed_file_publication_failure_closes_owner_before_credit_release(
         amount = 1
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             events.append("lease.release")
 
     class Stream:
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the stream test double."""
             events.append("stream.close")
             self.closed = True
 
@@ -42,6 +50,7 @@ def test_governed_file_publication_failure_closes_owner_before_credit_release(
 
     class PublicationFailure:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the publication failure test double."""
             raise MemoryError("injected wrapper publication failure")
 
     monkeypatch.setattr(module, "GovernedFile", PublicationFailure)
@@ -56,6 +65,7 @@ def test_governed_file_publication_failure_closes_owner_before_credit_release(
 def test_path_identity_prearms_cleanup_before_fd_admission_or_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify path identity prearms cleanup before FD admission or open."""
     from schema_sanitizer.core_impl import path_identity as module
 
     target = tmp_path / "identity.bin"
@@ -64,9 +74,11 @@ def test_path_identity_prearms_cleanup_before_fd_admission_or_open(
     open_called = False
 
     def fail_prepare() -> tuple[int, object]:
+        """Raise the deliberate failure during prepare."""
         raise MemoryError("injected finalizer escrow failure")
 
     def acquire(_amount: int) -> object:
+        """Acquire the resource under the controlled scheduling conditions."""
         nonlocal lease_called
         lease_called = True
         raise AssertionError("FD admission must happen after owner prearm")
@@ -74,6 +86,7 @@ def test_path_identity_prearms_cleanup_before_fd_admission_or_open(
     real_open = module.os.open
 
     def tracked_open(*args: object, **kwargs: object) -> int:
+        """Open the governed file while retaining its exact descriptor owner."""
         nonlocal open_called
         open_called = True
         return real_open(*args, **kwargs)
@@ -91,6 +104,7 @@ def test_path_identity_prearms_cleanup_before_fd_admission_or_open(
 def test_external_runtime_parallelism_requires_exact_thread_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external runtime parallelism requires exact thread envelope."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Lease:
@@ -98,12 +112,14 @@ def test_external_runtime_parallelism_requires_exact_thread_envelope(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     lease = Lease()
     calls: list[tuple[int, int]] = []
 
     def acquire(desired: int, *, minimum: int = 1) -> Lease:
+        """Acquire the resource under the controlled scheduling conditions."""
         calls.append((desired, minimum))
         return lease
 
@@ -117,6 +133,7 @@ def test_external_runtime_parallelism_requires_exact_thread_envelope(
 
 
 def test_parquet_external_path_and_thread_routes_are_governed() -> None:
+    """Verify Parquet external path and thread routes are governed."""
     factory = _source("adapters/parquet/record_batch_factory.py")
     results = _source("api_impl/results.py")
     duckdb_relation = _source("api_impl/duckdb_relation.py")
@@ -139,6 +156,7 @@ def test_parquet_external_path_and_thread_routes_are_governed() -> None:
 
 
 def test_replay_spool_reserves_inode_bytes_and_fds_before_writes() -> None:
+    """Verify replay spool reserves inode bytes and FDs before writes."""
     replay = _source("api_impl/parquet/replay_stream.py")
     assert "TemporaryStoragePermitPool(memory_limit_bytes)" in replay
     assert "artifact_count=1" in replay
@@ -154,6 +172,7 @@ def test_replay_spool_reserves_inode_bytes_and_fds_before_writes() -> None:
 
 
 def test_native_fd_reset_is_fail_closed_and_transcoding_eof_commits_close() -> None:
+    """Verify native FD reset is fail closed and transcoding eof commits close."""
     header = (CPP / "internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     transcoding = (CPP / "ingest/transcoding/chunk_source.cc").read_text(encoding="utf-8")
     reset = header[
@@ -171,6 +190,7 @@ def test_native_fd_reset_is_fail_closed_and_transcoding_eof_commits_close() -> N
 
 
 def test_remote_and_local_grouping_graphs_share_directory_metadata_budget() -> None:
+    """Verify remote and local grouping graphs share directory metadata budget."""
     budget = _source("input_impl/directory_metadata_budget.py")
     assert "_DIRECTORY_METADATA_GROUP_ASSOCIATION_BYTES" in budget
     assert "def charge_group_associations" in budget
@@ -184,6 +204,7 @@ def test_remote_and_local_grouping_graphs_share_directory_metadata_budget() -> N
 
 
 def test_directory_group_charge_is_admitted_before_publish() -> None:
+    """Verify directory group charge is admitted before publish."""
     from schema_sanitizer.input_impl.directory_metadata_budget import DirectoryMetadataBudget
 
     budget = DirectoryMetadataBudget(1024 * 1024)
@@ -195,6 +216,7 @@ def test_directory_group_charge_is_admitted_before_publish() -> None:
 def test_pyarrow_external_runtime_lease_is_reclaimed_on_baseexception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify PyArrow external runtime lease is reclaimed on baseexception."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     class RuntimeLease:
@@ -203,20 +225,24 @@ def test_pyarrow_external_runtime_lease_is_reclaimed_on_baseexception(
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the runtime lease test double."""
             self.closed = True
 
     class Dataset:
         def scanner(self, **_kwargs: object) -> object:
+            """Raise the deliberate failure for the scanner path."""
             raise KeyboardInterrupt("injected external runtime cancellation")
 
     class DatasetLifetime:
         def close(self) -> None:
+            """Close the resources owned by the dataset lifetime test double."""
             pass
 
     class DatasetOwner:
         dataset = Dataset()
 
         def acquire(self) -> DatasetLifetime:
+            """Acquire the resource represented by the dataset owner test double."""
             return DatasetLifetime()
 
     class Factory:
@@ -233,6 +259,7 @@ def test_pyarrow_external_runtime_lease_is_reclaimed_on_baseexception(
 
     class Logger:
         def debug(self, *_args: object, **_kwargs: object) -> None:
+            """Ignore debug logging while the lifecycle path is under test."""
             pass
 
     runtime = RuntimeLease()

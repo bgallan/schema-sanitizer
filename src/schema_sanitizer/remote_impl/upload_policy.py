@@ -1,4 +1,8 @@
-"""Memory-bounded policy and helpers for remote multipart publication."""
+"""Memory-bounded policy and helpers for remote multipart publication.
+
+It calculates bounded part sizes and worker counts, validates provider receipts and
+offsets, and budgets retained multipart manifests.
+"""
 
 from __future__ import annotations
 
@@ -131,6 +135,7 @@ class S3MultipartManifestBudget:
     def __init__(self, part_count: int) -> None:
         # Precharge list pointer growth conservatively for every possible part;
         # each actual ETag/dict shell is charged before it is adopted by the list.
+        """Precharge operation memory for the largest possible multipart manifest."""
         base = 512 + max(1, int(part_count)) * 16
         self._lease = acquire_operation_memory(base, stage="s3_multipart_manifest")
         self._reserved = base
@@ -138,9 +143,11 @@ class S3MultipartManifestBudget:
 
     @property
     def reserved_bytes(self) -> int:
+        """Return the reserved bytes."""
         return 0 if self._closed else self._reserved
 
     def append_part(self, parts: list[dict[str, Any]], etag: str, part_number: int) -> None:
+        """Append one uploaded part and its exact retained-byte charge."""
         if self._closed:
             raise RuntimeError("S3 multipart manifest budget is closed")
         # The scheduler/SDK owns ``etag`` before this call. Grow the successor
@@ -157,6 +164,7 @@ class S3MultipartManifestBudget:
         self._reserved = next_reserved
 
     def close(self) -> None:
+        """Release the manifest memory lease and clear its retained-byte accounting."""
         if self._closed:
             return
         lease = self._lease

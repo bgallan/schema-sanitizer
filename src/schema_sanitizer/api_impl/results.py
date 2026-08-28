@@ -1,4 +1,8 @@
-"""Analytical output conversion and result wrappers."""
+"""Analytical output conversion and result wrappers.
+
+It normalizes analytical targets and converts owned Arrow streams into public result
+wrappers while preserving diagnostics and resource lifetime.
+"""
 
 from __future__ import annotations
 
@@ -439,6 +443,7 @@ class Result(DiagnosticsAccessMixin):
         self._sync_finalizer_capsule()
 
     def _sync_finalizer_capsule(self) -> None:
+        """Synchronize a result wrapper with its finalizer cleanup capsule."""
         capsule = self._finalizer_capsule
         state = self._finalizer_state
         if capsule is None or state is None:
@@ -453,6 +458,7 @@ class Result(DiagnosticsAccessMixin):
         state.keepalive = getattr(self, "_keepalive", None)
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this result."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -591,6 +597,7 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
         self._stream: Stream | None = None
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this sink result."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:

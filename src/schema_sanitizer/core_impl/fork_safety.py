@@ -47,6 +47,7 @@ def _prepare_fork_child_state() -> None:
 
 
 def _clear_parent_fork_preparation() -> None:
+    """Clear parent fork preparation."""
     global _PREPARED_CHILD_LOCK
     _PREPARED_CHILD_LOCK = None
 

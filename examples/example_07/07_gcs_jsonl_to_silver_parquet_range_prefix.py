@@ -1,4 +1,8 @@
-"""Convert partitioned GCS inputs to silver Parquet and sync BigQuery."""
+"""Convert partitioned GCS inputs to silver Parquet and sync BigQuery.
+
+The entry point parses operator settings and delegates planning, conversion,
+publication, and reporting to the reusable example modules.
+"""
 
 from __future__ import annotations
 

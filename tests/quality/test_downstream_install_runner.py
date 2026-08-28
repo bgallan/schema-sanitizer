@@ -1,4 +1,8 @@
-"""Tests for compact isolated downstream installation checks."""
+"""Tests for compact isolated downstream installation checks.
+
+It validates isolated base, typed, and optional-extra consumer profiles plus complete
+constraints for every published dependency group.
+"""
 
 from __future__ import annotations
 

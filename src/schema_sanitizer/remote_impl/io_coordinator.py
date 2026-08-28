@@ -1,4 +1,8 @@
-"""One operation-owned event-loop thread for bounded remote I/O."""
+"""One operation-owned event-loop thread for bounded remote I/O.
+
+RemoteIoCoordinator serializes one operation's provider coroutines on an owned loop thread while
+integrating permits, sessions, diagnostics, and terminal cleanup.
+"""
 
 from __future__ import annotations
 
@@ -98,6 +102,7 @@ def _retain_terminal_retry_coordinator(coordinator: "RemoteIoCoordinator") -> bo
 
 
 def _discard_terminal_retry_coordinator(coordinator: "RemoteIoCoordinator") -> None:
+    """Discard terminal retry coordinator."""
     token = id(coordinator)
     with _TERMINAL_RETRY_COORDINATORS_LOCK:
         if _TERMINAL_RETRY_COORDINATORS.get(token) is coordinator:
@@ -106,6 +111,7 @@ def _discard_terminal_retry_coordinator(coordinator: "RemoteIoCoordinator") -> N
 
 
 def _retry_remote_terminal_callbacks_token(token: int) -> None:
+    """Retry remote terminal callbacks token."""
     with _TERMINAL_RETRY_COORDINATORS_LOCK:
         coordinator = _TERMINAL_RETRY_COORDINATORS.get(token)
     if coordinator is not None:
@@ -147,6 +153,7 @@ class _RemoteHostResourceCapsule:
 
 
 def _retry_remote_host_resource_capsule(token: int) -> None:
+    """Retry remote host resource capsule."""
     with _HOST_RESOURCE_CAPSULES_LOCK:
         capsule = _HOST_RESOURCE_CAPSULES.get(token)
     if capsule is None:
@@ -196,6 +203,7 @@ class _RemoteIoSubmission:
     ) = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate and normalize the initialized instance state."""
         self.callback_quiescent.set()
 
     def claim_finalization(self) -> bool:
@@ -501,6 +509,7 @@ class RemoteIoCoordinator:
             if loop is not None:
 
                 def cancel_startup() -> None:
+                    """Cancel startup and retire any partially acquired resources."""
                     task = startup_task or self._startup_task
                     if task is not None and not task.done():
                         task.cancel()
@@ -693,6 +702,7 @@ class RemoteIoCoordinator:
             def bridge_done(
                 done: Future[Any], owner: _RemoteIoSubmission = submission_owner
             ) -> None:
+                """Handle completion of the asynchronous bridge operation."""
                 self._bridge_submission_done(done, owner)
 
             future.add_done_callback(bridge_done)
@@ -1176,6 +1186,7 @@ class RemoteIoCoordinator:
         # Retry callbacks retain only the integer capsule token, never ``self``.
 
         def retry_capsule(token: int = capsule_token) -> None:
+            """Retry cleanup for the retained resource capsule."""
             _retry_remote_host_resource_capsule(token)
 
         scheduled = schedule_retry(
@@ -1191,6 +1202,7 @@ class RemoteIoCoordinator:
             return
 
     def _retry_host_resource_cleanup(self) -> None:
+        """Retry host resource cleanup."""
         with self._lock:
             self._resource_retry_scheduled = False
         errors: list[BaseException] = []
@@ -1355,6 +1367,7 @@ class RemoteIoCoordinator:
         token = id(self)
 
         def retry_callbacks(token: int = token) -> None:
+            """Retry the retained terminal callbacks."""
             _retry_remote_terminal_callbacks_token(token)
 
         self._terminal_retry_scheduled = schedule_retry(
@@ -1368,6 +1381,7 @@ class RemoteIoCoordinator:
             self._terminal_retry_attempt += 1
 
     def _retry_terminal_callbacks(self) -> None:
+        """Retry terminal callbacks retained by the coordinator."""
         with self._close_condition:
             self._terminal_retry_scheduled = False
             if self._failed_terminal_callbacks:
@@ -1618,6 +1632,7 @@ class RemoteIoCoordinator:
                 task.cancel()
 
             async def drain_round() -> None:
+                """Drain one bounded round of pending cleanup work."""
                 await asyncio.gather(*pending, return_exceptions=True)
 
             # A cancelled Task may create another Task from its finally block.
@@ -1636,6 +1651,7 @@ class RemoteIoCoordinator:
 
 
 def _reset_remote_terminal_retry_registry_after_fork() -> None:
+    """Reset remote terminal retry registry after fork."""
     global _TERMINAL_RETRY_COORDINATORS_LOCK, _TERMINAL_RETRY_COORDINATORS
     global _TERMINAL_RETRY_OVERFLOWS, _TERMINAL_RETRY_OVERFLOWED
     _TERMINAL_RETRY_COORDINATORS_LOCK = threading.Lock()
@@ -1650,6 +1666,7 @@ _register_fork_handler("remote-io-coordinator", mode="quarantine_only")
 
 
 def _orphaned_startup_snapshot() -> object:
+    """Return a bounded snapshot of orphaned startup."""
     return _ORPHANED_STARTUPS.snapshot()
 
 

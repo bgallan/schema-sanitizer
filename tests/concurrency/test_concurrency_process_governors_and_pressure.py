@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency process governors and pressure."""
+"""Stress process governors as pressure and remote demand change concurrently.
+
+The tests cover permit fairness and cancellation, safety reserves, native policy shrinkage,
+memory-ledger anomalies, bounded lookahead shutdown, weighted transfer admission, coordinator
+capacity callbacks, untracked RSS, and temporary-storage close diagnostics.
+"""
 
 from __future__ import annotations
 

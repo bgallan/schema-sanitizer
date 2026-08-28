@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency csv logical scalars bypass json temporary."""
+"""Define CSV logical-scalar formatting contracts across native and Arrow inputs.
+
+The cases bypass temporary JSON encoding for CSV while preserving JSONL quoting defaults and
+exact single/multi temporal output.
+"""
 
 from __future__ import annotations
 

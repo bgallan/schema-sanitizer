@@ -1,4 +1,8 @@
-"""Regression coverage for memory remote io bypasses blocked head with multiple operations."""
+"""Stress-tests multi-operation remote-I/O fairness with delivered-permit cancellation,
+opportunistic acquisition, provider gates, forked context cleanup, staged paths,
+diagnostics, telemetry journals, and process-guarded Arrow or Parquet cleanup. Blocked
+heads may be bypassed only by eligible queued operations, while inherited resources
+return without parent locks and hostile metadata cannot leak slots."""
 
 from __future__ import annotations
 
@@ -50,10 +54,12 @@ def test_remote_io_cancel_after_delivery_reclaims_future_owned_permit(
 
     class CancelAfterResultFuture(asyncio.Future[module.RemoteIoPermit]):
         def __await__(self):  # type: ignore[no-untyped-def]
+            """Return a fresh provider resource."""
             yield from super().__await__()
             raise asyncio.CancelledError
 
     async def run() -> None:
+        """Consume the delivered result, then raise cancellation to model the race."""
         governor = module.RemoteIoPermitGovernor(capacity=1)
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(
@@ -79,16 +85,20 @@ def test_remote_delivery_callback_is_noop_after_grant_reclamation() -> None:
 
     class DeferredLoop:
         def call_soon_threadsafe(self, callback: Any) -> None:
+            """Invoke the thread-safe callback immediately."""
             callbacks.append(callback)
 
     class Future:
         def cancelled(self) -> bool:
+            """Report whether the fake future was cancelled."""
             return False
 
         def done(self) -> bool:
+            """Report whether the future test double has completed."""
             return False
 
         def set_result(self, _value: object) -> None:
+            """Publish the controlled future result."""
             raise AssertionError("reclaimed grant must not be published")
 
     governor = module.RemoteIoPermitGovernor(capacity=1)
@@ -118,6 +128,7 @@ def test_opportunistic_process_acquisition_does_not_bypass_fifo_waiter() -> None
     acquired: list[Any] = []
 
     def wait_for_all() -> None:
+        """Wait until every queued remote operation reaches completion."""
         acquired.append(governor.acquire(2, timeout_seconds=2.0))
 
     thread = threading.Thread(target=wait_for_all)
@@ -158,12 +169,14 @@ def test_provider_key_gate_cleanup_survives_repeated_cancellation() -> None:
     )
 
     async def run() -> None:
+        """Cancel acquisition after delivery and verify permit reclamation."""
         pool = RemoteProviderSessionPool()
         await pool.__aenter__()
         entered = asyncio.Event()
         blocker = asyncio.Event()
 
         async def borrower() -> None:
+            """Borrow the provider resource in the competing task."""
             async with pool._key_guard(("key",)):
                 entered.set()
                 await blocker.wait()
@@ -341,7 +354,10 @@ def test_provider_pool_rejects_cross_event_loop_reuse() -> None:
     asyncio.run(pool.__aenter__())
 
     async def borrow() -> None:
+        """Borrow the resource under the controlled ownership conditions."""
+
         async def factory() -> object:
+            """Reject an invalid descriptor weight before constructing a resource."""
             return object()
 
         await pool.borrow_client(("key",), factory)
@@ -423,16 +439,20 @@ def test_remote_delivery_reentrancy_is_iterative() -> None:
 
     class ImmediateLoop:
         def call_soon_threadsafe(self, callback: Any) -> None:
+            """Count factory calls and return a fresh provider resource."""
             callback()
 
     class FinishedFuture:
         def cancelled(self) -> bool:
+            """Report whether the fake future was cancelled."""
             return False
 
         def done(self) -> bool:
+            """Report whether the finished future test double has completed."""
             return True
 
         def set_result(self, _value: object) -> None:
+            """Publish the controlled future result."""
             raise AssertionError("finished future must not receive a permit")
 
     governor = module.RemoteIoPermitGovernor(capacity=1, max_waiters=4096)
@@ -567,10 +587,12 @@ def test_provider_pool_rejects_invalid_descriptor_weight_before_factory(
     calls = 0
 
     async def run() -> None:
+        """Queue the thread-safe callback for deferred execution."""
         nonlocal calls
         pool = RemoteProviderSessionPool()
 
         async def factory() -> object:
+            """Reject inherited pool use before loop access or resource construction."""
             nonlocal calls
             calls += 1
             return object()
@@ -606,11 +628,13 @@ def test_provider_pool_rejects_inherited_reference_before_loop_or_factory() -> N
     calls = 0
 
     async def run() -> None:
+        """Cancel a guarded borrower twice and verify its key gate is reclaimed."""
         nonlocal calls
         pool = RemoteProviderSessionPool()
         pool._pid = -1
 
         async def factory() -> object:
+            """Count factory calls and return a fresh provider resource."""
             nonlocal calls
             calls += 1
             return object()
@@ -631,25 +655,31 @@ def test_provider_throttle_hostile_exception_metadata_cannot_leak_slot() -> None
     class HostileProviderError(RuntimeError):
         @property
         def status(self) -> object:
+            """Raise the deliberate failure for the status path."""
             raise RuntimeError("hostile status")
 
         @property
         def status_code(self) -> object:
+            """Raise the deliberate failure for the status code path."""
             raise KeyboardInterrupt("hostile status code")
 
         @property
         def retry_after(self) -> object:
+            """Return the controlled retry delay for the remote response."""
             raise RuntimeError("hostile retry-after")
 
         @property
         def headers(self) -> object:
+            """Raise the deliberate failure for the headers path."""
             raise KeyboardInterrupt("hostile headers")
 
         @property
         def response(self) -> object:
+            """Raise the deliberate failure for the response path."""
             raise RuntimeError("hostile response")
 
         def __str__(self) -> str:
+            """Raise when the test attempts to render the hostile value."""
             raise KeyboardInterrupt("hostile text")
 
     governor = module.ProviderThrottleGovernor()
@@ -735,6 +765,7 @@ def test_telemetry_reads_do_not_rewrite_or_publish_journals(
     path.write_bytes(payload)
 
     def unexpected(*_args: object, **_kwargs: object) -> None:
+        """Raise the deliberate failure for the unexpected path."""
         raise AssertionError("read-only telemetry query attempted a commit")
 
     monkeypatch.setattr(module, "commit_locked_payload", unexpected)
@@ -780,6 +811,7 @@ def test_relaxed_telemetry_journal_recovers_partial_main_write(
     calls = 0
 
     def partial_then_fail(handle: object, payload: bytes) -> None:
+        """Yield one partial response chunk before raising the injected failure."""
         nonlocal calls
         calls += 1
         if calls == 1:

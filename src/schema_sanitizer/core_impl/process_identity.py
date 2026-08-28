@@ -1,4 +1,8 @@
-"""PID-reuse- and reboot-safe process identity helpers for coordination state."""
+"""Build process identities that survive PID reuse and host reboots safely.
+
+Linux process start tokens and boot identifiers are combined with the PID so coordination files
+can distinguish a live owner from stale state.
+"""
 
 from __future__ import annotations
 

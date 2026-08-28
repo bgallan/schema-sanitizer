@@ -1,4 +1,7 @@
-"""Regression coverage for memory done callback retains failed submission for retry."""
+"""Exercises failed submission, staging, registration, and thread-release paths through
+callback completion and repeated close. Cleanup is committed only after release
+succeeds, primary errors win, and failed leases remain owned for retry without reopening
+the runtime."""
 
 from __future__ import annotations
 
@@ -24,11 +27,13 @@ class _FailingRelease:
     """Release owner that succeeds after a configured number of failures."""
 
     def __init__(self, failures: int = 1) -> None:
+        """Initialize the failing release test double."""
         self.failures = failures
         self.calls = 0
         self.released = False
 
     def release(self) -> None:
+        """Release the resource held by the failing release test double."""
         self.calls += 1
         if self.calls <= self.failures:
             raise OSError("transient release failure")
@@ -118,6 +123,7 @@ def test_failed_staging_storage_release_is_retained(native_stub: None) -> None:
         """Minimal submit-only coordinator."""
 
         def submit(self, *_args: Any, **_kwargs: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             return submitted
 
     lease = _FailingRelease()
@@ -195,6 +201,7 @@ def test_submit_failure_preserves_primary_and_retains_lease(native_stub: None) -
         """Coordinator double that rejects submission synchronously."""
 
         def submit(self, *_args: Any, **_kwargs: Any) -> Future[Any]:
+            """Submit work through the rejecting coordinator test double."""
             raise RuntimeError("submission rejected")
 
     lease = _FailingRelease()
@@ -227,9 +234,11 @@ def test_close_retries_retained_cleanup_without_reopening_runtime(native_stub: N
         ident = None
 
         def is_alive(self) -> bool:
+            """Report whether the dead thread test double is active."""
             return False
 
         def join(self, timeout: float | None = None) -> None:
+            """Wait for the dead thread test double to finish."""
             pass
 
     owner = _FailingRelease()

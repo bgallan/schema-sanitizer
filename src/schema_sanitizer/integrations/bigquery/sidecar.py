@@ -1,4 +1,8 @@
-"""BigQuery registry-sidecar SQL, lookup, and update operations."""
+"""BigQuery registry-sidecar SQL, lookup, and update operations.
+
+It renders sidecar table DDL and lookup or update SQL, then coordinates persisted
+registry state alongside external tables.
+"""
 
 from __future__ import annotations
 

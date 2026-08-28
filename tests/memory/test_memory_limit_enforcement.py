@@ -1,4 +1,7 @@
-"""Runtime guarantees for the global per-operation memory limit."""
+"""Checks end-to-end memory-limit enforcement for multithreaded file output, oversized
+rows, and large streaming input. Native peak usage stays within the global limit,
+partial output is never published, and resident memory does not scale with the entire
+file."""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Test and apply the reusable test-determinism checker."""
+"""Test and apply the reusable test-determinism checker.
+
+It exercises Python and C++ guards for speed ceilings, sleeps, polling, lazy-worker
+assumptions, safety timeouts, and repository-wide reporting.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _analyze(tmp_path: Path, name: str, source: str) -> checker.PythonFindings:
+    """Analyze a Python test fragment with the determinism checker."""
     path = tmp_path / name
     path.write_text(source, encoding="utf-8")
     return checker.analyze_python(path)
@@ -34,6 +39,7 @@ def _analyze(tmp_path: Path, name: str, source: str) -> checker.PythonFindings:
     ),
 )
 def test_wall_clock_guard_detects_speed_ceilings(tmp_path: Path, source: str) -> None:
+    """Verify wall clock guard detects speed ceilings."""
     assert _analyze(tmp_path, "test_fragile.py", source).wall_clock
 
 
@@ -52,6 +58,7 @@ def test_wall_clock_guard_detects_speed_ceilings(tmp_path: Path, source: str) ->
 def test_wall_clock_guard_preserves_safety_timeouts_and_evidence(
     tmp_path: Path, source: str
 ) -> None:
+    """Verify wall clock guard preserves safety timeouts and evidence."""
     assert not _analyze(tmp_path, "test_safe.py", source).wall_clock
 
 
@@ -65,6 +72,7 @@ def test_wall_clock_guard_preserves_safety_timeouts_and_evidence(
     ),
 )
 def test_thread_sleep_guard_detects_scheduler_delays(tmp_path: Path, source: str) -> None:
+    """Verify thread sleep guard detects scheduler delays."""
     assert _analyze(tmp_path, "test_fragile_sleep.py", source).thread_sleeps
 
 
@@ -78,6 +86,7 @@ def test_thread_sleep_guard_detects_scheduler_delays(tmp_path: Path, source: str
 def test_thread_sleep_guard_preserves_polling_and_async_stimuli(
     tmp_path: Path, source: str
 ) -> None:
+    """Verify thread sleep guard preserves polling and async stimuli."""
     assert not _analyze(tmp_path, "test_safe_sleep.py", source).thread_sleeps
 
 
@@ -90,6 +99,7 @@ def test_thread_sleep_guard_preserves_polling_and_async_stimuli(
     ),
 )
 def test_async_sleep_guard_detects_scheduler_delays(tmp_path: Path, source: str) -> None:
+    """Verify async sleep guard detects scheduler delays."""
     assert _analyze(tmp_path, "test_fragile_async_sleep.py", source).async_sleeps
 
 
@@ -106,6 +116,7 @@ def test_async_sleep_guard_detects_scheduler_delays(tmp_path: Path, source: str)
 def test_async_sleep_guard_preserves_yields_blockers_and_polling(
     tmp_path: Path, source: str
 ) -> None:
+    """Verify async sleep guard preserves yields blockers and polling."""
     assert not _analyze(tmp_path, "test_safe_async_sleep.py", source).async_sleeps
 
 
@@ -122,6 +133,7 @@ def test_async_sleep_guard_preserves_yields_blockers_and_polling(
     ),
 )
 def test_lazy_worker_guard_detects_exact_capacity_assumptions(tmp_path: Path, source: str) -> None:
+    """Verify lazy worker guard detects exact capacity assumptions."""
     assert _analyze(tmp_path, "test_fragile_workers.py", source).lazy_workers
 
 
@@ -138,6 +150,7 @@ def test_lazy_worker_guard_detects_exact_capacity_assumptions(tmp_path: Path, so
 def test_lazy_worker_guard_preserves_bounds_inline_and_unrelated_counts(
     tmp_path: Path, source: str
 ) -> None:
+    """Verify lazy worker guard preserves bounds inline and unrelated counts."""
     assert not _analyze(tmp_path, "test_safe_workers.py", source).lazy_workers
 
 
@@ -153,6 +166,7 @@ def test_lazy_worker_guard_preserves_bounds_inline_and_unrelated_counts(
     ),
 )
 def test_wall_clock_guard_detects_cpp_speed_ceiling(tmp_path: Path, body: str) -> None:
+    """Verify wall clock guard detects C++ speed ceiling."""
     path = tmp_path / "fragile.cc"
     path.write_text(
         "const auto before=std::chrono::steady_clock::now();\noperation();\n" + body,
@@ -162,6 +176,7 @@ def test_wall_clock_guard_detects_cpp_speed_ceiling(tmp_path: Path, body: str) -
 
 
 def test_wall_clock_guard_preserves_cpp_deadline_and_wait_timeout(tmp_path: Path) -> None:
+    """Verify wall clock guard preserves C++ deadline and wait timeout."""
     path = tmp_path / "safe.cc"
     path.write_text(
         """
@@ -180,6 +195,7 @@ def test_wall_clock_guard_preserves_cpp_deadline_and_wait_timeout(tmp_path: Path
 
 
 def _repository_python_findings(field: str) -> list[str]:
+    """Run the determinism checker over an isolated test repository."""
     return [
         f"{path.relative_to(ROOT)}:{line}: {expression}"
         for path in sorted((ROOT / "tests").rglob("test_*.py"))
@@ -189,18 +205,22 @@ def _repository_python_findings(field: str) -> list[str]:
 
 
 def test_tests_do_not_assert_wall_clock_speed() -> None:
+    """Verify tests do not assert wall clock speed."""
     assert not _repository_python_findings("wall_clock")
 
 
 def test_tests_do_not_use_fixed_thread_sleeps_as_synchronization() -> None:
+    """Verify tests do not use fixed thread sleeps as synchronization."""
     assert not _repository_python_findings("thread_sleeps")
 
 
 def test_tests_do_not_use_fixed_async_sleeps_as_synchronization() -> None:
+    """Verify tests do not use fixed async sleeps as synchronization."""
     assert not _repository_python_findings("async_sleeps")
 
 
 def test_tests_do_not_require_every_lazy_worker_to_start() -> None:
+    """Verify tests do not require every lazy worker to start."""
     findings = [
         f"{path.relative_to(ROOT)}:{line}: {expression}"
         for path in sorted((ROOT / "tests").rglob("test_*.py"))
@@ -210,6 +230,7 @@ def test_tests_do_not_require_every_lazy_worker_to_start() -> None:
 
 
 def test_output_preference_probe_guarantees_exact_prewarm_counts() -> None:
+    """Verify output preference probe guarantees exact prewarm counts."""
     source = (ROOT / "cpp/src/api/python_abi3/runtime/test_probes.cc").read_text(encoding="utf-8")
     start = source.index(
         "// The low-core contract reports",
@@ -228,6 +249,7 @@ def test_output_preference_probe_guarantees_exact_prewarm_counts() -> None:
 
 
 def test_cpp_tests_do_not_assert_wall_clock_speed() -> None:
+    """Verify C++ tests do not assert wall clock speed."""
     root = ROOT / "cpp/tests"
     paths = sorted(root.rglob("*.cc")) + sorted(root.rglob("*.cc.inc"))
     findings = [
@@ -241,6 +263,7 @@ def test_cpp_tests_do_not_assert_wall_clock_speed() -> None:
 def test_checker_cli_reports_repository_findings(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Verify checker CLI reports repository findings."""
     tests = tmp_path / "tests"
     tests.mkdir()
     (tmp_path / "cpp/tests").mkdir(parents=True)

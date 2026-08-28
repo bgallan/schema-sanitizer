@@ -1,4 +1,8 @@
-"""Regression coverage for memory deferred operation ledger close retires finalizer ticket on last release."""
+"""Unifies deferred operation-ledger retirement with metadata retention, fork quarantine,
+asynchronous scheduling, result queues, thread and file-descriptor envelopes, CPU
+refresh, registries, and source summaries. The last release retires its finalizer
+ticket; every auxiliary domain reserves before retention and remains fair, bounded, and
+observable through close."""
 
 from __future__ import annotations
 
@@ -13,10 +17,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _source(relative: str) -> str:
+    """Return the production source text inspected by this module."""
     return (ROOT / "src/schema_sanitizer" / relative).read_text(encoding="utf-8")
 
 
 def test_deferred_operation_ledger_close_retires_finalizer_ticket_on_last_release() -> None:
+    """Verify deferred operation ledger close retires finalizer ticket on last release."""
     from schema_sanitizer.core_impl import memory_budget as module
 
     baseline = module._MEMORY_LEDGER_FINALIZER_ESCROW.reserved_count()
@@ -37,6 +43,7 @@ def test_deferred_operation_ledger_close_retires_finalizer_ticket_on_last_releas
 
 
 def test_directory_metadata_retention_lease_survives_budget_scope_until_owner_release() -> None:
+    """Verify directory metadata retention lease survives budget scope until owner release."""
     from schema_sanitizer.core_impl.memory_budget import OperationMemoryLedger
     from schema_sanitizer.input_impl.directory_metadata_budget import DirectoryMetadataBudget
 
@@ -60,6 +67,7 @@ def test_directory_metadata_retention_lease_survives_budget_scope_until_owner_re
 
 
 def test_directory_metadata_reserves_before_retaining_python_containers() -> None:
+    """Verify directory metadata reserves before retaining Python containers."""
     source = _source("input_impl/directory_metadata_budget.py")
     uris = source[source.index("    def charge_uris") : source.index("    def charge_references")]
     refs = source[source.index("    def charge_references") : source.index("    def charge_file")]
@@ -70,6 +78,7 @@ def test_directory_metadata_reserves_before_retaining_python_containers() -> Non
 
 
 def test_fork_quarantine_is_marker_only_and_production_has_no_child_safe_allocators() -> None:
+    """Verify fork quarantine is marker only and production has no child safe allocators."""
     from schema_sanitizer.core_impl import fork_manager
 
     fork_manager.register_fork_handler(
@@ -104,6 +113,7 @@ def test_fork_quarantine_is_marker_only_and_production_has_no_child_safe_allocat
 
 
 def test_async_scheduler_lifecycle_closes_new_admission_and_reopens_only_quiescent() -> None:
+    """Verify async scheduler lifecycle closes new admission and reopens only quiescent."""
     from schema_sanitizer.core_impl import async_scheduler as module
 
     module.reopen_async_scheduler_for_tests()
@@ -119,6 +129,7 @@ def test_async_scheduler_lifecycle_closes_new_admission_and_reopens_only_quiesce
 def test_async_scheduler_fair_share_prevents_one_operation_monopolising_normal_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async scheduler fair share prevents one operation monopolising normal pool."""
     from schema_sanitizer.core_impl import async_scheduler as module
 
     monkeypatch.setattr(module, "_MAX_PROCESS_ASYNC_TASK_SLOTS", 8)
@@ -137,9 +148,11 @@ def test_async_scheduler_fair_share_prevents_one_operation_monopolising_normal_p
 def test_async_scheduler_cancellation_resistance_transfers_admission_to_terminal_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async scheduler cancellation resistance transfers admission to terminal debt."""
     from schema_sanitizer.core_impl import async_scheduler as module
 
     async def run() -> tuple[int, int]:
+        """Cancel a resistant task and transfer its admission to terminal debt."""
         module.reopen_async_scheduler_for_tests()
         monkeypatch.setattr(module, "_ASYNC_CANCEL_TIMEOUT_SECONDS", 0.001)
         admission = module._acquire_async_scheduler_admission(1)
@@ -148,6 +161,7 @@ def test_async_scheduler_cancellation_resistance_transfers_admission_to_terminal
         allow_terminal = asyncio.Event()
 
         async def resistant() -> None:
+            """Delay terminal cancellation until cleanup ownership transfers."""
             started.set()
             try:
                 await asyncio.sleep(60)
@@ -175,6 +189,7 @@ def test_async_scheduler_cancellation_resistance_transfers_admission_to_terminal
 def test_async_result_queue_charges_retained_payload_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async result queue charges retained payload bytes."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
     from schema_sanitizer.core_impl import memory_budget
 
@@ -182,6 +197,7 @@ def test_async_result_queue_charges_retained_payload_bytes(
 
     class Lease:
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             return None
 
     monkeypatch.setattr(
@@ -191,7 +207,10 @@ def test_async_result_queue_charges_retained_payload_bytes(
     )
 
     async def run() -> list[bytes]:
+        """Collect byte payloads through the charged asynchronous result queue."""
+
         async def fetch(index: int) -> bytes:
+            """Return the controlled fetch result used by the asynchronous operation."""
             return b"x" * (1024 + index)
 
         return [
@@ -206,6 +225,7 @@ def test_async_result_queue_charges_retained_payload_bytes(
 def test_async_result_queue_accepts_exact_postflight_estimator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async result queue accepts exact postflight estimator."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
     from schema_sanitizer.core_impl import memory_budget
 
@@ -216,6 +236,7 @@ def test_async_result_queue_accepts_exact_postflight_estimator(
 
     class Lease:
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             return None
 
     monkeypatch.setattr(
@@ -225,7 +246,10 @@ def test_async_result_queue_accepts_exact_postflight_estimator(
     )
 
     async def run() -> list[OpaqueResult]:
+        """Collect opaque results using the exact postflight size estimator."""
+
         async def fetch(_index: int) -> OpaqueResult:
+            """Return the controlled fetch result used by the asynchronous operation."""
             return OpaqueResult()
 
         return [
@@ -249,6 +273,7 @@ def test_async_result_queue_accepts_exact_postflight_estimator(
 def test_thread_and_fd_hard_caps_can_reach_zero_under_external_pressure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify thread and FD hard caps can reach zero under external pressure."""
     from schema_sanitizer.core_impl import process_resources as module
 
     monkeypatch.setattr(module, "_thread_requested_capacity", lambda: 128)
@@ -262,6 +287,7 @@ def test_thread_and_fd_hard_caps_can_reach_zero_under_external_pressure(
 
         @staticmethod
         def getrlimit(_kind: int) -> tuple[int, int]:
+            """Return the controlled process resource limits."""
             return 64, 64
 
     monkeypatch.setattr(module, "resource", Resource)
@@ -271,6 +297,7 @@ def test_thread_and_fd_hard_caps_can_reach_zero_under_external_pressure(
 
 
 def test_native_physical_thread_envelope_counts_external_and_pending_threads() -> None:
+    """Verify native physical thread envelope counts external and pending threads."""
     source = (ROOT / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     assert '"/proc/self/task"' in source
     assert "g_managed_running_threads" in source
@@ -282,6 +309,7 @@ def test_native_physical_thread_envelope_counts_external_and_pending_threads() -
 
 
 def test_process_cpu_governor_refreshes_capacity_outside_admission_mutex() -> None:
+    """Verify process CPU governor refreshes capacity outside admission mutex."""
     source = (ROOT / "cpp/src/internal/runtime/process_cpu_governor.hh").read_text()
     acquire = source[source.index("AcquireTask(") : source.index("void ReleaseTask")]
     lock = acquire.index("std::unique_lock lock(mutex_)")
@@ -320,6 +348,7 @@ def test_process_cpu_governor_refreshes_capacity_outside_admission_mutex() -> No
 
 
 def test_native_registry_has_dynamic_global_budget_and_two_choice_sharding() -> None:
+    """Verify native registry has dynamic global budget and two choice sharding."""
     source = (ROOT / "cpp/src/internal/memory/memory_pool_registry.cc.inc").read_text()
     header = (ROOT / "cpp/src/internal/memory/memory_pool.hh").read_text()
     assert "automatic_memory_limit_bytes()" in source
@@ -335,6 +364,7 @@ def test_native_registry_has_dynamic_global_budget_and_two_choice_sharding() -> 
 
 
 def test_single_file_source_discovery_is_inside_shared_metadata_envelope() -> None:
+    """Verify single file source discovery is inside shared metadata envelope."""
     async_source = _source("pipeline/source_discovery.py")
     sync_source = _source("pipeline/source_discovery_sync.py")
     memory_source = _source("pipeline/source_discovery_memory.py")
@@ -348,6 +378,7 @@ def test_single_file_source_discovery_is_inside_shared_metadata_envelope() -> No
 def test_stage_concurrency_admission_is_distinct_and_rolls_back_extra_domains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify stage concurrency admission is distinct and rolls back extra domains."""
     from schema_sanitizer.core_impl import memory_budget as module
 
     assert issubclass(module.StageConcurrencyAdmission, module.CompositeParallelAdmission)
@@ -356,15 +387,18 @@ def test_stage_concurrency_admission_is_distinct_and_rolls_back_extra_domains(
 
     class Domain:
         def __init__(self, name: str) -> None:
+            """Initialize the domain test double."""
             self.name = name
 
         def release(self) -> None:
+            """Release the resource held by the domain test double."""
             released.append(self.name)
 
     base = module.StageConcurrencyAdmission(2, 64)
     monkeypatch.setattr(module, "acquire_parallel_admission", lambda *args, **kwargs: base)
 
     def fail(_slots: int) -> object:
+        """Raise the deliberate failure injected by the test."""
         raise RuntimeError("domain rejected")
 
     with pytest.raises(RuntimeError, match="domain rejected"):
@@ -378,6 +412,7 @@ def test_stage_concurrency_admission_is_distinct_and_rolls_back_extra_domains(
 
 
 def test_release_concurrency_gate_requires_payload_evidence_not_structural_only() -> None:
+    """Verify release concurrency gate requires payload evidence not structural only."""
     source = _source("core_impl/concurrency_coverage.py")
     gate = source[source.index("def validate_release_concurrency_pair_contracts") :]
     assert "validate_format_pair_release_contracts()" in gate
@@ -393,6 +428,7 @@ def test_release_concurrency_gate_requires_payload_evidence_not_structural_only(
 
 
 def test_partition_result_history_supports_full_compact_and_streaming_modes() -> None:
+    """Verify partition result history supports full compact and streaming modes."""
     source = _source("pipeline/partition_execution.py")
     assert '{"full", "metadata_only", "streaming"}' in source
     assert 'if retention_mode == "full"' in source
@@ -408,6 +444,7 @@ def test_partition_result_history_supports_full_compact_and_streaming_modes() ->
 
 
 def test_directory_metadata_close_has_a_bounded_deadline() -> None:
+    """Verify directory metadata close has a bounded deadline."""
     source = _source("input_impl/directory_metadata_budget.py")
     close = source[
         source.index(
@@ -420,6 +457,7 @@ def test_directory_metadata_close_has_a_bounded_deadline() -> None:
 
 
 def test_source_summary_is_streaming_and_partition_summary_is_identity_cached() -> None:
+    """Verify source summary is streaming and partition summary is identity cached."""
     source = _source("pipeline/source_discovery.py")
     memory_source = _source("pipeline/source_discovery_memory.py")
     summary = memory_source[

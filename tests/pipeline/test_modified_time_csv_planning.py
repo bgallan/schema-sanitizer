@@ -1,4 +1,8 @@
-"""UTC modified-time planning and source-manifest contracts."""
+"""UTC modified-time planning and source-manifest contracts.
+
+It covers UTC normalization, half-open daily windows, exact timestamp boundaries,
+immutable manifests, empty windows, and generation requirements.
+"""
 
 from __future__ import annotations
 

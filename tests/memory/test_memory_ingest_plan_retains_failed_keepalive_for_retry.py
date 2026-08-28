@@ -1,4 +1,8 @@
-"""Regression coverage for memory ingest plan retains failed keepalive for retry."""
+"""Collects close-retry contracts for ingest plans, registry and replay streams, Arrow
+streams, sinks, lazy analytical resources, execution contexts, manifests, Parquet
+providers, schemas, source plans, and transcoders. Each independent failed owner or
+keepalive remains rooted and deduplicated until cleanup commits, including across fork
+generations and UTF-8 budget checks."""
 
 from __future__ import annotations
 
@@ -12,10 +16,12 @@ class _FailOnceClose:
     """Close double that fails once before committing."""
 
     def __init__(self) -> None:
+        """Initialize the fail once close test double."""
         self.calls = 0
         self.closed = False
 
     def close(self) -> None:
+        """Close the resources owned by the fail once close test double."""
         self.calls += 1
         if self.calls == 1:
             raise OSError("transient close failure")
@@ -23,12 +29,14 @@ class _FailOnceClose:
 
 
 class _CloseCounter:
-    """Idempotent close counter."""
+    """Count close attempts and optionally fail the first."""
 
     def __init__(self) -> None:
+        """Initialize the close counter test double."""
         self.calls = 0
 
     def close(self) -> None:
+        """Close the resources owned by the close counter test double."""
         self.calls += 1
 
 
@@ -93,10 +101,12 @@ def test_registry_wrapper_does_not_double_close_wrapped_raw() -> None:
         """Minimal wrapper that owns one raw backend."""
 
         def __init__(self) -> None:
+            """Initialize the wrapper test double."""
             self._raw = raw
             self.calls = 0
 
         def close(self) -> None:
+            """Close the resources owned by the wrapper test double."""
             self.calls += 1
             self._raw.close()
 
@@ -362,6 +372,7 @@ def test_execution_context_pool_serializes_lazy_construction(
         return replacement
 
     def get_context(_index: int) -> object:
+        """Return the controlled context used by the ownership test."""
         caller_barrier.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         return pool.get()
 
@@ -476,9 +487,11 @@ def test_schema_cache_enforces_utf8_bytes_not_character_count() -> None:
         """Schema text double."""
 
         def __init__(self, text: str) -> None:
+            """Initialize the schema test double."""
             self.text = text
 
         def to_string(self, **_kwargs: object) -> str:
+            """Render the fake schema through its string conversion path."""
             return self.text
 
     cache = SchemaDecisionCache(max_size=4, max_key_bytes=4)

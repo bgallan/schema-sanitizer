@@ -1,4 +1,8 @@
-"""XML input and public API tests."""
+"""XML input and public API tests.
+
+It covers document and row-tag modes, attributes and repeated children, streaming memory
+bounds, DTD rejection, encodings, and scanner validation.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ import schema_sanitizer as ss
 
 
 def test_read_xml_without_row_tag_emits_document_row(tmp_path, require_native: None) -> None:
+    """Verify read XML without row tag emits document row."""
     pytest.importorskip("pyarrow")
 
     path = tmp_path / "document.xml"
@@ -32,6 +37,7 @@ def test_read_xml_without_row_tag_emits_document_row(tmp_path, require_native: N
 def test_read_xml_row_tag_maps_attributes_text_and_repeated_children(
     tmp_path, require_native: None
 ) -> None:
+    """Verify read XML row tag maps attributes text and repeated children."""
     pytest.importorskip("pyarrow")
 
     path = tmp_path / "rows.xml"
@@ -54,7 +60,7 @@ def test_read_xml_row_tag_maps_attributes_text_and_repeated_children(
 
 
 def test_xml_input_format_is_supported_by_converters(tmp_path, require_native: None) -> None:
-
+    """Verify XML input format is supported by converters."""
     path = tmp_path / "rows.xml"
     out = tmp_path / "rows.jsonl"
     path.write_text("<rows><row><a>1</a></row><row><a>2</a></row></rows>", encoding="utf-8")
@@ -70,7 +76,7 @@ def test_xml_input_format_is_supported_by_converters(tmp_path, require_native: N
 
 
 def test_read_xml_memory_limit_rejects_large_dom_input(tmp_path, require_native: None) -> None:
-
+    """Verify read XML memory limit rejects large DOM input."""
     path = tmp_path / "large.xml"
     path.write_text(
         "<rows><row><a>" + ("x" * (2 * 1024 * 1024)) + "</a></row></rows>",
@@ -84,6 +90,7 @@ def test_read_xml_memory_limit_rejects_large_dom_input(tmp_path, require_native:
 def test_read_xml_row_tag_streams_file_larger_than_memory_limit(
     tmp_path, require_native: None
 ) -> None:
+    """Verify read XML row tag streams file larger than memory limit."""
     pytest.importorskip("pyarrow")
 
     path = tmp_path / "stream.xml"
@@ -98,6 +105,7 @@ def test_read_xml_row_tag_streams_file_larger_than_memory_limit(
 
 
 def test_read_xml_row_tag_streams_rows_split_across_chunks(tmp_path, require_native: None) -> None:
+    """Verify read XML row tag streams rows split across chunks."""
     pytest.importorskip("pyarrow")
 
     lower_payload = "a" * 40_000
@@ -126,7 +134,7 @@ def test_read_xml_row_tag_streams_rows_split_across_chunks(tmp_path, require_nat
 def test_read_xml_row_tag_rejects_single_row_larger_than_memory_limit(
     tmp_path, require_native: None
 ) -> None:
-
+    """Verify read XML row tag rejects single row larger than memory limit."""
     path = tmp_path / "huge_row.xml"
     path.write_text(
         "<rows><row><payload>" + ("x" * 300) + "</payload></row></rows>", encoding="utf-8"
@@ -137,7 +145,7 @@ def test_read_xml_row_tag_rejects_single_row_larger_than_memory_limit(
 
 
 def test_read_xml_rejects_dtd_declarations(tmp_path, require_native: None) -> None:
-
+    """Verify read XML rejects dtd declarations."""
     path = tmp_path / "dtd.xml"
     path.write_text(
         '<!DOCTYPE rows [<!ENTITY x "boom">]><rows><row><a>&x;</a></row></rows>',
@@ -149,7 +157,7 @@ def test_read_xml_rejects_dtd_declarations(tmp_path, require_native: None) -> No
 
 
 def test_read_xml_document_mode_rejects_dtd_declarations(tmp_path, require_native: None) -> None:
-
+    """Verify read XML document mode rejects dtd declarations."""
     path = tmp_path / "document_dtd.xml"
     path.write_text(
         '<!DOCTYPE rows [<!ENTITY x "boom">]><rows><row><a>&x;</a></row></rows>',
@@ -161,6 +169,7 @@ def test_read_xml_document_mode_rejects_dtd_declarations(tmp_path, require_nativ
 
 
 def test_all_public_to_functions_share_input_options() -> None:
+    """Verify all public to functions share input options."""
     common = set(inspect.signature(ss.to_pyarrow).parameters) - {"input_path"}
     parquet_output_options = {"parquet_compression", "parquet_gzip_level"}
     assert "schema_drift_date" not in common
@@ -190,6 +199,7 @@ def test_all_public_to_functions_share_input_options() -> None:
 
 
 def test_file_input_can_exceed_memory_limit_bytes(tmp_path) -> None:
+    """Verify file input can exceed memory limit bytes."""
     pytest.importorskip("pyarrow")
     path = tmp_path / "data.jsonl"
     path.write_text(
@@ -203,11 +213,13 @@ def test_file_input_can_exceed_memory_limit_bytes(tmp_path) -> None:
 
 
 def test_file_like_payload_is_rejected_by_format_reader() -> None:
+    """Verify file like payload is rejected by format reader."""
     with pytest.raises(TypeError):
         read_test_csv(io.BytesIO(b"a,b\n1,2\n"))
 
 
 def test_public_input_mode_must_be_a_string(tmp_path) -> None:
+    """Verify public input mode must be a string."""
     path = tmp_path / "data.jsonl"
     path.write_text('{"a": 1}\n', encoding="utf-8")
     out = tmp_path / "out.jsonl"
@@ -217,6 +229,7 @@ def test_public_input_mode_must_be_a_string(tmp_path) -> None:
 
 
 def test_reader_returns_result_with_clean_data(tmp_path) -> None:
+    """Verify reader returns result with clean data."""
     pytest.importorskip("pyarrow")
     path = tmp_path / "data.jsonl"
     path.write_text('{"a": 1}\n', encoding="utf-8")
@@ -227,6 +240,7 @@ def test_reader_returns_result_with_clean_data(tmp_path) -> None:
 
 
 def test_analytical_function_selects_clean_data_type(tmp_path) -> None:
+    """Verify analytical function selects clean data type."""
     pytest.importorskip("pyarrow")
     path = tmp_path / "data.jsonl"
     path.write_text('{"a": 1}\n', encoding="utf-8")
@@ -235,6 +249,7 @@ def test_analytical_function_selects_clean_data_type(tmp_path) -> None:
 
 
 def test_unknown_reader_parameter_is_rejected() -> None:
+    """Verify unknown reader parameter is rejected."""
     with pytest.raises(TypeError, match="unknown"):
         read_test_python([{"a": 1}], unknown=True)
 

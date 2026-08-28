@@ -1,4 +1,7 @@
-"""Regression coverage for memory csv quoted cells decode directly into bounded arena storage."""
+"""Validates direct quoted-cell decoding plus CSV metadata, JSON field caches and vectors,
+and native cell or field cardinality checks. Both formats reject oversized structures
+before unbounded retention, while accepted CSV data lands directly in bounded arena
+storage."""
 
 from __future__ import annotations
 

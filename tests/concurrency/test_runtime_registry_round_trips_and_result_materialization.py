@@ -1,4 +1,8 @@
-"""Tests stream and result resource lifecycle contracts."""
+"""Round-trip native registry state and materialize stream-backed sink results.
+
+Path, chunk-provider, and Arrow sources must share correct probe and automatic-sink state, while
+table materialization closes raw streams without discarding diagnostics before result closure.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ import pytest
 def test_registry_probe_path_sources_native_state_round_trip(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify registry probe path sources native state round trip."""
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
     first_path = tmp_path / "first.json"
@@ -44,6 +49,7 @@ def test_registry_probe_path_source_chunk_provider_native_round_trip(
     tmp_path: Path,
     require_native: None,
 ) -> None:
+    """Verify registry probe path source chunk provider native round trip."""
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
     first_path = tmp_path / "first.json"
@@ -55,10 +61,12 @@ def test_registry_probe_path_source_chunk_provider_native_round_trip(
         """Simple two-chunk path-source provider."""
 
         def __init__(self) -> None:
+            """Initialize the provider test double."""
             self.index = 0
             self.closed = 0
 
         def next_sources(self):
+            """Return the next path-source chunk, or None after both are consumed."""
             chunks = [
                 [("json", str(first_path), str(first_path))],
                 [("json", str(second_path), str(second_path))],
@@ -70,6 +78,7 @@ def test_registry_probe_path_source_chunk_provider_native_round_trip(
             return out
 
         def close(self) -> None:
+            """Close the resources owned by the provider test double."""
             self.closed += 1
 
     provider = Provider()
@@ -93,6 +102,7 @@ def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_tri
     tmp_path: Path,
     require_native: None,
 ) -> None:
+    """Verify registry sink path source chunk provider auto registry native round trip."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.streams import Stream
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -111,10 +121,12 @@ def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_tri
         """Simple replayable path-source chunk provider."""
 
         def __init__(self) -> None:
+            """Initialize the provider test double."""
             self.index = 0
             self.closed = 0
 
         def next_sources(self):
+            """Advance through the replayable path chunks and signal exhaustion."""
             if self.index >= len(chunks):
                 return None
             out = chunks[self.index]
@@ -122,6 +134,7 @@ def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_tri
             return out
 
         def close(self) -> None:
+            """Close the resources owned by the provider test double."""
             self.closed += 1
 
     probe_provider = Provider()
@@ -160,6 +173,7 @@ def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_tri
 
 
 def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) -> None:
+    """Verify registry probe Arrow sources uses native registry state."""
     from schema_sanitizer.core_impl import execution as execution_context
     from schema_sanitizer.core_impl import probes as probe_dependencies
 
@@ -170,6 +184,7 @@ def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) ->
 
         @staticmethod
         def context_registry_probe_from_arrow_sources_registry_state(*args):
+            """Record the stateful Arrow probe and return the next registry payload."""
             calls.append(args)
             return {
                 "schema": b"\x00\x00\x00\x00",
@@ -182,6 +197,7 @@ def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) ->
 
         @staticmethod
         def context_registry_probe_from_arrow_sources(*_args):
+            """Raise the deliberate failure for the context registry probe from Arrow sources path."""
             raise AssertionError("JSON Arrow-source registry probe should not be used")
 
     monkeypatch.setattr(execution_context, "_native", SimpleNamespace(context_new=lambda: "ctx"))
@@ -215,6 +231,7 @@ def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) ->
 
 
 def test_registry_probe_arrow_sources_native_state_round_trip(require_native: None) -> None:
+    """Verify registry probe Arrow sources native state round trip."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
@@ -246,6 +263,7 @@ def test_registry_probe_arrow_sources_native_state_round_trip(require_native: No
 def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_trip(
     require_native: None,
 ) -> None:
+    """Verify registry sink Arrow source chunk provider auto registry native round trip."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.streams import Stream
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -260,10 +278,12 @@ def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_tr
         """Simple replayable Arrow-source chunk provider."""
 
         def __init__(self) -> None:
+            """Initialize the provider test double."""
             self.index = 0
             self.closed = 0
 
         def next_sources(self):
+            """Advance through the replayable Arrow chunks and signal exhaustion."""
             if self.index >= len(chunks):
                 return None
             out = chunks[self.index]
@@ -271,6 +291,7 @@ def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_tr
             return out
 
         def close(self) -> None:
+            """Close the resources owned by the provider test double."""
             self.closed += 1
 
     probe_provider = Provider()
@@ -310,12 +331,14 @@ def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_tr
 
 
 def test_sink_result_table_materialization_closes_stream_backed_raw(monkeypatch) -> None:
+    """Verify sink result table materialization closes stream backed raw."""
     import schema_sanitizer.api_impl.results as sink_result
 
     class TableStream:
         """Test helper for TableStream."""
 
         def __arrow_c_stream__(self):
+            """Export the owned Arrow C Stream capsule."""
             return object()
 
     class Raw:
@@ -326,12 +349,13 @@ def test_sink_result_table_materialization_closes_stream_backed_raw(monkeypatch)
         closed = False
 
         def close(self):
+            """Close the resources owned by the raw test double."""
             self.closed = True
 
     raw = Raw()
 
     def fake_table_from_stream_like(obj, *, feature):
-        """Return fake table from stream like for the test."""
+        """Validate the sink stream request and return the materialized-table sentinel."""
         assert isinstance(obj, TableStream)
         assert feature == "sink table output"
         return "materialized-table"
@@ -347,12 +371,14 @@ def test_sink_result_table_materialization_closes_stream_backed_raw(monkeypatch)
 
 
 def test_sink_result_table_materialization_preserves_diagnostics_until_close(monkeypatch) -> None:
+    """Verify sink result table materialization preserves diagnostics until close."""
     import schema_sanitizer.api_impl.results as sink_result
 
     class TableStream:
         """Test helper for TableStream."""
 
         def __arrow_c_stream__(self):
+            """Export the owned Arrow C Stream capsule."""
             return object()
 
     class Diagnostics:
@@ -366,20 +392,23 @@ def test_sink_result_table_materialization_preserves_diagnostics_until_close(mon
         table = TableStream()
 
         def __init__(self) -> None:
+            """Initialize the raw test double."""
             self.diagnostics = Diagnostics()
             self.main_closed = 0
             self.closed = 0
 
         def close_main_stream(self) -> None:
+            """Close the primary stream while recording lifecycle calls."""
             self.main_closed += 1
 
         def close(self) -> None:
+            """Close the resources owned by the raw test double."""
             self.closed += 1
 
     raw = Raw()
 
     def fake_table_from_stream_like(obj, *, feature):
-        """Return fake table from stream like for the test."""
+        """Validate the retained stream request and return the materialized-table sentinel."""
         assert isinstance(obj, TableStream)
         assert feature == "sink table output"
         return "materialized-table"

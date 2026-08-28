@@ -1,4 +1,8 @@
-"""Regression coverage for memory orphaned prepared capsule can die and arm separate root."""
+"""Tests orphaned prepared capsules, cancellation acknowledgements, aggregate cross-memory
+rejection, deferred-counter reconciliation, path or direct-memory escrows, destructor
+restrictions, and nonsaturating admission bytes. Prepared authority can move to a
+separately rooted escrow without retaining the old capsule, and destructors neither
+block nor publish rich owners."""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ SRC = ROOT / "src" / "schema_sanitizer"
 
 
 def test_orphaned_prepared_capsule_can_die_and_arm_separate_root() -> None:
+    """Verify orphaned prepared capsule can die and arm separate root."""
     from schema_sanitizer.core_impl import finalizer_cleanup as module
 
     escrow = module._PREPARED_FINALIZER_ESCROW
@@ -66,6 +71,7 @@ def test_orphaned_prepared_capsule_can_die_and_arm_separate_root() -> None:
 def test_cancel_release_exception_is_irreversibly_ack_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cancel release exception is irreversibly ack only."""
     from schema_sanitizer.core_impl import finalizer_cleanup as module
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
@@ -76,6 +82,7 @@ def test_cancel_release_exception_is_irreversibly_ack_only(
     failed = False
 
     def raising(self: object, ticket: int) -> bool:
+        """Raise the injected callback failure."""
         nonlocal failed
         if self is target and not failed:
             failed = True
@@ -90,6 +97,7 @@ def test_cancel_release_exception_is_irreversibly_ack_only(
 
 
 def test_aggregate_cross_memory_rejection_does_not_publish_false_overflow() -> None:
+    """Verify aggregate cross memory rejection does not publish false overflow."""
     import schema_sanitizer.core_impl.cross_process_memory as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -108,6 +116,7 @@ def test_aggregate_cross_memory_rejection_does_not_publish_false_overflow() -> N
 def test_aggregate_cross_memory_fallback_is_ack_before_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify aggregate cross memory fallback is ack before publication."""
     from schema_sanitizer.core_impl.cross_process_memory import _ProcessCrossMemoryCoordinator
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
@@ -122,6 +131,7 @@ def test_aggregate_cross_memory_fallback_is_ack_before_publication(
     failed = False
 
     def flaky(self: object, value: int) -> bool:
+        """Inject the flaky failure at the controlled test point."""
         nonlocal failed
         if self is coordinator._finalizer_releases and not failed:
             failed = True
@@ -140,6 +150,7 @@ def test_aggregate_cross_memory_fallback_is_ack_before_publication(
 
 
 def test_control_plane_deferred_drain_reconciles_dirty_authoritative_counters() -> None:
+    """Verify control plane deferred drain reconciles dirty authoritative counters."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget(include_static_baseline=False)
@@ -155,6 +166,7 @@ def test_control_plane_deferred_drain_reconciles_dirty_authoritative_counters() 
 
 
 def test_path_claim_escrow_roots_authority_not_destructed_owner() -> None:
+    """Verify path claim escrow roots authority not destructed owner."""
     import schema_sanitizer.core_impl.path_identity as module
 
     owner = module.PathClaimOwner(None, None, None)
@@ -202,6 +214,7 @@ def test_path_claim_escrow_roots_authority_not_destructed_owner() -> None:
 def test_direct_cross_memory_escrow_roots_authority_not_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify direct cross memory escrow roots authority not lease."""
     import schema_sanitizer.core_impl.cross_process_memory as module
 
     escrow = module.ReservedFinalizerEscrow(8)
@@ -223,6 +236,7 @@ def test_direct_cross_memory_escrow_roots_authority_not_lease(
 
 
 def test_specialized_finalizer_destructors_never_block_or_publish_self() -> None:
+    """Verify specialized finalizer destructors never block or publish self."""
     paths = [
         SRC / "core_impl" / "memory_budget.py",
         SRC / "core_impl" / "temporary_storage.py",
@@ -242,6 +256,7 @@ def test_specialized_finalizer_destructors_never_block_or_publish_self() -> None
 
 
 def test_admission_byte_counters_never_saturate_downward() -> None:
+    """Verify admission byte counters never saturate downward."""
     temporary = (SRC / "core_impl" / "temporary_storage.py").read_text(encoding="utf-8")
     retry = (SRC / "core_impl" / "retry_scheduler.py").read_text(encoding="utf-8")
     bounded = (SRC / "core_impl" / "bounded_generation.py").read_text(encoding="utf-8")
@@ -255,6 +270,7 @@ def test_admission_byte_counters_never_saturate_downward() -> None:
 
 
 def test_specialized_escrows_use_separate_rooted_authority() -> None:
+    """Verify specialized escrows use separate rooted authority."""
     expected = {
         SRC / "core_impl" / "memory_budget.py": "RootedFinalizerAuthority",
         SRC / "core_impl" / "temporary_storage.py": "RootedFinalizerAuthority",

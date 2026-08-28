@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency numeric boundaries match single."""
+"""Hold the flat parallel parser to the single-worker scalar oracle.
+
+Numeric edges, escaped strings, literals, empty containers, nested fallback, and invalid floats
+must preserve results and errors; wide output stays byte-exact without hash-based or duplicate
+primitive scans.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Tests read adapters and file-to-file converters."""
+"""Parquet registry, generated timestamp, row-span metadata, and drift-routing tests.
+
+It checks registry embedding and drift routing, nested field order, timestamp precision,
+generated columns, row spans, and previous state.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ pytestmark = pytest.mark.usefixtures("require_native")
 def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
     tmp_path: Path,
 ) -> None:
+    """Verify to Parquet alphabetically orders incremental registry struct fields."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     first_source = tmp_path / "first.jsonl"
@@ -81,6 +86,7 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
 
 
 def test_to_parquet_writes_timestamp_micros_by_default(tmp_path: Path) -> None:
+    """Verify to Parquet writes timestamp micros by default."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -100,6 +106,7 @@ def test_to_parquet_writes_timestamp_micros_by_default(tmp_path: Path) -> None:
 
 
 def test_to_parquet_can_write_timestamp_nanos(tmp_path: Path) -> None:
+    """Verify to Parquet can write timestamp nanos."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -122,6 +129,7 @@ def test_to_parquet_can_write_timestamp_nanos(tmp_path: Path) -> None:
 def test_to_parquet_covers_schema_sanitizer_emitted_time(
     tmp_path: Path,
 ) -> None:
+    """Verify to Parquet covers schema sanitizer emitted time."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -151,6 +159,7 @@ def test_to_parquet_covers_schema_sanitizer_emitted_time(
 
 
 def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
+    """Verify metadata native stream handles all row and timestamp columns."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.file_metadata import prepare_file_output_metadata_stream
 
@@ -182,6 +191,7 @@ def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
 
 
 def test_metadata_native_stream_handles_row_span_columns_across_batches() -> None:
+    """Verify metadata native stream handles row span columns across batches."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.file_metadata import prepare_file_output_metadata_stream
 
@@ -214,6 +224,7 @@ def test_metadata_native_stream_handles_row_span_columns_across_batches() -> Non
 
 @pytest.mark.parametrize("suffix", [".csv", ".jsonl", ".parquet"])
 def test_to_file_embeds_native_schema_registry(tmp_path: Path, suffix: str) -> None:
+    """Verify to file embeds native schema registry."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -278,6 +289,7 @@ def test_to_file_embeds_native_schema_registry(tmp_path: Path, suffix: str) -> N
 
 
 def test_embedded_registry_wraps_singleton_into_existing_list(tmp_path: Path) -> None:
+    """Verify embedded registry wraps singleton into existing list."""
     pa = pytest.importorskip("pyarrow")
 
     sentence_struct = pa.struct([pa.field("text", pa.string())])
@@ -310,6 +322,7 @@ def test_embedded_registry_wraps_singleton_into_existing_list(tmp_path: Path) ->
 
 
 def test_analytical_ingestion_timestamp_is_timestamp_micros(tmp_path: Path) -> None:
+    """Verify analytical ingestion timestamp is timestamp micros."""
     pa = pytest.importorskip("pyarrow")
 
     sentence_struct = pa.struct([pa.field("text", pa.string())])
@@ -340,6 +353,7 @@ def test_analytical_ingestion_timestamp_is_timestamp_micros(tmp_path: Path) -> N
 def test_embedded_registry_routes_nested_scalar_versions_without_parent_growth(
     tmp_path: Path,
 ) -> None:
+    """Verify embedded registry routes nested scalar versions without parent growth."""
     pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])

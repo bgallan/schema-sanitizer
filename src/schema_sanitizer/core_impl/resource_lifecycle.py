@@ -1,4 +1,8 @@
-"""Private cleanup helpers for ingest runtime wrappers."""
+"""Close ingest runtime wrappers while preserving useful failure context.
+
+Wrapper attributes and owner sequences are retried in acquisition-safe order, primary exceptions
+receive bounded cleanup notes, and failed owners remain retained for later release.
+"""
 
 from __future__ import annotations
 

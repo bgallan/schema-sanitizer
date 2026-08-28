@@ -1,4 +1,8 @@
-"""Reusable progress and summary helpers for partitioned pipelines."""
+"""Reusable progress and summary helpers for partitioned pipelines.
+
+It derives CPU, I/O, and wall-time estimates and presents progress or completion
+summaries for partitioned runs.
+"""
 
 from __future__ import annotations
 

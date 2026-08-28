@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency wide mixed scalar inference matches single."""
+"""Compare wide mixed-scalar inference with the single-worker schema oracle.
+
+Nested and empty containers must take the same fallback, serialized output must be byte-identical,
+and scalar dispatch must stay a single tag switch rather than duplicating type logic.
+"""
 
 from __future__ import annotations
 

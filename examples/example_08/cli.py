@@ -1,4 +1,8 @@
-"""Command-line contract for example 08."""
+"""Command-line contract for example 08.
+
+It defines ISO-date and positive-integer validation plus the complete cloud workflow
+command-line contract.
+"""
 
 from __future__ import annotations
 

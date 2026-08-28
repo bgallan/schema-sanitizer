@@ -1,4 +1,8 @@
-"""Regression coverage for memory remote io closed loop delivery storm is iterative."""
+"""Exercises iterative closed-loop delivery plus asynchronous retry accounting,
+cancellation-graph walking, registry compaction, prefetch cursor or lease cleanup,
+native option caches, inline storage release, and pressure reset after fork. Delivery
+and cancellation never recurse, successful work is not replayed after telemetry failure,
+and consumed or pending chunks close without losing cursor state."""
 
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ def test_remote_io_closed_loop_delivery_storm_is_iterative() -> None:
 
     class ClosedLoop:
         def call_soon_threadsafe(self, *_args: object, **_kwargs: object) -> None:
+            """Reject scheduling through the forbidden thread-safe callback."""
             raise RuntimeError("event loop is closed")
 
     governor = module.RemoteIoPermitGovernor(capacity=1, max_waiters=1200)
@@ -56,24 +61,30 @@ def test_retry_async_neutrally_releases_throttle_on_base_exception(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
             self.failures = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
         def failure(self, _exc: BaseException) -> None:
+            """Count a throttle failure notification."""
             self.failures += 1
 
         def success(self) -> None:
+            """Reject an unexpected success-path invocation."""
             raise AssertionError("operation did not succeed")
 
     lease = Lease()
 
     async def acquire(_key: str) -> Lease:
+        """Return the controlled permit acquisition result."""
         return lease
 
     async def operation() -> None:
+        """Raise the deliberate failure for the operation path."""
         raise failure()
 
     monkeypatch.setattr(provider_throttle, "acquire_provider_request", acquire)
@@ -100,23 +111,29 @@ def test_retry_async_does_not_repeat_success_when_success_accounting_fails(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.failures = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             raise AssertionError("successful operations are not neutrally released")
 
         def failure(self, _exc: BaseException) -> None:
+            """Count a throttle failure notification."""
             self.failures += 1
 
         def success(self) -> None:
+            """Reject an unexpected success-path invocation."""
             raise RuntimeError("success telemetry failed")
 
     lease = Lease()
 
     async def acquire(_key: str) -> Lease:
+        """Return the controlled permit acquisition result."""
         return lease
 
     async def operation() -> str:
+        """Run the controlled operation under test."""
         nonlocal calls
         calls += 1
         return "committed"
@@ -144,9 +161,11 @@ def test_bounded_wait_checks_external_cancellation_once() -> None:
 
     class EventProbe:
         def __init__(self) -> None:
+            """Initialize the event probe test double."""
             self.calls = 0
 
         def is_set(self) -> bool:
+            """Count the cancellation probe and report that cancellation is unset."""
             self.calls += 1
             return False
 
@@ -190,6 +209,7 @@ def test_operation_registry_compacts_attacker_sized_ids() -> None:
 
     class Source:
         def snapshot(self) -> dict[str, object]:
+            """Return a snapshot of the state recorded by the test double."""
             return {"state": "running"}
 
     source = Source()
@@ -206,6 +226,7 @@ def test_operation_registry_compacts_attacker_sized_ids() -> None:
 
 
 def _bare_remote_prefetch_iterator(module: Any, manifest: Any) -> Any:
+    """Construct a remote prefetch iterator without starting background work."""
     iterator = object.__new__(module.RemoteChunkPrefetchIterator)
     iterator._pid = os.getpid()
     iterator._manifest = manifest
@@ -246,9 +267,11 @@ def test_remote_prefetch_next_chunk_failure_releases_lease_and_preserves_cursor(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     lease = Lease()
@@ -304,14 +327,17 @@ def test_remote_prefetch_cancelled_drain_still_exits_shared_session() -> None:
         shutdown_timeout_seconds = 0.001
 
         def submit(self, operation: Any, **_kwargs: object) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             captured.append(operation)
             return Future()
 
     class Session:
         def __init__(self) -> None:
+            """Initialize the session test double."""
             self.exits = 0
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             self.exits += 1
 
     running: Future[Any] = Future()
@@ -328,6 +354,7 @@ def test_remote_prefetch_cancelled_drain_still_exits_shared_session() -> None:
     operation = captured[0]
 
     async def exercise() -> None:
+        """Cancel prefetch during drain and verify shared-session cleanup."""
         task = asyncio.create_task(operation(None))
         await asyncio.sleep(0)
         task.cancel()
@@ -361,13 +388,16 @@ def test_remote_inline_stage_base_exception_releases_storage_lease() -> None:
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     class Manifest:
         def stage_chunk(self, _start: int) -> object:
+            """Stage one chunk through the controlled session."""
             raise KeyboardInterrupt("inline stage interrupted")
 
     lease = Lease()
@@ -432,9 +462,11 @@ def test_remote_prefetch_refill_failure_closes_consumed_chunk() -> None:
 
     class Staged:
         def __init__(self) -> None:
+            """Initialize the staged test double."""
             self.closes = 0
 
         def close(self) -> None:
+            """Close the resources owned by the staged test double."""
             self.closes += 1
 
     staged = Staged()
@@ -450,6 +482,7 @@ def test_remote_prefetch_refill_failure_closes_consumed_chunk() -> None:
     close_calls = 0
 
     def close() -> None:
+        """Close the resource at the synchronization point under test."""
         nonlocal close_calls
         close_calls += 1
         iterator._closed = True
@@ -476,6 +509,7 @@ def test_remote_prefetch_unexpected_stop_iteration_still_closes() -> None:
     close_calls = 0
 
     def close() -> None:
+        """Close the resource at the synchronization point under test."""
         nonlocal close_calls
         close_calls += 1
         iterator._closed = True

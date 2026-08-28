@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency native parquet decode reuses the operation arena."""
+"""Require native Parquet decoding to reuse the operation's shared worker arena.
+
+Parallel scratch sizing must be derived and saturating, and decoding through the reused arena must
+produce byte-identical output at single and multiple worker widths.
+"""
 
 from __future__ import annotations
 

@@ -37,6 +37,7 @@ class CgroupIntegerSample:
 
     @property
     def known(self) -> bool:
+        """Return whether this cgroup sample contains a known numeric value."""
         return self.state is not CgroupValueState.UNKNOWN
 
 
@@ -54,6 +55,7 @@ class CgroupView:
     controller_hierarchy_complete: tuple[tuple[str, bool], ...] = ()
 
     def _root_and_mountpoint(self, *, controller: str | None = None) -> tuple[Path, Path] | None:
+        """Return the hierarchy root and mountpoint represented by this cgroup view."""
         if self.version == 2:
             if self.root is None or self.mountpoint is None:
                 return None
@@ -164,6 +166,7 @@ def _iter_bounded_proc_lines(
 
 def _unescape_mount_field(value: str) -> str:
     # mountinfo uses octal escapes for whitespace/backslash in path fields.
+    """Decode octal escapes from a Linux mountinfo path field."""
     return (
         value.replace("\\040", " ")
         .replace("\\011", "\t")
@@ -190,6 +193,7 @@ def _join_mount_path(mountpoint: str, mount_root: str, cgroup_path: str) -> Path
 
 
 def _read_current_membership() -> tuple[str | None, dict[str, str]] | None:
+    """Read the process's current cgroup membership files."""
     unified: str | None = None
     v1_memberships: dict[str, str] = {}
     try:
@@ -215,6 +219,7 @@ def _read_current_membership() -> tuple[str | None, dict[str, str]] | None:
 
 
 def _resolve_linux_cgroup_view_once(membership: tuple[str | None, dict[str, str]]) -> CgroupView:
+    """Resolve one Linux cgroup membership and mount snapshot."""
     unified, v1_memberships = membership
     unified_candidate: CgroupView | None = None
     v1_roots: dict[str, Path] = {}
@@ -393,6 +398,7 @@ def _read_text_path(path: Path, *, limit: int) -> str | None:
 
 
 def _sample_membership_before() -> tuple[str | None, dict[str, str]] | None:
+    """Capture cgroup membership before reading hierarchy values."""
     if not sys.platform.startswith("linux"):
         return (None, {})
     return _read_current_membership()
@@ -401,6 +407,7 @@ def _sample_membership_before() -> tuple[str | None, dict[str, str]] | None:
 def _membership_sample_stable(
     before: tuple[str | None, dict[str, str]] | None,
 ) -> bool:
+    """Return whether cgroup membership remained stable across the sample."""
     if not sys.platform.startswith("linux"):
         return True
     if before is None:
@@ -409,6 +416,7 @@ def _membership_sample_stable(
 
 
 def _unknown_or_unbounded_for_view(view: CgroupView) -> CgroupIntegerSample:
+    """Classify an unavailable cgroup value from the resolved hierarchy view."""
     state = (
         CgroupValueState.UNBOUNDED
         if view.resolution_known and view.version == 0
@@ -458,6 +466,7 @@ def read_cgroup_hierarchy_texts(
 
 
 def _parse_cgroup_integer(raw: str | None, *, path: Path | None) -> CgroupIntegerSample:
+    """Parse one cgroup integer or its unbounded sentinel."""
     if raw is None or raw == "":
         return CgroupIntegerSample(CgroupValueState.UNKNOWN, path=path)
     if raw == "max":

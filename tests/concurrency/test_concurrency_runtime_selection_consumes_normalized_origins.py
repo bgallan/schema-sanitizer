@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency runtime selection consumes normalized origins."""
+"""Check that arena runtime selection consumes normalized task origins.
+
+Overflow fallback must preserve modulo order, mixed-lane probes must exercise real scheduling,
+and evidence must cover both odd and power-of-two worker widths.
+"""
 
 from __future__ import annotations
 

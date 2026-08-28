@@ -1,4 +1,8 @@
-"""Bounded one-partition source preparation for multi-mode pipelines."""
+"""Bounded one-partition source preparation for multi-mode pipelines.
+
+It prepares at most one future partition in multi mode while preserving result order,
+dynamic-option semantics, and deterministic resource cleanup.
+"""
 
 from __future__ import annotations
 
@@ -115,6 +119,7 @@ def drain_partition_lookahead_finalizers() -> int:
     progressed = 0
 
     def process(ticket: int, owner: object) -> None:
+        """Process one retained work item."""
         nonlocal progressed
         if isinstance(owner, RootedFinalizerAuthority):
             owner.ticket = ticket
@@ -149,6 +154,7 @@ def partition_lookahead_finalizer_snapshot() -> tuple[int, int]:
 
 
 def _release_parallel_admission(future: Future[Any]) -> None:
+    """Release the parallel-stage admission retained by lookahead."""
     admission = getattr(future, "_schema_sanitizer_parallel_admission", None)
     if admission is None:
         return
@@ -737,6 +743,7 @@ class PartitionSourceLookahead:
             pass
 
     def _release_finalizer_ticket(self) -> None:
+        """Acknowledge and retire lookahead finalizer authority."""
         ticket = getattr(self, "_finalizer_ticket", -1)
         owner = getattr(self, "_finalizer_owner", None)
         if type(ticket) is int and ticket >= 0:
@@ -896,6 +903,7 @@ class PartitionSourceLookahead:
             self._release_finalizer_ticket()
 
     def _runtime_shutdown(self, *, deadline_seconds: float) -> bool:
+        """Shut down the process-local runtime during teardown."""
         normalized = normalize_duration(
             deadline_seconds,
             name="partition lookahead shutdown deadline",
@@ -959,6 +967,7 @@ class PartitionSourceLookahead:
 
 
 def _reset_partition_lookahead_finalizers_after_fork() -> None:
+    """Reset partition lookahead finalizers after fork."""
     global _LOOKAHEAD_FINALIZER_OVERFLOWS, _LOOKAHEAD_FINALIZER_OVERFLOWED
     _LOOKAHEAD_FINALIZER_ESCROW.reset_after_fork()
     _LOOKAHEAD_FINALIZER_OVERFLOWS = 0

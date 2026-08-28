@@ -1,4 +1,8 @@
-"""Strict same-thread remote backend used by threading_mode='single'."""
+"""Strict same-thread remote backend used by threading_mode='single'.
+
+It dispatches provider work on the caller thread, reuses compatible blocking contexts,
+and owns staging, listing, metadata, download, and upload cleanup.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Shared workload dimensions for the single-versus-multi benchmark harness."""
+"""Shared workload dimensions for the single-versus-multi benchmark harness.
+
+It resolves nested workload sizes, applies CPU quotas, validates arguments, and writes
+deterministic pipeline fixtures.
+"""
 
 from __future__ import annotations
 

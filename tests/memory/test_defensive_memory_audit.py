@@ -1,4 +1,7 @@
-"""Defensive regressions for memory ownership and hostile Arrow metadata."""
+"""Exercises hostile Arrow offsets, capsule keepalives, bounded coalescing, and arena
+cleanup across generator replay and allocation faults. It verifies that validation
+precedes ownership transfer, foreign release callbacks stay suppressed, and backing
+pools deallocate without retaining Python batches."""
 
 from __future__ import annotations
 

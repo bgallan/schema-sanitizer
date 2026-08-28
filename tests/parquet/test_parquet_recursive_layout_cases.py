@@ -1,4 +1,8 @@
-"""Recursive Parquet layout and projection contract cases."""
+"""Recursive Parquet layout and projection contract cases.
+
+Its named layout matrix preserves collision, projection, composition, fingerprint, and
+diagnostic expectations for recursive schemas.
+"""
 
 from __future__ import annotations
 
@@ -14,5 +18,6 @@ from _support.parquet_contracts import RECURSIVE_LAYOUT_CASES
     ids=[case_id for case_id, _run_case in RECURSIVE_LAYOUT_CASES],
 )
 def test_recursive_layout_case(case_id: str, run_case: Callable[[], None]) -> None:
+    """Verify recursive layout case."""
     del case_id
     run_case()

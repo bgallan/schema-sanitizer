@@ -42,6 +42,7 @@ def _validate_total_locked() -> int:
 
 
 def _sync_dynamic_shadow_noexcept() -> None:
+    """Sync dynamic shadow without propagating exceptions."""
     module = sys.modules.get("schema_sanitizer.core_impl.control_plane_budget")
     sync = getattr(module, "try_synchronize_control_plane_native_shadow", None) if module else None
     if callable(sync):
@@ -72,6 +73,7 @@ def reserve_static_control_plane(kind: str, amount: int) -> bool:
     )
 
     def publish() -> bool:
+        """Publish the prepared value."""
         global _TOTAL
         with _LOCK:
             authoritative = _validate_total_locked()
@@ -131,6 +133,7 @@ def rollback_static_control_plane(kind: str, amount: int) -> bool:
     )
 
     def retire() -> bool:
+        """Retire the retained runtime entry."""
         global _TOTAL
         with _LOCK:
             authoritative = _validate_total_locked()
@@ -198,16 +201,19 @@ def _reset_static_control_plane_for_tests() -> None:
 
 
 def _prepare_for_fork() -> None:
+    """Prepare process-owned accounting before a process fork."""
     global _FORK_FRESH_LOCK
     _FORK_FRESH_LOCK = _FORK_LOCK_BANK[_FORK_LOCK_BANK_INDEX]
 
 
 def _clear_fork() -> None:
+    """Clear state established around a completed process fork."""
     global _FORK_FRESH_LOCK
     _FORK_FRESH_LOCK = None
 
 
 def _reset_after_fork() -> None:
+    """Reset process-local state inherited across a fork."""
     global _LOCK, _FORK_FRESH_LOCK, _FORK_LOCK_BANK_INDEX
     prepared = _FORK_FRESH_LOCK
     if prepared is None:

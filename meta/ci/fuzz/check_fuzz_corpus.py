@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate the CI layout and byte integrity of native fuzz inputs."""
+"""Validate the CI layout and byte integrity of native fuzz inputs.
+
+It checks root and target layouts, content-addressed names, digest manifests, and
+deterministic archive contents before fuzzing.
+"""
 
 from __future__ import annotations
 
@@ -72,6 +76,7 @@ def _tree_sha256(entries: list[tuple[str, int, bytes]]) -> str:
 
 
 def _validate_root_entries(fuzz_root: Path, errors: list[str]) -> None:
+    """Reject unexpected files or directories at the fuzz corpus root."""
     expected = {"README.md", *ROLES}
     actual = {path.name for path in fuzz_root.iterdir()}
     for name in sorted(expected - actual):
@@ -81,6 +86,7 @@ def _validate_root_entries(fuzz_root: Path, errors: list[str]) -> None:
 
 
 def _validate_role_entries(fuzz_root: Path, role: str, errors: list[str]) -> Path:
+    """Validate target entries and return their deterministic inventory."""
     role_root = fuzz_root / role
     if not role_root.is_dir() or role_root.is_symlink():
         errors.append(f"missing regular directory: {role}")

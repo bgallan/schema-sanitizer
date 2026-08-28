@@ -1,4 +1,9 @@
-"""Integrated regressions for wide arenas and process memory governance."""
+"""Integrate wide operation arenas with process CPU and memory governance.
+
+The suite covers worker bitmaps above 32, NUMA-aware stealing, PMR-backed queues and output,
+affinity-sensitive CPU admission, governed text scratch, skew fallback, process-pool byte routing,
+stream-lived leases, and suboperations that must not reserve the same budget twice.
+"""
 
 from __future__ import annotations
 

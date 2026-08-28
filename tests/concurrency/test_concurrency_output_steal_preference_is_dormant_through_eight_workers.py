@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency output steal preference is dormant through eight workers."""
+"""Define high-core output-steal selection contracts.
+
+The cases keep low-core stealing unchanged, prefer front output ahead of later broad work only
+at the high-core gate, and preserve constant-time selection.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,9 @@
-"""Compact semantic contracts for source and test ownership boundaries."""
+"""Enforce semantic architecture and documentation contracts across the repository.
+
+The checks protect dependency direction, public example boundaries, native target
+ownership, and complete Python and C++ documentation without coupling the project to a
+particular file layout.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,10 @@ from schema_sanitizer.integrations import bigquery
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "schema_sanitizer"
+PYTHON_ROOTS = tuple(ROOT / name for name in ("src", "tests", "meta", "benchmarks", "examples"))
+GENERATED_PYTHON_DIRECTORIES = frozenset(
+    {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+)
 
 # These low-level layers may depend on shared foundations, but not on the
 # orchestration layers listed here. File names and module sizes are deliberately
@@ -165,39 +174,47 @@ def test_call_option_filter_copies_before_removing_wrapper_keys() -> None:
 
 
 def _python_documentation_gaps(path: Path) -> list[str]:
+    """Return module-summary and callable-docstring gaps from one AST parse."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    gaps = [] if ast.get_docstring(tree) is not None else ["module"]
-    exported: set[str] = set()
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
-            )
-            and isinstance(node.value, (ast.List, ast.Tuple))
-        ):
-            exported.update(
-                value.value
-                for value in node.value.elts
-                if isinstance(value, ast.Constant) and isinstance(value.value, str)
-            )
+    summary = (ast.get_docstring(tree, clean=True) or "").strip()
+    gaps: list[str] = []
+    if not summary:
+        gaps.append("module:missing")
+    else:
+        sentence_count = len(re.findall(r"[.!?](?=\s|$)", summary))
+        word_count = len(re.findall(r"\b[\w'-]+\b", summary))
+        if not 2 <= sentence_count <= 3:
+            gaps.append(f"module:sentences={sentence_count}")
+        if word_count < 12:
+            gaps.append(f"module:words={word_count}")
     gaps.extend(
-        f"{node.name}:{node.lineno}"
-        for node in tree.body
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in exported
-        and ast.get_docstring(node) is None
+        f"callable:{node.name}:{node.lineno}"
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not (ast.get_docstring(node, clean=True) or "").strip()
     )
     return gaps
 
 
+def _project_python_files() -> tuple[Path, ...]:
+    """Return maintained Python files while excluding generated cache directories."""
+    return tuple(
+        path
+        for root in PYTHON_ROOTS
+        for path in sorted(root.rglob("*.py"))
+        if GENERATED_PYTHON_DIRECTORIES.isdisjoint(path.relative_to(ROOT).parts)
+    )
+
+
 def test_python_source_has_docstrings() -> None:
-    """Require module and explicitly exported callable docstrings."""
+    """Require concise module summaries and docstrings on every Python callable."""
+    paths = _project_python_files()
     failures = {
         path.relative_to(ROOT).as_posix(): gaps
-        for path in sorted(PACKAGE.rglob("*.py"))
+        for path in paths
         if (gaps := _python_documentation_gaps(path))
     }
+    assert paths
     assert failures == {}
 
 

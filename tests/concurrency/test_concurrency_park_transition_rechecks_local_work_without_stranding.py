@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency park transition rechecks local work without stranding."""
+"""Test the worker transition from active execution into a parked state.
+
+A final local-work recheck must prevent stranding, and exact streak telemetry must remain visible
+while the public pipeline coalesces scheduling streaks below its submitted task count.
+"""
 
 from __future__ import annotations
 

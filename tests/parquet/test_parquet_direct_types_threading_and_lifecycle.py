@@ -1,4 +1,8 @@
-"""Direct Parquet type, threading, and lifecycle runtime tests."""
+"""Direct Parquet type, threading, and lifecycle runtime tests.
+
+It combines supported and fallback types, shared threading policy, stream ownership,
+memory enforcement, conversion, and public-input boundaries.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ import schema_sanitizer as ss
 def test_direct_parquet_map_and_fixed_size_list_use_arrow_path(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify direct Parquet map and fixed size list use arrow path."""
     path = tmp_path / "map_fixed.parquet"
     table = pa.table(
         {
@@ -44,6 +49,7 @@ def test_direct_parquet_map_and_fixed_size_list_use_arrow_path(
 def test_direct_parquet_duration_values_are_lossless_strings(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify direct Parquet duration values are lossless strings."""
     path = tmp_path / "duration.parquet"
     table = pa.table({"elapsed": pa.array([123, -5], type=pa.duration("us"))})
     pq.write_table(table, path)
@@ -59,6 +65,7 @@ def test_direct_parquet_duration_values_are_lossless_strings(
 def test_native_arrow_schema_contract_payload_supports_new_direct_shapes(
     require_native: None,
 ) -> None:
+    """Verify native arrow schema contract payload supports new direct shapes."""
     from schema_sanitizer.core_impl.logical_schema import pyarrow_schema_from_payload
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
@@ -94,6 +101,7 @@ def test_native_arrow_schema_contract_payload_supports_new_direct_shapes(
 
 @_requires_pyarrow
 def test_parquet_threading_uses_shared_execution_policy() -> None:
+    """Verify Parquet threading uses shared execution policy."""
     from schema_sanitizer.adapters.parquet import memory as pyarrow_adapter
 
     assert not pyarrow_adapter.parquet_use_threads("single", None)
@@ -103,6 +111,7 @@ def test_parquet_threading_uses_shared_execution_policy() -> None:
 
 @_requires_pyarrow
 def test_parquet_stream_result_drop_closes_reader(tmp_path: Path, require_native: None) -> None:
+    """Verify Parquet stream result drop closes reader."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "data.parquet"
@@ -117,6 +126,7 @@ def test_parquet_stream_result_drop_closes_reader(tmp_path: Path, require_native
 
 @_requires_pyarrow
 def test_parquet_stream_survives_sink_result_drop(tmp_path: Path, require_native: None) -> None:
+    """Verify Parquet stream survives sink result drop."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "data.parquet"
@@ -136,6 +146,7 @@ def test_parquet_stream_survives_sink_result_drop(tmp_path: Path, require_native
 
 @_requires_pyarrow
 def test_parquet_stream_drop_releases_reader(tmp_path: Path, require_native: None) -> None:
+    """Verify Parquet stream drop releases reader."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "data.parquet"
@@ -154,6 +165,7 @@ def test_parquet_stream_drop_releases_reader(tmp_path: Path, require_native: Non
 def test_parquet_conversion_enforces_memory_limit_bytes(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify Parquet conversion enforces memory limit bytes."""
     path = tmp_path / "data.parquet"
     pq.write_table(sample_table(pa), path)
 
@@ -169,6 +181,7 @@ def test_parquet_conversion_enforces_memory_limit_bytes(
 
 @_requires_pyarrow
 def test_arrow_ipc_inputs_are_not_public(tmp_path: Path, require_native: None) -> None:
+    """Verify arrow ipc inputs are not public."""
     path = tmp_path / "data.feather"
     feather.write_feather(sample_table(pa), path)
 

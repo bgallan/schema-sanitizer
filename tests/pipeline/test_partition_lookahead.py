@@ -1,4 +1,8 @@
-"""One-partition source lookahead contracts."""
+"""One-partition source lookahead contracts.
+
+It covers one-partition prefetch, result ordering, dynamic options, temporary-storage
+contention, remote resume, and retained-resource finalization.
+"""
 
 from __future__ import annotations
 
@@ -188,6 +192,7 @@ def test_callable_partition_options_preserve_original_evaluation_order(
         """Fail if a dynamic options pipeline attempts speculative preparation."""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            """Fail immediately if callable options enable speculative lookahead."""
             raise AssertionError("callable options unexpectedly enabled lookahead")
 
     monkeypatch.setattr(execution_module, "PartitionSourceLookahead", ForbiddenLookahead)
@@ -265,9 +270,11 @@ def test_prefetched_remote_prefix_resumes_after_retained_file_count(monkeypatch)
         """Return one later staged packet for the remaining manifest."""
 
         def __enter__(self):
+            """Return the managed context value from context entry."""
             return iter([later])
 
         def __exit__(self, *_exc: object) -> None:
+            """Finalize the context context without suppressing exceptions."""
             return None
 
     def open_chunks(_manifest: object, *, start: int = 0) -> Context:
@@ -460,6 +467,7 @@ def test_manifest_carrier_closes_retained_remote_lookahead() -> None:
         """Track release of retained remote lookahead state."""
 
         def close(self) -> None:
+            """Close the manifest and release its retained resources."""
             closed.append("remote")
 
     carrier = NativeDirectoryManifestCarrier()

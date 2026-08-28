@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency prepares the row estimator once per batch."""
+"""Ensure wide-row cost estimation is prepared once for each batch.
+
+Fixed-wide planning must preserve the single-worker oracle, while nullable wide batches retain
+the row-aware fallback instead of repeatedly rebuilding or misapplying the estimator.
+"""
 
 from __future__ import annotations
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reject test contracts that depend on wall-clock speed or scheduler timing."""
+"""Reject test contracts that depend on wall-clock speed or scheduler timing.
+
+It analyzes Python and C++ tests for speed ceilings, scheduler sleeps, and
+worker-capacity assumptions while allowing bounded safety waits.
+"""
 
 from __future__ import annotations
 
@@ -77,6 +81,7 @@ class PythonFindings:
 
 
 def _assigned_names(node: ast.AST) -> set[str]:
+    """Collect names assigned within the selected AST scope."""
     return {
         child.id
         for child in ast.walk(node)
@@ -85,6 +90,7 @@ def _assigned_names(node: ast.AST) -> set[str]:
 
 
 def _loaded_names(node: ast.AST) -> set[str]:
+    """Collect names loaded within the selected AST scope."""
     return {
         child.id
         for child in ast.walk(node)
@@ -93,6 +99,7 @@ def _loaded_names(node: ast.AST) -> set[str]:
 
 
 def _called_names(node: ast.AST) -> set[str]:
+    """Collect directly invoked function names within the selected AST scope."""
     return {
         child.func.id
         for child in ast.walk(node)
@@ -101,6 +108,7 @@ def _called_names(node: ast.AST) -> set[str]:
 
 
 def _numeric_literal(node: ast.AST) -> int | float | None:
+    """Evaluate a signed numeric literal without executing source code."""
     if isinstance(node, ast.Constant) and type(node.value) in (int, float):
         return node.value
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
@@ -113,10 +121,12 @@ def _numeric_literal(node: ast.AST) -> int | float | None:
 def _scope_nodes(
     scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> tuple[ast.AST, ...]:
+    """Collect nodes in one lexical scope while skipping nested definitions."""
     nested = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
     collected: list[ast.AST] = []
 
     def visit(node: ast.AST) -> None:
+        """Collect nodes in the current scope while skipping nested scopes."""
         if node is not scope and isinstance(node, nested):
             return
         collected.append(node)
@@ -128,6 +138,7 @@ def _scope_nodes(
 
 
 def _scopes(tree: ast.Module) -> tuple[ast.Module | ast.FunctionDef | ast.AsyncFunctionDef, ...]:
+    """Return the module and every nested function scope to analyze independently."""
     return (tree,) + tuple(
         node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     )
@@ -141,6 +152,7 @@ def _aliases(
     inherited_callables: set[str] | None = None,
     inherited_modules: set[str] | None = None,
 ) -> tuple[set[str], set[str]]:
+    """Resolve local aliases for the selected module members."""
     callables = set(member_names if inherited_callables is None else inherited_callables)
     modules = set({module} if inherited_modules is None else inherited_modules)
     for node in nodes:
@@ -184,6 +196,7 @@ def _call_matches(
     modules: set[str],
     members: frozenset[str],
 ) -> bool:
+    """Return whether a call targets one of the selected functions."""
     if not isinstance(node, ast.Call):
         return False
     function = node.func
@@ -204,6 +217,7 @@ def _contains_call(
     modules: set[str],
     members: frozenset[str],
 ) -> bool:
+    """Return whether the nodes contain a direct call to any selected name."""
     return any(
         _call_matches(child, callables=callables, modules=modules, members=members)
         for child in ast.walk(node)
@@ -211,24 +225,29 @@ def _contains_call(
 
 
 def _temporal_value_names(node: ast.AST) -> set[str]:
+    """Infer names that carry values derived from a clock call."""
     values: set[str] = set()
 
     class Visitor(ast.NodeVisitor):
         def visit_Call(self, candidate: ast.Call) -> None:  # noqa: N802
+            """Visit call nodes while collecting findings."""
             for argument in candidate.args:
                 self.visit(argument)
             for keyword in candidate.keywords:
                 self.visit(keyword.value)
 
         def visit_Name(self, candidate: ast.Name) -> None:  # noqa: N802
+            """Visit name nodes while collecting findings."""
             if isinstance(candidate.ctx, ast.Load):
                 values.add(candidate.id)
 
         def visit_Attribute(self, candidate: ast.Attribute) -> None:  # noqa: N802
+            """Visit attribute nodes while collecting findings."""
             values.add(candidate.attr)
             self.visit(candidate.value)
 
         def visit_Subscript(self, candidate: ast.Subscript) -> None:  # noqa: N802
+            """Visit subscript nodes while collecting findings."""
             if isinstance(candidate.slice, ast.Constant) and isinstance(candidate.slice.value, str):
                 values.add(candidate.slice.value)
             self.visit(candidate.value)
@@ -242,6 +261,7 @@ def _temporal_value_names(node: ast.AST) -> set[str]:
 def _clock_values(
     nodes: tuple[ast.AST, ...], *, callables: set[str], modules: set[str]
 ) -> set[str]:
+    """Collect expressions whose values originate from wall-clock functions."""
     values: set[str] = set()
     changed = True
     while changed:
@@ -270,6 +290,7 @@ def _clock_values(
 def _temporal_functions(
     tree: ast.Module, *, module_callables: set[str], module_modules: set[str]
 ) -> set[str]:
+    """Identify helper functions that return or transform temporal values."""
     functions: set[str] = set()
     changed = True
     while changed:
@@ -316,6 +337,7 @@ def _temporal_functions(
 
 
 def _wall_clock_findings(tree: ast.Module) -> tuple[tuple[int, str], ...]:
+    """Find assertions that impose fragile wall-clock speed ceilings."""
     module_nodes = _scope_nodes(tree)
     module_callables, module_modules = _aliases(module_nodes, "time", _CLOCK_NAMES)
     temporal_functions = _temporal_functions(
@@ -381,6 +403,7 @@ def _wall_clock_findings(tree: ast.Module) -> tuple[tuple[int, str], ...]:
 
 
 def _polls_observable(loop: ast.While) -> bool:
+    """Return whether a polling loop checks an observable state transition."""
     if not (isinstance(loop.test, ast.Constant) and bool(loop.test.value)):
         return True
     return any(
@@ -393,6 +416,7 @@ def _polls_observable(loop: ast.While) -> bool:
 def _sleep_findings(
     tree: ast.Module,
 ) -> tuple[tuple[tuple[int, str], ...], tuple[tuple[int, str], ...]]:
+    """Classify sleeps as scheduler dependencies, polling, yielding, or safety waits."""
     nodes = tuple(ast.walk(tree))
     thread_callables, time_modules = _aliases(nodes, "time", frozenset({"sleep"}))
     async_callables, asyncio_modules = _aliases(nodes, "asyncio", frozenset({"sleep"}))
@@ -402,14 +426,17 @@ def _sleep_findings(
 
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
+            """Initialize visitor state for ancestors."""
             self.ancestors: list[ast.AST] = []
 
         def generic_visit(self, node: ast.AST) -> None:
+            """Visit child nodes while preserving the current analysis context."""
             self.ancestors.append(node)
             super().generic_visit(node)
             self.ancestors.pop()
 
         def inside_poll(self) -> bool:
+            """Return whether traversal is currently inside a recognized polling loop."""
             for ancestor in reversed(self.ancestors):
                 if isinstance(ancestor, ast.While) and _polls_observable(ancestor):
                     return True
@@ -418,6 +445,7 @@ def _sleep_findings(
             return False
 
         def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+            """Visit call nodes while collecting findings."""
             if _call_matches(
                 node,
                 callables=thread_callables,
@@ -450,6 +478,7 @@ def _sleep_findings(
 
 
 def _field_name(node: ast.AST) -> str | None:
+    """Return the terminal field name referenced by an AST expression."""
     if isinstance(node, ast.Attribute):
         return node.attr
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
@@ -458,6 +487,7 @@ def _field_name(node: ast.AST) -> str | None:
 
 
 def _worker_roles(name: str) -> set[str]:
+    """Infer capacity, started-worker, and prewarm roles for local names."""
     normalized = name.lower().lstrip("_")
     if normalized in _STARTED_WORKER_NAMES:
         return {"started"}
@@ -467,6 +497,7 @@ def _worker_roles(name: str) -> set[str]:
 
 
 def _worker_expression_roles(node: ast.AST, aliases: dict[str, set[str]]) -> set[str]:
+    """Infer worker roles carried by an arbitrary expression."""
     if isinstance(node, ast.Name):
         return set(aliases.get(node.id, _worker_roles(node.id)))
     value = _numeric_literal(node)
@@ -503,6 +534,7 @@ def _worker_expression_roles(node: ast.AST, aliases: dict[str, set[str]]) -> set
 
 
 def _bind_worker_alias(target: ast.AST, value: ast.AST, aliases: dict[str, set[str]]) -> None:
+    """Propagate worker-role information through one assignment target."""
     if isinstance(target, (ast.Tuple, ast.List)):
         if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(value.elts):
             for element, element_value in zip(target.elts, value.elts, strict=True):
@@ -524,6 +556,7 @@ def _bind_worker_alias(target: ast.AST, value: ast.AST, aliases: dict[str, set[s
 def _local_guard_nodes(
     scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> tuple[ast.AST, ...]:
+    """Collect nodes belonging to the current control-flow guard."""
     return tuple(
         sorted(
             (
@@ -537,6 +570,7 @@ def _local_guard_nodes(
 
 
 def _prewarm_counts(scope: ast.AST) -> set[int]:
+    """Find explicit prewarm counts associated with lazy worker pools."""
     return {
         call.args[0].value
         for call in ast.walk(scope)
@@ -553,6 +587,7 @@ def _prewarm_counts(scope: ast.AST) -> set[int]:
 def _lazy_worker_findings(
     tree: ast.Module,
 ) -> tuple[tuple[tuple[str, int, str], ...], tuple[tuple[str, int, str], ...]]:
+    """Find assertions that assume lazy pools immediately reach capacity."""
     findings: list[tuple[str, int, str]] = []
     prewarmed_findings: list[tuple[str, int, str]] = []
     for scope in _scopes(tree):
@@ -626,10 +661,12 @@ def unapproved_lazy_workers(path: Path) -> tuple[tuple[str, int, str], ...]:
 
 
 def _cpp_words(expression: str) -> set[str]:
+    """Tokenize the C++ source while retaining source offsets."""
     return set(re.findall(r"\b[A-Za-z_]\w*\b", expression))
 
 
 def _cpp_statements(code: str) -> tuple[tuple[int, str], ...]:
+    """Split C++ source into offset-preserving statements."""
     statements: list[tuple[int, str]] = []
     start = 0
     for index, character in enumerate(code):
@@ -642,6 +679,7 @@ def _cpp_statements(code: str) -> tuple[tuple[int, str], ...]:
 
 
 def _cpp_clock_dataflow(code: str) -> tuple[set[str], set[str]]:
+    """Track C++ variables whose values derive from clock reads."""
     assignments: list[tuple[str, str]] = []
     for _start, statement in _cpp_statements(code):
         match = _CPP_ASSIGNMENT.search(statement)
@@ -670,12 +708,14 @@ def _cpp_clock_dataflow(code: str) -> tuple[set[str], set[str]]:
 
 
 def _cpp_temporal(expression: str, clock_points: set[str], durations: set[str]) -> bool:
+    """Return whether a C++ expression depends on timing data."""
     words = _cpp_words(expression)
     temporal_operands = len(words & clock_points) + len(_CPP_CLOCK_EXPRESSION.findall(expression))
     return bool(words & durations) or "-" in expression and temporal_operands >= 2
 
 
 def _cpp_limit(expression: str) -> bool:
+    """Return whether a C++ expression contains a literal duration limit."""
     return bool(
         _CPP_DURATION_CONSTRUCTOR.search(expression)
         or _CPP_NUMBER.search(expression)
@@ -684,6 +724,7 @@ def _cpp_limit(expression: str) -> bool:
 
 
 def _balanced_cpp_arguments(source: str, opening: int) -> tuple[str, str, int] | None:
+    """Split macro arguments while respecting nested C++ delimiters."""
     depth = 0
     comma = -1
     for index in range(opening, len(source)):
@@ -702,6 +743,7 @@ def _balanced_cpp_arguments(source: str, opening: int) -> tuple[str, str, int] |
 
 
 def _mask_cpp(source: str) -> str:
+    """Mask C++ comments and literals without shifting source offsets."""
     masked = list(source)
     index = 0
     while index < len(source):
@@ -739,6 +781,7 @@ def fragile_cpp_assertions(path: Path) -> tuple[tuple[int, str], ...]:
     findings: list[tuple[int, str]] = []
 
     def record(left: str, operator: str, right: str, start: int, expression: str) -> None:
+        """Record one result in the current analysis."""
         fragile = (
             operator in {"<", "<="}
             and _cpp_temporal(left, clock_points, durations)

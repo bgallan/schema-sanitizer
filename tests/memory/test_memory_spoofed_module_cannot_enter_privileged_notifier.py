@@ -1,4 +1,8 @@
-"""Regression coverage for memory spoofed module cannot enter privileged notifier."""
+"""Protects privileged notifier and cleanup paths with terminal close, event-retry
+acknowledgements, guardian permits, per-item scheduler transfer, quarantine roots,
+seqlock diagnostics, bounded registries, fork capsules, and native reaper lanes. Caller
+identity cannot be spoofed through callback metadata; only explicit subsystems publish
+work, and every post-fork owner uses the single bounded capsule."""
 
 from __future__ import annotations
 
@@ -15,11 +19,13 @@ pytestmark = pytest.mark.skipif(
 
 
 def _delivery(module: object, governor: object, event: object) -> object:
+    """Deliver the notifier callback under the spoofed caller context."""
     del module
     return governor._availability_events[event]
 
 
 def test_notifier_close_is_terminal_and_rejects_late_publication() -> None:
+    """Verify notifier close is terminal and rejects late publication."""
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
@@ -37,6 +43,7 @@ def test_notifier_close_is_terminal_and_rejects_late_publication() -> None:
 def test_notifier_retries_failed_event_and_acks_only_after_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify notifier retries failed event and acks only after success."""
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
@@ -48,6 +55,7 @@ def test_notifier_retries_failed_event_and_acks_only_after_success(
     completed = threading.Event()
 
     def dispatch(event: module.AvailabilityEvent) -> None:
+        """Dispatch work through the controlled scheduling path."""
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -71,13 +79,16 @@ def test_notifier_retries_failed_event_and_acks_only_after_success(
 
 
 def test_guardian_worker_permits_are_never_recursively_adopted() -> None:
+    """Verify guardian worker permits are never recursively adopted."""
     from schema_sanitizer.core_impl.retry_scheduler import _ReleaseGuardian
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.attempts = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.attempts += 1
             raise RuntimeError("still held")
 
@@ -95,6 +106,7 @@ def test_guardian_worker_permits_are_never_recursively_adopted() -> None:
 
 
 def test_guardian_rejects_its_exact_bootstrap_lease() -> None:
+    """Verify guardian rejects its exact bootstrap lease."""
     from schema_sanitizer.core_impl import process_resources
     from schema_sanitizer.core_impl.retry_scheduler import _ReleaseGuardian
 
@@ -111,6 +123,7 @@ def test_guardian_rejects_its_exact_bootstrap_lease() -> None:
 def test_scheduler_failed_lease_transfer_is_per_item_transactional(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify scheduler failed lease transfer is per item transactional."""
     from schema_sanitizer.core_impl import retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -120,6 +133,7 @@ def test_scheduler_failed_lease_transfer_is_per_item_transactional(
         scheduler._failed_worker_leases.extend((first, second))
 
     def fail(*_args: object, **_kwargs: object) -> bool:
+        """Raise the deliberate failure injected by the test."""
         raise MemoryError("guardian unavailable")
 
     monkeypatch.setattr(module, "adopt_failed_release", fail)
@@ -131,13 +145,16 @@ def test_scheduler_failed_lease_transfer_is_per_item_transactional(
 def test_quarantine_root_owner_survives_guardian_rejection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Verify quarantine root owner survives guardian rejection."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.fail = True
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             if self.fail:
                 raise RuntimeError("lease busy")
 
@@ -152,6 +169,7 @@ def test_quarantine_root_owner_survives_guardian_rejection(
     monkeypatch.setattr(module, "_CLOSING_ROOT_OWNERS", module.deque())
 
     def reject(*_args: object, **_kwargs: object) -> bool:
+        """Raise the deliberate failure for the reject path."""
         raise MemoryError("guardian full")
 
     monkeypatch.setattr(module, "adopt_failed_release", reject)
@@ -165,6 +183,7 @@ def test_quarantine_root_owner_survives_guardian_rejection(
 def test_diagnostic_epoch_remains_odd_until_last_writer_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify diagnostic epoch remains odd until last writer exits."""
     from schema_sanitizer.core_impl import diagnostic_epoch as module
 
     monkeypatch.setattr(module, "_EPOCH", 0)
@@ -180,10 +199,12 @@ def test_diagnostic_epoch_remains_odd_until_last_writer_exits(
 
 
 def test_runtime_registry_is_bounded_and_opens_circuit() -> None:
+    """Verify runtime registry is bounded and opens circuit."""
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self, *, deadline_seconds: float = 0.0) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = _RuntimeServiceRegistry()
@@ -203,6 +224,7 @@ def test_runtime_registry_is_bounded_and_opens_circuit() -> None:
 def test_cleanup_subsystem_is_explicit_not_callback_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cleanup subsystem is explicit not callback metadata."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import (
         CleanupSubsystem,
         _CleanupDispatcher,
@@ -212,6 +234,7 @@ def test_cleanup_subsystem_is_explicit_not_callback_metadata(
     monkeypatch.setattr(dispatcher, "_ensure_workers", lambda: None)
 
     def callback() -> None:
+        """Return no value without exposing callback metadata."""
         return None
 
     callback.__module__ = "schema_sanitizer.fake_many_tenants"
@@ -222,6 +245,7 @@ def test_cleanup_subsystem_is_explicit_not_callback_metadata(
 
 
 def test_terminal_host_markers_are_bounded_without_retaining_owners() -> None:
+    """Verify terminal host markers are bounded without retaining owners."""
     from schema_sanitizer.core_impl.terminal_hosts import TerminalHostMarkers
 
     markers = TerminalHostMarkers(2)
@@ -236,6 +260,7 @@ def test_terminal_host_markers_are_bounded_without_retaining_owners() -> None:
 
 
 def test_fork_capsule_is_single_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify fork capsule is single and bounded."""
     from schema_sanitizer.core_impl import fork_safety as module
 
     monkeypatch.setattr(module, "_FORK_GENERATION", 1)
@@ -254,6 +279,7 @@ def test_fork_capsule_is_single_and_bounded(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_native_reaper_reserves_lane_before_start_and_promotes_parking() -> None:
+    """Verify native reaper reserves lane before start and promotes parking."""
     source = Path("cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     header = Path("cpp/src/internal/runtime/operation_task_arena.hh").read_text()
     abi = Path("cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
@@ -277,6 +303,7 @@ def test_native_reaper_reserves_lane_before_start_and_promotes_parking() -> None
 
 
 def test_native_accounting_uses_saturating_subtraction_for_retained_bytes() -> None:
+    """Verify native accounting uses saturating subtraction for retained bytes."""
     source = Path("cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     runtime = Path("cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
     assert "retained_bytes_total.fetch_sub" not in source
@@ -286,10 +313,12 @@ def test_native_accounting_uses_saturating_subtraction_for_retained_bytes() -> N
 
 
 def test_runtime_registry_reopens_circuit_after_capacity_drains() -> None:
+    """Verify runtime registry reopens circuit after capacity drains."""
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self, *, deadline_seconds: float = 0.0) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = _RuntimeServiceRegistry()
@@ -305,6 +334,7 @@ def test_runtime_registry_reopens_circuit_after_capacity_drains() -> None:
 
 
 def test_all_post_fork_owners_use_single_capsule() -> None:
+    """Verify all post fork owners use single capsule."""
     root = Path("src/schema_sanitizer")
     offenders: list[str] = []
     for path in root.rglob("*.py"):
@@ -315,6 +345,7 @@ def test_all_post_fork_owners_use_single_capsule() -> None:
 
 
 def test_shutdown_accounts_for_terminal_notifier_hosts_and_native_states() -> None:
+    """Verify shutdown accounts for terminal notifier hosts and native states."""
     source = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
     assert "notifier_snapshot.delayed_callbacks" in source
     assert "notifier_snapshot.parked_callbacks" in source

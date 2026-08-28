@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency output preference is dormant through eight workers."""
+"""Define low- and high-core output-lane scheduling contracts.
+
+The cases keep preference dormant through eight workers, permit one bounded high-core bypass,
+restore FIFO, and drain mixed lanes without extra threads.
+"""
 
 from __future__ import annotations
 

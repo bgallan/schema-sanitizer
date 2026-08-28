@@ -1,4 +1,8 @@
-"""Bounded provider sessions and file transfers for remote directories."""
+"""Bounded provider sessions and file transfers for remote directories.
+
+It derives transfer tuning, shares provider clients, limits concurrent files, and
+removes partial staging artifacts on failure or cancellation.
+"""
 
 from __future__ import annotations
 

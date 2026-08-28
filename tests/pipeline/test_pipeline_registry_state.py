@@ -1,4 +1,8 @@
-"""Pipeline registry state tests."""
+"""Pipeline registry state tests.
+
+It carries registry state and timing across partitions, accepts initial state, and
+clears stale native state deterministically.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ from schema_sanitizer.pipeline.types import PartitionRunPlan, SchemaRegistryStat
 
 
 def test_pipeline_runner_carries_registry_forward(monkeypatch, tmp_path) -> None:
+    """Verify pipeline runner carries registry forward."""
     from schema_sanitizer.pipeline import partition_execution
 
     seen_registries: list[str] = []
@@ -143,6 +148,7 @@ def test_pipeline_runner_attributes_discovery_and_transfer_time_to_io(
 
 
 def test_pipeline_json_registry_runner_carries_registry_json_forward(monkeypatch, tmp_path) -> None:
+    """Verify pipeline JSON registry runner carries registry JSON forward."""
     from schema_sanitizer.pipeline import partition_execution
 
     seen_registries = []
@@ -181,6 +187,7 @@ def test_pipeline_json_registry_runner_carries_registry_json_forward(monkeypatch
 
 
 def test_pipeline_runner_carries_native_registry_state_forward(monkeypatch, tmp_path) -> None:
+    """Verify pipeline runner carries native registry state forward."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 
@@ -215,6 +222,7 @@ def test_pipeline_runner_carries_native_registry_state_forward(monkeypatch, tmp_
 
 
 def test_pipeline_runner_accepts_initial_schema_registry_state(monkeypatch, tmp_path) -> None:
+    """Verify pipeline runner accepts initial schema registry state."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 
@@ -253,6 +261,7 @@ def test_pipeline_runner_accepts_initial_schema_registry_state(monkeypatch, tmp_
 
 
 def test_pipeline_runner_compiles_initial_registry_json_state(monkeypatch, tmp_path) -> None:
+    """Verify pipeline runner compiles initial registry JSON state."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 
@@ -338,6 +347,7 @@ def test_pipeline_runner_keeps_parquet_writer_options_out_of_registry_compile(
     monkeypatch,
     tmp_path,
 ) -> None:
+    """Verify pipeline runner keeps Parquet writer options out of registry compile."""
     from schema_sanitizer.pipeline import partition_execution
 
     seen_to_parquet_kwargs = []
@@ -388,6 +398,7 @@ def test_pipeline_runner_keeps_parquet_writer_options_out_of_registry_compile(
 
 
 def test_pipeline_runner_clears_stale_native_registry_state(monkeypatch, tmp_path) -> None:
+    """Verify pipeline runner clears stale native registry state."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 

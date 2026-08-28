@@ -1,4 +1,8 @@
-"""Bounded, callback-free concurrency diagnostics for support and watchdogs."""
+"""Produce bounded, callback-free diagnostics for concurrency support and watchdogs.
+
+Native arena metrics and Python service snapshots are combined into one debug record without
+executing user callbacks or exposing unbounded retained state.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +14,14 @@ _MAX_AGE_NS = (1 << 63) - 1
 
 
 def _age(now: int, then: int) -> int:
+    """Return the elapsed age for the supplied timestamp."""
     if then <= 0 or then > now:
         return 0
     return min(_MAX_AGE_NS, now - then)
 
 
 def _native_arena_snapshot() -> dict[str, int | bool]:
+    """Return a bounded snapshot of native arena."""
     try:
         from schema_sanitizer import _core_abi3 as native
     except ImportError:
@@ -89,6 +95,7 @@ def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
     from .temporary_janitor import temporary_janitor_snapshot
 
     def capture() -> tuple[Any, ...]:
+        """Capture the current bounded runtime diagnostics."""
         try:
             from ..remote_impl import async_bridge, io_coordinator
 

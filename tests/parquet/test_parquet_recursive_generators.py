@@ -1,7 +1,7 @@
 """Core tests for recursive Parquet nested-layout contracts.
 
-These tests exercise pure diagnostics and recursive corpus generators without
-requiring PyArrow. Runtime materialization lives in focused native modules.
+These tests exercise pure diagnostics and recursive corpus generators without requiring
+PyArrow. Runtime materialization lives in focused native modules.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from _support.parquet_recursive_cases import (
 
 
 def test_recursive_fuzz_cartesian_generator_covers_bounded_shape_space() -> None:
+    """Verify recursive fuzz cartesian generator covers bounded shape space."""
     cases = _recursive_fuzz_cartesian_specs()
     signatures = {_recursive_fuzz_signature(spec) for _, spec, _ in cases}
     root_kinds = {spec[0] for _, spec, _ in cases}
@@ -38,6 +39,7 @@ def test_recursive_fuzz_cartesian_generator_covers_bounded_shape_space() -> None
 
 
 def test_recursive_fuzz_null_empty_matrix_covers_container_profiles() -> None:
+    """Verify recursive fuzz null empty matrix covers container profiles."""
     cases = _recursive_fuzz_null_empty_matrix_specs()
     signatures = {_recursive_fuzz_signature(spec) for _, spec, _ in cases}
     root_kinds = {spec[0] for _, spec, _ in cases}
@@ -65,6 +67,7 @@ def test_recursive_fuzz_null_empty_matrix_covers_container_profiles() -> None:
 
 
 def test_recursive_fuzz_row_group_phase_matrix_covers_distinct_profiles() -> None:
+    """Verify recursive fuzz row group phase matrix covers distinct profiles."""
     cases = _recursive_fuzz_row_group_phase_matrix_specs()
     signatures = {_recursive_fuzz_signature(spec) for _, spec, _ in cases}
     root_kinds = {spec[0] for _, spec, _ in cases}
@@ -99,6 +102,7 @@ def test_recursive_fuzz_row_group_phase_matrix_covers_distinct_profiles() -> Non
 
 
 def test_recursive_fuzz_projection_noise_corpus_covers_deep_noise_roots() -> None:
+    """Verify recursive fuzz projection noise corpus covers deep noise roots."""
     target = _recursive_fuzz_row_group_phase_matrix_specs()[0]
     noise_specs = _recursive_fuzz_cartesian_specs()[:12]
     target_signature = _recursive_fuzz_signature(target[1])
@@ -117,6 +121,7 @@ def test_recursive_fuzz_projection_noise_corpus_covers_deep_noise_roots() -> Non
 
 
 def test_recursive_fuzz_seeded_generator_covers_irregular_shape_space() -> None:
+    """Verify recursive fuzz seeded generator covers irregular shape space."""
     cases = _recursive_fuzz_seeded_specs()
     signatures = {_recursive_fuzz_signature(spec) for _, spec, _ in cases}
     metrics = [metrics for _, _, metrics in cases]
@@ -137,6 +142,7 @@ def test_recursive_fuzz_seeded_generator_covers_irregular_shape_space() -> None:
 
 
 def test_recursive_fuzz_projection_permutation_corpus_covers_irregular_roots() -> None:
+    """Verify recursive fuzz projection permutation corpus covers irregular roots."""
     cases = _recursive_fuzz_projection_permutation_specs()
     signatures = {_recursive_fuzz_signature(spec) for _, spec, _ in cases}
     metrics = [metrics for _, _, metrics in cases]

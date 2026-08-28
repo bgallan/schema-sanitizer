@@ -1,4 +1,8 @@
-"""Production contracts for ordered multi-threaded text output."""
+"""Exercise ordered multi-worker JSONL and CSV text output.
+
+Output must remain byte-identical, isolate oversized rows, avoid files or threads for invalid and
+single-worker paths, promote after a small first batch, and reuse escaped member-name prefixes.
+"""
 
 from __future__ import annotations
 

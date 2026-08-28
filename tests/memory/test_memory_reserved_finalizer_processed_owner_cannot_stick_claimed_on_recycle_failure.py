@@ -1,4 +1,8 @@
-"""Regression coverage for memory reserved finalizer processed owner cannot stick claimed on recycle failure."""
+"""Exercises recycle-tail failure plus cross-process journal faults, runtime uncertainty,
+temporary moves or resizes, staged-result retirement, native residency debt, inflight
+latches, and remote or storage post-commit cleanup. Processed owners always reach an
+owner-free recycle state; fallible tails retain globally rooted exact capability without
+repeating physical release or holding pool locks."""
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ CPP = ROOT / "cpp" / "src"
 def test_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure(
     monkeypatch,
 ) -> None:
+    """Verify reserved finalizer processed owner cannot stick claimed on recycle failure."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(2)
@@ -30,6 +35,7 @@ def test_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_fail
     original = ReservedFinalizerEscrow._recycle_one_pending_locked
 
     def boom(self):
+        """Raise the deliberate failure injected by the test."""
         raise MemoryError("reserved-finalizer-processed-owner-cannot-stick recycle fault")
 
     monkeypatch.setattr(ReservedFinalizerEscrow, "_recycle_one_pending_locked", boom)
@@ -53,6 +59,7 @@ def test_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_fail
 def test_cross_process_growth_repairs_journal_when_local_commit_fails(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """Verify cross process growth repairs journal when local commit fails."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     if module.fcntl is None:
@@ -64,6 +71,7 @@ def test_cross_process_growth_repairs_journal_when_local_commit_fails(
     injected = {"done": False}
 
     def fail_once(owner, lease_id, capability, reserved):
+        """Inject the once failure at the controlled test point."""
         if reserved == 20 and not injected["done"]:
             injected["done"] = True
             raise MemoryError("local commit fault")
@@ -85,6 +93,7 @@ def test_cross_process_growth_repairs_journal_when_local_commit_fails(
 def test_cross_process_release_retains_journal_cleanup_owner_after_fsync_failure(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """Verify cross process release retains journal cleanup owner after fsync failure."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     if module.fcntl is None:
@@ -96,6 +105,7 @@ def test_cross_process_release_retains_journal_cleanup_owner_after_fsync_failure
     injected = {"done": False}
 
     def fail_zero(self, total):
+        """Inject the zero failure at the controlled test point."""
         if total == 0 and not injected["done"]:
             injected["done"] = True
             raise OSError("journal fsync fault")
@@ -116,6 +126,7 @@ def test_cross_process_release_retains_journal_cleanup_owner_after_fsync_failure
 def test_external_runtime_failed_post_setter_probe_is_uncertain_and_memory_conservative(
     monkeypatch,
 ) -> None:
+    """Verify external runtime failed post setter probe is uncertain and memory conservative."""
     from schema_sanitizer.core_impl import process_resources as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -125,15 +136,19 @@ def test_external_runtime_failed_post_setter_probe_is_uncertain_and_memory_conse
         supports_atomic_residency_update = False
 
         def external_runtime_stack_debt_threads_add(self, _amount: int) -> None:
+            """Ignore external runtime stack debt threads add while isolating finalizer recycling."""
             pass
 
         def external_runtime_stack_debt_threads_release(self, _amount: int) -> None:
+            """Ignore external runtime stack debt threads release while isolating finalizer recycling."""
             pass
 
         def external_runtime_resident_threads_add(self, _amount: int) -> None:
+            """Ignore external runtime resident threads add while isolating finalizer recycling."""
             pass
 
         def external_runtime_resident_threads_release(self, _amount: int) -> None:
+            """Ignore external runtime resident threads release while isolating finalizer recycling."""
             pass
 
     monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
@@ -141,12 +156,14 @@ def test_external_runtime_failed_post_setter_probe_is_uncertain_and_memory_conse
     state = {"width": 8, "fail_verify": True}
 
     def cpu_count() -> int:
+        """Return the controlled CPU count while recording the probe."""
         if state["width"] == 2 and state["fail_verify"]:
             state["fail_verify"] = False
             raise RuntimeError("verify fault")
         return state["width"]
 
     def set_cpu_count(value: int) -> None:
+        """Record the CPU count selected by the controlled runtime."""
         state["width"] = value
 
     runtime.cpu_count = cpu_count  # type: ignore[attr-defined]
@@ -176,6 +193,7 @@ def test_external_runtime_failed_post_setter_probe_is_uncertain_and_memory_conse
 
 
 def test_external_runtime_retirement_predicate_blocks_inflight_configuration() -> None:
+    """Verify external runtime retirement predicate blocks inflight configuration."""
     from schema_sanitizer.core_impl import process_resources as module
 
     key = ("declared", "reserved-finalizer-processed-owner-cannot-stick-config-inflight")
@@ -195,6 +213,7 @@ def test_external_runtime_retirement_predicate_blocks_inflight_configuration() -
 def test_temporary_storage_move_keeps_replacement_rooted_when_both_releases_fail(
     monkeypatch,
 ) -> None:
+    """Verify temporary storage move keeps replacement rooted when both releases fail."""
     from schema_sanitizer.core_impl.temporary_storage_governor import (
         _ProcessTemporaryStorageGovernor,
     )
@@ -208,6 +227,7 @@ def test_temporary_storage_move_keeps_replacement_rooted_when_both_releases_fail
     real_release = governor._release_capability_exact
 
     def fake_filesystem(path):
+        """Remap every path to a synthetic replacement device."""
         _device, target, free = real_filesystem(path)
         return old_device + 1, target, free
 
@@ -215,6 +235,7 @@ def test_temporary_storage_move_keeps_replacement_rooted_when_both_releases_fail
     captured = {"replacement": None}
 
     def fail_release(capability):
+        """Inject the release failure at the controlled test point."""
         if capability is old:
             raise RuntimeError("old release fault")
         captured["replacement"] = capability
@@ -241,6 +262,7 @@ def test_temporary_storage_move_keeps_replacement_rooted_when_both_releases_fail
 def test_temporary_storage_resize_does_not_hold_pool_condition_across_process_resize(
     monkeypatch,
 ) -> None:
+    """Verify temporary storage resize does not hold pool condition across process resize."""
     from schema_sanitizer.core_impl import temporary_storage as module
 
     monkeypatch.setattr(
@@ -257,6 +279,7 @@ def test_temporary_storage_resize_does_not_hold_pool_condition_across_process_re
     original = module._PROCESS_TEMPORARY_STORAGE.resize_capability
 
     def blocking_resize(*args, **kwargs):
+        """Pause at the blocking resize synchronization point."""
         entered.set()
         assert resume.wait(5)
         return original(*args, **kwargs)
@@ -265,6 +288,7 @@ def test_temporary_storage_resize_does_not_hold_pool_condition_across_process_re
     errors: list[BaseException] = []
 
     def worker() -> None:
+        """Run the worker side of the synchronization scenario."""
         try:
             first.resize(2)
         except BaseException as exc:  # pragma: no cover - diagnostic capture
@@ -290,6 +314,7 @@ def test_temporary_storage_resize_does_not_hold_pool_condition_across_process_re
 
 
 def test_staged_result_terminal_consume_retires_prepared_finalizer_slot() -> None:
+    """Verify staged result terminal consume retires prepared finalizer slot."""
     from schema_sanitizer.core_impl.finalizer_cleanup import prepared_finalizer_capacity_snapshot
     from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
@@ -304,6 +329,7 @@ def test_staged_result_terminal_consume_retires_prepared_finalizer_slot() -> Non
 
 
 def test_native_residency_update_rejects_final_debt_below_identity() -> None:
+    """Verify native residency update rejects final debt below identity."""
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     body = arena[arena.index("void update_process_external_runtime_residency") :]
     assert "target_debt < target_identity" in body
@@ -315,6 +341,7 @@ def test_native_residency_update_rejects_final_debt_below_identity() -> None:
 
 
 def test_inflight_latches_prepare_allocating_counters_before_publish() -> None:
+    """Verify inflight latches prepare allocating counters before publish."""
     staged = (SRC / "remote_impl/staged_ownership.py").read_text(encoding="utf-8")
     lookahead = (SRC / "pipeline/partition_lookahead.py").read_text(encoding="utf-8")
     resources = (SRC / "core_impl/process_resources.py").read_text(encoding="utf-8")
@@ -333,6 +360,7 @@ def test_inflight_latches_prepare_allocating_counters_before_publish() -> None:
 
 
 def test_finalizer_success_tail_has_owner_free_recycle_state() -> None:
+    """Verify finalizer success tail has owner free recycle state."""
     source = (SRC / "core_impl/finalizer_escrow.py").read_text(encoding="utf-8")
     body = source[
         source.index("    def process_one", source.index("class ReservedFinalizerEscrow")) :
@@ -351,11 +379,13 @@ def test_finalizer_success_tail_has_owner_free_recycle_state() -> None:
 def test_temporary_storage_post_commit_baseexception_rolls_back_exact_capability(
     monkeypatch,
 ) -> None:
+    """Verify temporary storage post commit baseexception rolls back exact capability."""
     from schema_sanitizer.core_impl import temporary_storage_governor as module
 
     governor = module._ProcessTemporaryStorageGovernor()
 
     def interrupt(**_kwargs):
+        """Raise the deliberate failure for the interrupt path."""
         raise KeyboardInterrupt(
             "reserved-finalizer-processed-owner-cannot-stick post-commit interrupt"
         )
@@ -374,12 +404,14 @@ def test_temporary_storage_post_commit_baseexception_rolls_back_exact_capability
 
 
 def test_temporary_storage_failed_post_commit_rollback_remains_globally_rooted(monkeypatch) -> None:
+    """Verify temporary storage failed post commit rollback remains globally rooted."""
     from schema_sanitizer.core_impl import temporary_storage_governor as module
 
     governor = module._ProcessTemporaryStorageGovernor()
     telemetry_calls = {"count": 0}
 
     def interrupt(**_kwargs):
+        """Inject the interruption at the controlled handoff point."""
         telemetry_calls["count"] += 1
         if telemetry_calls["count"] == 1:
             raise KeyboardInterrupt(
@@ -391,6 +423,7 @@ def test_temporary_storage_failed_post_commit_rollback_remains_globally_rooted(m
     release_calls = {"count": 0}
 
     def fail_once(capability):
+        """Inject the once failure at the controlled test point."""
         release_calls["count"] += 1
         if release_calls["count"] == 1:
             raise MemoryError("reserved-finalizer-processed-owner-cannot-stick rollback fault")
@@ -423,6 +456,7 @@ def test_temporary_storage_failed_post_commit_rollback_remains_globally_rooted(m
 def test_temporary_storage_control_ticket_failure_does_not_repeat_physical_release(
     monkeypatch,
 ) -> None:
+    """Verify temporary storage control ticket failure does not repeat physical release."""
     from schema_sanitizer.core_impl import temporary_storage as module
 
     monkeypatch.setattr(
@@ -441,6 +475,7 @@ def test_temporary_storage_control_ticket_failure_does_not_repeat_physical_relea
     calls = {"count": 0}
 
     def fail_once(ticket):
+        """Inject the once failure at the controlled test point."""
         calls["count"] += 1
         if calls["count"] == 1:
             raise MemoryError(
@@ -470,6 +505,7 @@ def test_temporary_storage_control_ticket_failure_does_not_repeat_physical_relea
 def test_remote_io_control_tail_failure_retains_exact_owner_without_double_release(
     monkeypatch,
 ) -> None:
+    """Verify remote I/O control tail failure retains exact owner without double release."""
     from schema_sanitizer.remote_impl import io_permits as module
 
     governor = module.RemoteIoPermitGovernor(2)
@@ -485,6 +521,7 @@ def test_remote_io_control_tail_failure_retains_exact_owner_without_double_relea
     calls = {"count": 0}
 
     def fail_once(value):
+        """Inject the once failure at the controlled test point."""
         assert value is ticket
         calls["count"] += 1
         if calls["count"] == 1:

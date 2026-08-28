@@ -1,4 +1,9 @@
-"""Unit coverage for the evidence-driven telemetry benchmark."""
+"""Validate the evidence-driven telemetry benchmark and its high-core plans.
+
+Tests distinguish generic counters from proven DRAM saturation, parse repeated platform events,
+select paired workload frontiers, preserve exact CPU sets across plan reuse, support devnull mode,
+and configure the wide fixture beyond sixteen workers.
+"""
 
 from __future__ import annotations
 

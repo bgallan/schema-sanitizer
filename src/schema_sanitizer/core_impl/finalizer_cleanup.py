@@ -1,4 +1,8 @@
-"""Bounded non-blocking handoff for resource finalizers that may otherwise block."""
+"""Provide bounded nonblocking handoff for cleanup that may otherwise block.
+
+Rooted cleanup authorities and escrow slots are reserved before publication so finalizers can
+enqueue work without allocation, then acknowledge, cancel, or drain it safely.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ class PreparedFinalizerCleanup:
     __slots__ = ("_ticket", "_authority")
 
     def __init__(self, callback: Any) -> None:
+        """Initialize the prepared finalizer cleanup and its owned runtime state."""
         if not callable(callback):
             raise TypeError("prepared finalizer callback must be callable")
         self._ticket = 0
@@ -25,6 +30,7 @@ class PreparedFinalizerCleanup:
 
     @property
     def ticket(self) -> int:
+        """Return the current ownership ticket."""
         ticket = self._ticket
         if ticket:
             return ticket
@@ -33,83 +39,103 @@ class PreparedFinalizerCleanup:
 
     @property
     def callback(self) -> Any:
+        """Return the callback retained by this prepared cleanup."""
         return self._authority.callback
 
     @callback.setter
     def callback(self, value: Any) -> None:
+        """Replace the callback retained by this prepared cleanup."""
         self._authority.callback = value
 
     @property
     def arg0(self) -> object | None:
+        """Return the first prepared callback argument."""
         return self._authority.arg0
 
     @arg0.setter
     def arg0(self, value: object | None) -> None:
+        """Replace the first prepared callback argument."""
         self._authority.arg0 = value
 
     @property
     def arg1(self) -> object | None:
+        """Return the second prepared callback argument."""
         return self._authority.arg1
 
     @arg1.setter
     def arg1(self, value: object | None) -> None:
+        """Replace the second prepared callback argument."""
         self._authority.arg1 = value
 
     @property
     def arg2(self) -> object | None:
+        """Return the third prepared callback argument."""
         return self._authority.arg2
 
     @arg2.setter
     def arg2(self, value: object | None) -> None:
+        """Replace the third prepared callback argument."""
         self._authority.arg2 = value
 
     @property
     def arg3(self) -> object | None:
+        """Return the fourth prepared callback argument."""
         return self._authority.arg3
 
     @arg3.setter
     def arg3(self, value: object | None) -> None:
+        """Replace the fourth prepared callback argument."""
         self._authority.arg3 = value
 
     @property
     def arg4(self) -> object | None:
+        """Return the fifth prepared callback argument."""
         return self._authority.arg4
 
     @arg4.setter
     def arg4(self, value: object | None) -> None:
+        """Replace the fifth prepared callback argument."""
         self._authority.arg4 = value
 
     @property
     def arg5(self) -> object | None:
+        """Return the sixth prepared callback argument."""
         return self._authority.arg5
 
     @arg5.setter
     def arg5(self, value: object | None) -> None:
+        """Replace the sixth prepared callback argument."""
         self._authority.arg5 = value
 
     @property
     def arg6(self) -> object | None:
+        """Return the seventh prepared callback argument."""
         return self._authority.arg6
 
     @arg6.setter
     def arg6(self, value: object | None) -> None:
+        """Replace the seventh prepared callback argument."""
         self._authority.arg6 = value
 
     @property
     def arg7(self) -> object | None:
+        """Return the eighth prepared callback argument."""
         return self._authority.arg7
 
     @arg7.setter
     def arg7(self, value: object | None) -> None:
+        """Replace the eighth prepared callback argument."""
         self._authority.arg7 = value
 
     def run(self) -> None:
         # Safe-point execution runs the rooted authority directly because the
         # wrapper may already have been collected.
+        """Execute the configured operation."""
         if not self._authority._ack_only:
             self.callback(self)
 
     def clear(self) -> None:
+        """Clear values and ownership retained by this prepared finalizer cleanup."""
         self._authority.clear()
 
     def __del__(self) -> None:
@@ -204,6 +230,7 @@ def reserve_reference_finalizer_cleanup() -> PreparedFinalizerCleanup:
 
 
 def _cleanup_prepared_resource_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup prepared resource capsule."""
     resource = capsule.arg0
     if resource is not None:
         _cleanup_owner(resource)
@@ -312,6 +339,7 @@ def defer_prepared_finalizer_cleanup(
 
 
 def _cleanup_owner(owner: object) -> None:
+    """Run and clear the owner retained by a finalizer capsule."""
     custom = getattr(owner, "_finalizer_cleanup_from_escrow", None)
     if callable(custom):
         custom()
@@ -341,6 +369,7 @@ def drain_finalizer_cleanup() -> int:
     progressed = 0
 
     def process_prepared(_ticket: int, authority: RootedFinalizerAuthority) -> None:
+        """Execute one prepared finalizer cleanup without allocating arguments."""
         nonlocal progressed
         authority.run()
         authority.clear()
@@ -390,6 +419,7 @@ def prepared_finalizer_capacity_snapshot() -> tuple[int, int, int, int]:
 
 
 def _reset_finalizer_cleanup_after_fork() -> None:
+    """Reset finalizer cleanup after fork."""
     global _PREPARED_FINALIZER_OVERFLOWS, _PREPARED_FINALIZER_OVERFLOWED
     _PREPARED_FINALIZER_ESCROW.reset_after_fork()
     _PREPARED_FINALIZER_OVERFLOWS = 0

@@ -1,4 +1,8 @@
-"""Registry-backed source-plan streams, materialization, and file output."""
+"""Registry-backed source-plan streams, materialization, and file output.
+
+It opens owned registry streams, appends drift metadata, and drives either analytical
+materialization or file output with authoritative cleanup.
+"""
 
 from __future__ import annotations
 
@@ -95,6 +99,7 @@ class OpenedSourcePlanRegistryStream:
     _terminal_close_items: list[Any] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate and normalize the initialized instance state."""
         self._finalizer_capsule = reserve_finalizer_cleanup(_cleanup_opened_registry_stream_capsule)
         self._finalizer_ticket = self._finalizer_capsule.ticket
 

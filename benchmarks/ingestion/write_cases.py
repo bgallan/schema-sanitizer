@@ -1,4 +1,8 @@
-"""Write-side benchmark cases for the local ingestion benchmark CLI."""
+"""Write-side benchmark cases for the local ingestion benchmark CLI.
+
+It runs the configured CSV, JSONL, and Parquet sink cases through the shared timing
+recorder.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Cross-profile analysis for fixed-host concurrency evidence suites."""
+"""Cross-profile analysis for fixed-host concurrency evidence suites.
+
+It combines profile curves, calculates frontier gains, recommends a suite-wide worker
+frontier, and renders Markdown.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +12,13 @@ from typing import Any
 
 
 def _frontier(report: dict[str, Any]) -> dict[str, Any]:
+    """Return the selected worker frontier from one profile curve."""
     value = report.get("next_frontier", {})
     return value if isinstance(value, dict) else {}
 
 
 def _gain(report: dict[str, Any], name: str) -> float | None:
+    """Calculate the throughput gain between two worker points."""
     evidence = _frontier(report).get("evidence", {})
     value = evidence.get(name) if isinstance(evidence, dict) else None
     if isinstance(value, (int, float)) and math.isfinite(float(value)):

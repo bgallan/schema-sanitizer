@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency telemetry operation metrics."""
+"""Validate lifecycle and contents of native per-operation telemetry reports.
+
+A fresh context starts empty, completed and prepare-failed operations publish bounded phase, task,
+and memory metrics, and each subsequent operation replaces the report with a higher identifier.
+"""
 
 from __future__ import annotations
 

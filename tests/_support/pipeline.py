@@ -1,4 +1,8 @@
-"""Source builders shared by pipeline warm-up tests."""
+"""Construct source files used by pipeline warm-up and execution tests.
+
+The builders cover every public format and input mode while preserving stable field names and
+expected row values.
+"""
 
 from __future__ import annotations
 

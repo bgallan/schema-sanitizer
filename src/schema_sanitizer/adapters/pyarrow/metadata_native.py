@@ -1,4 +1,8 @@
-"""Native Arrow C stream fast path for metadata column injection."""
+"""Native Arrow C stream fast path for metadata column injection.
+
+It checks whether metadata values are natively representable and builds an owned Arrow C
+stream that injects them without Python materialization.
+"""
 
 from __future__ import annotations
 

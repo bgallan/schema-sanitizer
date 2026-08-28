@@ -1,4 +1,8 @@
-"""Regression coverage for memory failed residency probe preserves previous cpu identity and debt."""
+"""Tests conservative recovery from failed or unstable residency probes, generation
+exhaustion, physical tombstones, control-plane faults, deferred close, descriptor debt,
+ABI result construction, and mirror reconciliation. The last known CPU identity and
+stack debt remain authoritative, while exact slots and rooted ledger capability repair
+partial commits without treating mirrors as corruption authority."""
 
 from __future__ import annotations
 
@@ -12,10 +16,12 @@ import pytest
 
 
 def _root() -> Path:
+    """Return the repository root used by source-contract checks."""
     return Path(__file__).resolve().parents[2]
 
 
 def _reset_external(module) -> None:
+    """Reset cached external-runtime state between lifecycle checks."""
     module.drain_finalizer_cleanup()
     module._EXTERNAL_RUNTIME_POOL_COORDINATOR.clear()
     module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS = 0
@@ -23,6 +29,7 @@ def _reset_external(module) -> None:
 
 
 def test_failed_residency_probe_preserves_previous_cpu_identity_and_debt() -> None:
+    """Verify failed residency probe preserves previous CPU identity and debt."""
     from schema_sanitizer.core_impl import process_resources as module
 
     _reset_external(module)
@@ -30,6 +37,7 @@ def test_failed_residency_probe_preserves_previous_cpu_identity_and_debt() -> No
 
     class Runtime:
         def schema_sanitizer_resident_thread_count(self) -> int:
+            """Raise the deliberate failure for the schema sanitizer resident thread count path."""
             raise RuntimeError("transient probe fault")
 
     class Native:
@@ -38,11 +46,13 @@ def test_failed_residency_probe_preserves_previous_cpu_identity_and_debt() -> No
         supports_stack_debt = True
 
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.identity = 8
             self.debt = 8
             self.updates: list[tuple[int, int]] = []
 
         def external_runtime_residency_update(self, identity_delta: int, debt_delta: int) -> None:
+            """Record and apply identity and stack-debt deltas."""
             self.updates.append((int(identity_delta), int(debt_delta)))
             self.identity += int(identity_delta)
             self.debt += int(debt_delta)
@@ -66,6 +76,7 @@ def test_failed_residency_probe_preserves_previous_cpu_identity_and_debt() -> No
 
 
 def test_unstable_residency_generation_is_bounded_and_fails_closed() -> None:
+    """Verify unstable residency generation is bounded and fails closed."""
     from schema_sanitizer.core_impl import process_resources as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -75,6 +86,7 @@ def test_unstable_residency_generation_is_bounded_and_fails_closed() -> None:
 
     class Runtime:
         def schema_sanitizer_resident_thread_count(self) -> int:
+            """Advance the configuration generation during each residency probe."""
             nonlocal calls
             calls += 1
             with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
@@ -88,10 +100,12 @@ def test_unstable_residency_generation_is_bounded_and_fails_closed() -> None:
         supports_stack_debt = True
 
         def __init__(self) -> None:
+            """Initialize the native test double."""
             self.identity = 4
             self.debt = 4
 
         def external_runtime_residency_update(self, identity_delta: int, debt_delta: int) -> None:
+            """Apply identity and stack-debt deltas to the native counters."""
             self.identity += int(identity_delta)
             self.debt += int(debt_delta)
 
@@ -112,6 +126,7 @@ def test_unstable_residency_generation_is_bounded_and_fails_closed() -> None:
 
 
 def test_external_configuration_generation_exhaustion_fails_before_callbacks() -> None:
+    """Verify external configuration generation exhaustion fails before callbacks."""
     from schema_sanitizer.core_impl import process_resources as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -120,10 +135,12 @@ def test_external_configuration_generation_exhaustion_fails_before_callbacks() -
 
     class Runtime:
         def cpu_count(self) -> int:
+            """Count the runtime callback invocation and report one CPU."""
             calls["get"] += 1
             return 1
 
         def set_cpu_count(self, _value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             calls["set"] += 1
 
     runtime = Runtime()
@@ -140,6 +157,7 @@ def test_external_configuration_generation_exhaustion_fails_before_callbacks() -
 
 
 def test_armed_physical_tombstone_retains_finalizer_until_actual_cleanup() -> None:
+    """Verify armed physical tombstone retains finalizer until actual cleanup."""
     from schema_sanitizer.core_impl import process_resources as module
 
     _reset_external(module)
@@ -152,9 +170,11 @@ def test_armed_physical_tombstone_retains_finalizer_until_actual_cleanup() -> No
         supports_exact_permit_lease = True
 
         def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return receipt.amount
 
         def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             receipt.amount = int(target)
             return receipt.amount
 
@@ -203,6 +223,7 @@ def test_armed_physical_tombstone_retains_finalizer_until_actual_cleanup() -> No
 
 
 def test_manual_target_zero_hands_off_retry_instead_of_waiting() -> None:
+    """Verify manual target zero hands off retry instead of waiting."""
     from schema_sanitizer.core_impl import process_resources as module
 
     _reset_external(module)
@@ -215,9 +236,11 @@ def test_manual_target_zero_hands_off_retry_instead_of_waiting() -> None:
         supports_exact_permit_lease = True
 
         def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return receipt.amount
 
         def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
             receipt.amount = int(target)
             return receipt.amount
 
@@ -255,6 +278,7 @@ def test_manual_target_zero_hands_off_retry_instead_of_waiting() -> None:
 
 
 def test_control_plane_wrapper_loss_requests_exact_capability_retirement() -> None:
+    """Verify control plane wrapper loss requests exact capability retirement."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget(include_static_baseline=False)
@@ -272,12 +296,14 @@ def test_control_plane_wrapper_loss_requests_exact_capability_retirement() -> No
 
 
 def test_control_plane_insert_then_raise_keeps_exact_owner_recoverable() -> None:
+    """Verify control plane insert then raise keeps exact owner recoverable."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     class InsertThenRaise(dict):
         fail = True
 
         def __setitem__(self, key, value):
+            """Store the requested value in the insert then raise test double."""
             super().__setitem__(key, value)
             if self.fail:
                 self.fail = False
@@ -298,12 +324,14 @@ def test_control_plane_insert_then_raise_keeps_exact_owner_recoverable() -> None
 
 
 def test_control_plane_pop_then_raise_is_idempotent_release_not_quarantine() -> None:
+    """Verify control plane pop then raise is idempotent release not quarantine."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     class PopThenRaise(dict):
         fail = True
 
         def pop(self, key, default=None):
+            """Remove an owner-map entry, then inject the configured interrupt."""
             value = super().pop(key, default)
             if self.fail:
                 self.fail = False
@@ -323,6 +351,7 @@ def test_control_plane_pop_then_raise_is_idempotent_release_not_quarantine() -> 
 def test_memory_deferred_close_tail_retries_from_rooted_ledger_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify memory deferred close tail retries from rooted ledger authority."""
     from schema_sanitizer.core_impl import memory_budget as module
     from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
 
@@ -330,13 +359,16 @@ def test_memory_deferred_close_tail_retries_from_rooted_ledger_authority(
 
     class Native:
         def operation_memory_ledger_snapshot(self, _capsule):
+            """Return the current operation-memory ledger snapshot."""
             return (1024, 0, 16)
 
     class Cross:
         def __init__(self) -> None:
+            """Initialize the cross test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the cross test double."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("first cross-process tail fails")
@@ -389,6 +421,7 @@ def test_memory_deferred_close_tail_retries_from_rooted_ledger_authority(
 
 
 def test_uncertain_fd_exact_slot_beats_stale_high_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify uncertain FD exact slot beats stale high counter."""
     from schema_sanitizer.core_impl import process_resources as module
 
     governor = module._Governor(2, "failed-residency-probe-preserves-previous-cpu-uncertain-fd")
@@ -414,6 +447,7 @@ def test_uncertain_fd_exact_slot_beats_stale_high_counter(monkeypatch: pytest.Mo
 
 
 def _assert_preallocated_before_commit(source: str, function_name: str, commit_marker: str) -> None:
+    """Assert that storage is preallocated before publication commits."""
     signature = re.compile(rf"(?m)^PyObject\s*\*\s*{re.escape(function_name)}\s*\(")
     match = signature.search(source)
     assert match is not None, f"missing ABI function {function_name}"
@@ -428,6 +462,7 @@ def _assert_preallocated_before_commit(source: str, function_name: str, commit_m
 
 
 def test_exact_abi_builds_all_python_results_before_native_commit() -> None:
+    """Verify exact ABI builds all Python results before native commit."""
     prepare = (_root() / "cpp/src/api/python_abi3/options/prepare.cc").read_text()
     probe = (_root() / "cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
 
@@ -464,6 +499,7 @@ def test_exact_abi_builds_all_python_results_before_native_commit() -> None:
 
 
 def test_external_claim_cardinality_uses_bounded_exact_slots_not_dict_scan() -> None:
+    """Verify external claim cardinality uses bounded exact slots not dict scan."""
     resources = (_root() / "src/schema_sanitizer/core_impl/process_resources.py").read_text()
     start = resources.index("def _external_runtime_total_claims_locked")
     end = resources.index("\ndef ", start + 5)
@@ -474,6 +510,7 @@ def test_external_claim_cardinality_uses_bounded_exact_slots_not_dict_scan() -> 
 
 
 def test_control_plane_mirror_reconciliation_is_not_corruption_authority() -> None:
+    """Verify control plane mirror reconciliation is not corruption authority."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget(include_static_baseline=False)

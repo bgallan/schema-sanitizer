@@ -1,4 +1,8 @@
-"""Google Cloud Storage resumable-upload protocol with offset reconciliation."""
+"""Google Cloud Storage resumable-upload protocol with offset reconciliation.
+
+It creates resumable sessions, uploads bounded ranges, reconciles committed offsets
+after ambiguous responses, and aborts terminal failures.
+"""
 
 from __future__ import annotations
 

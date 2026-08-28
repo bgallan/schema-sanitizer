@@ -1,4 +1,8 @@
-"""Parquet schema loading and schema-drift comparison helpers."""
+"""Parquet schema loading and schema-drift comparison helpers.
+
+It loads local or remote Parquet schemas, compares flat and nested paths, and resolves
+schema registry evidence for drift reporting.
+"""
 
 from __future__ import annotations
 

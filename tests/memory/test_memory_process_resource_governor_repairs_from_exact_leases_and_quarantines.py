@@ -1,4 +1,8 @@
-"""Regression coverage for memory process resource governor repairs from exact leases and quarantines."""
+"""Stress-tests repair from exact process-resource leases across corrupted derived
+counters, temporary storage, dispatcher indices, guardian headroom, retry mappings,
+cross-process tails, and fork generations. Low counters quarantine admission instead of
+creating capacity, while cleanup commits exact local authority and preserves same-device
+sibling accounts."""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ import pytest
 
 
 def test_process_resource_governor_repairs_from_exact_leases_and_quarantines() -> None:
+    """Verify process resource governor repairs from exact leases and quarantines."""
     from schema_sanitizer.core_impl.process_resources import _Governor
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -30,6 +35,7 @@ def test_process_resource_governor_repairs_from_exact_leases_and_quarantines() -
 
 
 def test_dynamic_control_plane_repairs_derived_mirrors_from_exact_owner_ledger() -> None:
+    """Verify dynamic control plane repairs derived mirrors from exact owner ledger."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget(include_static_baseline=False)
@@ -52,6 +58,7 @@ def test_temporary_storage_low_counter_corruption_closes_admission_but_cleanup_s
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify temporary storage low counter corruption closes admission but cleanup survives."""
     from schema_sanitizer.core_impl import temporary_storage_governor as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -75,6 +82,7 @@ def test_temporary_storage_low_counter_corruption_closes_admission_but_cleanup_s
 
 
 def test_cleanup_dispatcher_exact_index_quarantines_low_admission_cache() -> None:
+    """Verify cleanup dispatcher exact index quarantines low admission cache."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
@@ -94,10 +102,12 @@ def test_cleanup_dispatcher_exact_index_quarantines_low_admission_cache() -> Non
 def test_release_guardian_never_turns_low_counter_corruption_into_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify release guardian never turns low counter corruption into headroom."""
     from schema_sanitizer.core_impl.retry_scheduler import _ReleaseGuardian
 
     class Owner:
         def release(self) -> None:
+            """Release the resource held by the owner test double."""
             return None
 
     guardian = _ReleaseGuardian()
@@ -116,6 +126,7 @@ def test_release_guardian_never_turns_low_counter_corruption_into_headroom(
 def test_retry_scheduler_rebuilds_admission_from_exact_owner_mappings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry scheduler rebuilds admission from exact owner mappings."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     scheduler = _RetryScheduler()
@@ -144,6 +155,7 @@ def test_retry_scheduler_rebuilds_admission_from_exact_owner_mappings(
 def test_cross_process_storage_release_commits_local_authority_before_fallible_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cross process storage release commits local authority before fallible tail."""
     from schema_sanitizer.core_impl import cross_process_storage as module
 
     account = module.open_cross_process_storage_account(7801)
@@ -155,6 +167,7 @@ def test_cross_process_storage_release_commits_local_authority_before_fallible_t
     )
 
     def fail_release(*_args, **_kwargs):
+        """Raise the deliberate failure during release."""
         raise KeyboardInterrupt("injected post-authority cleanup fault")
 
     # Once local exact authority commits, the stale host side is conservative
@@ -173,6 +186,7 @@ def test_cross_process_storage_release_commits_local_authority_before_fallible_t
 def test_fork_quarantine_is_generation_scoped_and_does_not_dedupe_same_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fork quarantine is generation scoped and does not dedupe same label."""
     from schema_sanitizer.core_impl import fork_safety
 
     monkeypatch.setattr(
@@ -206,6 +220,7 @@ def test_temporary_storage_finishes_exact_local_commit_before_propagating_cross_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify temporary storage finishes exact local commit before propagating cross tail fault."""
     from schema_sanitizer.core_impl import cross_process_storage
     from schema_sanitizer.core_impl import temporary_storage_governor as module
 
@@ -222,6 +237,7 @@ def test_temporary_storage_finishes_exact_local_commit_before_propagating_cross_
     assert account is not None
 
     def fail_release(*_args, **_kwargs):
+        """Raise the deliberate failure during release."""
         raise KeyboardInterrupt("injected cross tail")
 
     monkeypatch.setattr(cross_process_storage, "_release_cross_process_raw", fail_release)
@@ -239,6 +255,7 @@ def test_temporary_storage_finishes_exact_local_commit_before_propagating_cross_
 
 
 def test_native_amount_permit_underflow_poison_is_sticky_and_fail_closed() -> None:
+    """Verify native amount permit underflow poison is sticky and fail closed."""
     root = Path(__file__).resolve().parents[2]
     source = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
 
@@ -283,6 +300,7 @@ def test_cross_process_storage_reconciliation_preserves_same_device_sibling_acco
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify cross process storage reconciliation preserves same device sibling account."""
     from schema_sanitizer.core_impl import cross_process_storage as module
 
     if module.fcntl is None:
@@ -296,6 +314,7 @@ def test_cross_process_storage_reconciliation_preserves_same_device_sibling_acco
     assert module.cross_process_reserved_bytes(7803) == 70
 
     def fail_release(*_args, **_kwargs):
+        """Raise the deliberate failure during release."""
         raise KeyboardInterrupt("injected before shared release")
 
     real_release = module._release_cross_process_raw

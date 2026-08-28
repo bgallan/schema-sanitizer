@@ -1,4 +1,8 @@
-"""Native-first stream and raw file writers grouped by output format."""
+"""Native-first stream and raw file writers grouped by output format.
+
+It selects native stream, raw stream, or fallback writers for JSONL, CSV, and Parquet
+while preserving primary errors and cleanup ownership.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ def _metadata_route(
     row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
     timestamp_columns: TimestampColumns,
 ) -> str:
+    """Select the native metadata route required by the requested columns."""
     return (
         "native"
         if _native_output.has_metadata_columns(
@@ -44,6 +49,7 @@ def _write_record_native_first(
     memory_limit_bytes: int | None,
     threading_mode: str,
 ) -> _native_output.FileWriteOutcome:
+    """Try direct native output, then wrap stream-writer statistics as a file outcome."""
     options = {
         "first_row_columns": first_row_columns,
         "all_row_columns": all_row_columns,

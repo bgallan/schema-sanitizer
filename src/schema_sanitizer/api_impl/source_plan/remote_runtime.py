@@ -1,4 +1,8 @@
-"""Retryable lazy provider for staged remote path-source chunks."""
+"""Retryable lazy provider for staged remote path-source chunks.
+
+Its base provider serializes staged-chunk consumption, rollback, retry, and terminal
+close for remote path-source execution.
+"""
 
 from __future__ import annotations
 
@@ -182,6 +186,7 @@ class RemotePathSourceChunkProviderBase:
             pass
 
     def _retire_finalizer_if_clean(self) -> None:
+        """Retire finalizer if clean."""
         if not self.is_closed or self._preserved_chunks:
             return
         ticket = getattr(self, "_finalizer_ticket", None)

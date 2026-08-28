@@ -1,4 +1,8 @@
-"""Regression coverage for memory rejected retry replacement keeps previous owner."""
+"""Exercises rejected retry replacement, ready-transition cancellation, out-of-lock
+finalizers, subsystem fairness, guardian workers, user-scoped coordination roots,
+bounded claim sweeps, fork authority, cleanup startup, and bridge or provider transfer.
+Rejection keeps the previous owner and generation; claims roll back on synchronization
+failure, and failed leases move to the guardian only after transfer."""
 
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ def _move_all_pending_to_ready(scheduler: Any) -> None:
 def test_rejected_retry_replacement_keeps_previous_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify rejected retry replacement keeps previous owner."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -44,6 +49,7 @@ def test_rejected_retry_replacement_keeps_previous_owner(
     monkeypatch.setattr(module, "_MAX_EMERGENCY_RETRIES", 0)
 
     def old() -> None:
+        """Run the stale callback retained across replacement."""
         pass
 
     key = ("rejected-retry-replacement-keeps-previous-owner-transaction", 1)
@@ -60,6 +66,7 @@ def test_rejected_retry_replacement_keeps_previous_owner(
 def test_cancel_removes_retry_after_timer_ready_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cancel removes retry after timer ready transition."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -78,6 +85,7 @@ def test_cancel_removes_retry_after_timer_ready_transition(
 def test_retry_payload_finalizer_runs_outside_scheduler_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry payload finalizer runs outside scheduler lock."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -86,9 +94,11 @@ def test_retry_payload_finalizer_runs_outside_scheduler_lock(
 
     class Callback:
         def __call__(self) -> None:
+            """Invoke the callback test double."""
             return None
 
         def __del__(self) -> None:
+            """Run fallback cleanup when the callback test double is collected."""
             owned = getattr(scheduler._condition, "_is_owned", lambda: False)()
             lock_states.append(bool(owned))
 
@@ -103,6 +113,7 @@ def test_retry_payload_finalizer_runs_outside_scheduler_lock(
 def test_subsystem_quota_covers_ready_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify subsystem quota covers ready state."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -120,6 +131,7 @@ def test_subsystem_quota_covers_ready_state(
 def test_ready_execution_round_robins_subsystems(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify ready execution round robins subsystems."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -149,12 +161,14 @@ def test_ready_execution_round_robins_subsystems(
 def test_release_guardian_uses_bounded_shared_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify release guardian uses bounded shared workers."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     monkeypatch.setattr(module, "_IDLE_SECONDS", 0.02)
 
     class WorkerPermit:
         def release(self) -> None:
+            """Release the resource held by the worker permit test double."""
             pass
 
     monkeypatch.setattr(module, "acquire_release_guardian_thread", WorkerPermit)
@@ -164,9 +178,11 @@ def test_release_guardian_uses_bounded_shared_workers(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             nonlocal released
             self.calls += 1
             if self.calls == 1:
@@ -192,6 +208,7 @@ def test_release_guardian_uses_bounded_shared_workers(
 def test_default_coordination_roots_are_scoped_to_the_effective_uid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify default coordination roots are scoped to the effective uid."""
     import schema_sanitizer.core_impl.path_identity as module
     import schema_sanitizer.core_impl.temporary_janitor as janitor_module
 
@@ -217,23 +234,28 @@ def test_default_coordination_roots_are_scoped_to_the_effective_uid(
 def test_claim_sweep_budget_counts_unrelated_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify claim sweep budget counts unrelated entries."""
     import schema_sanitizer.core_impl.path_identity as module
 
     class Lease:
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     class Iterator:
         def __init__(self) -> None:
+            """Initialize the iterator test double."""
             self.index = 0
             self.closed = False
 
         def __iter__(self) -> "Iterator":
+            """Iterate over values exposed by the iterator test double."""
             return self
 
         def __next__(self) -> Any:
+            """Return the next value from the iterator test double."""
             if self.index >= 10:
                 raise StopIteration
             index = self.index
@@ -244,6 +266,7 @@ def test_claim_sweep_budget_counts_unrelated_entries(
             )
 
         def close(self) -> None:
+            """Close the resources owned by the iterator test double."""
             self.closed = True
 
     lease = Lease()
@@ -267,6 +290,7 @@ def test_claim_sweep_budget_counts_unrelated_entries(
 def test_published_claim_is_rolled_back_if_parent_fsync_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify published claim is rolled back if parent fsync fails."""
     import schema_sanitizer.core_impl.path_identity as module
 
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path / "coord"))
@@ -276,6 +300,7 @@ def test_published_claim_is_rolled_back_if_parent_fsync_fails(
     real_fsync = module.os.fsync
 
     def fail_directory_fsync(descriptor: int) -> None:
+        """Inject the directory fsync failure at the controlled test point."""
         if stat.S_ISDIR(os.fstat(descriptor).st_mode):
             raise OSError("directory persistence failed")
         real_fsync(descriptor)
@@ -298,6 +323,7 @@ def test_published_claim_is_rolled_back_if_parent_fsync_fails(
 
 
 def test_claim_owner_finalizer_only_transfers_ownership() -> None:
+    """Verify claim owner finalizer only transfers ownership."""
     import schema_sanitizer.core_impl.path_identity as module
 
     owner = module.PathClaimOwner(None, None, None)
@@ -311,6 +337,7 @@ def test_claim_owner_finalizer_only_transfers_ownership() -> None:
 def test_sweep_recovers_dead_claim_write_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify sweep recovers dead claim write record."""
     import schema_sanitizer.core_impl.path_identity as module
 
     root = tmp_path / "claims"
@@ -329,6 +356,7 @@ def test_sweep_recovers_dead_claim_write_record(
 def test_inherited_claim_owner_cannot_release_parent_authority(
     tmp_path: Path,
 ) -> None:
+    """Verify inherited claim owner cannot release parent authority."""
     import schema_sanitizer.core_impl.path_identity as module
 
     marker = b"p" * 16
@@ -350,6 +378,7 @@ def test_inherited_claim_owner_cannot_release_parent_authority(
 def test_path_claim_admission_is_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify path claim admission is bounded."""
     import schema_sanitizer.core_impl.path_identity as module
 
     monkeypatch.setattr(module, "_MAX_LIVE_PATH_CLAIMS", 1)
@@ -365,6 +394,7 @@ def test_path_claim_admission_is_bounded(
 def test_cleanup_worker_start_is_published_before_start_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cleanup worker start is published before start commit."""
     import schema_sanitizer.core_impl.cleanup_dispatcher as module
 
     dispatcher = module._CleanupDispatcher()
@@ -372,20 +402,24 @@ def test_cleanup_worker_start_is_published_before_start_commit(
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     class FakeThread:
         def __init__(self, **_kwargs: Any) -> None:
+            """Initialize the fake thread test double."""
             nonlocal created
             created += 1
             self.started = False
 
         def is_alive(self) -> bool:
+            """Report whether the fake thread test double is active."""
             return self.started
 
         def start(self) -> None:
             # Re-enter while Thread.start has not committed.  The start
             # reservation plus published worker must suppress a duplicate.
+            """Start the activity represented by the fake thread test double."""
             dispatcher._ensure_workers()
             self.started = True
 
@@ -399,15 +433,18 @@ def test_cleanup_worker_start_is_published_before_start_commit(
 def test_async_bridge_transfers_failed_lease_to_guardian(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify async bridge transfers failed lease to guardian."""
     from contextvars import copy_context
 
     import schema_sanitizer.remote_impl.async_bridge as module
 
     async def operation() -> None:
+        """Return the operation result delivered through the retry path."""
         return None
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             raise OSError("release failed")
 
     adopted: list[Any] = []
@@ -427,10 +464,12 @@ def test_async_bridge_transfers_failed_lease_to_guardian(
 def test_remote_host_resources_transfer_after_release_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote host resources transfer after release failure."""
     import schema_sanitizer.remote_impl.io_coordinator as module
 
     class Owner:
         def release(self) -> None:
+            """Release the resource held by the owner test double."""
             raise OSError("release failed")
 
     coordinator = module.RemoteIoCoordinator.__new__(module.RemoteIoCoordinator)
@@ -452,6 +491,7 @@ def test_remote_host_resources_transfer_after_release_failure(
 
 
 def test_source_contracts() -> None:
+    """Verify source contracts."""
     root = Path(__file__).resolve().parents[2]
     retry = (root / "src/schema_sanitizer/core_impl/retry_scheduler.py").read_text()
     identity = (root / "src/schema_sanitizer/core_impl/path_identity.py").read_text()

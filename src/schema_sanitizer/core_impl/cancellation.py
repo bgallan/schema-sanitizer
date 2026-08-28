@@ -1,4 +1,8 @@
-"""Cooperative operation cancellation and monotonic deadlines."""
+"""Provide cooperative operation cancellation and monotonic deadlines.
+
+Context-scoped tokens combine explicit cancellation with optional deadlines and make sleeps and
+future waits interruptible without exposing wall-clock drift.
+"""
 
 from __future__ import annotations
 
@@ -150,11 +154,13 @@ _FORK_PREPARED_CURRENT_TOKEN: ContextVar[OperationCancellationToken | None] | No
 
 
 def _prepare_cancellation_token_for_fork() -> None:
+    """Prepare cancellation token for fork."""
     global _FORK_PREPARED_CURRENT_TOKEN
     _FORK_PREPARED_CURRENT_TOKEN = _FORK_CURRENT_TOKEN_BANKS[_FORK_CURRENT_TOKEN_BANK_INDEX]
 
 
 def _clear_cancellation_token_fork_preparation() -> None:
+    """Clear cancellation token fork preparation."""
     global _FORK_PREPARED_CURRENT_TOKEN
     _FORK_PREPARED_CURRENT_TOKEN = None
 

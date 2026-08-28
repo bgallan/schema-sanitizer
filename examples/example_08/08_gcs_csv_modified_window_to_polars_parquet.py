@@ -1,4 +1,8 @@
-"""Run example 08: flat GCS CSV prefix to Hive analytical Parquet."""
+"""Run example 08: flat GCS CSV prefix to Hive analytical Parquet.
+
+The entry point validates the cloud workflow configuration and delegates modified-window
+processing to reusable runtime support.
+"""
 
 from __future__ import annotations
 

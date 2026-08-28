@@ -1,4 +1,8 @@
-"""Protect sanitizer-aware local native build selection."""
+"""Protect sanitizer-aware local native build selection.
+
+It protects sanitizer compatibility, candidate precedence, missing-dependency recovery,
+repaired wheel paths, and required ASan or TSan runtime linkage.
+"""
 
 from __future__ import annotations
 

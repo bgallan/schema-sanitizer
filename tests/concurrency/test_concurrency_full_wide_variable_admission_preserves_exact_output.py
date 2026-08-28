@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency full wide variable admission preserves exact output."""
+"""Validate full admission for bounded wide-variable JSONL output.
+
+The optimization must remain limited to its eligible route, preserve byte-exact results, and
+reclaim only reorder slots that were actually removed from the active output plan.
+"""
 
 from __future__ import annotations
 

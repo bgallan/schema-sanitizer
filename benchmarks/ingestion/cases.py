@@ -1,4 +1,8 @@
-"""Benchmark case names grouped by workload type."""
+"""Benchmark case names grouped by workload type.
+
+The constants provide the canonical read, support, and write case groups consumed by the
+ingestion command.
+"""
 
 from __future__ import annotations
 

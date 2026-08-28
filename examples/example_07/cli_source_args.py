@@ -1,4 +1,8 @@
-"""Source/output URI argument builders for example 07."""
+"""Source/output URI argument builders for example 07.
+
+It defines source, output, date-range, prefix, discovery, and schema-warm-up arguments
+for the pipeline.
+"""
 
 from __future__ import annotations
 

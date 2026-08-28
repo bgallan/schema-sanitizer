@@ -1,4 +1,8 @@
-"""Regression coverage for memory sync retry does not replay success after telemetry failure."""
+"""Stress-tests synchronous retry and telemetry boundaries plus cancellation handoff, final
+operation close, staged paths, diagnostics locks, coordination timeouts, temporary
+storage, janitor quarantine, cross-process aggregation, and serialized final close.
+Success is never replayed after telemetry failure; releases use creation-time
+coordination identity and retain exact owners whenever shared or local cleanup fails."""
 
 from __future__ import annotations
 
@@ -27,21 +31,24 @@ def test_sync_retry_does_not_replay_success_after_telemetry_failure(
     calls = 0
 
     class Lease:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Make success telemetry fail after the blocking side effect commits."""
 
         def success(self) -> None:
+            """Reject an unexpected success-path invocation."""
             raise RuntimeError("telemetry failed")
 
         def failure(self, _exc: BaseException) -> None:
+            """Raise the deliberate failure injected by the test."""
             raise AssertionError("completed operation must not be marked failed")
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             raise AssertionError("completed operation must not be neutralized")
 
     monkeypatch.setattr(provider_throttle, "acquire_provider_request_sync", lambda _key: Lease())
 
     def operation() -> str:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+        """Run the controlled operation under test."""
         nonlocal calls
         calls += 1
         return "written"
@@ -59,22 +66,25 @@ def test_sync_retry_releases_throttle_on_control_flow_exception(
     from schema_sanitizer.remote_impl import provider_throttle
 
     class StopNow(BaseException):
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Represent non-Exception control flow escaping the retry wrapper."""
 
         pass
 
     released = 0
 
     class Lease:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Track release of the provider throttle slot under control flow."""
 
         def success(self) -> None:
+            """Reject an unexpected success-path invocation."""
             raise AssertionError
 
         def failure(self, _exc: BaseException) -> None:
+            """Raise the deliberate failure injected by the test."""
             raise AssertionError
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             nonlocal released
             released += 1
 
@@ -97,7 +107,7 @@ def test_process_resource_rechecks_cancellation_at_grant_handoff(
     probes = 0
 
     def check(*, stage: str) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+        """Run the controlled validation callback."""
         nonlocal probes
         assert stage == "test"
         probes += 1
@@ -114,30 +124,34 @@ def test_process_resource_rechecks_cancellation_at_grant_handoff(
 
 
 class _CloseCounter:
-    """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+    """Count close attempts and optionally fail the first."""
 
     def __init__(self, *, fail_once: bool = False) -> None:
+        """Initialize the close counter test double."""
         self.calls = 0
         self.fail_once = fail_once
 
     def close(self) -> None:
+        """Close the resources owned by the close counter test double."""
         self.calls += 1
         if self.fail_once and self.calls == 1:
             raise OSError("transient close failure")
 
 
 class _ReleaseCounter:
-    """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+    """Count release attempts across retryable cleanup."""
 
     def __init__(self) -> None:
+        """Initialize the release counter test double."""
         self.calls = 0
 
     def release(self) -> None:
+        """Release the resource held by the release counter test double."""
         self.calls += 1
 
 
 def _resource_domain_for_test(memory: Any) -> Any:
-    """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+    """Create the resource domain used by the retry assertion."""
     from schema_sanitizer.api_impl.operation_context import _OperationExecutionResources
 
     value = object.__new__(_OperationExecutionResources)
@@ -200,17 +214,20 @@ def test_operation_context_close_can_retry_and_blocks_new_work() -> None:
     from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 
     class Resources:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Expose closeable operation resources with one retryable owner."""
 
         def __init__(self) -> None:
+            """Initialize the resources test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the resources test double."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("journal unavailable")
 
         def ensure_open(self) -> None:
+            """Raise the deliberate failure for the ensure open path."""
             raise AssertionError("context-local close state must reject first")
 
     context = object.__new__(OperationExecutionContext)
@@ -253,7 +270,7 @@ def test_operation_resource_construction_rolls_back_partial_owners(
     monkeypatch.setattr(module, "TemporaryStoragePermitPool", lambda _limit: storage)
 
     def fail_directory(*_args: Any, **_kwargs: Any) -> Any:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+        """Inject the directory failure at the controlled test point."""
         raise RuntimeError("directory setup failed")
 
     monkeypatch.setattr(module, "DirectoryMetadataBudget", fail_directory)
@@ -272,12 +289,14 @@ def test_staged_path_keeps_lease_when_release_fails(tmp_path: Path) -> None:
     path.write_bytes(b"payload")
 
     class Lease:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Fail staged-path lease release once while preserving retry ownership."""
 
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("coordination write failed")
@@ -343,7 +362,7 @@ def test_completed_diagnostic_copy_does_not_hold_registry_lock(
     unblock = threading.Event()
 
     def slow_deepcopy(value: Any) -> Any:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+        """Pause at the slow deepcopy synchronization point."""
         entered.set()
         assert unblock.wait(timeout=2.0)
         return copy.deepcopy(value)
@@ -356,7 +375,7 @@ def test_completed_diagnostic_copy_does_not_hold_registry_lock(
     completed = threading.Event()
 
     def complete_second() -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+        """Complete the second queued operation before releasing the first."""
         module.complete_operation("second", {"payload": [4]})
         completed.set()
 
@@ -379,7 +398,7 @@ def test_coordination_lock_times_out_instead_of_blocking_forever(
     from schema_sanitizer.core_impl import coordination_journal as module
 
     class FakeFcntl:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Keep the coordination lock contended until its bounded timeout."""
 
         LOCK_EX = 1
         LOCK_NB = 2
@@ -387,6 +406,7 @@ def test_coordination_lock_times_out_instead_of_blocking_forever(
 
         @staticmethod
         def flock(_descriptor: int, operation: int) -> None:
+            """Reject every lock operation except unlock with a busy error."""
             if operation != FakeFcntl.LOCK_UN:
                 raise BlockingIOError("busy")
 
@@ -411,7 +431,7 @@ def test_coordination_lock_unlocks_after_control_flow_exception(
     operations: list[int] = []
 
     class FakeFcntl:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Record lock and unlock calls around a control-flow failure."""
 
         LOCK_EX = 1
         LOCK_NB = 2
@@ -419,10 +439,11 @@ def test_coordination_lock_unlocks_after_control_flow_exception(
 
         @staticmethod
         def flock(_descriptor: int, operation: int) -> None:
+            """Record each requested file-lock operation."""
             operations.append(operation)
 
     class StopNow(BaseException):
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Represent non-Exception control flow inside the coordination lock."""
 
         pass
 
@@ -481,7 +502,7 @@ def test_storage_governor_releases_with_creation_time_coordination_setting(
 
 
 def _temporary_pool_for_test(*, limit: int, reserved: int = 0, closed: bool = False) -> Any:
-    """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+    """Create the temporary-storage pool used by the retry assertion."""
     from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 
     pool = TemporaryStoragePermitPool(None)
@@ -503,16 +524,18 @@ def test_temporary_pool_rejects_locally_before_shared_reservation(
     from schema_sanitizer.core_impl import temporary_storage as module
 
     class Governor:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Reject if local temporary-pool admission reaches the shared governor."""
 
         reserve_calls = 0
 
         @staticmethod
         def filesystem(_path: object) -> tuple[int, Path, int]:
+            """Return the controlled filesystem-capacity sample."""
             return 7, tmp_path, 1 << 30
 
         @classmethod
         def reserve(cls, *_args: object, **_kwargs: object) -> int:
+            """Count and reject any attempted shared reservation."""
             cls.reserve_calls += 1
             raise AssertionError("shared reservation must not be attempted")
 
@@ -545,21 +568,23 @@ def test_temporary_lease_constructor_fails_before_shared_reservation(
     from schema_sanitizer.core_impl import temporary_storage as module
 
     class Governor:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Reject if lease construction reaches shared storage admission."""
 
         reserve_calls = 0
 
         @staticmethod
         def filesystem(_path: object) -> tuple[int, Path, int]:
+            """Return the controlled filesystem-capacity sample."""
             return 7, tmp_path, 1 << 30
 
         @classmethod
         def reserve(cls, *_args: object, **_kwargs: object) -> int:
+            """Count the shared reservation call and return capability token seven."""
             cls.reserve_calls += 1
             return 7
 
     def fail_lease(*_args: object, **_kwargs: object) -> object:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+        """Inject the lease failure at the controlled test point."""
         raise MemoryError("lease allocation failed")
 
     monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", Governor)
@@ -578,9 +603,10 @@ def test_janitor_quarantine_never_scans_stale_directory_inline(
     from schema_sanitizer.core_impl import temporary_janitor as module
 
     class Lease:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Record whether quarantine cleanup releases the stale lease inline."""
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             raise AssertionError("accepted ownership must retain the lease")
 
     janitor = module._TemporaryArtifactJanitor()
@@ -632,22 +658,25 @@ def test_failed_shared_storage_admission_leaves_inert_unpublished_lease(
     from schema_sanitizer.core_impl import temporary_storage as module
 
     class Governor:
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Fail shared storage admission before a lease can be published."""
 
         release_calls = 0
 
         @staticmethod
         def filesystem(_path: object) -> tuple[int, Path, int]:
+            """Return the controlled filesystem-capacity sample."""
             return 7, tmp_path, 1 << 30
 
         @staticmethod
         def reserve(*_args: object, **_kwargs: object) -> int:
+            """Raise the deliberate failure for the reserve path."""
             raise OSError("shared admission failed")
 
         reserve_capability = reserve
 
         @classmethod
         def release(cls, *_args: object, **_kwargs: object) -> None:
+            """Release the resource held by the governor test double."""
             cls.release_calls += 1
 
     monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", Governor)
@@ -673,9 +702,10 @@ def test_operation_resource_final_close_is_serialized_once(
     unblock = threading.Event()
 
     class BlockingClose(_CloseCounter):
-        """Provide a focused sync-retry-does-not-replay-success regression test helper."""
+        """Block final close so competing callers can verify serialization."""
 
         def close(self) -> None:
+            """Close the resources owned by the blocking close test double."""
             self.calls += 1
             entered.set()
             assert unblock.wait(timeout=2.0)
@@ -685,7 +715,7 @@ def test_operation_resource_final_close_is_serialized_once(
     errors: list[BaseException] = []
 
     def close() -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
+        """Close the resource at the synchronization point under test."""
         try:
             resources.release()
         except BaseException as exc:

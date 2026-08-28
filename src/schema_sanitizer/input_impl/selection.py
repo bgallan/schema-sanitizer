@@ -1,4 +1,8 @@
-"""Canonical input selectors, format rules, path validation, and text preparation."""
+"""Normalize input selectors, formats, paths, and text preparation.
+
+Path, file-like, and Python-row inputs are validated before non-native text encodings are
+transcoded and each source is converted into a native-safe representation.
+"""
 
 from __future__ import annotations
 

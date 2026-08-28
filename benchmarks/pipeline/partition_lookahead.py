@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Measure bounded partition lookahead against an ordered local HTTP source."""
+"""Measure bounded partition lookahead against an ordered local HTTP source.
+
+It hosts an ordered HTTP source, compares lookahead settings, verifies identical
+outputs, and reports timing and request order.
+"""
 
 from __future__ import annotations
 
@@ -53,9 +57,11 @@ class _SourceServer:
             """Serve HEAD/GET without logging benchmark requests."""
 
             def _body(self) -> bytes | None:
+                """Return the deterministic JSONL payload served by the benchmark."""
                 return payload_by_path.get(self.path)
 
             def do_HEAD(self) -> None:  # noqa: N802
+                """Handle HTTP HEAD requests for the local test server."""
                 body = self._body()
                 if body is None:
                     self.send_error(404)
@@ -65,6 +71,7 @@ class _SourceServer:
                 self.end_headers()
 
             def do_GET(self) -> None:  # noqa: N802
+                """Handle HTTP GET requests for the local test server."""
                 body = self._body()
                 if body is None:
                     self.send_error(404)
@@ -76,6 +83,7 @@ class _SourceServer:
                 self.wfile.write(body)
 
             def log_message(self, *_args: Any) -> None:
+                """Suppress routine request logging from the local test server."""
                 return
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency lexical scalars preserve single multi output."""
+"""Preserve lexical scalar semantics through parallel inference and writing.
+
+Numbers, booleans, strings, coercions, and escapes must match the single-worker result, with the
+direct token route taking precedence and canonical fallback handling unsupported spellings.
+"""
 
 from __future__ import annotations
 

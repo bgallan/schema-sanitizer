@@ -1,4 +1,8 @@
-"""Operation-wide permits for bounded temporary filesystem usage."""
+"""Provide operation-wide permits for bounded temporary filesystem usage.
+
+Exact byte leases, resizing, stream reservations, finalizer recovery, diagnostics, and the current
+operation context share one accounting boundary.
+"""
 
 from __future__ import annotations
 
@@ -79,10 +83,12 @@ class _StorageLeasePublication:
     __slots__ = ("lease_id", "capability")
 
     def __init__(self, capability: object) -> None:
+        """Initialize the storage lease publication and its owned runtime state."""
         self.lease_id = 0
         self.capability = capability
 
     def __iter__(self):
+        """Iterate over the retained values."""
         yield self.lease_id
         yield self.capability
 
@@ -96,11 +102,13 @@ class _StorageResizeResult:
         filesystem_key: int,
         filesystem_path: Path,
     ) -> None:
+        """Initialize the storage resize result and its owned runtime state."""
         self.requested = requested
         self.filesystem_key = filesystem_key
         self.filesystem_path = filesystem_path
 
     def __iter__(self):
+        """Iterate over the retained values."""
         yield self.requested
         yield self.filesystem_key
         yield self.filesystem_path
@@ -363,6 +371,7 @@ def drain_temporary_storage_finalizers() -> int:
     drained = 0
 
     def process(ticket: int, value: RootedFinalizerAuthority) -> None:
+        """Process one retained work item."""
         nonlocal drained
         if isinstance(value, RootedFinalizerAuthority):
             value.ticket = ticket
@@ -408,7 +417,7 @@ class StreamingStorageReservation:
         path: str | Path,
         quantum_bytes: int = 4 * 1024 * 1024,
     ) -> None:
-        """Initialize this helper."""
+        """Initialize the streaming storage reservation and its owned runtime state."""
         self._lease = lease
         self._credit = max(0, int(initial_credit_bytes))
         self._extra = 0
@@ -547,6 +556,7 @@ class TemporaryStoragePermitPool:
         process_capability: ProcessTemporaryStorageCapability,
         control_ticket: ControlPlaneTicket,
     ) -> _StorageLeasePublication:
+        """Publish lease while holding the governing lock."""
         lease_id = next_reusable_token(self._lease_sequence, self._leases)
         if lease_id is None:
             raise RuntimeError("temporary-storage lease namespace exhausted")
@@ -569,6 +579,7 @@ class TemporaryStoragePermitPool:
     def _lease_entry_authority_locked(
         self, lease_id: int, owner_id: int, capability: object
     ) -> _StorageLeaseEntry:
+        """Return the lease-entry authority while holding the pool lock."""
         entry = self._leases.get(lease_id)
         if entry is None or entry.owner_id != owner_id or capability is not entry.capability:
             self._unknown_lease_releases += 1
@@ -576,9 +587,11 @@ class TemporaryStoragePermitPool:
         return entry
 
     def _lease_entry_locked(self, lease: TemporaryStorageLease) -> _StorageLeaseEntry:
+        """Return the live lease entry while holding the pool lock."""
         return self._lease_entry_authority_locked(lease._lease_id, id(lease), lease._capability)
 
     def _lease_reserved_bytes(self, lease: TemporaryStorageLease) -> int:
+        """Return the lease reserved bytes."""
         with self._condition:
             return self._lease_entry_locked(lease).reserved_bytes
 

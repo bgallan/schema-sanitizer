@@ -1,4 +1,8 @@
-"""Regression coverage for memory external runtime shrink partial failure keeps finalizer exact."""
+"""Tests shared and standalone external-runtime pools across partial shrink failure,
+post-fork locks, Arrow-to-Polars memory, overlapping claims, operation borrows,
+completion ownership, and format evidence. Pool width never re-expands under live
+overlap, shared suffixes alone release, and named finalizer state retains exact
+move-only ownership."""
 
 from __future__ import annotations
 
@@ -43,14 +47,17 @@ class _ExactNative:
     """Minimal current exact-receipt native API used by runtime-pool tests."""
 
     def __init__(self, calls: list[tuple[str, int]]) -> None:
+        """Initialize the exact native test double."""
         self.calls = calls
 
     def acquire_exact_permit_lease(self, desired: int, minimum: int):
+        """Acquire the fake exact-permit lease requested by the resource owner."""
         assert desired >= minimum
         self.calls.append(("acquire", desired))
         return SimpleNamespace(amount=desired), desired
 
     def resize_exact_permit_lease(self, receipt: object, target: int) -> int:
+        """Resize the fake exact-permit lease to the requested amount."""
         previous = int(receipt.amount)  # type: ignore[attr-defined]
         receipt.amount = target  # type: ignore[attr-defined]
         if previous != target:
@@ -59,11 +66,13 @@ class _ExactNative:
 
     @staticmethod
     def exact_permit_lease_amount(receipt: object) -> int:
+        """Return the exact permit amount tracked by the fake lease."""
         return int(receipt.amount)  # type: ignore[attr-defined]
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> None:
+    """Verify external runtime shrink fails before inherited lock after fork."""
     from schema_sanitizer.core_impl import process_resources as module
 
     runtime = module.ExternalRuntimeConcurrencyLease(None, workers=2, parallel=True)
@@ -71,6 +80,7 @@ def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> Non
     release_lock = threading.Event()
 
     def hold_lock() -> None:
+        """Hold the ownership lock until the competing shrink arrives."""
         with runtime._lock:
             lock_held.set()
             release_lock.wait(5)
@@ -113,6 +123,7 @@ def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> Non
 
 
 def test_arrow_table_to_polars_admits_reported_polars_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Arrow table to Polars admits reported Polars pool."""
     from schema_sanitizer.api_impl import results as module
 
     seen_runtime: list[object] = []
@@ -120,10 +131,12 @@ def test_arrow_table_to_polars_admits_reported_polars_pool(monkeypatch: pytest.M
     class Polars:
         @staticmethod
         def thread_pool_size() -> int:
+            """Return the configured external thread-pool size."""
             return 3
 
         @staticmethod
         def from_arrow(value: object, *, rechunk: bool) -> tuple[object, bool]:
+            """Convert the Arrow value through the fake Polars entry point."""
             return (value, rechunk)
 
     class Lease:
@@ -131,11 +144,13 @@ def test_arrow_table_to_polars_admits_reported_polars_pool(monkeypatch: pytest.M
         parallel = True
 
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             pass
 
     monkeypatch.setattr(module, "ensure_optional_dependency", lambda *args, **kwargs: Polars)
 
     def admit(runtime: object | None = None) -> Lease:
+        """Admit the resource under the controlled scheduling conditions."""
         seen_runtime.append(runtime)
         return Lease()
 
@@ -151,6 +166,7 @@ def test_arrow_table_to_polars_admits_reported_polars_pool(monkeypatch: pytest.M
 def test_process_global_runtime_pool_shares_logical_and_native_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify process global runtime pool shares logical and native envelope."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -191,6 +207,7 @@ def test_process_global_runtime_pool_shares_logical_and_native_envelope(
 
 
 def test_shared_runtime_pool_releases_only_unshared_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify shared runtime pool releases only unshared suffix."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -230,6 +247,7 @@ def test_shared_runtime_pool_releases_only_unshared_suffix(monkeypatch: pytest.M
 def test_live_global_runtime_pool_never_reexpands_for_overlapping_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify live global runtime pool never reexpands for overlapping claim."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -273,6 +291,7 @@ def test_live_global_runtime_pool_never_reexpands_for_overlapping_claim(
 def test_operation_borrow_shares_already_constrained_global_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify operation borrow shares already constrained global pool."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -316,6 +335,7 @@ def test_operation_borrow_shares_already_constrained_global_pool(
 def test_standalone_claim_aligns_to_pool_preconstrained_by_operation_borrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify standalone claim aligns to pool preconstrained by operation borrow."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -365,6 +385,7 @@ def test_standalone_claim_aligns_to_pool_preconstrained_by_operation_borrow(
 
 
 def test_completion_memory_ownership_is_move_only_not_quantity_release() -> None:
+    """Verify completion memory ownership is move only not quantity release."""
     header = (CPP / "internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     ordered = (CPP / "internal/runtime/ordered_executor.hh").read_text(encoding="utf-8")
@@ -383,6 +404,7 @@ def test_completion_memory_ownership_is_move_only_not_quantity_release() -> None
 
 
 def test_release_gate_requires_format_specific_stage_evidence() -> None:
+    """Verify release gate requires format specific stage evidence."""
     from schema_sanitizer.core_impl import concurrency_coverage as coverage
     from schema_sanitizer.core_impl.concurrency_stage_evidence import (
         INPUT_PRIMARY_RUNTIME_STAGE,
@@ -402,6 +424,7 @@ def test_release_gate_requires_format_specific_stage_evidence() -> None:
 
 
 def test_complex_finalizers_use_named_state_for_external_runtime_and_result() -> None:
+    """Verify complex finalizers use named state for external runtime and result."""
     process = (SRC / "core_impl/process_resources.py").read_text(encoding="utf-8")
     result = (SRC / "api_impl/results.py").read_text(encoding="utf-8")
     parquet = (SRC / "adapters/parquet/record_batch_factory.py").read_text(encoding="utf-8")

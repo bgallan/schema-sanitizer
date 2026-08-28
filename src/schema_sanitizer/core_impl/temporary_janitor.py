@@ -1,4 +1,8 @@
-"""Quarantine and retry cleanup for temporary artifacts that resist deletion."""
+"""Quarantine temporary artifacts that resist immediate deletion and retry cleanup.
+
+Descriptor-pinned identities preserve exact storage and file-descriptor ownership while a
+governed worker handles retries, diagnostics, shutdown, and fork recovery.
+"""
 
 from __future__ import annotations
 
@@ -72,6 +76,7 @@ _JANITOR_RETRY_FORK_PREPARED: tuple[threading.Lock, dict[int, object]] | None = 
 
 
 def _retry_janitor_owner(token: int) -> None:
+    """Retry cleanup for a retained temporary-artifact owner."""
     with _JANITOR_RETRY_OWNERS_LOCK:
         owner = _JANITOR_RETRY_OWNERS.pop(token, None)
     if owner is None:
@@ -111,12 +116,13 @@ def _replace_into_root(source: Path, target_name: str, handle: _QuarantineRootHa
 
 
 def _replace_from_root(source_name: str, target: Path, handle: _QuarantineRootHandle) -> None:
+    """Move a quarantined entry relative to the trusted root descriptor."""
     os.replace(source_name, target, src_dir_fd=handle.descriptor)
 
 
 class _StorageLeaseOwner(Protocol):
     def release(self) -> None:
-        """Release storage ownership."""
+        """Release exact storage ownership retained by this owner."""
 
 
 @dataclass(slots=True)
@@ -138,6 +144,7 @@ class _StaleArtifactLease:
     __slots__ = ()
 
     def release(self) -> None:
+        """Release resources owned by this stale artifact lease."""
         return None
 
 
@@ -168,7 +175,9 @@ _MAX_ROOT_GENERATIONS = 4
 
 
 class _Releasable(Protocol):
-    def release(self) -> None: ...
+    def release(self) -> None:
+        """Release resources owned by this releasable."""
+        ...
 
 
 _CLOSING_ROOT_OWNERS: deque[_Releasable] = deque()
@@ -176,6 +185,7 @@ _MAX_CLOSING_ROOT_OWNERS = _MAX_ROOT_GENERATIONS
 
 
 def _configured_root_location() -> tuple[Path, str, Path]:
+    """Return the configured quarantine root and whether it was explicit."""
     configured_base = os.getenv(_ENV_DIRECTORY)
     base = Path(configured_base or tempfile.gettempdir())
     getuid = getattr(os, "geteuid", None)
@@ -388,6 +398,7 @@ class _JanitorDescriptorOwner:
     lock: threading.Lock = dataclass_field(default_factory=threading.Lock)
 
     def release(self) -> None:
+        """Release resources owned by this janitor descriptor owner."""
         with self.lock:
             descriptor = self.descriptor
             lease = self.lease
@@ -457,6 +468,7 @@ def _close_descriptor_bundle_or_retain(
 
 
 def _close_or_retain_descriptor(descriptor: int, lease: object | None) -> None:
+    """Close or retain descriptor."""
     owner = _JanitorDescriptorOwner(descriptor if descriptor >= 0 else None, lease)
     try:
         owner.release()
@@ -480,7 +492,7 @@ class _TemporaryArtifactJanitor:
     """Retain leases until failed-cleanup artifacts are actually removed."""
 
     def __init__(self) -> None:
-        """Initialize this helper."""
+        """Initialize the temporary artifact janitor and its owned runtime state."""
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._scan_lock = threading.Lock()
@@ -517,6 +529,7 @@ class _TemporaryArtifactJanitor:
 
     @staticmethod
     def _new_fork_bank() -> tuple[object, ...]:
+        """Allocate a fresh janitor fork-quarantine bank."""
         lock = threading.RLock()
         return (
             lock,
@@ -537,6 +550,7 @@ class _TemporaryArtifactJanitor:
 
     @staticmethod
     def _private_delete_path(path: Path) -> Path:
+        """Return the private delete path."""
         if path.parent.name == ".delete":
             return path
         handle = _pinned_handle_for_path(path.parent)
@@ -638,6 +652,7 @@ class _TemporaryArtifactJanitor:
 
     @staticmethod
     def _metadata_charge(path: Path) -> int:
+        """Estimate control-plane bytes retained by a janitor artifact."""
         try:
             encoded = os.fsencode(str(path))
         except BaseException:
@@ -645,6 +660,7 @@ class _TemporaryArtifactJanitor:
         return _PENDING_METADATA_BASE + len(encoded)
 
     def _pending_fits_locked(self, charge: int, *, reserve_slot: bool = True) -> bool:
+        """Return whether another janitor entry fits while holding the janitor lock."""
         count = len(self._pending) + (self._quarantine_inflight if reserve_slot else 0)
         if count >= _MAX_PENDING_ARTIFACTS:
             return False
@@ -1003,9 +1019,11 @@ class _TemporaryArtifactJanitor:
         return accepted
 
     def _has_failed_thread_leases_locked(self) -> bool:
+        """Return whether failed thread leases remain while holding the janitor lock."""
         return bool(self._failed_thread_leases or self._terminal_failed_thread_lease is not None)
 
     def _retain_failed_thread_lease_locked(self, lease: _Releasable) -> None:
+        """Retain a failed janitor thread lease while holding the janitor lock."""
         if any(item is lease for item in self._failed_thread_leases):
             return
         if self._terminal_failed_thread_lease is lease:
@@ -1020,6 +1038,7 @@ class _TemporaryArtifactJanitor:
         raise RuntimeError("janitor thread lease ownership invariant exceeded")
 
     def _take_failed_thread_leases_locked(self) -> deque[_Releasable]:
+        """Remove retained janitor thread leases while holding the janitor lock."""
         failed = self._failed_thread_leases
         self._failed_thread_leases = deque()
         terminal = self._terminal_failed_thread_lease
@@ -1168,6 +1187,7 @@ class _TemporaryArtifactJanitor:
                 _JANITOR_RETRY_OWNERS[retry_token] = self
 
                 def retry_owner(token: int = retry_token) -> None:
+                    """Retry terminal cleanup for one retained owner."""
                     _retry_janitor_owner(token)
 
                 self._retry_scheduled = schedule_retry(
@@ -1187,9 +1207,11 @@ class _TemporaryArtifactJanitor:
     def _availability_wakeup(self) -> None:
         # Acknowledgment is owned by the sealed notifier delivery.  Do not
         # unregister before work succeeds or a transient wakeup would be lost.
+        """Retry starting the janitor worker when thread capacity becomes available."""
         self._retry_worker_start()
 
     def _unregister_availability(self) -> None:
+        """Remove the registered capacity-availability callback."""
         with self._condition:
             if not self._availability_registered:
                 return
@@ -1197,6 +1219,7 @@ class _TemporaryArtifactJanitor:
         unregister_project_thread_availability(AvailabilityEvent.TEMPORARY_JANITOR)
 
     def _retry_worker_start(self) -> None:
+        """Retry starting the governed temporary-janitor worker."""
         self._unregister_availability()
         with self._condition:
             self._retry_scheduled = False
@@ -1310,6 +1333,7 @@ class _TemporaryArtifactJanitor:
         return lease
 
     def _release_thread_lease_owner(self, lease: _Releasable | None) -> None:
+        """Release thread lease owner."""
         current = threading.current_thread()
         thread = self._thread
         if lease is not None and thread is current and thread.is_alive():
@@ -1393,7 +1417,7 @@ class _TemporaryArtifactJanitor:
         self._sweep_cycle()
 
     def snapshot(self) -> TemporaryJanitorSnapshot:
-        """Implement the internal snapshot helper."""
+        """Return a bounded snapshot of pending and quarantined artifacts."""
         with self._lock:
             pending_without_worker = int(
                 bool(self._pending) and (self._thread is None or not self._thread.is_alive())
@@ -1515,6 +1539,7 @@ class _TemporaryArtifactJanitor:
         self._fork_prepared = self._fork_banks[self._fork_bank_index]
 
     def clear_fork_preparation(self) -> None:
+        """Clear state established while preparing for a fork."""
         self._fork_prepared = None
 
     def reset_after_fork(self) -> None:
@@ -1597,7 +1622,7 @@ def quarantine_temporary_artifact(
 
 
 def temporary_janitor_snapshot() -> TemporaryJanitorSnapshot:
-    """Implement the internal temporary_janitor_snapshot helper."""
+    """Return the process-wide temporary janitor snapshot."""
     return _JANITOR.snapshot()
 
 
@@ -1608,16 +1633,19 @@ def sweep_temporary_quarantine() -> None:
 
 
 def _prepare_janitor_retry_owners_for_fork() -> None:
+    """Prepare janitor retry owners for fork."""
     global _JANITOR_RETRY_FORK_PREPARED
     _JANITOR_RETRY_FORK_PREPARED = _JANITOR_RETRY_FORK_BANKS[_JANITOR_RETRY_FORK_BANK_INDEX]
 
 
 def _clear_janitor_retry_fork_preparation() -> None:
+    """Clear janitor retry fork preparation."""
     global _JANITOR_RETRY_FORK_PREPARED
     _JANITOR_RETRY_FORK_PREPARED = None
 
 
 def _reset_janitor_retry_owners_after_fork() -> None:
+    """Reset janitor retry owners after fork."""
     global _JANITOR_RETRY_OWNERS_LOCK, _JANITOR_RETRY_OWNERS, _JANITOR_RETRY_FORK_PREPARED
     global _JANITOR_RETRY_FORK_BANK_INDEX
     prepared = _JANITOR_RETRY_FORK_PREPARED

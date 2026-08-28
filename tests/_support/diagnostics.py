@@ -1,4 +1,8 @@
-"""Assertions for diagnostics whose resource peaks are execution-mode dependent."""
+"""Normalize diagnostics whose allocator peaks legitimately vary by execution mode.
+
+The assertions retain semantic resource counters while removing only volatile charged-memory
+samples before comparison.
+"""
 
 from __future__ import annotations
 

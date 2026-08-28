@@ -1,4 +1,8 @@
-"""Behavioral architecture contracts for the CI helper tree."""
+"""Behavioral architecture contracts for the CI helper tree.
+
+The check keeps fuzz, native, Parquet, quality, and release helpers under explicit owner
+directories and rejects obsolete flat-script locations.
+"""
 
 from __future__ import annotations
 

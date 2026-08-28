@@ -1,4 +1,8 @@
-"""Tests for strict-first string scalar parsing with whitespace retry."""
+"""Tests for strict-first string scalar parsing with whitespace retry.
+
+It verifies strict-first scalar parsing with ASCII-trim retry while preserving exact
+Boolean-token precedence.
+"""
 
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ def _expected_row() -> dict[str, object]:
 
 
 def test_python_strings_retry_scalar_parsing_after_ascii_trim() -> None:
+    """Verify python strings retry scalar parsing after ascii trim."""
     result = read_test_python(
         [
             {
@@ -61,6 +66,7 @@ def test_python_strings_retry_scalar_parsing_after_ascii_trim() -> None:
 
 
 def test_json_strings_retry_scalar_parsing_after_ascii_trim(tmp_path) -> None:
+    """Verify JSON strings retry scalar parsing after ascii trim."""
     path = tmp_path / "rows.jsonl"
     path.write_text(
         '{"integer":" 123456 ","floating":" 1,234.50 ","boolean":" yes ",'
@@ -76,6 +82,7 @@ def test_json_strings_retry_scalar_parsing_after_ascii_trim(tmp_path) -> None:
 
 
 def test_quoted_csv_cell_retries_integer_parsing_after_trim(tmp_path) -> None:
+    """Verify quoted CSV cell retries integer parsing after trim."""
     path = tmp_path / "rows.csv"
     path.write_text('value\n" 123456 "\n', encoding="utf-8")
 
@@ -85,6 +92,7 @@ def test_quoted_csv_cell_retries_integer_parsing_after_trim(tmp_path) -> None:
 
 
 def test_exact_boolean_token_is_checked_before_trimmed_retry() -> None:
+    """Verify exact boolean token is checked before trimmed retry."""
     result = read_test_python(
         [{"value": " yes "}],
         true_tokens=(" yes ",),

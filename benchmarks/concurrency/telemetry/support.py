@@ -1,4 +1,8 @@
-"""Host, Arrow C Stream, and matrix helpers for concurrency telemetry benchmarks."""
+"""Host, Arrow C Stream, and matrix helpers for concurrency telemetry benchmarks.
+
+It normalizes CPU affinity and NUMA topology, manages Arrow C streams, and constructs
+benchmark matrices.
+"""
 
 from __future__ import annotations
 
@@ -93,6 +97,7 @@ def apply_exact_affinity(cpus: tuple[int, ...]) -> tuple[int, ...]:
 
 
 def _read_text(path: Path) -> str | None:
+    """Read an optional host-information file, returning nothing when unavailable."""
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
@@ -111,6 +116,7 @@ def numa_nodes() -> dict[int, tuple[int, ...]]:
 
 
 def _core_key(cpu: int) -> tuple[int, int]:
+    """Return the physical-core identity for a logical CPU."""
     root = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
     package = _read_text(root / "physical_package_id")
     core = _read_text(root / "core_id")
@@ -296,6 +302,7 @@ ArrowArrayStream._fields_ = [
 
 
 def _stream_error(stream: ctypes.POINTER(ArrowArrayStream), operation: str) -> RuntimeError:
+    """Decode an Arrow C Stream release error if one was reported."""
     message = stream.contents.get_last_error(stream) if stream.contents.get_last_error else None
     detail = message.decode("utf-8", errors="replace") if message else "unknown error"
     return RuntimeError(f"Arrow C Stream {operation} failed: {detail}")

@@ -1,4 +1,8 @@
-"""Operation and subprocess runners for concurrency telemetry benchmarks."""
+"""Operation and subprocess runners for concurrency telemetry benchmarks.
+
+It controls operation and subprocess execution, captures robust timings, and assembles
+the repeated matrix statistics used by reports.
+"""
 
 from __future__ import annotations
 

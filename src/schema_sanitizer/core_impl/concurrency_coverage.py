@@ -1,4 +1,8 @@
-"""Machine-readable concurrency coverage for every supported input and output."""
+"""Describe machine-readable concurrency coverage for every input and output pair.
+
+Registered concrete contracts are expanded and validated against stages, routes, payload kinds,
+and observed evidence so no supported combination lacks a concurrency guarantee.
+"""
 
 from __future__ import annotations
 

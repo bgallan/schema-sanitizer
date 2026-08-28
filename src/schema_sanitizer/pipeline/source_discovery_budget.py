@@ -1,4 +1,8 @@
-"""Shared operation-memory scopes for public source discovery APIs."""
+"""Shared operation-memory scopes for public source discovery APIs.
+
+It creates a bounded operation context around public discovery calls and bridges
+synchronous or asynchronous execution with guaranteed cleanup.
+"""
 
 from __future__ import annotations
 

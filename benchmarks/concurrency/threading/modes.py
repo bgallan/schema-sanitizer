@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reproducible single-vs-multi benchmarks for inference, output, and pipelines."""
+"""Reproducible single-vs-multi benchmarks for inference, output, and pipelines.
+
+It creates fixtures, normalizes generated values, computes logical digests, and times
+inference, output, and pipeline cases.
+"""
 
 from __future__ import annotations
 
@@ -315,6 +319,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                 name = f"output_{format_name}_{shape}"
 
                 def run_output(mode: Mode, path: Path, *, table=table, writer=writer) -> None:
+                    """Measure the selected tabular output conversion and return its digest."""
                     writer(
                         _reader(table),
                         path,
@@ -349,6 +354,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                     table=table,
                     name=name,
                 ) -> None:
+                    """Measure Parquet publication and return its logical digest and route evidence."""
                     write_parquet_native_first_stream(
                         _reader(table),
                         path,
@@ -403,6 +409,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                     source=source,
                     input_mode=input_mode,
                 ) -> None:
+                    """Measure the end-to-end partition pipeline and return normalized output evidence."""
                     result = converter(
                         source,
                         path,

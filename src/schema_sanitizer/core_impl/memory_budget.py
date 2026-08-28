@@ -1,4 +1,8 @@
-"""Derive every runtime resource budget from one per-operation memory limit."""
+"""Derive runtime resource budgets from one per-operation memory limit.
+
+Exact operation leases, ledgers, parallel admission, pressure snapshots, and finalizer recovery
+share the same stage and resource ceilings defined here.
+"""
 
 from __future__ import annotations
 
@@ -231,6 +235,7 @@ class GovernedResultOwnership:
     def __init__(
         self, lease: "OperationMemoryLease | None", *, _seal: object, zero_payload: bool = False
     ) -> None:
+        """Initialize the governed result ownership and its owned runtime state."""
         if _seal is not _GOVERNED_OWNERSHIP_SEAL:
             raise TypeError("governed result ownership capabilities are runtime-issued")
         if lease is None and not zero_payload:
@@ -395,12 +400,7 @@ class OperationMemoryLease:
             self._size_bytes = size_bytes
 
     def transfer_stage(self, stage: str) -> "OperationMemoryLease":
-        """Transfer resident-byte ownership to a new generation/handle.
-
-        The upstream object is invalidated without releasing or reacquiring any
-        bytes. A new finalizer ticket, lock and capability are prepared before
-        the authoritative ledger owner is changed.
-        """
+        """Transfer retained admission from one execution stage to another."""
         if type(stage) is not str:
             raise TypeError("operation memory stage must be an exact string")
         if os.getpid() != self._pid:
@@ -598,6 +598,7 @@ class _MemoryLeaseRegistration:
     __slots__ = ("lease_id", "capability")
 
     def __init__(self) -> None:
+        """Initialize the memory lease registration and its owned runtime state."""
         self.lease_id = 0
         self.capability: object | None = None
 
@@ -714,6 +715,7 @@ class OperationMemoryLedger:
     def _python_lease_entry_authority(
         self, lease_id: int, owner_id: int, capability: object
     ) -> _PythonMemoryLeaseEntry:
+        """Return the python lease entry authority."""
         entry = self._python_leases.get(lease_id)
         if entry is None or entry.owner_id != owner_id or capability is not entry.capability:
             self._unknown_python_lease_releases += 1
@@ -721,13 +723,16 @@ class OperationMemoryLedger:
         return entry
 
     def _python_lease_entry(self, owner: OperationMemoryLease) -> _PythonMemoryLeaseEntry:
+        """Return the python lease entry."""
         return self._python_lease_entry_authority(owner._lease_id, id(owner), owner._capability)
 
     def _python_lease_size(self, owner: OperationMemoryLease) -> int:
+        """Return the python lease size."""
         with self._lock:
             return self._python_lease_entry(owner).size_bytes
 
     def _native_reservation_metadata(self, receipt: object) -> tuple[int, int, int]:
+        """Return the native reservation metadata."""
         values = self._native.operation_memory_reservation_metadata(receipt)
         if not isinstance(values, tuple) or len(values) != 3:
             raise RuntimeError("operation memory reservation returned invalid metadata")
@@ -736,6 +741,7 @@ class OperationMemoryLedger:
     def _native_reservation_resize(
         self, receipt: object, requested: int, stage: str
     ) -> tuple[int, int]:
+        """Resize the native reservation tracked by this operation ledger."""
         metadata = self._native_reservation_metadata(receipt)
         result = self._native.operation_memory_reservation_resize(
             receipt, requested, stage, metadata[1]
@@ -745,6 +751,7 @@ class OperationMemoryLedger:
         return int(result[0]), max(0, int(result[1]))
 
     def _native_reservation_release(self, receipt: object) -> tuple[int, int]:
+        """Release the native reservation tracked by this operation ledger."""
         metadata = self._native_reservation_metadata(receipt)
         result = self._native.operation_memory_reservation_release(receipt, metadata[1])
         if not isinstance(result, tuple) or len(result) != 2:
@@ -1532,6 +1539,7 @@ _MEMORY_FINALIZER_OVERFLOWED = False
 def _run_stage_admission_construction_finalizer(
     authority: RootedFinalizerAuthority,
 ) -> None:
+    """Run stage admission construction finalizer."""
     owner = authority.arg0
     if owner is None:
         return
@@ -1543,6 +1551,7 @@ def _run_stage_admission_construction_finalizer(
 
 
 def _reserve_stage_admission_construction_authority() -> tuple[int, RootedFinalizerAuthority]:
+    """Reserve an escrowed authority for stage-construction rollback."""
     return reserve_rooted_finalizer_authority(
         _STAGE_ADMISSION_CONSTRUCTION_ESCROW,
         _run_stage_admission_construction_finalizer,
@@ -1564,6 +1573,7 @@ def _retire_stage_admission_construction_ticket(
 
 
 def _mark_memory_finalizer_overflow(ticket: int) -> None:
+    """Mark memory finalizer overflow."""
     global _MEMORY_FINALIZER_OVERFLOWS, _MEMORY_FINALIZER_OVERFLOWED
     _MEMORY_FINALIZER_OVERFLOWED = True
     try:
@@ -1583,6 +1593,7 @@ def drain_abandoned_memory_finalizers() -> int:
     ):
 
         def process(ticket: int, owner: object, *, _kind: str = kind) -> None:
+            """Process one retained work item."""
             nonlocal drained
             if _kind in {"lease", "ledger", "stage_admission"} and isinstance(
                 owner, RootedFinalizerAuthority
@@ -1675,6 +1686,7 @@ _ABANDONED_MEMORY_GENERATIONS = [0] * _MAX_ABANDONED_MEMORY_OWNERS
 
 
 def _memory_owner_finished(owner: object, kind: str) -> bool:
+    """Attempt terminal cleanup for one memory owner and report completion."""
     if kind == "lease":
         owner.release()  # type: ignore[attr-defined]
         return True
@@ -1695,6 +1707,7 @@ def _memory_owner_finished(owner: object, kind: str) -> bool:
 
 
 def _retry_abandoned_memory_owner(token: int) -> None:
+    """Retry abandoned memory owner."""
     global _ABANDONED_MEMORY_FREE_COUNT
     with _ABANDONED_MEMORY_LOCK:
         entry = _ABANDONED_MEMORY_OWNERS.get(token)
@@ -1920,6 +1933,7 @@ class _ParallelAdmissionConstructionOwner:
     )
 
     def __init__(self) -> None:
+        """Initialize the parallel admission construction owner and its owned runtime state."""
         self.memory_lease: object | None = None
         self.execution_lease: object | None = None
         self.owns_execution_lease = False
@@ -1928,6 +1942,7 @@ class _ParallelAdmissionConstructionOwner:
         self.pending_domain_lease: object | None = None
 
     def disarm(self) -> None:
+        """Disarm automatic cleanup for the transferred resource."""
         self.memory_lease = None
         self.execution_lease = None
         self.owns_execution_lease = False
@@ -1936,6 +1951,7 @@ class _ParallelAdmissionConstructionOwner:
         self.pending_domain_lease = None
 
     def close(self) -> None:
+        """Release resources owned by this parallel admission construction owner."""
         pending = self.pending_domain_lease
         if pending is not None:
             release = getattr(pending, "release", None)
@@ -1990,9 +2006,11 @@ class CompositeParallelAdmission:
 
     @property
     def reserved_bytes(self) -> int:
+        """Return the reserved bytes."""
         return self.slots * self.per_slot_bytes
 
     def transfer_stage(self, stage: str) -> "CompositeParallelAdmission":
+        """Transfer retained admission from one execution stage to another."""
         if self.memory_lease is not None:
             self.memory_lease = self.memory_lease.transfer_stage(stage)
         return self
@@ -2057,9 +2075,11 @@ class CompositeParallelAdmission:
     release = close
 
     def __enter__(self) -> "CompositeParallelAdmission":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
 
@@ -2069,6 +2089,7 @@ class _StageControlReservation:
     __slots__ = ("ticket", "control_bytes")
 
     def __init__(self, control_bytes: int) -> None:
+        """Initialize the stage control reservation and its owned runtime state."""
         self.ticket: ControlPlaneTicket | None = None
         self.control_bytes = control_bytes
 
@@ -2089,10 +2110,12 @@ _STAGE_DOMAIN_ORDER: dict[str, int] = {
 def _stage_domain_order_key(name: str) -> tuple[int, str]:
     # Unknown extension domains sort after the published process-wide domains
     # but remain deterministic amongst themselves.
+    """Return the stage domain order key."""
     return (_STAGE_DOMAIN_ORDER.get(name, 1_000), name)
 
 
 def _reserve_stage_control(slots: int, stage: str) -> _StageControlReservation:
+    """Reserve control-plane bytes for one parallel stage."""
     control_bytes = _STAGE_ADMISSION_BASE_CONTROL_BYTES + (
         max(1, slots) * _STAGE_ADMISSION_PER_SLOT_CONTROL_BYTES
     )
@@ -2137,6 +2160,7 @@ def acquire_parallel_admission(
     escrow_published = False
 
     def rollback(primary: BaseException) -> None:
+        """Roll back resources reserved by an incomplete construction transaction."""
         nonlocal escrow_published
         try:
             construction.close()

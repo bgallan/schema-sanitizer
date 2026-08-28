@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency csv coverage names the adaptive framing stage."""
+"""Certify adaptive CSV framing as the concrete parallel stage recorded by coverage.
+
+The scanner must adapt without private threads, preserve values across chunk boundaries, and keep
+wide-schema decoding and probing identical between single- and multi-worker execution.
+"""
 
 from __future__ import annotations
 

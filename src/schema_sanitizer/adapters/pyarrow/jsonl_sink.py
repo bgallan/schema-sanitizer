@@ -1,4 +1,8 @@
-"""JSON Lines sink for PyArrow record-batch streams."""
+"""JSON Lines sink for PyArrow record-batch streams.
+
+It caches native schema support, attaches requested metadata columns, and atomically publishes
+JSONL through the native stream writer.
+"""
 
 from __future__ import annotations
 

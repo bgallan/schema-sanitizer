@@ -1,4 +1,8 @@
-"""Process and optional host-wide temporary filesystem admission."""
+"""Govern temporary filesystem admission across the process and optional host account.
+
+Filesystem free-space floors, exact reservations, process capacity, terminal debt, diagnostics,
+and fork recovery are combined into one conservative admission decision.
+"""
 
 from __future__ import annotations
 
@@ -111,6 +115,7 @@ class ProcessTemporaryStorageCapability:
     )
 
     def __init__(self, governor: "_ProcessTemporaryStorageGovernor") -> None:
+        """Initialize the process temporary storage capability and its owned runtime state."""
         self.governor = governor
         self.token = 0
         self.device = -1
@@ -270,6 +275,7 @@ class _ProcessTemporaryStorageGovernor:
 
     @staticmethod
     def _raise_quarantined(label: str) -> None:
+        """Raise the error describing inherited quarantined governor state."""
         raise SchemaSanitizerResourceError(
             "temporary filesystem admission quarantined after accounting corruption",
             detail={
@@ -869,9 +875,11 @@ class _ProcessTemporaryStorageGovernor:
         )
 
     def prepare_for_fork(self) -> None:
+        """Prepare process-owned state for a safe fork."""
         self._fork_prepared = self._fork_banks[self._fork_bank_index]
 
     def clear_fork_preparation(self) -> None:
+        """Clear state established while preparing for a fork."""
         self._fork_prepared = None
 
     def reset_after_fork(self) -> None:

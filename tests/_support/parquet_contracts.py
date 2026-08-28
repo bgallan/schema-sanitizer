@@ -1,4 +1,8 @@
-"""Stable contract fixtures shared by the split Parquet gate tests."""
+"""Provide stable callbacks and fixtures for Parquet gate and telemetry contracts.
+
+The helpers capture writer decisions, synthesize status outcomes, and isolate recording state
+across cases.
+"""
 
 from __future__ import annotations
 
@@ -199,12 +203,13 @@ def repeated_ancestor_field(path_rep: list[list[int]]) -> dict[str, object]:
 
 
 def test_native_recursive_layout_summary_detects_root_contract_drift() -> None:
+    """Verify native recursive layout summary detects root contract drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
 
     def field(extra_leaf: bool) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor used by the contract assertion."""
         leaf_paths = ["payload.list.element.items.entries.value"]
         leaf_components = [["payload", "list", "element", "items", "entries", "value"]]
         leaf_max_definition_levels = [5]
@@ -265,6 +270,7 @@ def test_native_recursive_layout_summary_detects_root_contract_drift() -> None:
 
 
 def test_native_recursive_layout_summary_detects_repeated_ancestor_drift() -> None:
+    """Verify native recursive layout summary detects repeated ancestor drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -303,6 +309,7 @@ def test_native_recursive_layout_summary_detects_repeated_ancestor_drift() -> No
 
 
 def test_native_recursive_layout_summary_detects_row_group_shape_drift() -> None:
+    """Verify native recursive layout summary detects row group shape drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -374,6 +381,7 @@ def test_native_recursive_layout_summary_detects_row_group_shape_drift() -> None
 
 
 def test_native_recursive_layout_summary_is_defensive_for_partial_diagnostics() -> None:
+    """Verify native recursive layout summary is defensive for partial diagnostics."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -398,6 +406,7 @@ def test_native_recursive_layout_summary_is_defensive_for_partial_diagnostics() 
 
 
 def test_native_recursive_layout_summary_fingerprints_and_collision_checks() -> None:
+    """Verify native recursive layout summary fingerprints and collision checks."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -466,6 +475,7 @@ def test_native_recursive_layout_summary_fingerprints_and_collision_checks() -> 
 
 
 def test_native_recursive_layout_summary_exposes_order_independent_fingerprints() -> None:
+    """Verify native recursive layout summary exposes order independent fingerprints."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -545,6 +555,7 @@ def test_native_recursive_layout_summary_exposes_order_independent_fingerprints(
 
 
 def test_native_recursive_layout_summary_detects_repeated_node_collisions() -> None:
+    """Verify native recursive layout summary detects repeated node collisions."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -609,6 +620,7 @@ def test_native_recursive_layout_summary_detects_repeated_node_collisions() -> N
 
 
 def test_native_recursive_layout_summary_uses_component_paths_for_arbitrary_names() -> None:
+    """Verify native recursive layout summary uses component paths for arbitrary names."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -675,12 +687,13 @@ def test_native_recursive_layout_summary_uses_component_paths_for_arbitrary_name
 
 
 def test_native_recursive_layout_summary_tracks_repeated_ancestor_profiles() -> None:
+    """Verify native recursive layout summary tracks repeated ancestor profiles."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
 
     def field() -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor with repeated-path profiles."""
         return {
             "name": "payload",
             "root_kind": "struct",
@@ -736,6 +749,7 @@ def test_native_recursive_layout_summary_tracks_repeated_ancestor_profiles() -> 
 
 
 def test_native_recursive_layout_summary_detects_repeated_ancestor_level_assignment_drift() -> None:
+    """Verify native recursive layout summary detects repeated ancestor level assignment drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -774,6 +788,7 @@ def test_native_recursive_layout_summary_detects_repeated_ancestor_level_assignm
 
 
 def test_native_recursive_layout_summary_exposes_leaf_contracts() -> None:
+    """Verify native recursive layout summary exposes leaf contracts."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -838,12 +853,13 @@ def test_native_recursive_layout_summary_exposes_leaf_contracts() -> None:
 
 
 def test_native_recursive_layout_summary_detects_leaf_contract_drift() -> None:
+    """Verify native recursive layout summary detects leaf contract drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
 
     def field(path_def: list[list[int]], path_rep: list[list[int]]) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor used for leaf-drift mutation."""
         return {
             "name": "payload",
             "root_kind": "list",
@@ -897,6 +913,7 @@ def test_native_recursive_layout_summary_detects_leaf_contract_drift() -> None:
 
 
 def test_native_recursive_layout_summary_exposes_root_contracts() -> None:
+    """Verify native recursive layout summary exposes root contracts."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -997,6 +1014,7 @@ def test_native_recursive_layout_summary_exposes_root_contracts() -> None:
 
 
 def test_native_recursive_layout_summary_component_collision_is_authoritative() -> None:
+    """Verify native recursive layout summary component collision is authoritative."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1067,12 +1085,13 @@ def test_native_recursive_layout_summary_component_collision_is_authoritative() 
 
 
 def test_native_recursive_layout_summary_tracks_definition_level_profiles() -> None:
+    """Verify native recursive layout summary tracks definition level profiles."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
 
     def field(def_levels: list[int], path_defs: list[list[int]]) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor with definition-level profiles."""
         return {
             "name": "payload",
             "root_kind": "struct",
@@ -1136,6 +1155,7 @@ def test_native_recursive_layout_summary_tracks_definition_level_profiles() -> N
 
 
 def test_native_recursive_layout_summary_detects_definition_level_drift() -> None:
+    """Verify native recursive layout summary detects definition level drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1143,7 +1163,7 @@ def test_native_recursive_layout_summary_detects_definition_level_drift() -> Non
     def field(
         def_levels: list[int], rep_levels: list[int], path_defs: list[list[int]]
     ) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor with definition-level profiles."""
         return {
             "name": "payload",
             "root_kind": "list",
@@ -1194,6 +1214,7 @@ def test_native_recursive_layout_summary_detects_definition_level_drift() -> Non
 
 
 def test_native_recursive_layout_summary_tracks_path_repetition_profiles() -> None:
+    """Verify native recursive layout summary tracks path repetition profiles."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1245,12 +1266,13 @@ def test_native_recursive_layout_summary_tracks_path_repetition_profiles() -> No
 
 
 def test_native_recursive_layout_summary_detects_path_repetition_drift() -> None:
+    """Verify native recursive layout summary detects path repetition drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
 
     def field(path_rep: list[list[int]]) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor with repeated-path profiles."""
         return {
             "name": "payload",
             "root_kind": "list",
@@ -1301,12 +1323,13 @@ def test_native_recursive_layout_summary_detects_path_repetition_drift() -> None
 
 
 def test_native_recursive_layout_summary_tracks_row_group_segment_fingerprints() -> None:
+    """Verify native recursive layout summary tracks row group segment fingerprints."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
 
     def field(name: str) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor with row-group fingerprints."""
         return {
             "name": name,
             "root_kind": "struct",
@@ -1365,12 +1388,13 @@ def test_native_recursive_layout_summary_tracks_row_group_segment_fingerprints()
 
 
 def test_native_recursive_layout_summary_detects_segment_fingerprint_drift() -> None:
+    """Verify native recursive layout summary detects segment fingerprint drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
 
     def field(path_rep: list[list[int]]) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the recursive field descriptor with row-group fingerprints."""
         return {
             "name": "payload",
             "root_kind": "map",
@@ -1425,6 +1449,7 @@ def test_native_recursive_layout_summary_detects_segment_fingerprint_drift() -> 
 
 
 def test_duplicate_projection_names_are_sorted_and_unique() -> None:
+    """Verify duplicate projection names are sorted and unique."""
     from schema_sanitizer.adapters.parquet.projection.audits.summary import duplicate_names
 
     assert duplicate_names(["b", "a", "b", "c", "a", "b"]) == ["a", "b"]
@@ -1432,6 +1457,7 @@ def test_duplicate_projection_names_are_sorted_and_unique() -> None:
 
 
 def test_native_recursive_projection_partition_contract_audit_recomposes_full_layout() -> None:
+    """Verify native recursive projection partition contract audit recomposes full layout."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1512,6 +1538,7 @@ def test_native_recursive_projection_partition_contract_audit_recomposes_full_la
 def test_native_recursive_projection_partition_contract_audit_detects_gaps_duplicates_and_drift() -> (
     None
 ):
+    """Verify native recursive projection partition contract audit detects gaps duplicates and drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1573,6 +1600,7 @@ def test_native_recursive_projection_partition_contract_audit_detects_gaps_dupli
 
 
 def test_native_recursive_projection_coverage_contract_audit_allows_partial_overlaps() -> None:
+    """Verify native recursive projection coverage contract audit allows partial overlaps."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1644,6 +1672,7 @@ def test_native_recursive_projection_coverage_contract_audit_allows_partial_over
 
 
 def test_native_recursive_projection_coverage_contract_audit_enforces_requested_guards() -> None:
+    """Verify native recursive projection coverage contract audit enforces requested guards."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1708,6 +1737,7 @@ def test_native_recursive_projection_coverage_contract_audit_enforces_requested_
 
 
 def test_native_recursive_projection_contract_audit_matches_reordered_root_subset() -> None:
+    """Verify native recursive projection contract audit matches reordered root subset."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1716,7 +1746,7 @@ def test_native_recursive_projection_contract_audit_matches_reordered_root_subse
     )
 
     def field(name: str, root_kind: str, leaf_suffix: str, rep_depth: int) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the projected recursive field descriptor used by the audit."""
         components = [name, *leaf_suffix.split(".")]
         repeated_components = [[name, "list"]] if rep_depth else []
         return {
@@ -1794,6 +1824,7 @@ def test_native_recursive_projection_contract_audit_matches_reordered_root_subse
 
 
 def test_native_recursive_projection_contract_audit_detects_drift_and_column_mismatch() -> None:
+    """Verify native recursive projection contract audit detects drift and column mismatch."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1802,7 +1833,7 @@ def test_native_recursive_projection_contract_audit_detects_drift_and_column_mis
     )
 
     def field(name: str, leaf_path: str, max_def: int, max_rep: int) -> dict[str, object]:
-        """Internal test helper."""
+        """Build the projected recursive field descriptor used by the audit."""
         return {
             "name": name,
             "root_kind": "list",
@@ -1867,6 +1898,7 @@ def test_native_recursive_projection_contract_audit_detects_drift_and_column_mis
 
 
 def test_native_recursive_projection_chain_contract_audit_composes_subprojections() -> None:
+    """Verify native recursive projection chain contract audit composes subprojections."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -1942,6 +1974,7 @@ def test_native_recursive_projection_chain_contract_audit_composes_subprojection
 
 
 def test_native_recursive_projection_chain_contract_audit_detects_non_subset_and_drift() -> None:
+    """Verify native recursive projection chain contract audit detects non subset and drift."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (
         _native_recursive_layout_summary_from_footer_info,
     )
@@ -2004,6 +2037,7 @@ RECURSIVE_LAYOUT_CASES = tuple(
 
 
 def test_parquet_contract_certification_status_certifies_native_writer_contract() -> None:
+    """Verify Parquet contract certification status certifies native writer contract."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2033,6 +2067,7 @@ def test_parquet_contract_certification_status_certifies_native_writer_contract(
 
 
 def test_parquet_contract_certification_status_certifies_external_pyarrow_fallback() -> None:
+    """Verify Parquet contract certification status certifies external PyArrow fallback."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2062,6 +2097,7 @@ def test_parquet_contract_certification_status_certifies_external_pyarrow_fallba
 
 
 def test_parquet_contract_certification_status_fails_native_nested_drift() -> None:
+    """Verify Parquet contract certification status fails native nested drift."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2093,6 +2129,7 @@ def test_parquet_contract_certification_status_fails_native_nested_drift() -> No
 
 
 def test_parquet_contract_certification_status_fails_projection_drift() -> None:
+    """Verify Parquet contract certification status fails projection drift."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2119,6 +2156,7 @@ def test_parquet_contract_certification_status_fails_projection_drift() -> None:
 
 
 def test_parquet_contract_certification_status_public_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Parquet contract certification status public gate."""
     from schema_sanitizer.adapters.parquet import status as parquet_runtime
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
@@ -2151,6 +2189,7 @@ def test_parquet_contract_certification_status_public_gate(monkeypatch: pytest.M
 
 
 def test_native_parquet_writer_contract_status_enforces_runtime_batch_size() -> None:
+    """Verify native Parquet writer contract status enforces runtime batch size."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2175,6 +2214,7 @@ def test_native_parquet_writer_contract_status_enforces_runtime_batch_size() -> 
 
 
 def test_parquet_contract_certification_status_fails_native_batch_size_contract() -> None:
+    """Verify Parquet contract certification status fails native batch size contract."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2211,12 +2251,13 @@ def test_parquet_contract_certification_status_fails_native_batch_size_contract(
 def test_parquet_preflight_contract_status_passes_batch_size_to_writer_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet preflight contract status passes batch size to writer gate."""
     from schema_sanitizer.adapters.parquet import status as parquet_runtime
 
     captured: dict[str, object] = {}
 
     def fake_writer_status(*args: object, **kwargs: object) -> dict[str, object]:
-        """Internal test helper."""
+        """Capture writer-gate arguments and return an accepted status."""
         captured.update(kwargs)
         return {
             "applicable": True,
@@ -2244,6 +2285,7 @@ def test_parquet_preflight_contract_status_passes_batch_size_to_writer_gate(
 
 
 def test_native_parquet_writer_contract_status_rejects_runtime_filters() -> None:
+    """Verify native Parquet writer contract status rejects runtime filters."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2264,6 +2306,7 @@ def test_native_parquet_writer_contract_status_rejects_runtime_filters() -> None
 
 
 def test_parquet_contract_certification_status_fails_native_filter_contract() -> None:
+    """Verify Parquet contract certification status fails native filter contract."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2298,6 +2341,7 @@ def test_parquet_contract_certification_status_fails_native_filter_contract() ->
 def test_parquet_preflight_contract_status_passes_filters_to_writer_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet preflight contract status passes filters to writer gate."""
     from schema_sanitizer.adapters.parquet import status as parquet_runtime
 
     captured: dict[str, object] = {}
@@ -2324,6 +2368,7 @@ def test_parquet_preflight_contract_status_passes_filters_to_writer_gate(
 def test_parquet_contract_certification_status_passes_filters_to_writer_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet contract certification status passes filters to writer gate."""
     from schema_sanitizer.adapters.parquet import status as parquet_runtime
 
     captured: dict[str, object] = {}
@@ -2347,6 +2392,7 @@ def test_parquet_contract_certification_status_passes_filters_to_writer_gate(
 
 
 def test_parquet_contract_runtime_readiness_status_from_capabilities_accepts_full_runtime() -> None:
+    """Verify Parquet contract runtime readiness status from capabilities accepts full runtime."""
     from schema_sanitizer.adapters.parquet.status import (
         _parquet_contract_runtime_readiness_status_from_capabilities,
     )
@@ -2363,6 +2409,7 @@ def test_parquet_contract_runtime_readiness_status_from_capabilities_accepts_ful
 
 
 def test_parquet_contract_runtime_readiness_status_fails_without_pyarrow() -> None:
+    """Verify Parquet contract runtime readiness status fails without PyArrow."""
     from schema_sanitizer.adapters.parquet.status import (
         _parquet_contract_runtime_readiness_status_from_capabilities,
     )
@@ -2379,6 +2426,7 @@ def test_parquet_contract_runtime_readiness_status_fails_without_pyarrow() -> No
 
 
 def test_parquet_contract_runtime_readiness_status_fails_without_native_gates() -> None:
+    """Verify Parquet contract runtime readiness status fails without native gates."""
     from schema_sanitizer.adapters.parquet.status import (
         _parquet_contract_runtime_readiness_status_from_capabilities,
     )
@@ -2399,6 +2447,7 @@ def test_parquet_contract_runtime_readiness_status_fails_without_native_gates() 
 
 
 def test_parquet_contract_runtime_readiness_status_can_relax_native_requirement() -> None:
+    """Verify Parquet contract runtime readiness status can relax native requirement."""
     from schema_sanitizer.adapters.parquet.status import (
         _parquet_contract_runtime_readiness_status_from_capabilities,
     )
@@ -2417,6 +2466,7 @@ def test_parquet_contract_runtime_readiness_status_can_relax_native_requirement(
 def test_parquet_contract_runtime_readiness_status_public_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet contract runtime readiness status public gate."""
     from schema_sanitizer.adapters.parquet import status as parquet_runtime
 
     monkeypatch.setattr(parquet_runtime, "pyarrow_importable", lambda: True)
@@ -2428,6 +2478,7 @@ def test_parquet_contract_runtime_readiness_status_public_gate(
 
 
 def test_runtime_parquet_gate_snapshots_keep_inputs_defensive() -> None:
+    """Verify runtime Parquet gate snapshots keep inputs defensive."""
     from schema_sanitizer.adapters.parquet.status import (
         _parquet_contract_certification_status_from_parts,
         _parquet_preflight_contract_status_from_writer_status,
@@ -2455,6 +2506,7 @@ def test_runtime_parquet_gate_snapshots_keep_inputs_defensive() -> None:
 
 
 def test_native_nested_contract_status_certifies_stable_recursive_summary() -> None:
+    """Verify native nested contract status certifies stable recursive summary."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_nested_contract_status_from_summary,
     )
@@ -2472,6 +2524,7 @@ def test_native_nested_contract_status_certifies_stable_recursive_summary() -> N
 
 
 def test_native_nested_contract_status_fails_closed_on_recursive_drift() -> None:
+    """Verify native nested contract status fails closed on recursive drift."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_nested_contract_status_from_summary,
     )
@@ -2501,6 +2554,7 @@ def test_native_nested_contract_status_fails_closed_on_recursive_drift() -> None
 def test_native_parquet_nested_contract_status_uses_public_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify native Parquet nested contract status uses public summary."""
     from schema_sanitizer.adapters.parquet import status as parquet_footer
 
     monkeypatch.setattr(
@@ -2517,6 +2571,7 @@ def test_native_parquet_nested_contract_status_uses_public_summary(
 
 
 def test_parquet_fallback_failure_marks_pipeline_contract_failed() -> None:
+    """Verify Parquet fallback failure marks pipeline contract failed."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -2541,6 +2596,7 @@ def test_parquet_fallback_failure_marks_pipeline_contract_failed() -> None:
 
 
 def test_last_parquet_pipeline_contract_status_certifies_native_success() -> None:
+    """Verify last Parquet pipeline contract status certifies native success."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -2566,6 +2622,7 @@ def test_last_parquet_pipeline_contract_status_certifies_native_success() -> Non
 
 
 def test_last_parquet_pipeline_contract_status_certifies_safe_fallback_success() -> None:
+    """Verify last Parquet pipeline contract status certifies safe fallback success."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -2589,6 +2646,7 @@ def test_last_parquet_pipeline_contract_status_certifies_safe_fallback_success()
 
 
 def test_last_parquet_pipeline_contract_status_fails_closed_on_inconsistent_state() -> None:
+    """Verify last Parquet pipeline contract status fails closed on inconsistent state."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -2610,6 +2668,7 @@ def test_last_parquet_pipeline_contract_status_fails_closed_on_inconsistent_stat
 
 
 def test_native_parquet_writer_contract_status_certifies_stable_native_nested_file() -> None:
+    """Verify native Parquet writer contract status certifies stable native nested file."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2630,6 +2689,7 @@ def test_native_parquet_writer_contract_status_certifies_stable_native_nested_fi
 
 
 def test_native_parquet_writer_contract_status_fails_closed_on_missing_native_stream() -> None:
+    """Verify native Parquet writer contract status fails closed on missing native stream."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2643,6 +2703,7 @@ def test_native_parquet_writer_contract_status_fails_closed_on_missing_native_st
 
 
 def test_native_parquet_writer_contract_status_fails_closed_on_external_writer() -> None:
+    """Verify native Parquet writer contract status fails closed on external writer."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2660,6 +2721,7 @@ def test_native_parquet_writer_contract_status_fails_closed_on_external_writer()
 def test_native_parquet_writer_contract_status_uses_public_footer_info(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify native Parquet writer contract status uses public footer info."""
     from schema_sanitizer.adapters.parquet import status as parquet_footer
 
     monkeypatch.setattr(
@@ -2676,6 +2738,7 @@ def test_native_parquet_writer_contract_status_uses_public_footer_info(
 
 
 def test_parquet_preflight_contract_status_certifies_native_without_pyarrow() -> None:
+    """Verify Parquet preflight contract status certifies native without PyArrow."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2699,6 +2762,7 @@ def test_parquet_preflight_contract_status_certifies_native_without_pyarrow() ->
 
 
 def test_parquet_preflight_contract_status_certifies_external_with_pyarrow() -> None:
+    """Verify Parquet preflight contract status certifies external with PyArrow."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2726,6 +2790,7 @@ def test_parquet_preflight_contract_status_certifies_external_with_pyarrow() -> 
 
 
 def test_parquet_preflight_contract_status_fails_without_native_or_pyarrow() -> None:
+    """Verify Parquet preflight contract status fails without native or PyArrow."""
     from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
@@ -2753,6 +2818,7 @@ def test_parquet_preflight_contract_status_fails_without_native_or_pyarrow() -> 
 def test_parquet_preflight_contract_status_uses_public_writer_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet preflight contract status uses public writer gate."""
     from schema_sanitizer.adapters.parquet import status as parquet_runtime
 
     monkeypatch.setattr(
@@ -2776,6 +2842,7 @@ def test_parquet_preflight_contract_status_uses_public_writer_gate(
 
 
 def test_native_writer_nested_contract_blockers_fail_closed_on_drift() -> None:
+    """Verify native writer nested contract blockers fail closed on drift."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         ParquetRecordBatchStreamFactory,
     )

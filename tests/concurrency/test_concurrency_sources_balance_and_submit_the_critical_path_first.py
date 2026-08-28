@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources balance and submit the critical path first."""
+"""Validate source balancing and critical-path-first submission for wide JSONL.
+
+Clustered mixed rows must reach the dedicated native frontend, activate parallel materialization,
+preserve exact output, and report conversion errors in canonical column order despite reordering.
+"""
 
 from __future__ import annotations
 

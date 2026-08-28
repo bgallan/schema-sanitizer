@@ -1,4 +1,8 @@
-"""Fake-cloud integration coverage for example 08."""
+"""Fake-cloud integration coverage for example 08.
+
+It runs the two-day workflow against in-memory GCS and BigQuery clients and proves
+validation failures publish nothing.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ class FakeGcsClient:
     """In-memory exact-generation GCS client for one integration process."""
 
     def __init__(self, objects: list[tuple[RemoteFile, bytes]]) -> None:
+        """Initialize fake GCS client state for objects, listing, and list calls."""
         self._objects = {remote.content_identity: payload for remote, payload in objects}
         self._listing = tuple(remote for remote, _payload in objects)
         self.list_calls = 0
@@ -35,12 +40,14 @@ class FakeGcsClient:
         *,
         memory_limit_bytes: int | None,
     ) -> tuple[RemoteFile, ...]:
+        """Return the configured CSV object listing for the requested window."""
         del memory_limit_bytes
         self.list_calls += 1
         return self._listing
 
     @contextmanager
     def schema_sanitizer_download_scope(self):
+        """Open the fake provider download scope for schema-sanitizer."""
         original_sync = sync_backend.download_files_to_directory
         original_open = directory_downloads.provider_client_for_downloads
         original_close = directory_downloads.close_provider_client
@@ -102,6 +109,7 @@ class FakeGcsClient:
         *,
         memory_limit_bytes: int | None,
     ) -> int:
+        """Record an atomic publication without writing to cloud storage."""
         del memory_limit_bytes
         payload = Path(local_path).read_bytes()
         self.published[destination_uri] = payload
@@ -112,13 +120,16 @@ class FakeBigQueryClient:
     """In-memory target schema and external-table update recorder."""
 
     def __init__(self, schema: Any) -> None:
+        """Initialize fake BigQuery client state for schema and replace calls."""
         self.schema = schema
         self.replace_calls: list[dict[str, Any]] = []
 
     def read_target_schema(self, _target_table: str) -> Any:
+        """Return the in-memory target schema while recording the lookup when needed."""
         return self.schema
 
     def replace_external_table(self, target_table: str, **kwargs: Any) -> None:
+        """Record the requested external-table replacement."""
         self.replace_calls.append({"target_table": target_table, **kwargs})
 
 

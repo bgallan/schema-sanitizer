@@ -1,4 +1,8 @@
-"""Wide JSONL row, validation, and column-slot materialization contracts."""
+"""Specify hybrid row handling, validation, and column slots for wide JSONL.
+
+Row packets and the shared arena barrier must preserve output and parse-error precedence, while
+column builders remain bounded by packet slots and reuse those slots exactly across worker modes.
+"""
 
 from __future__ import annotations
 

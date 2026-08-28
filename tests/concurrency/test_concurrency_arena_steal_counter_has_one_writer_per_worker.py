@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency arena steal counter has one writer per worker."""
+"""Define telemetry ownership contracts for sharded arena steal counters.
+
+The cases ensure each worker writes only its own counter and mixed native lanes aggregate
+shard totals without reintroducing shared writes.
+"""
 
 from __future__ import annotations
 

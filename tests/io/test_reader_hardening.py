@@ -1,4 +1,8 @@
-"""Regression tests for hostile XML, CSV, and JSON reader inputs."""
+"""Regression tests for hostile XML, CSV, and JSON reader inputs.
+
+It subjects XML, CSV, JSON, and Parquet readers to depth, entity, expansion,
+malformed-token, memory, privacy, and subprocess stress boundaries.
+"""
 
 from __future__ import annotations
 

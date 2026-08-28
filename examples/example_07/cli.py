@@ -1,4 +1,8 @@
-"""Command-line parser for the BigQuery range-prefix example."""
+"""Command-line parser for the BigQuery range-prefix example.
+
+It assembles the parser and enforces cross-option requirements before any cloud client
+or conversion resource is created.
+"""
 
 from __future__ import annotations
 

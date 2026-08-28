@@ -1,4 +1,7 @@
-"""Regression coverage for memory proc stat parser handles spaces and parentheses."""
+"""Combines robust process-stat parsing with bounded threaded Parquet telemetry and
+retryable remote-provider cleanup. Spaces and parentheses parse correctly while
+malformed input fails closed; telemetry bounds labels or history and resets across fork,
+and provider resources stay rooted until all cleanup contexts close."""
 
 from __future__ import annotations
 
@@ -23,11 +26,13 @@ class _FailOnceClose:
     """Close double that fails once with a configurable exception type."""
 
     def __init__(self, error_type: type[BaseException] = OSError) -> None:
+        """Initialize the fail once close test double."""
         self.error_type = error_type
         self.calls = 0
         self.closed = False
 
     def close(self) -> None:
+        """Close the resources owned by the fail once close test double."""
         self.calls += 1
         if self.calls == 1:
             raise self.error_type("transient cleanup failure")
@@ -38,6 +43,7 @@ class _Staged(_FailOnceClose):
     """Staged chunk with a minimal source-count manifest."""
 
     def __init__(self, *, fail_once: bool = True) -> None:
+        """Initialize the staged test double."""
         super().__init__()
         if not fail_once:
             self.calls = 1
@@ -156,6 +162,7 @@ def test_parquet_telemetry_does_not_trust_exception_text() -> None:
         """Exception whose string conversion is unsafe."""
 
         def __str__(self) -> str:
+            """Raise when the test attempts to render the hostile value."""
             raise RuntimeError("hostile __str__")
 
     telemetry.reset_parquet_stream_factory_observability()
@@ -261,12 +268,15 @@ def test_remote_provider_retains_failed_context_exit(
         """Context whose exit fails once."""
 
         def __init__(self) -> None:
+            """Initialize the context test double."""
             self.calls = 0
 
         def __enter__(self) -> Any:
+            """Enter the context managed by the context test double."""
             return iter(())
 
         def __exit__(self, *_exc: object) -> None:
+            """Exit the context managed by the context test double and run cleanup."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("exit busy")

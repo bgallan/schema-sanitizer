@@ -1,4 +1,8 @@
-"""Load, verify, stage, and deterministically pack concurrency benchmark assets."""
+"""Load, verify, stage, and deterministically pack concurrency benchmark assets.
+
+The module validates catalog metadata and integrity hashes before staging deterministic
+probe archives for isolated runs.
+"""
 
 from __future__ import annotations
 
@@ -24,11 +28,13 @@ _MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 
 
 def _require(condition: bool, message: str) -> None:
+    """Return required catalog metadata or reject the missing key."""
     if not condition:
         raise ValueError(message)
 
 
 def _safe_probe_name(name: str, *, domain: str | None = None) -> bool:
+    """Validate and return a path-safe benchmark probe name."""
     path = PurePosixPath(name)
     return (
         len(path.parts) == 2
@@ -102,6 +108,7 @@ def load_catalog(path: Path = CATALOG_PATH) -> dict[str, Any]:
 
 
 def _record(record_id: str, catalog: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Record one result in the current analysis."""
     for record in catalog["records"]:
         if record["id"] == record_id:
             return record
@@ -117,6 +124,7 @@ def load_evidence(record_id: str) -> dict[str, Any]:
 
 
 def _probe_bytes() -> dict[str, bytes]:
+    """Read and validate the selected benchmark probe payload."""
     catalog = load_catalog()
     expected = sorted(probe for record in catalog["records"] for probe in record["probes"])
     probes: dict[str, bytes] = {}
@@ -192,6 +200,7 @@ def stage_probes(destination: Path, record_ids: Iterable[str] = ()) -> tuple[Pat
 
 
 def _write_probe_archive(probes: Mapping[str, bytes]) -> None:
+    """Write a deterministic archive for the selected probe payload."""
     total = 0
     for name, payload in probes.items():
         _require(_safe_probe_name(name), f"unsafe concurrency probe name: {name!r}")
@@ -243,6 +252,7 @@ def pack_staged_probes(source: Path) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("verify", help="validate the catalog and probe archive")

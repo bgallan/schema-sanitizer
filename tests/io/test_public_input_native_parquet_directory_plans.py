@@ -1,4 +1,8 @@
-"""Tests explicit public input formats, extensions, and directory mode."""
+"""Tests explicit public input formats, extensions, and directory mode.
+
+It verifies native-first Parquet directory plans, lazy child opening, source tracking,
+registry state, and consistent converter keyword contracts.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ import schema_sanitizer as ss
 
 
 def test_native_directory_source_plan_is_native_first(tmp_path: Path, require_native: None) -> None:
+    """Verify native directory source plan is native first."""
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
     from schema_sanitizer.api_impl.source_plan.attached import source_plan_from_data
 
@@ -44,6 +49,7 @@ def test_native_directory_source_plan_is_native_first(tmp_path: Path, require_na
 def test_directory_conversion_uses_self_bootstrapping_native_path_sources(
     tmp_path: Path, monkeypatch, input_format: str
 ) -> None:
+    """Verify directory conversion uses self bootstrapping native path sources."""
     from schema_sanitizer.api_impl.source_plan import probing as source_plan_probe
 
     folder = tmp_path / input_format
@@ -88,6 +94,7 @@ def test_directory_conversion_uses_self_bootstrapping_native_path_sources(
 
 
 def test_parquet_directory_source_file_tracks_each_child(tmp_path: Path) -> None:
+    """Verify Parquet directory source file tracks each child."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     folder = tmp_path / "parquet"
@@ -106,6 +113,7 @@ def test_parquet_directory_source_file_tracks_each_child(tmp_path: Path) -> None
 
 
 def test_parquet_directory_source_file_is_native_tracked(tmp_path: Path) -> None:
+    """Verify Parquet directory source file is native tracked."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -127,6 +135,7 @@ def test_parquet_directory_source_file_is_native_tracked(tmp_path: Path) -> None
 def test_parquet_directory_writer_source_file_does_not_precount_rows(
     tmp_path: Path,
 ) -> None:
+    """Verify Parquet directory writer source file does not precount rows."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -153,6 +162,7 @@ def test_parquet_directory_writer_source_file_does_not_precount_rows(
 def test_parquet_directory_writer_uses_arrow_source_auto_registry(
     tmp_path: Path,
 ) -> None:
+    """Verify Parquet directory writer uses arrow source auto registry."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -179,6 +189,7 @@ def test_parquet_directory_writer_uses_arrow_source_auto_registry(
 def test_parquet_directory_writer_accepts_previous_native_registry_state(
     tmp_path: Path,
 ) -> None:
+    """Verify Parquet directory writer accepts previous native registry state."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.core_impl.schema_registry import native_registry_state_context
@@ -212,6 +223,7 @@ def test_parquet_directory_source_plan_does_not_preopen_factories(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    """Verify Parquet directory source plan does not preopen factories."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     import schema_sanitizer.input_impl.source_plan as source_plan_model
@@ -266,6 +278,7 @@ def test_parquet_directory_source_plan_does_not_preopen_factories(
 def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Parquet arrow source chunk provider opens bounded chunks."""
     from schema_sanitizer.api_impl.parquet import arrow_sources as parquet_arrow_sources
     from schema_sanitizer.api_impl.parquet.arrow_sources import ParquetArrowSource
 
@@ -276,10 +289,12 @@ def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
         """Fake Arrow stream factory with close tracking."""
 
         def __init__(self, path: str) -> None:
+            """Initialize factory state for path and schema."""
             self.path = path
             self.schema = object()
 
         def close(self) -> None:
+            """Close the factory and release its retained resources."""
             closed.append(self.path)
 
     def fake_factory_or_none(data, **_kwargs):
@@ -336,6 +351,7 @@ def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
 
 
 def test_file_and_analytical_functions_share_keyword_contract() -> None:
+    """Verify file and analytical functions share keyword contract."""
     import inspect
 
     analytical = set(inspect.signature(ss.to_pyarrow).parameters) - {"input_path"}

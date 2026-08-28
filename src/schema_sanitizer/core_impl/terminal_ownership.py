@@ -1,13 +1,8 @@
-"""Bounded metadata ledger for terminal runtime ownership.
+"""Track terminal runtime ownership in a bounded metadata-only ledger.
 
-The ledger intentionally stores no payload objects.  It centralizes the answer
-to "does terminal ownership still exist?" without becoming a second owner graph.
-
-The authoritative terminal records live in one preallocated
-fixed-capacity bank.  Publishing or retiring terminal ownership therefore never
-needs to grow a dict/list at the exact point where the runtime may already be
-under memory pressure.  Metadata overhead is also reported explicitly in bytes
-instead of being hidden behind an item count.
+Authoritative records live in a preallocated fixed-capacity bank, so publishing or
+retiring ownership cannot grow containers under memory pressure. The ledger avoids a
+second payload-owner graph and reports its metadata overhead explicitly in bytes.
 """
 
 from __future__ import annotations
@@ -27,6 +22,7 @@ _TERMINAL_OWNER_RECORD_BYTES = 128
 
 
 def _bounded_label(value: object) -> str:
+    """Validate and truncate a terminal-ownership label to its fixed bound."""
     if type(value) is not str:
         raise TypeError("terminal ownership labels must be exact strings")
     return value if len(value) <= _MAX_LABEL_CHARS else value[:_MAX_LABEL_CHARS]
@@ -65,6 +61,7 @@ class _TerminalOwnerSlot:
     generation: int = 0
 
     def clear(self) -> None:
+        """Clear values and ownership retained by this terminal owner slot."""
         self.active = False
         self.category = ""
         self.token = 0
@@ -77,6 +74,7 @@ class TerminalOwnershipLedger:
     """Process-local bounded metadata authority for terminal owners."""
 
     def __init__(self, capacity: int = _MAX_TERMINAL_OWNERS) -> None:
+        """Initialize the terminal ownership ledger and its owned runtime state."""
         if type(capacity) is not int:
             raise TypeError("terminal ownership capacity must be an exact integer")
         if capacity <= 0 or capacity > _MAX_TERMINAL_OWNERS:
@@ -88,6 +86,7 @@ class TerminalOwnershipLedger:
         self._reset(os.getpid())
 
     def _reset(self, pid: int) -> None:
+        """Reset process-local state owned by this terminal ownership ledger."""
         self._pid = pid
         # A child must not touch the parent's inherited lock.  Replacing this one
         # small synchronization primitive is the only post-fork allocation; the
@@ -103,10 +102,12 @@ class TerminalOwnershipLedger:
         self._corrupted = False
 
     def _ensure_process(self) -> None:
+        """Ensure the owner still belongs to the active process."""
         if self._pid != os.getpid():
             self._reset(os.getpid())
 
     def _prepare_generation_advance_locked(self) -> int | None:
+        """Prepare generation advance while holding the governing lock."""
         if self._generation_exhausted:
             return None
         if self._generation >= (1 << 63) - 1:
@@ -120,12 +121,14 @@ class TerminalOwnershipLedger:
         # publication is not a hot data-plane path; correctness under pressure is
         # preferred to an auxiliary dynamic hash index that would itself need
         # ownership and failure handling.
+        """Find slot while holding the governing lock."""
         for slot in self._slots:
             if slot.active and slot.token == token and slot.category == category:
                 return slot
         return None
 
     def _find_free_slot_locked(self) -> _TerminalOwnerSlot | None:
+        """Find free slot while holding the governing lock."""
         for slot in self._slots:
             if not slot.active:
                 return slot
@@ -166,6 +169,7 @@ class TerminalOwnershipLedger:
         *,
         retained_bytes: int = 0,
     ) -> bool:
+        """Publish the prepared value."""
         self._ensure_process()
         category = _bounded_label(category)
         if type(token) is not int:
@@ -221,6 +225,7 @@ class TerminalOwnershipLedger:
             return True
 
     def retire(self, category: str, token: int) -> None:
+        """Retire the retained runtime entry."""
         self._ensure_process()
         category = _bounded_label(category)
         if type(token) is not int:
@@ -242,6 +247,7 @@ class TerminalOwnershipLedger:
             diagnostic_transition()
 
     def retire_category(self, category: str) -> None:
+        """Retire every terminal owner in the requested category."""
         self._ensure_process()
         category = _bounded_label(category)
         with self._lock:
@@ -264,6 +270,7 @@ class TerminalOwnershipLedger:
             diagnostic_transition()
 
     def snapshot(self) -> TerminalOwnershipSnapshot:
+        """Return a bounded snapshot of the current terminal ownership ledger."""
         self._ensure_process()
         with self._lock:
             # Snapshot construction is advisory/read-only and may allocate; the
@@ -295,6 +302,7 @@ class TerminalOwnershipLedger:
             )
 
     def reset_after_fork(self) -> None:
+        """Reset process-local state inherited across a fork."""
         self._reset(os.getpid())
 
 

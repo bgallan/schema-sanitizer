@@ -45,6 +45,7 @@ class BoundedGenerationPool:
     )
 
     def __init__(self, capacity: int) -> None:
+        """Initialize the bounded generation pool and its owned runtime state."""
         if type(capacity) is not int or capacity <= 0:
             raise ValueError("bounded generation capacity must be a positive exact integer")
         self._capacity = capacity
@@ -60,9 +61,11 @@ class BoundedGenerationPool:
         self._corrupted = False
 
     def _encode(self, slot: int, generation: int) -> int:
+        """Encode an owner slot and generation into one bounded token."""
         return (generation << self._slot_bits) | slot
 
     def _slot_for_owner(self, owner: object) -> int:
+        """Return the slot currently assigned to an owner."""
         for slot in range(self._capacity):
             if self._owners[slot] is owner:
                 return slot
@@ -191,6 +194,7 @@ class BoundedGenerationPool:
             raise
 
     def token_for(self, owner: object) -> int | None:
+        """Return the active generation token for an owner."""
         slot = self._slot_for_owner(owner)
         if slot < 0:
             return None
@@ -207,6 +211,7 @@ class BoundedGenerationPool:
         return self._owners[slot]
 
     def owns_owner(self, owner: object, token: int | None = None) -> bool:
+        """Return whether this generation pool owns the supplied owner identity."""
         slot = self._slot_for_owner(owner)
         if slot < 0:
             return False
@@ -215,6 +220,7 @@ class BoundedGenerationPool:
         return self._encode(slot, self._generations[slot]) == token
 
     def exact_active_count(self) -> int:
+        """Return the exact active count."""
         active = 0
         for owner in self._owners:
             if owner is not None:
@@ -222,6 +228,7 @@ class BoundedGenerationPool:
         return active
 
     def snapshot(self) -> BoundedGenerationSnapshot:
+        """Return a bounded snapshot of the current bounded generation pool."""
         return BoundedGenerationSnapshot(
             self._capacity, self._active, self._count, self._retired, self._corrupted
         )

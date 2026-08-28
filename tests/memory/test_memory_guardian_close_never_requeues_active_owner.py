@@ -1,4 +1,8 @@
-"""Regression coverage for memory guardian close never requeues active owner."""
+"""Stress-tests guardian and notifier shutdown with active retry workers, hard dispatch
+deadlines, level-trigger rearming, uncertain descriptor debt, reserved-thread
+cancellation, watchdog age, snapshots, and biphasic native reaping. Close never requeues
+an active owner; work and debt remain visible until permit release or terminal
+retirement commits."""
 
 from __future__ import annotations
 
@@ -14,10 +18,12 @@ from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 def test_guardian_close_never_requeues_active_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify guardian close never requeues active owner."""
     from schema_sanitizer.core_impl import retry_scheduler as module
 
     class Permit:
         def release(self) -> None:
+            """Release the resource held by the permit test double."""
             return None
 
     monkeypatch.setattr(module, "acquire_release_guardian_thread", lambda: Permit())
@@ -27,6 +33,7 @@ def test_guardian_close_never_requeues_active_owner(
 
     class CloseObservedCondition(threading.Condition):
         def wait(self, timeout: float | None = None) -> bool:
+            """Wait for the close observed condition test double to reach its terminal state."""
             if threading.current_thread() is close_thread:
                 close_wait_entered.set()
             return super().wait(timeout)
@@ -41,6 +48,7 @@ def test_guardian_close_never_requeues_active_owner(
 
     class BlockingOwner:
         def release(self) -> None:
+            """Release the resource held by the blocking owner test double."""
             nonlocal calls, concurrent, peak
             with lock:
                 calls += 1
@@ -53,6 +61,7 @@ def test_guardian_close_never_requeues_active_owner(
 
     class QuickOwner:
         def release(self) -> None:
+            """Release the resource held by the quick owner test double."""
             return None
 
     owner = BlockingOwner()
@@ -74,6 +83,7 @@ def test_guardian_close_never_requeues_active_owner(
 
 
 def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
+    """Verify retry worker remains visible until permit release commits."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     scheduler = _RetryScheduler()
@@ -83,12 +93,14 @@ def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             release_entered.set()
             assert release_resume.wait(2)
 
     lease = Lease()
 
     def retire() -> None:
+        """Retire the tracked owner at the controlled lifecycle point."""
         current = threading.current_thread()
         with scheduler._condition:
             scheduler._execution_workers.add(current)
@@ -111,6 +123,7 @@ def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
 def test_notifier_hard_deadline_is_dispatch_barrier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify notifier hard deadline is dispatch barrier."""
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
@@ -142,6 +155,7 @@ def test_notifier_hard_deadline_is_dispatch_barrier(
 def test_level_triggered_availability_closes_release_before_register_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify level triggered availability closes release before register gap."""
     from schema_sanitizer.core_impl import process_resources as module
 
     governor = module._Governor(
@@ -155,6 +169,7 @@ def test_level_triggered_availability_closes_release_before_register_gap(
     published: list[Any] = []
 
     def capture_target_and_forward_others(delivery: Any) -> bool:
+        """Capture the target and forward others for the enclosing assertion."""
         if delivery.governor is governor:
             published.append(delivery)
             return True
@@ -180,6 +195,7 @@ def test_level_triggered_availability_closes_release_before_register_gap(
 def test_notifier_rearm_during_execution_is_not_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify notifier rearm during execution is not lost."""
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
@@ -191,6 +207,7 @@ def test_notifier_rearm_during_execution_is_not_lost(
     delivery: module._AvailabilityDelivery
 
     def dispatch(_event: module.AvailabilityEvent) -> None:
+        """Dispatch work through the controlled scheduling path."""
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -216,6 +233,7 @@ def test_notifier_rearm_during_execution_is_not_lost(
 def test_uncertain_fd_close_retains_capacity_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify uncertain FD close retains capacity debt."""
     from schema_sanitizer.core_impl import path_identity, process_resources
 
     monkeypatch.setattr(
@@ -244,10 +262,12 @@ def test_uncertain_fd_close_retains_capacity_debt(
 
 
 def test_runtime_registry_cancels_reserved_thread_before_start() -> None:
+    """Verify runtime registry cancels reserved thread before start."""
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self, *, deadline_seconds: float = 0.0) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = _RuntimeServiceRegistry()
@@ -266,10 +286,12 @@ def test_runtime_registry_cancels_reserved_thread_before_start() -> None:
 def test_dispatcher_watchdog_tracks_real_active_call_age(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify dispatcher watchdog tracks real active call age."""
     from schema_sanitizer.core_impl import cleanup_dispatcher as module
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     monkeypatch.setattr(module, "acquire_project_threads", lambda *_a, **_k: Lease())
@@ -278,6 +300,7 @@ def test_dispatcher_watchdog_tracks_real_active_call_age(
     resume = threading.Event()
 
     def blocked() -> None:
+        """Pause at the blocked synchronization point."""
         entered.set()
         assert resume.wait(2)
 
@@ -292,6 +315,7 @@ def test_dispatcher_watchdog_tracks_real_active_call_age(
 
 
 def test_runtime_snapshot_includes_fd_debt_and_retirement() -> None:
+    """Verify runtime snapshot includes FD debt and retirement."""
     source = Path("src/schema_sanitizer/core_impl/runtime_diagnostics.py").read_text()
     shutdown = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
     # Separately conserved external resident-stack debt is part of the
@@ -303,6 +327,7 @@ def test_runtime_snapshot_includes_fd_debt_and_retirement() -> None:
 
 
 def test_native_reaper_shutdown_is_biphasic_and_terminal_states_are_visible() -> None:
+    """Verify native reaper shutdown is biphasic and terminal states are visible."""
     source = Path("cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     header = Path("cpp/src/internal/runtime/operation_task_arena.hh").read_text()
     abi = Path("cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()

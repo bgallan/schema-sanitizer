@@ -1,4 +1,8 @@
-"""Typed CSV header-mode API contracts."""
+"""Typed CSV header-mode API contracts.
+
+It validates typed exact and union modes across all converters, then checks identical
+rows, mismatch handling, and option propagation.
+"""
 
 from __future__ import annotations
 

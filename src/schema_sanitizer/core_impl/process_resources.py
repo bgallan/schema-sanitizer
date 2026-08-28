@@ -1,4 +1,8 @@
-"""Process-wide logical admission for project-owned threads and file handles."""
+"""Govern process-wide capacity for project-owned threads and file handles.
+
+Exact leases, callbacks, runtime pools, native permits, physical descriptor transitions, and
+governed file wrappers all share the admission and diagnostic accounting maintained here.
+"""
 
 from __future__ import annotations
 
@@ -113,6 +117,7 @@ class _AvailabilityDelivery:
 
     @property
     def key(self) -> tuple[int, AvailabilityEvent, int]:
+        """Return the immutable queue key retained by this entry."""
         return (id(self.governor), self.event, self.generation)
 
 
@@ -150,6 +155,7 @@ class _Waiter:
 
 
 def _release_process_lease_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Release process lease capsule."""
     governor = capsule.arg0
     lease_id = capsule.arg1
     capability = capsule.arg2
@@ -172,6 +178,7 @@ class _ExternalRuntimeBorrowResult:
     __slots__ = ("lease",)
 
     def __init__(self, lease: "_OperationThreadBorrowLease | None" = None) -> None:
+        """Initialize the external runtime borrow result and its owned runtime state."""
         self.lease = lease
 
 
@@ -208,6 +215,7 @@ class _Lease:
     _finalizer_capsule: PreparedFinalizerCleanup | None
 
     def __init__(self, governor: "_Governor", amount: int, *, _active: bool = True) -> None:
+        """Initialize the lease and its owned runtime state."""
         object.__setattr__(self, "_sealed", False)
         object.__setattr__(self, "_finalizer_ticket", 0)
         object.__setattr__(self, "_finalizer_capsule", None)
@@ -227,16 +235,19 @@ class _Lease:
             object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
+        """Reject mutation of lease identity after authoritative publication."""
         if getattr(self, "_sealed", False) and name in self._IMMUTABLE_FIELDS:
             raise AttributeError(f"{name} is immutable after lease publication")
         object.__setattr__(self, name, value)
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this lease."""
         return self._amount
 
     @property
     def lease_id(self) -> int:
+        """Return the lease id."""
         return self._lease_id
 
     def _activate(
@@ -246,6 +257,7 @@ class _Lease:
         lease_id: int,
         capability: object,
     ) -> None:
+        """Activate this lease with authoritative capacity and capability."""
         if self._sealed:
             raise RuntimeError("lease already published")
         if amount is not None:
@@ -260,6 +272,7 @@ class _Lease:
         object.__setattr__(self, "_sealed", True)
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this lease."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -277,6 +290,7 @@ class _Lease:
             object.__setattr__(self, "_finalizer_capsule", None)
 
     def release(self) -> None:
+        """Release resources owned by this lease."""
         if os.getpid() != self._pid:
             return
         # Keep the per-lease lock until the governor acknowledges removal from
@@ -391,9 +405,11 @@ class _Lease:
     close = release
 
     def __enter__(self) -> "_Lease":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.release()
 
     def __del__(self) -> None:
@@ -460,6 +476,7 @@ class _Governor:
         teardown_reserve: int = 0,
         availability_dispatcher: Callable[[AvailabilityEvent], None] | None = None,
     ) -> None:
+        """Initialize the governor and its owned runtime state."""
         if type(capacity) is not int:
             raise TypeError("process resource capacity must be an exact integer")
         if type(teardown_reserve) is not int:
@@ -530,6 +547,7 @@ class _Governor:
                 self._condition.notify_all()
 
     def _raise_closed(self, *, teardown: bool = False) -> None:
+        """Raise the standard closed-governor error."""
         domain = "teardown" if teardown else "external"
         raise SchemaSanitizerResourceError(
             f"process {self.label} {domain} admission is closed",
@@ -625,6 +643,7 @@ class _Governor:
         return False
 
     def _can_grant_locked(self, amount: int, *, teardown: bool) -> bool:
+        """Return whether a request can be granted while holding the governor lock."""
         if not self._reconcile_authority_locked():
             return False
         if self._in_use + amount > self.capacity:
@@ -634,6 +653,7 @@ class _Governor:
         return self._external_in_use + amount <= self.external_capacity
 
     def _available_locked(self, *, teardown: bool) -> int:
+        """Return available capacity while holding the governor lock."""
         total_available = max(0, self.capacity - self._in_use)
         if teardown:
             return total_available
@@ -643,6 +663,7 @@ class _Governor:
         )
 
     def _request_capacity_locked(self, *, teardown: bool) -> int:
+        """Derive request capacity while holding the governor lock."""
         return self.capacity if teardown else self.external_capacity
 
     def _raise_if_waiter_became_impossible_locked(self, waiter: _Waiter) -> None:
@@ -673,6 +694,7 @@ class _Governor:
         timeout_seconds: float | None = None,
         _teardown: bool = False,
     ) -> _Lease:
+        """Acquire governed capacity through this governor."""
         if type(amount) is not int:
             raise TypeError(f"process {self.label} request must be an exact integer")
         if amount <= 0:
@@ -808,6 +830,7 @@ class _Governor:
     def try_acquire_up_to(
         self, desired: int, *, minimum: int = 1, _teardown: bool = False
     ) -> _Lease:
+        """Acquire up to the requested capacity without blocking."""
         if type(desired) is not int:
             raise TypeError(f"process {self.label} desired amount must be an exact integer")
         if type(minimum) is not int:
@@ -884,6 +907,7 @@ class _Governor:
             return lease
 
     def _return_capacity_locked(self, returned: int) -> tuple[_AvailabilityDelivery, ...]:
+        """Return capacity while holding the governing lock."""
         if returned < 0 or returned > self._in_use:
             self._over_release_count += 1
             self._over_release_amount += max(0, returned - self._in_use)
@@ -1139,10 +1163,12 @@ class _Governor:
             self._schedule_availability_retry_noexcept()
 
     def _delivery_is_current(self, delivery: _AvailabilityDelivery) -> bool:
+        """Return whether a queued delivery still belongs to this governor generation."""
         with self._condition:
             return self._delivery_is_current_locked(delivery)
 
     def _ack_delivery(self, delivery: _AvailabilityDelivery) -> bool:
+        """Acknowledge a completed asynchronous permit delivery."""
         with self._condition:
             if not self._delivery_is_current_locked(delivery):
                 return False
@@ -1153,10 +1179,12 @@ class _Governor:
             return True
 
     def _delivery_is_current_locked(self, delivery: _AvailabilityDelivery) -> bool:
+        """Return whether a delivery is current while holding the governor lock."""
         current = self._availability_events.get(delivery.event)
         return delivery.governor is self and current is delivery
 
     def register_availability_event(self, event: object) -> bool:
+        """Register a callback for the next capacity transition."""
         ensure_runtime_fork_safe()
         if not isinstance(event, AvailabilityEvent):
             raise TypeError("availability event must be AvailabilityEvent")
@@ -1211,6 +1239,7 @@ class _Governor:
         return True
 
     def unregister_availability_event(self, event: object) -> None:
+        """Remove a capacity-transition callback registration."""
         if not isinstance(event, AvailabilityEvent):
             return
         with self._condition:
@@ -1243,6 +1272,7 @@ class _Governor:
             self._condition.notify_all()
 
     def reopen_admission_for_tests(self) -> None:
+        """Reopen admission for an isolated test run."""
         with self._condition:
             self._corrupted = False
             self._reconcile_authority_locked()
@@ -1256,6 +1286,7 @@ class _Governor:
         # Snapshot is a normal governed safe point: make abandoned lease
         # handoffs observable and retry any level-triggered availability that
         # an earlier OOM could not publish.
+        """Return a bounded snapshot of the current governor."""
         drain_finalizer_cleanup()
         if self._availability_dirty:
             self._publish_available_events_noexcept()
@@ -1285,6 +1316,7 @@ class _Governor:
             )
 
     def reset_after_fork(self) -> None:
+        """Reset process-local state inherited across a fork."""
         quarantine_inherited_state(f"governor:{self.label}", self.__dict__)
         self._condition = Condition()
         self._in_use = 0
@@ -1344,6 +1376,7 @@ _NOTIFIER_RETRY_OWNERS: dict[int, object] = {}
 
 
 def _retry_availability_notifier_token(token: int) -> None:
+    """Resume the notifier owner retained under a retry token."""
     with _NOTIFIER_RETRY_OWNERS_LOCK:
         owner = _NOTIFIER_RETRY_OWNERS.pop(token, None)
     if owner is None:
@@ -1355,6 +1388,7 @@ class _AvailabilityNotifier:
     """Bounded host for sealed, acknowledged internal availability events."""
 
     def __init__(self, *, reserve_thread_slot: bool = False) -> None:
+        """Initialize the availability notifier and its owned runtime state."""
         self._condition = Condition()
         self._queued: dict[tuple[int, AvailabilityEvent, int], _AvailabilityDelivery] = {}
         self._queued_keys: set[tuple[int, AvailabilityEvent, int]] = set()
@@ -1406,6 +1440,7 @@ class _AvailabilityNotifier:
             publish_terminal_owner("availability_notifier", id(delivery), retained_bytes=256)
 
     def _schedule_restart(self) -> None:
+        """Schedule governed restart of the availability notifier."""
         with self._condition:
             if (
                 self._state is not _NotifierLifecycle.RUNNING
@@ -1444,6 +1479,7 @@ class _AvailabilityNotifier:
                 self._condition.notify_all()
 
     def _restart_from_retry(self) -> None:
+        """Restart the availability notifier after a governed retry."""
         with self._condition:
             self._restart_scheduled = False
             if self._state is not _NotifierLifecycle.RUNNING:
@@ -1496,6 +1532,7 @@ class _AvailabilityNotifier:
         return True
 
     def _ensure_worker(self, *, allow_stopping: bool) -> None:
+        """Ensure the availability notifier owns a live governed worker."""
         self._retry_failed_leases()
         with self._condition:
             allowed = self._state is _NotifierLifecycle.RUNNING or (
@@ -1563,6 +1600,7 @@ class _AvailabilityNotifier:
                 self._condition.notify_all()
 
     def _release_or_retain_lease(self, lease: _Lease) -> None:
+        """Release or retain lease."""
         try:
             lease.release()
             return
@@ -1587,6 +1625,7 @@ class _AvailabilityNotifier:
             self._condition.notify_all()
 
     def _retry_failed_leases(self) -> None:
+        """Retry release of thread leases retained after worker failure."""
         with self._condition:
             pending = tuple(self._failed_leases)
         for lease in pending:
@@ -1605,6 +1644,7 @@ class _AvailabilityNotifier:
                 self._condition.notify_all()
 
     def _take_due_locked(self) -> _AvailabilityDelivery | None:
+        """Remove due availability callbacks while holding the notifier lock."""
         if not self._queued:
             return None
         if self._state is not _NotifierLifecycle.RUNNING:
@@ -1627,6 +1667,7 @@ class _AvailabilityNotifier:
         return None
 
     def _run(self, lease: _Lease) -> None:
+        """Run the background worker loop for this availability notifier."""
         current = threading.current_thread()
         try:
             while True:
@@ -1732,6 +1773,7 @@ class _AvailabilityNotifier:
             # physical exit even though the permit remains correctly charged.
 
     def snapshot(self) -> AvailabilityNotifierSnapshot:
+        """Return a bounded snapshot of the current availability notifier."""
         with self._condition:
             worker = self._worker
             now_ns = monotonic_ns()
@@ -1752,6 +1794,7 @@ class _AvailabilityNotifier:
             )
 
     def close(self, *, deadline_seconds: float = 5.0) -> bool:
+        """Release resources owned by this availability notifier."""
         deadline_ns = deadline_ns_from_timeout(
             deadline_seconds, name="availability notifier shutdown deadline"
         )
@@ -1801,6 +1844,7 @@ class _AvailabilityNotifier:
                 self._condition.wait(timeout=min(0.01, remaining_seconds(deadline_ns)))
 
     def reopen_for_tests(self) -> None:
+        """Reopen for an isolated test run."""
         with self._condition:
             if self._state is _NotifierLifecycle.RUNNING:
                 return
@@ -1819,6 +1863,7 @@ class _AvailabilityNotifier:
             self._condition.notify_all()
 
     def reset_after_fork(self) -> None:
+        """Reset process-local state inherited across a fork."""
         if globals().get("_AVAILABILITY_NOTIFIER") is self:
             retire_terminal_category("availability_notifier")
         quarantine_inherited_state(
@@ -2005,6 +2050,7 @@ def _thread_requested_capacity() -> int:
     # in the process.  A CPU-scaled envelope would therefore count the same
     # constraint twice and can collapse to zero after importing a runtime with
     # a persistent pool (Arrow, Polars, DuckDB, ...).
+    """Return the configured process-wide project-thread envelope."""
     default = _DEFAULT_MAX_PROJECT_THREADS
     configured = os.getenv("SCHEMA_SANITIZER_MAX_PROJECT_THREADS")
     if configured:
@@ -2018,6 +2064,7 @@ def _thread_requested_capacity() -> int:
 
 
 def _cgroup_pid_headroom() -> int | None:
+    """Return the cgroup process-count headroom, when known."""
     view = current_cgroup_view()
     if view.version not in (1, 2):
         return None if view.resolution_known else 0
@@ -2037,6 +2084,7 @@ def _cgroup_pid_headroom() -> int | None:
 
 
 def _thread_hard_capacity(*, governed_in_use: int = 0) -> int:
+    """Return the live thread ceiling after process and cgroup headroom."""
     requested = _thread_requested_capacity()
     hard = requested
     observed_threads = _process_physical_thread_count()
@@ -2071,10 +2119,12 @@ def _thread_hard_capacity(*, governed_in_use: int = 0) -> int:
 
 
 def _thread_capacity() -> int:
+    """Return the thread capacity."""
     return _thread_hard_capacity(governed_in_use=0)
 
 
 def _open_fd_count() -> int | None:
+    """Return the open fd count."""
     try:
         with os.scandir("/proc/self/fd") as entries:
             return sum(1 for _ in entries)
@@ -2096,6 +2146,7 @@ def _open_fd_count() -> int | None:
 
 
 def _fd_requested_capacity() -> int:
+    """Return the fd requested capacity."""
     configured = os.getenv("SCHEMA_SANITIZER_MAX_OPEN_FILES")
     if configured:
         try:
@@ -2112,11 +2163,13 @@ _PYTHON_GOVERNED_FDS_OPENED_LOCK = Lock()
 
 
 def _python_governed_fds_opened() -> int:
+    """Return descriptors currently opened through Python-governed leases."""
     with _PYTHON_GOVERNED_FDS_OPENED_LOCK:
         return _PYTHON_GOVERNED_FDS_OPENED
 
 
 def _mark_python_file_descriptors_opened_noexcept(amount: int) -> None:
+    """Mark python file descriptors opened without propagating exceptions."""
     global _PYTHON_GOVERNED_FDS_OPENED
     if amount <= 0:
         return
@@ -2128,6 +2181,7 @@ def _mark_python_file_descriptors_opened_noexcept(amount: int) -> None:
 
 
 def _mark_python_file_descriptors_closed_noexcept(amount: int) -> None:
+    """Mark python file descriptors closed without propagating exceptions."""
     global _PYTHON_GOVERNED_FDS_OPENED
     if amount <= 0:
         return
@@ -2162,6 +2216,7 @@ def record_physical_file_descriptors_closed(amount: int = 1) -> None:
 def _fd_hard_capacity() -> int:
     # Capacity follows physically-open governed FDs rather than reservations
     # that may not have reached ``open()`` yet.
+    """Return the fd hard capacity."""
     hard = _fd_requested_capacity()
     if resource is not None:
         try:
@@ -2194,6 +2249,7 @@ def _fd_hard_capacity() -> int:
 
 
 def _fd_capacity() -> int:
+    """Return the fd capacity."""
     return _fd_hard_capacity()
 
 
@@ -2225,12 +2281,14 @@ class _NativeFdPermitAcquisition:
     __slots__ = ("native", "lease", "amount")
 
     def __init__(self) -> None:
+        """Initialize the native fd permit acquisition and its owned runtime state."""
         self.native: Any | None = None
         self.lease: object | None = None
         self.amount = 0
 
 
 def _native_fd_exact_metadata(native: Any, receipt: object) -> tuple[int, int, int, int]:
+    """Return the native fd exact metadata."""
     values = native.process_file_descriptor_permit_lease_metadata(receipt)
     if not isinstance(values, tuple) or len(values) != 4:
         raise RuntimeError("native FD receipt returned invalid metadata")
@@ -2238,14 +2296,17 @@ def _native_fd_exact_metadata(native: Any, receipt: object) -> tuple[int, int, i
 
 
 def _native_fd_exact_amount(native: Any, receipt: object) -> int:
+    """Return the native fd exact amount."""
     return max(0, _native_fd_exact_metadata(native, receipt)[2])
 
 
 def _native_fd_exact_opened(native: Any, receipt: object) -> int:
+    """Return the exact opened-descriptor count from a native lease receipt."""
     return max(0, _native_fd_exact_metadata(native, receipt)[3])
 
 
 def _native_fd_exact_resize(native: Any, receipt: object, target: int) -> tuple[int, int, int]:
+    """Resize a native descriptor receipt and validate its returned metadata."""
     metadata = _native_fd_exact_metadata(native, receipt)
     result = native.process_file_descriptor_permit_lease_resize(
         receipt, max(0, int(target)), metadata[1]
@@ -2256,6 +2317,7 @@ def _native_fd_exact_resize(native: Any, receipt: object, target: int) -> tuple[
 
 
 def _native_fd_exact_mark_opened(native: Any, receipt: object, amount: int) -> tuple[int, int, int]:
+    """Mark descriptors opened on a native receipt and validate the transition."""
     metadata = _native_fd_exact_metadata(native, receipt)
     result = native.process_file_descriptor_permit_lease_mark_opened(
         receipt, max(0, int(amount)), metadata[1]
@@ -2266,6 +2328,7 @@ def _native_fd_exact_mark_opened(native: Any, receipt: object, amount: int) -> t
 
 
 def _native_fd_exact_mark_closed(native: Any, receipt: object, amount: int) -> tuple[int, int, int]:
+    """Mark exact descriptors closed and report whether the native transition committed."""
     metadata = _native_fd_exact_metadata(native, receipt)
     result = native.process_file_descriptor_permit_lease_mark_closed(
         receipt, max(0, int(amount)), metadata[1]
@@ -2318,6 +2381,7 @@ def _acquire_native_file_descriptor_permits(
 
 
 def _mark_native_file_descriptors_opened_noexcept(amount: int) -> None:
+    """Mark native file descriptors opened without propagating exceptions."""
     native = _native_file_descriptor_api()
     if amount > 0:
         try:
@@ -2327,6 +2391,7 @@ def _mark_native_file_descriptors_opened_noexcept(amount: int) -> None:
 
 
 def _mark_native_file_descriptors_closed_noexcept(amount: int) -> None:
+    """Mark native file descriptors closed without propagating exceptions."""
     native = _native_file_descriptor_api()
     if amount > 0:
         try:
@@ -2360,6 +2425,7 @@ def _attach_native_file_descriptor_permits(
 
 
 def _native_fd_receipt_for_python_lease(lease: _Lease) -> tuple[Any, object] | None:
+    """Resolve the native receipt backing a live Python descriptor lease."""
     governor = lease._governor
     if governor is not _FD_GOVERNOR:
         return None
@@ -2379,6 +2445,7 @@ def _native_fd_receipt_for_python_lease(lease: _Lease) -> tuple[Any, object] | N
 
 
 def _mark_file_descriptor_lease_opened(lease: _Lease, amount: int) -> int | None:
+    """Mark file descriptor lease opened."""
     exact = _native_fd_receipt_for_python_lease(lease)
     if exact is None:
         raise RuntimeError("file descriptor lease lacks exact native authority")
@@ -2388,6 +2455,7 @@ def _mark_file_descriptor_lease_opened(lease: _Lease, amount: int) -> int | None
 
 
 def _mark_file_descriptor_lease_closed(lease: _Lease, amount: int) -> int | None:
+    """Mark descriptors closed and report whether exact accounting committed."""
     exact = _native_fd_receipt_for_python_lease(lease)
     if exact is None:
         raise RuntimeError("file descriptor lease lacks exact native authority")
@@ -2397,6 +2465,7 @@ def _mark_file_descriptor_lease_closed(lease: _Lease, amount: int) -> int | None
 
 
 def _opened_for_file_descriptor_lease(lease: _Lease) -> int | None:
+    """Return the exact opened count when a descriptor lease has a native receipt."""
     exact = _native_fd_receipt_for_python_lease(lease)
     if exact is None:
         return None
@@ -2404,12 +2473,14 @@ def _opened_for_file_descriptor_lease(lease: _Lease) -> int | None:
 
 
 def _refresh_thread_governor_capacity() -> None:
+    """Refresh and return process thread-governor capacity."""
     with _THREAD_GOVERNOR._condition:
         in_use = _THREAD_GOVERNOR._in_use
     _THREAD_GOVERNOR.refresh_capacity(_thread_hard_capacity(governed_in_use=in_use))
 
 
 def _refresh_fd_governor_capacity() -> None:
+    """Refresh and return process descriptor-governor capacity."""
     _FD_GOVERNOR.refresh_capacity(_fd_hard_capacity())
 
 
@@ -2426,6 +2497,7 @@ def acquire_project_threads(desired: int, *, minimum: int = 1) -> _Lease:
 
 
 def _cleanup_operation_thread_borrow_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup operation thread borrow capsule."""
     budget = capsule.arg0
     claim_id = capsule.arg1
     capability = capsule.arg2
@@ -2460,6 +2532,7 @@ class _OperationThreadBorrowLease:
     def __init__(
         self, budget: "_OperationThreadBorrowBudget", claim_id: int, capability: object, amount: int
     ) -> None:
+        """Initialize the operation thread borrow lease and its owned runtime state."""
         self._budget = budget
         self._claim_id = int(claim_id)
         self._capability = capability
@@ -2476,6 +2549,7 @@ class _OperationThreadBorrowLease:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this operation thread borrow lease."""
         if self._released:
             return 0
         try:
@@ -2484,6 +2558,7 @@ class _OperationThreadBorrowLease:
             return 0
 
     def shrink_to(self, target: int) -> int:
+        """Shrink this borrow lease to an exact retained amount."""
         wanted = max(0, int(target))
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
@@ -2500,6 +2575,7 @@ class _OperationThreadBorrowLease:
             return current
 
     def _ack_finalizer(self) -> None:
+        """Acknowledge and retire this lease's finalizer authority."""
         capsule = self._finalizer_capsule
         if self._finalizer_ticket and capsule is not None:
             acknowledge_prepared_finalizer_cleanup(capsule)
@@ -2507,6 +2583,7 @@ class _OperationThreadBorrowLease:
             self._finalizer_capsule = None
 
     def release(self) -> None:
+        """Release resources owned by this operation thread borrow lease."""
         if os.getpid() != self._pid:
             return
         with self._lock:
@@ -2521,6 +2598,7 @@ class _OperationThreadBorrowLease:
     close = release
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -2545,6 +2623,7 @@ class _OperationThreadBorrowBudget:
     )
 
     def __init__(self, capacity: int, *, exact_reservation: int = 0) -> None:
+        """Initialize the operation thread borrow budget and its owned runtime state."""
         self.capacity = max(0, int(capacity))
         self._exact_reservation = max(0, int(exact_reservation))
         self._claims: dict[int, tuple[object, int]] = {}
@@ -2552,14 +2631,17 @@ class _OperationThreadBorrowBudget:
         self._lock = Lock()
 
     def _exact_borrowed_locked(self) -> int:
+        """Return exact borrowed capacity while holding the borrow-budget lock."""
         return sum(max(0, int(amount)) for _capability, amount in self._claims.values())
 
     @property
     def borrowed(self) -> int:
+        """Return the exact thread capacity currently borrowed."""
         with self._lock:
             return self._exact_borrowed_locked()
 
     def set_capacity(self, capacity: int) -> None:
+        """Set and return the exact operation-thread borrow capacity."""
         value = max(0, int(capacity))
         with self._lock:
             if value < self._exact_borrowed_locked():
@@ -2574,6 +2656,7 @@ class _OperationThreadBorrowBudget:
             self._exact_reservation = max(0, int(amount))
 
     def _next_claim_id_locked(self) -> int:
+        """Allocate the next claim identifier while holding the borrow-budget lock."""
         candidate = max(1, int(self._next_claim))
         start = candidate
         while candidate in self._claims:
@@ -2588,6 +2671,7 @@ class _OperationThreadBorrowBudget:
     def try_borrow_up_to_exact(
         self, desired: int, *, minimum: int = 1, exact: bool = False
     ) -> _OperationThreadBorrowLease | None:
+        """Borrow up to the requested exact thread capacity."""
         requested = max(0, int(desired))
         floor = max(0, int(minimum))
         if requested == 0:
@@ -2609,6 +2693,7 @@ class _OperationThreadBorrowBudget:
             return owner
 
     def _claim_amount(self, claim_id: int, capability: object) -> int:
+        """Return the amount retained by an operation-thread claim."""
         with self._lock:
             entry = self._claims.get(int(claim_id))
             if entry is None or entry[0] is not capability:
@@ -2616,6 +2701,7 @@ class _OperationThreadBorrowBudget:
             return max(0, int(entry[1]))
 
     def _resize_claim(self, claim_id: int, capability: object, target: int) -> int:
+        """Resize one authoritative operation-thread borrow claim."""
         wanted = max(0, int(target))
         with self._lock:
             entry = self._claims.get(int(claim_id))
@@ -2639,9 +2725,11 @@ class _ExternalNativeThreadAuthority:
     __slots__ = ("_core",)
 
     def __init__(self, core: Any) -> None:
+        """Initialize the external native thread authority and its owned runtime state."""
         self._core = core
 
     def acquire_exact_permit_lease(self, desired: int, minimum: int) -> tuple[object, int] | None:
+        """Acquire exact permit lease."""
         result = self._core.process_external_runtime_thread_permit_lease_acquire(
             int(desired), int(minimum)
         )
@@ -2652,6 +2740,7 @@ class _ExternalNativeThreadAuthority:
         return result[0], int(result[1])
 
     def resize_exact_permit_lease(self, lease: object, target: int) -> int:
+        """Resize the runtime's exact physical-thread permit lease."""
         values = self._metadata(lease)
         result = self._core.process_external_runtime_thread_permit_lease_resize(
             lease, int(target), values[1]
@@ -2661,9 +2750,11 @@ class _ExternalNativeThreadAuthority:
         return max(0, int(result[1]))
 
     def exact_permit_lease_amount(self, lease: object) -> int:
+        """Return the exact capacity retained by a native permit receipt."""
         return max(0, self._metadata(lease)[2])
 
     def _metadata(self, lease: object) -> tuple[int, int, int]:
+        """Return exact native permit metadata for the supplied receipt."""
         values = self._core.process_external_runtime_thread_permit_lease_metadata(lease)
         if not isinstance(values, tuple) or len(values) != 3:
             raise RuntimeError("native external-runtime permit receipt returned invalid metadata")
@@ -2671,29 +2762,37 @@ class _ExternalNativeThreadAuthority:
 
     @property
     def supports_resident_attribution(self) -> bool:
+        """Return whether the runtime reports resident-thread attribution."""
         return True
 
     def external_runtime_resident_threads_add(self, amount: int) -> None:
+        """Add resident threads to external-runtime accounting."""
         self._core.process_external_runtime_resident_threads_add(int(amount))
 
     def external_runtime_resident_threads_release(self, amount: int) -> None:
+        """Release resident threads from external-runtime accounting."""
         self._core.process_external_runtime_resident_threads_release(int(amount))
 
     @property
     def supports_stack_debt(self) -> bool:
+        """Return whether the runtime reports stack-debt threads."""
         return True
 
     def external_runtime_stack_debt_threads_add(self, amount: int) -> None:
+        """Add stack-debt threads to external-runtime accounting."""
         self._core.process_external_runtime_stack_debt_threads_add(int(amount))
 
     def external_runtime_stack_debt_threads_release(self, amount: int) -> None:
+        """Release stack-debt threads from external-runtime accounting."""
         self._core.process_external_runtime_stack_debt_threads_release(int(amount))
 
     @property
     def supports_atomic_residency_update(self) -> bool:
+        """Return whether the runtime supports atomic residency updates."""
         return True
 
     def external_runtime_residency_update(self, identity_delta: int, stack_debt_delta: int) -> None:
+        """Apply one atomic external-runtime residency update."""
         self._core.process_external_runtime_residency_update(
             int(identity_delta), int(stack_debt_delta)
         )
@@ -2705,18 +2804,21 @@ class _ExactExternalRuntimeNativePermit:
     __slots__ = ("_native", "_lease", "_pid")
 
     def __init__(self, native: _ExternalNativeThreadAuthority, lease: object) -> None:
+        """Initialize the exact external runtime native permit and its owned runtime state."""
         self._native = native
         self._lease = lease
         self._pid = os.getpid()
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this exact external runtime native permit."""
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
             raise RuntimeError("external runtime exact permit owner belongs to a different process")
         return self._native.exact_permit_lease_amount(self._lease)
 
     def resize_physical_thread_permits(self, target: int) -> None:
+        """Resize the physical-thread permits owned by this runtime lease."""
         wanted = max(0, int(target))
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
@@ -2733,6 +2835,7 @@ class _ExternalNativePermitAcquisition:
     __slots__ = ("owner", "amount")
 
     def __init__(self) -> None:
+        """Initialize the external native permit acquisition and its owned runtime state."""
         self.owner: Any | None = None
         self.amount = 0
 
@@ -2819,6 +2922,7 @@ class _ExternalRuntimeCoordinator(dict[tuple[str, object], _ExternalRuntimePoolC
     """Coordinator map whose explicit reset retires exact claim slots first."""
 
     def clear(self) -> None:
+        """Clear values and ownership retained by this external runtime coordinator."""
         global _EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS, _EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS
         slot_pool = globals().get("_EXTERNAL_RUNTIME_CLAIM_SLOTS")
         if isinstance(slot_pool, BoundedGenerationPool):
@@ -2978,6 +3082,7 @@ def _external_runtime_pool_identity_key(runtime: Any) -> tuple[str, object]:
 def _external_runtime_entry_locked(
     runtime: Any, *, create: bool, runtime_key: tuple[str, object] | None = None
 ) -> _ExternalRuntimePoolCoordinatorEntry | None:
+    """Return the external-runtime entry while holding the coordinator lock."""
     if runtime_key is None:
         runtime_key = _external_runtime_pool_identity_key(runtime)
     entry = _EXTERNAL_RUNTIME_POOL_COORDINATOR.get(runtime_key)
@@ -3005,6 +3110,7 @@ def _external_runtime_entry_locked(
 def _retire_external_runtime_entry_locked(
     runtime_key: tuple[str, object], entry: _ExternalRuntimePoolCoordinatorEntry
 ) -> None:
+    """Retire external runtime entry while holding the governing lock."""
     if (
         not entry.physical_claims
         and entry.physical_amount == 0
@@ -3087,6 +3193,7 @@ def _note_external_runtime_claim_removed_locked(*, logical: bool) -> None:
 
 
 def _next_external_runtime_claim_id(claims: dict[int, int], candidate: int) -> int:
+    """Choose the next unused bounded claim identifier for an external runtime."""
     claim_id = max(1, int(candidate))
     while claim_id in claims:
         claim_id += 1
@@ -3098,6 +3205,7 @@ def _next_external_runtime_claim_id(claims: dict[int, int], candidate: int) -> i
 def _cleanup_shared_external_physical_claim_capsule(
     capsule: PreparedFinalizerCleanup,
 ) -> None:
+    """Cleanup shared external physical claim capsule."""
     runtime_id = capsule.arg0
     claim_id = capsule.arg1
     if not _is_external_runtime_key(runtime_id) or type(claim_id) is not int or claim_id <= 0:
@@ -3137,6 +3245,7 @@ class _SharedExternalRuntimeNativePermit:
     )
 
     def __init__(self, runtime_id: _ExternalRuntimeKey, claim_id: int = 0) -> None:
+        """Initialize the shared external runtime native permit and its owned runtime state."""
         self._runtime_id = runtime_id
         self._claim_id = int(claim_id)
         self._pid = os.getpid()
@@ -3148,6 +3257,7 @@ class _SharedExternalRuntimeNativePermit:
         self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
 
     def _bind_claim_id(self, claim_id: int) -> None:
+        """Bind the authoritative external-runtime claim identifier."""
         claim_id = int(claim_id)
         if claim_id <= 0 or self._claim_id not in (0, claim_id):
             raise RuntimeError("external runtime physical claim binding mismatch")
@@ -3158,6 +3268,7 @@ class _SharedExternalRuntimeNativePermit:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this shared external runtime native permit."""
         if self._released:
             return 0
         if os.getpid() != self._pid:
@@ -3172,6 +3283,7 @@ class _SharedExternalRuntimeNativePermit:
             return max(0, int(entry.physical_claims.get(self._claim_id, 0)))
 
     def _ack_finalizer(self) -> None:
+        """Acknowledge and retire this lease's finalizer authority."""
         capsule = self._finalizer_capsule
         if self._finalizer_ticket and capsule is not None:
             acknowledge_prepared_finalizer_cleanup(capsule)
@@ -3184,6 +3296,7 @@ class _SharedExternalRuntimeNativePermit:
         self._ack_finalizer()
 
     def resize_physical_thread_permits(self, target: int) -> None:
+        """Resize the physical-thread permits owned by this runtime lease."""
         wanted = max(0, int(target))
         current = self.amount
         if wanted > current:
@@ -3218,11 +3331,13 @@ class _SharedExternalRuntimeNativePermit:
             )
 
     def release(self) -> None:
+        """Release resources owned by this shared external runtime native permit."""
         self.resize_physical_thread_permits(0)
 
     close = release
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -3771,6 +3886,7 @@ def _sync_external_logical_lease_width_locked(
 def _cleanup_shared_external_logical_claim_capsule(
     capsule: PreparedFinalizerCleanup,
 ) -> None:
+    """Cleanup shared external logical claim capsule."""
     runtime_id = capsule.arg0
     claim_id = capsule.arg1
     if not _is_external_runtime_key(runtime_id) or type(claim_id) is not int or claim_id <= 0:
@@ -3802,6 +3918,7 @@ class _SharedExternalRuntimeLogicalLease:
     )
 
     def __init__(self, runtime_id: _ExternalRuntimeKey, claim_id: int = 0, amount: int = 0) -> None:
+        """Initialize the shared external runtime logical lease and its owned runtime state."""
         self._runtime_id = runtime_id
         self._claim_id = int(claim_id)
         self._amount = max(0, int(amount))
@@ -3814,6 +3931,7 @@ class _SharedExternalRuntimeLogicalLease:
         self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
 
     def _bind_claim_id(self, claim_id: int) -> None:
+        """Bind the authoritative external-runtime claim identifier."""
         claim_id = int(claim_id)
         if claim_id <= 0 or self._claim_id not in (0, claim_id):
             raise RuntimeError("external runtime logical claim binding mismatch")
@@ -3824,6 +3942,7 @@ class _SharedExternalRuntimeLogicalLease:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this shared external runtime logical lease."""
         if self._released:
             return 0
         if os.getpid() != self._pid:
@@ -3838,6 +3957,7 @@ class _SharedExternalRuntimeLogicalLease:
             return max(0, int(entry.logical_claims.get(self._claim_id, 0)))
 
     def _ack_finalizer(self) -> None:
+        """Acknowledge and retire this lease's finalizer authority."""
         capsule = self._finalizer_capsule
         if self._finalizer_ticket and capsule is not None:
             acknowledge_prepared_finalizer_cleanup(capsule)
@@ -3851,6 +3971,7 @@ class _SharedExternalRuntimeLogicalLease:
         self._ack_finalizer()
 
     def shrink(self, amount: int) -> None:
+        """Shrink this logical runtime lease to the requested capacity."""
         target = int(amount)
         if target <= 0:
             raise ValueError("shared external runtime logical lease shrink target must be > 0")
@@ -3863,6 +3984,7 @@ class _SharedExternalRuntimeLogicalLease:
         self._amount = target
 
     def release(self) -> None:
+        """Release resources owned by this shared external runtime logical lease."""
         if os.getpid() != self._pid:
             return
         if not self._released:
@@ -3891,6 +4013,7 @@ class _SharedExternalRuntimeLogicalLease:
     close = release
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -4260,6 +4383,7 @@ def _external_runtime_pool_can_reexpand(runtime: Any, target: int) -> bool:
 
 
 def _external_runtime_pool_mark_configured(runtime: Any, width: int) -> None:
+    """Record the worker width configured for an external runtime pool."""
     ensure_runtime_fork_safe()
     runtime_key = _external_runtime_pool_identity_key(runtime)
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
@@ -4378,6 +4502,7 @@ class _ExternalRuntimeCleanupState:
 def _external_runtime_cleanup_state(
     capsule: PreparedFinalizerCleanup,
 ) -> _ExternalRuntimeCleanupState:
+    """Return the typed cleanup state retained by a finalizer capsule."""
     state = capsule.arg0
     if isinstance(state, _ExternalRuntimeCleanupState):
         return state
@@ -4424,6 +4549,7 @@ class _ExternalRuntimeConstructionEscrow:
     __slots__ = ("prepared", "state", "active")
 
     def __init__(self, prepared: PreparedFinalizerCleanup) -> None:
+        """Initialize the external runtime construction escrow and its owned runtime state."""
         self.prepared = prepared
         self.state = _external_runtime_cleanup_state(prepared)
         self.active = True
@@ -4433,16 +4559,20 @@ class _ExternalRuntimeConstructionEscrow:
         parent_lease: _Lease | None,
         borrow: _OperationThreadBorrowLease | None,
     ) -> None:
+        """Retain the logical borrow lease in this construction escrow."""
         self.state.parent_lease = parent_lease
         self.state.borrow_lease = borrow
 
     def set_native(self, native: Any | None) -> None:
+        """Retain the native permit receipt in this construction escrow."""
         self.state.native = native
 
     def set_lease(self, lease: Any | None) -> None:
+        """Retain the process-thread lease in this construction escrow."""
         self.state.lease = lease
 
     def release_native_now(self) -> None:
+        """Release the retained native permit immediately."""
         native = self.state.native
         if native is not None:
             native.resize_physical_thread_permits(0)
@@ -4451,6 +4581,7 @@ class _ExternalRuntimeConstructionEscrow:
             self.state.native = None
 
     def release_borrow_now(self) -> None:
+        """Release the retained logical borrow immediately."""
         borrow_lease = self.state.borrow_lease
         if borrow_lease is not None:
             borrow_lease.release()
@@ -4460,6 +4591,7 @@ class _ExternalRuntimeConstructionEscrow:
             self.state.parent_lease = None
 
     def release_lease_now(self) -> None:
+        """Release the retained process-thread lease immediately."""
         lease = self.state.lease
         if lease is not None:
             lease.release()
@@ -4468,17 +4600,20 @@ class _ExternalRuntimeConstructionEscrow:
     def release_all_now(self) -> None:
         # Match finalizer/close ordering. Each state field clears only after the
         # corresponding authoritative commit succeeds.
+        """Release every resource retained during runtime construction."""
         self.release_native_now()
         self.release_borrow_now()
         self.release_lease_now()
 
     def transfer_to_wrapper(self) -> PreparedFinalizerCleanup:
+        """Transfer construction resources to their published wrapper."""
         if not self.active:
             raise RuntimeError("external runtime construction escrow already retired")
         self.active = False
         return self.prepared
 
     def defer_after_failure(self, primary: BaseException) -> None:
+        """Transfer failed construction resources to governed deferred cleanup."""
         if not self.active:
             return
         self.active = False
@@ -4499,6 +4634,7 @@ class _ExternalRuntimeConstructionEscrow:
 
 
 def _runtime_has_configurable_worker_pool(runtime: Any | None) -> bool:
+    """Return whether a runtime exposes a configurable worker-pool interface."""
     if runtime is None:
         return False
     return callable(getattr(runtime, "cpu_count", None)) and callable(
@@ -4542,6 +4678,7 @@ class ExternalRuntimeConcurrencyLease:
         native: Any | None = None,
         _prepared_finalizer: PreparedFinalizerCleanup | None = None,
     ) -> None:
+        """Initialize the external runtime concurrency lease and its owned runtime state."""
         self._pid = os.getpid()
         prepared = _prepared_finalizer
         if prepared is None:
@@ -4561,6 +4698,7 @@ class ExternalRuntimeConcurrencyLease:
         self._sync_finalizer_capsule_locked()
 
     def _sync_finalizer_capsule_locked(self) -> None:
+        """Sync finalizer capsule while holding the governing lock."""
         capsule = self._finalizer_capsule
         state = self._cleanup_state
         if capsule is None or state is None:
@@ -4571,6 +4709,7 @@ class ExternalRuntimeConcurrencyLease:
         state.lease = self._lease
 
     def _retire_finalizer_locked(self) -> None:
+        """Retire finalizer while holding the governing lock."""
         if any(
             (
                 self._native is not None,
@@ -4591,12 +4730,7 @@ class ExternalRuntimeConcurrencyLease:
         self._borrow_lease = None
 
     def shrink_to(self, workers: int) -> int:
-        """Return excess logical/native capacity after discovering real pool width.
-
-        Each resource component is committed independently and mirrored into
-        the prearmed finalizer immediately after the authoritative release.
-        This keeps GC retry exact even when a later component fails.
-        """
+        """Return excess logical and native capacity after discovering real pool width."""
         target = max(1, int(workers))
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
@@ -4640,6 +4774,7 @@ class ExternalRuntimeConcurrencyLease:
             return self.workers
 
     def close(self) -> None:
+        """Release resources owned by this external runtime concurrency lease."""
         if os.getpid() != self._pid:
             return
         # Clear each component only after its exact release commits, keeping the
@@ -4670,12 +4805,15 @@ class ExternalRuntimeConcurrencyLease:
             self._retire_finalizer_locked()
 
     def __enter__(self) -> "ExternalRuntimeConcurrencyLease":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -4869,6 +5007,7 @@ def constrain_external_runtime_worker_pool(runtime: Any, workers: int) -> int:
         )
 
     def read_width() -> int:
+        """Read the external runtime's current worker-pool width."""
         try:
             observed = int(getter())
         except BaseException as exc:
@@ -5077,6 +5216,7 @@ def unregister_project_thread_availability(event: AvailabilityEvent) -> None:
 def _acquire_file_descriptor_lease(
     amount: int, *, timeout_seconds: float, teardown: bool
 ) -> _Lease:
+    """Acquire file descriptor lease."""
     _refresh_fd_governor_capacity()
     lease = _FD_GOVERNOR.acquire(amount, timeout_seconds=timeout_seconds, _teardown=teardown)
     acquisition: _NativeFdPermitAcquisition | None = None
@@ -5183,6 +5323,7 @@ class _FdOpenAttempt:
     __slots__ = ("committed", "native_before")
 
     def __init__(self) -> None:
+        """Initialize the fd open attempt and its owned runtime state."""
         self.committed = False
         self.native_before: int | None = None
 
@@ -5212,6 +5353,7 @@ class FileDescriptorCapability:
     )
 
     def __init__(self, lease: _Lease, amount: int, *, label: str) -> None:
+        """Initialize the file descriptor capability and its owned runtime state."""
         self._lease: _Lease | None = lease
         self._amount = amount
         self._opened = 0
@@ -5224,25 +5366,30 @@ class FileDescriptorCapability:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this file descriptor capability."""
         return self._amount
 
     @property
     def opened(self) -> int:
+        """Return descriptors whose open transition has committed."""
         with self._lock:
             self._reconcile_opened_locked()
             return self._opened
 
     @property
     def opening(self) -> int:
+        """Return descriptors reserved for an in-flight open transition."""
         with self._lock:
             return len(self._opening_attempts)
 
     @property
     def retained_as_debt(self) -> bool:
+        """Return whether descriptor ownership remains as terminal cleanup debt."""
         with self._lock:
             return self._state == self._TERMINAL_DEBT
 
     def _ensure_active_locked(self) -> None:
+        """Ensure active while holding the governing lock."""
         if self._state == self._TERMINAL_DEBT:
             raise RuntimeError(
                 "file descriptor capability is terminally poisoned by uncertain close"
@@ -5253,6 +5400,7 @@ class FileDescriptorCapability:
             raise RuntimeError("file descriptor capability is already released")
 
     def _reconcile_opened_locked(self) -> None:
+        """Reconcile opened while holding the governing lock."""
         lease = self._lease
         if lease is None:
             return
@@ -5277,6 +5425,7 @@ class FileDescriptorCapability:
             self._opening_attempts.discard(attempt)
 
     def _commit_opened(self, attempt: _FdOpenAttempt) -> None:
+        """Commit an in-flight descriptor-open transition."""
         with self._lock:
             if attempt not in self._opening_attempts:
                 raise RuntimeError("file descriptor capability open committed without reservation")
@@ -5308,6 +5457,7 @@ class FileDescriptorCapability:
             self._opening_attempts.discard(attempt)
 
     def _mark_closed(self) -> None:
+        """Mark the capability closed and report whether exact accounting committed."""
         with self._lock:
             if self._state == self._TERMINAL_DEBT:
                 raise RuntimeError("terminal FD debt cannot be committed as a proven close")
@@ -5345,6 +5495,7 @@ class FileDescriptorCapability:
             # the corresponding increment never reached the Python mirror.
 
     def _retain_uncertain(self, *, label: str) -> None:
+        """Retain uncertain descriptor ownership as terminal cleanup debt."""
         with self._lock:
             if self._state in (self._CLOSED, self._TERMINAL_DEBT):
                 return
@@ -5530,9 +5681,11 @@ class FileDescriptorCapability:
             self._state = self._CLOSED
 
     def __enter__(self) -> "FileDescriptorCapability":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> None:
+        """Release managed resources when leaving the context."""
         try:
             self.release()
         except BaseException as cleanup_error:
@@ -5581,9 +5734,11 @@ class ExternalFileCapability:
     __slots__ = ("_capability",)
 
     def __init__(self, capability: FileDescriptorCapability) -> None:
+        """Initialize the external file capability and its owned runtime state."""
         self._capability: FileDescriptorCapability | None = capability
 
     def close(self) -> None:
+        """Release resources owned by this external file capability."""
         capability = self._capability
         if capability is None:
             return
@@ -5591,9 +5746,11 @@ class ExternalFileCapability:
         self._capability = None
 
     def __enter__(self) -> "ExternalFileCapability":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
 
@@ -5693,6 +5850,7 @@ def close_release_guardian_thread_admission() -> None:
 
 
 def _reopen_process_resource_admission_for_tests() -> None:
+    """Reopen process resource admission for an isolated test run."""
     _THREAD_GOVERNOR.reopen_admission_for_tests()
     _FD_GOVERNOR.reopen_admission_for_tests()
     _GUARDIAN_THREAD_GOVERNOR.reopen_admission_for_tests()
@@ -5701,6 +5859,7 @@ def _reopen_process_resource_admission_for_tests() -> None:
 
 
 def _reset_after_fork() -> None:
+    """Reset process-local state inherited across a fork."""
     global _NOTIFIER_RETRY_OWNERS_LOCK, _NOTIFIER_RETRY_OWNERS, _PYTHON_GOVERNED_FDS_OPENED
     from .fork_safety import fork_quarantine_generation
 
@@ -5753,6 +5912,7 @@ class _PhysicalFileOwner:
     )
 
     def __init__(self) -> None:
+        """Initialize the physical file owner and its owned runtime state."""
         self.stream: Any | None = None
         self.lease: _Lease | None = None
         self.physical_closed = False
@@ -5762,6 +5922,7 @@ class _PhysicalFileOwner:
         self._state = self._OPEN
 
     def bind(self, stream: Any, lease: _Lease) -> None:
+        """Bind the physical resource and exact lease to this physical file owner."""
         with self._condition:
             if self.stream is not None or self.lease is not None or self.native_opened:
                 raise RuntimeError("physical file owner is already bound")
@@ -5849,6 +6010,7 @@ class _PhysicalFileOwner:
 
 
 def _cleanup_governed_file_owner_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup governed file owner capsule."""
     owner = capsule.arg0
     if isinstance(owner, _PhysicalFileOwner):
         owner.close()
@@ -5867,6 +6029,7 @@ class GovernedFile(io.IOBase):
         finalizer_ticket: int,
         finalizer_capsule: PreparedFinalizerCleanup,
     ) -> None:
+        """Initialize the governed file and its owned runtime state."""
         super().__init__()
         self._owner: _PhysicalFileOwner | None = owner
         self._finalizer_ticket = finalizer_ticket
@@ -5880,6 +6043,7 @@ class GovernedFile(io.IOBase):
         return owner.stream
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unresolved attributes to the wrapped object."""
         owner = self._owner
         if owner is None or owner.stream is None:
             raise AttributeError(name)
@@ -5889,54 +6053,70 @@ class GovernedFile(io.IOBase):
     # and then uses these standard methods directly. IOBase supplies stubs for
     # most of them, so __getattr__ alone cannot forward the protocol.
     def read(self, size: int = -1) -> Any:
+        """Read bytes through this governed file."""
         return self._open_stream().read(size)
 
     def readline(self, size: int | None = -1) -> Any:
+        """Read one line through the governed file wrapper."""
         stream = self._open_stream()
         return stream.readline() if size is None else stream.readline(size)
 
     def readlines(self, hint: int = -1) -> Any:
+        """Read lines through the governed file wrapper."""
         return self._open_stream().readlines(hint)
 
     def write(self, data: Any) -> Any:
+        """Write bytes through this governed file."""
         return self._open_stream().write(data)
 
     def writelines(self, lines: Any) -> None:
+        """Write an iterable of lines through the governed file wrapper."""
         self._open_stream().writelines(lines)
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        """Move the governed file's stream position."""
         return int(self._open_stream().seek(offset, whence))
 
     def tell(self) -> int:
+        """Return the governed file's current stream position."""
         return int(self._open_stream().tell())
 
     def truncate(self, size: int | None = None) -> int:
+        """Resize the governed file to the requested byte length."""
         stream = self._open_stream()
         return int(stream.truncate() if size is None else stream.truncate(size))
 
     def fileno(self) -> int:
+        """Return the governed file's native descriptor number."""
         return int(self._open_stream().fileno())
 
     def flush(self) -> None:
+        """Flush buffered data through the governed file wrapper."""
         self._open_stream().flush()
 
     def isatty(self) -> bool:
+        """Return whether the governed file is attached to a terminal."""
         return bool(self._open_stream().isatty())
 
     def readable(self) -> bool:
+        """Return whether the governed file supports reading."""
         return bool(self._open_stream().readable())
 
     def writable(self) -> bool:
+        """Return whether the governed file supports writing."""
         return bool(self._open_stream().writable())
 
     def seekable(self) -> bool:
+        """Return whether the governed file supports random access."""
         return bool(self._open_stream().seekable())
 
     def __iter__(self) -> "GovernedFile":
+        """Iterate over the retained values."""
         self._open_stream()
         return self
 
     def __next__(self) -> Any:
+        """Return the next retained value."""
         return next(self._open_stream())
 
     def close(self) -> None:
@@ -5955,6 +6135,7 @@ class GovernedFile(io.IOBase):
 
     @property
     def closed(self) -> bool:
+        """Return whether the governed file has been closed."""
         owner = self._owner
         if owner is None:
             return True
@@ -5962,9 +6143,11 @@ class GovernedFile(io.IOBase):
         return bool(getattr(stream, "closed", owner.physical_closed))
 
     def __enter__(self) -> "GovernedFile":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
     def __del__(self) -> None:

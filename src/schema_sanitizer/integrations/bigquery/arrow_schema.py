@@ -1,4 +1,8 @@
-"""Arrow-to-BigQuery schema conversion helpers."""
+"""Arrow-to-BigQuery schema conversion helpers.
+
+It recursively maps Arrow scalars, decimals, lists, and structs to BigQuery SQL fields
+while preserving nullability and repetition modes.
+"""
 
 from __future__ import annotations
 
@@ -175,8 +179,8 @@ def read_external_table_arrow_schema(client: Any, table: Any) -> Any:
 
     This is the fallback for external tables that do not yet contain an embedded
     schema-sanitizer registry. ``client`` must expose ``get_table`` and the
-    returned table must expose an iterable ``schema`` of BigQuery SchemaField-
-    compatible objects.
+    returned table must expose an iterable ``schema`` of BigQuery
+    ``SchemaField``-compatible objects.
     """
     pa = import_module("pyarrow")
     resolved = client.get_table(table)

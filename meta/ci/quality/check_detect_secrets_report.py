@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fail the CI quality gate on secrets outside narrow public-data exclusions."""
+"""Fail the CI quality gate on secrets outside narrow public-data exclusions.
+
+It recognizes narrowly approved public digests and revisions while retaining every
+actionable scanner finding.
+"""
 
 from __future__ import annotations
 

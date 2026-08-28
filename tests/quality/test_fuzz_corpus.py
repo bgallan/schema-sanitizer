@@ -1,4 +1,8 @@
-"""Contracts for byte-exact fuzz inputs and isolated campaign staging."""
+"""Contracts for byte-exact fuzz inputs and isolated campaign staging.
+
+It checks content-addressed corpus structure and manifests, rejects drift and unsafe
+archives, and builds isolated deduplicated campaigns.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ PACKER = ROOT / "meta" / "ci" / "fuzz" / "pack_fuzz_regressions.py"
 
 
 def _module(path: Path, name: str):
+    """Load the CI helper module under test from its repository path."""
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -25,6 +30,7 @@ def _module(path: Path, name: str):
 
 
 def _minimal_fuzz_tree(root: Path, targets: tuple[str, ...]) -> None:
+    """Create the smallest valid native fuzz corpus layout."""
     (root / "README.md").parent.mkdir(parents=True)
     (root / "README.md").write_text("fuzz\n", encoding="utf-8")
     (root / "regressions" / "README.md").parent.mkdir(parents=True)
@@ -42,6 +48,7 @@ def _minimal_fuzz_tree(root: Path, targets: tuple[str, ...]) -> None:
 
 
 def _copy_repository_fuzz_tree(destination: Path) -> Path:
+    """Copy the maintained fuzz corpus into an isolated test directory."""
     return shutil.copytree(ROOT / "fuzz", destination / "fuzz")
 
 
@@ -249,6 +256,7 @@ def test_campaigns_stage_a_temporary_deduplicated_union(
         (corpus_target / "shared-copy").write_bytes(shared)
 
     def fake_run(command: list[str], *, check: bool) -> None:
+        """Record the fuzzer subprocess command and return a successful result."""
         assert check is True
         staged = Path(command[-1])
         staged_roots.append(staged)

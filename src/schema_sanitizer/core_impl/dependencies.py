@@ -1,4 +1,8 @@
-"""Cached loading and availability checks for optional dependencies."""
+"""Load optional dependencies lazily and cache their availability.
+
+Imports are translated into extra-specific installation errors, while PyArrow capability checks
+avoid forcing optional packages on callers that do not use them.
+"""
 
 from __future__ import annotations
 

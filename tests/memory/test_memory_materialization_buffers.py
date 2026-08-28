@@ -1,4 +1,8 @@
-"""Bounded materialization buffers, validity, and retained-slice contracts."""
+"""Tests lazy validity allocation and bounded retention across coalescing, hostile folder
+chunks, XML borrowed slices, multichunk CSV records, JSON metadata amplification, and
+secure cleanup. Null bitmaps appear only on the first null, oversized rows fail under
+the single budget, and segment owners or scratch capacity release on success and
+exception."""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_coalescer_allocates_validity_only_after_first_null() -> None:
+    """Verify coalescer allocates validity only after first null."""
     append = (ROOT / "cpp/src/api/python_abi3/streaming/coalesce_append.cc").read_text()
     estimate = (ROOT / "cpp/src/api/python_abi3/streaming/coalesce_export.cc").read_text()
     validity = append.split("sanitize::Status append_validity", 1)[1].split(
@@ -26,6 +31,7 @@ def test_coalescer_allocates_validity_only_after_first_null() -> None:
 
 
 def test_coalescer_uses_the_single_memory_budget() -> None:
+    """Verify coalescer uses the single memory budget."""
     stream = (ROOT / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc").read_text()
     state = (ROOT / "cpp/src/api/python_abi3/streaming/coalesce_stream_internal.hh").read_text()
     assert "memory_budget_from_limit(memory_limit_bytes)" in stream
@@ -36,19 +42,22 @@ def test_coalescer_uses_the_single_memory_budget() -> None:
 
 
 def test_folder_reader_checks_hostile_chunk_before_retaining_it() -> None:
+    """Verify folder reader checks hostile chunk before retaining it."""
     from schema_sanitizer.errors import SchemaSanitizerResourceError
     from schema_sanitizer.input_impl.directory_inputs import FolderFile, read_folder_file_bytes
 
     requested: list[int] = []
 
     class OversizedReader:
-        """Provide a lightweight test double."""
+        """Return an oversized chunk regardless of the requested read bound."""
 
         def read(self, size: int = -1, /) -> bytes:
+            """Read bounded data from the oversized reader test double."""
             requested.append(size)
             return b"x" * 4096
 
         def close(self) -> None:
+            """Close the resources owned by the oversized reader test double."""
             return None
 
     file = FolderFile("hostile.bin", "hostile.bin", None, OversizedReader)
@@ -58,13 +67,14 @@ def test_folder_reader_checks_hostile_chunk_before_retaining_it() -> None:
 
 
 def test_folder_reader_wipes_temporary_accumulator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify folder reader wipes temporary accumulator."""
     from schema_sanitizer.input_impl import directory_inputs
 
     observed: list[bytes] = []
     original_zero = directory_inputs._zero_bytearray_range
 
     def capture(buffer: bytearray, start: int, end: int) -> None:
-        """Provide a test helper implementation."""
+        """Record the accumulator after each zeroing pass."""
         original_zero(buffer, start, end)
         observed.append(bytes(buffer))
 
@@ -85,6 +95,7 @@ def test_folder_reader_wipes_temporary_accumulator(monkeypatch: pytest.MonkeyPat
 def test_native_coalescer_preserves_late_nulls_without_eager_validity(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify native coalescer preserves late nulls without eager validity."""
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_symbols import COALESCING_STREAM_WRAP, JSONL_STREAM_WRITE
 
@@ -101,6 +112,7 @@ def test_native_coalescer_preserves_late_nulls_without_eager_validity(
 
 
 def test_native_coalescer_rejects_one_row_over_budget(tmp_path: Path, require_native: None) -> None:
+    """Verify native coalescer rejects one row over budget."""
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_symbols import (
         COALESCING_STREAM_WRAP,

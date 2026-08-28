@@ -1,4 +1,8 @@
-"""Side-effect-free callable contract fingerprints for bounded runtime registries."""
+"""Side-effect-free callable contract fingerprints for bounded runtime registries.
+
+It fingerprints code, defaults, closures, and bounded safe containers while representing opaque
+owners by identity instead of invoking user behavior.
+"""
 
 from __future__ import annotations
 

@@ -1,10 +1,8 @@
-"""Preallocated, non-blocking handoff slots for Python finalizers.
+"""Provide preallocated, non-blocking handoff slots for Python finalizers.
 
-The critical producer path performs no container growth and never waits for a
-contended lock.  Reserved escrows use generation-stamped tickets and explicit
-slot states so a stale consumer can never recycle a slot already reused by a
-new owner (ABA).  Governed consumers process one slot at a time while the
-owner remains rooted until cleanup acknowledges success.
+Generation-stamped tickets and explicit slot states prevent stale ABA recycling without
+container growth or lock waits on the producer path. Governed consumers retain each
+owner while processing one slot at a time until cleanup acknowledges success.
 """
 
 from __future__ import annotations
@@ -60,10 +58,12 @@ _ATOMIC_EPOCH_BYTES = 256
 
 
 def _list_storage_bytes(count: int, *, element_bytes: int = 0) -> int:
+    """Return the list storage bytes."""
     return _LIST_BASE_BYTES + count * (_PTR_BYTES + element_bytes)
 
 
 def _reserved_escrow_static_bytes(capacity: int) -> int:
+    """Return the reserved escrow static bytes."""
     per_bank = (
         _list_storage_bytes(capacity)  # owner slots
         + _BYTEARRAY_BASE_BYTES
@@ -84,6 +84,7 @@ def _reserved_escrow_static_bytes(capacity: int) -> int:
 
 
 def _write_u64(value: int, target: bytearray, offset: int) -> int:
+    """Append one unsigned 64-bit integer to a fixed buffer."""
     if value < 0 or value > 0xFFFFFFFFFFFFFFFF:
         raise OverflowError("activity counter exceeds u64")
     for shift in range(0, 64, 8):
@@ -108,6 +109,7 @@ class _StaticFootprintGuard:
     __slots__ = ("kind", "amount", "created", "rollback")
 
     def __init__(self, kind: str, amount: int) -> None:
+        """Initialize the static footprint guard and its owned runtime state."""
         from .static_control_plane import (
             reserve_static_control_plane,
             rollback_static_control_plane,
@@ -119,6 +121,7 @@ class _StaticFootprintGuard:
         self.created = reserve_static_control_plane(kind, amount)
 
     def commit(self) -> None:
+        """Commit the admission retained by this static footprint guard."""
         self.created = False
 
     def rollback_now(self) -> None:
@@ -132,6 +135,7 @@ class _StaticFootprintGuard:
 def _static_footprint_guard(
     kind: str | None, *, prefix: str, amount: int
 ) -> _StaticFootprintGuard | None:
+    """Register a static escrow footprint when control-plane accounting is available."""
     if kind is None:
         return None
     if type(kind) is not str or not kind:
@@ -164,6 +168,7 @@ class FinalizerEscrowCapacitySnapshot:
 
     @property
     def invariant_ok(self) -> bool:
+        """Return whether the snapshot satisfies its capacity invariant."""
         return (
             0 <= self.active <= self.capacity
             and 0 <= self.retired <= self.capacity
@@ -219,6 +224,7 @@ class ReservedFinalizerEscrow(Generic[T]):
     )
 
     def __init__(self, capacity: int, *, static_kind: str | None = None) -> None:
+        """Initialize the reserved finalizer escrow and its owned runtime state."""
         if type(capacity) is not int:
             raise TypeError("reserved finalizer escrow capacity must be an exact integer")
         if capacity <= 0:
@@ -287,6 +293,7 @@ class ReservedFinalizerEscrow(Generic[T]):
             raise
 
     def _make_fresh_bank(self) -> _ReservedForkBank:
+        """Allocate a fresh fixed-capacity escrow bank."""
         return (
             [_EMPTY] * self._capacity,
             bytearray(self._capacity),
@@ -327,11 +334,13 @@ class ReservedFinalizerEscrow(Generic[T]):
             self._fork_spare2 = self._make_fresh_bank()
 
     def _bump_progress(self) -> None:
+        """Advance and return the escrow progress epoch."""
         if not self._progress_epoch_counter.increment():
             self._overflowed = True
             self._publication_failures_counter.increment()
 
     def _bump_publication(self) -> None:
+        """Advance and return the escrow publication epoch."""
         publication_ok = self._publication_epoch_counter.increment()
         progress_ok = self._progress_epoch_counter.increment()
         if not publication_ok or not progress_ok:
@@ -340,16 +349,20 @@ class ReservedFinalizerEscrow(Generic[T]):
 
     @property
     def capacity(self) -> int:
+        """Return the escrow's fixed slot capacity."""
         return self._capacity
 
     @property
     def overflowed(self) -> bool:
+        """Return whether the escrow observed an irreversible publication failure."""
         return self._overflowed
 
     def _encode_ticket(self, slot: int, generation: int) -> int:
+        """Encode an escrow slot and generation as one ticket."""
         return (generation << self._slot_bits) | slot
 
     def _decode_ticket(self, ticket: int) -> tuple[int, int] | None:
+        """Decode an escrow ticket into its slot and generation."""
         if type(ticket) is not int or ticket < 0:
             return None
         slot = ticket & self._slot_mask
@@ -360,6 +373,7 @@ class ReservedFinalizerEscrow(Generic[T]):
 
     @staticmethod
     def _armed_ticket(value: object) -> int:
+        """Return the ownership ticket currently armed on a value."""
         try:
             return max(0, int(value._escrow_armed_ticket))  # type: ignore[attr-defined]
         except BaseException:
@@ -367,10 +381,12 @@ class ReservedFinalizerEscrow(Generic[T]):
 
     @classmethod
     def _is_armed_for(cls, value: object, ticket: int | None) -> bool:
+        """Return whether the value is armed for the supplied escrow ticket."""
         return ticket is not None and ticket > 0 and cls._armed_ticket(value) == ticket
 
     @staticmethod
     def _arm_value_for(value: object, ticket: int) -> bool:
+        """Arm a retained value with its authoritative escrow ticket."""
         try:
             value.arm_for_ticket(ticket)  # type: ignore[attr-defined]
             return True
@@ -379,6 +395,7 @@ class ReservedFinalizerEscrow(Generic[T]):
 
     @staticmethod
     def _disarm_value_for(value: object, ticket: int | None = None) -> None:
+        """Disarm finalization for a value carrying the matching escrow ticket."""
         try:
             value.disarm_ticket(ticket)  # type: ignore[attr-defined]
         except BaseException:
@@ -386,6 +403,7 @@ class ReservedFinalizerEscrow(Generic[T]):
 
     @staticmethod
     def _clear_value_ticket(value: object, ticket: int | None) -> None:
+        """Clear a matching escrow ticket from a retained value."""
         if ticket is None:
             return
         try:
@@ -406,6 +424,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         return slot, next_head, next_count
 
     def _ring_commit_pop_locked(self, next_head: int, next_count: int) -> None:
+        """Commit removal from the escrow ring while holding its lock."""
         self._free_head = next_head
         self._free_count = next_count
 
@@ -423,6 +442,7 @@ class ReservedFinalizerEscrow(Generic[T]):
     def _ring_commit_push_locked(
         self, slot: int, tail: int, next_tail: int, next_count: int
     ) -> None:
+        """Commit insertion into the escrow ring while holding its lock."""
         self._free_ring[tail] = slot
         self._free_tail = next_tail
         self._free_count = next_count
@@ -1059,11 +1079,13 @@ class ReservedFinalizerEscrow(Generic[T]):
             raise
 
     def drain(self) -> tuple[T, ...]:
+        """Drain all published values from this reserved finalizer escrow."""
         items: list[T] = []
         while True:
             box: list[T] = []
 
             def collect(_ticket: int, value: T) -> None:
+                """Collect one value drained from this reserved finalizer escrow."""
                 box.append(value)
 
             if not self.process_one(collect):
@@ -1072,11 +1094,13 @@ class ReservedFinalizerEscrow(Generic[T]):
         return tuple(items)
 
     def drain_with_tickets(self) -> tuple[tuple[int, T], ...]:
+        """Drain published values together with their ownership tickets."""
         items: list[tuple[int, T]] = []
         while True:
             box: list[tuple[int, T]] = []
 
             def collect(ticket: int, value: T) -> None:
+                """Collect one value drained from this reserved finalizer escrow."""
                 box.append((ticket, value))
 
             if not self.process_one(collect):
@@ -1085,6 +1109,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         return tuple(items)
 
     def published_count(self) -> int:
+        """Return the published count."""
         if self._fork_unusable_after_fork:
             return 0
         published = 0
@@ -1094,6 +1119,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         return published
 
     def reserved_count(self) -> int:
+        """Return the reserved count."""
         return self.active_count()
 
     def active_count(self) -> int:
@@ -1113,6 +1139,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         return active
 
     def retired_count(self) -> int:
+        """Return the retired count."""
         if self._fork_unusable_after_fork:
             return 0
         retired = 0
@@ -1157,6 +1184,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         return offset + 32
 
     def activity_counters(self) -> tuple[AtomicEpoch, AtomicEpoch, AtomicEpoch, AtomicEpoch]:
+        """Return activity counters retained by this reserved finalizer escrow."""
         return (
             self._active_counter,
             self._publication_failures_counter,
@@ -1165,6 +1193,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         )
 
     def activity_is_quiescent(self) -> bool:
+        """Return whether the supplied activity counters prove quiescence."""
         if self._fork_unusable_after_fork:
             return False
         if self.active_count() != 0:
@@ -1174,6 +1203,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         return True
 
     def inherited_roots(self) -> tuple[object, ...]:
+        """Return inherited roots retained by this reserved finalizer escrow."""
         return (
             self._slots,
             self._states,

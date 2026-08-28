@@ -1,4 +1,8 @@
-"""Helpers that separate wide ingress schemas from normalized analytical schemas."""
+"""Separate wide ingress schemas from normalized analytical schemas.
+
+This module converts between Arrow schemas and registry JSON, projects wide scalar inputs, and
+validates clean and rejected outputs against stable field ordering.
+"""
 
 from __future__ import annotations
 

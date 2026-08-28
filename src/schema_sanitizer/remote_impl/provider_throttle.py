@@ -1,4 +1,8 @@
-"""Process-wide adaptive provider throttling and bounded circuit breaking."""
+"""Process-wide adaptive provider throttling and bounded circuit breaking.
+
+It adapts per-provider concurrency from outcomes, applies cooldown and circuit breaking,
+and issues cancellation-safe request leases fairly.
+"""
 
 from __future__ import annotations
 
@@ -114,20 +118,24 @@ class _ExpiryHeap:
     __slots__ = ("_nodes", "_positions", "peak_entries")
 
     def __init__(self) -> None:
+        """Create an empty indexed expiry heap and its peak-size counter."""
         self._nodes: list[_ExpiryNode] = []
         self._positions: dict[str, int] = {}
         self.peak_entries = 0
 
     def __len__(self) -> int:
+        """Return the number of retained values."""
         return len(self._nodes)
 
     def _swap(self, left: int, right: int) -> None:
+        """Swap two entries in the indexed expiry heap."""
         nodes = self._nodes
         nodes[left], nodes[right] = nodes[right], nodes[left]
         self._positions[nodes[left].key] = left
         self._positions[nodes[right].key] = right
 
     def _sift_up(self, index: int) -> None:
+        """Restore heap order toward the root."""
         while index:
             parent = (index - 1) // 2
             if self._nodes[parent].expiry <= self._nodes[index].expiry:
@@ -136,6 +144,7 @@ class _ExpiryHeap:
             index = parent
 
     def _sift_down(self, index: int) -> None:
+        """Restore heap order toward the leaves."""
         size = len(self._nodes)
         while True:
             left = index * 2 + 1
@@ -153,6 +162,7 @@ class _ExpiryHeap:
             index = child
 
     def add(self, node: _ExpiryNode) -> None:
+        """Add one value to the bounded collection."""
         index = len(self._nodes)
         self._nodes.append(node)
         try:
@@ -164,6 +174,7 @@ class _ExpiryHeap:
         self._sift_up(index)
 
     def update(self, node: _ExpiryNode, expiry: float) -> None:
+        """Update a retained entry."""
         index = self._positions.get(node.key)
         if index is None:
             return
@@ -175,6 +186,7 @@ class _ExpiryHeap:
             self._sift_down(index)
 
     def remove(self, node: _ExpiryNode) -> None:
+        """Remove a retained entry."""
         index = self._positions.pop(node.key, None)
         if index is None:
             return
@@ -187,6 +199,7 @@ class _ExpiryHeap:
         self._sift_down(self._positions[last.key])
 
     def first_expired(self, now: float) -> _ExpiryNode | None:
+        """Return the first expired heap entry, if any."""
         if not self._nodes or self._nodes[0].expiry > now:
             return None
         return self._nodes[0]
@@ -204,6 +217,7 @@ class _LeaseEntry:
 
 
 def _release_provider_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Release the provider throttle lease retained by a cleanup capsule."""
     governor = capsule.arg0
     lease_id = capsule.arg1
     capability = capsule.arg2
@@ -217,7 +231,7 @@ class ProviderRequestLease:
     """Exactly-once provider slot that feeds AIMD outcome telemetry."""
 
     def __init__(self, governor: "ProviderThrottleGovernor", key: str) -> None:
-        """Initialize this helper."""
+        """Prearm finalization and bind the governor and endpoint key before activation."""
         self._finalizer_ticket = 0
         self._finalizer_capsule: PreparedFinalizerCleanup | None = None
         capsule = reserve_finalizer_cleanup(_release_provider_capsule)
@@ -249,6 +263,7 @@ class ProviderRequestLease:
         self._state = "active"
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this provider request lease."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -300,7 +315,7 @@ class ProviderRequestLease:
         return True
 
     def success(self) -> None:
-        """Implement the internal success helper."""
+        """Record success and release this throttle admission."""
         self._release_outcome(outcome="success", throttled=False, retry_after_seconds=None)
 
     def failure(self, exc: BaseException) -> None:
@@ -317,7 +332,7 @@ class ProviderRequestLease:
         )
 
     def release(self) -> None:
-        """Implement the internal release helper."""
+        """Release this admission without recording a provider outcome."""
         self._release_outcome(outcome="neutral", throttled=False, retry_after_seconds=None)
 
     def __del__(self) -> None:
@@ -347,7 +362,7 @@ class ProviderThrottleGovernor:
     """AIMD concurrency windows plus fail-fast bounded circuit breaking."""
 
     def __init__(self, *, max_tracked_keys: int = _MAX_TRACKED_KEYS) -> None:
-        """Initialize this helper."""
+        """Validate key capacity and initialize adaptive windows, expiry tracking, and lease accounting."""
         self._condition = Condition()
         self._states: OrderedDict[str, _State] = OrderedDict()
         self._inactive_keys: OrderedDict[str, None] = OrderedDict()
@@ -669,7 +684,7 @@ class ProviderThrottleGovernor:
             self._note_post_commit_failure_locked()
 
     def snapshot(self, key: str) -> ProviderThrottleSnapshot:
-        """Implement the internal snapshot helper."""
+        """Return the bounded throttle state for a provider key."""
         normalized = _normalize_key(key)
         with self._condition:
             state = self._states.get(normalized)
@@ -715,9 +730,11 @@ class ProviderThrottleGovernor:
         return (Condition(), OrderedDict(), OrderedDict(), _ExpiryHeap(), {})
 
     def prepare_for_fork(self) -> None:
+        """Prepare process-owned state for a safe fork."""
         self._fork_prepared = self._fork_banks[self._fork_bank_index]
 
     def clear_fork_preparation(self) -> None:
+        """Clear state established while preparing for a fork."""
         self._fork_prepared = None
 
     def reset_after_fork(self) -> None:
@@ -870,7 +887,7 @@ def acquire_provider_request_sync(key: str) -> ProviderRequestLease:
 
 
 def provider_throttle_snapshot(key: str) -> ProviderThrottleSnapshot:
-    """Implement the internal provider_throttle_snapshot helper."""
+    """Return the throttle snapshot for a provider key."""
     return _PROVIDER_THROTTLE.snapshot(key)
 
 

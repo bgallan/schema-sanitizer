@@ -1,4 +1,8 @@
-"""Owned local staging for remote inputs, outputs, and object transfers."""
+"""Owned local staging for remote inputs, outputs, and object transfers.
+
+It owns temporary paths for remote inputs and outputs, coordinates single or multi
+transfers, and publishes only after complete success.
+"""
 
 from __future__ import annotations
 

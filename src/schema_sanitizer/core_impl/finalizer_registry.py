@@ -55,10 +55,12 @@ def _fixed_increment(counter: bytearray) -> bool:
 
 
 def _fixed_value(counter: bytearray) -> int:
+    """Return the fixed value."""
     return int.from_bytes(counter, "little", signed=False)
 
 
 def _write_fixed(counter: bytearray, target: bytearray, offset: int) -> int:
+    """Write one value into a bounded finalizer-registry buffer."""
     for value in counter:
         target[offset] = value
         offset += 1
@@ -68,12 +70,14 @@ def _write_fixed(counter: bytearray, target: bytearray, offset: int) -> int:
 def _same_callable_contract(
     left: Callable[..., object] | None, right: Callable[..., object] | None
 ) -> bool:
+    """Return whether two callables have the same stable contract."""
     return callable_contract(left) == callable_contract(right)
 
 
 def _same_escrow_contract(
     left: tuple[tuple[str, object], ...], right: tuple[tuple[str, object], ...]
 ) -> bool:
+    """Return whether two escrows expose the same cleanup contract."""
     if len(left) != len(right):
         return False
     for (left_name, left_escrow), (right_name, right_escrow) in zip(left, right):
@@ -92,6 +96,7 @@ def _same_escrow_contract(
 
 
 def _same_domain(left: FinalizerRuntimeDomain, right: FinalizerRuntimeDomain) -> bool:
+    """Return whether two finalizer domains carry identical capacity state."""
     return (
         left.name == right.name
         and left.contract_generation == right.contract_generation
@@ -312,16 +317,19 @@ def _reset_finalizer_registry_for_tests() -> None:
 
 
 def _prepare_registry_for_fork() -> None:
+    """Prepare registry for fork."""
     global _FORK_FRESH_LOCK
     _FORK_FRESH_LOCK = _FORK_LOCK_BANK[_FORK_LOCK_BANK_INDEX]
 
 
 def _clear_registry_fork_preparation() -> None:
+    """Clear registry fork preparation."""
     global _FORK_FRESH_LOCK
     _FORK_FRESH_LOCK = None
 
 
 def _reset_registry_after_fork() -> None:
+    """Reset registry after fork."""
     global _REGISTRY_LOCK, _FORK_FRESH_LOCK, _FORK_LOCK_BANK_INDEX
     prepared = _FORK_FRESH_LOCK
     if prepared is None:

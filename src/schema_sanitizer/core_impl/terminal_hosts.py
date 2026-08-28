@@ -26,6 +26,7 @@ class TerminalHostSnapshot:
 
 class TerminalHostMarkers:
     def __init__(self, capacity: int = 256, *, category: str = "terminal_host") -> None:
+        """Initialize the terminal host markers and its owned runtime state."""
         if type(capacity) is not int:
             raise TypeError("terminal host capacity must be an exact integer")
         if capacity <= 0:
@@ -60,6 +61,7 @@ class TerminalHostMarkers:
         return len(dead)
 
     def add(self, owner: object) -> bool:
+        """Add one value to the bounded collection."""
         owner_id = id(owner)
         with self._lock:
             self._prune_dead_locked()
@@ -95,6 +97,7 @@ class TerminalHostMarkers:
             return True
 
     def discard(self, owner: object) -> None:
+        """Discard one owner marker and retire its terminal-ownership record."""
         with self._lock:
             owner_id = id(owner)
             existing = self._entries.get(owner_id)
@@ -109,6 +112,7 @@ class TerminalHostMarkers:
                 diagnostic_transition()
 
     def snapshot(self) -> TerminalHostSnapshot:
+        """Return a bounded snapshot of the current terminal host markers."""
         with self._lock:
             self._prune_dead_locked()
             return TerminalHostSnapshot(

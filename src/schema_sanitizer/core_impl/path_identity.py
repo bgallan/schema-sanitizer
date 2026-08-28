@@ -1,4 +1,8 @@
-"""No-follow filesystem identity helpers for temporary artifact ownership."""
+"""Prove temporary-artifact ownership with no-follow filesystem identities.
+
+Descriptor-backed device and inode fingerprints, claim files, markers, and checksums prevent
+path substitution while retryable finalizers clean up retained claims.
+"""
 
 from __future__ import annotations
 
@@ -155,6 +159,7 @@ class _PathClaimAdmission:
     lock: Lock = field(default_factory=Lock)
 
     def transfer(self) -> None:
+        """Transfer ownership of the retained resource."""
         with self.lock:
             if self.released:
                 raise RuntimeError("path claim admission was already released")
@@ -163,12 +168,14 @@ class _PathClaimAdmission:
             self.transferred = True
 
     def release_if_untransferred(self) -> None:
+        """Release admission unless ownership was transferred."""
         with self.lock:
             if self.transferred or self.released:
                 return
         self.release()
 
     def release(self) -> None:
+        """Release resources owned by this path claim admission."""
         with self.lock:
             if self.released:
                 return
@@ -225,6 +232,7 @@ class _PathClaimAdmission:
 
 
 def _acquire_path_claim_admission() -> _PathClaimAdmission:
+    """Acquire path claim admission."""
     global _PATH_CLAIM_ADMISSIONS
     authority = RootedFinalizerAuthority(_run_path_claim_admission_finalizer)
     pid = os.getpid()
@@ -283,6 +291,7 @@ class _IdentityDescriptorOwner:
         # Reserve finalizer capacity while this owner is still empty. Callers
         # using bind_opened() therefore cannot create an unowned descriptor if
         # finalizer admission fails.
+        """Validate and normalize the initialized instance state."""
         self._condition = Condition(self.lock)
         self._finalizer_capsule = reserve_owner_finalizer_cleanup()
         self._finalizer_ticket = self._finalizer_capsule.ticket
@@ -312,6 +321,7 @@ class _IdentityDescriptorOwner:
             self._state = self._ACTIVE
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this identity descriptor owner."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket:
@@ -517,6 +527,7 @@ class _ScandirCleanupOwner:
     _CLOSED = 5
 
     def __post_init__(self) -> None:
+        """Validate and normalize the initialized instance state."""
         self._condition = Condition(self.lock)
         self._finalizer_capsule = reserve_owner_finalizer_cleanup()
         self._finalizer_ticket = self._finalizer_capsule.ticket
@@ -542,12 +553,14 @@ class _ScandirCleanupOwner:
             self._state = self._ACTIVE
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this scandir cleanup owner."""
         ticket = self._finalizer_ticket
         if ticket:
             cancel_prepared_finalizer_cleanup(self._finalizer_capsule)
             self._finalizer_ticket = 0
 
     def release(self) -> None:
+        """Release resources owned by this scandir cleanup owner."""
         iterator: Any | None = None
         lease: Any | None = None
         debt_only = False
@@ -664,6 +677,7 @@ class _ScandirCleanupOwner:
 
 
 def _release_scandir_owner(owner: _ScandirCleanupOwner | None) -> None:
+    """Close the directory iterator retained by its finalizer owner."""
     if owner is None:
         return
     try:
@@ -723,6 +737,7 @@ def _private_claim_root() -> Path:
 
 
 def _claim_key(metadata: os.stat_result) -> str:
+    """Return the claim key."""
     payload = (
         f"{int(metadata.st_dev)}:{int(metadata.st_ino)}:{stat.S_IFMT(metadata.st_mode)}"
     ).encode("ascii")
@@ -730,6 +745,7 @@ def _claim_key(metadata: os.stat_result) -> str:
 
 
 def _claim_path(metadata: os.stat_result) -> Path:
+    """Return the claim path."""
     return _private_claim_root() / f"claim-{_claim_key(metadata)}"
 
 
@@ -784,6 +800,7 @@ def _read_claim_at(
     )
 
     def read_from(descriptor: int) -> tuple[bytes, os.stat_result]:
+        """Read and validate a path claim from an open descriptor."""
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise OSError("temporary path claim must be a regular file")
@@ -807,6 +824,7 @@ def _read_claim_at(
         return raw, metadata
 
     def opener() -> int:
+        """Open the target relative to its trusted directory descriptor."""
         return os.open(name, flags, dir_fd=directory_fd)
 
     if capability is not None:
@@ -923,11 +941,13 @@ def _remove_claim_if_unchanged(path: Path, expected: bytes) -> bool:
 
 
 def _claim_checksum(payload: dict[str, object]) -> str:
+    """Compute the canonical checksum for a serialized path claim."""
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.blake2b(canonical.encode("utf-8"), digest_size=16).hexdigest()
 
 
 def _serialize_claim(record: _ExternalClaim) -> bytes:
+    """Serialize a path claim into its canonical JSON payload."""
     payload: dict[str, object] = {
         "version": _CLAIM_VERSION,
         "pid": record.pid,
@@ -973,6 +993,7 @@ def _parse_claim(raw: bytes) -> _ExternalClaim | None:
 
 
 def _claim_process_alive(record: _ExternalClaim) -> bool:
+    """Return whether the process recorded by a path claim is still alive."""
     if record.pid <= 0:
         return False
     try:
@@ -1135,6 +1156,7 @@ def _sweep_external_claims(root: Path, *, limit: int = _CLAIM_SWEEP_LIMIT) -> No
 
 
 def _read_external_claim(metadata: os.stat_result) -> tuple[bytes | None, str | None]:
+    """Read and validate an externally owned path claim."""
     path = _claim_path(metadata)
     try:
         raw = _read_claim_bytes(path)
@@ -1149,6 +1171,7 @@ def _read_external_claim(metadata: os.stat_result) -> tuple[bytes | None, str | 
 
 
 def _write_claim_payload(descriptor: int, payload: bytes) -> None:
+    """Publish a canonical path-claim payload through the locked descriptor."""
     view = memoryview(payload)
     while view:
         written = os.write(descriptor, view)
@@ -1159,6 +1182,7 @@ def _write_claim_payload(descriptor: int, payload: bytes) -> None:
 
 
 def _claim_is_stable_stale(path: Path, raw: bytes) -> bool:
+    """Return whether repeated observations prove a path claim stale."""
     record = _parse_claim(raw)
     if record is not None:
         return not _claim_process_alive(record)
@@ -1303,6 +1327,7 @@ class PathFingerprint:
     external_claim_path: str | None = None
 
     def _comparison_key(self) -> tuple[object, ...]:
+        """Return the comparison key."""
         discriminator: tuple[str, object]
         if self.owner_marker is not None:
             discriminator = ("marker", self.owner_marker)
@@ -1311,11 +1336,13 @@ class PathFingerprint:
         return (self.device, self.inode, self.file_type, discriminator)
 
     def __eq__(self, other: object) -> bool:
+        """Return whether this value equals the other value."""
         if not isinstance(other, PathFingerprint):
             return NotImplemented
         return self._comparison_key() == other._comparison_key()
 
     def __hash__(self) -> int:
+        """Return the hash of the canonical fingerprint comparison key."""
         return hash(self._comparison_key())
 
 
@@ -1384,6 +1411,7 @@ class PathClaimOwner:
     finalizer_owner: RootedFinalizerAuthority | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate and normalize the initialized instance state."""
         admission = self.claim_admission
         if admission is not None:
             ticket = admission.finalizer_ticket
@@ -1451,10 +1479,12 @@ class PathIdentity(PathFingerprint):
 
     @property
     def descriptor_owner(self) -> _IdentityDescriptorOwner | None:
+        """Return the descriptor-owning path identity."""
         return self.claim_owner.descriptor_owner if self.claim_owner is not None else None
 
     @property
     def owns_claim(self) -> bool:
+        """Return whether this identity still owns its path claim."""
         return self.claim_owner is not None and not self.claim_owner.authority_released
 
     @classmethod
@@ -1468,6 +1498,7 @@ class PathIdentity(PathFingerprint):
         claim_admission: _PathClaimAdmission | None = None,
         owns_claim: bool = False,
     ) -> "PathIdentity":
+        """Build a path identity from trusted filesystem metadata."""
         claim_owner = None
         if owns_claim:
             claim_owner = PathClaimOwner(
@@ -1488,6 +1519,7 @@ class PathIdentity(PathFingerprint):
 
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    """Return whether two filesystem samples identify the same inode."""
     return (
         int(left.st_dev) == int(right.st_dev)
         and int(left.st_ino) == int(right.st_ino)
@@ -1559,6 +1591,7 @@ def _open_identity_fd(path: str | Path) -> _IdentityDescriptorOwner | None:
 
 
 def _read_owner_marker(path: str | Path | int) -> bytes | None:
+    """Read the ownership marker attached to a temporary artifact."""
     getter = getattr(os, "getxattr", None)
     if getter is None:
         return None
@@ -1571,6 +1604,7 @@ def _read_owner_marker(path: str | Path | int) -> bytes | None:
 
 
 def _set_new_owner_marker(path: str | Path | int, marker: bytes) -> bool:
+    """Set new owner marker."""
     setter = getattr(os, "setxattr", None)
     if setter is None:
         return False
@@ -1590,6 +1624,7 @@ def _set_new_owner_marker(path: str | Path | int, marker: bytes) -> bool:
 
 
 def _remove_owner_marker(descriptor: int, marker: bytes) -> None:
+    """Remove the ownership marker from a temporary artifact."""
     remover = getattr(os, "removexattr", None)
     if remover is None:
         raise OSError("filesystem owner marker cannot be removed")
@@ -1717,6 +1752,7 @@ def lstat_identity(path: str | Path) -> PathIdentity | None:
 
 
 def _claim_owner_retry_key(owner: PathClaimOwner) -> tuple[str, int]:
+    """Return the claim owner retry key."""
     return ("path-claim-owner", id(owner))
 
 
@@ -1838,6 +1874,7 @@ def _adopt_abandoned_claim_owner(owner: PathClaimOwner, *, delay_seconds: float 
             raise RuntimeError("normalized abandoned claim retry delay is missing")
 
         def retry_owner() -> None:
+            """Retry terminal cleanup for one retained owner."""
             _retry_abandoned_claim_owner_token(owner_id)
 
         scheduled = schedule_retry(
@@ -1870,6 +1907,7 @@ def _retry_abandoned_claim_owner_token(owner_id: int) -> None:
 
 
 def _retry_abandoned_claim_owner(owner: PathClaimOwner) -> None:
+    """Retry abandoned claim owner."""
     try:
         _release_claim_owner(owner)
     except BaseException:
@@ -1885,6 +1923,7 @@ def _drain_path_claim_finalizers(*, limit: int = 8) -> int:
     progressed = 0
 
     def process(ticket: int, owner: RootedFinalizerAuthority | PathClaimOwner) -> None:
+        """Process one retained work item."""
         nonlocal progressed
         if isinstance(owner, RootedFinalizerAuthority):
             owner.ticket = ticket
@@ -1911,6 +1950,7 @@ def _drain_path_claim_finalizers(*, limit: int = 8) -> int:
 
 
 def path_claim_finalizer_snapshot() -> tuple[int, int]:
+    """Return a bounded snapshot of path claim finalizer."""
     return (
         _PATH_CLAIM_FINALIZER_ESCROW.published_count(),
         max(1, _PATH_CLAIM_FINALIZER_OVERFLOWS)
@@ -1920,6 +1960,7 @@ def path_claim_finalizer_snapshot() -> tuple[int, int]:
 
 
 def _drain_abandoned_claim_owners(*, limit: int = 8) -> None:
+    """Drain abandoned claim owners."""
     with _ABANDONED_CLAIM_LOCK:
         owners = tuple(_ABANDONED_CLAIM_OWNERS.values())[: max(0, int(limit))]
     for owner in owners:
@@ -1927,6 +1968,7 @@ def _drain_abandoned_claim_owners(*, limit: int = 8) -> None:
 
 
 def _release_abandoned_claim_for_path(path: str) -> bool:
+    """Release retained claim owners for a path and report any success."""
     with _ABANDONED_CLAIM_LOCK:
         owners = tuple(
             owner for owner in _ABANDONED_CLAIM_OWNERS.values() if owner.external_claim_path == path
@@ -2072,6 +2114,7 @@ def identity_matches(path: str | Path, expected: PathIdentity | None) -> bool:
 
 
 def _reset_path_identity_after_fork() -> None:
+    """Reset path identity after fork."""
     global _CLAIM_SWEEP_CURSOR, _CLAIM_SWEEP_ITERATOR, _CLAIM_SWEEP_ROOT
     global _CLAIM_SWEEP_OWNER, _CLAIM_SWEEP_LOCK, _ABANDONED_CLAIM_LOCK
     global _ABANDONED_DESCRIPTOR_LOCK, _PATH_CLAIM_ADMISSION_LOCK

@@ -1,4 +1,8 @@
-"""Asynchronous provider transfer dispatch used by threading_mode='multi'."""
+"""Asynchronous provider transfer dispatch used by threading_mode='multi'.
+
+It selects the asynchronous provider implementation for one download or upload and
+reuses operation-owned sessions where compatible.
+"""
 
 from __future__ import annotations
 

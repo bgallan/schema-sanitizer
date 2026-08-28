@@ -1,4 +1,8 @@
-"""Parquet runtime status, footer diagnostics, and projection audits."""
+"""Parquet runtime status, footer diagnostics, and projection audits.
+
+It exposes direct-read eligibility, footer diagnostics, runtime readiness, and recursive
+projection audits to public status and CI callers.
+"""
 
 from __future__ import annotations
 

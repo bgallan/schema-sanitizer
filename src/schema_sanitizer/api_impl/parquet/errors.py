@@ -1,4 +1,8 @@
-"""Shared Parquet ingestion error helpers."""
+"""Shared Parquet ingestion error helpers.
+
+It constructs consistent typed errors for unsupported direct ingestion and Parquet
+memory-budget violations.
+"""
 
 from __future__ import annotations
 

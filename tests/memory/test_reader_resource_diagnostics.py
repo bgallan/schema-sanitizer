@@ -1,4 +1,7 @@
-"""Reader hardening resource diagnostics regressions."""
+"""Checks bounded reader metrics across modes, consumer cancellation or close, memory-pool
+release, and Parquet footer accounting. Diagnostics differ only in legitimate peak
+values, record cancellation at close, and sum footer sizes without retaining unbounded
+state."""
 
 from __future__ import annotations
 

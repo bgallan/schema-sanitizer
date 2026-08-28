@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency wide reordered flat inference matches single."""
+"""Verify reordered flat-field inference against the single-worker schema oracle.
+
+Crossing the field ceiling must fall back without semantic drift, low-memory output remains
+byte-identical, and flat-parser overflow stays bounded and charged to memory accounting.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Remote directory validation and prepared-input assembly."""
+"""Remote directory validation and prepared-input assembly.
+
+It verifies that a provider and format support native directory execution, then attaches
+the remote manifest to a prepared input.
+"""
 
 from __future__ import annotations
 

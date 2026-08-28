@@ -1,4 +1,8 @@
-"""Regression coverage for memory fd capability counts physical open and close."""
+"""Traces descriptor credit through open and close, scandir duplication, nested path
+identity, remote callback failures, Windows mappings, DuckDB streaming, directory
+indexing, janitor scans, and fragmented HTTP reads. Physical and reserved states remain
+distinct, every adopted descriptor is precharged, and bounded readers avoid full-copy or
+list-clone barriers."""
 
 from __future__ import annotations
 
@@ -15,10 +19,12 @@ CPP = ROOT / "cpp/src"
 
 
 def _source(relative: str) -> str:
+    """Return the production source text inspected by this module."""
     return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_fd_capability_counts_physical_open_and_close(tmp_path: Path) -> None:
+    """Verify FD capability counts physical open and close."""
     from schema_sanitizer.core_impl import process_resources as module
 
     target = tmp_path / "payload.bin"
@@ -41,6 +47,7 @@ def test_fd_capability_counts_physical_open_and_close(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-relative scandir is POSIX-only")
 def test_fd_capability_accounts_scandir_descriptor_duplication(tmp_path: Path) -> None:
+    """Verify FD capability accounts scandir descriptor duplication."""
     from schema_sanitizer.core_impl import process_resources as module
 
     (tmp_path / "entry.txt").write_text("x", encoding="utf-8")
@@ -66,6 +73,7 @@ def test_fd_capability_accounts_scandir_descriptor_duplication(tmp_path: Path) -
 
 
 def test_path_identity_nested_claim_reads_use_preacquired_capability() -> None:
+    """Verify path identity nested claim reads use preacquired capability."""
     source = _source("core_impl/path_identity.py")
     assert "acquire_file_descriptor_capability(" in source
     assert "temporary_claim_remove" in source and "temporary_claim_recovery" in source
@@ -80,15 +88,18 @@ def test_path_identity_nested_claim_reads_use_preacquired_capability() -> None:
 def test_remote_async_publication_delivery_baseexception_reclaims_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote async publication delivery baseexception reclaims waiter."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     async def run() -> None:
+        """Inject a delivery interruption and verify waiter and permit reclamation."""
         governor = RemoteIoPermitGovernor(1, max_waiters=8)
         holder = await governor.acquire(label="holder")
         original_deliver = governor._deliver
         armed = True
 
         def fail_once(deliveries: object) -> None:
+            """Inject the once failure at the controlled test point."""
             nonlocal armed
             if armed:
                 armed = False
@@ -112,6 +123,7 @@ def test_remote_async_publication_delivery_baseexception_reclaims_waiter(
 
 
 def test_native_fd_lease_has_explicit_physical_close_commit_and_debt() -> None:
+    """Verify native FD lease has explicit physical close commit and debt."""
     header = (CPP / "internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     mapped = (CPP / "ingest/chunk_source_file.cc").read_text(encoding="utf-8")
     assert "retain_uncertain_close()" in header
@@ -136,6 +148,7 @@ def test_windows_read_only_mapping_allows_staged_path_rename_without_write_shari
 
 
 def test_duckdb_stream_handoff_has_no_full_batch_list_barrier() -> None:
+    """Verify duckdb stream handoff has no full batch list barrier."""
     results = _source("api_impl/results.py")
     coverage = _source("core_impl/concurrency_coverage.py")
     duckdb = results[
@@ -150,6 +163,7 @@ def test_duckdb_stream_handoff_has_no_full_batch_list_barrier() -> None:
 
 
 def test_remote_success_reads_are_bounded_even_without_operation_ledger() -> None:
+    """Verify remote success reads are bounded even without operation ledger."""
     source = _source("remote_impl/transport.py")
     success = source[
         source.index("async def read_response_bytes") : source.index(
@@ -161,6 +175,7 @@ def test_remote_success_reads_are_bounded_even_without_operation_ledger() -> Non
 
 
 def test_remote_directory_index_overhead_is_precharged_and_lists_are_not_recloned() -> None:
+    """Verify remote directory index overhead is precharged and lists are not recloned."""
     staging = _source("remote_impl/staging.py")
     preparation = _source("api_impl/input/preparation.py")
     assert "selected = list(files)" not in staging
@@ -171,6 +186,7 @@ def test_remote_directory_index_overhead_is_precharged_and_lists_are_not_reclone
 
 
 def test_temporary_janitor_uses_atomic_root_bundle_and_governed_scandir() -> None:
+    """Verify temporary janitor uses atomic root bundle and governed scandir."""
     source = _source("core_impl/temporary_janitor.py")
     root = source[source.index("def _root_handle") : source.index("def _close_root_handle")]
     scan = source[source.index("def _iter_directory") : source.index("def _stale_scan_candidates")]
@@ -184,6 +200,7 @@ def test_temporary_janitor_uses_atomic_root_bundle_and_governed_scandir() -> Non
 
 
 def test_staged_tree_pending_directory_metadata_is_hard_bounded() -> None:
+    """Verify staged tree pending directory metadata is hard bounded."""
     source = _source("remote_impl/staging_paths.py")
     assert "_MAX_PENDING_TREE_DIRECTORIES = 4096" in source
     assert source.count("len(pending) >= _MAX_PENDING_TREE_DIRECTORIES") == 2
@@ -191,6 +208,7 @@ def test_staged_tree_pending_directory_metadata_is_hard_bounded() -> None:
 
 
 def test_remote_local_file_adopts_preacquired_descriptor_credit(tmp_path: Path) -> None:
+    """Verify remote local file adopts preacquired descriptor credit."""
     from schema_sanitizer.core_impl import process_resources as resources
     from schema_sanitizer.remote_impl.io_footprint import (
         ActiveRemoteIoFootprint,
@@ -227,6 +245,7 @@ def test_remote_local_file_adopts_preacquired_descriptor_credit(tmp_path: Path) 
 
 
 def test_bounded_http_reader_handles_fragmented_aiohttp_without_third_full_copy() -> None:
+    """Verify bounded HTTP reader handles fragmented aiohttp without third full copy."""
     source = _source("remote_impl/transport.py")
     bounded = source[
         source.index("async def read_bounded_response_bytes") : source.index(

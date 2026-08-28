@@ -1,4 +1,9 @@
-"""Example 07 CLI, planning, discovery, execution, and reporting contracts."""
+"""Example 07 CLI, planning, discovery, execution, and reporting contracts.
+
+It covers offline CLI validation, schema warm-up, daily and hourly planning, source
+discovery, conversion delegation, and operator-facing reporting without live cloud
+services.
+"""
 
 from __future__ import annotations
 
@@ -94,6 +99,7 @@ def test_example_07_always_forces_additive_normal_runs(monkeypatch) -> None:
 
 
 def test_example_07_parser_lives_in_cli_module() -> None:
+    """Verify example 07 parser lives in CLI module."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.integrations.bigquery.advanced import (
         hive_partition_columns,
@@ -240,6 +246,7 @@ def test_example_07_rejects_non_positive_memory_limit_at_cli_boundary() -> None:
 
 
 def test_example_07_warm_up_prefix_plan_uses_warm_up_range() -> None:
+    """Verify example 07 warm up prefix plan uses warm up range."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.pipeline.advanced import (
         build_warm_up_hive_range_plan_from_namespace,
@@ -276,6 +283,7 @@ def test_example_07_warm_up_prefix_plan_uses_warm_up_range() -> None:
 
 
 def test_example_07_warm_up_hourly_plan_uses_warm_up_hours() -> None:
+    """Verify example 07 warm up hourly plan uses warm up hours."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.pipeline.advanced import (
         build_warm_up_hive_range_plan_from_namespace,
@@ -321,6 +329,7 @@ def test_example_07_warm_up_hourly_plan_uses_warm_up_hours() -> None:
 
 
 def test_example_07_hour_flags_require_hourly_granularity() -> None:
+    """Verify example 07 hour flags require hourly granularity."""
     from examples.example_07.cli import build_parser
 
     parser = build_parser()
@@ -349,6 +358,7 @@ def test_example_07_hour_flags_require_hourly_granularity() -> None:
 
 
 def test_example_07_warm_up_hour_flags_require_warm_up_dates() -> None:
+    """Verify example 07 warm up hour flags require warm up dates."""
     from examples.example_07.cli import build_parser
 
     parser = build_parser()
@@ -379,6 +389,7 @@ def test_example_07_warm_up_hour_flags_require_warm_up_dates() -> None:
 
 
 def test_example_07_hourly_plan_defaults_to_full_day_when_hours_omitted() -> None:
+    """Verify example 07 hourly plan defaults to full day when hours omitted."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
@@ -409,6 +420,7 @@ def test_example_07_hourly_plan_defaults_to_full_day_when_hours_omitted() -> Non
 
 
 def test_example_07_warm_up_hourly_plan_defaults_to_full_day_when_hours_omitted() -> None:
+    """Verify example 07 warm up hourly plan defaults to full day when hours omitted."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.pipeline.advanced import (
         build_warm_up_hive_range_plan_from_namespace,
@@ -445,6 +457,7 @@ def test_example_07_warm_up_hourly_plan_defaults_to_full_day_when_hours_omitted(
 
 
 def test_example_07_warm_up_infers_one_additive_registry(tmp_path: Path) -> None:
+    """Verify example 07 warm up infers one additive registry."""
     example = _load_example_07_runtime_support()
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"
@@ -936,12 +949,15 @@ def test_example_07_logs_partition_cpu_and_io_percentages(caplog, monkeypatch) -
         """Stand in for an existing Windows source while running on any host."""
 
         def __init__(self, value: str):
+            """Initialize existing windows path state for value."""
             assert value == r"C:\source\events.jsonl"
 
         def is_file(self) -> bool:
+            """Return whether the warm-up path should be treated as an existing file."""
             return True
 
         def stat(self) -> SimpleNamespace:
+            """Return deterministic file metadata for discovery assertions."""
             return SimpleNamespace(st_size=2_500_000)
 
     monkeypatch.setattr(runtime_reporting, "Path", ExistingWindowsPath)
@@ -1033,6 +1049,7 @@ def test_example_07_logs_full_filesystem_prefixes_once(caplog) -> None:
 
 
 def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> None:
+    """Verify example 07 warm up supports JSON directory input."""
     example = _load_example_07_runtime_support()
     first = tmp_path / "hour=00"
     second = tmp_path / "hour=01"
@@ -1083,6 +1100,7 @@ def test_example_07_warm_up_supports_json_directory_input(tmp_path: Path) -> Non
 
 
 def test_example_07_source_discovery_skips_missing_dates(tmp_path: Path) -> None:
+    """Verify example 07 source discovery skips missing dates."""
     from schema_sanitizer.pipeline import PartitionRunPlan
     from schema_sanitizer.pipeline.advanced import discover_existing_source_plans
 
@@ -1107,6 +1125,7 @@ def test_example_07_source_discovery_skips_missing_dates(tmp_path: Path) -> None
 
 
 def test_example_07_daily_single_file_prefix_plan() -> None:
+    """Verify example 07 daily single file prefix plan."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
@@ -1139,6 +1158,7 @@ def test_example_07_daily_single_file_prefix_plan() -> None:
 
 
 def test_example_07_hourly_directory_prefix_plan() -> None:
+    """Verify example 07 hourly directory prefix plan."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.integrations.bigquery.advanced import hive_partition_columns
     from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
@@ -1191,6 +1211,7 @@ def test_example_07_hourly_directory_prefix_plan() -> None:
 
 
 def test_example_07_rejects_source_extension_mismatched_with_input_format() -> None:
+    """Verify example 07 rejects source extension mismatched with input format."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
@@ -1218,6 +1239,7 @@ def test_example_07_rejects_source_extension_mismatched_with_input_format() -> N
 
 
 def test_example_07_hourly_uri_templates_render_hour_and_filename() -> None:
+    """Verify example 07 hourly URI templates render hour and filename."""
     from examples.example_07.cli import build_parser
     from schema_sanitizer.pipeline.advanced import build_hive_range_plan_from_namespace
 
@@ -1256,6 +1278,7 @@ def test_example_07_hourly_uri_templates_render_hour_and_filename() -> None:
 
 
 def test_example_07_directory_discovery_skips_empty_partitions(tmp_path: Path) -> None:
+    """Verify example 07 directory discovery skips empty partitions."""
     from schema_sanitizer.pipeline import PartitionRunPlan
     from schema_sanitizer.pipeline.advanced import discover_existing_source_plans
 

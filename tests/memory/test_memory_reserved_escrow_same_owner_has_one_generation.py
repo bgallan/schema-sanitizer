@@ -1,4 +1,8 @@
-"""Regression coverage for memory reserved escrow same owner has one generation."""
+"""Tests reserved-escrow generation identity, rollback or recycle states, replayed
+finalizer admission, exact releases for memory, storage, and cross-process domains,
+snapshots, source capabilities, and control-plane headroom. One owner has one
+generation; replay is acknowledgement-only, stale tickets clear on rollback, and
+recycle-pending state remains recoverable capacity."""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import pytest
 
 
 def test_reserved_escrow_same_owner_has_one_generation() -> None:
+    """Verify reserved escrow same owner has one generation."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
     from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
 
@@ -32,6 +37,7 @@ def test_reserved_escrow_same_owner_has_one_generation() -> None:
 
 
 def test_reserved_escrow_rollback_clears_stale_ticket_and_arm(monkeypatch) -> None:
+    """Verify reserved escrow rollback clears stale ticket and arm."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
     from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
 
@@ -42,6 +48,7 @@ def test_reserved_escrow_rollback_clears_stale_ticket_and_arm(monkeypatch) -> No
     stale_ticket = 0
 
     def interrupt(self: ReservedFinalizerEscrow[RootedFinalizerAuthority]) -> None:
+        """Inject the interruption at the controlled handoff point."""
         nonlocal failed, stale_ticket
         if self is escrow and not failed:
             failed = True
@@ -64,6 +71,7 @@ def test_reserved_escrow_rollback_clears_stale_ticket_and_arm(monkeypatch) -> No
 
 
 def test_recycle_pending_is_recoverable_capacity_not_overflow(monkeypatch) -> None:
+    """Verify recycle pending is recoverable capacity not overflow."""
     import schema_sanitizer.core_impl.finalizer_escrow as module
     from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
 
@@ -78,6 +86,7 @@ def test_recycle_pending_is_recoverable_capacity_not_overflow(monkeypatch) -> No
     original = module.ReservedFinalizerEscrow._recycle_one_pending_locked
 
     def interrupt(self: module.ReservedFinalizerEscrow[RootedFinalizerAuthority]) -> bool:
+        """Inject the interruption at the controlled handoff point."""
         if self is escrow:
             raise KeyboardInterrupt("reserved-escrow-same-owner-has-one recycle")
         return original(self)
@@ -94,6 +103,7 @@ def test_recycle_pending_is_recoverable_capacity_not_overflow(monkeypatch) -> No
 
 
 def test_path_claim_admission_finalizer_is_replay_idempotent() -> None:
+    """Verify path claim admission finalizer is replay idempotent."""
     from schema_sanitizer.core_impl import path_identity as module
 
     before = module._PATH_CLAIM_ADMISSION_OWNERS.exact_active_count()
@@ -113,6 +123,7 @@ def test_path_claim_admission_finalizer_is_replay_idempotent() -> None:
 
 
 def test_operation_memory_exact_release_replay_is_ack(monkeypatch) -> None:
+    """Verify operation memory exact release replay is ack."""
     from schema_sanitizer.core_impl import memory_budget as module
 
     ledger = object.__new__(module.OperationMemoryLedger)
@@ -150,6 +161,7 @@ def test_operation_memory_exact_release_replay_is_ack(monkeypatch) -> None:
 
 
 def test_temporary_storage_exact_release_replay_is_ack(monkeypatch, tmp_path: Path) -> None:
+    """Verify temporary storage exact release replay is ack."""
     from schema_sanitizer.core_impl import temporary_storage as module
 
     pool = module.TemporaryStoragePermitPool(None)
@@ -181,6 +193,7 @@ def test_temporary_storage_exact_release_replay_is_ack(monkeypatch, tmp_path: Pa
 
 
 def test_direct_cross_memory_exact_release_replay_is_ack() -> None:
+    """Verify direct cross memory exact release replay is ack."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     owner = object()
@@ -199,6 +212,7 @@ def test_direct_cross_memory_exact_release_replay_is_ack() -> None:
 
 
 def test_finalizer_admission_snapshot_counts_recycle_pending(monkeypatch) -> None:
+    """Verify finalizer admission snapshot counts recycle pending."""
     import schema_sanitizer.core_impl.finalizer_escrow as module
     from schema_sanitizer.core_impl.finalizer_admission import _domain
     from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
@@ -228,6 +242,7 @@ def test_finalizer_admission_snapshot_counts_recycle_pending(monkeypatch) -> Non
 
 
 def test_source_contract_replay_capabilities_and_exact_arms() -> None:
+    """Verify source contract replay capabilities and exact arms."""
     root = Path(__file__).resolve().parents[2] / "src/schema_sanitizer/core_impl"
     escrow = (root / "finalizer_escrow.py").read_text(encoding="utf-8")
     rooted = (root / "rooted_finalizer.py").read_text(encoding="utf-8")
@@ -247,6 +262,7 @@ def test_source_contract_replay_capabilities_and_exact_arms() -> None:
 
 
 def test_default_control_plane_capacity_leaves_dynamic_headroom() -> None:
+    """Verify default control plane capacity leaves dynamic headroom."""
     from schema_sanitizer.core_impl.control_plane_budget import (
         _DEFAULT_CAPACITY_BYTES,
         _MAX_CAPACITY_BYTES,

@@ -1,4 +1,8 @@
-"""Native option catalog, model, validation, and SZOPT wire protocol."""
+"""Define the native option catalog, validation model, and SZOPT wire protocol.
+
+Current enums and option values are normalized and encoded into cached compiled capsules, with
+strict validation and cache reset across process forks.
+"""
 
 from __future__ import annotations
 
@@ -352,11 +356,13 @@ _FORK_PREPARED_OPTIONS_STATE: tuple[OrderedDict[bytes, Any], Lock] | None = None
 
 
 def _prepare_options_cache_for_fork() -> None:
+    """Prepare options cache for fork."""
     global _FORK_PREPARED_OPTIONS_STATE
     _FORK_PREPARED_OPTIONS_STATE = _FORK_OPTIONS_BANKS[_FORK_OPTIONS_BANK_INDEX]
 
 
 def _clear_options_cache_fork_preparation() -> None:
+    """Clear options cache fork preparation."""
     global _FORK_PREPARED_OPTIONS_STATE
     _FORK_PREPARED_OPTIONS_STATE = None
 

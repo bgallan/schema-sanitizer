@@ -1,4 +1,8 @@
-"""Prepared-finalizer publication, acknowledgement, and retirement contracts."""
+"""Exercises prepared-finalizer publication, cancellation acknowledgement transfer, stale
+control capabilities, temporary-device identity, remote freeze, cross-process roots,
+shutdown observation, wrapper deferral, provider tails, path rollback, and cleanup
+outside locks. Primary authority disarms before secondary retirement, stale or underflow
+states fail closed, and tail retries never double-release."""
 
 from __future__ import annotations
 
@@ -12,12 +16,14 @@ SRC = ROOT / "src" / "schema_sanitizer"
 
 
 def _fail_first_release_for(monkeypatch: pytest.MonkeyPatch, target: object) -> None:
+    """Inject the first release for failure at the controlled test point."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     original = ReservedFinalizerEscrow.release_ticket
     failed = False
 
     def flaky(self: object, ticket: int) -> bool:
+        """Inject the flaky failure at the controlled test point."""
         nonlocal failed
         if self is target and not failed:
             failed = True
@@ -28,6 +34,7 @@ def _fail_first_release_for(monkeypatch: pytest.MonkeyPatch, target: object) -> 
 
 
 def test_prepared_finalizer_pre_root_survives_publish_lock_contention() -> None:
+    """Verify prepared finalizer pre root survives publish lock contention."""
     from schema_sanitizer.core_impl import finalizer_cleanup as module
 
     escrow = module._PREPARED_FINALIZER_ESCROW
@@ -36,6 +43,7 @@ def test_prepared_finalizer_pre_root_survives_publish_lock_contention() -> None:
     calls = 0
 
     def cleanup(_capsule: object) -> None:
+        """Count each cleanup invocation."""
         nonlocal calls
         calls += 1
 
@@ -63,11 +71,13 @@ def test_prepared_finalizer_pre_root_survives_publish_lock_contention() -> None:
 def test_prepared_cancel_failure_transfers_ack_without_primary_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify prepared cancel failure transfers ack without primary replay."""
     from schema_sanitizer.core_impl import finalizer_cleanup as module
 
     calls = 0
 
     def primary(_capsule: object) -> None:
+        """Run the primary operation before its injected cleanup failure."""
         nonlocal calls
         calls += 1
 
@@ -83,6 +93,7 @@ def test_prepared_cancel_failure_transfers_ack_without_primary_replay(
 
 
 def test_control_plane_stale_live_capability_fails_closed() -> None:
+    """Verify control plane stale live capability fails closed."""
     from schema_sanitizer.core_impl.control_plane_budget import (
         ControlPlaneTicket,
         _ProcessControlPlaneBudget,
@@ -109,6 +120,7 @@ def test_control_plane_stale_live_capability_fails_closed() -> None:
 
 
 def test_control_plane_failed_tail_can_be_retried_from_ledger_root() -> None:
+    """Verify control plane failed tail can be retried from ledger root."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget(include_static_baseline=False)
@@ -123,6 +135,7 @@ def test_control_plane_failed_tail_can_be_retried_from_ledger_root() -> None:
 
 
 def test_temporary_storage_governor_users_underflow_pins_device_identity() -> None:
+    """Verify temporary storage governor users underflow pins device identity."""
     from schema_sanitizer.core_impl.temporary_storage_governor import (
         _FilesystemReservationState,
         _ProcessTemporaryStorageGovernor,
@@ -140,6 +153,7 @@ def test_temporary_storage_governor_users_underflow_pins_device_identity() -> No
 
 
 def test_remote_io_admission_freeze_rejects_new_authorities() -> None:
+    """Verify remote I/O admission freeze rejects new authorities."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     governor = RemoteIoPermitGovernor(2)
@@ -154,6 +168,7 @@ def test_remote_io_admission_freeze_rejects_new_authorities() -> None:
 
 
 def test_cross_process_reservation_uses_separate_pre_rooted_finalizer_owner() -> None:
+    """Verify cross process reservation uses separate pre rooted finalizer owner."""
     import gc
 
     from schema_sanitizer.core_impl.cross_process_memory import _ProcessCrossMemoryCoordinator
@@ -180,6 +195,7 @@ def test_cross_process_reservation_uses_separate_pre_rooted_finalizer_owner() ->
 
 
 def test_authoritative_quiescence_counters_do_not_saturate() -> None:
+    """Verify authoritative quiescence counters do not saturate."""
     sources = {
         "temporary_storage": SRC / "core_impl" / "temporary_storage.py",
         "partition": SRC / "pipeline" / "partition_lookahead.py",
@@ -202,6 +218,7 @@ def test_authoritative_quiescence_counters_do_not_saturate() -> None:
 
 
 def test_shutdown_observes_remote_waiters_protocol_and_freeze() -> None:
+    """Verify shutdown observes remote waiters protocol and freeze."""
     source = (SRC / "core_impl" / "runtime_shutdown.py").read_text(encoding="utf-8")
     assert "close_remote_io_permit_admission" in source
     assert "remote_io_waiting" in source
@@ -211,6 +228,7 @@ def test_shutdown_observes_remote_waiters_protocol_and_freeze() -> None:
 
 
 def test_io_wrappers_use_ack_after_primary_release_and_safe_defer() -> None:
+    """Verify I/O wrappers use ack after primary release and safe defer."""
     paths = [
         SRC / "remote_impl" / "transport.py",
         SRC / "remote_impl" / "sync_http.py",
@@ -237,11 +255,13 @@ def test_io_wrappers_use_ack_after_primary_release_and_safe_defer() -> None:
 def test_prepared_finalizer_ack_disarms_primary_before_retirement_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify prepared finalizer ack disarms primary before retirement failure."""
     from schema_sanitizer.core_impl import finalizer_cleanup as module
 
     calls = 0
 
     def primary(_capsule: object) -> None:
+        """Run the primary operation before its injected cleanup failure."""
         nonlocal calls
         calls += 1
 
@@ -261,6 +281,7 @@ def test_prepared_finalizer_ack_disarms_primary_before_retirement_failure(
 def test_remote_permit_ack_failure_retries_only_secondary_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote permit ack failure retries only secondary tail."""
     from schema_sanitizer.core_impl import finalizer_cleanup
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
@@ -270,6 +291,7 @@ def test_remote_permit_ack_failure_retries_only_secondary_tail(
     real_release = governor._release_permit
 
     def counting_release(owner: object) -> None:
+        """Record counting release for the enclosing assertion."""
         nonlocal calls
         calls += 1
         real_release(owner)  # type: ignore[arg-type]
@@ -290,6 +312,7 @@ def test_remote_permit_ack_failure_retries_only_secondary_tail(
 def test_provider_control_tail_failure_keeps_exact_owner_without_double_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify provider control tail failure keeps exact owner without double release."""
     from schema_sanitizer.remote_impl import provider_throttle as module
 
     governor = module.ProviderThrottleGovernor(max_tracked_keys=4)
@@ -301,6 +324,7 @@ def test_provider_control_tail_failure_keeps_exact_owner_without_double_release(
     failed = False
 
     def flaky(ticket: object) -> bool:
+        """Inject the flaky failure at the controlled test point."""
         nonlocal failed
         if ticket is lease_ticket and not failed:
             failed = True
@@ -326,6 +350,7 @@ def test_provider_control_tail_failure_keeps_exact_owner_without_double_release(
 
 
 def test_cross_process_exact_stale_authority_fails_closed() -> None:
+    """Verify cross process exact stale authority fails closed."""
     from schema_sanitizer.core_impl.cross_process_memory import _ProcessCrossMemoryCoordinator
 
     coordinator = _ProcessCrossMemoryCoordinator(16 << 20)
@@ -349,6 +374,7 @@ def test_cross_process_exact_stale_authority_fails_closed() -> None:
 def test_path_claim_capacity_rollback_never_decrements_uncommitted_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify path claim capacity rollback never decrements uncommitted admission."""
     from schema_sanitizer.core_impl import path_identity as module
 
     baseline = module._PATH_CLAIM_ADMISSIONS
@@ -367,6 +393,7 @@ def test_path_claim_capacity_rollback_never_decrements_uncommitted_admission(
 
 
 def test_quiescence_counters_do_not_use_saturating_decrements() -> None:
+    """Verify quiescence counters do not use saturating decrements."""
     sources = {
         "janitor": SRC / "core_impl" / "temporary_janitor.py",
         "prefetch": SRC / "api_impl" / "source_plan" / "remote.py",
@@ -387,6 +414,7 @@ def test_quiescence_counters_do_not_use_saturating_decrements() -> None:
 
 
 def test_temporary_storage_replacement_cleanup_is_outside_pool_condition() -> None:
+    """Verify temporary storage replacement cleanup is outside pool condition."""
     source = (SRC / "core_impl" / "temporary_storage.py").read_text(encoding="utf-8")
     start = source.index("    def _resize_lease(")
     end = source.index("\n    def ", start + 10)

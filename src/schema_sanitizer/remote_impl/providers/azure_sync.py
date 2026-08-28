@@ -1,4 +1,8 @@
-"""Strictly synchronous Azure Blob operations for threading_mode='single'."""
+"""Strictly synchronous Azure Blob operations for threading_mode='single'.
+
+It opens Blob services on the caller thread and performs bounded metadata, listing,
+download, and upload operations with explicit ownership.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ class _AzureServiceOwner:
     """Retryable owner for one synchronous service client and credential."""
 
     def __init__(self) -> None:
+        """Create empty service and credential slots for retryable synchronous cleanup."""
         self.service: Any | None = None
         self.credential: Any | None = None
 
@@ -135,7 +140,7 @@ def download_file_with_service(
     iterator = iter(stream.chunks())
 
     def read(_size: int) -> bytes:
-        """Provide a deterministic test or worker helper."""
+        """Return the next Blob chunk, or empty bytes after iterator exhaustion."""
         try:
             return next(iterator)
         except StopIteration:

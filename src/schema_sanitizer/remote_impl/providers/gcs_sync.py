@@ -1,4 +1,8 @@
-"""Strictly synchronous Google Cloud Storage operations for single mode."""
+"""Strictly synchronous Google Cloud Storage operations for single mode.
+
+It performs GCS metadata, listing, download, and resumable upload entirely on the caller
+thread for strict single mode.
+"""
 
 from __future__ import annotations
 

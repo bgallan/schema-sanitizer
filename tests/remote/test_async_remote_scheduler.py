@@ -1,4 +1,8 @@
-"""Tests for async remote staging scheduler helpers."""
+"""Tests for async remote staging scheduler helpers.
+
+It covers retry classification, ordered and unordered windows, fixed workers,
+cancellation, queue shutdown, memory contracts, and iterable retention.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from schema_sanitizer.core_impl.async_scheduler import (
 
 
 def test_retry_async_retries_raised_operations() -> None:
+    """Verify retry async retries raised operations."""
 
     async def run() -> None:
         """Run the async retry scenario."""
@@ -39,6 +44,7 @@ def test_retry_async_retries_raised_operations() -> None:
 
 
 def test_ordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
+    """Verify ordered indexed results cancels prefetched tasks on failure."""
 
     async def run() -> None:
         """Run the async scheduler failure scenario."""
@@ -71,6 +77,7 @@ def test_ordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
 
 
 def test_unordered_indexed_results_uses_bounded_task_window() -> None:
+    """Verify unordered indexed results uses bounded task window."""
 
     async def run() -> None:
         """Run the unordered scheduler bounded-window scenario."""
@@ -115,6 +122,7 @@ def test_unordered_indexed_results_uses_bounded_task_window() -> None:
 
 
 def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
+    """Verify unordered indexed results cancels prefetched tasks on failure."""
 
     async def run() -> None:
         """Run the unordered scheduler failure scenario."""
@@ -149,6 +157,7 @@ def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None
 def test_unordered_indexed_results_reuses_fixed_worker_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify unordered indexed results reuses fixed worker tasks."""
 
     async def run() -> None:
         """Run a large trivial batch while counting task construction."""
@@ -259,11 +268,13 @@ def test_bounded_event_wait_propagates_external_task_cancellation() -> None:
         """Record the exact task that owns the underlying Event wait."""
 
         def __init__(self) -> None:
+            """Initialize observed event state for wait started and waiting task."""
             super().__init__()
             self.wait_started = asyncio.Event()
             self.waiting_task: asyncio.Task[object] | None = None
 
         async def wait(self) -> bool:
+            """Wait until the cancellation event is set."""
             self.waiting_task = asyncio.current_task()
             self.wait_started.set()
             return await super().wait()
@@ -386,11 +397,13 @@ def test_drain_ordered_iterable_results_materializes_only_one_window() -> None:
     """Large iterables retain only O(window) unconsumed references."""
 
     async def run() -> None:
+        """Drain the bounded iterable while tracking producer-consumer distance."""
         produced = 0
         consumed = 0
         max_ahead = 0
 
         def values():
+            """Return the scheduler values consumed by the worker pool."""
             nonlocal produced, max_ahead
             for value in range(100):
                 produced += 1
@@ -398,6 +411,7 @@ def test_drain_ordered_iterable_results_materializes_only_one_window() -> None:
                 yield value
 
         async def fetch(value: int) -> None:
+            """Fetch one scheduler value while recording active concurrency."""
             nonlocal consumed
             await asyncio.sleep(0)
             consumed += 1

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate the package version and manual PyPI release controls."""
+"""Validate the package version and manual PyPI release controls.
+
+It validates package and requested versions, reads manual-workflow inputs, and requires
+explicit publication confirmation.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,6 @@
-"""Regression coverage for registry metadata-stream memory-limit propagation."""
+"""Ensures that registry wrappers preserve the caller's explicit memory limit through
+public Parquet conversion. Metadata budgeting and conversion atomicity share the same
+operation boundary, preventing generated schemas from escaping the budget."""
 
 from __future__ import annotations
 

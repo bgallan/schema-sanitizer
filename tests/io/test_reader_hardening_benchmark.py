@@ -1,4 +1,8 @@
-"""Smoke coverage for the isolated reader hardening A/B benchmark."""
+"""Smoke coverage for the isolated reader hardening A/B benchmark.
+
+It validates isolated cross-tree benchmark execution and enforces the reviewed release
+evidence budget.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,7 @@
-"""Regression coverage for memory json scanners share a finite nesting budget."""
+"""Applies a shared finite nesting ceiling to Python and native JSON scanners, compaction,
+configured inference depth, schema-decision caches, and CSV projection. Excessive depth
+fails without stack exhaustion or unbounded key retention, while documents below the
+ceiling still round-trip."""
 
 from __future__ import annotations
 
@@ -93,9 +96,11 @@ def test_schema_decision_cache_bounds_retained_key_bytes() -> None:
         """Helper class used by this regression."""
 
         def __init__(self, text: str) -> None:
+            """Initialize the fake schema test double."""
             self.text = text
 
         def to_string(self, **_kwargs: object) -> str:
+            """Render the fake schema through its string conversion path."""
             return self.text
 
     cache = SchemaDecisionCache(max_size=8, max_key_bytes=16)

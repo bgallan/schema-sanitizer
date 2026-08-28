@@ -1,4 +1,8 @@
-"""Component-safe path handling for recursive Parquet layouts."""
+"""Component-safe path handling for recursive Parquet layouts.
+
+It validates component vectors, creates unambiguous diagnostic keys, and appends nested
+path segments without string-splitting errors.
+"""
 
 from __future__ import annotations
 

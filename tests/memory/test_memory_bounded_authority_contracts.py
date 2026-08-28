@@ -1,4 +1,7 @@
-"""Bounded authority, escrow, and transactional publication contracts."""
+"""Collects exact-authority contracts for escrow publication, transfer rollback,
+process-resource shrink, retry charges, fork banks, conversion pairs, and cross-process
+resize. Every capability is reserved before visibility, rolled back from preallocated
+state, and represented by bounded registries rather than growable cleanup structures."""
 
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_ephemeral_reserved_escrow_is_not_rooted_by_at_fork_registry() -> None:
+    """Verify ephemeral reserved escrow is not rooted by at fork registry."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow = ReservedFinalizerEscrow(2)
@@ -24,6 +28,7 @@ def test_ephemeral_reserved_escrow_is_not_rooted_by_at_fork_registry() -> None:
 
 
 def test_atomic_epoch_is_exact_under_concurrent_publishers() -> None:
+    """Verify atomic epoch is exact under concurrent publishers."""
     from schema_sanitizer.core_impl.atomic_epoch import AtomicEpoch
 
     counter = AtomicEpoch()
@@ -41,6 +46,7 @@ def test_atomic_epoch_is_exact_under_concurrent_publishers() -> None:
 
 
 def test_reserved_owner_activity_is_published_before_slot_visibility() -> None:
+    """Verify reserved owner activity is published before slot visibility."""
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
     start = source.index(
         "    def reserve_ticket(self)", source.index("class ReservedFinalizerEscrow")
@@ -53,6 +59,7 @@ def test_reserved_owner_activity_is_published_before_slot_visibility() -> None:
 
 
 def test_transfer_stage_rolls_back_every_failure_after_ticket_reservation() -> None:
+    """Verify transfer stage rolls back every failure after ticket reservation."""
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     start = source.index("    def transfer_stage(self")
     end = source.index("\n    def ", start + 8)
@@ -68,6 +75,7 @@ def test_transfer_stage_rolls_back_every_failure_after_ticket_reservation() -> N
 
 
 def test_process_resource_release_and_shrink_prepare_before_capability_commit() -> None:
+    """Verify process resource release and shrink prepare before capability commit."""
     source = (ROOT / "src/schema_sanitizer/core_impl/process_resources.py").read_text()
     release_start = source.index("    def _release_lease_entry")
     release_end = source.index("\n    def ", release_start + 8)
@@ -80,6 +88,7 @@ def test_process_resource_release_and_shrink_prepare_before_capability_commit() 
 
 
 def test_retry_subsystem_charge_rolls_back_partial_mapping_and_ticket() -> None:
+    """Verify retry subsystem charge rolls back partial mapping and ticket."""
     source = (ROOT / "src/schema_sanitizer/core_impl/retry_scheduler.py").read_text()
     start = source.index("    def _add_subsystem_charge_locked")
     end = source.index("\n    @staticmethod", start)
@@ -92,26 +101,32 @@ def test_retry_subsystem_charge_rolls_back_partial_mapping_and_ticket() -> None:
 def test_required_memory_is_acquired_before_thread_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify required memory is acquired before thread fallback."""
     from schema_sanitizer.core_impl import memory_budget as module
     from schema_sanitizer.core_impl import process_resources
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
     class Lease:
         def __init__(self, owner: "Ledger") -> None:
+            """Initialize the lease test double."""
             self.owner = owner
 
         def resize(self, amount: int) -> None:
+            """Resize the resource represented by the lease test double."""
             self.owner.resizes.append(amount)
 
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             pass
 
     class Ledger:
         def __init__(self) -> None:
+            """Initialize the ledger test double."""
             self.calls: list[int] = []
             self.resizes: list[int] = []
 
         def acquire(self, amount: int, *, stage: str):
+            """Acquire the resource represented by the ledger test double."""
             self.calls.append(amount)
             return Lease(self)
 
@@ -120,6 +135,7 @@ def test_required_memory_is_acquired_before_thread_fallback(
     monkeypatch.setattr(module, "current_operation_memory_ledger", lambda: ledger)
 
     def fail_threads(*_a, **_k):
+        """Raise the deliberate failure during threads."""
         raise SchemaSanitizerResourceError("threads exhausted")
 
     monkeypatch.setattr(process_resources, "acquire_project_threads", fail_threads)
@@ -182,6 +198,7 @@ def test_bounded_authority_source_contract(contract: SourceContract) -> None:
 
 
 def test_cross_process_constructor_is_terminal_safe_before_finalizer_ticket() -> None:
+    """Verify cross process constructor is terminal safe before finalizer ticket."""
     source = (ROOT / "src/schema_sanitizer/core_impl/cross_process_memory.py").read_text()
     start = source.index("class CrossProcessMemoryLease")
     init = source.index("    def __init__", start)
@@ -197,6 +214,7 @@ def test_cross_process_constructor_is_terminal_safe_before_finalizer_ticket() ->
 
 
 def test_finalizer_freeze_builds_complete_view_before_publication() -> None:
+    """Verify finalizer freeze builds complete view before publication."""
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_registry.py").read_text()
     start = source.index("def freeze_finalizer_registry")
     end = source.index("\ndef ", start + 5)
@@ -206,6 +224,7 @@ def test_finalizer_freeze_builds_complete_view_before_publication() -> None:
 
 
 def test_static_registration_computes_total_before_publish_and_rolls_back_shadow_failure() -> None:
+    """Verify static registration computes total before publish and rolls back shadow failure."""
     source = (ROOT / "src/schema_sanitizer/core_impl/static_control_plane.py").read_text()
     start = source.index("def reserve_static_control_plane")
     end = source.index("\ndef rollback_static_control_plane", start)
@@ -216,6 +235,7 @@ def test_static_registration_computes_total_before_publish_and_rolls_back_shadow
 
 
 def test_resident_snapshot_is_pure_and_admission_serialized() -> None:
+    """Verify resident snapshot is pure and admission serialized."""
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     start = source.index("def process_resident_memory_snapshot")
     end = source.index("\ndef ", start + 5)
@@ -225,6 +245,7 @@ def test_resident_snapshot_is_pure_and_admission_serialized() -> None:
 
 
 def test_control_plane_release_recycles_token_without_growable_append() -> None:
+    """Verify control plane release recycles token without growable append."""
     source = (ROOT / "src/schema_sanitizer/core_impl/control_plane_budget.py").read_text()
     release_start = source.index(
         "    def _release_capability(", source.index("class _ProcessControlPlaneBudget")
@@ -236,6 +257,7 @@ def test_control_plane_release_recycles_token_without_growable_append() -> None:
 
 
 def test_registry_and_sequence_caps_are_explicit() -> None:
+    """Verify registry and sequence caps are explicit."""
     finalizers = (ROOT / "src/schema_sanitizer/core_impl/finalizer_registry.py").read_text()
     shutdown = (ROOT / "src/schema_sanitizer/core_impl/shutdown_observers.py").read_text()
     contracts = (ROOT / "src/schema_sanitizer/core_impl/concurrency_contracts.py").read_text()
@@ -250,6 +272,7 @@ def test_registry_and_sequence_caps_are_explicit() -> None:
 
 
 def test_fork_manager_is_single_bounded_dispatch_registry_for_static_escrows() -> None:
+    """Verify fork manager is single bounded dispatch registry for static escrows."""
     manager = (ROOT / "src/schema_sanitizer/core_impl/fork_manager.py").read_text()
     escrow = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
     assert "_MAX_FORK_HANDLERS" in manager
@@ -259,6 +282,7 @@ def test_fork_manager_is_single_bounded_dispatch_registry_for_static_escrows() -
 
 
 def test_janitor_child_reset_uses_prepared_bank_not_new_sync_objects() -> None:
+    """Verify janitor child reset uses prepared bank not new sync objects."""
     source = (ROOT / "src/schema_sanitizer/core_impl/temporary_janitor.py").read_text()
     start = source.index("    def reset_after_fork(self)")
     end = source.index("\n\n_JANITOR =", start)
@@ -270,6 +294,7 @@ def test_janitor_child_reset_uses_prepared_bank_not_new_sync_objects() -> None:
 
 
 def test_real_public_conversion_entrypoints_use_exact_pair_admission_scope() -> None:
+    """Verify real public conversion entrypoints use exact pair admission scope."""
     converter = (ROOT / "src/schema_sanitizer/api_impl/file_conversion/converters.py").read_text()
     analytical = (ROOT / "src/schema_sanitizer/api_impl/analytical.py").read_text()
     for source in (converter, analytical):
@@ -280,6 +305,7 @@ def test_real_public_conversion_entrypoints_use_exact_pair_admission_scope() -> 
 
 
 def test_all_56_pairs_use_the_exact_production_pair_admission_when_native_available() -> None:
+    """Verify all 56 pairs use the exact production pair admission when native available."""
     from types import ModuleType
 
     from schema_sanitizer.core_impl.native_runtime import native_core
@@ -314,12 +340,15 @@ def test_all_56_pairs_use_the_exact_production_pair_admission_when_native_availa
 
 
 def test_callable_contract_distinguishes_defaults_and_captured_owner_identity() -> None:
+    """Verify callable contract distinguishes defaults and captured owner identity."""
     from schema_sanitizer.core_impl.callable_contract import callable_contract
 
     def default_one(value: int = 1) -> int:
+        """Return the first default callback value."""
         return value
 
     def default_two(value: int = 2) -> int:
+        """Return the second default callback value."""
         return value
 
     assert callable_contract(default_one) != callable_contract(default_two)
@@ -328,7 +357,10 @@ def test_callable_contract_distinguishes_defaults_and_captured_owner_identity() 
         pass
 
     def make(owner: Owner):
+        """Construct the callback retained by the bounded-authority check."""
+
         def callback() -> object:
+            """Return the owner captured by this callback closure."""
             return owner
 
         return callback
@@ -337,6 +369,7 @@ def test_callable_contract_distinguishes_defaults_and_captured_owner_identity() 
 
 
 def test_static_escrow_footprint_is_reserved_before_allocating_slot_banks() -> None:
+    """Verify static escrow footprint is reserved before allocating slot banks."""
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
     start = source.index(
         "    def __init__(self, capacity: int, *, static_kind",
@@ -353,6 +386,7 @@ def test_static_escrow_footprint_is_reserved_before_allocating_slot_banks() -> N
 
 
 def test_production_pair_boundary_releases_base_credit_before_result_diagnostics() -> None:
+    """Verify production pair boundary releases base credit before result diagnostics."""
     for relative in (
         "src/schema_sanitizer/api_impl/file_conversion/converters.py",
         "src/schema_sanitizer/api_impl/analytical.py",
@@ -365,6 +399,7 @@ def test_production_pair_boundary_releases_base_credit_before_result_diagnostics
 
 
 def test_cross_process_resize_commits_host_state_into_preallocated_mutable_entry() -> None:
+    """Verify cross process resize commits host state into preallocated mutable entry."""
     source = (ROOT / "src/schema_sanitizer/core_impl/cross_process_memory.py").read_text()
     start = source.index("    def resize(self", source.index("class CrossProcessMemoryLease"))
     end = source.index("\n    def ", start + 8)

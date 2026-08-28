@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate release archives from a downstream-consumer perspective."""
+"""Validate release archives from a downstream-consumer perspective.
+
+It inspects wheel and source archives for required files, safe paths, deterministic
+timestamps, metadata identity, and scratch artifacts.
+"""
 
 from __future__ import annotations
 

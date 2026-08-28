@@ -1,4 +1,8 @@
-"""Wake, park, and one-shot initialization contracts for the operation arena."""
+"""Exercise wake, park, and one-shot worker initialization in the operation arena.
+
+Epoch sampling stays at park boundaries, targeted generations remain cache-aligned, running-target
+coalescing preserves helper wakes, and native mixed lanes drain exactly through repeated waves.
+"""
 
 from __future__ import annotations
 

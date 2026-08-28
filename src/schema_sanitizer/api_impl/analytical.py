@@ -1,4 +1,8 @@
-"""Public and internal in-memory analytical conversion."""
+"""Public and internal in-memory analytical conversion.
+
+It prepares inputs and source plans, executes native registry streams, and adapts the
+owned Arrow result to PyArrow, pandas, Polars, or DuckDB.
+"""
 
 from __future__ import annotations
 
@@ -307,6 +311,7 @@ def convert_analytical_with_options(
         cleanup_error: BaseException | None = None
 
         def record_cleanup_failure(label: str, exc: BaseException) -> None:
+            """Record one bounded cleanup failure in result diagnostics."""
             nonlocal cleanup_error
             if primary is not None:
                 add_bounded_note(primary, label, exc)

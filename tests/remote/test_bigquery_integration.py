@@ -1,4 +1,8 @@
-"""BigQuery integration tests."""
+"""BigQuery integration tests.
+
+It validates external-table DDL, nested and canonical schemas, Hive collisions, registry
+queries, sidecars, client ownership, and namespace configuration.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ def _pyarrow():
 
 
 def test_bigquery_integration_builds_external_table_ddl() -> None:
+    """Verify BigQuery integration builds external table DDL."""
     pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
@@ -42,6 +47,7 @@ def test_bigquery_integration_builds_external_table_ddl() -> None:
 
 
 def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> None:
+    """Verify BigQuery external table DDL can sort nested fields alphabetically."""
     pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
@@ -196,6 +202,7 @@ def test_bigquery_namespace_uses_requested_parquet_reference_file(monkeypatch) -
 def test_bigquery_external_table_ddl_keeps_etl_columns_last(
     sort_fields_alphabetically: bool,
 ) -> None:
+    """Verify BigQuery external table DDL keeps etl columns last."""
     pa = _pyarrow()
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
@@ -237,6 +244,7 @@ def test_bigquery_external_table_ddl_keeps_etl_columns_last(
 
 
 def test_bigquery_registry_sidecar_partition_queries() -> None:
+    """Verify BigQuery registry sidecar partition queries."""
     from schema_sanitizer.integrations.bigquery.advanced import (
         BigQueryTableRef,
         latest_schema_registry_query,
@@ -282,6 +290,7 @@ def test_bigquery_registry_sidecar_partition_queries() -> None:
 
 
 def test_bigquery_registry_sidecar_fetch_fast_path_and_missing_fallback(caplog) -> None:
+    """Verify BigQuery registry sidecar fetch fast path and missing fallback."""
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
         fetch_latest_schema_registry,
@@ -291,16 +300,20 @@ def test_bigquery_registry_sidecar_fetch_fast_path_and_missing_fallback(caplog) 
         """Minimal cursor returning configured BigQuery query results."""
 
         def __init__(self, dbapi):
+            """Initialize fake cursor state for dbapi and result."""
             self._dbapi = dbapi
             self._result = None
 
         def __enter__(self):
+            """Return the managed fake cursor value from context entry."""
             return self
 
         def __exit__(self, _exc_type, _exc, _tb):
+            """Finalize the fake cursor context without suppressing exceptions."""
             return False
 
         def execute(self, query):
+            """Record the submitted SQL statement and return the recording cursor."""
             self._dbapi.queries.append(query)
             if "INFORMATION_SCHEMA.TABLES" in query:
                 self._result = self._dbapi.table_type
@@ -312,6 +325,7 @@ def test_bigquery_registry_sidecar_fetch_fast_path_and_missing_fallback(caplog) 
                 self._result = '{"schema_generation":2,"canonical_schema":{}}'
 
         def fetchone(self):
+            """Return the configured single-row database result."""
             if self._result is None:
                 return None
             return (self._result,)
@@ -320,26 +334,32 @@ def test_bigquery_registry_sidecar_fetch_fast_path_and_missing_fallback(caplog) 
         """Minimal connection returning fake cursors."""
 
         def __init__(self, dbapi):
+            """Initialize fake connection state for dbapi."""
             self._dbapi = dbapi
 
         def __enter__(self):
+            """Return the managed fake connection value from context entry."""
             return self
 
         def __exit__(self, _exc_type, _exc, _tb):
+            """Finalize the fake connection context without suppressing exceptions."""
             return False
 
         def cursor(self):
+            """Return the recording database cursor used by this scenario."""
             return FakeCursor(self._dbapi)
 
     class FakeDbapi:
         """Minimal DB-API facade for sidecar fetch tests."""
 
         def __init__(self, *, table_type, sidecar_partition):
+            """Initialize fake dbapi state for table type, sidecar partition, and queries."""
             self.table_type = table_type
             self.sidecar_partition = sidecar_partition
             self.queries = []
 
         def connect(self, *, db_kwargs):
+            """Return the configured recording database connection."""
             assert db_kwargs == {"project": "project"}
             return FakeConnection(self)
 
@@ -393,6 +413,7 @@ def test_bigquery_registry_sidecar_fetch_fast_path_and_missing_fallback(caplog) 
 
 
 def test_bigquery_registry_sidecar_update_logs_create_and_upsert(caplog) -> None:
+    """Verify BigQuery registry sidecar update logs create and upsert."""
     from schema_sanitizer.integrations.bigquery import (
         BigQueryTableRef,
         update_registry_sidecar_table,
@@ -402,16 +423,20 @@ def test_bigquery_registry_sidecar_update_logs_create_and_upsert(caplog) -> None
         """Minimal cursor for sidecar update logging tests."""
 
         def __init__(self, dbapi):
+            """Initialize fake cursor state for dbapi and result."""
             self._dbapi = dbapi
             self._result = None
 
         def __enter__(self):
+            """Return the managed fake cursor value from context entry."""
             return self
 
         def __exit__(self, _exc_type, _exc, _tb):
+            """Finalize the fake cursor context without suppressing exceptions."""
             return False
 
         def execute(self, query):
+            """Record the submitted SQL statement and return the recording cursor."""
             self._dbapi.queries.append(query)
             if "INFORMATION_SCHEMA.TABLES" in query:
                 self._result = self._dbapi.table_type
@@ -419,6 +444,7 @@ def test_bigquery_registry_sidecar_update_logs_create_and_upsert(caplog) -> None
                 self._result = None
 
         def fetchone(self):
+            """Return the configured single-row database result."""
             if self._result is None:
                 return None
             return (self._result,)
@@ -427,25 +453,31 @@ def test_bigquery_registry_sidecar_update_logs_create_and_upsert(caplog) -> None
         """Minimal fake BigQuery connection."""
 
         def __init__(self, dbapi):
+            """Initialize fake connection state for dbapi."""
             self._dbapi = dbapi
 
         def __enter__(self):
+            """Return the managed fake connection value from context entry."""
             return self
 
         def __exit__(self, _exc_type, _exc, _tb):
+            """Finalize the fake connection context without suppressing exceptions."""
             return False
 
         def cursor(self):
+            """Return the recording database cursor used by this scenario."""
             return FakeCursor(self._dbapi)
 
     class FakeDbapi:
         """Minimal DB-API facade for sidecar update tests."""
 
         def __init__(self, table_type):
+            """Initialize fake dbapi state for table type and queries."""
             self.table_type = table_type
             self.queries = []
 
         def connect(self, *, db_kwargs):
+            """Return the configured recording database connection."""
             assert db_kwargs == {"project": "project"}
             return FakeConnection(self)
 
@@ -507,6 +539,7 @@ def test_external_table_spec_resolves_partition_location_once(
     original = external_table_owner.external_table_hive_uri_prefix
 
     def counted_prefix(**kwargs: object) -> str:
+        """Return a prefix object that records string coercion."""
         nonlocal calls
         calls += 1
         return original(**kwargs)

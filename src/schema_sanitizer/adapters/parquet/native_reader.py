@@ -1,4 +1,8 @@
-"""Native Parquet reader preflight, contracts, and stream opening."""
+"""Native Parquet reader preflight, contracts, and stream opening.
+
+It inspects footer, writer, projection, schema, and memory evidence to plan and open a
+native Arrow stream or report a precise decline.
+"""
 
 from __future__ import annotations
 

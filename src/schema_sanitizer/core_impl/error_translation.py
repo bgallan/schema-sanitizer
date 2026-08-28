@@ -1,4 +1,8 @@
-"""Translate native execution failures to public schema-sanitizer errors."""
+"""Translate native execution failures into public schema-sanitizer errors.
+
+Reader context and native detail payloads are decoded and mapped to stable exception classes
+without leaking ABI-specific failure shapes through the public API.
+"""
 
 from __future__ import annotations
 

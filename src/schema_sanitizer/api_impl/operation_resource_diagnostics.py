@@ -1,4 +1,8 @@
-"""Composition of cross-resource operation diagnostic snapshots."""
+"""Composition of cross-resource operation diagnostic snapshots.
+
+It merges memory, storage, descriptor, external-runtime, remote-permit, and provider
+snapshots into one operation diagnostic record.
+"""
 
 from __future__ import annotations
 

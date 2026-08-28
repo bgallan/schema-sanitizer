@@ -1,4 +1,8 @@
-"""Validation coverage for dynamic and fixed generated timestamp columns."""
+"""Validation coverage for dynamic and fixed generated timestamp columns.
+
+It validates ordering, integer requirements, int64 bounds, and sequence handling for
+fixed and dynamically generated timestamp columns.
+"""
 
 from __future__ import annotations
 

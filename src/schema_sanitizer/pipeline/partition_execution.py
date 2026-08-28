@@ -1,4 +1,8 @@
-"""Partition conversion loop, registry state, and result models."""
+"""Partition conversion loop, registry state, and result models.
+
+It runs partitions in order, carries schema registry state, invokes callbacks, and
+aggregates per-partition diagnostics into the final result.
+"""
 
 from __future__ import annotations
 

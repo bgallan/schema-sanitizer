@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run evidence-driven concurrency scaling with fixed CPU/NUMA placement."""
+"""Run evidence-driven concurrency scaling with fixed CPU/NUMA placement.
+
+The command validates CPU and NUMA placement, creates workloads, checks host readiness,
+and writes the parent evidence report.
+"""
 
 from __future__ import annotations
 

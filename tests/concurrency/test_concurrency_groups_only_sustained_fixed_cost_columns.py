@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency groups only sustained fixed cost columns."""
+"""Constrain column grouping to sustained fixed-cost materialization work.
+
+Grouped ranges must preserve column order under one shared budget, and fixed-wide Parquet output
+must remain byte-identical between single- and multi-worker execution.
+"""
 
 from __future__ import annotations
 

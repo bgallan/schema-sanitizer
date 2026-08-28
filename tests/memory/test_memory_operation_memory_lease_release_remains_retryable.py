@@ -1,4 +1,8 @@
-"""Regression coverage for memory operation memory lease release remains retryable."""
+"""Combines retryable directory-metadata close with remote owners, temporary-device pools,
+process checks, shutdown-safe finalizers, keepalive chains, duplicate-URI defense,
+compact session plans, and source manifests. Owners are constructed before capacity
+commits, failed attributes stay rooted, device admissions remain isolated, and bounded
+manifests avoid full reference snapshots."""
 
 from __future__ import annotations
 
@@ -16,11 +20,13 @@ class _RetryingMemoryOwner:
     """Minimal exact memory lease with injectable resize/close failures."""
 
     def __init__(self, failures: int = 0) -> None:
+        """Initialize the retrying memory owner test double."""
         self.failures = failures
         self.reserved = 0
         self.resize_calls: list[int] = []
 
     def resize(self, amount: int) -> None:
+        """Resize the resource represented by the retrying memory owner test double."""
         self.resize_calls.append(amount)
         if self.failures:
             self.failures -= 1
@@ -28,6 +34,7 @@ class _RetryingMemoryOwner:
         self.reserved = amount
 
     def close(self) -> None:
+        """Close the resources owned by the retrying memory owner test double."""
         self.resize(0)
 
 
@@ -125,6 +132,7 @@ def test_process_resource_owner_is_built_before_capacity_commit(
         """Test double used by operation-memory-lease-release-remains-retryable hardening regressions."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the broken lease test double."""
             raise MemoryError("owner allocation failed")
 
     monkeypatch.setattr(module, "_Lease", BrokenLease)
@@ -150,6 +158,7 @@ def test_remote_submission_owner_is_built_before_accounting(
         """Test double used by operation-memory-lease-release-remains-retryable hardening regressions."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the broken reservation test double."""
             raise MemoryError("submission owner failed")
 
     monkeypatch.setattr(module, "RemoteIoSubmissionReservation", BrokenReservation)
@@ -170,6 +179,7 @@ def test_remote_capacity_owner_is_built_before_registration(
         """Test double used by operation-memory-lease-release-remains-retryable hardening regressions."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the broken registration test double."""
             raise MemoryError("capacity owner failed")
 
     monkeypatch.setattr(module, "RemoteIoCapacityRegistration", BrokenRegistration)
@@ -192,6 +202,7 @@ def test_remote_permit_owner_failure_reclaims_grant(
         """Test double used by operation-memory-lease-release-remains-retryable hardening regressions."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the broken permit test double."""
             raise MemoryError("permit owner failed")
 
     monkeypatch.setattr(module, "RemoteIoPermit", BrokenPermit)
@@ -409,6 +420,7 @@ def test_temporary_lease_finalizer_skips_interpreter_shutdown(
     calls = 0
 
     def release(active_lease: object) -> None:
+        """Release the resource at the synchronization point under test."""
         nonlocal calls
         calls += 1
         original_release(active_lease)
@@ -426,10 +438,12 @@ class _RetryingClose:
     """Inject one cleanup failure before succeeding."""
 
     def __init__(self, failures: int = 1) -> None:
+        """Initialize the retrying close test double."""
         self.failures = failures
         self.calls = 0
 
     def close(self) -> None:
+        """Close the resources owned by the retrying close test double."""
         self.calls += 1
         if self.failures:
             self.failures -= 1
@@ -591,6 +605,7 @@ def test_temporary_pool_admission_isolated_across_devices(
 
         @staticmethod
         def filesystem(path: object) -> tuple[int, Path, int]:
+            """Map paths ending in 'a' to device one and all others to device two."""
             device = 1 if str(path).endswith("a") else 2
             return device, Path(str(path)), 1 << 30
 
@@ -602,6 +617,7 @@ def test_temporary_pool_admission_isolated_across_devices(
             label: str,
             inode_count: int,
         ) -> object:
+            """Block device-one admission, then return its storage capability."""
             del label
             device = 1 if str(path).endswith("a") else 2
             if device == 1:
@@ -615,6 +631,7 @@ def test_temporary_pool_admission_isolated_across_devices(
             )
 
         def release_capability(self, capability: Any) -> bool:
+            """Release the cleanup capability and record the call."""
             capability.active = False
             return True
 
@@ -652,10 +669,12 @@ def test_temporary_pool_close_waits_for_started_admission(
 
         @staticmethod
         def filesystem(_path: object) -> tuple[int, Path, int]:
+            """Return the controlled filesystem-capacity sample."""
             return 1, tmp_path, 1 << 30
 
         @staticmethod
         def reserve_capability(amount: int, **kwargs: object) -> object:
+            """Signal reservation start, wait for release, and return its capability."""
             entered.set()
             assert unblock.wait(timeout=2.0)
             return SimpleNamespace(
@@ -666,6 +685,7 @@ def test_temporary_pool_close_waits_for_started_admission(
             )
 
         def release_capability(self, capability: Any) -> bool:
+            """Release the cleanup capability and record the call."""
             capability.active = False
             return True
 
@@ -675,6 +695,7 @@ def test_temporary_pool_close_waits_for_started_admission(
 
     class TrackingCondition(threading.Condition):
         def wait(self, timeout: float | None = None) -> bool:
+            """Wait for the tracking condition test double to reach its terminal state."""
             close_wait_entered.set()
             return super().wait(timeout)
 
@@ -718,6 +739,7 @@ def test_sync_directory_session_retains_only_compact_provider_plan() -> None:
         """Test double used by operation-memory-lease-release-remains-retryable hardening regressions."""
 
         def __init__(self, uri: str) -> None:
+            """Initialize the file ref test double."""
             self.uri = uri
 
     files = [FileRef(f"s3://bucket/path/{index}.csv") for index in range(512)]

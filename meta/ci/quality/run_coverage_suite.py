@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run one centrally declared Python or native coverage suite."""
+"""Run one centrally declared Python or native coverage suite.
+
+It resolves centrally declared test selections and launches the requested Python or
+native coverage workflow.
+"""
 
 from __future__ import annotations
 

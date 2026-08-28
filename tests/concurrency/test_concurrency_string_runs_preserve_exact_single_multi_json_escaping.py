@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency string runs preserve exact single multi json escaping."""
+"""Keep JSON string escaping exact across parallel string-run emission.
+
+The token writer must append maximal safe runs instead of visiting every byte individually, while
+single- and multi-worker outputs remain identical for all escaping boundaries.
+"""
 
 from __future__ import annotations
 

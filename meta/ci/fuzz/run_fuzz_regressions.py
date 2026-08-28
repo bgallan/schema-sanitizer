@@ -1,4 +1,8 @@
-"""Execute CI fuzz regressions and bounded deterministic campaigns."""
+"""Execute CI fuzz regressions and bounded deterministic campaigns.
+
+It resolves native fuzzers, stages promoted inputs, runs bounded regression and campaign
+modes, and records their outcomes.
+"""
 
 from __future__ import annotations
 

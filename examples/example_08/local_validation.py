@@ -1,4 +1,8 @@
-"""Local, infrastructure-free validation path for example 08."""
+"""Local, infrastructure-free validation path for example 08.
+
+It reads a local heterogeneous CSV directory, normalizes events, validates the
+analytical schema, and writes Hive Parquet.
+"""
 
 from __future__ import annotations
 

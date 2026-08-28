@@ -1,4 +1,8 @@
-"""Synthetic fixture writers used by local ingestion benchmarks."""
+"""Synthetic fixture writers used by local ingestion benchmarks.
+
+It writes deterministic JSON, CSV, XML, Parquet, directory, dirty-field, nested, and
+empty-container inputs.
+"""
 
 from __future__ import annotations
 

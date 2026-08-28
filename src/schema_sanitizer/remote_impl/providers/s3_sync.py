@@ -1,4 +1,8 @@
-"""Strictly synchronous Amazon S3 operations for threading_mode='single'."""
+"""Strictly synchronous Amazon S3 operations for threading_mode='single'.
+
+It opens an owned blocking client and performs S3 metadata, listing, download, and
+multipart publication without background transports.
+"""
 
 from __future__ import annotations
 
@@ -55,9 +59,11 @@ class _S3ClientOwner:
     """Retryable physical owner for one synchronous Botocore client."""
 
     def __init__(self) -> None:
+        """Create an empty slot for the blocking Botocore client."""
         self.client: Any | None = None
 
     def close(self) -> None:
+        """Physically close the Botocore client before clearing its authoritative slot."""
         client = self.client
         if client is None:
             return

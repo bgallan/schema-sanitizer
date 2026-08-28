@@ -1,4 +1,8 @@
-"""Regression tests for bounded-memory native execution paths."""
+"""Measures memory-saving reader paths across native Parquet restreaming and slicing,
+coalescer preflight, footer diagnostics, provider descriptors, generator spooling, XML
+mapping, Arrow direct bounds, and hardening counters. Every format streams or slices
+within actual retained capacity, avoiding whole-dataset descriptors, row groups, pages,
+or batch barriers."""
 
 from __future__ import annotations
 

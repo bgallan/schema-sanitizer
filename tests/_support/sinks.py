@@ -1,4 +1,8 @@
-"""Shared fixtures and normalization helpers for sink tests."""
+"""Create inputs and normalize outputs shared by sink tests.
+
+The helpers preserve logical rows and files while excluding only generated metadata from
+cross-sink comparisons.
+"""
 
 from __future__ import annotations
 
@@ -58,9 +62,11 @@ class PythonStreamSinkPool:
     """Return one configured streaming sink from the execution-context API."""
 
     def __init__(self, output: object) -> None:
+        """Initialize the Python stream sink pool test double."""
         self.output = output
 
     def get(self) -> object:
+        """Return a context that routes Python rows to the configured stream output."""
         output = self.output
 
         class Context:
@@ -73,6 +79,7 @@ class PythonStreamSinkPool:
                 format: object,
                 source: object,
             ) -> object:
+                """Validate the Python stream route and return the configured output."""
                 assert data is not None
                 assert (sink, options, format, source) == (
                     "stream",
@@ -89,14 +96,17 @@ class SinkLifecycleRaw:
     """Count raw-stream closure calls while exposing diagnostics."""
 
     def __init__(self, diagnostics: object = None) -> None:
+        """Initialize the sink lifecycle raw test double."""
         self.diagnostics = diagnostics
         self.main_close_calls = 0
         self.close_calls = 0
 
     def close_main_stream(self) -> None:
+        """Close the primary stream while recording lifecycle calls."""
         self.main_close_calls += 1
 
     def close(self) -> None:
+        """Close the resources owned by the sink lifecycle raw test double."""
         self.close_calls += 1
 
 
@@ -109,17 +119,20 @@ class SinkLifecycleStream:
         *,
         close_error: BaseException | None = None,
     ) -> None:
+        """Initialize the sink lifecycle stream test double."""
         self.raw = raw
         self.close_error = close_error
         self.main_close_calls = 0
         self.close_calls = 0
 
     def close_main_stream(self) -> None:
+        """Close the primary stream while recording lifecycle calls."""
         self.main_close_calls += 1
         if self.raw is not None:
             self.raw.close_main_stream()
 
     def close(self) -> None:
+        """Close the resources owned by the sink lifecycle stream test double."""
         self.close_calls += 1
         if self.raw is not None:
             self.raw.close()
@@ -140,6 +153,7 @@ class SinkLifecycleOutput:
         cascade_close: bool = False,
         close_available: bool = True,
     ) -> None:
+        """Initialize the sink lifecycle output test double."""
         self._raw = raw
         self._stream = stream
         self.stream_error = stream_error
@@ -149,21 +163,25 @@ class SinkLifecycleOutput:
         self.close_calls = 0
 
     def __getattribute__(self, name: str) -> object:
+        """Hide close when unavailable, otherwise return the requested attribute."""
         if name == "close" and not object.__getattribute__(self, "close_available"):
             raise AttributeError(name)
         return object.__getattribute__(self, name)
 
     @property
     def raw(self) -> object:
+        """Return the raw stream owned by the sink output."""
         return self._raw
 
     @property
     def stream(self) -> object:
+        """Return the configured stream or raise its injected access error."""
         if self.stream_error is not None:
             raise self.stream_error
         return self._stream
 
     def close(self) -> None:
+        """Close the resources owned by the sink lifecycle output test double."""
         self.close_calls += 1
         if self.cascade_close:
             if self._stream is not None:
@@ -179,6 +197,7 @@ def skipped_rows_json_diagnostics(count: int) -> object:
 
     class Diagnostics:
         def to_json(self) -> str:
+            """Serialize the controlled diagnostics payload to JSON."""
             return f'{{"skipped_rows":{count}}}'
 
     return Diagnostics()

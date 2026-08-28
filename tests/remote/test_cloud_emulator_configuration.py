@@ -1,4 +1,8 @@
-"""Provider configuration tests without process-environment coupling."""
+"""Provider configuration tests without process-environment coupling.
+
+It checks S3, GCS, and Azure configuration, pagination, credentials, client reuse,
+bounded transfers, error classification, and canonical URIs.
+"""
 
 from __future__ import annotations
 
@@ -36,23 +40,28 @@ def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
         """Model aiohttp's response, whose read method accepts no size."""
 
         async def read(self) -> bytes:
+            """Read data from the in-memory transport at its current offset."""
             raise AssertionError("chunk reads must use the streaming-body wrapper")
 
     class StreamingBody:
         """Model aiobotocore's wrapper around an aiohttp response."""
 
         def __init__(self) -> None:
+            """Initialize streaming body state for chunks, read sizes, and exited."""
             self.chunks = [b"first", b"second", b""]
             self.read_sizes: list[int] = []
             self.exited = False
 
         async def __aenter__(self) -> RawResponse:
+            """Return the managed streaming body value from context entry."""
             return RawResponse()
 
         async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+            """Finalize the streaming body context without suppressing exceptions."""
             self.exited = True
 
         async def read(self, size: int) -> bytes:
+            """Read data from the in-memory transport at its current offset."""
             self.read_sizes.append(size)
             return self.chunks.pop(0)
 
@@ -62,6 +71,7 @@ def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
         """Return the streaming response for one S3 object."""
 
         async def get_object(self, **kwargs) -> dict[str, object]:
+            """Return the configured provider object and its streaming body."""
             assert kwargs == {"Bucket": "bucket", "Key": "input/data.json"}
             return {"Body": body}
 
@@ -96,19 +106,23 @@ def test_azure_uses_default_sdk_credential_chain(monkeypatch: pytest.MonkeyPatch
         """Record explicit credential cleanup."""
 
         def __init__(self) -> None:
+            """Initialize fake credential state for close calls."""
             self.close_calls = 0
 
         async def close(self) -> None:
+            """Close the fake credential and update close calls."""
             self.close_calls += 1
 
     class FakeService:
         """Record service construction and transport cleanup."""
 
         def __init__(self, *, account_url: str, credential: object) -> None:
+            """Initialize fake service state for close calls."""
             captured.update(account_url=account_url, credential=credential)
             self.close_calls = 0
 
         async def close(self) -> None:
+            """Close the fake service and update close calls."""
             self.close_calls += 1
 
     def fake_import(name: str) -> object:
@@ -161,25 +175,28 @@ def test_gcs_list_directory_retries_and_paginates(monkeypatch: pytest.MonkeyPatc
     ]
 
     class FakeSession:
-        """Provide a lightweight test double."""
+        """Serve the configured sequence of paginated GCS responses."""
 
         async def __aenter__(self):
+            """Return the managed fake session value from context entry."""
             return self
 
         async def __aexit__(self, _exc_type, _exc, _tb):
+            """Finalize the fake session context without suppressing exceptions."""
             return False
 
         def get(self, _url: str, *, params: dict[str, str]):
+            """Return the configured response for the requested provider object."""
             requests.append(dict(params))
             status, body = responses.pop(0)
             return _Response(status, body=body)
 
     async def fake_open_session(_headers, **_kwargs):
-        """Provide a test helper implementation."""
+        """Return the session containing the next paginated GCS response."""
         return FakeSession()
 
     async def no_sleep(_delay: float) -> None:
-        """Provide a test helper implementation."""
+        """Elide retry delays while preserving the retry sequence."""
         return None
 
     monkeypatch.setattr(gcs, "access_token", lambda: "token")
@@ -203,26 +220,29 @@ def test_gcs_permission_errors_do_not_retry(monkeypatch: pytest.MonkeyPatch) -> 
     attempts = 0
 
     class FakeSession:
-        """Provide a lightweight test double."""
+        """Return one permanent GCS permission failure and count requests."""
 
         async def __aenter__(self):
+            """Return the managed fake session value from context entry."""
             return self
 
         async def __aexit__(self, _exc_type, _exc, _tb):
+            """Finalize the fake session context without suppressing exceptions."""
             return False
 
         def get(self, _url: str, *, params: dict[str, str]):
+            """Return the configured response for the requested provider object."""
             del params
             nonlocal attempts
             attempts += 1
             return _Response(403, body="forbidden")
 
     async def fake_open_session(_headers, **_kwargs):
-        """Provide a test helper implementation."""
+        """Return the session that emits the permanent permission failure."""
         return FakeSession()
 
     async def fail_sleep(_delay: float) -> None:
-        """Provide a test helper implementation."""
+        """Fail if a permanent provider error enters retry backoff."""
         raise AssertionError("permission errors must not back off")
 
     monkeypatch.setattr(gcs, "access_token", lambda: "token")
@@ -241,18 +261,18 @@ def test_gcs_adc_scope_supports_pipeline_uploads(monkeypatch: pytest.MonkeyPatch
     captured: dict[str, object] = {}
 
     class Credentials:
-        """Provide a lightweight test double."""
+        """Represent a valid ADC credential with a fixed access token."""
 
         valid = True
         token = "token"
 
     def default(*, scopes: list[str]):
-        """Provide a test helper implementation."""
+        """Capture requested ADC scopes and return the fixed credential."""
         captured["scopes"] = scopes
         return Credentials(), "project"
 
     def fake_import(name: str):
-        """Provide a test helper implementation."""
+        """Resolve the minimal Google authentication modules used by the provider."""
         if name == "google.auth":
             return SimpleNamespace(default=default)
         if name == "google.auth.transport.requests":
@@ -276,14 +296,17 @@ def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path: Path
 
     class FakeStream:
         async def chunks(self):
+            """Yield the configured response body chunks."""
             yield b"payload"
 
     class FakeBlob:
         def __init__(self, container: str, blob: str) -> None:
+            """Initialize fake blob state for container and blob."""
             self.container = container
             self.blob = blob
 
         async def download_blob(self, *, max_concurrency: int = 1) -> FakeStream:
+            """Copy the configured Azure blob payload into the destination stream."""
             requested_concurrency.append(max_concurrency)
             downloaded.append((self.container, self.blob))
             return FakeStream()
@@ -292,14 +315,17 @@ def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path: Path
         closed = False
 
         def get_blob_client(self, container: str, blob: str) -> FakeBlob:
+            """Return the recording client for the requested Azure blob."""
             return FakeBlob(container, blob)
 
         async def close(self) -> None:
+            """Close the fake service and update closed."""
             self.closed = True
 
     service = FakeService()
 
     async def fake_open_service(ref: Any) -> FakeService:
+        """Open the configured Azure service while recording reuse."""
         opened.append(ref.account_url)
         return service
 
@@ -310,6 +336,7 @@ def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path: Path
     ]
 
     async def exercise() -> None:
+        """Download both blobs through one shared Azure provider context."""
         context = await directory_downloads.provider_client_for_downloads(files)
         assert context is not None
         for file in files:
@@ -338,6 +365,7 @@ def test_bulk_discovery_reuses_unique_uri_classifications(monkeypatch) -> None:
     }
 
     def fail_classification(_uri: str):
+        """Raise the classification error used to verify cleanup."""
         raise AssertionError("location classification must be reused")
 
     monkeypatch.setattr(source_discovery, "location_kind", fail_classification)

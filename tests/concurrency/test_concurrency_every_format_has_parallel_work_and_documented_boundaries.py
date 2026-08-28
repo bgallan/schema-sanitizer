@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency every format has parallel work and documented boundaries."""
+"""Prove that each public format has real parallel work and a documented execution boundary.
+
+JSON parsing covers worker deferral, adaptive flat-array packets, small-input fallback, and exact
+errors; adapter checks then enforce threading policy for pandas and multi-worker support for every
+public output.
+"""
 
 from __future__ import annotations
 
@@ -195,9 +200,11 @@ class _RecordingArrowTable:
     """Minimal Arrow-like table recording pandas conversion policy."""
 
     def __init__(self) -> None:
+        """Initialize the recording Arrow table test double."""
         self.calls: list[dict[str, object]] = []
 
     def to_pandas(self, **kwargs: object) -> object:
+        """Record pandas conversion options and return a placeholder frame."""
         self.calls.append(dict(kwargs))
         return object()
 
@@ -206,13 +213,16 @@ class _ConfigurableArrowRuntime:
     """PyArrow double exposing a verifiable process-global CPU pool width."""
 
     def __init__(self) -> None:
+        """Initialize the configurable Arrow runtime test double."""
         self._workers = 1
         self.configurations: list[int] = []
 
     def cpu_count(self) -> int:
+        """Return the controlled CPU count reported by the runtime."""
         return self._workers
 
     def set_cpu_count(self, workers: int) -> None:
+        """Record the CPU count selected by the controlled runtime."""
         self._workers = int(workers)
         self.configurations.append(self._workers)
 

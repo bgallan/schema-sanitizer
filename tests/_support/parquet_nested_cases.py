@@ -1,4 +1,8 @@
-"""Named native nested-Parquet cases shared by one parametrized runner."""
+"""Collect named nested-Parquet round-trip cases for the parametrized native runner.
+
+The cases exercise list, map, struct, null, and chained-child layouts through one shared runtime
+harness.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_map_struct_list_chain_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct with map struct list chain child."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -95,6 +100,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_struct_list_cha
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_map_child(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list struct with map child."""
     path = tmp_path / "native-list-struct-map-child.parquet"
     table = pa.table(
         {
@@ -129,6 +135,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_child(tmp_path:
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_map_list_child(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list struct with map list child."""
     path = tmp_path / "native-list-struct-map-list-child.parquet"
     table = pa.table(
         {
@@ -168,6 +175,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_list_child(tmp_
 def test_native_parquet_stream_materializes_list_struct_with_map_list_chain_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct with map list chain child."""
     path = tmp_path / "native-list-struct-map-list-chain-child.parquet"
     table = pa.table(
         {
@@ -207,6 +215,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_list_chain_chil
 def test_native_parquet_stream_materializes_list_struct_with_map_struct_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct with map struct child."""
     path = tmp_path / "native-list-struct-map-struct-child.parquet"
     value_type = pa.struct([pa.field("score", pa.int64()), pa.field("label", pa.string())])
     table = pa.table(
@@ -248,6 +257,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_struct_child(
 def test_native_parquet_stream_materializes_list_struct_with_map_struct_list_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct with map struct list child."""
     path = tmp_path / "native-list-struct-map-struct-list-child.parquet"
     value_type = pa.struct([pa.field("ids", pa.list_(pa.int64())), pa.field("label", pa.string())])
     table = pa.table(
@@ -293,6 +303,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_struct_list_chi
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_inner_list(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list struct with inner list."""
     path = tmp_path / "native-list-struct-inner-list.parquet"
     table = pa.table(
         {
@@ -328,6 +339,7 @@ def test_native_parquet_stream_materializes_list_struct_with_inner_list(tmp_path
 def test_native_parquet_stream_materializes_list_struct_with_inner_list_chain(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct with inner list chain."""
     path = tmp_path / "native-list-struct-inner-list-chain.parquet"
     table = pa.table(
         {
@@ -363,6 +375,7 @@ def test_native_parquet_stream_materializes_list_struct_with_inner_list_chain(
 def test_native_parquet_stream_materializes_list_struct_with_nested_struct_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct with nested struct child."""
     path = tmp_path / "native-list-struct-nested-struct-child.parquet"
     inner_type = pa.struct([pa.field("score", pa.int64()), pa.field("label", pa.string())])
     table = pa.table(
@@ -402,6 +415,7 @@ def test_native_parquet_stream_materializes_list_struct_with_nested_struct_child
 def test_native_parquet_stream_materializes_list_struct_nested_struct_list_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct nested struct list child."""
     path = tmp_path / "native-list-struct-nested-struct-list-child.parquet"
     inner_type = pa.struct([pa.field("ids", pa.list_(pa.int64())), pa.field("label", pa.string())])
     table = pa.table(
@@ -437,6 +451,7 @@ def test_native_parquet_stream_materializes_list_struct_nested_struct_list_child
 def test_native_parquet_stream_materializes_list_struct_nested_struct_list_chain_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list struct nested struct list chain child."""
     path = tmp_path / "native-list-struct-nested-struct-list-chain-child.parquet"
     inner_type = pa.struct(
         [pa.field("ids", pa.list_(pa.list_(pa.int64()))), pa.field("label", pa.string())]
@@ -475,6 +490,7 @@ def test_native_parquet_stream_materializes_list_struct_nested_struct_list_chain
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_struct_nested_struct_list_child(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes struct nested struct list child."""
     path = tmp_path / "native-struct-nested-struct-list-child.parquet"
     inner_type = pa.struct([pa.field("ids", pa.list_(pa.int64())), pa.field("label", pa.string())])
     outer_type = pa.struct([pa.field("inner", inner_type), pa.field("kind", pa.string())])
@@ -502,6 +518,7 @@ def test_native_parquet_stream_materializes_struct_nested_struct_list_child(tmp_
 def test_native_parquet_stream_materializes_struct_nested_struct_list_chain_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes struct nested struct list chain child."""
     path = tmp_path / "native-struct-nested-struct-list-chain-child.parquet"
     inner_type = pa.struct(
         [pa.field("groups", pa.list_(pa.list_(pa.int64()))), pa.field("label", pa.string())]
@@ -531,6 +548,7 @@ def test_native_parquet_stream_materializes_struct_nested_struct_list_chain_chil
 def test_native_parquet_stream_materializes_map_nested_struct_list_chain_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes map nested struct list chain values."""
     path = tmp_path / "native-map-nested-struct-list-chain-values.parquet"
     inner_type = pa.struct(
         [pa.field("groups", pa.list_(pa.list_(pa.int64()))), pa.field("label", pa.string())]
@@ -558,6 +576,7 @@ def test_native_parquet_stream_materializes_map_nested_struct_list_chain_values(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_list_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map list struct values."""
     path = tmp_path / "native-map-list-struct-values.parquet"
     element_type = pa.struct([pa.field("x", pa.int64()), pa.field("ys", pa.list_(pa.int64()))])
     table = pa.table(
@@ -582,6 +601,7 @@ def test_native_parquet_stream_materializes_map_list_struct_values(tmp_path: Pat
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_with_struct_list_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map with struct list values."""
     path = tmp_path / "native-map-struct-list-values.parquet"
     table = pa.table(
         {
@@ -618,6 +638,7 @@ def test_native_parquet_stream_materializes_map_with_struct_list_values(tmp_path
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_with_list_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map with list values."""
     path = tmp_path / "native-map-list-values.parquet"
     table = pa.table(
         {
@@ -643,6 +664,7 @@ def test_native_parquet_stream_materializes_map_with_list_values(tmp_path: Path)
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_with_list_chain_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map with list chain values."""
     path = tmp_path / "native-map-list-chain-values.parquet"
     table = pa.table(
         {
@@ -665,6 +687,7 @@ def test_native_parquet_stream_materializes_map_with_list_chain_values(tmp_path:
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_with_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map with struct values."""
     path = tmp_path / "native-map-struct-values.parquet"
     table = pa.table(
         {
@@ -695,6 +718,7 @@ def test_native_parquet_stream_materializes_map_with_struct_values(tmp_path: Pat
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_with_nested_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map with nested struct values."""
     path = tmp_path / "native-map-nested-struct-values.parquet"
     inner_type = pa.struct([pa.field("score", pa.int64()), pa.field("label", pa.string())])
     value_type = pa.struct([pa.field("inner", inner_type), pa.field("kind", pa.string())])
@@ -727,6 +751,7 @@ def test_native_parquet_stream_materializes_map_with_nested_struct_values(tmp_pa
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_nested_struct_list_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map nested struct list values."""
     path = tmp_path / "native-map-nested-struct-list-values.parquet"
     inner_type = pa.struct([pa.field("ids", pa.list_(pa.int64())), pa.field("label", pa.string())])
     value_type = pa.struct([pa.field("inner", inner_type), pa.field("kind", pa.string())])
@@ -754,6 +779,7 @@ def test_native_parquet_stream_materializes_map_nested_struct_list_values(tmp_pa
 def test_native_parquet_stream_materializes_map_with_struct_list_chain_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes map with struct list chain values."""
     path = tmp_path / "native-map-struct-list-chain-values.parquet"
     table = pa.table(
         {
@@ -795,6 +821,7 @@ def test_native_parquet_stream_materializes_map_with_struct_list_chain_values(
 def test_native_parquet_stream_materializes_list_map_nested_struct_list_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list map nested struct list values."""
     path = tmp_path / "native-list-map-nested-struct-list-values.parquet"
     inner_type = pa.struct([pa.field("ids", pa.list_(pa.int64())), pa.field("label", pa.string())])
     value_type = pa.struct([pa.field("inner", inner_type), pa.field("kind", pa.string())])
@@ -825,6 +852,7 @@ def test_native_parquet_stream_materializes_list_map_nested_struct_list_values(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_map_list_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list map list struct values."""
     path = tmp_path / "native-list-map-list-struct-values.parquet"
     element_type = pa.struct([pa.field("x", pa.int64()), pa.field("ys", pa.list_(pa.int64()))])
     table = pa.table(
@@ -848,6 +876,7 @@ def test_native_parquet_stream_materializes_list_map_list_struct_values(tmp_path
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_map_with_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list map with struct values."""
     path = tmp_path / "native-list-map-struct-values.parquet"
     table = pa.table(
         {
@@ -882,6 +911,7 @@ def test_native_parquet_stream_materializes_list_map_with_struct_values(tmp_path
 def test_native_parquet_stream_materializes_list_map_with_nested_struct_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list map with nested struct values."""
     path = tmp_path / "native-list-map-nested-struct-values.parquet"
     inner_type = pa.struct([pa.field("score", pa.int64()), pa.field("label", pa.string())])
     value_type = pa.struct([pa.field("inner", inner_type), pa.field("kind", pa.string())])
@@ -916,6 +946,7 @@ def test_native_parquet_stream_materializes_list_map_with_nested_struct_values(
 def test_native_parquet_stream_materializes_list_map_with_struct_list_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list map with struct list values."""
     path = tmp_path / "native-list-map-struct-list-values.parquet"
     table = pa.table(
         {
@@ -952,6 +983,7 @@ def test_native_parquet_stream_materializes_list_map_with_struct_list_values(
 def test_native_parquet_stream_materializes_list_map_with_struct_list_chain_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list map with struct list chain values."""
     path = tmp_path / "native-list-map-struct-list-chain-values.parquet"
     table = pa.table(
         {
@@ -989,6 +1021,7 @@ def test_native_parquet_stream_materializes_list_map_with_struct_list_chain_valu
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_list_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list list struct values."""
     path = tmp_path / "native-list-list-struct-values.parquet"
     struct_type = pa.struct([pa.field("x", pa.int64()), pa.field("ys", pa.list_(pa.int64()))])
     table = pa.table(
@@ -1011,6 +1044,7 @@ def test_native_parquet_stream_materializes_list_list_struct_values(tmp_path: Pa
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_deep_list_chain_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes deep list chain struct values."""
     path = tmp_path / "native-deep-list-chain-struct-values.parquet"
     struct_type = pa.struct([pa.field("x", pa.int64()), pa.field("name", pa.string())])
     item_type = pa.list_(pa.list_(pa.list_(pa.list_(struct_type))))
@@ -1035,6 +1069,7 @@ def test_native_parquet_stream_materializes_deep_list_chain_struct_values(tmp_pa
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_deeper_map_list_recursion(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes deeper map list recursion."""
     map_int_type = pa.map_(pa.string(), pa.int64())
     map_map_type = pa.map_(pa.string(), map_int_type)
     struct_map_type = pa.struct([pa.field("m", map_map_type), pa.field("n", pa.int64())])
@@ -1085,6 +1120,7 @@ def test_native_parquet_stream_materializes_deeper_map_list_recursion(tmp_path: 
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_list_list_struct_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map list list struct values."""
     path = tmp_path / "native-map-list-list-struct-values.parquet"
     struct_type = pa.struct([pa.field("x", pa.int64()), pa.field("ys", pa.list_(pa.int64()))])
     table = pa.table(
@@ -1107,6 +1143,7 @@ def test_native_parquet_stream_materializes_map_list_list_struct_values(tmp_path
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_map_list_list_map_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes map list list map values."""
     path = tmp_path / "native-map-list-list-map-values.parquet"
     table = pa.table(
         {
@@ -1126,6 +1163,7 @@ def test_native_parquet_stream_materializes_map_list_list_map_values(tmp_path: P
 def test_native_parquet_stream_materializes_list_map_list_list_struct_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list map list list struct values."""
     path = tmp_path / "native-list-map-list-list-struct-values.parquet"
     struct_type = pa.struct([pa.field("x", pa.int64()), pa.field("ys", pa.list_(pa.int64()))])
     table = pa.table(
@@ -1144,6 +1182,7 @@ def test_native_parquet_stream_materializes_list_map_list_list_struct_values(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_map_list_list_map_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list map list list map values."""
     path = tmp_path / "native-list-map-list-list-map-values.parquet"
     table = pa.table(
         {
@@ -1173,6 +1212,7 @@ MAP_CASE_IDS = (
 
 
 def _recursive_map_case(case_id: str) -> tuple[object, list[object]]:
+    """Build the recursive map case for the native nested corpus."""
     scalar_map = pa.map_(pa.string(), pa.int64())
     map_map = pa.map_(pa.string(), scalar_map)
     if case_id == "list-list-map":
@@ -1219,6 +1259,7 @@ def _recursive_map_case(case_id: str) -> tuple[object, list[object]]:
 def test_native_parquet_stream_materializes_recursive_map_case(
     tmp_path: Path, case_id: str
 ) -> None:
+    """Verify native Parquet stream materializes recursive map case."""
     item_type, values = _recursive_map_case(case_id)
     table = pa.table({"items": pa.array(values, type=item_type)})
     write_read_native_parquet(table, tmp_path / f"native-{case_id}-values.parquet")
@@ -1226,6 +1267,7 @@ def test_native_parquet_stream_materializes_recursive_map_case(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_top_level_map_scalar_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes top level map scalar values."""
     path = tmp_path / "native-map.parquet"
     table = pa.table(
         {
@@ -1252,6 +1294,7 @@ def test_native_parquet_stream_materializes_top_level_map_scalar_values(tmp_path
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_of_struct_scalar_leaves(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list of struct scalar leaves."""
     path = tmp_path / "native-list-struct.parquet"
     table = pa.table(
         {
@@ -1285,6 +1328,7 @@ def test_native_parquet_stream_materializes_list_of_struct_scalar_leaves(tmp_pat
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_of_list_scalar_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list of list scalar values."""
     path = tmp_path / "native-list-list.parquet"
     table = pa.table(
         {
@@ -1309,6 +1353,7 @@ def test_native_parquet_stream_materializes_list_of_list_scalar_values(tmp_path:
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_of_map_scalar_values(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes list of map scalar values."""
     path = tmp_path / "native-list-map.parquet"
     table = pa.table(
         {
@@ -1338,6 +1383,7 @@ def test_native_parquet_stream_materializes_list_of_map_scalar_values(tmp_path: 
 def test_native_parquet_stream_materializes_list_of_list_of_list_scalar_values(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes list of list of list scalar values."""
     path = tmp_path / "native-list-list-list.parquet"
     table = pa.table(
         {
@@ -1368,6 +1414,7 @@ def test_native_parquet_stream_materializes_list_of_list_of_list_scalar_values(
 def test_native_parquet_stream_materializes_arbitrary_depth_list_chains(
     tmp_path: Path, name: str
 ) -> None:
+    """Verify native Parquet stream materializes arbitrary depth list chains."""
     path = tmp_path / f"native-{name}.parquet"
     if name == "list4-int":
         array = pa.array(
@@ -1388,6 +1435,7 @@ def test_native_parquet_stream_materializes_arbitrary_depth_list_chains(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_struct_with_map_child(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes struct with map child."""
     path = tmp_path / "native-struct-map-child.parquet"
     table = pa.table(
         {
@@ -1423,6 +1471,7 @@ def test_native_parquet_stream_materializes_struct_with_map_child(tmp_path: Path
 def test_native_parquet_stream_materializes_struct_with_map_struct_list_chain_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes struct with map struct list chain child."""
     path = tmp_path / "native-struct-map-struct-list-chain-child.parquet"
     value_type = pa.struct(
         [pa.field("ids", pa.list_(pa.list_(pa.int64()))), pa.field("label", pa.string())]
@@ -1466,6 +1515,7 @@ def test_native_parquet_stream_materializes_struct_with_map_struct_list_chain_ch
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_struct_with_nested_struct_child(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes struct with nested struct child."""
     path = tmp_path / "native-struct-nested-struct-child.parquet"
     table = pa.table(
         {
@@ -1504,6 +1554,7 @@ def test_native_parquet_stream_materializes_struct_with_nested_struct_child(tmp_
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_struct_with_map_list_child(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes struct with map list child."""
     path = tmp_path / "native-struct-map-list-child.parquet"
     table = pa.table(
         {
@@ -1539,6 +1590,7 @@ def test_native_parquet_stream_materializes_struct_with_map_list_child(tmp_path:
 def test_native_parquet_stream_materializes_struct_with_map_list_chain_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes struct with map list chain child."""
     path = tmp_path / "native-struct-map-list-chain-child.parquet"
     table = pa.table(
         {
@@ -1572,6 +1624,7 @@ def test_native_parquet_stream_materializes_struct_with_map_list_chain_child(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_struct_with_map_struct_child(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes struct with map struct child."""
     path = tmp_path / "native-struct-map-struct-child.parquet"
     value_type = pa.struct([pa.field("score", pa.int64()), pa.field("label", pa.string())])
     table = pa.table(
@@ -1609,6 +1662,7 @@ def test_native_parquet_stream_materializes_struct_with_map_struct_child(tmp_pat
 def test_native_parquet_stream_materializes_struct_with_map_struct_list_child(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes struct with map struct list child."""
     path = tmp_path / "native-struct-map-struct-list-child.parquet"
     value_type = pa.struct([pa.field("ids", pa.list_(pa.int64())), pa.field("label", pa.string())])
     table = pa.table(
@@ -1652,6 +1706,7 @@ NativeNestedCase = tuple[str, Callable[[Path], None]]
 
 
 def _native_nested_cases() -> tuple[NativeNestedCase, ...]:
+    """Return the named native nested cases consumed by the parametrized runner."""
     excluded = {
         "test_native_parquet_stream_materializes_recursive_map_case",
         "test_native_parquet_stream_materializes_arbitrary_depth_list_chains",

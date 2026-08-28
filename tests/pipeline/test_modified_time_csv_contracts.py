@@ -1,4 +1,8 @@
-"""Documentation, compatibility, and CI contracts for modified-time CSV flows."""
+"""Documentation, default behavior, and CI contracts for modified-time CSV flows.
+
+The checks keep both documentation indexes, the flat-prefix guide, memory guidance,
+public defaults, and consolidated CI ownership aligned with the shipped workflow.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Shared schema decision cache helpers for PyArrow adapter fast paths."""
+"""Shared schema decision cache helpers for PyArrow adapter fast paths.
+
+It builds stable schema keys and memoizes native-support and payload decisions shared by
+PyArrow fast paths.
+"""
 
 from __future__ import annotations
 

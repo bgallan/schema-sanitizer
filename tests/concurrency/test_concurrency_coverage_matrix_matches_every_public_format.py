@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency coverage matrix matches every public format."""
+"""Keep concurrency coverage aligned with every public input and output format.
+
+These checks require frontends to receive the shared operation arena, every native route to name
+parallel work, and real CSV and XML decoding to preserve probe parity, including small inputs and
+explicit output evidence.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Streaming writer cleanup and exception-precedence contracts."""
+"""Streaming writer cleanup and exception-precedence contracts.
+
+It covers diagnostic snapshots, missing streams, writer and cleanup failures, property
+errors, exception precedence, and exactly-once sink closure.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ def _write(
     output: SinkLifecycleOutput,
     writer: object,
 ) -> object:
+    """Run the streaming writer with the configured fake sink."""
     from schema_sanitizer.api_impl import execution_context, stream_output
 
     monkeypatch.setattr(
@@ -44,6 +49,7 @@ def test_streaming_writer_result_closes_sink_after_diagnostics_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer result closes sink after diagnostics snapshot."""
     raw = SinkLifecycleRaw(skipped_rows_diagnostics(2))
     stream = SinkLifecycleStream(raw)
     output = SinkLifecycleOutput(raw=raw, stream=stream, cascade_close=True)
@@ -68,6 +74,7 @@ def test_streaming_writer_stats_use_diagnostics_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer stats use diagnostics snapshot."""
     raw = SinkLifecycleRaw(skipped_rows_json_diagnostics(3))
     output = SinkLifecycleOutput(raw=raw, stream=SinkLifecycleStream())
 
@@ -80,6 +87,7 @@ def test_streaming_writer_missing_stream_closes_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer missing stream closes sink."""
     output = SinkLifecycleOutput(raw=SinkLifecycleRaw())
 
     with pytest.raises(RuntimeError, match="did not produce a stream"):
@@ -92,6 +100,7 @@ def test_streaming_writer_failure_closes_full_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer failure closes full sink."""
     raw = SinkLifecycleRaw(skipped_rows_diagnostics(0))
     output = SinkLifecycleOutput(
         raw=raw,
@@ -100,6 +109,7 @@ def test_streaming_writer_failure_closes_full_sink(
     )
 
     def fail_writer(_stream: object, _path: object) -> None:
+        """Raise the configured sink-writing failure."""
         raise RuntimeError("writer failed")
 
     with pytest.raises(RuntimeError, match="writer failed"):
@@ -113,12 +123,14 @@ def test_streaming_writer_failure_preserves_writer_exception_when_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer failure preserves writer exception when cleanup fails."""
     output = SinkLifecycleOutput(
         stream=SinkLifecycleStream(close_error=RuntimeError("stream cleanup failed")),
         close_error=RuntimeError("sink cleanup failed"),
     )
 
     def fail_writer(_stream: object, _path: object) -> None:
+        """Raise the configured sink-writing failure."""
         raise ValueError("writer failed")
 
     with pytest.raises(SchemaSanitizerError, match="writer failed") as caught:
@@ -131,6 +143,7 @@ def test_streaming_writer_stream_property_error_closes_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer stream property error closes sink."""
     output = SinkLifecycleOutput(stream_error=ValueError("stream construction failed"))
 
     with pytest.raises(ValueError, match="stream construction failed"):
@@ -143,6 +156,7 @@ def test_streaming_writer_stream_property_error_preserved_when_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer stream property error preserved when cleanup fails."""
     output = SinkLifecycleOutput(
         stream_error=ValueError("stream construction failed"),
         close_error=RuntimeError("cleanup failed"),
@@ -156,6 +170,7 @@ def test_streaming_writer_missing_stream_preserves_contract_error_when_cleanup_f
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify streaming writer missing stream preserves contract error when cleanup fails."""
     output = SinkLifecycleOutput(close_error=RuntimeError("cleanup failed"))
 
     with pytest.raises(RuntimeError, match="did not produce a stream"):

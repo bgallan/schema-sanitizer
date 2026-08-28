@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency integer boundaries preserve exact single multi output."""
+"""Compare integer boundary serialization across single- and multi-worker output.
+
+Signed and unsigned edge values must remain exact, and both execution modes must share one
+canonical pair-and-digit formatter rather than diverging at numeric boundaries.
+"""
 
 from __future__ import annotations
 

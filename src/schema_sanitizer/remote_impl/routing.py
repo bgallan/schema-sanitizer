@@ -1,4 +1,8 @@
-"""Provider routing for remote object discovery and existence checks."""
+"""Provider routing for remote object discovery and existence checks.
+
+It classifies URI schemes and dispatches existence or directory-listing requests to the
+matching HTTP, S3, GCS, or Azure backend.
+"""
 
 from __future__ import annotations
 

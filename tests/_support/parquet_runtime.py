@@ -1,4 +1,8 @@
-"""Optional PyArrow imports and fixtures shared by Parquet runtime tests."""
+"""Centralize optional PyArrow setup and native Parquet round-trip helpers.
+
+The utilities construct recursive Arrow types, write governed inputs, and normalize outputs for
+logical comparisons.
+"""
 
 from __future__ import annotations
 
@@ -101,6 +105,7 @@ def recursive_arrow_type(spec: object) -> object:
 
 @_requires_pyarrow
 def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) -> None:
+    """Verify native Parquet footer info reads schema sanitizer file."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
     src = tmp_path / "source.parquet"
@@ -273,6 +278,7 @@ def test_native_parquet_footer_info_reads_schema_sanitizer_file(tmp_path: Path) 
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_simple_integer_lists(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes simple integer lists."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -297,6 +303,7 @@ def test_native_parquet_stream_materializes_simple_integer_lists(tmp_path: Path)
 def test_native_parquet_stream_materializes_simple_lists_across_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify native Parquet stream materializes simple lists across pages."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -336,6 +343,7 @@ def test_native_parquet_stream_materializes_simple_lists_across_pages(
 
 @_requires_pyarrow
 def test_native_parquet_footer_info_captures_repeated_level_values(tmp_path: Path) -> None:
+    """Verify native Parquet footer info captures repeated level values."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -390,6 +398,7 @@ def test_native_parquet_footer_info_captures_repeated_level_values(tmp_path: Pat
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_simple_string_lists(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes simple string lists."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -426,6 +435,7 @@ def test_native_parquet_stream_materializes_simple_string_lists(tmp_path: Path) 
 def test_native_parquet_stream_materializes_plain_byte_array_lists(
     tmp_path: Path, name: str
 ) -> None:
+    """Verify native Parquet stream materializes plain byte array lists."""
     path = tmp_path / f"native-plain-byte-array-{name}-list.parquet"
     if name == "string":
         array = pa.array([["only"]], type=pa.list_(pa.string()))
@@ -445,6 +455,7 @@ def test_native_parquet_stream_materializes_plain_byte_array_lists(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_simple_float_lists(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes simple float lists."""
     path = tmp_path / "native-float-list.parquet"
     table = pa.table(
         {"values": pa.array([[1.25, 2.5], None, [], [3.75]], type=pa.list_(pa.float64()))}
@@ -462,6 +473,7 @@ def test_native_parquet_stream_materializes_simple_float_lists(tmp_path: Path) -
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_simple_boolean_lists(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes simple boolean lists."""
     path = tmp_path / "native-boolean-list.parquet"
     table = pa.table(
         {"flags": pa.array([[True, False], None, [], [True]], type=pa.list_(pa.bool_()))}
@@ -490,6 +502,7 @@ def test_native_parquet_stream_materializes_simple_boolean_lists(tmp_path: Path)
 def test_native_parquet_stream_materializes_logical_fixed_width_lists(
     tmp_path: Path, name: str, native_format: str, expected_offsets: list[int]
 ) -> None:
+    """Verify native Parquet stream materializes logical fixed width lists."""
     path = tmp_path / f"native-logical-{name}-list.parquet"
     if name == "date32":
         array = pa.array(
@@ -530,6 +543,7 @@ def test_native_parquet_stream_materializes_logical_fixed_width_lists(
 def test_native_parquet_stream_materializes_nullable_list_elements(
     tmp_path: Path, name: str
 ) -> None:
+    """Verify native Parquet stream materializes nullable list elements."""
     path = tmp_path / f"native-nullable-{name}-list.parquet"
     if name == "int":
         array = pa.array([[1, None, 2], None, [], [None, 3]], type=pa.list_(pa.int64()))
@@ -550,6 +564,7 @@ def test_native_parquet_stream_materializes_nullable_list_elements(
 
 @_requires_pyarrow
 def test_native_parquet_footer_info_plans_byte_stream_split_float_lists(tmp_path: Path) -> None:
+    """Verify native Parquet footer info plans byte stream split float lists."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
     path = tmp_path / "pyarrow-byte-stream-split-list.parquet"
@@ -576,6 +591,7 @@ def test_native_parquet_footer_info_plans_byte_stream_split_float_lists(tmp_path
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_dictionary_string_lists(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes dictionary string lists."""
     path = tmp_path / "native-dict-string-list.parquet"
     table = pa.table(
         {"tags": pa.array([["same", "same"], None, [], ["same"]] * 200, type=pa.list_(pa.string()))}
@@ -592,6 +608,7 @@ def test_native_parquet_stream_materializes_dictionary_string_lists(tmp_path: Pa
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_dictionary_integer_lists(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes dictionary integer lists."""
     path = tmp_path / "native-dict-integer-list.parquet"
     table = pa.table({"nums": pa.array([[7, 7], None, [], [7]] * 200, type=pa.list_(pa.int64()))})
     info = write_read_native_parquet(table, path)
@@ -607,6 +624,7 @@ def test_native_parquet_stream_materializes_dictionary_integer_lists(tmp_path: P
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_fixed_size_binary(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes fixed size binary."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -660,6 +678,7 @@ def test_native_parquet_stream_materializes_fixed_size_binary(tmp_path: Path) ->
 
 @_requires_pyarrow
 def test_native_parquet_stream_preserves_required_scalar_nullability(tmp_path: Path) -> None:
+    """Verify native Parquet stream preserves required scalar nullability."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -739,6 +758,7 @@ def test_native_parquet_stream_preserves_required_scalar_nullability(tmp_path: P
 def test_native_parquet_writer_rejects_null_in_required_field(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Verify native Parquet writer rejects null in required field."""
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     path = tmp_path / "required-null.parquet"
@@ -757,6 +777,7 @@ def test_native_parquet_writer_rejects_null_in_required_field(
 
 @_requires_pyarrow
 def test_native_parquet_stream_reads_empty_file_schema(tmp_path: Path) -> None:
+    """Verify native Parquet stream reads empty file schema."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -787,6 +808,7 @@ def test_native_parquet_stream_reads_empty_file_schema(tmp_path: Path) -> None:
 
 @_requires_pyarrow
 def test_native_parquet_stream_reads_empty_struct_file_schema(tmp_path: Path) -> None:
+    """Verify native Parquet stream reads empty struct file schema."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -827,6 +849,7 @@ def test_native_parquet_stream_reads_empty_struct_file_schema(tmp_path: Path) ->
 
 @_requires_pyarrow
 def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(tmp_path: Path) -> None:
+    """Verify PyArrow empty row group Parquet falls back cleanly."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -866,6 +889,7 @@ def test_pyarrow_empty_row_group_parquet_falls_back_cleanly(tmp_path: Path) -> N
 
 @_requires_pyarrow
 def test_native_parquet_stream_reads_empty_supported_list_file_schema(tmp_path: Path) -> None:
+    """Verify native Parquet stream reads empty supported list file schema."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -914,6 +938,7 @@ def test_native_parquet_stream_reads_empty_supported_list_file_schema(tmp_path: 
 
 @_requires_pyarrow
 def test_parquet_path_auto(tmp_path: Path) -> None:
+    """Verify Parquet path auto."""
     path = tmp_path / "data.parquet"
     pq.write_table(sample_table(pa), path)
     result = read_test_parquet(path)
@@ -923,6 +948,7 @@ def test_parquet_path_auto(tmp_path: Path) -> None:
 
 @_requires_pyarrow
 def test_parquet_path_with_temporal_values(tmp_path: Path) -> None:
+    """Verify Parquet path with temporal values."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
     path = tmp_path / "data.parquet"
@@ -952,6 +978,7 @@ def test_parquet_path_with_temporal_values(tmp_path: Path) -> None:
 
 @_requires_pyarrow
 def test_native_parquet_footer_info_maps_utc_timestamp_timezone(tmp_path: Path) -> None:
+    """Verify native Parquet footer info maps utc timestamp timezone."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
     path = tmp_path / "data.parquet"
@@ -976,6 +1003,7 @@ def test_native_parquet_footer_info_maps_utc_timestamp_timezone(tmp_path: Path) 
 
 @_requires_pyarrow
 def test_read_parquet_path_materializes_table(tmp_path: Path) -> None:
+    """Verify read Parquet path materializes table."""
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
@@ -995,6 +1023,7 @@ def test_read_parquet_path_materializes_table(tmp_path: Path) -> None:
 
 @_requires_pyarrow
 def test_native_snappy_parquet_roundtrip_uses_native_reader(tmp_path: Path) -> None:
+    """Verify native snappy Parquet roundtrip uses native reader."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
@@ -1034,6 +1063,7 @@ def test_native_snappy_parquet_roundtrip_uses_native_reader(tmp_path: Path) -> N
 def test_native_parquet_reader_logs_not_ready_fallback(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Verify native Parquet reader logs not ready fallback."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1059,6 +1089,7 @@ def test_native_parquet_reader_logs_not_ready_fallback(
 
 @_requires_pyarrow
 def test_parquet_file_like_records_non_native_source_diagnostics() -> None:
+    """Verify Parquet file like records non native source diagnostics."""
     from io import BytesIO
 
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
@@ -1085,6 +1116,7 @@ def test_parquet_file_like_records_non_native_source_diagnostics() -> None:
 
 @_requires_pyarrow
 def test_parquet_buffer_stages_then_falls_back_for_external_writer() -> None:
+    """Verify Parquet buffer stages then falls back for external writer."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1110,6 +1142,7 @@ def test_parquet_buffer_stages_then_falls_back_for_external_writer() -> None:
 
 @_requires_pyarrow
 def test_parquet_buffer_projection_materializes_requested_columns() -> None:
+    """Verify Parquet buffer projection materializes requested columns."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1128,6 +1161,7 @@ def test_parquet_buffer_projection_materializes_requested_columns() -> None:
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_plain_fixed_width_rows(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes plain fixed width rows."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1168,6 +1202,7 @@ def test_native_parquet_stream_materializes_plain_fixed_width_rows(tmp_path: Pat
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_staged_buffer(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes staged buffer."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1200,6 +1235,7 @@ def test_native_parquet_stream_materializes_staged_buffer(tmp_path: Path) -> Non
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_file_backed_stream(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes file backed stream."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1233,6 +1269,7 @@ def test_native_parquet_stream_materializes_file_backed_stream(tmp_path: Path) -
 def test_native_parquet_stream_respects_small_batch_size_with_pyarrow_fallback(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream respects small batch size with PyArrow fallback."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1271,6 +1308,7 @@ def test_native_parquet_stream_respects_small_batch_size_with_pyarrow_fallback(
 
 @_requires_pyarrow
 def test_native_parquet_stream_projection_uses_native_route(tmp_path: Path) -> None:
+    """Verify native Parquet stream projection uses native route."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1313,6 +1351,7 @@ def test_native_parquet_stream_projection_uses_native_route(tmp_path: Path) -> N
 
 @_requires_pyarrow
 def test_parquet_filter_uses_dataset_scanner_instead_of_native_route(tmp_path: Path) -> None:
+    """Verify Parquet filter uses dataset scanner instead of native route."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1350,6 +1389,7 @@ def test_parquet_filter_uses_dataset_scanner_instead_of_native_route(tmp_path: P
 
 @_requires_pyarrow
 def test_parquet_filter_stages_buffer_source_for_dataset_scan() -> None:
+    """Verify Parquet filter stages buffer source for dataset scan."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1369,6 +1409,7 @@ def test_parquet_filter_stages_buffer_source_for_dataset_scan() -> None:
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_plain_boolean_rows(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes plain boolean rows."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1402,6 +1443,7 @@ def test_native_parquet_stream_materializes_plain_boolean_rows(tmp_path: Path) -
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_rle_dictionary_strings(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes rle dictionary strings."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1432,6 +1474,7 @@ def test_native_parquet_stream_materializes_rle_dictionary_strings(tmp_path: Pat
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_rle_dictionary_fixed_width(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes rle dictionary fixed width."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1473,6 +1516,7 @@ def test_native_parquet_stream_materializes_rle_dictionary_fixed_width(tmp_path:
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_integer_logical_widths(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes integer logical widths."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1515,6 +1559,7 @@ def test_native_parquet_stream_materializes_integer_logical_widths(tmp_path: Pat
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_decimal_fixed_bytes(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes decimal fixed bytes."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1574,6 +1619,7 @@ def test_native_parquet_stream_materializes_decimal_fixed_bytes(tmp_path: Path) 
 
 @_requires_pyarrow
 def test_native_parquet_stream_projects_empty_file_schema(tmp_path: Path) -> None:
+    """Verify native Parquet stream projects empty file schema."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1615,6 +1661,7 @@ def test_native_parquet_stream_projects_empty_file_schema(tmp_path: Path) -> Non
 def test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repeated(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream projects empty file past unprojected complex repeated."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1654,6 +1701,7 @@ def test_native_parquet_stream_projects_empty_file_past_unprojected_complex_repe
 def test_native_parquet_footer_info_accepts_empty_list_struct_list_chain_readiness(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet footer info accepts empty list struct list chain readiness."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1688,6 +1736,7 @@ def test_native_parquet_footer_info_accepts_empty_list_struct_list_chain_readine
 
 @_requires_pyarrow
 def test_native_parquet_stream_reads_multiple_row_groups(tmp_path: Path) -> None:
+    """Verify native Parquet stream reads multiple row groups."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1724,6 +1773,7 @@ def test_native_parquet_stream_reads_multiple_row_groups(tmp_path: Path) -> None
 
 @_requires_pyarrow
 def test_native_parquet_stream_reads_list_columns_across_row_groups(tmp_path: Path) -> None:
+    """Verify native Parquet stream reads list columns across row groups."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1767,6 +1817,7 @@ def test_native_parquet_stream_reads_list_columns_across_row_groups(tmp_path: Pa
 def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify native Parquet stream reads multiple pages with null spans."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1819,6 +1870,7 @@ def test_native_parquet_stream_reads_multiple_pages_with_null_spans(
 
 
 def _native_scalar_cases():
+    """Return the named native scalar cases consumed by the parametrized runner."""
     excluded = {
         "test_native_parquet_stream_materializes_plain_byte_array_lists",
         "test_native_parquet_stream_materializes_logical_fixed_width_lists",

@@ -1,4 +1,8 @@
-"""Replayable Arrow stream storage for safe Parquet fallback."""
+"""Replayable Arrow stream storage for safe Parquet fallback.
+
+It spools Arrow batches under memory and temporary-storage budgets so a safe native
+decline can be replayed once through the fallback route.
+"""
 
 from __future__ import annotations
 
@@ -64,10 +68,12 @@ class _ReplayArtifactReaderLease:
     __slots__ = ("_owner", "_lock")
 
     def __init__(self, owner: "_ReplayArtifactOwner") -> None:
+        """Retain one reader reference to the shared replay artifact."""
         self._owner: _ReplayArtifactOwner | None = owner
         self._lock = Lock()
 
     def close(self) -> None:
+        """Release this reader reference so replay storage can retire when ready."""
         with self._lock:
             owner = self._owner
             self._owner = None
@@ -92,6 +98,7 @@ class _ReplayArtifactOwner:
     )
 
     def __init__(self, lease: Any, pool: TemporaryStoragePermitPool) -> None:
+        """Track spool-path, storage-credit, and active-reader ownership under one condition."""
         self._pid = os.getpid()
         self._condition = Condition(Lock())
         self._path: str | None = None
@@ -105,26 +112,31 @@ class _ReplayArtifactOwner:
 
     @property
     def path(self) -> str | None:
+        """Return the durable spool path owned by this replay store."""
         with self._condition:
             return self._path
 
     @property
     def active_readers(self) -> int:
+        """Return the active readers."""
         with self._condition:
             return self._active_readers
 
     @property
     def released(self) -> bool:
+        """Return whether the resource has been released."""
         with self._condition:
             return self._released
 
     def bind_path(self, path: str) -> None:
+        """Bind the replay store to its durable spool path."""
         with self._condition:
             if self._path is not None or self._close_requested or self._released:
                 raise RuntimeError("replay artifact path is already bound or closing")
             self._path = path
 
     def acquire_reader(self) -> _ReplayArtifactReaderLease:
+        """Acquire one active reader reference to the replay store."""
         with self._condition:
             if self._close_requested or self._released or self._path is None:
                 raise RuntimeError("Replayable Parquet stream has been closed.")
@@ -136,6 +148,7 @@ class _ReplayArtifactOwner:
             raise
 
     def release_reader(self) -> None:
+        """Release one active reader reference from the replay store."""
         with self._condition:
             if self._active_readers <= 0:
                 raise RuntimeError("replay artifact reader over-release")
@@ -144,6 +157,7 @@ class _ReplayArtifactOwner:
         self._retire_storage_if_ready()
 
     def _retire_storage_if_ready(self) -> None:
+        """Retire storage if ready."""
         with self._condition:
             if (
                 self._released
@@ -187,6 +201,7 @@ class _ReplayArtifactOwner:
             raise primary
 
     def close(self) -> None:
+        """Unlink the spool and retire storage credits after active readers drain."""
         if os.getpid() != self._pid:
             return
         deadline = monotonic() + _REPLAY_CLOSE_WAIT_TIMEOUT_SECONDS
@@ -228,15 +243,18 @@ class _BudgetedReplayFile:
     __slots__ = ("_handle", "_reservation")
 
     def __init__(self, handle: Any, reservation: StreamingStorageReservation) -> None:
+        """Bind the replay file handle to a reservation charged before every write."""
         self._handle = handle
         self._reservation = reservation
 
     def write(self, data: Any) -> int:
+        """Write bytes through this budgeted replay file."""
         amount = len(data)
         self._reservation.before_write(amount)
         return int(self._handle.write(data))
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unresolved attributes to the wrapped object."""
         return getattr(self._handle, name)
 
 
@@ -244,7 +262,7 @@ class _ReplayReader:
     """Keep replay-file resources alive while exposing an Arrow stream reader."""
 
     def __init__(self, reader: Any, keepalive: tuple[Any, ...] = ()):
-        """Initialize the replay reader wrapper."""
+        """Retain the Arrow reader and replay keepalives under safe-point finalization."""
         self._pid = os.getpid()
         self._reader = reader
         self._keepalive = keepalive
@@ -363,6 +381,7 @@ class ReplayableArrowStream:
         path_box: list[str] = []
 
         def create_spool_fd() -> int:
+            """Create a governed descriptor for the replay spool file."""
             fd, path = tempfile.mkstemp(
                 prefix="schema-sanitizer-parquet-replay-",
                 suffix=".arrow",

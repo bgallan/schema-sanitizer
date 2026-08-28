@@ -1,4 +1,8 @@
-"""Regression coverage for memory fork manager freezes exact generation when before registers handler."""
+"""Exercises fork preparation and child authorization across atomic epochs, reserved
+finalizer rings, reusable tokens, authoritative retry maps, snapshots, pair scopes,
+journals, arena generations, registries, and the native ABI. The manager freezes one
+exact generation before handler registration, failed prepare never authorizes a child,
+and all OS callbacks select bounded prewarmed state."""
 
 from __future__ import annotations
 
@@ -10,12 +14,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _source(relative: str) -> str:
+    """Return the production source text inspected by this module."""
     return (ROOT / "src/schema_sanitizer" / relative).read_text()
 
 
 def test_fork_manager_freezes_exact_generation_when_before_registers_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fork manager freezes exact generation when before registers handler."""
     from schema_sanitizer.core_impl import fork_manager as module
 
     monkeypatch.setattr(module, "_HANDLERS", [None] * module._MAX_FORK_HANDLERS)
@@ -27,9 +33,11 @@ def test_fork_manager_freezes_exact_generation_when_before_registers_handler(
     events: list[str] = []
 
     def b_child() -> None:
+        """Run the registered child callback in deterministic order."""
         events.append("b_child")
 
     def a_before() -> None:
+        """Run the registered before-fork callback in deterministic order."""
         events.append("a_before")
         module.register_fork_handler(
             "fork-manager-freezes-exact-generation-when-b",
@@ -49,6 +57,7 @@ def test_fork_manager_freezes_exact_generation_when_before_registers_handler(
 def test_fork_manager_failed_prepare_never_authorizes_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fork manager failed prepare never authorizes child."""
     from schema_sanitizer.core_impl import fork_manager as module
 
     monkeypatch.setattr(module, "_HANDLERS", [None] * module._MAX_FORK_HANDLERS)
@@ -60,9 +69,11 @@ def test_fork_manager_failed_prepare_never_authorizes_child(
     events: list[str] = []
 
     def fail_before() -> None:
+        """Raise the deliberate failure during before."""
         raise MemoryError("fork-manager-freezes-exact-generation-when")
 
     def child() -> None:
+        """Run the child-side operation in the controlled lifecycle."""
         events.append("child")
 
     module.register_fork_handler(
@@ -78,6 +89,7 @@ def test_fork_manager_failed_prepare_never_authorizes_child(
 
 def test_every_fork_handler_has_explicit_bounded_mode() -> None:
     # Import representative runtime modules so their bounded contracts register.
+    """Verify every fork handler has explicit bounded mode."""
     from schema_sanitizer.core_impl import control_plane_budget as _cp  # noqa: F401
     from schema_sanitizer.core_impl import finalizer_registry as _fr  # noqa: F401
     from schema_sanitizer.core_impl import runtime_shutdown as _rs  # noqa: F401
@@ -92,6 +104,7 @@ def test_every_fork_handler_has_explicit_bounded_mode() -> None:
 
 
 def test_atomic_epoch_can_write_into_preallocated_buffer() -> None:
+    """Verify atomic epoch can write into preallocated buffer."""
     from schema_sanitizer.core_impl.atomic_epoch import AtomicEpoch
 
     epoch = AtomicEpoch()
@@ -103,6 +116,7 @@ def test_atomic_epoch_can_write_into_preallocated_buffer() -> None:
 
 
 def test_native_atomic_epoch_has_direct_buffer_abi_without_pylong_readback() -> None:
+    """Verify native atomic epoch has direct buffer ABI without pylong readback."""
     source = _source("core_impl/atomic_epoch.py")
     cpp = (ROOT / "cpp/src/api/python_abi3/options/prepare.cc").read_text()
     assert "atomic_epoch_write_le" in source
@@ -117,6 +131,7 @@ def test_native_atomic_epoch_has_direct_buffer_abi_without_pylong_readback() -> 
 
 
 def test_reserved_finalizer_ring_prepares_before_owner_visibility_and_recycle() -> None:
+    """Verify reserved finalizer ring prepares before owner visibility and recycle."""
     source = _source("core_impl/finalizer_escrow.py")
     reserve = source[
         source.index("    def reserve_ticket", source.index("class ReservedFinalizerEscrow")) :
@@ -144,6 +159,7 @@ def test_reserved_finalizer_ring_prepares_before_owner_visibility_and_recycle() 
 def test_control_plane_failed_prepare_does_not_consume_reusable_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify control plane failed prepare does not consume reusable token."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget()
@@ -155,6 +171,7 @@ def test_control_plane_failed_prepare_does_not_consume_reusable_token(
     calls = 0
 
     def fail_on_growth(value: int) -> bool:
+        """Inject the on growth failure at the controlled test point."""
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -171,6 +188,7 @@ def test_control_plane_failed_prepare_does_not_consume_reusable_token(
 def test_retry_deadline_index_has_one_physical_node_per_logical_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry deadline index has one physical node per logical retry."""
     from schema_sanitizer.core_impl import retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -188,6 +206,7 @@ def test_retry_deadline_index_has_one_physical_node_per_logical_retry(
 
 
 def test_retry_deadline_index_backing_storage_never_grows() -> None:
+    """Verify retry deadline index backing storage never grows."""
     from schema_sanitizer.core_impl.retry_scheduler import _BoundedDeadlineIndex
 
     heap = _BoundedDeadlineIndex(8)
@@ -196,6 +215,7 @@ def test_retry_deadline_index_backing_storage_never_grows() -> None:
 
 
 def test_retry_ready_map_is_authoritative_not_deque_rotation() -> None:
+    """Verify retry ready map is authoritative not deque rotation."""
     source = _source("core_impl/retry_scheduler.py")
     scheduler_start = source.index("class _RetryScheduler")
     body = source[source.index("    def _take_ready_locked", scheduler_start) :]
@@ -206,6 +226,7 @@ def test_retry_ready_map_is_authoritative_not_deque_rotation() -> None:
 
 
 def test_release_guardian_dead_letter_owner_remains_authoritative_for_dedup() -> None:
+    """Verify release guardian dead letter owner remains authoritative for dedup."""
     source = _source("core_impl/retry_scheduler.py")
     assert "self._items" in source
     assert "DEAD_LETTER" in source
@@ -218,6 +239,7 @@ def test_release_guardian_dead_letter_owner_remains_authoritative_for_dedup() ->
 
 
 def test_cleanup_dispatcher_keeps_authoritative_owner_map_across_states() -> None:
+    """Verify cleanup dispatcher keeps authoritative owner map across states."""
     source = _source("core_impl/cleanup_dispatcher.py")
     assert "self._owned_index" in source
     assert "_CleanupState.DELAYED" in source
@@ -227,6 +249,7 @@ def test_cleanup_dispatcher_keeps_authoritative_owner_map_across_states() -> Non
 
 
 def test_availability_notifier_uses_authoritative_delivery_map_not_queue_rotation() -> None:
+    """Verify availability notifier uses authoritative delivery map not queue rotation."""
     source = _source("core_impl/process_resources.py")
     start = source.index("class _AvailabilityNotifier")
     fragment = source[start : source.index("_AVAILABILITY_NOTIFIER =", start)]
@@ -237,6 +260,7 @@ def test_availability_notifier_uses_authoritative_delivery_map_not_queue_rotatio
 
 
 def test_operation_memory_snapshot_is_pure_and_safe_point_is_explicit() -> None:
+    """Verify operation memory snapshot is pure and safe point is explicit."""
     source = _source("core_impl/memory_budget.py")
     start = source.index("    def snapshot(self", source.index("class OperationMemoryLedger"))
     end = source.index("\n    def ", start + 8)
@@ -246,6 +270,7 @@ def test_operation_memory_snapshot_is_pure_and_safe_point_is_explicit() -> None:
 
 
 def test_pair_bootstrap_is_excluded_from_payload_contract_evidence() -> None:
+    """Verify pair bootstrap is excluded from payload contract evidence."""
     contracts = _source("core_impl/concurrency_contracts.py")
     coverage = _source("core_impl/concurrency_coverage.py")
     start = contracts.index("def activate_runtime_concurrency_pair_admission")
@@ -257,6 +282,7 @@ def test_pair_bootstrap_is_excluded_from_payload_contract_evidence() -> None:
 
 
 def test_pair_bootstrap_credit_is_retired_before_output_metrics() -> None:
+    """Verify pair bootstrap credit is retired before output metrics."""
     source = _source("core_impl/concurrency_contracts.py")
     start = source.index("    def transfer_to_output(self)")
     end = source.index("\n    def close(self)", start)
@@ -268,6 +294,7 @@ def test_pair_bootstrap_credit_is_retired_before_output_metrics() -> None:
 
 
 def test_public_pair_scope_remains_live_through_output_work() -> None:
+    """Verify public pair scope remains live through output work."""
     for relative in ("api_impl/file_conversion/converters.py", "api_impl/analytical.py"):
         source = _source(relative)
         transfer = source.index("pair_scope.transfer_to_output()")
@@ -276,6 +303,7 @@ def test_public_pair_scope_remains_live_through_output_work() -> None:
 
 
 def test_cross_process_journal_only_commits_owner_delta_on_success() -> None:
+    """Verify cross process journal only commits owner delta on success."""
     for relative in ("core_impl/cross_process_memory.py", "core_impl/cross_process_storage.py"):
         source = _source(relative)
         assert "committed = False" in source or "commit_owner_delta = False" in source
@@ -283,12 +311,14 @@ def test_cross_process_journal_only_commits_owner_delta_on_success() -> None:
 
 
 def test_cross_process_liveness_work_is_bounded_per_transaction() -> None:
+    """Verify cross process liveness work is bounded per transaction."""
     for relative in ("core_impl/cross_process_memory.py", "core_impl/cross_process_storage.py"):
         source = _source(relative)
         assert "_MAX_LIVENESS_CHECKS_PER_TRANSACTION = 256" in source
 
 
 def test_low_core_estimates_retained_bytes_before_executor_mutex() -> None:
+    """Verify low core estimates retained bytes before executor mutex."""
     source = (ROOT / "cpp/src/internal/runtime/ordered_executor.hh").read_text()
     assert "EstimateQueueRetainedBytes(outcome.result)" in source
     # fork-manager-freezes-exact-generation-when moved all retained-byte estimation to callers before store_outcome_locked.
@@ -298,6 +328,7 @@ def test_low_core_estimates_retained_bytes_before_executor_mutex() -> None:
 
 
 def test_operation_task_arena_generation_exhaustion_is_fail_closed() -> None:
+    """Verify operation task arena generation exhaustion is fail closed."""
     source = (ROOT / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     assert "NextArenaGeneration" in source
     assert "std::numeric_limits<std::uint64_t>::max()" in source
@@ -305,6 +336,7 @@ def test_operation_task_arena_generation_exhaustion_is_fail_closed() -> None:
 
 
 def test_shutdown_failure_recording_uses_preallocated_static_codes() -> None:
+    """Verify shutdown failure recording uses preallocated static codes."""
     source = _source("core_impl/runtime_shutdown.py")
     assert "class _BoundedShutdownFailures" in source
     assert "observability_failures.append(f" not in source
@@ -312,12 +344,14 @@ def test_shutdown_failure_recording_uses_preallocated_static_codes() -> None:
 
 
 def test_terminal_ownership_generation_exhaustion_is_latched_fail_closed() -> None:
+    """Verify terminal ownership generation exhaustion is latched fail closed."""
     source = _source("core_impl/terminal_ownership.py")
     assert "generation_exhausted" in source
     assert "_prepare_generation_advance_locked" in source
 
 
 def test_native_shadow_is_prewarmed_before_global_admission_lock() -> None:
+    """Verify native shadow is prewarmed before global admission lock."""
     source = _source("core_impl/control_plane_budget.py")
     start = source.index("    def reserve(", source.index("class _ProcessControlPlaneBudget"))
     end = source.index("\n    def release", start)
@@ -328,6 +362,7 @@ def test_native_shadow_is_prewarmed_before_global_admission_lock() -> None:
 
 
 def test_reusable_fixed_width_lease_namespaces_replace_lifetime_growth() -> None:
+    """Verify reusable fixed width lease namespaces replace lifetime growth."""
     process = _source("core_impl/process_resources.py")
     memory = _source("core_impl/memory_budget.py")
     storage = _source("core_impl/temporary_storage.py")
@@ -337,6 +372,7 @@ def test_reusable_fixed_width_lease_namespaces_replace_lifetime_growth() -> None
 
 
 def test_runtime_service_registry_uses_fixed_capacity_slot_generation_pool() -> None:
+    """Verify runtime service registry uses fixed capacity slot generation pool."""
     source = _source("core_impl/runtime_registry.py")
     assert "BoundedGenerationPool(256)" in source
     assert "self._token_pool.acquire_for(entry)" in source
@@ -344,6 +380,7 @@ def test_runtime_service_registry_uses_fixed_capacity_slot_generation_pool() -> 
 
 
 def test_only_central_fork_dispatchers_register_with_os() -> None:
+    """Verify only central fork dispatchers register with OS."""
     matches = []
     for path in (ROOT / "src/schema_sanitizer").rglob("*.py"):
         text = path.read_text()
@@ -353,12 +390,14 @@ def test_only_central_fork_dispatchers_register_with_os() -> None:
 
 
 def test_static_escrow_footprint_is_runtime_layout_derived_not_single_magic_multiplier() -> None:
+    """Verify static escrow footprint is runtime layout derived not single magic multiplier."""
     source = _source("core_impl/finalizer_escrow.py")
     assert "sys.getsizeof" in source
     assert "_reserved_escrow_static_bytes" in source
 
 
 def test_native_abi_surface_declares_direct_atomic_activity_writer() -> None:
+    """Verify native ABI surface declares direct atomic activity writer."""
     catalog = (ROOT / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
     module = (ROOT / "cpp/src/api/python_abi3/_core_abi3_module.cc").read_text()
     assert "atomic_epoch_write_activity" in catalog

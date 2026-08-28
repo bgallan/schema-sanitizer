@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources define bounded immutable token handoff."""
+"""Specify the bounded immutable token handoff used by native JSONL sources.
+
+Validated tokens may be reused, budget exhaustion falls back per row, escaped and duplicate keys
+retain single-worker semantics, and syntax errors keep precedence over worker conversion failures.
+"""
 
 from __future__ import annotations
 

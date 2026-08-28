@@ -1,4 +1,8 @@
-"""Shared timing helpers for local ingestion benchmarks."""
+"""Shared timing helpers for local ingestion benchmarks.
+
+It manages warmups and measurements, derives median and p95 records, and tracks logical
+and physical input sizes.
+"""
 
 from __future__ import annotations
 
@@ -33,12 +37,14 @@ def records() -> list[BenchmarkRecord]:
 
 
 def _p95(values: list[float]) -> float:
+    """Return the nearest-rank p95 for the recorded timing samples."""
     ordered = sorted(values)
     index = max(0, math.ceil(0.95 * len(ordered)) - 1)
     return ordered[index]
 
 
 def _resolve_size(value: int | Path | Callable[[], int] | None) -> int | None:
+    """Resolve an explicit size or derive it from the benchmark result."""
     if value is None:
         return None
     if isinstance(value, Path):

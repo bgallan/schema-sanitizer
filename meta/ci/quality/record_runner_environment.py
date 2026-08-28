@@ -1,4 +1,8 @@
-"""Record comparable, non-secret platform-runner evidence for CI timings."""
+"""Record comparable, non-secret platform-runner evidence for CI timings.
+
+It gathers normalized operating-system, CPU, memory, toolchain, and runner metadata
+without recording secrets.
+"""
 
 from __future__ import annotations
 

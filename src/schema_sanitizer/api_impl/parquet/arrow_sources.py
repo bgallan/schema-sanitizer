@@ -1,4 +1,8 @@
-"""Direct Parquet Arrow-source planning and lifecycle."""
+"""Direct Parquet Arrow-source planning and lifecycle.
+
+It wraps Parquet paths and factories as Arrow sources, retains their readers and
+keepalives, and records whether native or fallback routing was used.
+"""
 
 from __future__ import annotations
 

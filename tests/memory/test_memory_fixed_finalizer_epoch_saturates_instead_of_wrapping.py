@@ -1,4 +1,8 @@
-"""Regression coverage for memory fixed finalizer epoch saturates instead of wrapping."""
+"""Stress-tests fixed-width finalizer epochs alongside reserved rings, registry freeze,
+fork reset, composite admission, native and Python reserve transactions, cross-process
+pruning, shutdown barriers, pair observations, and control-plane shadow charges. Epochs
+saturate without wrap; all recovery uses preallocated slots or scratch, and allocation
+or snapshot failures roll back gates and resource domains exactly."""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_fixed_finalizer_epoch_saturates_instead_of_wrapping() -> None:
+    """Verify fixed finalizer epoch saturates instead of wrapping."""
     from schema_sanitizer.core_impl.finalizer_registry import _fixed_increment
 
     counter = bytearray([255, 255])
@@ -18,6 +23,7 @@ def test_fixed_finalizer_epoch_saturates_instead_of_wrapping() -> None:
 
 
 def test_reserved_finalizer_admission_uses_preallocated_ring_with_bounded_recovery() -> None:
+    """Verify reserved finalizer admission uses preallocated ring with bounded recovery."""
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
     start = source.index(
         "    def reserve_ticket(self)", source.index("class ReservedFinalizerEscrow")
@@ -35,6 +41,7 @@ def test_reserved_finalizer_admission_uses_preallocated_ring_with_bounded_recove
 
 
 def test_reserved_finalizer_capacity_snapshot_uses_exact_fixed_slot_authority() -> None:
+    """Verify reserved finalizer capacity snapshot uses exact fixed slot authority."""
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
     start = source.index(
         "    def capacity_snapshot(self)", source.index("class ReservedFinalizerEscrow")
@@ -48,6 +55,7 @@ def test_reserved_finalizer_capacity_snapshot_uses_exact_fixed_slot_authority() 
 
 
 def test_quiescence_buffer_rejects_stable_reserved_owner_without_allocating_token() -> None:
+    """Verify quiescence buffer rejects stable reserved owner without allocating token."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
     from schema_sanitizer.core_impl.finalizer_registry import (
         _reset_finalizer_registry_for_tests,
@@ -78,6 +86,7 @@ def test_quiescence_buffer_rejects_stable_reserved_owner_without_allocating_toke
 
 
 def test_finalizer_registry_rejects_genuinely_different_duplicate_hooks() -> None:
+    """Verify finalizer registry rejects genuinely different duplicate hooks."""
     from schema_sanitizer.core_impl.finalizer_registry import (
         _reset_finalizer_registry_for_tests,
         register_finalizer_domain,
@@ -87,12 +96,15 @@ def test_finalizer_registry_rejects_genuinely_different_duplicate_hooks() -> Non
     name = "fixed-finalizer-epoch-saturates-instead-of-different-domain"
 
     def drain_a() -> int:
+        """Drain callbacks from the first finalizer generation."""
         return 0
 
     def drain_b() -> int:
+        """Drain callbacks from the second finalizer generation."""
         return 1
 
     def snapshot() -> tuple[()]:
+        """Return the authoritative state snapshot expected by the test."""
         return ()
 
     register_finalizer_domain(name, drain=drain_a, snapshot=snapshot)
@@ -101,6 +113,7 @@ def test_finalizer_registry_rejects_genuinely_different_duplicate_hooks() -> Non
 
 
 def test_finalizer_registry_freeze_rejects_new_domains() -> None:
+    """Verify finalizer registry freeze rejects new domains."""
     from schema_sanitizer.core_impl.finalizer_registry import (
         _reset_finalizer_registry_for_tests,
         freeze_finalizer_registry,
@@ -119,6 +132,7 @@ def test_finalizer_registry_freeze_rejects_new_domains() -> None:
 
 
 def test_reserved_fork_reset_is_idempotent_for_duplicate_child_callbacks() -> None:
+    """Verify reserved fork reset is idempotent for duplicate child callbacks."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(2)
@@ -132,6 +146,7 @@ def test_reserved_fork_reset_is_idempotent_for_duplicate_child_callbacks() -> No
 
 
 def test_fork_quarantine_preserves_previous_generation_until_safe_point() -> None:
+    """Verify fork quarantine preserves previous generation until safe point."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -156,6 +171,7 @@ def test_fork_quarantine_preserves_previous_generation_until_safe_point() -> Non
 
 
 def test_fork_prepare_exhaustion_never_raises_inside_atfork_callback() -> None:
+    """Verify fork prepare exhaustion never raises inside atfork callback."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -172,6 +188,7 @@ def test_fork_prepare_exhaustion_never_raises_inside_atfork_callback() -> None:
 
 
 def test_ephemeral_escrow_does_not_pollute_static_baseline() -> None:
+    """Verify ephemeral escrow does not pollute static baseline."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
     from schema_sanitizer.core_impl.static_control_plane import static_control_plane_entries
 
@@ -182,6 +199,7 @@ def test_ephemeral_escrow_does_not_pollute_static_baseline() -> None:
 
 
 def test_global_escrows_declare_stable_static_kinds() -> None:
+    """Verify global escrows declare stable static kinds."""
     files = (
         "core_impl/finalizer_cleanup.py",
         "core_impl/memory_budget.py",
@@ -196,6 +214,7 @@ def test_global_escrows_declare_stable_static_kinds() -> None:
 
 
 def test_control_plane_reuses_released_exact_token_without_aba() -> None:
+    """Verify control plane reuses released exact token without ABA."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget()
@@ -212,21 +231,25 @@ def test_control_plane_reuses_released_exact_token_without_aba() -> None:
 
 
 def test_composite_close_keeps_execution_owned_until_memory_cleanup_commits() -> None:
+    """Verify composite close keeps execution owned until memory cleanup commits."""
     from schema_sanitizer.core_impl.memory_budget import CompositeParallelAdmission
 
     released: list[str] = []
 
     class Memory:
         def __init__(self) -> None:
+            """Initialize the memory test double."""
             self.calls = 0
 
         def close(self) -> None:
+            """Close the resources owned by the memory test double."""
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("memory cleanup failed")
 
     class Execution:
         def release(self) -> None:
+            """Release the resource held by the execution test double."""
             released.append("execution")
 
     memory = Memory()
@@ -244,6 +267,7 @@ def test_composite_close_keeps_execution_owned_until_memory_cleanup_commits() ->
 def test_composite_downshift_returns_surplus_physical_threads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify composite downshift returns surplus physical threads."""
     from schema_sanitizer.core_impl import memory_budget, process_resources
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -253,20 +277,24 @@ def test_composite_downshift_returns_surplus_physical_threads(
         amount = 7
 
         def shrink(self, amount: int) -> None:
+            """Update the execution lease and record the downshift target."""
             self.amount = amount
             shrink_calls.append(amount)
 
         def release(self) -> None:
+            """Release the resource held by the execution test double."""
             self.amount = 0
 
     class Lease:
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             pass
 
     class Ledger:
         calls = 0
 
         def acquire(self, amount: int, *, stage: str):
+            """Acquire the resource represented by the ledger test double."""
             self.calls += 1
             if self.calls == 1:
                 raise SchemaSanitizerResourceError("pressure")
@@ -290,6 +318,7 @@ def test_composite_downshift_returns_surplus_physical_threads(
 def test_required_composite_memory_fails_closed_and_returns_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify required composite memory fails closed and returns execution."""
     from schema_sanitizer.core_impl import memory_budget, process_resources
 
     class Execution:
@@ -297,6 +326,7 @@ def test_required_composite_memory_fails_closed_and_returns_execution(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the execution test double."""
             self.released = True
 
     execution = Execution()
@@ -315,6 +345,7 @@ def test_required_composite_memory_fails_closed_and_returns_execution(
 
 
 def test_native_reserve_snapshot_rolls_back_if_python_result_allocation_fails() -> None:
+    """Verify native reserve snapshot rolls back if Python result allocation fails."""
     source = (ROOT / "cpp/src/api/python_abi3/options/prepare.cc").read_text()
     start = source.index("py_operation_memory_ledger_reserve_snapshot")
     end = source.index("py_operation_memory_ledger_release", start)
@@ -326,6 +357,7 @@ def test_native_reserve_snapshot_rolls_back_if_python_result_allocation_fails() 
 
 
 def test_python_memory_reserve_uses_transactional_native_primitive() -> None:
+    """Verify Python memory reserve uses transactional native primitive."""
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     start = source.index("\n    def reserve(\n", source.index("class OperationMemoryLedger"))
     end = source.index("\n    def release", start)
@@ -334,6 +366,7 @@ def test_python_memory_reserve_uses_transactional_native_primitive() -> None:
 
 
 def test_memory_ledger_close_rolls_back_closing_gate_on_snapshot_failure() -> None:
+    """Verify memory ledger close rolls back closing gate on snapshot failure."""
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     start = source.index(
         "    def close(self) -> None:", source.index("class OperationMemoryLedger")
@@ -346,6 +379,7 @@ def test_memory_ledger_close_rolls_back_closing_gate_on_snapshot_failure() -> No
 
 
 def test_cross_process_pruning_uses_fixed_scratch_not_dynamic_stale_list() -> None:
+    """Verify cross process pruning uses fixed scratch not dynamic stale list."""
     for relative in ("cross_process_storage.py", "cross_process_memory.py"):
         source = (ROOT / "src/schema_sanitizer/core_impl" / relative).read_text()
         assert "_STALE_KEY_SCRATCH" in source
@@ -354,6 +388,7 @@ def test_cross_process_pruning_uses_fixed_scratch_not_dynamic_stale_list() -> No
 
 
 def test_cross_process_scratch_locks_are_replaced_after_fork() -> None:
+    """Verify cross process scratch locks are replaced after fork."""
     storage = (ROOT / "src/schema_sanitizer/core_impl/cross_process_storage.py").read_text()
     memory = (ROOT / "src/schema_sanitizer/core_impl/cross_process_memory.py").read_text()
     assert "_STALE_KEY_SCRATCH_FORK_FRESH_LOCK" in storage
@@ -362,6 +397,7 @@ def test_cross_process_scratch_locks_are_replaced_after_fork() -> None:
 
 
 def test_shutdown_correctness_barrier_uses_preallocated_activity_buffers() -> None:
+    """Verify shutdown correctness barrier uses preallocated activity buffers."""
     source = (ROOT / "src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
     assert "finalizer_activity_a = bytearray(activity_size)" in source
     assert "finalizer_activity_b = bytearray(activity_size)" in source
@@ -374,6 +410,7 @@ def test_shutdown_correctness_barrier_uses_preallocated_activity_buffers() -> No
 
 
 def test_shutdown_primary_path_contains_no_dynamic_subsystem_imports() -> None:
+    """Verify shutdown primary path contains no dynamic subsystem imports."""
     source = (ROOT / "src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
     start = source.index("def _perform_shutdown")
     end = source.index("\ndef shutdown_concurrency_runtime", start)
@@ -384,6 +421,7 @@ def test_shutdown_primary_path_contains_no_dynamic_subsystem_imports() -> None:
 
 
 def test_finalizer_and_shutdown_registries_are_fork_safe_and_freezable() -> None:
+    """Verify finalizer and shutdown registries are fork safe and freezable."""
     finalizers = (ROOT / "src/schema_sanitizer/core_impl/finalizer_registry.py").read_text()
     shutdown = (ROOT / "src/schema_sanitizer/core_impl/shutdown_observers.py").read_text()
     for source in (finalizers, shutdown):
@@ -393,6 +431,7 @@ def test_finalizer_and_shutdown_registries_are_fork_safe_and_freezable() -> None
 
 
 def test_finalizer_epochs_are_fixed_width_not_best_effort_python_integers() -> None:
+    """Verify finalizer epochs are fixed width not best effort Python integers."""
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
     assert "_publication_epoch +=" not in source
     assert "_progress_epoch +=" not in source
@@ -401,6 +440,7 @@ def test_finalizer_epochs_are_fixed_width_not_best_effort_python_integers() -> N
 
 
 def test_finalizer_registry_epoch_is_fixed_width() -> None:
+    """Verify finalizer registry epoch is fixed width."""
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_registry.py").read_text()
     assert "_REGISTRY_EPOCH = bytearray(8)" in source
     assert "_fixed_increment(_REGISTRY_EPOCH)" in source
@@ -409,6 +449,7 @@ def test_finalizer_registry_epoch_is_fixed_width() -> None:
 
 def test_real_pair_observation_matrix_records_bound_contracts() -> None:
     # Import implementing modules so the shared contracts are registered.
+    """Verify real pair observation matrix records bound contracts."""
     import schema_sanitizer.core_impl.control_plane_budget  # noqa: F401
     import schema_sanitizer.core_impl.memory_budget  # noqa: F401
     from schema_sanitizer.core_impl.concurrency_contracts import (
@@ -433,6 +474,7 @@ def test_real_pair_observation_matrix_records_bound_contracts() -> None:
 
 
 def test_observed_56_pair_validator_is_execution_backed_not_boolean_metadata() -> None:
+    """Verify observed 56 pair validator is execution backed not boolean metadata."""
     source = (ROOT / "src/schema_sanitizer/core_impl/concurrency_coverage.py").read_text()
     assert "runtime_pair_contract_observations()" in source
     assert "def validate_observed_concurrency_pair_contracts" in source
@@ -440,12 +482,14 @@ def test_observed_56_pair_validator_is_execution_backed_not_boolean_metadata() -
 
 
 def test_static_baseline_no_longer_uses_anonymous_eight_mib_constant() -> None:
+    """Verify static baseline no longer uses anonymous eight mib constant."""
     source = (ROOT / "src/schema_sanitizer/core_impl/control_plane_budget.py").read_text()
     assert "_STATIC_RUNTIME_BASELINE_BYTES" not in source
     assert "static_control_plane_bytes()" in source
 
 
 def test_native_transaction_is_exposed_through_abi_table() -> None:
+    """Verify native transaction is exposed through ABI table."""
     catalog = (ROOT / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
     module = (ROOT / "cpp/src/api/python_abi3/_core_abi3_module.cc").read_text()
     assert "operation_memory_ledger_reserve_snapshot" in catalog

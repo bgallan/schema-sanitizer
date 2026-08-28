@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark single/multi remote pipelines against explicit local emulators."""
+"""Benchmark single/multi remote pipelines against explicit local emulators.
+
+It creates deterministic sources, configures S3, GCS, and Azure emulators, and compares
+single and multi pipeline results.
+"""
 
 from __future__ import annotations
 
@@ -108,6 +112,7 @@ def _configure_s3(
     bucket = "schema-sanitizer-benchmark"
 
     async def create_bucket() -> None:
+        """Create the emulator bucket required by the provider benchmark."""
         async with await s3.open_client() as client:
             try:
                 await client.create_bucket(Bucket=bucket)
@@ -134,6 +139,7 @@ def _configure_gcs(
     bucket = "schema-sanitizer-benchmark"
 
     async def create_bucket() -> None:
+        """Create the emulator bucket required by the provider benchmark."""
         async with await open_aiohttp_session(gcs.request_headers()) as session:
             async with session.post(
                 f"{endpoint}/storage/v1/b",
@@ -158,6 +164,7 @@ def _configure_azure(
     from schema_sanitizer.remote_impl.providers import azure, azure_sync
 
     async def open_async(_ref: object) -> object:
+        """Open the asynchronous provider scope used by the benchmark."""
         return AsyncBlobServiceClient.from_connection_string(
             connection_string,
             api_version=AZURITE_API_VERSION,
@@ -165,6 +172,7 @@ def _configure_azure(
 
     @contextmanager
     def open_sync(_ref: object):
+        """Open the synchronous provider scope used by the benchmark."""
         service = SyncBlobServiceClient.from_connection_string(
             connection_string,
             api_version=AZURITE_API_VERSION,
@@ -179,6 +187,7 @@ def _configure_azure(
     container = "schema-sanitizer-benchmark"
 
     async def create_container() -> None:
+        """Create the emulator container required by the Azure benchmark."""
         service = AsyncBlobServiceClient.from_connection_string(
             connection_string,
             api_version=AZURITE_API_VERSION,

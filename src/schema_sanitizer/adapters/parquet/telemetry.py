@@ -1,4 +1,8 @@
-"""Parquet reader route, fallback, and diagnostic telemetry."""
+"""Parquet reader route, fallback, and diagnostic telemetry.
+
+It maintains synchronized native-attempt, success, failure, fallback, and
+last-diagnostic state for reader observability.
+"""
 
 from __future__ import annotations
 

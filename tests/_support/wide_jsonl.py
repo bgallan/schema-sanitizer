@@ -1,4 +1,8 @@
-"""Shared exact single/multi JSONL materialization harness."""
+"""Run exact single-versus-multi materialization checks for wide JSONL inputs.
+
+The harness builds governed execution contexts and compares rows, schemas, diagnostics, and
+encoded output bytes.
+"""
 
 from __future__ import annotations
 

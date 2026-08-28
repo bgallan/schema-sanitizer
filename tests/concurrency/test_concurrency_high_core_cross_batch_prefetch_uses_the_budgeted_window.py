@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency high core cross batch prefetch uses the budgeted window."""
+"""Verify high-core prefetch across batch boundaries stays inside its admitted window.
+
+The source dispatcher must use the entire budgeted opportunity without creating duplicate
+ownership, leaving one canonical owner for every submitted source packet.
+"""
 
 from __future__ import annotations
 

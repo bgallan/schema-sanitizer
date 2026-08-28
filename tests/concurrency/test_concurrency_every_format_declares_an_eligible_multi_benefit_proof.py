@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency every format declares an eligible multi benefit proof."""
+"""Require every format to declare executable evidence for useful multi-worker execution.
+
+Parquet cases complement the coverage proof by routing small row groups through the common output
+arena, committing page indexes only after absolute output commit, and preserving logical results.
+"""
 
 from __future__ import annotations
 

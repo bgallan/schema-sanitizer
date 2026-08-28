@@ -1,4 +1,6 @@
-"""Regression coverage for memory async tuning is derived from memory budget."""
+"""Connects asynchronous concurrency, retry delay, remote prefetch, and Parquet scratch
+capacity to the single operation memory budget. Direct callers and native consumers
+share the same derived limits, and exceptional page work returns its reservation."""
 
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_async_tuning_is_derived_from_memory_budget() -> None:
+    """Verify async tuning is derived from memory budget."""
     from schema_sanitizer.core_impl.memory_budget import memory_budget
     from schema_sanitizer.remote_impl.directory_downloads import directory_download_tuning
 
@@ -28,6 +31,7 @@ def test_async_tuning_is_derived_from_memory_budget() -> None:
 
 
 def test_retry_delay_bounds_exponent_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify retry delay bounds exponent work."""
     from schema_sanitizer.core_impl import async_scheduler
 
     monkeypatch.setattr(async_scheduler.random, "uniform", lambda _a, _b: 0.0)
@@ -36,10 +40,11 @@ def test_retry_delay_bounds_exponent_work(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_remote_prefetch_window_comes_from_memory_limit() -> None:
+    """Verify remote prefetch window comes from memory limit."""
     from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 
     class Manifest:
-        """Provide a lightweight test double."""
+        """Expose the manifest fields needed to derive remote prefetch tuning."""
 
         files: tuple[()] = ()
         chunk_size = 1
@@ -52,20 +57,21 @@ def test_remote_prefetch_window_comes_from_memory_limit() -> None:
 
 
 def test_shared_async_scheduler_caps_direct_callers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify shared async scheduler caps direct callers."""
     from schema_sanitizer.core_impl import async_scheduler
 
     async def run() -> None:
-        """Provide a test helper implementation."""
+        """Run the bounded retry scenario on one event loop."""
         attempts = 0
 
         async def operation() -> None:
-            """Provide a test helper implementation."""
+            """Fail each retry attempt while counting invocations."""
             nonlocal attempts
             attempts += 1
             raise RuntimeError("transient")
 
         async def no_sleep(_delay: float) -> None:
-            """Provide a test helper implementation."""
+            """Skip real backoff delays during the retry test."""
             return None
 
         monkeypatch.setattr(async_scheduler.asyncio, "sleep", no_sleep)
@@ -77,6 +83,7 @@ def test_shared_async_scheduler_caps_direct_callers(monkeypatch: pytest.MonkeyPa
 
 
 def test_native_consumers_share_the_memory_budget_helper() -> None:
+    """Verify native consumers share the memory budget helper."""
     consumers = [
         ROOT / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc",
         ROOT / "cpp/src/internal/json_output/schema/array_validation.cc",
@@ -91,6 +98,7 @@ def test_native_consumers_share_the_memory_budget_helper() -> None:
 
 
 def test_parquet_page_scratch_releases_exceptional_capacity() -> None:
+    """Verify Parquet page scratch releases exceptional capacity."""
     source = (
         ROOT / "cpp/src/internal/parquet/footer_reader/pages/footer_reader_page_scratch.cc.inc"
     ).read_text(encoding="utf-8")

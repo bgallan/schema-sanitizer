@@ -1,6 +1,7 @@
-"""Recursive Parquet nested-shape fixtures shared by runtime tests.
+"""Build deterministic recursive Parquet schemas and values for native runtime tests.
 
-The corpus generators remain separate from the focused assertion modules.
+The bounded and seeded corpora cover irregular list, map, struct, scalar, empty, and null
+combinations while keeping failures reproducible.
 """
 
 from __future__ import annotations
@@ -351,20 +352,14 @@ def _recursive_fuzz_row_group_phase_labels() -> tuple[str, ...]:
 
 
 def _recursive_fuzz_seeded_specs() -> list[tuple[str, object, dict[str, int]]]:
-    """Return a deterministic pseudo-random recursive grammar corpus.
-
-    This complements the bounded Cartesian corpus with less regular tree shapes:
-    varied root kinds, branch widths, repeated siblings, and mixed scalar leaves.
-    It is intentionally deterministic so failing production-like shapes can be
-    reproduced by corpus name.
-    """
+    """Return the deterministic pseudo-random recursive grammar corpus."""
 
     def next_seed(seed: int, salt: int) -> int:
-        """Internal recursive fuzz helper."""
+        """Advance the deterministic recursive-corpus seed."""
         return (seed * 1103515245 + 12345 + salt * 2654435761) & 0x7FFFFFFF
 
     def node(seed: int, depth: int, max_depth: int, forced: str | None = None) -> object:
-        """Internal recursive fuzz helper."""
+        """Build one bounded recursive grammar node from the seed."""
         if depth >= max_depth:
             return _recursive_fuzz_scalar(seed + depth)
         kind = forced or _RECURSIVE_FUZZ_OPS[next_seed(seed, depth) % len(_RECURSIVE_FUZZ_OPS)]
@@ -417,6 +412,7 @@ def _recursive_fuzz_projection_permutation_specs() -> list[tuple[str, object, di
 def test_native_parquet_stream_materializes_adversarial_recursive_struct_siblings(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes adversarial recursive struct siblings."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -513,6 +509,7 @@ def test_native_parquet_stream_materializes_adversarial_recursive_struct_sibling
 
 @_requires_pyarrow
 def test_native_parquet_stream_projects_recursive_shapes_across_row_groups(tmp_path: Path) -> None:
+    """Verify native Parquet stream projects recursive shapes across row groups."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -594,6 +591,7 @@ def test_native_parquet_stream_projects_recursive_shapes_across_row_groups(tmp_p
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_recursive_null_empty_matrix(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes recursive null empty matrix."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -714,6 +712,7 @@ def test_native_parquet_stream_materializes_recursive_null_empty_matrix(tmp_path
 def test_native_parquet_stream_materializes_generated_extreme_recursive_shapes(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes generated extreme recursive shapes."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -865,6 +864,7 @@ def test_native_parquet_stream_materializes_generated_extreme_recursive_shapes(
 def test_native_parquet_stream_materializes_generated_recursive_shape_fuzzer(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes generated recursive shape fuzzer."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -873,11 +873,11 @@ def test_native_parquet_stream_materializes_generated_recursive_shape_fuzzer(
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_spec(seed: int) -> tuple[str]:
-        """Internal test helper."""
+        """Select a scalar leaf specification from the deterministic seed."""
         return (("int64",), ("string",), ("bool",), ("float64",))[seed % 4]
 
     def chain_spec(ops: list[str], leaf: object) -> object:
-        """Internal test helper."""
+        """Build an alternating recursive chain around one scalar leaf."""
         spec = leaf
         for op_index, op in enumerate(reversed(ops)):
             if op == "list":
@@ -897,7 +897,7 @@ def test_native_parquet_stream_materializes_generated_recursive_shape_fuzzer(
         return spec
 
     def full_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a fully populated value for the recursive specification."""
         kind = spec[0]
         if kind == "int64":
             return seed * 10 + 1
@@ -923,7 +923,7 @@ def test_native_parquet_stream_materializes_generated_recursive_shape_fuzzer(
         raise AssertionError(kind)
 
     def empty_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build the canonical empty value for the recursive specification."""
         kind = spec[0]
         if kind in {"int64", "string", "bool", "float64"}:
             return None
@@ -939,7 +939,7 @@ def test_native_parquet_stream_materializes_generated_recursive_shape_fuzzer(
         raise AssertionError(kind)
 
     def generated_specs() -> list[tuple[str, object, int]]:
-        """Internal test helper."""
+        """Generate the bounded recursive specifications used by the fuzzer."""
         op_pool = ["list", "map", "struct"]
         cases: list[tuple[str, object, int]] = []
         for seed in range(18):
@@ -1003,6 +1003,7 @@ def test_native_parquet_stream_materializes_generated_recursive_shape_fuzzer(
 def test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes cartesian recursive grammar corpus."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1011,7 +1012,7 @@ def test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus(
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def full_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a fully populated value for the recursive specification."""
         kind = spec[0]
         if kind == "int64":
             return seed * 10 + 1
@@ -1096,6 +1097,7 @@ def test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus(
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_seeded_recursive_fuzzer_corpus(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes seeded recursive fuzzer corpus."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1104,7 +1106,7 @@ def test_native_parquet_stream_materializes_seeded_recursive_fuzzer_corpus(tmp_p
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_value(kind: str, seed: int) -> object:
-        """Internal test helper."""
+        """Build a deterministic scalar value for the requested leaf type."""
         if kind == "int64":
             return seed * 17
         if kind == "string":
@@ -1118,7 +1120,7 @@ def test_native_parquet_stream_materializes_seeded_recursive_fuzzer_corpus(tmp_p
     full_value = _recursive_fuzz_full_value_factory(scalar_value, include_null=False)
 
     def sparse_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a sparsely populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return None if seed % 3 == 0 else scalar_value(kind, seed)
@@ -1185,6 +1187,7 @@ def test_native_parquet_stream_materializes_seeded_recursive_fuzzer_corpus(tmp_p
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(tmp_path: Path) -> None:
+    """Verify native Parquet stream materializes deep recursive mixed shapes."""
     map_type = pa.map_(pa.string(), pa.int64())
     map_list_map_type = pa.map_(pa.string(), pa.list_(map_type))
     inner_struct = pa.struct([pa.field("m", map_type), pa.field("v", pa.int64())])
@@ -1302,6 +1305,7 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(tmp_path
 def test_native_parquet_stream_materializes_required_and_optional_root_structs(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes required and optional root structs."""
     root_struct = pa.struct(
         [
             pa.field("id", pa.int64()),
@@ -1339,6 +1343,7 @@ def test_native_parquet_stream_materializes_required_and_optional_root_structs(
 def test_native_parquet_stream_materializes_recursive_sibling_repeated_branches(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes recursive sibling repeated branches."""
     path = tmp_path / "native-recursive-sibling-repeated-branches.parquet"
     left_value_type = pa.list_(
         pa.map_(
@@ -1424,6 +1429,7 @@ def test_native_parquet_stream_materializes_recursive_sibling_repeated_branches(
 def test_native_parquet_stream_materializes_recursive_null_empty_matrix_corpus(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes recursive null empty matrix corpus."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1432,7 +1438,7 @@ def test_native_parquet_stream_materializes_recursive_null_empty_matrix_corpus(
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_value(kind: str, seed: int) -> object:
-        """Internal test helper."""
+        """Build a deterministic scalar value for the requested leaf type."""
         if kind == "int64":
             return seed * 100 + 7
         if kind == "string":
@@ -1444,7 +1450,7 @@ def test_native_parquet_stream_materializes_recursive_null_empty_matrix_corpus(
         raise AssertionError(kind)
 
     def full_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a fully populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return scalar_value(kind, seed)
@@ -1525,6 +1531,7 @@ def test_native_parquet_stream_materializes_recursive_null_empty_matrix_corpus(
 def test_native_parquet_stream_materializes_recursive_row_group_phase_matrix_corpus(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream materializes recursive row group phase matrix corpus."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1533,7 +1540,7 @@ def test_native_parquet_stream_materializes_recursive_row_group_phase_matrix_cor
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_value(kind: str, seed: int) -> object:
-        """Internal test helper."""
+        """Build a deterministic scalar value for the requested leaf type."""
         if kind == "int64":
             return seed * 1000 + 13
         if kind == "string":
@@ -1548,7 +1555,7 @@ def test_native_parquet_stream_materializes_recursive_row_group_phase_matrix_cor
     sparse_value = _recursive_fuzz_sparse_value_factory(scalar_value, full_value)
 
     def phase_values(spec: object, phase: str, seed: int) -> list[object]:
-        """Internal test helper."""
+        """Build values for one null-and-empty row-group phase."""
         if phase == "all-null":
             return [None, None]
         if phase == "empty-only":
@@ -1611,6 +1618,7 @@ def test_native_parquet_stream_materializes_recursive_row_group_phase_matrix_cor
 
 @_requires_pyarrow
 def test_native_parquet_stream_preserves_recursive_segmentation_invariants(tmp_path: Path) -> None:
+    """Verify native Parquet stream preserves recursive segmentation invariants."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1619,7 +1627,7 @@ def test_native_parquet_stream_preserves_recursive_segmentation_invariants(tmp_p
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_value(kind: str, seed: int) -> object:
-        """Internal test helper."""
+        """Build a deterministic scalar value for the requested leaf type."""
         if kind == "int64":
             return seed * 29 + 7
         if kind == "string":
@@ -1631,7 +1639,7 @@ def test_native_parquet_stream_preserves_recursive_segmentation_invariants(tmp_p
         raise AssertionError(kind)
 
     def full_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a fully populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return scalar_value(kind, seed)
@@ -1651,7 +1659,7 @@ def test_native_parquet_stream_preserves_recursive_segmentation_invariants(tmp_p
         raise AssertionError(kind)
 
     def sparse_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a sparsely populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return None if seed % 3 == 0 else scalar_value(kind, seed)
@@ -1671,7 +1679,7 @@ def test_native_parquet_stream_preserves_recursive_segmentation_invariants(tmp_p
     phase_value = _recursive_fuzz_phase_value_factory(sparse_value, full_value)
 
     def write_segments(path: Path, lengths: tuple[int, ...]) -> None:
-        """Internal test helper."""
+        """Write recursive values using the requested batch segmentation."""
         batches = []
         offset = 0
         for length in lengths:
@@ -1751,6 +1759,7 @@ def test_native_parquet_stream_preserves_recursive_segmentation_invariants(tmp_p
 def test_native_parquet_stream_preserves_recursive_root_fingerprints_under_projection_permutations(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream preserves recursive root fingerprints under projection permutations."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -1765,7 +1774,7 @@ def test_native_parquet_stream_preserves_recursive_root_fingerprints_under_proje
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_value(kind: str, seed: int) -> object:
-        """Internal test helper."""
+        """Build a deterministic scalar value for the requested leaf type."""
         if kind == "int64":
             return seed * 31
         if kind == "string":
@@ -1779,7 +1788,7 @@ def test_native_parquet_stream_preserves_recursive_root_fingerprints_under_proje
     full_value = _recursive_fuzz_full_value_factory(scalar_value, include_null=False)
 
     def sparse_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a sparsely populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return None if seed % 4 == 0 else scalar_value(kind, seed)
@@ -1922,6 +1931,7 @@ def test_native_parquet_stream_preserves_recursive_root_fingerprints_under_proje
 
 @_requires_pyarrow
 def test_native_parquet_stream_projects_multiple_recursive_roots(tmp_path: Path) -> None:
+    """Verify native Parquet stream projects multiple recursive roots."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -2002,6 +2012,7 @@ def test_native_parquet_stream_projects_multiple_recursive_roots(tmp_path: Path)
 
 @_requires_pyarrow
 def test_native_parquet_stream_projects_recursive_row_group_phase_roots(tmp_path: Path) -> None:
+    """Verify native Parquet stream projects recursive row group phase roots."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -2010,7 +2021,7 @@ def test_native_parquet_stream_projects_recursive_row_group_phase_roots(tmp_path
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_value(kind: str, seed: int) -> object:
-        """Internal test helper."""
+        """Build a deterministic scalar value for the requested leaf type."""
         if kind == "int64":
             return seed * 17
         if kind == "string":
@@ -2022,7 +2033,7 @@ def test_native_parquet_stream_projects_recursive_row_group_phase_roots(tmp_path
         raise AssertionError(kind)
 
     def full_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a fully populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return scalar_value(kind, seed)
@@ -2042,7 +2053,7 @@ def test_native_parquet_stream_projects_recursive_row_group_phase_roots(tmp_path
         raise AssertionError(kind)
 
     def sparse_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a sparsely populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return None if seed % 2 else scalar_value(kind, seed)
@@ -2128,6 +2139,7 @@ def test_native_parquet_stream_projects_recursive_row_group_phase_roots(tmp_path
 def test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet recursive layout summary tracks projected noise roots."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -2136,7 +2148,7 @@ def test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots(
     from schema_sanitizer.api_impl.file_conversion.writers import write_parquet_native_first_stream
 
     def scalar_value(kind: str, seed: int) -> object:
-        """Internal test helper."""
+        """Build a deterministic scalar value for the requested leaf type."""
         if kind == "int64":
             return seed * 31
         if kind == "string":
@@ -2150,7 +2162,7 @@ def test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots(
     full_value = _recursive_fuzz_full_value_factory(scalar_value, include_null=True)
 
     def sparse_value(spec: object, seed: int) -> object:
-        """Internal test helper."""
+        """Build a sparsely populated value for the recursive specification."""
         kind = spec[0]
         if kind in set(_RECURSIVE_FUZZ_SCALARS):
             return None if seed % 2 == 0 else scalar_value(kind, seed)
@@ -2248,6 +2260,7 @@ def test_native_parquet_recursive_layout_summary_tracks_projected_noise_roots(
 def test_native_parquet_stream_projects_independent_recursive_roots_in_subsets(
     tmp_path: Path,
 ) -> None:
+    """Verify native Parquet stream projects independent recursive roots in subsets."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -2333,6 +2346,7 @@ def test_native_parquet_stream_projects_independent_recursive_roots_in_subsets(
 
 @_requires_pyarrow
 def test_list_struct_projection_uses_native_reader(tmp_path: Path) -> None:
+    """Verify list struct projection uses native reader."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )

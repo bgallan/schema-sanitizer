@@ -1,4 +1,7 @@
-"""Regression coverage for memory call option cache keys have byte and item budgets."""
+"""Bounds prepared-option cache entries by both key bytes and item count across mutable
+option fingerprints, logical schema parsing, and native field registries. Large lists
+avoid duplicate fingerprint state, and impossible schema cardinality is rejected under
+the same safety budget."""
 
 from __future__ import annotations
 

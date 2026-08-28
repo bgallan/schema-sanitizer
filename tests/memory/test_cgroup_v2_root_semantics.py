@@ -1,3 +1,9 @@
+"""Define cgroup-v2 hierarchy and controller-value parsing contracts.
+
+The Python and native cases distinguish absent, unbounded, truncated, unknown, and valid root
+controller data without treating read failures as unlimited capacity.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,6 +12,7 @@ import pytest
 
 
 def _stable_view(monkeypatch: pytest.MonkeyPatch, root: Path, mountpoint: Path) -> None:
+    """Install a stable cgroup view rooted at the supplied test hierarchy."""
     from schema_sanitizer.core_impl import cgroup_view
 
     view = cgroup_view.CgroupView(2, root, mountpoint, resolution_known=True)
@@ -17,6 +24,7 @@ def _stable_view(monkeypatch: pytest.MonkeyPatch, root: Path, mountpoint: Path) 
 def test_missing_cgroup2_mount_root_controller_file_is_known_unbounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify missing cgroup v2 mount root controller file is known unbounded."""
     from schema_sanitizer.core_impl import cgroup_view
 
     mountpoint = tmp_path / "cgroup"
@@ -40,6 +48,7 @@ def test_missing_cgroup2_mount_root_controller_file_is_known_unbounded(
 def test_cgroup2_root_existing_value_counts_and_other_failures_stay_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify cgroup v2 root existing value counts and other failures stay unknown."""
     from schema_sanitizer.core_impl import cgroup_view
 
     mountpoint = tmp_path / "cgroup"
@@ -75,6 +84,7 @@ def test_cgroup2_root_existing_value_counts_and_other_failures_stay_unknown(
 
 
 def test_cgroup_text_reader_distinguishes_absence_from_truncation(tmp_path: Path) -> None:
+    """Verify cgroup text reader distinguishes absence from truncation."""
     from schema_sanitizer.core_impl.cgroup_view import _read_text_path_sample
 
     missing = tmp_path / "missing"
@@ -86,6 +96,7 @@ def test_cgroup_text_reader_distinguishes_absence_from_truncation(tmp_path: Path
 
 
 def test_native_cgroup2_root_missing_contract_is_narrow() -> None:
+    """Verify native cgroup v2 root missing contract is narrow."""
     root = Path(__file__).resolve().parents[2]
     cgroup = (root / "cpp/src/internal/runtime/cgroup_view.hh").read_text(encoding="utf-8")
     cpu = (root / "cpp/src/internal/runtime/cpu_capacity.hh").read_text(encoding="utf-8")

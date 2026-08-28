@@ -1,4 +1,8 @@
-"""Shared normalization and fingerprint helpers for projection audits."""
+"""Shared normalization and fingerprint helpers for projection audits.
+
+It normalizes layout summaries and centralizes duplicate-name, fingerprint, mismatch,
+and diagnostic-note handling for every audit mode.
+"""
 
 from __future__ import annotations
 

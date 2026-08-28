@@ -1,4 +1,7 @@
-"""Regression coverage for memory provider throttle registry is bounded under endpoint churn."""
+"""Bounds provider throttle and pool state under endpoint churn, oversized keys, live or
+open circuits, failed gates, cancellation, remote directory sessions, diagnostics, and
+waiter timeouts. Unknown samples create no entries, live single-flight gates are not
+evicted, and memory-bound wait queues remove timeout tickets without tombstones."""
 
 from __future__ import annotations
 
@@ -22,9 +25,11 @@ class _Client:
     """Minimal asynchronously closable provider client."""
 
     def __init__(self) -> None:
+        """Initialize the client test double."""
         self.close_calls = 0
 
     async def close(self) -> None:
+        """Close the resources owned by the client test double."""
         self.close_calls += 1
 
 

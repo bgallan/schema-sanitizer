@@ -1,4 +1,8 @@
-"""Regression coverage for memory reserved finalizer saturation is recoverable not corruption."""
+"""Treats reserved-finalizer saturation across snapshots, child reset, provider indices,
+operation resize, ABA tokens, composite admission, pair implementations, pruning,
+shutdown domains, emergency availability, and remote delivery. Saturation is recoverable
+capacity rather than corruption; fixed registries remain nonblocking, bytes precede
+slots, and shutdown uses registered precharged state without dynamic imports."""
 
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ _CPP_TOKEN = re.compile(
 
 
 def _cpp_scope(source: str, signature: str) -> str:
+    """Extract C++ scope from the production source contract."""
     code = _CPP_IGNORED.sub(" ", source)
     match = re.search(signature, code)
     assert match is not None, signature
@@ -39,10 +44,12 @@ def _cpp_scope(source: str, signature: str) -> str:
 
 
 def _cpp_tokens(source: str) -> tuple[str, ...]:
+    """Return the tokens extracted from the production C++ source."""
     return tuple(_CPP_TOKEN.findall(_CPP_IGNORED.sub(" ", source)))
 
 
 def _token_index(tokens: tuple[str, ...], needle: tuple[str, ...], *, start: int = 0) -> int:
+    """Extract token index from the production source contract."""
     width = len(needle)
     for index in range(start, len(tokens) - width + 1):
         if tokens[index : index + width] == needle:
@@ -51,11 +58,13 @@ def _token_index(tokens: tuple[str, ...], needle: tuple[str, ...], *, start: int
 
 
 def _token_count(tokens: tuple[str, ...], needle: tuple[str, ...]) -> int:
+    """Extract token count from the production source contract."""
     width = len(needle)
     return sum(tokens[index : index + width] == needle for index in range(len(tokens) - width + 1))
 
 
 def test_reserved_finalizer_saturation_is_recoverable_not_corruption() -> None:
+    """Verify reserved finalizer saturation is recoverable not corruption."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -73,6 +82,7 @@ def test_reserved_finalizer_saturation_is_recoverable_not_corruption() -> None:
 
 
 def test_finalizer_snapshot_never_waits_for_reserved_publisher_lock() -> None:
+    """Verify finalizer snapshot never waits for reserved publisher lock."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -84,6 +94,7 @@ def test_finalizer_snapshot_never_waits_for_reserved_publisher_lock() -> None:
     box: list[object] = []
 
     def snapshot() -> None:
+        """Capture the authoritative state snapshot for the assertion."""
         box.append(escrow.capacity_snapshot())
         done.set()
 
@@ -97,6 +108,7 @@ def test_finalizer_snapshot_never_waits_for_reserved_publisher_lock() -> None:
 
 
 def test_reserved_consumer_does_not_contend_with_unpublished_reserved_slot() -> None:
+    """Verify reserved consumer does not contend with unpublished reserved slot."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -108,6 +120,7 @@ def test_reserved_consumer_does_not_contend_with_unpublished_reserved_slot() -> 
     result: list[bool] = []
 
     def consume() -> None:
+        """Process one escrow token, capture its result, and signal completion."""
         result.append(escrow.process_one(lambda _ticket, _value: None))
         done.set()
 
@@ -122,6 +135,7 @@ def test_reserved_consumer_does_not_contend_with_unpublished_reserved_slot() -> 
 
 
 def test_control_plane_release_uses_authoritative_amount_not_mutable_ticket() -> None:
+    """Verify control plane release uses authoritative amount not mutable ticket."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget()
@@ -134,6 +148,7 @@ def test_control_plane_release_uses_authoritative_amount_not_mutable_ticket() ->
 
 
 def test_control_plane_child_reset_replaces_inherited_locked_state() -> None:
+    """Verify control plane child reset replaces inherited locked state."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget()
@@ -150,6 +165,7 @@ def test_control_plane_child_reset_replaces_inherited_locked_state() -> None:
 
 
 def test_storage_account_child_reset_replaces_inherited_global_lock() -> None:
+    """Verify storage account child reset replaces inherited global lock."""
     from schema_sanitizer.core_impl import cross_process_storage as storage
 
     storage._prepare_storage_accounts_for_fork()
@@ -165,6 +181,7 @@ def test_storage_account_child_reset_replaces_inherited_global_lock() -> None:
 
 
 def test_provider_expiry_index_is_one_node_per_live_key() -> None:
+    """Verify provider expiry index is one node per live key."""
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
     governor = ProviderThrottleGovernor(max_tracked_keys=4)
@@ -185,6 +202,7 @@ def test_provider_expiry_index_is_one_node_per_live_key() -> None:
 def test_provider_state_admission_failure_does_not_create_finalizer_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify provider state admission failure does not create finalizer debt."""
     from schema_sanitizer.core_impl.finalizer_cleanup import finalizer_cleanup_snapshot
     from schema_sanitizer.remote_impl import provider_throttle as module
 
@@ -192,6 +210,7 @@ def test_provider_state_admission_failure_does_not_create_finalizer_debt(
     before = finalizer_cleanup_snapshot()
 
     def fail(*_args: object, **_kwargs: object) -> object:
+        """Raise the deliberate failure injected by the test."""
         raise MemoryError("control-plane OOM")
 
     monkeypatch.setattr(module, "reserve_control_plane", fail)
@@ -202,6 +221,7 @@ def test_provider_state_admission_failure_does_not_create_finalizer_debt(
 
 
 def test_operation_memory_resize_commits_into_mutable_authoritative_entry() -> None:
+    """Verify operation memory resize commits into mutable authoritative entry."""
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text(encoding="utf-8")
     start = source.index("    def _resize_python_lease(")
     end = source.index("\n    def _transfer_python_lease", start)
@@ -212,6 +232,7 @@ def test_operation_memory_resize_commits_into_mutable_authoritative_entry() -> N
 
 
 def test_finalizer_activity_token_changes_across_cardinality_aba() -> None:
+    """Verify finalizer activity token changes across cardinality ABA."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
     from schema_sanitizer.core_impl.finalizer_registry import (
         finalizer_activity_token,
@@ -239,6 +260,7 @@ def test_finalizer_activity_token_changes_across_cardinality_aba() -> None:
 
 
 def test_active_owner_domains_are_charged_to_control_plane_budget() -> None:
+    """Verify active owner domains are charged to control plane budget."""
     sources = {
         "process_resource_lease": ROOT / "src/schema_sanitizer/core_impl/process_resources.py",
         "remote_io_waiter": ROOT / "src/schema_sanitizer/remote_impl/io_permits.py",
@@ -257,6 +279,7 @@ def test_active_owner_domains_are_charged_to_control_plane_budget() -> None:
 def test_composite_parallel_admission_acquires_bytes_before_physical_slots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify composite parallel admission acquires bytes before physical slots."""
     from schema_sanitizer.core_impl import memory_budget, process_resources
 
     order: list[str] = []
@@ -266,14 +289,17 @@ def test_composite_parallel_admission_acquires_bytes_before_physical_slots(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the execution test double."""
             self.released = True
 
     class MemoryLease:
         def close(self) -> None:
+            """Close the resources owned by the memory lease test double."""
             pass
 
     class Ledger:
         def acquire(self, _amount: int, *, stage: str):
+            """Acquire the resource represented by the ledger test double."""
             order.append("bytes")
             return MemoryLease()
 
@@ -298,6 +324,7 @@ def test_composite_parallel_admission_acquires_bytes_before_physical_slots(
 
 
 def test_56_pair_contracts_are_backed_by_concrete_runtime_implementations() -> None:
+    """Verify 56 pair contracts are backed by concrete runtime implementations."""
     from schema_sanitizer.core_impl.concurrency_coverage import validate_concurrency_pair_contracts
 
     pair_count, evidence = validate_concurrency_pair_contracts()
@@ -311,6 +338,7 @@ def test_56_pair_contracts_are_backed_by_concrete_runtime_implementations() -> N
 
 
 def test_native_active_to_completion_uses_single_authoritative_transfer() -> None:
+    """Verify native active to completion uses single authoritative transfer."""
     ordered = (ROOT / "cpp/src/internal/runtime/ordered_executor.hh").read_text(encoding="utf-8")
     arena = (ROOT / "cpp/src/internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     runtime = (ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text(
@@ -439,6 +467,7 @@ def test_native_active_to_completion_uses_single_authoritative_transfer() -> Non
 
 
 def test_cross_process_pruning_is_single_pass_and_bounded() -> None:
+    """Verify cross process pruning is single pass and bounded."""
     storage = (ROOT / "src/schema_sanitizer/core_impl/cross_process_storage.py").read_text(
         encoding="utf-8"
     )
@@ -452,6 +481,7 @@ def test_cross_process_pruning_is_single_pass_and_bounded() -> None:
 
 
 def test_shutdown_uses_registered_finalizer_domains_epochs_and_control_budget() -> None:
+    """Verify shutdown uses registered finalizer domains epochs and control budget."""
     source = (ROOT / "src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text(
         encoding="utf-8"
     )
@@ -467,6 +497,7 @@ def test_shutdown_uses_registered_finalizer_domains_epochs_and_control_budget() 
 def test_availability_emergency_debt_starts_worker_without_normal_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify availability emergency debt starts worker without normal queue."""
     from schema_sanitizer.core_impl import process_resources as module
 
     local_threads = module._Governor(
@@ -478,6 +509,7 @@ def test_availability_emergency_debt_starts_worker_without_normal_queue(
 
     class Debt:
         def _retry_dirty_availability(self) -> None:
+            """Retry publication of the dirty availability state."""
             completed.set()
 
     notifier.arm_emergency_republish(Debt())  # type: ignore[arg-type]
@@ -488,6 +520,7 @@ def test_availability_emergency_debt_starts_worker_without_normal_queue(
 def test_availability_dispatcher_is_sealed_per_governor_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify availability dispatcher is sealed per governor instance."""
     from schema_sanitizer.core_impl import process_resources as module
 
     local_threads = module._Governor(
@@ -513,6 +546,7 @@ def test_availability_dispatcher_is_sealed_per_governor_instance(
 
 
 def test_availability_dirty_retry_does_not_depend_on_retry_scheduler() -> None:
+    """Verify availability dirty retry does not depend on retry scheduler."""
     source = (ROOT / "src/schema_sanitizer/core_impl/process_resources.py").read_text(
         encoding="utf-8"
     )
@@ -525,6 +559,7 @@ def test_availability_dirty_retry_does_not_depend_on_retry_scheduler() -> None:
 
 
 def test_remote_delivery_reclaims_batch_tail_before_propagating_baseexception() -> None:
+    """Verify remote delivery reclaims batch tail before propagating baseexception."""
     source = (ROOT / "src/schema_sanitizer/remote_impl/io_permits.py").read_text(encoding="utf-8")
     start = source.index("    def _deliver(")
     end = source.index("\n    def reset_after_fork", start)
@@ -536,12 +571,14 @@ def test_remote_delivery_reclaims_batch_tail_before_propagating_baseexception() 
 
 
 def test_control_plane_static_baseline_is_part_of_governed_headroom() -> None:
+    """Verify control plane static baseline is part of governed headroom."""
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text(encoding="utf-8")
     assert "exact.reserved_bytes + control.governed_bytes" in source
     assert "snapshot.capacity_bytes - snapshot.reserved_bytes" in source
 
 
 def test_runtime_shutdown_does_not_import_finalizer_domains_dynamically() -> None:
+    """Verify runtime shutdown does not import finalizer domains dynamically."""
     source = (ROOT / "src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text(
         encoding="utf-8"
     )

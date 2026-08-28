@@ -1,4 +1,8 @@
-"""Version helpers for `schema_sanitizer`."""
+"""Version helpers for `schema_sanitizer`.
+
+It reads installed distribution metadata first, falls back to meta/VERSION in a source checkout,
+and raises clearly when neither source exists.
+"""
 
 from __future__ import annotations
 

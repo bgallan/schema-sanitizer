@@ -1,4 +1,6 @@
-"""Regression coverage for memory metadata collection limits precede large reservations."""
+"""Enforces metadata collection limits ahead of batch allocation, root or child generation,
+native row iteration, and serializer scratch. Impossible offsets or span counts fail
+before materialization, while large transient buffers are wiped and released."""
 
 from __future__ import annotations
 
@@ -90,9 +92,11 @@ def test_native_row_span_count_is_rejected_before_iteration(require_native: None
         """Helper class used by this regression."""
 
         def __len__(self) -> int:
+            """Return the number of values tracked by the huge sequence test double."""
             return 1_000_001
 
         def __getitem__(self, index: int) -> Any:
+            """Return the requested value from the huge sequence test double."""
             raise AssertionError(f"element {index} must not be read")
 
     with pytest.raises(ValueError, match="row-span entry count"):

@@ -1,4 +1,8 @@
-"""Shared JSON payload parsing helpers."""
+"""Shared JSON payload parsing helpers.
+
+It accepts decoded JSON only when it is an object; blank, malformed, and other JSON values become
+an empty mapping so diagnostic parsing never expands the failure surface.
+"""
 
 from __future__ import annotations
 

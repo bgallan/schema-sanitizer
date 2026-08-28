@@ -1,4 +1,8 @@
-"""Tests the supported public Python API."""
+"""Tests the supported public Python API.
+
+It checks version exposure, native-loader isolation, error translation, format
+normalization, optional adapters, and the supported public signature.
+"""
 
 from __future__ import annotations
 
@@ -14,11 +18,13 @@ import schema_sanitizer as ss
 
 
 def test_public_version_nonempty() -> None:
+    """Verify public version nonempty."""
     assert isinstance(ss.__version__, str)
     assert ss.__version__.strip()
 
 
 def test_import_error_loader_debug_never_collects_environment() -> None:
+    """Verify import error loader debug never collects environment."""
     from schema_sanitizer.core_impl.loader_debug import loader_debug
 
     diagnostics = loader_debug()
@@ -29,6 +35,7 @@ def test_import_error_loader_debug_never_collects_environment() -> None:
 
 
 def test_native_loader_does_not_scan_current_working_directory(tmp_path: Path) -> None:
+    """Verify native loader does not scan current working directory."""
     shadow_pkg = tmp_path / "schema_sanitizer"
     shadow_pkg.mkdir()
     for suffix in importlib.machinery.EXTENSION_SUFFIXES:
@@ -55,7 +62,7 @@ def test_native_loader_does_not_scan_current_working_directory(tmp_path: Path) -
 
 
 def test_invalid_argument_translated(tmp_path: Path, require_native: None) -> None:
-
+    """Verify invalid argument translated."""
     path = tmp_path / "rows.csv"
     path.write_text("a,b\n1,2\n", encoding="utf-8")
     with pytest.raises(ss.SchemaSanitizerInvalidArgumentError) as excinfo:
@@ -69,6 +76,7 @@ def test_invalid_argument_translated(tmp_path: Path, require_native: None) -> No
 def test_public_format_selectors_ignore_surrounding_whitespace(
     tmp_path: Path, require_native: None
 ) -> None:
+    """Verify public format selectors ignore surrounding whitespace."""
     pytest.importorskip("pyarrow")
 
     path = tmp_path / "rows.jsonl"
@@ -94,6 +102,7 @@ def test_public_format_selectors_ignore_surrounding_whitespace(
 
 
 def test_read_duckdb_optional(tmp_path: Path, require_native: None) -> None:
+    """Verify read duckdb optional."""
     pytest.importorskip("duckdb")
     pytest.importorskip("pyarrow")
 
@@ -104,6 +113,7 @@ def test_read_duckdb_optional(tmp_path: Path, require_native: None) -> None:
 
 
 def test_public_api_contract() -> None:
+    """Verify public API contract."""
     assert isinstance(ss.__all__, list)
 
     expected = {

@@ -1,4 +1,8 @@
-"""Public read/converter option matrices."""
+"""Public read/converter option matrices.
+
+Its parameter matrix applies token, error, inference, output-format, and converter
+combinations through the public read and write APIs.
+"""
 
 from __future__ import annotations
 
@@ -83,19 +87,19 @@ _TEMPORAL_CASES = [
 
 
 def _token_combo_id(c: _PolicyCombo) -> str:
-    """Return combo id for the test."""
+    """Render one token-policy combination as a stable parameter ID."""
     return f"on_error={c.on_error}|enabled={int(c.enabled)}"
 
 
 def _path(tmp_path: Path, case: _CsvCase) -> Path:
-    """Return path for the test."""
+    """Write one CSV option case and return its temporary path."""
     path = tmp_path / f"{case.name}.csv"
     path.write_text(case.csv_text, encoding="utf-8")
     return path
 
 
 def _kwargs(case: _CsvCase, combo: _PolicyCombo) -> dict[str, object]:
-    """Return kwargs for the test."""
+    """Build public reader options for one CSV case and policy combination."""
     kwargs = dict(case.kwargs_when_enabled) if combo.enabled else {}
     if "bool" in case.name and combo.enabled:
         kwargs.setdefault("true_tokens", ("true", "True"))
@@ -106,6 +110,7 @@ def _kwargs(case: _CsvCase, combo: _PolicyCombo) -> dict[str, object]:
 @pytest.mark.parametrize("case", _BOOL_CASES + _TEMPORAL_CASES, ids=lambda c: c.name)
 @pytest.mark.parametrize("combo", _POLICY_COMBOS, ids=_token_combo_id)
 def test_token_option_matrix_read(tmp_path: Path, combo: _PolicyCombo, case: _CsvCase) -> None:
+    """Verify token option matrix read."""
     pytest.importorskip("pyarrow")
 
     result = read_test_csv(_path(tmp_path, case), **_kwargs(case, combo))
@@ -118,6 +123,7 @@ def test_token_option_matrix_read(tmp_path: Path, combo: _PolicyCombo, case: _Cs
 def test_token_option_matrix_converters(
     tmp_path: Path, combo: _PolicyCombo, case: _CsvCase, suffix: str
 ) -> None:
+    """Verify token option matrix converters."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     out = tmp_path / f"{case.name}_{combo.on_error}_{int(combo.enabled)}{suffix}"
@@ -148,6 +154,7 @@ class _Combo:
 
     @property
     def expected_rows(self) -> int:
+        """Return the rows expected for this option-matrix case."""
         return EXPECTED_ROWS
 
 
@@ -163,17 +170,17 @@ _OPTION_COMBOS = list(
 
 
 def _api_combo_id(c: _Combo) -> str:
-    """Return combo id for the test."""
+    """Render one public API option combination as a stable parameter ID."""
     return f"on_error={c.on_error}|infer_bools={int(c.infer_bools)}"
 
 
 def _slug(s: str) -> str:
-    """Return slug for the test."""
+    """Convert a parameter label into a filesystem-safe fixture name."""
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", s)
 
 
 def _kwargs_for_combo(c: _Combo) -> dict[str, object]:
-    """Return kwargs for combo for the test."""
+    """Build public converter arguments for one option combination."""
     if c.infer_bools:
         return {
             "column_order": "alphabetically",
@@ -185,7 +192,7 @@ def _kwargs_for_combo(c: _Combo) -> dict[str, object]:
 
 
 def _csv_path(tmp_path: Path, name: str = "rows.csv") -> Path:
-    """Return csv path for the test."""
+    """Write the shared API matrix CSV and return its path."""
     path = tmp_path / name
     path.write_text(API_CSV_TEXT, encoding="utf-8")
     return path
@@ -194,6 +201,7 @@ def _csv_path(tmp_path: Path, name: str = "rows.csv") -> Path:
 @pytest.mark.parametrize("output_format", ("pyarrow", "pandas", "polars", "duckdb"))
 @pytest.mark.parametrize("combo", _OPTION_COMBOS, ids=_api_combo_id)
 def test_read_option_matrix(tmp_path: Path, combo: _Combo, output_format: str) -> None:
+    """Verify read option matrix."""
     if output_format == "pyarrow":
         pytest.importorskip("pyarrow")
     elif output_format == "pandas":
@@ -224,6 +232,7 @@ def test_read_option_matrix(tmp_path: Path, combo: _Combo, output_format: str) -
 @pytest.mark.parametrize("suffix", (".csv", ".jsonl", ".parquet"))
 @pytest.mark.parametrize("combo", _OPTION_COMBOS, ids=_api_combo_id)
 def test_converter_option_matrix(tmp_path: Path, combo: _Combo, suffix: str) -> None:
+    """Verify converter option matrix."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     source = _csv_path(tmp_path, f"source_{_slug(_api_combo_id(combo))}.csv")

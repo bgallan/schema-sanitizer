@@ -1,4 +1,7 @@
-"""Cross-language operation-wide resident-memory ledger regressions."""
+"""Validates one atomic cross-language operation-memory ledger for Python reservations,
+directory metadata, native reader work, high-level text streams, remote control bodies,
+and transfer chunks. Charges precede blocking reads and remain held until the owning
+stream or body closes, while peak usage survives ledger closure."""
 
 from __future__ import annotations
 
@@ -167,15 +170,18 @@ def test_remote_control_body_retains_shared_ledger_charge_until_released(
         status = 200
 
         def read(self, size: int = -1) -> bytes:
+            """Read bounded data from the response test double."""
             return b'{"value":1}' if size < 0 else b'{"value":1}'[:size]
 
         def getheaders(self):
+            """Return the controlled HTTP response headers."""
             return []
 
     class Connection:
-        """Provide a focused helper for the surrounding regression."""
+        """Expose the closeable connection paired with the bounded response."""
 
         def close(self) -> None:
+            """Close the resources owned by the connection test double."""
             pass
 
     monkeypatch.setattr(
@@ -229,17 +235,20 @@ def test_remote_transfer_reserves_chunk_before_blocking_read(
         calls = 0
 
         def getheader(self, _name: str):
+            """Return the requested controlled HTTP response header."""
             return None
 
         def read(self, _size: int = -1) -> bytes:
+            """Read bounded data from the response test double."""
             observed.append(operation.memory_ledger.snapshot().reserved_bytes)
             self.calls += 1
             return b"data" if self.calls == 1 else b""
 
     class Connection:
-        """Provide a focused helper for the surrounding regression."""
+        """Expose the closeable connection paired with the staged response."""
 
         def close(self) -> None:
+            """Close the resources owned by the connection test double."""
             pass
 
     monkeypatch.setattr(

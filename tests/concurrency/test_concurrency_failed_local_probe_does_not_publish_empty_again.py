@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency failed local probe does not publish empty again."""
+"""Protect ordered publication from stale or failed producer observations.
+
+Failed local probes and stale remote candidates must not republish an empty state, while genuine
+last-packet removal, visibility ordering, and native direct-producer completion remain exact.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ def _function(source: str, start: str, end: str) -> str:
 
 
 def test_failed_local_probe_does_not_publish_empty_again() -> None:
+    """Verify failed local probe does not publish empty again."""
     source = RUNTIME.read_text(encoding="utf-8")
     local = _function(source, "bool take_local", "bool steal_compatible")
     empty_branch = local[
@@ -32,6 +37,7 @@ def test_failed_local_probe_does_not_publish_empty_again() -> None:
 
 
 def test_stale_remote_candidate_does_not_repeat_empty_rmw() -> None:
+    """Verify stale remote candidate does not repeat empty RMW."""
     source = RUNTIME.read_text(encoding="utf-8")
     steal = _function(source, "bool steal_compatible", "bool take_task")
     empty_branch = steal[
@@ -46,6 +52,7 @@ def test_stale_remote_candidate_does_not_repeat_empty_rmw() -> None:
 
 
 def test_successful_last_packet_removals_still_publish_empty() -> None:
+    """Verify successful last packet removals still publish empty."""
     source = RUNTIME.read_text(encoding="utf-8")
     local = _function(source, "bool take_local", "bool steal_compatible")
     steal = _function(source, "bool steal_compatible", "bool take_task")
@@ -58,6 +65,7 @@ def test_successful_last_packet_removals_still_publish_empty() -> None:
 
 
 def test_visibility_transitions_keep_existing_ordering() -> None:
+    """Verify visibility transitions keep existing ordering."""
     runtime = RUNTIME.read_text(encoding="utf-8")
 
     assert "nonempty_mask.fetch_or(" in runtime

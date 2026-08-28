@@ -1,4 +1,8 @@
-"""Regression coverage for memory remote io wait queue is bounded and recovers after cancellation."""
+"""Bounds remote-I/O and native-memory waiters alongside coordinator submissions, provider
+terminal outcomes, attacker-sized metadata, cross-process persistence, telemetry
+overflow, and constant-size pool close. Cancellation compacts queues, overflow preserves
+the last valid journal, invalid entries fail closed, and failed persisted releases
+remain retryable."""
 
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ def test_remote_io_wait_queue_is_bounded_and_recovers_after_cancellation() -> No
     """Direct permit callers cannot append unlimited loop-affine futures."""
 
     async def exercise() -> tuple[int, int, int]:
+        """Fill the remote permit queue, cancel waiters, and verify recovery."""
         governor = RemoteIoPermitGovernor(1, max_waiters=2)
         holder = await governor.acquire(label="holder")
         first = asyncio.create_task(governor.acquire(label="first"))
@@ -59,6 +64,7 @@ def test_remote_io_queue_compacts_attacker_sized_metadata() -> None:
     """Queued labels and operation identities retain only bounded digests."""
 
     async def exercise() -> tuple[str, str]:
+        """Queue attacker-sized metadata and verify compact waiter state."""
         governor = RemoteIoPermitGovernor(1, max_waiters=1)
         holder = await governor.acquire(label="holder")
         huge = "x" * (2 << 20)
@@ -94,6 +100,7 @@ def test_remote_coordinator_bounds_not_yet_admitted_submissions() -> None:
     )
 
     async def blocked(_context: object) -> None:
+        """Pause at the blocked synchronization point."""
         await asyncio.Event().wait()
 
     coordinator.submit(blocked)
@@ -119,6 +126,7 @@ def test_provider_request_lease_terminal_outcome_is_thread_safe() -> None:
     barrier = threading.Barrier(32)
 
     def complete() -> None:
+        """Complete the pending operation at the controlled point."""
         barrier.wait()
         lease.success()
 
@@ -242,6 +250,7 @@ def test_cross_process_memory_release_remains_retryable_after_persist_failure(
 
     @contextmanager
     def fail_locked_state(_path=None):
+        """Inject the locked state failure at the controlled test point."""
         raise OSError("persist failed")
         yield {}
 

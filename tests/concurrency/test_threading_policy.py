@@ -1,4 +1,9 @@
-"""Contracts for deterministic single and bounded multi execution modes."""
+"""Define deterministic single-worker and bounded multi-worker execution policy.
+
+Normalization, public defaults, Boolean validation, inline sync and prefetch behavior, output
+parity, affinity-aware capacity, low-memory fallback, and uncapped-but-governed multi widths are
+verified without allowing single mode to create helper threads or processes.
+"""
 
 from __future__ import annotations
 
@@ -200,6 +205,7 @@ def test_remote_prefetch_single_stages_inline_without_executor(
         """Fail if the multi-only remote coordinator is constructed."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the forbidden coordinator test double."""
             raise AssertionError("single mode constructed RemoteIoCoordinator")
 
     staged = SimpleNamespace(close=lambda: None)
@@ -208,6 +214,7 @@ def test_remote_prefetch_single_stages_inline_without_executor(
         """Provide one inline-stage manifest for the prefetch test."""
 
         def stage_chunk(self, start: int) -> object:
+            """Stage one chunk through the controlled session."""
             assert start == 0
             return staged
 

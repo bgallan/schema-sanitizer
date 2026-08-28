@@ -124,6 +124,7 @@ def open_coordination_file(path: Path) -> BinaryIO:
         flags |= os.O_NOFOLLOW
 
     def _opener():
+        """Open the target relative to its trusted directory descriptor."""
         descriptor = -1
         try:
             descriptor = os.open(path, flags, 0o600)
@@ -197,6 +198,7 @@ def _publish_record_mode(
         flags |= os.O_NOFOLLOW
 
     def _opener():
+        """Open the target relative to its trusted directory descriptor."""
         descriptor = -1
         try:
             descriptor = os.open(temporary, flags, 0o600)
@@ -279,12 +281,15 @@ class _ReadRecordStreamAdapter:
     __slots__ = ("handle", "metadata")
 
     def __init__(self, pair):
+        """Initialize the read record stream adapter and its owned runtime state."""
         self.handle, self.metadata = pair
 
     def __getattr__(self, name):
+        """Delegate unresolved attributes to the wrapped object."""
         return getattr(self.handle, name)
 
     def close(self):
+        """Release resources owned by this read record stream adapter."""
         return self.handle.close()
 
 
@@ -298,6 +303,7 @@ def _read_record(path: Path, max_payload_bytes: int) -> _JournalRecord | None:
         flags |= os.O_NOFOLLOW
 
     def _opener():
+        """Open the target relative to its trusted directory descriptor."""
         descriptor = -1
         try:
             descriptor = os.open(journal, flags)

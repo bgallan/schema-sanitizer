@@ -1,4 +1,8 @@
-"""Allocation-bounded text measurement helpers."""
+"""Allocation-bounded text measurement helpers.
+
+It measures UTF-8 in fixed character chunks and returns a one-byte-over-limit sentinel without
+constructing the full encoded payload.
+"""
 
 from __future__ import annotations
 
