@@ -63,9 +63,19 @@ runs:
         tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py
         tests/concurrency/test_runtime_resource_close_and_finalization.py
         tests/parquet/test_parquet_direct_nested_projection.py
-        tests/parquet/test_parquet_native_nested_list_map_combinators.py
-        tests/parquet/test_parquet_native_recursive_adversarial_shapes.py
-        tests/parquet/test_parquet_native_recursive_extreme_runtime.py
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_list_map_nested_struct_list_values]
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_list_map_list_struct_values]
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_list_map_with_struct_values]
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_list_map_with_nested_struct_values]
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_list_map_with_struct_list_values]
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_list_map_with_struct_list_chain_values]
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_list_list_struct_values]
+        tests/parquet/test_parquet_native_nested_cases.py::test_native_nested_case[native_parquet_stream_materializes_deep_list_chain_struct_values]
+        tests/parquet/test_parquet_native_recursive_cases.py::test_native_recursive_case[native_parquet_stream_materializes_adversarial_recursive_struct_siblings]
+        tests/parquet/test_parquet_native_recursive_cases.py::test_native_recursive_case[native_parquet_stream_projects_recursive_shapes_across_row_groups]
+        tests/parquet/test_parquet_native_recursive_cases.py::test_native_recursive_case[native_parquet_stream_materializes_recursive_null_empty_matrix]
+        tests/parquet/test_parquet_native_recursive_cases.py::test_native_recursive_case[native_parquet_stream_materializes_generated_extreme_recursive_shapes]
+        tests/parquet/test_parquet_native_recursive_cases.py::test_native_recursive_case[native_parquet_stream_materializes_generated_recursive_shape_fuzzer]
         tests/pipeline/test_csv_union_projection.py
     - name: Configure Linux ASan/UBSan
       if: inputs.mode == 'linux-full'

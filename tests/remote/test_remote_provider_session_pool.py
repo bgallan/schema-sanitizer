@@ -12,21 +12,17 @@ class _FakeClient:
     """Record provider client closure without real network resources."""
 
     def __init__(self) -> None:
-        """Initialize close accounting."""
         self.close_calls = 0
         self.uses = 0
 
     async def close(self) -> None:
-        """Record the operation-final close."""
         self.close_calls += 1
 
     async def __aenter__(self) -> _FakeClient:
-        """Record one borrowed use."""
         self.uses += 1
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        """The raw client would normally close per use."""
         await self.close()
 
 
@@ -263,18 +259,15 @@ class _FakeManager:
     """Record one provider manager entry and final exit."""
 
     def __init__(self, value: Any) -> None:
-        """Store the entered provider value."""
         self.value = value
         self.enter_calls = 0
         self.exit_calls = 0
 
     async def __aenter__(self) -> Any:
-        """Enter the provider manager once."""
         self.enter_calls += 1
         return self.value
 
     async def __aexit__(self, *_exc: object) -> None:
-        """Close the provider manager once."""
         self.exit_calls += 1
 
 

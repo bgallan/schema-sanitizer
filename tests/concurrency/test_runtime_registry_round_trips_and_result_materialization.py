@@ -6,12 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 
-def test_registry_probe_path_sources_native_state_round_trip(tmp_path: Path) -> None:
-    """Verify native path-source probes accept registry-state capsules."""
-    require_native()
+def test_registry_probe_path_sources_native_state_round_trip(
+    tmp_path: Path, require_native: None
+) -> None:
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
     first_path = tmp_path / "first.json"
@@ -43,9 +42,8 @@ def test_registry_probe_path_sources_native_state_round_trip(tmp_path: Path) -> 
 
 def test_registry_probe_path_source_chunk_provider_native_round_trip(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native registry probes consume lazy path-source chunks."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
     first_path = tmp_path / "first.json"
@@ -57,12 +55,10 @@ def test_registry_probe_path_source_chunk_provider_native_round_trip(
         """Simple two-chunk path-source provider."""
 
         def __init__(self) -> None:
-            """Initialize chunk state."""
             self.index = 0
             self.closed = 0
 
         def next_sources(self):
-            """Return one path source per chunk."""
             chunks = [
                 [("json", str(first_path), str(first_path))],
                 [("json", str(second_path), str(second_path))],
@@ -74,7 +70,6 @@ def test_registry_probe_path_source_chunk_provider_native_round_trip(
             return out
 
         def close(self) -> None:
-            """Record native provider cleanup."""
             self.closed += 1
 
     provider = Provider()
@@ -96,9 +91,8 @@ def test_registry_probe_path_source_chunk_provider_native_round_trip(
 
 def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_trip(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native provider auto-registry probes and streams through paired providers."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.streams import Stream
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -117,12 +111,10 @@ def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_tri
         """Simple replayable path-source chunk provider."""
 
         def __init__(self) -> None:
-            """Initialize chunk state."""
             self.index = 0
             self.closed = 0
 
         def next_sources(self):
-            """Return one path source per chunk."""
             if self.index >= len(chunks):
                 return None
             out = chunks[self.index]
@@ -130,7 +122,6 @@ def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_tri
             return out
 
         def close(self) -> None:
-            """Record native provider cleanup."""
             self.closed += 1
 
     probe_provider = Provider()
@@ -169,7 +160,6 @@ def test_registry_sink_path_source_chunk_provider_auto_registry_native_round_tri
 
 
 def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) -> None:
-    """Verify Arrow-source probes prefer the native-state ABI when available."""
     from schema_sanitizer.core_impl import execution as execution_context
     from schema_sanitizer.core_impl import probes as probe_dependencies
 
@@ -180,7 +170,6 @@ def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) ->
 
         @staticmethod
         def context_registry_probe_from_arrow_sources_registry_state(*args):
-            """Capture the native-state probe call."""
             calls.append(args)
             return {
                 "schema": b"\x00\x00\x00\x00",
@@ -193,7 +182,6 @@ def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) ->
 
         @staticmethod
         def context_registry_probe_from_arrow_sources(*_args):
-            """Fail if the JSON-registry path is used."""
             raise AssertionError("JSON Arrow-source registry probe should not be used")
 
     monkeypatch.setattr(execution_context, "_native", SimpleNamespace(context_new=lambda: "ctx"))
@@ -226,9 +214,7 @@ def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) ->
     ]
 
 
-def test_registry_probe_arrow_sources_native_state_round_trip() -> None:
-    """Verify native Arrow-source probes accept registry-state capsules."""
-    require_native()
+def test_registry_probe_arrow_sources_native_state_round_trip(require_native: None) -> None:
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
@@ -257,9 +243,9 @@ def test_registry_probe_arrow_sources_native_state_round_trip() -> None:
     assert set(second.field_names) >= {"a", "b"}
 
 
-def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_trip() -> None:
-    """Verify native Arrow-source provider auto-registry probes and streams."""
-    require_native()
+def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_trip(
+    require_native: None,
+) -> None:
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.streams import Stream
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -274,12 +260,10 @@ def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_tr
         """Simple replayable Arrow-source chunk provider."""
 
         def __init__(self) -> None:
-            """Initialize chunk state."""
             self.index = 0
             self.closed = 0
 
         def next_sources(self):
-            """Return one Arrow source per chunk."""
             if self.index >= len(chunks):
                 return None
             out = chunks[self.index]
@@ -287,7 +271,6 @@ def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_tr
             return out
 
         def close(self) -> None:
-            """Record native provider cleanup."""
             self.closed += 1
 
     probe_provider = Provider()
@@ -327,14 +310,12 @@ def test_registry_sink_arrow_source_chunk_provider_auto_registry_native_round_tr
 
 
 def test_sink_result_table_materialization_closes_stream_backed_raw(monkeypatch) -> None:
-    """Verify sink result table materialization closes stream backed raw."""
     import schema_sanitizer.api_impl.results as sink_result
 
     class TableStream:
         """Test helper for TableStream."""
 
         def __arrow_c_stream__(self):
-            """Return the Arrow C stream capsule."""
             return object()
 
     class Raw:
@@ -345,7 +326,6 @@ def test_sink_result_table_materialization_closes_stream_backed_raw(monkeypatch)
         closed = False
 
         def close(self):
-            """Close the test helper."""
             self.closed = True
 
     raw = Raw()
@@ -367,14 +347,12 @@ def test_sink_result_table_materialization_closes_stream_backed_raw(monkeypatch)
 
 
 def test_sink_result_table_materialization_preserves_diagnostics_until_close(monkeypatch) -> None:
-    """Verify sink result table materialization preserves diagnostics until close."""
     import schema_sanitizer.api_impl.results as sink_result
 
     class TableStream:
         """Test helper for TableStream."""
 
         def __arrow_c_stream__(self):
-            """Return the Arrow C stream capsule."""
             return object()
 
     class Diagnostics:
@@ -388,17 +366,14 @@ def test_sink_result_table_materialization_preserves_diagnostics_until_close(mon
         table = TableStream()
 
         def __init__(self) -> None:
-            """Initialize the test helper."""
             self.diagnostics = Diagnostics()
             self.main_closed = 0
             self.closed = 0
 
         def close_main_stream(self) -> None:
-            """Close the main test stream."""
             self.main_closed += 1
 
         def close(self) -> None:
-            """Close the test helper."""
             self.closed += 1
 
     raw = Raw()

@@ -168,7 +168,6 @@ def test_bigquery_resolution_prefers_embedded_registry() -> None:
         """Client double that rejects any external-schema fallback."""
 
         def get_table(self, _table: object) -> object:
-            """Fail when registry precedence is not respected."""
             raise AssertionError("external schema fallback should not run")
 
     resolved = resolve_bigquery_arrow_schema(

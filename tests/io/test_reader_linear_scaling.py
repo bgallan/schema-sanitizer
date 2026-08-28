@@ -9,7 +9,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 from benchmarks.readers import linear_scaling
 
@@ -51,9 +50,8 @@ def test_recorded_reader_linear_scaling_evidence_stays_within_budget() -> None:
     )
 
 
-def test_reader_linear_scaling_harness_runs_all_text_frontends() -> None:
+def test_reader_linear_scaling_harness_runs_all_text_frontends(require_native: None) -> None:
     """A tiny smoke run protects the executable benchmark contract."""
-    require_native()
     initial_sys_path = list(sys.path)
     report = linear_scaling.run(ROOT, sizes=[8, 16], repeats=1)
     assert sys.path == initial_sys_path
@@ -267,9 +265,8 @@ def test_static_latency_budget_requires_every_platform_artifact(tmp_path: Path) 
         linear_scaling.load_latency_budget(path)
 
 
-def test_provenance_hashes_the_measured_native_extension() -> None:
+def test_provenance_hashes_the_measured_native_extension(require_native: None) -> None:
     """Reports identify native bits even when CI cannot conveniently pass a wheel path."""
-    require_native()
     provenance = linear_scaling.collect_provenance(ROOT)
     native = provenance["native_extension"]
 

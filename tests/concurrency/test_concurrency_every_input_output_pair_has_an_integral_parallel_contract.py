@@ -6,7 +6,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl import python_rows
@@ -100,9 +99,9 @@ def test_every_input_output_pair_has_an_integral_parallel_contract() -> None:
 
 def test_sequence_rows_are_encoded_once_across_repeated_replays(
     monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
     """A reusable sequence pays for one native object walk."""
-    require_native()
     original = python_rows.PYTHON_ROWS_JSONL_BYTES
     encoded_ranges: list[tuple[int, int]] = []
 
@@ -128,9 +127,8 @@ def test_sequence_rows_are_encoded_once_across_repeated_replays(
     assert sum(stop - start for start, stop in encoded_ranges) == len(rows)
 
 
-def test_generator_seek_is_progressive_and_never_reiterates() -> None:
+def test_generator_seek_is_progressive_and_never_reiterates(require_native: None) -> None:
     """Schema replay starts immediately instead of draining the generator first."""
-    require_native()
     yielded = 0
 
     def source() -> Iterator[dict[str, int]]:
@@ -174,9 +172,9 @@ def test_single_encode_route_reaches_every_native_output(
     converter_name: str,
     suffix: str,
     extra: dict[str, str],
+    require_native: None,
 ) -> None:
     """The common one-pass Python source route feeds every native sink."""
-    require_native()
     original = python_rows.PYTHON_ROWS_JSONL_BYTES
     encoded_rows = 0
 

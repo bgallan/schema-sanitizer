@@ -17,7 +17,6 @@ from _ordered_executor_probe import (
     assert_exact_completion,
     assert_ring_generations,
 )
-from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -25,9 +24,8 @@ CONCURRENCY_TESTS = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("workers", FUNCTIONAL_WORKERS)
-def test_completion_probe_matrix_is_exact_and_bounded(workers: int) -> None:
+def test_completion_probe_matrix_is_exact_and_bounded(workers: int, require_native: None) -> None:
     """Every scheduler boundary gets the same functional load on every OS."""
-    require_native()
     assert_ring_generations(workers, FUNCTIONAL_TASKS, minimum=32)
 
     result = native_core.ordered_executor_arena_completion_probe(
@@ -44,9 +42,8 @@ def test_completion_probe_matrix_is_exact_and_bounded(workers: int) -> None:
     )
 
 
-def test_completion_probe_is_worker_count_deterministic() -> None:
+def test_completion_probe_is_worker_count_deterministic(require_native: None) -> None:
     """Crossing the eight-worker gate cannot change the ordered value oracle."""
-    require_native()
     low = native_core.ordered_executor_arena_completion_probe(
         8,
         FUNCTIONAL_TASKS,
@@ -75,9 +72,8 @@ def test_completion_probe_is_worker_count_deterministic() -> None:
 
 
 @pytest.mark.native_stress
-def test_completion_probe_sustains_many_ring_generations() -> None:
+def test_completion_probe_sustains_many_ring_generations(require_native: None) -> None:
     """One explicit heavy case exercises the maximum 16-worker load."""
-    require_native()
     assert_ring_generations(STRESS_WORKERS, STRESS_TASKS, minimum=781)
 
     result = native_core.ordered_executor_arena_completion_probe(

@@ -71,9 +71,7 @@ runs:
         print(package.__version__, extension)
         PY
         pytest --collect-only -q \
-          tests/parquet/test_parquet_contract_native_and_pipeline_status.py \
-          tests/parquet/test_parquet_contract_certification_and_batch_size.py \
-          tests/parquet/test_parquet_contract_filters_and_runtime_readiness.py
+          tests/parquet/test_parquet_contract_cases.py
     - name: Verify the extension does not link Arrow C++
       if: runner.os != 'Windows'
       shell: bash

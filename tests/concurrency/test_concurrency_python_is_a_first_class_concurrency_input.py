@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import default_pool
@@ -106,9 +105,8 @@ def test_auto_source_accepts_sequences_and_one_shot_iterables() -> None:
     assert fmt == "python"
 
 
-def test_native_iterator_encoder_batches_without_retaining_rows() -> None:
+def test_native_iterator_encoder_batches_without_retaining_rows(require_native: None) -> None:
     """One ABI call consumes a bounded iterator chunk and reports exact progress."""
-    require_native()
     payload, next_index, exhausted = native_core.python_iter_rows_jsonl_bytes(
         iter({"a": index} for index in range(10_000)),
         0,
@@ -120,9 +118,10 @@ def test_native_iterator_encoder_batches_without_retaining_rows() -> None:
     assert payload.count(b"\n") == 4_096
 
 
-def test_generator_reader_batches_replays_and_preserves_ordinal_errors() -> None:
+def test_generator_reader_batches_replays_and_preserves_ordinal_errors(
+    require_native: None,
+) -> None:
     """One-shot rows are batched, replayed once, and validated by source ordinal."""
-    require_native()
     yielded = 0
 
     def source() -> Iterator[dict[str, int]]:
@@ -150,9 +149,10 @@ def test_generator_reader_batches_replays_and_preserves_ordinal_errors() -> None
 
 
 @pytest.mark.parametrize("mode", ["single", "multi"])
-def test_public_csv_accepts_generator_and_auto_detects_python(tmp_path: Path, mode: str) -> None:
+def test_public_csv_accepts_generator_and_auto_detects_python(
+    tmp_path: Path, mode: str, require_native: None
+) -> None:
     """The public file API consumes a generator without a path-only facade."""
-    require_native()
     output = tmp_path / f"rows-{mode}.csv"
     result = ss.to_csv(
         _rows(8_000),
@@ -168,9 +168,10 @@ def test_public_csv_accepts_generator_and_auto_detects_python(tmp_path: Path, mo
         assert _materialization_tasks() > 0
 
 
-def test_python_generator_has_exact_single_multi_values(tmp_path: Path) -> None:
+def test_python_generator_has_exact_single_multi_values(
+    tmp_path: Path, require_native: None
+) -> None:
     """Pure-Python generators preserve order and values in both execution models."""
-    require_native()
     outputs: dict[str, Path] = {}
     for mode in ("single", "multi"):
         output = tmp_path / f"rows-{mode}.jsonl"
@@ -185,9 +186,10 @@ def test_python_generator_has_exact_single_multi_values(tmp_path: Path) -> None:
     assert _jsonl_user_rows(outputs["single"]) == _jsonl_user_rows(outputs["multi"])
 
 
-def test_python_input_reaches_every_native_file_output(tmp_path: Path) -> None:
+def test_python_input_reaches_every_native_file_output(
+    tmp_path: Path, require_native: None
+) -> None:
     """CSV, JSONL, and Parquet outputs accept the same Python generator route."""
-    require_native()
     csv_path = tmp_path / "rows.csv"
     jsonl_path = tmp_path / "rows.jsonl"
     parquet_path = tmp_path / "rows.parquet"
@@ -213,9 +215,9 @@ def test_python_input_reaches_every_native_file_output(tmp_path: Path) -> None:
 def test_python_generator_file_outputs_do_not_deadlock_at_high_width(
     tmp_path: Path,
     width: int,
+    require_native: None,
 ) -> None:
     """Python callbacks can acquire the GIL while native writers await the arena."""
-    require_native()
     if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
         pytest.skip("exact CPU affinity is unavailable")
     available = sorted(os.sched_getaffinity(0))
@@ -278,9 +280,9 @@ def test_python_input_reaches_every_analytical_output_without_adapter_import(
     monkeypatch: pytest.MonkeyPatch,
     converter_name: str,
     target: str,
+    require_native: None,
 ) -> None:
     """Each analytical API opens the same native Python-row stream before its adapter."""
-    require_native()
     from schema_sanitizer.api_impl import analytical
     from schema_sanitizer.api_impl.duckdb_relation import (
         _DuckDBConnectionOwner,
@@ -325,10 +327,9 @@ def test_python_input_reaches_every_analytical_output_without_adapter_import(
     assert seen == [(target, "multi")]
 
 
-def test_public_analytical_python_input_when_pyarrow_is_available() -> None:
+def test_public_analytical_python_input_when_pyarrow_is_available(require_native: None) -> None:
     """All analytical adapters start from the same Python-row native stream."""
     pytest.importorskip("pyarrow")
-    require_native()
     result = ss.to_pyarrow(
         ({"a": index} for index in range(2_000)),
         input_format="python",

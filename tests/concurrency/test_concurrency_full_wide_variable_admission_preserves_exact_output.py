@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -17,9 +16,9 @@ _MEMORY_LIMIT = 128 * 1024 * 1024
 
 def test_full_wide_variable_admission_preserves_exact_output(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Cross-batch output overlap preserves order, nulls, UTF-8, and escapes."""
-    require_native()
     values: tuple[str | None, ...] = (
         "ordinary-mañana-café-漢字-🙂",
         'quoted"value\\path',
@@ -64,4 +63,19 @@ def test_full_admission_is_limited_to_bounded_wide_variable_jsonl() -> None:
     assert "admit_full_wide_variable_output" in writer
     assert "reclaim_wide_variable_packet_window" in writer
     assert "scale_wide_fixed_output || admit_full_wide_variable_output" in writer
+    assert "wide_flat && !wide_fixed_flat" in writer
+
+
+def test_reclaims_only_removed_reorder_slots_for_wide_variable_jsonl() -> None:
+    """The optimization reuses bounded bytes and excludes exact fixed rows."""
+    root = Path(__file__).resolve().parents[2]
+    ordered = (root / "cpp/src/internal/output/ordered_text_output.hh").read_text(encoding="utf-8")
+    writer = (root / "cpp/src/internal/json_output/jsonl_stream_writer.cc").read_text(
+        encoding="utf-8"
+    )
+    assert "reclaim_reorder_window_for_packets" in ordered
+    assert "original_window / output_policy.reorder_capacity" in ordered
+    assert "output_policy.worker_arena_bytes / 8" in ordered
+    assert "operation_policy.materialization_packet_target_bytes *" in ordered
+    assert "reclaim_wide_variable_packet_window" in writer
     assert "wide_flat && !wide_fixed_flat" in writer

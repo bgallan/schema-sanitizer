@@ -12,11 +12,9 @@ class _CloseCounter:
     """Test double that counts idempotent lifecycle close calls."""
 
     def __init__(self) -> None:
-        """Initialize the close counter."""
         self.closed = 0
 
     def close(self) -> None:
-        """Record one close call."""
         self.closed += 1
 
 
@@ -27,7 +25,6 @@ class _CloseCountingReader(_CloseCounter):
 
 
 def test_abi3_sink_output_close_main_stream_preserves_diagnostics() -> None:
-    """Verify abi3 sink output close main stream preserves diagnostics."""
     from schema_sanitizer.core_impl.native_results import SinkOutput
 
     main_capsule = object()
@@ -45,27 +42,22 @@ def test_abi3_sink_output_close_main_stream_preserves_diagnostics() -> None:
 
 
 def test_arrow_c_stream_close_prefers_main_stream_only_close() -> None:
-    """Verify arrow c stream close prefers main stream only close."""
     from schema_sanitizer.api_impl.streams import ArrowCStream
 
     class Raw:
         """Test helper for Raw."""
 
         def __init__(self) -> None:
-            """Initialize the test helper."""
             self.main_closed = 0
             self.closed = 0
 
         def close_main_stream(self) -> None:
-            """Close the main test stream."""
             self.main_closed += 1
 
         def close(self) -> None:
-            """Close the test helper."""
             self.closed += 1
 
         def __arrow_c_stream__(self):
-            """Return the Arrow C stream capsule."""
             return object()
 
     raw = Raw()
@@ -78,7 +70,6 @@ def test_arrow_c_stream_close_prefers_main_stream_only_close() -> None:
 
 
 def test_arrow_c_stream_close_releases_keepalive_reference() -> None:
-    """Verify arrow c stream close releases keepalive reference."""
     from schema_sanitizer.api_impl.streams import ArrowCStream
 
     class Raw:
@@ -87,11 +78,9 @@ def test_arrow_c_stream_close_releases_keepalive_reference() -> None:
         closed = False
 
         def close(self):
-            """Close the test helper."""
             self.closed = True
 
         def __arrow_c_stream__(self):
-            """Return the Arrow C stream capsule."""
             return object()
 
     class Keepalive:
@@ -100,7 +89,6 @@ def test_arrow_c_stream_close_releases_keepalive_reference() -> None:
         closed = False
 
         def close(self):
-            """Close the test helper."""
             self.closed = True
 
     raw = Raw()
@@ -116,18 +104,15 @@ def test_arrow_c_stream_close_releases_keepalive_reference() -> None:
 
 
 def test_sink_result_close_clears_owned_references() -> None:
-    """Verify sink result close clears owned references."""
     from schema_sanitizer.api_impl.results import SinkResult
 
     class Closable:
         """Test helper for Closable."""
 
         def __init__(self) -> None:
-            """Initialize the test helper."""
             self.closed = 0
 
         def close(self) -> None:
-            """Close the test helper."""
             self.closed += 1
 
     raw = Closable()
@@ -145,7 +130,6 @@ def test_sink_result_close_clears_owned_references() -> None:
 
 
 def test_stream_close_deduplicates_reader_raw_close(monkeypatch) -> None:
-    """Verify stream close deduplicates reader raw close."""
     from schema_sanitizer.api_impl import streams as stream_batches
 
     Stream = stream_batches.Stream
@@ -174,7 +158,6 @@ def test_stream_close_deduplicates_reader_raw_close(monkeypatch) -> None:
 
 
 def test_stream_close_main_stream_preserves_diagnostics(monkeypatch) -> None:
-    """Verify stream close main stream preserves diagnostics."""
     from schema_sanitizer.api_impl import streams as stream_batches
 
     Stream = stream_batches.Stream
@@ -183,20 +166,16 @@ def test_stream_close_main_stream_preserves_diagnostics(monkeypatch) -> None:
         """Test helper for Raw."""
 
         def __init__(self) -> None:
-            """Initialize the test helper."""
             self.main_closed = 0
             self.closed = 0
 
         def __arrow_c_stream__(self):
-            """Return the Arrow C stream capsule."""
             return object()
 
         def close_main_stream(self) -> None:
-            """Close the main test stream."""
             self.main_closed += 1
 
         def close(self) -> None:
-            """Close the test helper."""
             self.closed += 1
 
     reader = _CloseCountingReader()
@@ -237,7 +216,6 @@ def test_stream_close_main_stream_preserves_diagnostics(monkeypatch) -> None:
 
 
 def test_result_drop_closes_private_resource_owner() -> None:
-    """Verify result drop closes private resource owner."""
 
     from schema_sanitizer.api_impl.results import Result
 
@@ -245,11 +223,9 @@ def test_result_drop_closes_private_resource_owner() -> None:
         """Test helper for Owner."""
 
         def __init__(self) -> None:
-            """Initialize the test helper."""
             self.closed = 0
 
         def close(self) -> None:
-            """Close the test helper."""
             self.closed += 1
 
     owner = Owner()
@@ -266,23 +242,19 @@ def test_result_drop_closes_private_resource_owner() -> None:
 
 
 def test_arrow_c_stream_drop_closes_main_stream_and_keepalive() -> None:
-    """Verify arrow c stream drop closes main stream and keepalive."""
     from schema_sanitizer.api_impl.streams import ArrowCStream
 
     class Raw:
         """Test helper for Raw."""
 
         def __init__(self) -> None:
-            """Initialize the test helper."""
             self.main_closed = 0
             self.closed = 0
 
         def close_main_stream(self) -> None:
-            """Close the main test stream."""
             self.main_closed += 1
 
         def close(self) -> None:
-            """Close the test helper."""
             self.closed += 1
 
     raw = Raw()
@@ -302,7 +274,6 @@ def test_arrow_c_stream_drop_closes_main_stream_and_keepalive() -> None:
 
 
 def test_result_drop_closes_private_keepalive() -> None:
-    """Verify result drop closes private keepalive."""
 
     from schema_sanitizer.api_impl.results import Result
 
@@ -320,7 +291,6 @@ def test_result_drop_closes_private_keepalive() -> None:
 
 
 def test_abi3_runtime_support_destructors_suppress_cleanup_errors() -> None:
-    """Verify abi3 runtime support destructors suppress cleanup errors."""
     from schema_sanitizer.core_impl.native_results import SinkOutput
 
     sink = SinkOutput(sink="stream", diagnostics_json="{}")

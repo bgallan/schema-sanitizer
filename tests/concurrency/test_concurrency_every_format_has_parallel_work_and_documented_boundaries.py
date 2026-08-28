@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_exceptions_equivalent
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import results as result_adapters
@@ -116,10 +115,11 @@ def test_flat_json_arrays_use_adaptive_columnar_packets() -> None:
 
 @pytest.mark.parametrize("input_format", ["json", "json_array"])
 def test_large_flat_arrays_parallelize_with_exact_user_data(
-    tmp_path: Path, input_format: str
+    tmp_path: Path,
+    input_format: str,
+    require_native: None,
 ) -> None:
     """Both JSON array routes publish work and preserve ordered user data."""
-    require_native()
     source = tmp_path / f"array-{input_format}.json"
     _write_flat_array(source)
 
@@ -147,9 +147,9 @@ def test_large_flat_arrays_parallelize_with_exact_user_data(
 
 def test_small_json_document_avoids_artificial_column_parallelism(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """One-row documents keep a single useful materialization task in multi mode."""
-    require_native()
     source = tmp_path / "single-document.json"
     source.write_text(
         json.dumps({f"field_{index:04d}": index for index in range(1_024)}),
@@ -171,9 +171,9 @@ def test_small_json_document_avoids_artificial_column_parallelism(
 
 def test_json_array_object_contract_has_exact_single_multi_error(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Deferred parsing preserves the json_array object-only public contract."""
-    require_native()
     source = tmp_path / "invalid-array.json"
     source.write_text('[{"value":1},2,{"value":3}]', encoding="utf-8")
 
@@ -195,11 +195,9 @@ class _RecordingArrowTable:
     """Minimal Arrow-like table recording pandas conversion policy."""
 
     def __init__(self) -> None:
-        """Initialize the recorded keyword arguments."""
         self.calls: list[dict[str, object]] = []
 
     def to_pandas(self, **kwargs: object) -> object:
-        """Record conversion keywords and return a sentinel object."""
         self.calls.append(dict(kwargs))
         return object()
 
@@ -208,16 +206,13 @@ class _ConfigurableArrowRuntime:
     """PyArrow double exposing a verifiable process-global CPU pool width."""
 
     def __init__(self) -> None:
-        """Start serial and retain every admitted pool reconfiguration."""
         self._workers = 1
         self.configurations: list[int] = []
 
     def cpu_count(self) -> int:
-        """Return the currently configured worker-pool width."""
         return self._workers
 
     def set_cpu_count(self, workers: int) -> None:
-        """Apply and record the exact width selected by shared admission."""
         self._workers = int(workers)
         self.configurations.append(self._workers)
 

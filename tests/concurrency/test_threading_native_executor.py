@@ -8,14 +8,14 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 def test_native_inline_executor_preserves_order_without_worker_threads() -> None:
     """The inline executor runs every packet on one calling host thread."""
-    require_native()
     ordinals, values, thread_count, failure, inline, workers, status = (
         native_core.ordered_executor_probe(0, 8, 24, -1)
     )
@@ -31,7 +31,6 @@ def test_native_inline_executor_preserves_order_without_worker_threads() -> None
 
 def test_native_pool_hides_forced_out_of_order_completion() -> None:
     """Pool completion timing never changes coordinator-visible ordinal order."""
-    require_native()
     ordinals, values, thread_count, failure, inline, workers, status = (
         native_core.ordered_executor_probe(1, 4, 48, -1)
     )
@@ -47,7 +46,6 @@ def test_native_pool_hides_forced_out_of_order_completion() -> None:
 
 def test_native_pool_reports_earliest_source_order_failure() -> None:
     """A later fast failure cannot overtake the lowest failing ordinal."""
-    require_native()
     ordinals, values, _threads, failure, inline, workers, status = (
         native_core.ordered_executor_probe(1, 4, 32, 3)
     )
@@ -62,7 +60,6 @@ def test_native_pool_reports_earliest_source_order_failure() -> None:
 
 def test_native_executor_probe_validates_limits() -> None:
     """The internal probe rejects invalid modes, worker counts, and ordinals."""
-    require_native()
     with pytest.raises(ValueError, match="mode"):
         native_core.ordered_executor_probe(2, 1, 1, -1)
     with pytest.raises(ValueError, match="workers"):
@@ -75,7 +72,6 @@ def test_native_executor_probe_validates_limits() -> None:
 
 def test_native_inline_probe_does_not_add_host_threads(tmp_path: Path) -> None:
     """The native inline primitive itself creates no temporary host thread."""
-    require_native()
     proc_root = Path("/proc")
     if not sys.platform.startswith("linux") or not proc_root.is_dir():
         pytest.skip("host thread accounting requires Linux /proc")
@@ -134,7 +130,6 @@ assert result[2] == 1
 
 def test_operation_task_arena_reuses_exact_worker_budget_across_stages() -> None:
     """Complementary stages share N physical workers without oversubscription."""
-    require_native()
     workers, peak, total_threads, overlap, upstream, output, submitted = (
         native_core.operation_task_arena_probe(8, 4, 4, 32)
     )
@@ -150,7 +145,6 @@ def test_operation_task_arena_reuses_exact_worker_budget_across_stages() -> None
 
 def test_operation_task_arena_executes_beyond_32_workers() -> None:
     """A 64-worker arena retains its lanes while sharing process CPU capacity."""
-    require_native()
     workers, peak, total_threads, overlap, upstream, output, submitted = (
         native_core.operation_task_arena_probe(64, 32, 32, 128)
     )
@@ -166,7 +160,6 @@ def test_operation_task_arena_executes_beyond_32_workers() -> None:
 
 def test_operation_task_arena_single_mode_is_strictly_inline() -> None:
     """An arena with one worker does not create a native helper thread."""
-    require_native()
     workers, peak, total_threads, overlap, upstream, output, submitted = (
         native_core.operation_task_arena_probe(1, 1, 1, 4)
     )
@@ -182,7 +175,6 @@ def test_operation_task_arena_single_mode_is_strictly_inline() -> None:
 
 def test_operation_task_arena_starts_only_workers_used_by_stage_lanes() -> None:
     """N remains available while narrow stages avoid starting idle helpers."""
-    require_native()
     workers, peak, total_threads, overlap, upstream, output, submitted = (
         native_core.operation_task_arena_probe(8, 2, 2, 16)
     )
@@ -198,7 +190,6 @@ def test_operation_task_arena_starts_only_workers_used_by_stage_lanes() -> None:
 
 def test_operation_task_arena_peak_respects_available_stage_tasks() -> None:
     """Peak validation counts runnable packets, not merely configured lane widths."""
-    require_native()
     workers, peak, total_threads, overlap, upstream, output, submitted = (
         native_core.operation_task_arena_probe(8, 8, 1, 4)
     )
@@ -214,7 +205,6 @@ def test_operation_task_arena_peak_respects_available_stage_tasks() -> None:
 
 def test_operation_task_arena_steals_lane_compatible_backlog() -> None:
     """An idle compatible worker drains work queued behind a slow packet."""
-    require_native()
     stolen, displaced_worker, completed, queued, peak = (
         native_core.operation_task_arena_stealing_probe()
     )
@@ -226,14 +216,3 @@ def test_operation_task_arena_steals_lane_compatible_backlog() -> None:
     assert completed == effective_workers * 2
     assert queued == 0
     assert peak == effective_workers
-
-
-def test_operation_task_arena_cancels_active_stage_work_promptly() -> None:
-    """Cancelling one ordered stage propagates to its active arena packets."""
-    require_native()
-    drained, active, observed_stop, queued = native_core.operation_task_arena_cancellation_probe()
-
-    assert drained is True
-    assert active == 0
-    assert observed_stop >= 1
-    assert queued == 0

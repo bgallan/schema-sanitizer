@@ -137,13 +137,11 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
         """Track staged-resource cleanup."""
 
         def __init__(self, start: int, lease: object | None = None) -> None:
-            """Store the chunk ordinal."""
             self.start = start
             self.closed = False
             self.lease = lease
 
         def close(self) -> None:
-            """Mark this staging resource as released."""
             self.closed = True
             if self.lease is not None:
                 self.lease.release()
@@ -163,7 +161,6 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
         operation_context = None
 
         def __init__(self) -> None:
-            """Initialize lifecycle tracking."""
             self.entered = 0
             self.exited = 0
             self.thread_ids: set[int] = set()
@@ -174,7 +171,6 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
 
         @asynccontextmanager
         async def open_staging_session(self):
-            """Open one shared fake provider session."""
             self.entered += 1
             try:
                 yield SimpleNamespace()
@@ -200,7 +196,6 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
             *,
             storage_lease: object | None = None,
         ) -> FakeStaged:
-            """Complete chunks out of order on the same I/O thread."""
             self.thread_ids.add(threading.get_ident())
             if start == 0:
                 self.zero_started.set()
@@ -309,7 +304,6 @@ def test_coordinator_cancellation_removes_partial_staging(monkeypatch, tmp_path)
         """Block a staged chunk until coordinator cancellation."""
 
         async def download_files(self, _files, _directory):
-            """Wait indefinitely after exposing that the transfer started."""
             started.set()
             await asyncio.Event().wait()
 
@@ -381,7 +375,6 @@ def test_single_remote_operation_context_stays_inline(monkeypatch) -> None:
         """Fail if single mode attempts to construct a coordinator."""
 
         def __init__(self, *_args, **_kwargs) -> None:
-            """Reject construction."""
             raise AssertionError("single mode created a remote coordinator")
 
     monkeypatch.setattr(operation_context_module, "RemoteIoCoordinator", ForbiddenCoordinator)
@@ -419,24 +412,20 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
             self.lease = lease
 
         def close(self) -> None:
-            """Release the fake result."""
             self.lease.release()
 
     class Session:
         """Track one provider-session lifetime."""
 
         def __init__(self) -> None:
-            """Initialize enter and exit counters."""
             self.entered = 0
             self.exited = 0
 
         async def __aenter__(self):
-            """Enter the fake provider session."""
             self.entered += 1
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Exit the fake provider session."""
             self.exited += 1
 
     operation = OperationExecutionContext(
@@ -456,7 +445,6 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
-            """Advance by the single fake file."""
             return start + 1
 
         @staticmethod
@@ -469,7 +457,6 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
 
         @staticmethod
         def open_staging_session() -> Session:
-            """Return the shared fake provider session."""
             return session
 
         @staticmethod
@@ -479,7 +466,6 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
             *,
             storage_lease: object | None = None,
         ) -> FakeStaged:
-            """Return one staged fake packet."""
             assert storage_lease is not None
             return FakeStaged(storage_lease)
 

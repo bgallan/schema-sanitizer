@@ -6,7 +6,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 
 def test_path_identity_fallback_avoids_posix_directory_claims(
@@ -54,9 +53,8 @@ def test_path_based_tree_measurement_is_bounded_and_does_not_follow_symlinks(
         staged.close()
 
 
-def test_temporary_storage_pool_bounds_and_reuses_released_capacity() -> None:
+def test_temporary_storage_pool_bounds_and_reuses_released_capacity(require_native: None) -> None:
     """Reservations are aggregate, resizable, and returned exactly once."""
-    require_native()
     from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 
     pool = TemporaryStoragePermitPool(16 << 20)
@@ -78,9 +76,8 @@ def test_temporary_storage_pool_bounds_and_reuses_released_capacity() -> None:
     assert pool.snapshot().active_leases == 0
 
 
-def test_temporary_storage_pool_rejects_one_oversized_artifact() -> None:
+def test_temporary_storage_pool_rejects_one_oversized_artifact(require_native: None) -> None:
     """One artifact cannot silently exceed the derived operation spool cap."""
-    require_native()
     from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -97,9 +94,10 @@ def test_temporary_storage_pool_rejects_one_oversized_artifact() -> None:
     }
 
 
-def test_zero_temporary_storage_capability_can_grow_and_release(tmp_path: Path) -> None:
+def test_zero_temporary_storage_capability_can_grow_and_release(
+    tmp_path: Path, require_native: None
+) -> None:
     """A zero-byte, zero-inode lease still owns an exact resizable capability."""
-    require_native()
     from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 
     pool = TemporaryStoragePermitPool(16 << 20)
@@ -111,9 +109,8 @@ def test_zero_temporary_storage_capability_can_grow_and_release(tmp_path: Path) 
     assert pool.snapshot().reserved_bytes == 0
 
 
-def test_staged_path_resizes_and_releases_its_permit(tmp_path: Path) -> None:
+def test_staged_path_resizes_and_releases_its_permit(tmp_path: Path, require_native: None) -> None:
     """Exact staged bytes replace the estimate and disappear on cleanup."""
-    require_native()
     from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
     from schema_sanitizer.remote_impl.staging import StagedPath
 
@@ -134,9 +131,9 @@ def test_staged_path_resizes_and_releases_its_permit(tmp_path: Path) -> None:
 def test_remote_output_is_accounted_until_upload_finishes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
     """Remote publication holds its exact local spool permit through upload."""
-    require_native()
     from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
     from schema_sanitizer.remote_impl import staging
 
@@ -184,9 +181,8 @@ def test_remote_output_is_accounted_until_upload_finishes(
         operation.close()
 
 
-def test_remote_prefetch_waits_for_temporary_storage_release() -> None:
+def test_remote_prefetch_waits_for_temporary_storage_release(require_native: None) -> None:
     """Prefetch cannot multiply staged packets beyond the operation spool cap."""
-    require_native()
     from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
     from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 
@@ -200,21 +196,18 @@ def test_remote_prefetch_waits_for_temporary_storage_release() -> None:
         """Minimal async provider-session context."""
 
         async def __aenter__(self) -> Session:
-            """Return the session."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Close the fake session."""
+            pass
 
     class FakeStaged:
         """Own the packet lease until the source consumer closes it."""
 
         def __init__(self, lease: object) -> None:
-            """Store one permit lease."""
             self._lease = lease
 
         def close(self) -> None:
-            """Release the packet reservation."""
             self._lease.release()
 
     class Manifest:
@@ -228,12 +221,10 @@ def test_remote_prefetch_waits_for_temporary_storage_release() -> None:
 
         @staticmethod
         def open_staging_session() -> Session:
-            """Return the fake provider session."""
             return Session()
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
-            """Advance one file ordinal."""
             return start + 1
 
         @staticmethod
@@ -242,7 +233,6 @@ def test_remote_prefetch_waits_for_temporary_storage_release() -> None:
 
         @staticmethod
         def try_acquire_storage_lease(start: int) -> object | None:
-            """Reserve 160 MiB from a 256 MiB operation spool window."""
             return operation.temporary_storage.try_acquire(
                 160 << 20,
                 label=f"packet-{start}",
@@ -255,7 +245,6 @@ def test_remote_prefetch_waits_for_temporary_storage_release() -> None:
             *,
             storage_lease: object,
         ) -> FakeStaged:
-            """Return one staged packet after recording its ordinal."""
             starts.append(start)
             await asyncio.sleep(0)
             return FakeStaged(storage_lease)
@@ -277,9 +266,8 @@ def test_remote_prefetch_waits_for_temporary_storage_release() -> None:
     assert operation.temporary_storage.snapshot().reserved_bytes == 0
 
 
-def test_remote_prefetch_failure_releases_reserved_packet() -> None:
+def test_remote_prefetch_failure_releases_reserved_packet(require_native: None) -> None:
     """A failed async stage returns its pre-acquired storage permit."""
-    require_native()
     from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
     from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 
@@ -292,11 +280,10 @@ def test_remote_prefetch_failure_releases_reserved_packet() -> None:
         """Minimal async provider-session context."""
 
         async def __aenter__(self) -> Session:
-            """Return the session."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Close the fake session."""
+            pass
 
     class Manifest:
         """Fail after the iterator reserves one remote packet."""
@@ -309,12 +296,10 @@ def test_remote_prefetch_failure_releases_reserved_packet() -> None:
 
         @staticmethod
         def open_staging_session() -> Session:
-            """Return the fake provider session."""
             return Session()
 
         @staticmethod
         def next_chunk_start(start: int) -> int:
-            """Advance one file ordinal."""
             return start + 1
 
         @staticmethod
@@ -323,7 +308,6 @@ def test_remote_prefetch_failure_releases_reserved_packet() -> None:
 
         @staticmethod
         def try_acquire_storage_lease(start: int) -> object | None:
-            """Reserve one packet from the operation pool."""
             return operation.temporary_storage.try_acquire(
                 8 << 20,
                 label=f"failing-packet-{start}",
@@ -336,7 +320,6 @@ def test_remote_prefetch_failure_releases_reserved_packet() -> None:
             *,
             storage_lease: object,
         ) -> None:
-            """Release the owned permit while propagating the stage failure."""
             try:
                 await asyncio.sleep(0)
                 raise RuntimeError("forced remote stage failure")
@@ -356,9 +339,8 @@ def test_remote_prefetch_failure_releases_reserved_packet() -> None:
     assert operation.temporary_storage.snapshot().active_leases == 0
 
 
-def test_cancelled_prefetch_future_releases_preacquired_permit() -> None:
+def test_cancelled_prefetch_future_releases_preacquired_permit(require_native: None) -> None:
     """Cancellation before coroutine start cannot orphan a packet reservation."""
-    require_native()
     from concurrent.futures import Future
 
     from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
@@ -375,7 +357,6 @@ def test_cancelled_prefetch_future_releases_preacquired_permit() -> None:
 
         @staticmethod
         def submit(_operation: object, **_permit_options: object) -> Future[object]:
-            """Return the pending future while accepting weighted admission."""
             return pending
 
     class Manifest:
@@ -392,7 +373,6 @@ def test_cancelled_prefetch_future_releases_preacquired_permit() -> None:
 
         @staticmethod
         async def stage_chunk_async(*_args: object, **_kwargs: object) -> None:
-            """Never run in this cancellation regression."""
             raise AssertionError("staging coroutine should not start")
 
     lease = operation.temporary_storage.acquire(8 << 20, label="cancelled packet")
@@ -410,9 +390,9 @@ def test_cancelled_prefetch_future_releases_preacquired_permit() -> None:
 def test_failed_remote_output_releases_spool_permit_and_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
     """A publication failure removes its spool and returns the exact lease."""
-    require_native()
     from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
     from schema_sanitizer.remote_impl import staging
 

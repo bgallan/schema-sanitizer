@@ -167,18 +167,15 @@ def test_remote_control_body_retains_shared_ledger_charge_until_released(
         status = 200
 
         def read(self, size: int = -1) -> bytes:
-            """Implement the minimal response protocol required by the test."""
             return b'{"value":1}' if size < 0 else b'{"value":1}'[:size]
 
         def getheaders(self):
-            """Implement the minimal response protocol required by the test."""
             return []
 
     class Connection:
         """Provide a focused helper for the surrounding regression."""
 
         def close(self) -> None:
-            """Close the helper resource exactly once."""
             pass
 
     monkeypatch.setattr(
@@ -232,11 +229,9 @@ def test_remote_transfer_reserves_chunk_before_blocking_read(
         calls = 0
 
         def getheader(self, _name: str):
-            """Implement the minimal response protocol required by the test."""
             return None
 
         def read(self, _size: int = -1) -> bytes:
-            """Implement the minimal response protocol required by the test."""
             observed.append(operation.memory_ledger.snapshot().reserved_bytes)
             self.calls += 1
             return b"data" if self.calls == 1 else b""
@@ -245,7 +240,6 @@ def test_remote_transfer_reserves_chunk_before_blocking_read(
         """Provide a focused helper for the surrounding regression."""
 
         def close(self) -> None:
-            """Close the helper resource exactly once."""
             pass
 
     monkeypatch.setattr(

@@ -9,9 +9,10 @@ from threading import Thread
 from typing import Iterator
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 @contextmanager
@@ -22,20 +23,17 @@ def _payload_server(payload: bytes, suffix: str) -> Iterator[str]:
         """Serve deterministic hostile bytes without logging test traffic."""
 
         def do_HEAD(self) -> None:  # noqa: N802
-            """Return deterministic metadata for the hostile HTTP fixture."""
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
-            """Return the hostile HTTP fixture body."""
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
 
         def log_message(self, _format: str, *_args: object) -> None:
-            """Suppress HTTP-server logging during the regression."""
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
@@ -99,7 +97,6 @@ def test_malformed_inputs_have_one_contract_across_local_directory_and_remote_mo
     format_options: dict[str, object],
 ) -> None:
     """Every public source/mode rejects the same hostile bytes at the same stage."""
-    require_native()
 
     local = tmp_path / f"hostile.{suffix}"
     local.write_bytes(payload)

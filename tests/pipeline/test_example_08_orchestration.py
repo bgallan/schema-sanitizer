@@ -50,7 +50,6 @@ class FakeListingClient:
     """Minimal fake GCS client used before optional analytical dependencies."""
 
     def __init__(self, files: tuple[RemoteFile, ...]) -> None:
-        """Store one immutable listing and observable call counters."""
         self.files = files
         self.list_calls = 0
 
@@ -60,13 +59,11 @@ class FakeListingClient:
         *,
         memory_limit_bytes: int | None,
     ) -> tuple[RemoteFile, ...]:
-        """Return the configured listing exactly once per workflow call."""
         del memory_limit_bytes
         self.list_calls += 1
         return self.files
 
     def schema_sanitizer_download_scope(self):
-        """Return a no-op scope because day execution is stubbed here."""
         return nullcontext()
 
     def publish_file_atomic(
@@ -76,7 +73,6 @@ class FakeListingClient:
         *,
         memory_limit_bytes: int | None,
     ) -> int:
-        """Reject accidental publication from the orchestration-only test."""
         del memory_limit_bytes
         raise AssertionError("stubbed day execution must not publish")
 
@@ -85,12 +81,10 @@ class FakeBigQueryClient:
     """Minimal fake target service with observable replacement calls."""
 
     def __init__(self) -> None:
-        """Initialize call tracking."""
         self.read_calls = 0
         self.replace_calls: list[dict[str, Any]] = []
 
     def read_target_schema(self, _target_table: str) -> object:
-        """Return an opaque schema consumed by monkeypatched helpers."""
         self.read_calls += 1
         return SimpleNamespace(
             names=[
@@ -104,7 +98,6 @@ class FakeBigQueryClient:
         )
 
     def replace_external_table(self, target_table: str, **kwargs: Any) -> None:
-        """Record one post-publication external-table replacement."""
         self.replace_calls.append({"target_table": target_table, **kwargs})
 
 

@@ -16,7 +16,6 @@ pa = pytest.importorskip("pyarrow")
 
 
 def test_mixed_integer_float_values_infer_float_column() -> None:
-    """Verify integer and float observations widen to one float column."""
     res = read_test_python(
         [{"value": 10}, {"value": 37.5}, {"value": "12.5"}, {"value": "0"}],
         parse_integers=True,
@@ -34,7 +33,6 @@ def test_mixed_integer_float_values_infer_float_column() -> None:
 
 
 def test_nested_versioned_sibling_fields_prefer_list_variant_for_single_values() -> None:
-    """Verify nested version families prefer the widest compatible list version."""
     sentiment_struct = pa.struct(
         [pa.field("sentiment", pa.struct([pa.field("magnitude", pa.float64())]))]
     )
@@ -81,7 +79,6 @@ def test_nested_versioned_sibling_fields_prefer_list_variant_for_single_values()
 
 
 def test_field_name_policy_sanitizes_strict_schema_contract_and_matches_dirty_rows() -> None:
-    """Verify strict schema contracts are sanitized before source-row matching."""
     schema_contract = pa.schema(
         [
             ("User-ID", pa.int64()),
@@ -122,7 +119,6 @@ def test_parquet_max_depth_enforcement_flattens_nested_object_fields(input_case,
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_parquet_max_depth_policy_changes_nested_schema_shape(input_case, tmp_path) -> None:
-    """Verify schema shape changes when parquet_max_depth is tightened/relaxed."""
     rows = _nested_depth_rows()
 
     shallow = _read_result(
@@ -150,7 +146,6 @@ def test_parquet_max_depth_policy_changes_nested_schema_shape(input_case, tmp_pa
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_arrow_max_depth_counts_lists_and_structs(input_case, tmp_path) -> None:
-    """Verify Arrow depth counts both list and struct containers."""
     rows = [{"value": [{"a": 1}]}]
 
     shallow = _read_result(
@@ -177,7 +172,6 @@ def test_arrow_max_depth_counts_lists_and_structs(input_case, tmp_path) -> None:
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_mixed_integer_float_scalars_infer_as_float(input_case, tmp_path) -> None:
-    """Verify integer and float scalar mixes widen to float."""
     rows = [{"value": 1}, {"value": 1.5}]
 
     res = _read_result(rows, options={}, case=input_case, tmp_path=tmp_path)
@@ -189,7 +183,6 @@ def test_mixed_integer_float_scalars_infer_as_float(input_case, tmp_path) -> Non
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_list_of_scalars_stays_typed_when_conflict_free(input_case, tmp_path) -> None:
-    """Verify list of scalars stays typed when conflict free."""
     rows = [{"value": [1, 2]}, {"value": [3, 4]}]
 
     res = _read_result(rows, options={}, case=input_case, tmp_path=tmp_path)
@@ -201,7 +194,6 @@ def test_list_of_scalars_stays_typed_when_conflict_free(input_case, tmp_path) ->
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_list_of_structs_stays_typed_when_conflict_free(input_case, tmp_path) -> None:
-    """Verify list of structs stays typed when conflict free."""
     rows = [{"value": [{"a": 1}, {"a": 2}]}, {"value": [{"a": 3}]}]
 
     res = _read_result(rows, options={}, case=input_case, tmp_path=tmp_path)
@@ -213,7 +205,6 @@ def test_list_of_structs_stays_typed_when_conflict_free(input_case, tmp_path) ->
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_nested_lists_fall_back_to_list_of_string(input_case, tmp_path) -> None:
-    """Verify nested lists fall back to list of string."""
     rows = [{"value": [[1, 2], [3]]}, {"value": [[4]]}]
 
     res = _read_result(rows, options={}, case=input_case, tmp_path=tmp_path)
@@ -229,7 +220,6 @@ def test_nested_lists_fall_back_to_list_of_string(input_case, tmp_path) -> None:
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_list_of_structs_allows_nested_list_fields(input_case, tmp_path) -> None:
-    """Verify list structs can contain typed nested list fields."""
     rows = [
         {
             "author": [
@@ -268,7 +258,6 @@ def test_list_of_structs_allows_nested_list_fields(input_case, tmp_path) -> None
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_list_struct_scalar_conflict_resolves_at_nested_field(input_case, tmp_path) -> None:
-    """Verify list struct scalar conflicts resolve as nested string fields."""
     rows = [{"value": [{"a": 1}]}, {"value": [{"a": "x"}]}]
 
     res = _read_result(rows, options={}, case=input_case, tmp_path=tmp_path)
@@ -284,7 +273,6 @@ def test_list_struct_scalar_conflict_resolves_at_nested_field(input_case, tmp_pa
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_list_struct_numeric_looking_string_conflict_stays_typed(input_case, tmp_path) -> None:
-    """Verify numeric-looking strings do not stringify the parent list."""
     rows = [
         {"author": [{"tagauthor": {"externalid": "el_pais_a"}}]},
         {"author": [{"tagauthor": {"externalid": "-1"}}]},

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -101,9 +100,9 @@ def test_sources_define_direct_rows_and_lazy_segment_state() -> None:
 
 def test_direct_raw_rows_preserve_crlf_and_missing_final_newline(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """The one-pass RowRef path retains exact output at the final record."""
-    require_native()
     contract_source = tmp_path / "contract.jsonl"
     _write_rows(contract_source, 64)
     contract = _contract(contract_source, tmp_path / "contract-output.jsonl")
@@ -125,9 +124,9 @@ def test_direct_raw_rows_preserve_crlf_and_missing_final_newline(
 
 def test_chunk_crossing_jsonl_record_keeps_exact_owner_and_offsets(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """The lazy segment vector still handles records larger than one chunk."""
-    require_native()
     payload = "x" * (2 * 1024 * 1024 + 257)
     source = tmp_path / "large.jsonl"
     rows = [

@@ -19,7 +19,6 @@ from schema_sanitizer.core_impl.async_scheduler import (
 
 
 def test_retry_async_retries_raised_operations() -> None:
-    """Verify retry_async retries raised operations and returns the first success."""
 
     async def run() -> None:
         """Run the async retry scenario."""
@@ -40,7 +39,6 @@ def test_retry_async_retries_raised_operations() -> None:
 
 
 def test_ordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
-    """Verify failed ordered work drains cancellation for prefetched tasks."""
 
     async def run() -> None:
         """Run the async scheduler failure scenario."""
@@ -73,7 +71,6 @@ def test_ordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
 
 
 def test_unordered_indexed_results_uses_bounded_task_window() -> None:
-    """Verify unordered results cap active tasks without waiting for input order."""
 
     async def run() -> None:
         """Run the unordered scheduler bounded-window scenario."""
@@ -118,7 +115,6 @@ def test_unordered_indexed_results_uses_bounded_task_window() -> None:
 
 
 def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
-    """Verify unordered failed work drains cancellation for pending prefetched tasks."""
 
     async def run() -> None:
         """Run the unordered scheduler failure scenario."""
@@ -153,7 +149,6 @@ def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None
 def test_unordered_indexed_results_reuses_fixed_worker_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify large batches create only the configured worker count."""
 
     async def run() -> None:
         """Run a large trivial batch while counting task construction."""
@@ -269,7 +264,6 @@ def test_bounded_event_wait_propagates_external_task_cancellation() -> None:
             self.waiting_task: asyncio.Task[object] | None = None
 
         async def wait(self) -> bool:
-            """Publish waiter ownership before suspending on the real event."""
             self.waiting_task = asyncio.current_task()
             self.wait_started.set()
             return await super().wait()

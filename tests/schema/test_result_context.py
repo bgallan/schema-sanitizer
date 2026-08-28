@@ -12,7 +12,6 @@ from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 
 def test_result_stats_reflect_finalized_materialization() -> None:
-    """Verify result stats reflect finalized materialization."""
     result = ExecutionContext().to_table(
         [{"a": "bad"}, {"a": 2}],
         options=normalize_call_options(
@@ -31,7 +30,6 @@ def test_result_stats_reflect_finalized_materialization() -> None:
 
 
 def test_execution_context_accepts_explicit_text_source() -> None:
-    """Verify execution context accepts explicit text source."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     result = ExecutionContext().to_table('[{"a": 1}, {"a": 2}]', format="json", source="text")
@@ -40,7 +38,6 @@ def test_execution_context_accepts_explicit_text_source() -> None:
 
 
 def test_execution_context_normalizes_uppercase_text_formats() -> None:
-    """Verify execution context normalizes uppercase text formats."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     ctx = ExecutionContext()
@@ -55,7 +52,6 @@ def test_execution_context_normalizes_uppercase_text_formats() -> None:
 
 
 def test_execution_context_rejects_unknown_options() -> None:
-    """Verify execution context rejects unknown options."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     with pytest.raises(TypeError, match="unknown"):
@@ -63,7 +59,6 @@ def test_execution_context_rejects_unknown_options() -> None:
 
 
 def test_table_sink_does_not_expose_single_use_stream() -> None:
-    """Verify table sink does not expose single use stream."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     out = ExecutionContext().to_sink([{"a": 1}], sink="table", format="python", source="python")
@@ -73,7 +68,6 @@ def test_table_sink_does_not_expose_single_use_stream() -> None:
 
 
 def test_execution_context_normalizes_sink_selector() -> None:
-    """Verify execution context normalizes sink selector."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     out = ExecutionContext().to_sink([{"a": 1}], sink=" TABLE ", format="python", source="python")
@@ -82,7 +76,6 @@ def test_execution_context_normalizes_sink_selector() -> None:
 
 
 def test_execution_context_selector_arguments_must_be_strings() -> None:
-    """Verify execution context selector arguments must be strings."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     ctx = ExecutionContext()
@@ -96,7 +89,6 @@ def test_execution_context_selector_arguments_must_be_strings() -> None:
 
 
 def test_result_only_exposes_explicit_result_properties() -> None:
-    """Verify result only exposes explicit result properties."""
 
     class Raw:
         """Test helper for Raw."""

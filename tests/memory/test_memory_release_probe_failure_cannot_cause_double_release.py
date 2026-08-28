@@ -39,11 +39,9 @@ class _ThreadLeaseDouble:
     amount = 1
 
     def __init__(self) -> None:
-        """Create an unreleased slot."""
         self.released = Event()
 
     def release(self) -> None:
-        """Mark the slot returned."""
         self.released.set()
 
 
@@ -152,7 +150,6 @@ def test_native_diagnostics_close_freezes_json_and_releases_capsule(
 
         @staticmethod
         def diagnostics_json(_capsule: object) -> str:
-            """Return the final payload."""
             return '{"batches":3}'
 
     monkeypatch.setattr(module, "_native", Native())
@@ -263,11 +260,9 @@ def test_stream_finalizer_skips_native_cleanup_during_shutdown(
         """Track whether finalizer cleanup reached the backend."""
 
         def __init__(self) -> None:
-            """Initialize the close counter."""
             self.closed = 0
 
         def close_main_stream(self) -> None:
-            """Record one close attempt."""
             self.closed += 1
 
     raw = Raw()
@@ -288,15 +283,12 @@ def test_remote_coordinator_startup_error_join_is_bounded() -> None:
         """Record the requested timeout while remaining alive."""
 
         def __init__(self) -> None:
-            """Initialize observations."""
             self.timeout: float | None = None
 
         def join(self, timeout: float | None = None) -> None:
-            """Capture the bounded join."""
             self.timeout = timeout
 
         def is_alive(self) -> bool:
-            """Model a startup host that has not exited yet."""
             return True
 
     coordinator = object.__new__(RemoteIoCoordinator)

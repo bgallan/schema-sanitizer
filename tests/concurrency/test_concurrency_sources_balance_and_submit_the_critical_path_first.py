@@ -11,7 +11,6 @@ from _support.threading_goldens import (
     assert_logical_files_equivalent,
     semantic_stats,
 )
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -159,9 +158,10 @@ def test_jsonl_reaches_the_dedicated_native_frontend() -> None:
     assert normalize_format_selector("jsonl") == "jsonl"
 
 
-def test_clustered_mixed_wide_rows_preserve_exact_output(tmp_path: Path) -> None:
+def test_clustered_mixed_wide_rows_preserve_exact_output(
+    tmp_path: Path, require_native: None
+) -> None:
     """Weighted fan-out keeps exact Arrow ownership and single-mode semantics."""
-    require_native()
     source = tmp_path / "clustered-mixed.jsonl"
     _write_clustered_mixed_jsonl(source, 2_000)
 
@@ -195,9 +195,9 @@ def test_clustered_mixed_wide_rows_preserve_exact_output(tmp_path: Path) -> None
 
 def test_mixed_fixture_activates_parallel_materialization_telemetry(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Exercise the production hybrid path instead of a serial fallback."""
-    require_native()
     contract = _critical_path_contract(tmp_path)
     source = tmp_path / "telemetry-mixed.jsonl"
     with source.open("w", encoding="utf-8") as handle:
@@ -246,9 +246,9 @@ def test_mixed_fixture_activates_parallel_materialization_telemetry(
 
 def test_critical_path_first_submission_preserves_column_error_order(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """A heavy tail submitted first cannot overtake a lower column failure."""
-    require_native()
     contract = _critical_path_contract(tmp_path)
     row = {name: index for index, name in enumerate(_REORDER_INTEGER_COLUMNS)}
     row.update(

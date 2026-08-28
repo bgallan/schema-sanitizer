@@ -246,11 +246,9 @@ def test_bounded_response_text_accounts_final_unicode_object() -> None:
         """Return one bounded UTF-8 response body."""
 
         async def read(self, _maximum: int) -> bytes:
-            """Return deterministic multibyte text."""
             return "áβ中".encode() * 64
 
         def at_eof(self) -> bool:
-            """Confirm that the bounded read consumed the complete response."""
             return True
 
     response = SimpleNamespace(content=Content(), charset="utf-8")
@@ -353,7 +351,6 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
         """Async manager whose entry ignores cancellation forever."""
 
         async def __aenter__(self) -> object:
-            """Never finish entering the provider context."""
             while not release.is_set():
                 try:
                     await asyncio.sleep(0.01)
@@ -361,7 +358,7 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
                     continue
 
         async def __aexit__(self, *_exc: object) -> None:
-            """No-op exit for completeness."""
+            pass
 
     with pytest.raises(RuntimeError, match="startup exceeded its deadline"):
         RemoteIoCoordinator(
@@ -456,7 +453,6 @@ def test_operation_remote_wait_has_a_hard_transport_deadline(
             raise FutureTimeoutError
 
         def cancel(self) -> bool:
-            """Record the required cancellation of timed-out transport work."""
             observed_timeouts.append(-1.0)
             return True
 
@@ -551,7 +547,6 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
         """Delay entry beyond the iterator deadline and record cleanup."""
 
         async def __aenter__(self) -> Session:
-            """Ignore cancellation until the test releases the entry."""
             while not release.is_set():
                 try:
                     await asyncio.sleep(0.005)
@@ -560,7 +555,6 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Record closure of the late-entered manager."""
             exited.set()
 
     class Manifest:
@@ -574,12 +568,10 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
 
         @staticmethod
         def open_staging_session() -> Session:
-            """Return the delayed session."""
             return Session()
 
         @staticmethod
         async def stage_chunk_async(*_args: object, **_kwargs: object) -> None:
-            """Never stage because session startup times out first."""
             raise AssertionError("staging should not start")
 
     iterator = RemoteChunkPrefetchIterator(Manifest())

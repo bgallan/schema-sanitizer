@@ -24,7 +24,6 @@ def _native_try_state() -> object:
 
 
 def test_parquet_stream_factory_observability_counts_are_defensive() -> None:
-    """Verify Parquet route counters expose safe production observability."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -105,7 +104,6 @@ def test_parquet_stream_factory_observability_counts_are_defensive() -> None:
 
 
 def test_parquet_fallback_observability_counts_attempts_successes_and_failures() -> None:
-    """Verify fallback observability has aggregate attempt/success/failure counts."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -165,7 +163,6 @@ def test_parquet_fallback_observability_counts_attempts_successes_and_failures()
 def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify native success records schema-sanitizer writer detection."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
@@ -209,7 +206,6 @@ def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
 def test_parquet_native_reader_non_runtime_errors_fall_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify unexpected native failures become safe PyArrow fallback diagnostics."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
@@ -250,7 +246,6 @@ def test_parquet_native_reader_non_runtime_errors_fall_back(
 
 
 def test_parquet_native_footer_errors_fall_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify footer diagnostics failures are reported as fallback-safe skips."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
@@ -276,7 +271,6 @@ def test_parquet_native_footer_errors_fall_back(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_parquet_fallback_route_annotation_is_defensive() -> None:
-    """Verify successful PyArrow fallbacks are visible without losing native reason."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()

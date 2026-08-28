@@ -83,7 +83,6 @@ def test_context_construction_releases_resources_when_clock_capture_fails(
         """Minimal resource-domain double recording final release."""
 
         def release(self) -> None:
-            """Record cleanup after constructor failure."""
             released.append(True)
 
     resources = Resources()

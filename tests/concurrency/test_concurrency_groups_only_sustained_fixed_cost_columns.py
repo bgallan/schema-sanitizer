@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
 
-from conftest import require_native
+from _support.resource_fakes import CapsuleStream
 
 ROOT = Path(__file__).resolve().parents[2]
 ROW_GROUP_DIR = (
@@ -15,19 +14,6 @@ ROW_GROUP_DIR = (
 ROW_GROUP = ROW_GROUP_DIR / "native_stream_row_group.cc.inc"
 PARALLEL = ROW_GROUP_DIR / "native_stream_parallel_columns.cc.inc"
 FOOTER = ROOT / "cpp/src/internal/parquet/footer_reader/footer_reader.cc"
-
-
-class _CapsuleStream:
-    """Expose one owned Arrow C Stream capsule to a native consumer."""
-
-    def __init__(self, capsule: Any):
-        """Retain the owned Arrow C Stream capsule."""
-        self._capsule = capsule
-
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
-        """Return the capsule through the Arrow PyCapsule protocol."""
-        del requested_schema
-        return self._capsule
 
 
 def test_groups_only_sustained_fixed_cost_columns() -> None:
@@ -76,9 +62,9 @@ def test_grouped_ranges_preserve_column_order_and_one_budget() -> None:
 
 def test_fixed_wide_parquet_single_and_multi_are_byte_identical(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Grouped decode preserves exact Arrow ownership and deterministic output."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_runtime import native_core
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE
@@ -104,7 +90,7 @@ def test_fixed_wide_parquet_single_and_multi_are_byte_identical(
             on_error="stop",
         ).raw
         capsule = native_core.parquet_stream_read(str(source), [], 64 << 20)
-        sink = context.to_sink_arrow_stream("stream", "arrow", _CapsuleStream(capsule), options)
+        sink = context.to_sink_arrow_stream("stream", "arrow", CapsuleStream(capsule), options)
         output = tmp_path / f"{mode}.parquet"
         PARQUET_STREAM_WRITE(sink, str(output), "uncompressed", -1, 128 << 20)
         sink.close_main_stream()

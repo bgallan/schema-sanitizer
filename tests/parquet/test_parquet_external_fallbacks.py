@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from _support.parquet_runtime import pa, pq, sample_table
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
-from conftest import read_test_parquet, require_native
+from conftest import read_test_parquet
 
 import schema_sanitizer as ss
 
@@ -48,8 +48,8 @@ def test_parquet_buffer_reader_receives_original_bytes_like_object() -> None:
 def test_native_parquet_reader_memory_budget_blocks_native_route(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
-    """Verify native Parquet reader refuses row groups over its buffer budget."""
     from schema_sanitizer.adapters.parquet.status import (
         native_parquet_footer_info,
         native_parquet_stream_preflight_info,
@@ -58,7 +58,6 @@ def test_native_parquet_reader_memory_budget_blocks_native_route(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "budget.parquet"
     table = pa.table(
         {
@@ -89,11 +88,10 @@ def test_read_parquet_retries_pyarrow_after_native_reader_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    require_native: None,
 ) -> None:
-    """Verify native Parquet reader failure falls back to a PyArrow stream."""
     from schema_sanitizer.api_impl.parquet import direct_routes as parquet_direct_routes
 
-    require_native()
     path = tmp_path / "data.parquet"
     pq.write_table(sample_table(pa), path)
 
@@ -115,11 +113,10 @@ def test_to_parquet_retries_pyarrow_after_native_reader_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    require_native: None,
 ) -> None:
-    """Verify Parquet conversion retries with PyArrow after native reader failure."""
     from schema_sanitizer.api_impl.parquet import direct_routes as parquet_direct_routes
 
-    require_native()
     path = tmp_path / "data.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(sample_table(pa), path)
@@ -151,11 +148,11 @@ def test_to_parquet_retries_pyarrow_after_native_reader_failure(
 
 
 @_requires_pyarrow
-def test_native_parquet_footer_info_reads_pyarrow_file(tmp_path: Path) -> None:
-    """Verify native Parquet footer parsing reads bounded file metadata."""
+def test_native_parquet_footer_info_reads_pyarrow_file(
+    tmp_path: Path, require_native: None
+) -> None:
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
-    require_native()
     path = tmp_path / "data.parquet"
     pq.write_table(sample_table(pa), path)
 
@@ -197,15 +194,13 @@ def test_native_parquet_footer_info_reads_pyarrow_file(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_spark_int96_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
-    """Verify Spark-style INT96 timestamps stay readable through fallback."""
+def test_spark_int96_parquet_uses_pyarrow_fallback(tmp_path: Path, require_native: None) -> None:
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     path = tmp_path / "spark-int96.parquet"
     value = dt.datetime(2024, 1, 1, 1, 2, 3, 123456)
     pq.write_table(
@@ -234,15 +229,15 @@ def test_spark_int96_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_spark_flavored_nested_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
-    """Verify Spark-flavored nested Parquet remains readable through fallback."""
+def test_spark_flavored_nested_parquet_uses_pyarrow_fallback(
+    tmp_path: Path, require_native: None
+) -> None:
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     path = tmp_path / "spark-flavored-nested.parquet"
     table = pa.table(
         {
@@ -285,15 +280,14 @@ def test_spark_flavored_nested_parquet_uses_pyarrow_fallback(tmp_path: Path) -> 
 @_requires_pyarrow
 def test_pyarrow_deprecated_nested_list_map_encoding_uses_pyarrow_fallback(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify deprecated nested encodings use the canonical sanitized representation."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     path = tmp_path / "pyarrow-deprecated-nested-list-map.parquet"
     item_type = pa.struct(
         [
@@ -373,15 +367,14 @@ def test_pyarrow_deprecated_nested_list_map_encoding_uses_pyarrow_fallback(
 @_requires_pyarrow
 def test_bigquery_compatible_standard_parquet_uses_pyarrow_fallback(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify BigQuery-style logical scalars without Arrow metadata stay readable."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     path = tmp_path / "bigquery-compatible.parquet"
     table = pa.table(
         {
@@ -462,15 +455,14 @@ def test_bigquery_compatible_standard_parquet_uses_pyarrow_fallback(
 @_requires_pyarrow
 def test_bigquery_export_like_nested_parquet_uses_pyarrow_fallback(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify BigQuery-export-like nested/repeated Parquet stays readable."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     path = tmp_path / "bigquery-export-like.parquet"
     table = pa.table(
         {
@@ -560,8 +552,7 @@ def test_bigquery_export_like_nested_parquet_uses_pyarrow_fallback(
 
 
 @_requires_pyarrow
-def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
-    """Verify DuckDB-written Parquet stays readable through the safe fallback."""
+def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path, require_native: None) -> None:
     duckdb = pytest.importorskip("duckdb")
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
@@ -569,7 +560,6 @@ def test_duckdb_written_parquet_uses_pyarrow_fallback(tmp_path: Path) -> None:
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     path = tmp_path / "duckdb.parquet"
     with duckdb.connect() as connection:
         connection.execute(

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
-
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,9 +50,8 @@ def test_performance_telemetry_uses_the_same_worker_ownership() -> None:
     assert "shard.stolen.load(std::memory_order_relaxed)" in json_source
 
 
-def test_native_mixed_lanes_accumulate_multiple_worker_shards() -> None:
+def test_native_mixed_lanes_accumulate_multiple_worker_shards(require_native: None) -> None:
     """Mixed input/output lanes still drain while compatible workers steal."""
-    require_native()
     _elapsed, stolen, started, peak, finished, queued, submitted = (
         native_core.operation_task_arena_mixed_lane_probe(4, 8_000)
     )

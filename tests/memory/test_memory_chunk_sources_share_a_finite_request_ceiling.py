@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import require_native
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -67,9 +65,8 @@ def test_secure_cleanup_wipes_transcoding_input_scratch() -> None:
     assert "SensitiveStringGuard raw_guard(&raw)" in source
 
 
-def test_utf16_round_trip_under_explicit_budget(tmp_path: Path) -> None:
+def test_utf16_round_trip_under_explicit_budget(tmp_path: Path, require_native: None) -> None:
     """UTF-16 transcoding remains correct with only memory_limit_bytes exposed."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / "utf16.jsonl"
@@ -94,9 +91,10 @@ def test_transcoded_output_is_sliced_without_copying_oversized_scalars() -> None
     assert "std::string_view(*owner).substr(pending_utf8_pos_, take)" in source
 
 
-def test_multi_path_directory_preserves_separator_order(tmp_path: Path) -> None:
+def test_multi_path_directory_preserves_separator_order(
+    tmp_path: Path, require_native: None
+) -> None:
     """Directory children remain ordered under the derived chunk budget."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / "inputs"

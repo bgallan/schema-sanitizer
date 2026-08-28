@@ -71,7 +71,6 @@ def _read_csv_result(input_case: str, tmp_path, *, content: str, **options):
 def test_csv_field_name_policy_matches_dirty_headers_against_strict_schema(
     input_case, tmp_path
 ) -> None:
-    """Verify sanitized strict schemas still match dirty CSV headers."""
     schema = pa.schema(
         [
             ("User-ID", pa.int64()),

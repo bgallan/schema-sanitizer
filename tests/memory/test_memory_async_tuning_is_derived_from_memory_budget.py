@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_async_tuning_is_derived_from_memory_budget() -> None:
-    """Verify the defensive regression contract."""
     from schema_sanitizer.core_impl.memory_budget import memory_budget
     from schema_sanitizer.remote_impl.directory_downloads import directory_download_tuning
 
@@ -29,7 +28,6 @@ def test_async_tuning_is_derived_from_memory_budget() -> None:
 
 
 def test_retry_delay_bounds_exponent_work(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify the defensive regression contract."""
     from schema_sanitizer.core_impl import async_scheduler
 
     monkeypatch.setattr(async_scheduler.random, "uniform", lambda _a, _b: 0.0)
@@ -38,7 +36,6 @@ def test_retry_delay_bounds_exponent_work(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_remote_prefetch_window_comes_from_memory_limit() -> None:
-    """Verify the defensive regression contract."""
     from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 
     class Manifest:
@@ -55,7 +52,6 @@ def test_remote_prefetch_window_comes_from_memory_limit() -> None:
 
 
 def test_shared_async_scheduler_caps_direct_callers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify the defensive regression contract."""
     from schema_sanitizer.core_impl import async_scheduler
 
     async def run() -> None:
@@ -81,7 +77,6 @@ def test_shared_async_scheduler_caps_direct_callers(monkeypatch: pytest.MonkeyPa
 
 
 def test_native_consumers_share_the_memory_budget_helper() -> None:
-    """Verify the defensive regression contract."""
     consumers = [
         ROOT / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc",
         ROOT / "cpp/src/internal/json_output/schema/array_validation.cc",
@@ -96,7 +91,6 @@ def test_native_consumers_share_the_memory_budget_helper() -> None:
 
 
 def test_parquet_page_scratch_releases_exceptional_capacity() -> None:
-    """Verify the defensive regression contract."""
     source = (
         ROOT / "cpp/src/internal/parquet/footer_reader/pages/footer_reader_page_scratch.cc.inc"
     ).read_text(encoding="utf-8")

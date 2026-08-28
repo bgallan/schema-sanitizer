@@ -100,43 +100,35 @@ def test_async_bucket_root_listing_requests_metadata_and_sorts_by_identity(
         status = 200
 
         def __init__(self, payload: dict[str, object]) -> None:
-            """Store one JSON response payload."""
             self._body = json.dumps(payload).encode()
             self._offset = 0
             self.content = self
 
         async def __aenter__(self):
-            """Enter the asynchronous response context."""
             return self
 
         async def __aexit__(self, *_exc: object) -> bool:
-            """Leave the asynchronous response context."""
             return False
 
         async def read(self, size: int) -> bytes:
-            """Return at most ``size`` bytes through the bounded reader API."""
             end = min(len(self._body), self._offset + size)
             chunk = self._body[self._offset : end]
             self._offset = end
             return chunk
 
         def at_eof(self) -> bool:
-            """Report whether the bounded body has been consumed."""
             return self._offset == len(self._body)
 
     class Session:
         """Minimal asynchronous client-session double."""
 
         async def __aenter__(self):
-            """Enter the asynchronous session context."""
             return self
 
         async def __aexit__(self, *_exc: object) -> bool:
-            """Leave the asynchronous session context."""
             return False
 
         def get(self, _url: str, *, params: dict[str, str]):
-            """Return the next paginated response and capture its query."""
             captured.append(dict(params))
             return Response(pages.pop(0))
 

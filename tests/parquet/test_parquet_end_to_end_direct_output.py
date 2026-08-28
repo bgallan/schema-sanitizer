@@ -12,11 +12,9 @@ class _ReplayStream:
     """Minimal replay stream used to record lifecycle events."""
 
     def __init__(self, events: list[str]):
-        """Store the shared event recorder."""
         self._events = events
 
     def close_main_stream(self) -> None:
-        """Record closure of the replay reader."""
         self._events.append("stream-close")
 
 
@@ -24,24 +22,20 @@ class _Replay:
     """Minimal replay owner used by fallback lifecycle tests."""
 
     def __init__(self, events: list[str]):
-        """Create a replay owner and its stream."""
         self._events = events
         self._stream = _ReplayStream(events)
 
     def reader(self) -> _ReplayStream:
-        """Return the replay reader while recording access."""
         self._events.append("replay-reader")
         return self._stream
 
     def close(self) -> None:
-        """Record release of the replay owner."""
         self._events.append("replay-close")
 
 
 def test_supported_internal_parquet_stream_skips_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify operation-owned streams reach native Parquet without IPC replay."""
     from schema_sanitizer.api_impl import stream_output
     from schema_sanitizer.api_impl.file_conversion.direct_writers import FileWriteOutcome
     from schema_sanitizer.core_impl.native_results import SinkOutput
@@ -77,7 +71,6 @@ def test_supported_internal_parquet_stream_skips_replay(
 def test_internal_parquet_replay_is_created_only_after_safe_decline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify a pre-consumption native decline may still create one replay."""
     from schema_sanitizer.api_impl import stream_output
     from schema_sanitizer.core_impl.native_results import SinkOutput
 
@@ -125,7 +118,6 @@ def test_internal_parquet_replay_is_created_only_after_safe_decline(
 def test_internal_parquet_late_failure_is_not_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify a possibly consuming native failure cannot fall back on the stream."""
     from schema_sanitizer.api_impl.file_conversion import direct_writers, writers
 
     def fail_after_consumption(*_args: Any, **_kwargs: Any) -> bool:

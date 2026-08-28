@@ -12,7 +12,6 @@ import schema_sanitizer as ss
 
 
 def test_none_input_format_is_rejected(tmp_path: Path) -> None:
-    """Verify the default None selector never infers from the extension."""
     path = tmp_path / "rows.jsonl"
     path.write_text('{"a":1}\n', encoding="utf-8")
 
@@ -29,7 +28,6 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
     input_format: str,
     failure: type[BaseException],
 ) -> None:
-    """Verify format normalization completes before preparation can acquire ownership."""
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.input_impl.prepared import PreparedPublicInput
 
@@ -84,7 +82,6 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
 def test_single_file_requires_matching_extension(
     tmp_path: Path, input_format: str, filename: str
 ) -> None:
-    """Verify every explicit format checks its source extension."""
     path = tmp_path / filename
     path.write_text("{}", encoding="utf-8")
 
@@ -93,7 +90,6 @@ def test_single_file_requires_matching_extension(
 
 
 def test_json_array_materializes_top_level_objects(tmp_path: Path) -> None:
-    """Verify json_array emits one row per top-level object."""
     path = tmp_path / "rows.json"
     path.write_text(
         '[\n  {"id":1,"name":"Ana"},\n  {"id":2,"name":"Luis"}\n]\n',
@@ -107,7 +103,6 @@ def test_json_array_materializes_top_level_objects(tmp_path: Path) -> None:
 
 
 def test_json_array_single_file_uses_native_path_source(tmp_path: Path) -> None:
-    """Verify single-file json_array remains native path input."""
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
 
     path = tmp_path / "rows.json"
@@ -133,7 +128,6 @@ def test_json_array_single_file_uses_native_path_source(tmp_path: Path) -> None:
 
 
 def test_json_array_rejects_non_object_elements(tmp_path: Path) -> None:
-    """Verify json_array only accepts object rows."""
     path = tmp_path / "rows.json"
     path.write_text('[{"id":1}, 2]\n', encoding="utf-8")
 
@@ -142,7 +136,6 @@ def test_json_array_rejects_non_object_elements(tmp_path: Path) -> None:
 
 
 def test_json_array_rejects_trailing_characters(tmp_path: Path) -> None:
-    """Verify json_array rejects non-whitespace after the top-level array."""
     path = tmp_path / "rows.json"
     path.write_text('[{"id":1}] trailing\n', encoding="utf-8")
 
@@ -151,7 +144,6 @@ def test_json_array_rejects_trailing_characters(tmp_path: Path) -> None:
 
 
 def test_json_top_level_array_rejects_trailing_characters(tmp_path: Path) -> None:
-    """Verify native JSON array scanning validates the document tail."""
     path = tmp_path / "rows.json"
     path.write_text('[{"id":1}] trailing\n', encoding="utf-8")
 
@@ -160,7 +152,6 @@ def test_json_top_level_array_rejects_trailing_characters(tmp_path: Path) -> Non
 
 
 def test_json_wide_top_level_rows_materialize_all_fields(tmp_path: Path) -> None:
-    """Verify wide top-level rows materialize through the native root snapshot."""
     path = tmp_path / "rows.json"
     path.write_text(
         '[{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8}]',
@@ -173,7 +164,6 @@ def test_json_wide_top_level_rows_materialize_all_fields(tmp_path: Path) -> None
 
 
 def test_json_directory_source_file_tracks_multirow_documents(tmp_path: Path) -> None:
-    """Verify native JSON directory source_file tracking remains per produced row."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text('[{"id":1},{"id":2}]', encoding="utf-8")
@@ -191,7 +181,6 @@ def test_json_directory_source_file_tracks_multirow_documents(tmp_path: Path) ->
 
 
 def test_jsonl_directory_coalesces_with_native_source_file_tracking(tmp_path: Path) -> None:
-    """Verify JSONL directory materialization groups files without losing row origins."""
     folder = tmp_path / "jsonl"
     folder.mkdir()
     (folder / "a.jsonl").write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
@@ -213,7 +202,6 @@ def test_jsonl_directory_coalesces_with_native_source_file_tracking(tmp_path: Pa
 def test_json_directory_coalesces_object_documents_with_source_file_tracking(
     tmp_path: Path,
 ) -> None:
-    """Verify object-style JSON documents can share one native stream."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text('{"id":1}', encoding="utf-8")
@@ -232,7 +220,6 @@ def test_json_directory_coalesces_object_documents_with_source_file_tracking(
 def test_json_directory_coalesces_array_documents_with_source_file_tracking(
     tmp_path: Path,
 ) -> None:
-    """Verify JSON array documents can share one native stream in json mode."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text('[{"id":1},{"id":2}]', encoding="utf-8")
@@ -250,7 +237,6 @@ def test_json_directory_coalesces_array_documents_with_source_file_tracking(
 
 
 def test_json_directory_preserves_scalar_array_documents(tmp_path: Path) -> None:
-    """Verify json-mode scalar array documents keep default-key semantics."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text("[1,2]", encoding="utf-8")
@@ -274,7 +260,6 @@ def test_json_directory_preserves_scalar_array_documents(tmp_path: Path) -> None
 def test_json_directory_scalar_array_documents_preserve_values_with_registry(
     tmp_path: Path,
 ) -> None:
-    """Verify scalar array documents keep default-key values with an existing registry."""
     seed = tmp_path / "seed.json"
     seed.write_text("1", encoding="utf-8")
     registry = ss.to_pyarrow(seed, input_format="json").schema_registry
@@ -302,7 +287,6 @@ def test_json_directory_scalar_array_documents_preserve_values_with_registry(
 def test_native_json_path_source_probe_coalesces_with_best_effort_fallback(
     tmp_path: Path,
 ) -> None:
-    """Verify grouped JSON registry probing falls back to per-file invalid skips."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     folder = tmp_path / "json"
@@ -334,7 +318,6 @@ def test_native_json_path_source_probe_coalesces_with_best_effort_fallback(
 def test_native_json_probe_and_materialization_share_array_boundary_plan(
     tmp_path: Path,
 ) -> None:
-    """Verify JSON array documents and object documents use one source-plan rule."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     folder = tmp_path / "json"
@@ -370,7 +353,6 @@ def test_native_json_probe_and_materialization_share_array_boundary_plan(
 
 
 def test_native_path_source_probe_state_feeds_materialization(tmp_path: Path) -> None:
-    """Verify two-phase native materialization reuses compiled registry state."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
     from schema_sanitizer.api_impl.streams import Stream
 
@@ -410,7 +392,6 @@ def test_native_path_source_probe_state_feeds_materialization(tmp_path: Path) ->
 
 
 def test_jsonl_materializes_line_delimited_objects(tmp_path: Path) -> None:
-    """Verify JSONL materializes one object per line."""
     path = tmp_path / "rows.jsonl"
     path.write_text('{"a":1}\n{"a":2}\n', encoding="utf-8")
 
@@ -418,7 +399,6 @@ def test_jsonl_materializes_line_delimited_objects(tmp_path: Path) -> None:
 
 
 def test_directory_mode_is_non_recursive_and_deterministic(tmp_path: Path) -> None:
-    """Verify directory mode reads matching direct children only."""
     folder = tmp_path / "rows"
     folder.mkdir()
     (folder / "b.jsonl").write_text('{"a":2}\n', encoding="utf-8")
@@ -437,7 +417,6 @@ def test_directory_mode_is_non_recursive_and_deterministic(tmp_path: Path) -> No
 
 
 def test_directory_mode_requires_explicit_format(tmp_path: Path) -> None:
-    """Verify directory mode also rejects the default None format."""
     folder = tmp_path / "rows"
     folder.mkdir()
 
@@ -446,7 +425,6 @@ def test_directory_mode_requires_explicit_format(tmp_path: Path) -> None:
 
 
 def test_csv_directory_validates_shared_header(tmp_path: Path) -> None:
-    """Verify CSV directory mode removes matching repeated headers."""
     folder = tmp_path / "csv"
     folder.mkdir()
     (folder / "a.csv").write_text("id,name\n1,Ana\n", encoding="utf-8")

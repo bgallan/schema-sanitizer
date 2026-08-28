@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -118,9 +117,9 @@ def test_sources_define_bounded_immutable_token_handoff() -> None:
 
 def test_wide_jsonl_reuses_validated_tokens_with_exact_output(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Workers consume the immutable token index instead of the root parser."""
-    require_native()
     memory_limit = 64 * 1024 * 1024
     source = tmp_path / "wide.jsonl"
     _write_rows(source, 2_048)
@@ -154,9 +153,9 @@ def test_wide_jsonl_reuses_validated_tokens_with_exact_output(
 
 def test_token_budget_falls_back_per_row_without_changing_results(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """A full token budget degrades to raw rows, never a partial index."""
-    require_native()
     # MSVC's allocator/STL overhead is part of the strict global budget.
     oracle_memory_limit = (256 if os.name == "nt" else 128) * 1024 * 1024
     constrained_memory_limit = (63 if os.name == "nt" else 32) * 1024 * 1024
@@ -202,9 +201,9 @@ def test_token_budget_falls_back_per_row_without_changing_results(
 
 def test_escaped_and_duplicate_keys_keep_single_thread_semantics(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Escaped names and duplicate fields retain canonical lookup behavior."""
-    require_native()
     memory_limit = 64 * 1024 * 1024
     clean = tmp_path / "clean.jsonl"
     _write_rows(clean, 256)
@@ -254,10 +253,12 @@ def test_escaped_and_duplicate_keys_keep_single_thread_semantics(
     ],
 )
 def test_syntax_error_still_precedes_worker_conversion_failure(
-    tmp_path: Path, bad_row: str, message_fragment: str
+    tmp_path: Path,
+    bad_row: str,
+    message_fragment: str,
+    require_native: None,
 ) -> None:
     """Frontend syntax errors still outrank earlier worker conversion errors."""
-    require_native()
     memory_limit = 64 * 1024 * 1024
     clean = tmp_path / "clean.jsonl"
     _write_rows(clean, 256)

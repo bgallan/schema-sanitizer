@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
 
-from conftest import require_native
+from _support.resource_fakes import CapsuleStream
 
 ROOT = Path(__file__).resolve().parents[2]
 FOOTER = ROOT / "cpp/src/internal/parquet/footer_reader/footer_reader.cc"
@@ -25,19 +24,6 @@ RETAINED = (
     / "cpp/src/internal/parquet/footer_reader/native_stream/materialization/row_group"
     / "native_stream_retained_budget.cc.inc"
 )
-
-
-class _CapsuleStream:
-    """Expose one owned Arrow C Stream capsule to a native consumer."""
-
-    def __init__(self, capsule: Any):
-        """Retain the owned Arrow C Stream capsule."""
-        self._capsule = capsule
-
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
-        """Return the capsule through the Arrow PyCapsule protocol."""
-        del requested_schema
-        return self._capsule
 
 
 def test_native_parquet_decode_reuses_the_operation_arena() -> None:
@@ -72,9 +58,8 @@ def test_parquet_parallel_scratch_is_derived_and_saturating() -> None:
     assert "getenv" not in row_group + budget_sources
 
 
-def test_parquet_single_and_multi_are_byte_identical(tmp_path: Path) -> None:
+def test_parquet_single_and_multi_are_byte_identical(tmp_path: Path, require_native: None) -> None:
     """Parallel column decode preserves exact deterministic Parquet output."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_runtime import native_core
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE
@@ -103,7 +88,7 @@ def test_parquet_single_and_multi_are_byte_identical(tmp_path: Path) -> None:
             on_error="stop",
         ).raw
         capsule = native_core.parquet_stream_read(str(source), [], 128 << 20)
-        sink = context.to_sink_arrow_stream("stream", "arrow", _CapsuleStream(capsule), options)
+        sink = context.to_sink_arrow_stream("stream", "arrow", CapsuleStream(capsule), options)
         output = tmp_path / f"{mode}.parquet"
         PARQUET_STREAM_WRITE(sink, str(output), "uncompressed", -1, 128 << 20)
         sink.close_main_stream()

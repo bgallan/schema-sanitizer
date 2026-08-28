@@ -7,16 +7,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer import sources
 from schema_sanitizer.remote_impl import sync_backend
 
 
-def test_configured_sanitizer_executes_real_conversion(tmp_path: Path) -> None:
+def test_configured_sanitizer_executes_real_conversion(
+    tmp_path: Path, require_native: None
+) -> None:
     """The friendly facade reaches the native engine without an adapter-specific path."""
-    require_native()
     pytest.importorskip("pyarrow")
     path = tmp_path / "rows.csv"
     path.write_text("id,name\n1,Ada\n", encoding="utf-8")

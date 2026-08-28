@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 
 import pytest
-from conftest import require_native
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 def _reader(table: object, *, max_chunksize: int = 4096) -> object:
@@ -49,7 +50,6 @@ def test_native_parquet_multi_matches_single_for_wide_scalars(
     compression: str,
 ) -> None:
     """Wide scalar output must remain logically identical under column workers."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     rows = 12_000
     columns: dict[str, object] = {
@@ -78,7 +78,6 @@ def test_native_parquet_multi_matches_single_for_wide_scalars(
 
 def test_native_parquet_multi_matches_single_for_nested_columns(tmp_path: Path) -> None:
     """Nested lists and structs retain null semantics and row order."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     rows = 8_000
     payload_type = pa.struct(
@@ -124,7 +123,6 @@ def test_native_parquet_multi_matches_single_for_nested_columns(tmp_path: Path) 
 @pytest.mark.skipif(not Path("/proc/self/task").is_dir(), reason="Linux /proc required")
 def test_native_parquet_single_does_not_create_host_threads(tmp_path: Path) -> None:
     """The Parquet single path must not construct a native worker pool."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     rows = 16_000
     table = pa.table(

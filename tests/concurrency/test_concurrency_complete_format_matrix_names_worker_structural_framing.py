@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_exceptions_equivalent
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import default_pool
@@ -104,10 +103,11 @@ def test_scanner_is_bounded_worker_authoritative_and_has_canonical_fallback() ->
 
 @pytest.mark.parametrize("input_format", ["json", "json_array"])
 def test_object_arrays_keep_exact_single_multi_data_and_real_work(
-    tmp_path: Path, input_format: str
+    tmp_path: Path,
+    input_format: str,
+    require_native: None,
 ) -> None:
     """Both array aliases frame cheaply and preserve authoritative worker output."""
-    require_native()
     source = tmp_path / f"{input_format}.json"
     _write_object_array(source)
     assert source.stat().st_size < 1 << 20
@@ -134,9 +134,10 @@ def test_object_arrays_keep_exact_single_multi_data_and_real_work(
     assert telemetry["multi"][1] >= 2
 
 
-def test_deep_values_fall_back_without_changing_results(tmp_path: Path) -> None:
+def test_deep_values_fall_back_without_changing_results(
+    tmp_path: Path, require_native: None
+) -> None:
     """Nesting beyond the inline stack uses the canonical span scanner."""
-    require_native()
     value: object = 7
     for depth in range(70):
         value = {f"level_{depth}": value}
@@ -159,9 +160,10 @@ def test_deep_values_fall_back_without_changing_results(tmp_path: Path) -> None:
     assert rows["multi"] == rows["single"]
 
 
-def test_scalar_split_at_chunk_boundary_is_complete_and_parallel(tmp_path: Path) -> None:
+def test_scalar_split_at_chunk_boundary_is_complete_and_parallel(
+    tmp_path: Path, require_native: None
+) -> None:
     """A primitive spanning the 1 MiB chunk boundary is never emitted partially."""
-    require_native()
     source = tmp_path / "scalars.json"
     source.write_text(
         "[" + ",".join(str(index) for index in range(200_000)) + "]",
@@ -195,9 +197,10 @@ def test_scalar_split_at_chunk_boundary_is_complete_and_parallel(tmp_path: Path)
         '[{"value":"unterminated}]',
     ],
 )
-def test_malformed_arrays_keep_exact_single_multi_errors(tmp_path: Path, payload: str) -> None:
+def test_malformed_arrays_keep_exact_single_multi_errors(
+    tmp_path: Path, payload: str, require_native: None
+) -> None:
     """Light framing never weakens deterministic public parse failures."""
-    require_native()
     source = tmp_path / "invalid.json"
     source.write_text(payload, encoding="utf-8")
 

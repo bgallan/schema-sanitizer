@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import default_pool
@@ -43,9 +42,9 @@ def test_telemetry_exposes_exact_streak_count() -> None:
 
 def test_public_pipeline_reports_fewer_streaks_than_tasks(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """A sustained public conversion amortizes active transitions across packets."""
-    require_native()
     if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
         pytest.skip("CPU affinity is required for the four-worker contract")
     original_affinity = os.sched_getaffinity(0)

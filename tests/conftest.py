@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import pytest
 
@@ -55,8 +55,9 @@ def native_available() -> bool:
         return False
 
 
+@pytest.fixture
 def require_native() -> None:
-    """Return require native for the test."""
+    """Skip a test when the compiled schema-sanitizer core is unavailable."""
     if not native_available():
         pytest.skip("native schema_sanitizer core is not available")
 
@@ -130,48 +131,10 @@ def read_test_python(rows, *, output_format: str = "pyarrow", **options):
     return result
 
 
-def read_test_csv(path, *, output_format: str = "pyarrow", **options):
-    """Read CSV through the new analytical API."""
-    return read_test_path(path, input_format="csv", output_format=output_format, **options)
-
-
-def read_test_json(path, *, output_format: str = "pyarrow", **options):
-    """Read one JSON document through the new analytical API."""
-    return read_test_path(path, input_format="json", output_format=output_format, **options)
-
-
-def read_test_jsonl(path, *, output_format: str = "pyarrow", **options):
-    """Read JSONL through the analytical API."""
-    return read_test_path(path, input_format="jsonl", output_format=output_format, **options)
-
-
-def read_test_json_folder(path, *, output_format: str = "pyarrow", **options):
-    """Read a flat JSON directory through the new analytical API."""
-    return read_test_path(
-        path,
-        input_format="json",
-        input_mode="directory",
-        output_format=output_format,
-        **options,
-    )
-
-
-def read_test_xml(path, *, output_format: str = "pyarrow", **options):
-    """Read XML through the new analytical API."""
-    return read_test_path(path, input_format="xml", output_format=output_format, **options)
-
-
-def read_test_xml_folder(path, *, output_format: str = "pyarrow", **options):
-    """Read a flat XML directory through the new analytical API."""
-    return read_test_path(
-        path,
-        input_format="xml",
-        input_mode="directory",
-        output_format=output_format,
-        **options,
-    )
-
-
-def read_test_parquet(path, *, output_format: str = "pyarrow", **options):
-    """Read Parquet through the new analytical API."""
-    return read_test_path(path, input_format="parquet", output_format=output_format, **options)
+read_test_csv = partial(read_test_path, input_format="csv")
+read_test_json = partial(read_test_path, input_format="json")
+read_test_jsonl = partial(read_test_path, input_format="jsonl")
+read_test_json_folder = partial(read_test_path, input_format="json", input_mode="directory")
+read_test_xml = partial(read_test_path, input_format="xml")
+read_test_xml_folder = partial(read_test_path, input_format="xml", input_mode="directory")
+read_test_parquet = partial(read_test_path, input_format="parquet")

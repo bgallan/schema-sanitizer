@@ -13,7 +13,6 @@ import schema_sanitizer as ss
 
 
 def test_csv_directory_source_file_spans_count_quoted_newlines(tmp_path: Path) -> None:
-    """Verify CSV directory source_file spans follow parsed rows, not physical lines."""
     folder = tmp_path / "csv"
     folder.mkdir()
     (folder / "a.csv").write_text('id,note\n1,"hello\nworld"\n', encoding="utf-8")
@@ -35,7 +34,6 @@ def test_csv_directory_source_file_spans_count_quoted_newlines(tmp_path: Path) -
 def test_native_csv_path_source_probe_coalesces_and_skips_child_headers(
     tmp_path: Path,
 ) -> None:
-    """Verify grouped CSV registry probing treats each child header as metadata."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     folder = tmp_path / "csv"
@@ -61,7 +59,6 @@ def test_native_csv_path_source_probe_coalesces_and_skips_child_headers(
 
 
 def test_csv_directory_source_file_does_not_precount_rows(tmp_path: Path) -> None:
-    """Verify native multi-source directory conversion owns source_file tracking."""
     folder = tmp_path / "csv"
     folder.mkdir()
     (folder / "a.csv").write_text('id,note\n1,"hello\nworld"\n', encoding="utf-8")
@@ -76,7 +73,6 @@ def test_csv_directory_source_file_does_not_precount_rows(tmp_path: Path) -> Non
 
 
 def test_csv_directory_writer_source_file_does_not_precount_rows(tmp_path: Path) -> None:
-    """Verify file writers use native multi-source source_file tracking."""
     folder = tmp_path / "csv"
     folder.mkdir()
     (folder / "a.csv").write_text("id,note\n1,one\n", encoding="utf-8")
@@ -97,7 +93,6 @@ def test_csv_directory_writer_source_file_does_not_precount_rows(tmp_path: Path)
 
 
 def test_jsonl_directory_file_writer_reports_nonzero_stats(tmp_path: Path) -> None:
-    """Verify native JSONL file output patches row stats after streaming."""
     folder = tmp_path / "jsonl"
     folder.mkdir()
     (folder / "a.jsonl").write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
@@ -118,7 +113,6 @@ def test_jsonl_directory_file_writer_reports_nonzero_stats(tmp_path: Path) -> No
 
 
 def test_csv_directory_file_writer_reports_logical_row_stats(tmp_path: Path) -> None:
-    """Verify native CSV file output counts logical CSV records, not physical lines."""
     folder = tmp_path / "csv"
     folder.mkdir()
     (folder / "a.csv").write_text('id,note\n1,"hello\nworld"\n', encoding="utf-8")
@@ -136,7 +130,6 @@ def test_registry_directory_analysis_and_writer_share_source_plan_opener(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Verify analytical and file registry routes use the same source-plan opener."""
     pytest.importorskip("pyarrow.parquet")
     import schema_sanitizer.api_impl.analytical as analytical_conversion
     import schema_sanitizer.input_impl.source_plan as source_plan_model
@@ -183,7 +176,6 @@ def test_directory_file_conversion_uses_core_source_plan_fast_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Verify public file conversion opens source plans before writer fallback."""
     pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl import registry_output as registry_file_execution
 
@@ -212,7 +204,6 @@ def test_directory_file_conversion_uses_core_source_plan_fast_path(
 def test_jsonl_directory_writer_accepts_previous_native_registry_state(
     tmp_path: Path,
 ) -> None:
-    """Verify path-source writers can seed inference from native registry state."""
     from schema_sanitizer.core_impl.schema_registry import native_registry_state_context
 
     pq = pytest.importorskip("pyarrow.parquet")
@@ -244,7 +235,6 @@ def test_jsonl_directory_writer_accepts_previous_native_registry_state(
 
 
 def test_json_array_directory_flattens_each_file(tmp_path: Path) -> None:
-    """Verify directory json_array mode flattens all direct arrays."""
     folder = tmp_path / "arrays"
     folder.mkdir()
     (folder / "a.json").write_text('[{"a":1},{"a":2}]', encoding="utf-8")
@@ -267,7 +257,6 @@ def test_json_array_directory_flattens_each_file(tmp_path: Path) -> None:
 def test_native_json_array_path_source_probe_coalesces_each_array_file(
     tmp_path: Path,
 ) -> None:
-    """Verify grouped json_array probing scans each file as its own array."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     folder = tmp_path / "arrays"
@@ -295,7 +284,6 @@ def test_native_json_array_path_source_probe_coalesces_each_array_file(
 
 
 def test_json_array_directory_does_not_preconvert_or_precount(tmp_path: Path) -> None:
-    """Verify directory json_array source_file tracking is native."""
     folder = tmp_path / "arrays"
     folder.mkdir()
     (folder / "a.json").write_text('[{"id":1},{"id":2}]', encoding="utf-8")
@@ -313,7 +301,6 @@ def test_json_array_directory_does_not_preconvert_or_precount(tmp_path: Path) ->
 
 
 def test_xml_directory_source_file_tracks_each_child(tmp_path: Path) -> None:
-    """Verify XML directory rows carry the child XML path."""
     folder = tmp_path / "xml"
     folder.mkdir()
     (folder / "a.xml").write_text('<?xml version="1.0"?><row><id>1</id></row>', encoding="utf-8")
@@ -329,7 +316,6 @@ def test_xml_directory_source_file_tracks_each_child(tmp_path: Path) -> None:
 
 
 def test_xml_directory_does_not_wrap_child_files(tmp_path: Path) -> None:
-    """Verify native XML directory conversion reads child paths directly."""
     folder = tmp_path / "xml"
     folder.mkdir()
     (folder / "a.xml").write_text('<?xml version="1.0"?><row><id>1</id></row>', encoding="utf-8")
@@ -355,7 +341,6 @@ def test_native_directory_preparation_uses_path_sources(
     input_format: str,
     expected_ids: list,
 ) -> None:
-    """Verify native-compatible directories prepare source-plan path inputs."""
     folder = tmp_path / input_format
     folder.mkdir()
     options = {"input_format": input_format, "input_mode": "directory"}

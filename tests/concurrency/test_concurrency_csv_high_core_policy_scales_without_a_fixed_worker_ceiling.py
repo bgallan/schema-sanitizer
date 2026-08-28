@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import results as result_adapters
@@ -33,11 +32,9 @@ class _FakeReader:
     num_record_batches = 2
 
     def __init__(self) -> None:
-        """Initialize the reader as open."""
         self.closed = False
 
     def close(self) -> None:
-        """Record deterministic reader closure."""
         self.closed = True
 
 
@@ -92,7 +89,6 @@ def test_polars_disables_full_frame_rechunk_when_supported(
 
         @staticmethod
         def from_arrow(value: object, **kwargs: object) -> _FakePolarsFrame:
-            """Record conversion arguments and return a deterministic frame."""
             calls.append((value, dict(kwargs)))
             return _FakePolarsFrame()
 
@@ -134,7 +130,6 @@ def test_polars_does_not_hide_conversion_type_errors(
 
         @staticmethod
         def from_arrow(value: object, **kwargs: object) -> _FakePolarsFrame:
-            """Raise a non-signature TypeError without accepting a retry."""
             nonlocal calls
             calls += 1
             raise TypeError("cannot convert incompatible Arrow value")
@@ -183,9 +178,9 @@ def test_all_56_pairs_cover_csv_scaling_and_chunk_preserving_polars() -> None:
 
 def test_public_wide_csv_uses_hybrid_plan_and_parallel_output(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """The real public path reuses fixed columns and publishes output tasks."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     output = tmp_path / "wide.csv"
     with source.open("w", encoding="utf-8") as handle:

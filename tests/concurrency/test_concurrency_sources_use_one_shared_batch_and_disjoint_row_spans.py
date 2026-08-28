@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -63,9 +62,8 @@ def test_sources_use_one_shared_batch_and_disjoint_row_spans() -> None:
     assert "std::move(batch.owner)" in inference
 
 
-def test_zero_copy_packets_preserve_single_oracle(tmp_path: Path) -> None:
+def test_zero_copy_packets_preserve_single_oracle(tmp_path: Path, require_native: None) -> None:
     """Shared packet views preserve every row and byte of logical output."""
-    require_native()
     source = tmp_path / "source.jsonl"
     _write_rows(source, 12_000)
 

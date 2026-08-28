@@ -14,7 +14,6 @@ import pytest
 
 
 def test_parquet_contract_runtime_suite_selects_no_skip_runtime_contract_tests() -> None:
-    """Verify the CI runtime suite covers fallback, native, and nested contracts."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         PARQUET_CONTRACT_RUNTIME_TESTS,
     )
@@ -35,14 +34,13 @@ def test_parquet_contract_runtime_suite_selects_no_skip_runtime_contract_tests()
 
 
 def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
-    """Verify the CI runtime suite fails closed instead of accepting skips."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import _NoSkipPlugin
 
     plugin = _NoSkipPlugin()
     assert hash(plugin) == object.__hash__(plugin)
     plugin.pytest_runtest_logreport(
         SimpleNamespace(
-            nodeid="tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_runtime",
+            nodeid="tests/parquet/test_parquet_native_scalar_cases.py::test_runtime",
             outcome="skipped",
             skipped=True,
             when="setup",
@@ -51,7 +49,7 @@ def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
     )
     plugin.pytest_runtest_logreport(
         SimpleNamespace(
-            nodeid="tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_other",
+            nodeid="tests/parquet/test_parquet_native_scalar_cases.py::test_other",
             outcome="passed",
             skipped=False,
             when="call",
@@ -61,7 +59,7 @@ def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
 
     assert plugin.skipped == [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_runtime",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_runtime",
             "outcome": "skipped",
             "when": "setup",
             "reason": "pyarrow not installed",
@@ -69,7 +67,7 @@ def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
     ]
     assert plugin.passed == [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_other",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_other",
             "outcome": "passed",
             "when": "call",
         }
@@ -79,7 +77,6 @@ def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
 def test_parquet_contract_runtime_suite_fails_closed_when_readiness_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify the CI runtime suite fails before pytest when runtime is incomplete."""
     from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
 
     monkeypatch.setattr(
@@ -95,7 +92,6 @@ def test_parquet_contract_runtime_suite_fails_closed_when_readiness_fails(
 
 
 def test_parquet_contract_runtime_suite_manifest_groups_cover_every_contract_family() -> None:
-    """Verify the runtime suite manifest is grouped by the production guarantees."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         PARQUET_CONTRACT_RUNTIME_REQUIRED_GROUPS,
         PARQUET_CONTRACT_RUNTIME_TEST_GROUPS,
@@ -126,7 +122,6 @@ def test_parquet_contract_runtime_suite_manifest_groups_cover_every_contract_fam
 
 
 def test_parquet_contract_runtime_suite_selection_detects_missing_group() -> None:
-    """Verify the runtime suite fails closed if a guarantee family is dropped."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _validate_runtime_suite_selection,
     )
@@ -134,7 +129,7 @@ def test_parquet_contract_runtime_suite_selection_detects_missing_group() -> Non
     status = _validate_runtime_suite_selection(
         groups={
             "safe_pyarrow_fallback": (
-                "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_spark_flavored_nested_parquet_uses_pyarrow_fallback",
+                "tests/parquet/test_parquet_native_scalar_cases.py::test_spark_flavored_nested_parquet_uses_pyarrow_fallback",
             )
         },
         required_groups=("safe_pyarrow_fallback", "nested_recursive_grammar"),
@@ -145,7 +140,6 @@ def test_parquet_contract_runtime_suite_selection_detects_missing_group() -> Non
 
 
 def test_parquet_contract_runtime_suite_selection_detects_a_missing_nodeid() -> None:
-    """Verify the runtime suite fails closed if a selected test is missing."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _validate_runtime_suite_selection,
     )
@@ -153,7 +147,7 @@ def test_parquet_contract_runtime_suite_selection_detects_a_missing_nodeid() -> 
     status = _validate_runtime_suite_selection(
         groups={
             "safe_pyarrow_fallback": (
-                "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_missing_contract",
+                "tests/parquet/test_parquet_native_scalar_cases.py::test_missing_contract",
             )
         },
         required_groups=("safe_pyarrow_fallback",),
@@ -166,7 +160,6 @@ def test_parquet_contract_runtime_suite_selection_detects_a_missing_nodeid() -> 
 def test_parquet_contract_runtime_suite_fails_closed_when_selection_is_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify the CI runtime suite fails before readiness when the manifest is stale."""
     from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
 
     monkeypatch.setattr(
@@ -184,26 +177,25 @@ def test_parquet_contract_runtime_suite_fails_closed_when_selection_is_invalid(
 
 
 def test_parquet_contract_runtime_suite_group_execution_summary_accepts_group_passes() -> None:
-    """Verify runtime execution is certified per contract family, not only by totals."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
 
     groups = {
         "safe_pyarrow_fallback": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_fallback"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_fallback"
         ],
         "nested_projection_contracts": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_projection"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_projection"
         ],
     }
     reports = [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_fallback",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_fallback",
             "outcome": "passed",
         },
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_projection",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_projection",
             "outcome": "passed",
         },
     ]
@@ -225,26 +217,25 @@ def test_parquet_contract_runtime_suite_group_execution_summary_accepts_group_pa
 def test_parquet_contract_runtime_suite_group_execution_summary_detects_missing_group_pass() -> (
     None
 ):
-    """Verify a green-looking total cannot hide a missing contract family."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
 
     groups = {
         "schema_sanitizer_native_reader": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_native"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_native"
         ],
         "nested_recursive_grammar": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_nested"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_nested"
         ],
     }
     reports = [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_native",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_native",
             "outcome": "passed",
         },
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_unselected",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_unselected",
             "outcome": "passed",
         },
     ]
@@ -257,7 +248,7 @@ def test_parquet_contract_runtime_suite_group_execution_summary_detects_missing_
     assert summary["satisfied"] is False
     assert summary["passed_by_group"]["nested_recursive_grammar"] == []
     assert summary["missing_passes_by_group"]["nested_recursive_grammar"] == [
-        "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_nested"
+        "tests/parquet/test_parquet_native_scalar_cases.py::test_nested"
     ]
     assert any("produced no passing tests" in issue for issue in summary["issues"])
     assert any("test_nested" in issue for issue in summary["issues"])
@@ -266,19 +257,18 @@ def test_parquet_contract_runtime_suite_group_execution_summary_detects_missing_
 def test_parquet_contract_runtime_suite_group_execution_summary_matches_parametrized_reports() -> (
     None
 ):
-    """Verify parametrized selected functions count as execution for their group."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
 
     groups = {
         "nested_recursive_grammar": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_nested_fuzzer"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_nested_fuzzer"
         ],
     }
     reports = [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_nested_fuzzer[seed-0]",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_nested_fuzzer[seed-0]",
             "outcome": "passed",
         }
     ]
@@ -295,27 +285,26 @@ def test_parquet_contract_runtime_suite_group_execution_summary_matches_parametr
 def test_parquet_contract_runtime_suite_group_execution_summary_records_skips_and_failures() -> (
     None
 ):
-    """Verify skipped/failed selected tests are reported by contract family."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_group_execution_summary,
     )
 
     groups = {
         "safe_pyarrow_fallback": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_fallback"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_fallback"
         ],
         "schema_sanitizer_native_reader": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_native"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_native"
         ],
     }
     reports = [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_fallback",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_fallback",
             "outcome": "skipped",
             "reason": "pyarrow not installed",
         },
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_native",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_native",
             "outcome": "failed",
         },
     ]
@@ -337,7 +326,6 @@ def test_parquet_contract_runtime_suite_group_execution_summary_records_skips_an
 
 
 def test_parquet_contract_runtime_suite_parses_certificate_output_arg() -> None:
-    """Verify suite-owned artifact arguments are not forwarded to pytest."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import _parse_runtime_suite_args
 
     output, pytest_args = _parse_runtime_suite_args(
@@ -349,7 +337,6 @@ def test_parquet_contract_runtime_suite_parses_certificate_output_arg() -> None:
 
 
 def test_parquet_contract_runtime_suite_certificate_accepts_full_contract() -> None:
-    """Verify the JSON certificate is satisfied only when every guarantee passes."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         PARQUET_CONTRACT_RUNTIME_GUARANTEE_GROUPS,
         _runtime_suite_contract_certificate,
@@ -357,7 +344,7 @@ def test_parquet_contract_runtime_suite_certificate_accepts_full_contract() -> N
     )
 
     selected_by_group = {
-        group: [f"tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_{group}"]
+        group: [f"tests/parquet/test_parquet_native_scalar_cases.py::test_{group}"]
         for groups in PARQUET_CONTRACT_RUNTIME_GUARANTEE_GROUPS.values()
         for group in groups
     }
@@ -395,7 +382,6 @@ def test_parquet_contract_runtime_suite_certificate_accepts_full_contract() -> N
 
 
 def test_parquet_contract_runtime_suite_certificate_fails_missing_nested_group() -> None:
-    """Verify the certificate fails closed if one nested contract family did not pass."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _runtime_suite_contract_certificate,
         _runtime_suite_group_execution_summary,
@@ -403,22 +389,22 @@ def test_parquet_contract_runtime_suite_certificate_fails_missing_nested_group()
 
     selected_by_group = {
         "safe_pyarrow_fallback": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_fallback"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_fallback"
         ],
         "schema_sanitizer_native_reader": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_native"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_native"
         ],
         "nested_recursive_grammar": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_nested"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_nested"
         ],
         "nested_null_empty_row_group_phases": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_phases"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_phases"
         ],
         "nested_levels_repetition_topology": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_levels"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_levels"
         ],
         "nested_projection_contracts": [
-            "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_projection"
+            "tests/parquet/test_parquet_native_scalar_cases.py::test_projection"
         ],
     }
     selection = {
@@ -430,23 +416,23 @@ def test_parquet_contract_runtime_suite_certificate_fails_missing_nested_group()
     }
     reports = [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_fallback",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_fallback",
             "outcome": "passed",
         },
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_native",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_native",
             "outcome": "passed",
         },
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_nested",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_nested",
             "outcome": "passed",
         },
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_phases",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_phases",
             "outcome": "passed",
         },
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_levels",
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_levels",
             "outcome": "passed",
         },
     ]
@@ -474,7 +460,6 @@ def test_parquet_contract_runtime_suite_writes_certificate_on_readiness_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Verify CI gets an artifact even when the runtime cannot execute tests."""
     from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
 
     output = tmp_path / "parquet-contract-runtime-certificate.json"

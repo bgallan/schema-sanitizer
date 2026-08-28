@@ -153,6 +153,21 @@ def _exact_lock_names(path: Path) -> set[str]:
     return {canonicalize_name(requirement.name) for requirement in requirements}
 
 
+def _assert_text_contract(
+    source: str,
+    *,
+    required: tuple[str, ...] = (),
+    forbidden: tuple[str, ...] = (),
+    counts: tuple[tuple[str, int], ...] = (),
+) -> None:
+    """Apply one compact required/forbidden/exact-count source contract."""
+    assert [value for value in required if value not in source] == []
+    assert [value for value in forbidden if value in source] == []
+    assert {
+        value: source.count(value) for value, count in counts if source.count(value) != count
+    } == {}
+
+
 def test_only_publish_is_a_manual_entry_point() -> None:
     """PR/main validation is automatic; publishing is the sole manual action."""
     workflows = tuple(
@@ -432,17 +447,18 @@ def test_ci_shell_entry_points_are_executable() -> None:
 
 def test_secret_scan_uses_the_tested_report_checker() -> None:
     """Secret exclusions stay narrow and outside the workflow YAML."""
-    quality = _action("quality-validation")
-
-    assert "python meta/ci/quality/check_detect_secrets_report.py" in quality
-    assert ".work/audit/detect-secrets.json" in quality
+    _assert_text_contract(
+        _action("quality-validation"),
+        required=(
+            "python meta/ci/quality/check_detect_secrets_report.py",
+            ".work/audit/detect-secrets.json",
+        ),
+    )
 
 
 def test_static_security_scan_covers_release_automation() -> None:
     """Code with release authority receives the same Bandit gate as runtime code."""
-    quality = _action("quality-validation")
-
-    assert "bandit -r src meta/ci -ll" in quality
+    _assert_text_contract(_action("quality-validation"), required=("bandit -r src meta/ci -ll",))
 
 
 def test_dependency_audit_includes_pinned_ci_executables() -> None:
@@ -536,11 +552,14 @@ def test_validation_matrix_has_eight_exact_workloads_and_safe_dispatch() -> None
 
 def test_platform_suite_exercises_the_installed_wheel() -> None:
     """The full suite must retain the wheel's platform-specific runtime bootstrap."""
-    test_action = _action("test-platform-wheel")
-
-    assert "pytest -q -o pythonpath=." in test_action
-    assert "wheelhouse/*.whl" in test_action
-    assert "extension.is_relative_to(checkout)" in test_action
+    _assert_text_contract(
+        _action("test-platform-wheel"),
+        required=(
+            "pytest -q -o pythonpath=.",
+            "wheelhouse/*.whl",
+            "extension.is_relative_to(checkout)",
+        ),
+    )
 
 
 def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
@@ -1012,24 +1031,17 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
 def test_native_launcher_arguments_preserve_shell_word_boundaries() -> None:
     """Compiler/linker flags and interpreter paths remain arrays or quoted scalars."""
     native_actions = _action("platform-sanitizer") + _action("thread-sanitizer")
-
-    assert (
-        native_actions.count(
-            'read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"'
-        )
-        == 2
+    _assert_text_contract(
+        native_actions,
+        required=('-DPython3_EXECUTABLE="$(command -v python)"',),
+        forbidden=("python3-config --embed --cflags --ldflags", "$(which python)"),
+        counts=(
+            ('read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"', 2),
+            ('read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"', 2),
+            ('"${python_embed_cflags[@]}"', 2),
+            ('"${python_embed_ldflags[@]}"', 2),
+        ),
     )
-    assert (
-        native_actions.count(
-            'read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"'
-        )
-        == 2
-    )
-    assert native_actions.count('"${python_embed_cflags[@]}"') == 2
-    assert native_actions.count('"${python_embed_ldflags[@]}"') == 2
-    assert "python3-config --embed --cflags --ldflags" not in native_actions
-    assert '-DPython3_EXECUTABLE="$(command -v python)"' in native_actions
-    assert "$(which python)" not in native_actions
 
 
 def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> None:
@@ -1119,9 +1131,9 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
 
 def test_python_coverage_has_an_explicit_regression_floor() -> None:
     """Coverage collection is a gate, not merely a report artifact."""
-    checks = _action("quality-validation")
-
-    assert checks.count("coverage report --fail-under=44") == 1
+    _assert_text_contract(
+        _action("quality-validation"), counts=(("coverage report --fail-under=44", 1),)
+    )
 
 
 def test_ci_artifact_policies_are_explicit_and_bounded() -> None:

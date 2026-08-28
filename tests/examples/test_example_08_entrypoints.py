@@ -147,7 +147,6 @@ def test_local_validation_transfers_frame_and_closes_result(
         clean_data = frame
 
         def close(self) -> None:
-            """Record the explicit ownership handoff."""
             state["closed"] = True
 
     def fake_to_polars(path: Path, **kwargs: Any) -> ResultDouble:

@@ -13,7 +13,6 @@ from schema_sanitizer.adapters.parquet import telemetry as recording
 def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify local path fallback tries ParquetFile when Dataset scanner fails."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
@@ -23,7 +22,6 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
         schema = None
 
         def scanner(self, **kwargs: object) -> object:
-            """Internal test helper."""
             raise ValueError("dataset scanner failed")
 
     class DatasetOwner:
@@ -39,14 +37,12 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
         """Internal test helper class."""
 
         def iter_batches(self, **kwargs: object) -> object:
-            """Internal test helper."""
             yield "batch"
 
     class WorkingReader:
         """Internal test helper class."""
 
         def __arrow_c_stream__(self) -> str:
-            """Internal test helper."""
             return "iter-stream"
 
     def fake_record_batch_reader_from_iterable(
@@ -115,7 +111,6 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
 
 
 def test_parquet_dataset_filter_failure_is_observable() -> None:
-    """Verify filters fail closed when Dataset fallback is unavailable."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
@@ -148,7 +143,6 @@ def test_parquet_dataset_filter_failure_is_observable() -> None:
 def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify Dataset construction failures do not block ParquetFile fallback."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as factory_schema
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
@@ -157,7 +151,6 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
         """Internal test helper class."""
 
         def schema(self, fields: object, metadata: object = None) -> tuple[object, object]:
-            """Internal test helper."""
             return (tuple(fields), metadata)
 
     class FakeSchema:
@@ -167,21 +160,18 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
         _names = ["keep", "drop"]
 
         def get_field_index(self, name: str) -> int:
-            """Internal test helper."""
             try:
                 return self._names.index(name)
             except ValueError:
                 return -1
 
         def field(self, index: int) -> str:
-            """Internal test helper."""
             return f"field:{self._names[index]}"
 
     class FakeDatasetModule:
         """Internal test helper class."""
 
         def dataset(self, path: str, *, format: str) -> object:
-            """Internal test helper."""
             assert path == "/tmp/fallback.parquet"
             assert format == "parquet"
             raise ValueError("dataset open failed")
@@ -192,7 +182,6 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
         schema_arrow = FakeSchema()
 
         def iter_batches(self, **kwargs: object) -> object:
-            """Internal test helper."""
             assert kwargs["columns"] == ["keep"]
             yield "batch"
 
@@ -200,7 +189,6 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
         """Internal test helper class."""
 
         def ParquetFile(self, src: object) -> FakeParquetFile:
-            """Internal test helper."""
             assert src == "opened-source"
             return FakeParquetFile()
 
@@ -208,7 +196,6 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
         """Internal test helper class."""
 
         def __arrow_c_stream__(self) -> str:
-            """Internal test helper."""
             return "iter-stream"
 
     def fake_optional_dependency(name: str, **kwargs: object) -> object:
@@ -285,7 +272,6 @@ def test_parquet_local_dataset_open_failure_uses_iter_batches_fallback(
 
 
 def test_parquet_iter_batches_fallback_failure_is_observable() -> None:
-    """Verify ParquetFile.iter_batches fallback failures are annotated."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
@@ -293,7 +279,6 @@ def test_parquet_iter_batches_fallback_failure_is_observable() -> None:
         """Internal test helper class."""
 
         def iter_batches(self, **kwargs: object) -> object:
-            """Internal test helper."""
             raise OSError("iter_batches failed")
 
     observability.reset_parquet_stream_factory_observability()
@@ -334,7 +319,6 @@ def test_parquet_iter_batches_fallback_failure_is_observable() -> None:
 
 
 def test_parquet_snappy_compression_option_normalizes_without_pyarrow() -> None:
-    """Verify Snappy is part of the public Parquet compression contract."""
     from schema_sanitizer.adapters.parquet.compression import (
         normalize_parquet_compression,
         pyarrow_parquet_writer_options,
@@ -350,7 +334,6 @@ def test_parquet_snappy_compression_option_normalizes_without_pyarrow() -> None:
 def test_native_parquet_footer_info_forwards_projected_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify projected native footer planning does not require PyArrow."""
     from schema_sanitizer.adapters.parquet import status as parquet_footer
 
     calls: list[tuple[object, ...]] = []
@@ -371,7 +354,6 @@ def test_native_parquet_footer_info_forwards_projected_columns(
 
 
 def test_parquet_bytes_native_staging_lifecycle() -> None:
-    """Verify buffer-backed Parquet staging is local, exact, and cleaned up."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         remove_staged_parquet,
         stage_parquet_buffer,
@@ -391,7 +373,6 @@ def test_parquet_bytes_native_staging_lifecycle() -> None:
 
 
 def test_parquet_stream_native_path_detection(tmp_path: Path) -> None:
-    """Verify file-backed streams can expose a native local path safely."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import local_stream_path
 
     path = tmp_path / "data.parquet"

@@ -7,20 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import read_test_xml, require_native
-
-
-class _CapsuleStream:
-    """Expose an owned Arrow C Stream capsule to another native entry point."""
-
-    def __init__(self, capsule: Any):
-        """Retain the capsule for one downstream native consumer."""
-        self._capsule = capsule
-
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
-        """Return the wrapped stream capsule."""
-        del requested_schema
-        return self._capsule
+from _support.resource_fakes import CapsuleStream
+from conftest import read_test_xml
 
 
 def _footer(path: Path) -> dict[str, Any]:
@@ -32,9 +20,9 @@ def _footer(path: Path) -> dict[str, Any]:
 
 def test_native_reader_restreams_multiple_row_groups_without_pyarrow(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """The lazy reader must consume every row group through the native writer."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_runtime import native_core
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE
@@ -50,7 +38,7 @@ def test_native_reader_restreams_multiple_row_groups_without_pyarrow(
     source_info = _footer(source)
     native_capsule = native_core.parquet_stream_read(str(source))
     PARQUET_STREAM_WRITE(
-        _CapsuleStream(native_capsule), str(rewritten), "uncompressed", -1, 128 << 20
+        CapsuleStream(native_capsule), str(rewritten), "uncompressed", -1, 128 << 20
     )
     rewritten_info = _footer(rewritten)
 
@@ -59,9 +47,10 @@ def test_native_reader_restreams_multiple_row_groups_without_pyarrow(
     assert len(rewritten_info["row_groups"]) == 2
 
 
-def test_native_coalescer_stops_on_retained_byte_budget(tmp_path: Path) -> None:
+def test_native_coalescer_stops_on_retained_byte_budget(
+    tmp_path: Path, require_native: None
+) -> None:
     """Very wide batches must not be coalesced solely by their row count."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_symbols import (
         COALESCING_STREAM_WRAP,
@@ -77,7 +66,7 @@ def test_native_coalescer_stops_on_retained_byte_budget(tmp_path: Path) -> None:
     assert capsule is not None
 
     out = tmp_path / "byte-bounded-coalesce.parquet"
-    PARQUET_STREAM_WRITE(_CapsuleStream(capsule), str(out), "uncompressed", -1, 128 << 20)
+    PARQUET_STREAM_WRITE(CapsuleStream(capsule), str(out), "uncompressed", -1, 128 << 20)
     info = _footer(out)
 
     assert info["num_rows"] == 70_000
@@ -85,9 +74,10 @@ def test_native_coalescer_stops_on_retained_byte_budget(tmp_path: Path) -> None:
     assert max(group["num_rows"] for group in info["row_groups"]) < 40_000
 
 
-def test_native_stream_preflight_is_bounded_and_minimal(tmp_path: Path) -> None:
+def test_native_stream_preflight_is_bounded_and_minimal(
+    tmp_path: Path, require_native: None
+) -> None:
     """Stream readiness must not retain page diagnostics for every row group."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_runtime import native_core
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE
@@ -109,10 +99,11 @@ def test_native_stream_preflight_is_bounded_and_minimal(tmp_path: Path) -> None:
 
 
 def test_public_parquet_reader_skips_deep_footer_diagnostics(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path,
+    monkeypatch: Any,
+    require_native: None,
 ) -> None:
     """Opening the production stream must use bounded preflight, not full diagnostics."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.adapters.parquet import status
@@ -182,9 +173,8 @@ def test_parquet_source_provider_does_not_materialize_all_descriptors(
     assert consumed == 4
 
 
-def test_native_coalescer_skips_empty_live_batches(tmp_path: Path) -> None:
+def test_native_coalescer_skips_empty_live_batches(tmp_path: Path, require_native: None) -> None:
     """A live zero-row Arrow batch must not force an invalid one-row slice."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.native_symbols import (
@@ -200,15 +190,14 @@ def test_native_coalescer_skips_empty_live_batches(tmp_path: Path) -> None:
     assert capsule is not None
 
     out = tmp_path / "empty-then-populated.parquet"
-    PARQUET_STREAM_WRITE(_CapsuleStream(capsule), str(out), "uncompressed", -1, 128 << 20)
+    PARQUET_STREAM_WRITE(CapsuleStream(capsule), str(out), "uncompressed", -1, 128 << 20)
     info = _footer(out)
 
     assert info["num_rows"] == 2
 
 
-def test_context_memory_stats_expose_hardening_counters() -> None:
+def test_context_memory_stats_expose_hardening_counters(require_native: None) -> None:
     """Context diagnostics must expose allocator integrity and quota fields."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
     stats = ExecutionContext().memory_stats()
@@ -224,10 +213,11 @@ def test_context_memory_stats_expose_hardening_counters() -> None:
 
 
 def test_native_flat_parquet_reader_slices_large_row_group(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path,
+    monkeypatch: Any,
+    require_native: None,
 ) -> None:
     """Flat row groups must stream in bounded windows without changing rows."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
@@ -322,9 +312,8 @@ def test_python_generator_spool_checks_temp_disk_capacity(monkeypatch: Any) -> N
         reader.close()
 
 
-def test_xml_memory_map_respects_address_space_limit(tmp_path: Path) -> None:
+def test_xml_memory_map_respects_address_space_limit(tmp_path: Path, require_native: None) -> None:
     """Whole-document XML views reject files above the derived materialization budget."""
-    require_native()
     pytest.importorskip("pyarrow")
 
     import schema_sanitizer as ss
@@ -340,10 +329,11 @@ def test_xml_memory_map_respects_address_space_limit(tmp_path: Path) -> None:
 
 
 def test_native_struct_parquet_reader_slices_large_row_group(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path,
+    monkeypatch: Any,
+    require_native: None,
 ) -> None:
     """Non-repeated nested structs must use the same bounded row windows as leaves."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
@@ -383,10 +373,11 @@ def test_native_struct_parquet_reader_slices_large_row_group(
 
 
 def test_native_list_parquet_reader_slices_large_row_group(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path,
+    monkeypatch: Any,
+    require_native: None,
 ) -> None:
     """Repeated list leaves must be sliced by the selected top-level row window."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
@@ -430,10 +421,11 @@ def test_native_list_parquet_reader_slices_large_row_group(
 
 
 def test_native_nested_repeated_parquet_reader_slices_large_row_group(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path,
+    monkeypatch: Any,
+    require_native: None,
 ) -> None:
     """Lists of structs and nested lists must preserve offsets across windows."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
@@ -491,9 +483,10 @@ def test_native_nested_repeated_parquet_reader_slices_large_row_group(
     assert pa.Table.from_batches(batches).to_pylist() == table.to_pylist()
 
 
-def test_native_map_parquet_reader_slices_large_row_group(tmp_path: Path, monkeypatch: Any) -> None:
+def test_native_map_parquet_reader_slices_large_row_group(
+    tmp_path: Path, monkeypatch: Any, require_native: None
+) -> None:
     """Map entry offsets and nullable values must remain valid across windows."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
@@ -536,9 +529,8 @@ def test_native_map_parquet_reader_slices_large_row_group(tmp_path: Path, monkey
     assert pa.Table.from_batches(batches).to_pylist() == table.to_pylist()
 
 
-def test_arrow_direct_rejects_batches_above_logical_slot_limit() -> None:
+def test_arrow_direct_rejects_batches_above_logical_slot_limit(require_native: None) -> None:
     """External Arrow metadata is bounded by the derived logical-slot budget."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -556,9 +548,10 @@ def test_arrow_direct_rejects_batches_above_logical_slot_limit() -> None:
         pa.RecordBatchReader.from_stream(output).read_all()
 
 
-def test_arrow_direct_rejects_variable_values_above_logical_byte_limit() -> None:
+def test_arrow_direct_rejects_variable_values_above_logical_byte_limit(
+    require_native: None,
+) -> None:
     """Declared UTF-8 ranges respect the derived logical-byte budget."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -574,10 +567,11 @@ def test_arrow_direct_rejects_variable_values_above_logical_byte_limit() -> None
 
 
 def test_native_parquet_reader_enforces_actual_retained_capacity(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path,
+    monkeypatch: Any,
+    require_native: None,
 ) -> None:
     """Vector capacity and Arrow shells must not escape the estimated window budget."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.adapters.parquet.record_batch_factory import (

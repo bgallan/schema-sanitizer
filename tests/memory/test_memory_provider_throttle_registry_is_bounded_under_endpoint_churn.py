@@ -22,11 +22,9 @@ class _Client:
     """Minimal asynchronously closable provider client."""
 
     def __init__(self) -> None:
-        """Initialize close accounting."""
         self.close_calls = 0
 
     async def close(self) -> None:
-        """Record one operation-final close."""
         self.close_calls += 1
 
 

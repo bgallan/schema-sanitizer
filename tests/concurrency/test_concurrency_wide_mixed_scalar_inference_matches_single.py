@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 from _support.diagnostics import assert_diagnostics_semantically_equal
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -52,9 +51,8 @@ def _mixed_scalar_row(row: int, columns: int = 128) -> dict[str, object]:
     return values
 
 
-def test_wide_mixed_scalar_inference_matches_single() -> None:
+def test_wide_mixed_scalar_inference_matches_single(require_native: None) -> None:
     """One tag dispatch preserves wide scalar schema and diagnostics."""
-    require_native()
     lines: list[str] = []
     for row in range(2_048):
         record = _mixed_scalar_row(row)
@@ -73,9 +71,8 @@ def test_wide_mixed_scalar_inference_matches_single() -> None:
     assert len(multi.field_names) == 128
 
 
-def test_nested_and_empty_container_fallback_matches_single() -> None:
+def test_nested_and_empty_container_fallback_matches_single(require_native: None) -> None:
     """Container tags retain empty semantics and generic nested fallback."""
-    require_native()
     rows = []
     for row in range(512):
         rows.append(
@@ -98,9 +95,8 @@ def test_nested_and_empty_container_fallback_matches_single() -> None:
     assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
 
 
-def test_wide_mixed_output_is_byte_identical(tmp_path: Path) -> None:
+def test_wide_mixed_output_is_byte_identical(tmp_path: Path, require_native: None) -> None:
     """Scalar-category dispatch does not alter materialized JSONL bytes."""
-    require_native()
     source = tmp_path / "mixed.jsonl"
     rows = [_mixed_scalar_row(row) for row in range(4_096)]
     source.write_text(

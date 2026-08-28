@@ -8,15 +8,15 @@ from pathlib import Path
 import pytest
 from _support.parquet_runtime import feather, pa, pq, sample_table
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
-from conftest import read_test_parquet, require_native
+from conftest import read_test_parquet
 
 import schema_sanitizer as ss
 
 
 @_requires_pyarrow
-def test_direct_parquet_map_and_fixed_size_list_use_arrow_path(tmp_path: Path) -> None:
-    """Verify direct Parquet handles map and fixed-size list columns."""
-    require_native()
+def test_direct_parquet_map_and_fixed_size_list_use_arrow_path(
+    tmp_path: Path, require_native: None
+) -> None:
     path = tmp_path / "map_fixed.parquet"
     table = pa.table(
         {
@@ -41,9 +41,9 @@ def test_direct_parquet_map_and_fixed_size_list_use_arrow_path(tmp_path: Path) -
 
 
 @_requires_pyarrow
-def test_direct_parquet_duration_values_are_lossless_strings(tmp_path: Path) -> None:
-    """Verify direct Parquet handles duration values without JSONL fallback."""
-    require_native()
+def test_direct_parquet_duration_values_are_lossless_strings(
+    tmp_path: Path, require_native: None
+) -> None:
     path = tmp_path / "duration.parquet"
     table = pa.table({"elapsed": pa.array([123, -5], type=pa.duration("us"))})
     pq.write_table(table, path)
@@ -56,9 +56,9 @@ def test_direct_parquet_duration_values_are_lossless_strings(tmp_path: Path) -> 
 
 
 @_requires_pyarrow
-def test_native_arrow_schema_contract_payload_supports_new_direct_shapes() -> None:
-    """Verify native schema-contract encoding reuses the Arrow direct parser."""
-    require_native()
+def test_native_arrow_schema_contract_payload_supports_new_direct_shapes(
+    require_native: None,
+) -> None:
     from schema_sanitizer.core_impl.logical_schema import pyarrow_schema_from_payload
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
@@ -94,7 +94,6 @@ def test_native_arrow_schema_contract_payload_supports_new_direct_shapes() -> No
 
 @_requires_pyarrow
 def test_parquet_threading_uses_shared_execution_policy() -> None:
-    """Verify Parquet direct threading follows the operation execution mode."""
     from schema_sanitizer.adapters.parquet import memory as pyarrow_adapter
 
     assert not pyarrow_adapter.parquet_use_threads("single", None)
@@ -103,9 +102,7 @@ def test_parquet_threading_uses_shared_execution_policy() -> None:
 
 
 @_requires_pyarrow
-def test_parquet_stream_result_drop_closes_reader(tmp_path: Path) -> None:
-    """Verify parquet stream sink can be dropped without temporary files."""
-    require_native()
+def test_parquet_stream_result_drop_closes_reader(tmp_path: Path, require_native: None) -> None:
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "data.parquet"
@@ -119,9 +116,7 @@ def test_parquet_stream_result_drop_closes_reader(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_parquet_stream_survives_sink_result_drop(tmp_path: Path) -> None:
-    """Verify parquet stream owns the native reader after stream access."""
-    require_native()
+def test_parquet_stream_survives_sink_result_drop(tmp_path: Path, require_native: None) -> None:
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "data.parquet"
@@ -140,9 +135,7 @@ def test_parquet_stream_survives_sink_result_drop(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_parquet_stream_drop_releases_reader(tmp_path: Path) -> None:
-    """Verify parquet stream can be dropped without explicit close."""
-    require_native()
+def test_parquet_stream_drop_releases_reader(tmp_path: Path, require_native: None) -> None:
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "data.parquet"
@@ -158,9 +151,9 @@ def test_parquet_stream_drop_releases_reader(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_parquet_conversion_enforces_memory_limit_bytes(tmp_path: Path) -> None:
-    """Verify parquet conversion enforces memory limit bytes."""
-    require_native()
+def test_parquet_conversion_enforces_memory_limit_bytes(
+    tmp_path: Path, require_native: None
+) -> None:
     path = tmp_path / "data.parquet"
     pq.write_table(sample_table(pa), path)
 
@@ -175,9 +168,7 @@ def test_parquet_conversion_enforces_memory_limit_bytes(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_arrow_ipc_inputs_are_not_public(tmp_path: Path) -> None:
-    """Verify arrow ipc inputs are not public."""
-    require_native()
+def test_arrow_ipc_inputs_are_not_public(tmp_path: Path, require_native: None) -> None:
     path = tmp_path / "data.feather"
     feather.write_feather(sample_table(pa), path)
 

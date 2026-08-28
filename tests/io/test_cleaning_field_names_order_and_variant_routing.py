@@ -9,7 +9,7 @@ from _support.cleaning_policies import INPUT_CASES as _INPUT_CASES
 from _support.cleaning_policies import field_names as _field_names
 from _support.cleaning_policies import read_result as _read_result
 from _support.cleaning_policies import versioned_scalar_registry as _versioned_scalar_registry
-from conftest import read_test_python, require_native
+from conftest import read_test_python
 
 pa = pytest.importorskip("pyarrow")
 
@@ -17,7 +17,6 @@ import schema_sanitizer as ss
 
 
 def test_column_order_alphabetically_is_recursive_by_default() -> None:
-    """Verify default output ordering is alphabetical at every struct depth."""
     rows = [
         {
             "z": 1,
@@ -42,7 +41,6 @@ def test_column_order_alphabetically_is_recursive_by_default() -> None:
 
 
 def test_column_order_schema_contract_first_preserves_inferred_order_without_contract() -> None:
-    """Verify schema_contract_first preserves inferred order without a contract."""
     rows = [{"z": 1, "a": {"z": 1, "a": 2}, "l": [{"z": 1, "a": 2}]}]
 
     res = read_test_python(rows, output_format="pyarrow", column_order="schema_contract_first")
@@ -55,7 +53,6 @@ def test_column_order_schema_contract_first_preserves_inferred_order_without_con
 
 
 def test_column_order_alphabetically_applies_to_strict_schema_contract() -> None:
-    """Verify strict schema contracts are reordered alphabetically by default."""
     schema_contract = pa.schema(
         [
             ("z", pa.int64()),
@@ -79,7 +76,6 @@ def test_column_order_alphabetically_applies_to_strict_schema_contract() -> None
 
 
 def test_column_order_alphabetically_reorders_additive_contract_nested_fields() -> None:
-    """Verify additive schema contracts merge and sort newly inferred nested fields."""
     schema_contract = pa.schema(
         [
             (
@@ -124,7 +120,6 @@ def test_column_order_alphabetically_reorders_additive_contract_nested_fields() 
 def test_column_order_alphabetically_reorders_incremental_registry_struct_fields(
     tmp_path,
 ) -> None:
-    """Verify registry-backed additive runs sort existing and newly added nested fields."""
     first_path = tmp_path / "first.jsonl"
     first_path.write_text(
         json.dumps({"variables": {"email": "a@example.com", "phone": "1"}}) + "\n",
@@ -173,7 +168,6 @@ def test_column_order_alphabetically_reorders_incremental_registry_struct_fields
 def test_field_name_policy_lower_alpha_sanitizes_dirty_keys_by_default(
     input_case, tmp_path
 ) -> None:
-    """Verify dirty source keys are sanitized and still materialized."""
     rows = [
         {
             "User-ID": 1,
@@ -200,7 +194,6 @@ def test_field_name_policy_lower_alpha_sanitizes_dirty_keys_by_default(
 
 
 def test_field_name_policy_preserve_keeps_source_key_names() -> None:
-    """Verify preserve mode disables output field-name sanitization."""
     rows = [{"User-ID": 1, "Full Name": "Ana", "nested-Obj": {"Bad.Key": 2}}]
 
     res = read_test_python(rows, output_format="pyarrow", field_name_policy="preserve")
@@ -213,7 +206,6 @@ def test_field_name_policy_preserve_keeps_source_key_names() -> None:
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_null_only_fields_do_not_infer_fields(input_case, tmp_path) -> None:
-    """Verify root and nested null-only paths provide no type evidence."""
     rows = [
         {
             "id": 1,
@@ -232,7 +224,6 @@ def test_null_only_fields_do_not_infer_fields(input_case, tmp_path) -> None:
 
 @pytest.mark.parametrize("input_case", _INPUT_CASES)
 def test_empty_container_elements_do_not_infer_fields(input_case, tmp_path) -> None:
-    """Verify empty nested containers provide no type evidence."""
     rows = [
         {"items": [{}, {"id": 1, "details": {}}]},
         {"items": [[]]},
@@ -251,7 +242,6 @@ def test_empty_container_elements_do_not_infer_fields(input_case, tmp_path) -> N
 
 
 def test_empty_fields_do_not_affect_sanitized_name_collisions() -> None:
-    """Verify ignored keys cannot reserve a cleaned output name."""
     result = read_test_python(
         [{"User-ID": {}, "user id": 1}],
         output_format="pyarrow",
@@ -262,7 +252,6 @@ def test_empty_fields_do_not_affect_sanitized_name_collisions() -> None:
 
 
 def test_field_name_policy_lower_snake_keeps_numbers_and_underscores() -> None:
-    """Verify lower_snake preserves useful BigQuery-compatible separators."""
     rows = [{"User-ID 2": 1, "user_id_2": 2}]
 
     res = read_test_python(rows, output_format="pyarrow", field_name_policy="lower_snake")
@@ -272,7 +261,6 @@ def test_field_name_policy_lower_snake_keeps_numbers_and_underscores() -> None:
 
 
 def test_field_name_collision_suffixes_are_independent_of_source_order() -> None:
-    """Verify collision suffixes are derived from dirty keys, not observation order."""
     first = read_test_python([{"User-ID": 1, "user id": 2}], output_format="pyarrow")
     second = read_test_python([{"user id": 2, "User-ID": 1}], output_format="pyarrow")
 
@@ -285,7 +273,6 @@ def test_field_name_collision_suffixes_are_independent_of_source_order() -> None
 
 
 def test_versioned_sibling_fields_prefer_list_variant_for_single_values() -> None:
-    """Verify list variants receive arrays and single values through wrapping."""
     sentence_struct = pa.struct([pa.field("text", pa.string())])
     schema_contract = pa.schema(
         [
@@ -312,7 +299,6 @@ def test_versioned_sibling_fields_prefer_list_variant_for_single_values() -> Non
 
 
 def test_hybrid_version_names_route_scalars_to_the_most_compatible_type() -> None:
-    """Verify semantic sibling names do not change compatibility-based routing."""
     schema_contract = pa.schema(
         [
             pa.field("value", pa.string()),
@@ -341,9 +327,9 @@ def test_hybrid_version_names_route_scalars_to_the_most_compatible_type() -> Non
     ]
 
 
-def test_registry_variant_routing_collapses_integer_values_to_float(tmp_path) -> None:
-    """Verify registry routing sends numeric values to the single float variant."""
-    require_native()
+def test_registry_variant_routing_collapses_integer_values_to_float(
+    tmp_path, require_native: None
+) -> None:
     registry = _versioned_scalar_registry(
         "phone",
         [pa.int64(), pa.string(), pa.float64()],
@@ -383,9 +369,9 @@ def test_registry_variant_routing_collapses_integer_values_to_float(tmp_path) ->
     ]
 
 
-def test_nested_variant_routing_prefers_integer_string_over_float_string() -> None:
-    """Verify nested scalar variants use the same native-value routing."""
-    require_native()
+def test_nested_variant_routing_prefers_integer_string_over_float_string(
+    require_native: None,
+) -> None:
     schema_contract = pa.schema(
         [
             pa.field(

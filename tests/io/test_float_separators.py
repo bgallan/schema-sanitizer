@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from conftest import read_test_csv, read_test_jsonl, read_test_python, require_native
+from conftest import read_test_csv, read_test_jsonl, read_test_python
 
 
-def test_default_float_separators_parse_grouped_strings() -> None:
-    """Verify default US-style separators parse grouped float strings."""
-    require_native()
+def test_default_float_separators_parse_grouped_strings(require_native: None) -> None:
     result = read_test_python(
         [{"value": "1,234.56"}, {"value": "12.5e2"}],
         parse_floats=True,
@@ -17,9 +15,7 @@ def test_default_float_separators_parse_grouped_strings() -> None:
     assert result.clean_data.to_pylist() == [{"value": 1234.56}, {"value": 1250.0}]
 
 
-def test_custom_float_separators_parse_european_strings() -> None:
-    """Verify European separators parse grouped and ungrouped float strings."""
-    require_native()
+def test_custom_float_separators_parse_european_strings(require_native: None) -> None:
     result = read_test_python(
         [
             {"value": "1.234,56"},
@@ -38,9 +34,7 @@ def test_custom_float_separators_parse_european_strings() -> None:
     ]
 
 
-def test_comma_decimal_csv_value_is_parsed_when_quoted(tmp_path) -> None:
-    """Verify comma decimal values work in comma-delimited CSV when quoted."""
-    require_native()
+def test_comma_decimal_csv_value_is_parsed_when_quoted(tmp_path, require_native: None) -> None:
     path = tmp_path / "prices.csv"
     path.write_text('value\n"1.234,56"\n', encoding="utf-8")
 
@@ -63,17 +57,13 @@ def test_comma_decimal_csv_value_is_parsed_when_quoted(tmp_path) -> None:
         "1,234,56",
     ),
 )
-def test_malformed_float_grouping_remains_string(value: str) -> None:
-    """Verify malformed or mismatched separator syntax is not parsed."""
-    require_native()
+def test_malformed_float_grouping_remains_string(value: str, require_native: None) -> None:
     result = read_test_python([{"value": value}], parse_floats=True)
 
     assert result.clean_data.to_pylist() == [{"value": value}]
 
 
-def test_json_number_tokens_ignore_string_float_separators(tmp_path) -> None:
-    """Verify native JSON numbers continue to follow JSON number syntax."""
-    require_native()
+def test_json_number_tokens_ignore_string_float_separators(tmp_path, require_native: None) -> None:
     path = tmp_path / "rows.jsonl"
     path.write_text('{"value":1.5}\n', encoding="utf-8")
 
@@ -99,7 +89,6 @@ def test_json_number_tokens_ignore_string_float_separators(tmp_path) -> None:
     ),
 )
 def test_invalid_float_separators_are_rejected(decimal: str, thousands: str) -> None:
-    """Verify separator options reject ambiguous or unsupported characters."""
     with pytest.raises((TypeError, ValueError), match="parse_float"):
         read_test_python(
             [{"value": "1.0"}],

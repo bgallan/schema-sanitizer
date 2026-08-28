@@ -16,10 +16,11 @@ from _support.sinks import (
 from _support.sinks import (
     write_csv as _write_csv,
 )
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.schema_registry import merge_schema_registry
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 _GENERATED_METADATA_COLUMN_ORDER = (
     "schema_registry",
@@ -30,8 +31,6 @@ _GENERATED_METADATA_COLUMN_ORDER = (
 
 
 def test_embedded_metadata_uses_fixed_native_source_path_column(tmp_path: Path) -> None:
-    """Verify generated source path metadata comes from the native helper."""
-    require_native()
 
     pa = pytest.importorskip("pyarrow")
     previous_registry = merge_schema_registry(
@@ -68,8 +67,6 @@ def test_generated_etl_columns_are_materialized_last_for_grouped_sources(
     column_order: str,
     data_columns: list[str],
 ) -> None:
-    """Verify every output keeps generated ETL columns at the schema tail."""
-    require_native()
     pq = pytest.importorskip("pyarrow.parquet")
     source = tmp_path / "parts"
     source.mkdir()
@@ -123,8 +120,6 @@ def test_embedded_metadata_rejects_source_column_collisions(
     tmp_path: Path,
     reserved_name: str,
 ) -> None:
-    """Verify generated embedded metadata column names cannot collide."""
-    require_native()
 
     source = tmp_path / "rows.jsonl"
     source.write_text(json.dumps({reserved_name: "source"}) + "\n", encoding="utf-8")
@@ -136,8 +131,6 @@ def test_embedded_metadata_rejects_source_column_collisions(
 
 
 def test_embedded_metadata_rejects_direct_parquet_source_collision(tmp_path: Path) -> None:
-    """Verify direct Parquet ingestion enforces the fixed ETL column contract."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -151,8 +144,6 @@ def test_embedded_metadata_rejects_direct_parquet_source_collision(tmp_path: Pat
 
 
 def test_embedded_metadata_allows_nested_reserved_names(tmp_path: Path) -> None:
-    """Verify only top-level ETL column names are reserved."""
-    require_native()
 
     source = tmp_path / "rows.jsonl"
     source.write_text('{"payload":{"source_file":"nested"}}\n', encoding="utf-8")
@@ -166,8 +157,6 @@ def test_embedded_metadata_allows_nested_reserved_names(tmp_path: Path) -> None:
 
 
 def test_embedded_registry_strict_requires_previous_canonical_schema(tmp_path: Path) -> None:
-    """Verify strict registry-backed writes cannot bootstrap a new registry."""
-    require_native()
 
     source = tmp_path / "rows.jsonl"
     source.write_text('{"a":1}\n', encoding="utf-8")
@@ -184,8 +173,6 @@ def test_embedded_registry_strict_requires_previous_canonical_schema(tmp_path: P
 
 
 def test_file_uri_input_metadata_preserves_original_uri(tmp_path: Path) -> None:
-    """Verify file URI inputs still emit the original URI as source metadata."""
-    require_native()
     pytest.importorskip("pyarrow")
 
     source = _write_csv(tmp_path / "rows.csv", "a,b\n1,2\n")
@@ -200,8 +187,6 @@ def test_file_uri_input_metadata_preserves_original_uri(tmp_path: Path) -> None:
 
 
 def test_to_parquet_writes_file_uri(tmp_path: Path) -> None:
-    """Verify to parquet writes through file URI outputs."""
-    require_native()
     pq = pytest.importorskip("pyarrow.parquet")
 
     out = tmp_path / "out-uri.parquet"
@@ -218,8 +203,6 @@ def test_to_parquet_writes_file_uri(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("suffix", [".csv", ".jsonl", ".parquet"])
 def test_to_file_idempotent_repeated_runs(tmp_path: Path, suffix: str) -> None:
-    """Verify to file idempotent repeated runs."""
-    require_native()
     pq = pytest.importorskip("pyarrow.parquet")
 
     path = _write_csv(tmp_path / "rows.csv")

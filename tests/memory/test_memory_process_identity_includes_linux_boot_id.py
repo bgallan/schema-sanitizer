@@ -22,13 +22,11 @@ class _FailingClose:
     """Close owner that commits only after a configured number of failures."""
 
     def __init__(self, failures: int = 1) -> None:
-        """Initialize one bounded sequence of cleanup failures."""
         self.failures = failures
         self.calls = 0
         self.closed = False
 
     def close(self) -> None:
-        """Fail until the configured retry ordinal and then commit."""
         self.calls += 1
         if self.calls <= self.failures:
             raise OSError("transient cleanup failure")
@@ -39,11 +37,9 @@ class _FailingContext:
     """Operation context double with retryable close."""
 
     def __init__(self, failures: int = 1) -> None:
-        """Initialize one retryable context."""
         self.owner = _FailingClose(failures)
 
     def close(self) -> None:
-        """Delegate close to the retryable owner."""
         self.owner.close()
 
 

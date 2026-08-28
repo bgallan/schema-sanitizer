@@ -12,14 +12,14 @@ import pytest
 from _support.sinks import (
     write_csv as _write_csv,
 )
-from conftest import read_test_csv, read_test_json, require_native
+from conftest import read_test_csv, read_test_json
 
 import schema_sanitizer as ss
 
+pytestmark = pytest.mark.usefixtures("require_native")
+
 
 def test_read_pandas_adapter(tmp_path: Path) -> None:
-    """Verify read pandas adapter."""
-    require_native()
     pd = pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
 
@@ -31,8 +31,6 @@ def test_read_pandas_adapter(tmp_path: Path) -> None:
 
 
 def test_read_polars_adapter(tmp_path: Path) -> None:
-    """Verify read polars adapter."""
-    require_native()
     pl = pytest.importorskip("polars")
     pytest.importorskip("pyarrow")
 
@@ -44,8 +42,6 @@ def test_read_polars_adapter(tmp_path: Path) -> None:
 
 
 def test_read_duckdb_relation(tmp_path: Path) -> None:
-    """Verify read duckdb relation."""
-    require_native()
     pytest.importorskip("duckdb")
     pytest.importorskip("pyarrow")
 
@@ -55,8 +51,6 @@ def test_read_duckdb_relation(tmp_path: Path) -> None:
 
 
 def test_optional_adapters_equivalent_to_arrow(tmp_path: Path) -> None:
-    """Verify optional adapters equivalent to arrow."""
-    require_native()
     pd = pytest.importorskip("pandas")
     pl = pytest.importorskip("polars")
     pytest.importorskip("pyarrow")
@@ -73,8 +67,6 @@ def test_optional_adapters_equivalent_to_arrow(tmp_path: Path) -> None:
 
 
 def test_filelike_input_is_rejected() -> None:
-    """Verify filelike input is rejected."""
-    require_native()
     with pytest.raises(TypeError):
         read_test_json(io.BytesIO(b'[{"a": 1}, {"a": 2}]'))
 
@@ -86,8 +78,6 @@ def test_native_file_output_bypasses_stream_wrapper(
     converter: object,
     suffix: str,
 ) -> None:
-    """Verify native JSONL/CSV file output does not construct a PyArrow stream wrapper."""
-    require_native()
     pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl import stream_output
 
@@ -95,7 +85,6 @@ def test_native_file_output_bypasses_stream_wrapper(
         """Fail if the stream-wrapper fallback is used."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            """Reject construction."""
             raise AssertionError("native file output should bypass Stream(raw)")
 
     monkeypatch.setattr(stream_output, "Stream", FailingStream)
@@ -113,8 +102,6 @@ def test_native_csv_file_output_diagnostics_do_not_post_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify native CSV writer stats avoid Python output-file recounting."""
-    require_native()
     pytest.importorskip("pyarrow")
 
     def fail_reader(*_args: object, **_kwargs: object) -> object:
@@ -138,8 +125,6 @@ def test_native_jsonl_file_output_diagnostics_do_not_post_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify native JSONL writer stats avoid Python output-file recounting."""
-    require_native()
     pytest.importorskip("pyarrow")
 
     source = _write_csv(tmp_path / "rows.csv", "a,b\n1,2\n3,4\n")
@@ -168,8 +153,6 @@ def test_single_source_registry_metadata_is_injected_before_file_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify single-file generated metadata is present before file output runs."""
-    require_native()
     pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl import stream_output
 
@@ -203,8 +186,6 @@ def test_single_source_registry_metadata_is_injected_before_file_output(
 def test_single_source_to_pyarrow_uses_native_registry_metadata_stream(
     tmp_path: Path,
 ) -> None:
-    """Verify analytical single-file conversion emits native registry metadata."""
-    require_native()
     pytest.importorskip("pyarrow")
 
     source = tmp_path / "rows.jsonl"
@@ -223,8 +204,6 @@ def test_single_source_to_pyarrow_uses_native_registry_metadata_stream(
 
 
 def test_registry_source_sink_accepts_native_row_span_metadata() -> None:
-    """Verify source-selected registry sinks can append native row-span metadata."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
     from schema_sanitizer.api_impl.streams import Stream

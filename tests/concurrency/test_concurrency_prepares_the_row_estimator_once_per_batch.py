@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -73,9 +72,9 @@ def test_prepares_the_row_estimator_once_per_batch() -> None:
 
 def test_fixed_wide_planning_preserves_the_single_oracle(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """The O(1) estimate preserves packetization and exact output bytes."""
-    require_native()
     source = tmp_path / "fixed.jsonl"
     _write_rows(source, 6_000, nullable=False)
 
@@ -92,9 +91,9 @@ def test_fixed_wide_planning_preserves_the_single_oracle(
 
 def test_nullable_wide_batches_keep_the_row_aware_fallback(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Null-bearing batches must retain exact row-aware size estimation."""
-    require_native()
     source = tmp_path / "nullable.jsonl"
     _write_rows(source, 3_000, nullable=True)
 

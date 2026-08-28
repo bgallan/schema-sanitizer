@@ -45,25 +45,20 @@ def native_stub(
             self._memory_ledgers: dict[int, list[int]] = {}
 
         def process_resident_memory_stats(self) -> tuple[int, int, int]:
-            """Return the current resident-memory snapshot contract."""
             return (1 << 40, 0, 0)
 
         def process_physical_thread_permits_acquire(self, amount: int, minimum: int) -> int:
-            """Grant the exact physical-thread request used by governed hosts."""
             return amount if amount >= minimum else 0
 
         def process_physical_thread_permits_release(self, _amount: int) -> None:
-            """Release a governed-host permit."""
             return None
 
         def process_file_descriptor_permits_snapshot(
             self,
         ) -> tuple[int, int, int, int, int, int]:
-            """Return the current native descriptor-accounting contract."""
             return (0, 0, 4096, 0, 0, 0)
 
         def operation_memory_ledger_create(self, limit_bytes: int) -> object:
-            """Create one exact in-memory ledger capsule for Python-only tests."""
             capsule = object()
             self._memory_ledgers[id(capsule)] = [limit_bytes, 0, 0]
             return capsule
@@ -71,26 +66,21 @@ def native_stub(
         def operation_memory_ledger_reserve_snapshot(
             self, capsule: object, amount: int, _stage: str
         ) -> tuple[int, int, int]:
-            """Reserve bytes and return the current three-field snapshot."""
             values = self._memory_ledgers[id(capsule)]
             values[1] += amount
             values[2] = max(values[2], values[1])
             return tuple(values)  # type: ignore[return-value]
 
         def operation_memory_ledger_release(self, capsule: object, amount: int) -> None:
-            """Release bytes from one exact in-memory ledger capsule."""
             self._memory_ledgers[id(capsule)][1] -= amount
 
         def operation_memory_ledger_snapshot(self, capsule: object) -> tuple[int, int, int]:
-            """Return the exact in-memory ledger snapshot."""
             return tuple(self._memory_ledgers[id(capsule)])  # type: ignore[return-value]
 
         def options_catalog(self) -> tuple[object, ...]:
-            """Return an empty option catalog."""
             return ()
 
         def __getattr__(self, _name: str) -> Any:
-            """Return no-op native entry points."""
             return lambda *_args, **_kwargs: None
 
     module_names = cast(

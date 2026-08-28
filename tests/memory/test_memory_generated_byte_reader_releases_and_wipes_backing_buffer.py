@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -20,16 +19,13 @@ def test_generated_byte_reader_releases_and_wipes_backing_buffer(
         """Helper class used by this regression."""
 
         def __init__(self) -> None:
-            """Helper used by this regression."""
             super().__init__("memory regression", default_chunk_bytes=16)
 
         def _append_next(self, target_bytes: int) -> bool:
-            """Helper used by this regression."""
             del target_bytes
             return False
 
         def _reset_reader(self) -> None:
-            """Helper used by this regression."""
             return None
 
     reader = _Reader()
@@ -63,16 +59,13 @@ def test_generated_byte_reader_overwrites_before_clear(
         """Helper class used by this regression."""
 
         def __init__(self) -> None:
-            """Helper used by this regression."""
             super().__init__("memory regression", default_chunk_bytes=16)
 
         def _append_next(self, target_bytes: int) -> bool:
-            """Helper used by this regression."""
             del target_bytes
             return False
 
         def _reset_reader(self) -> None:
-            """Helper used by this regression."""
             return None
 
     monkeypatch.setattr(generated_bytes, "_zero_bytearray_range", capture)
@@ -85,10 +78,11 @@ def test_generated_byte_reader_overwrites_before_clear(
 
 
 def test_jsonl_writer_enforces_logical_buffer_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
     """Foreign Arrow offsets cannot make the writer read beyond its byte budget."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
@@ -104,9 +98,8 @@ def test_jsonl_writer_enforces_logical_buffer_limit(
         )
 
 
-def test_csv_nested_stream_omits_validity_without_nulls() -> None:
+def test_csv_nested_stream_omits_validity_without_nulls(require_native: None) -> None:
     """Rendered nested UTF-8 columns allocate validity only after the first null."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.csv_sink import native_csv_nested_reader
 

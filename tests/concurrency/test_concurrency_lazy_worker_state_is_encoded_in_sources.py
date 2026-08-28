@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -77,9 +76,10 @@ def test_plan_ordered_fields_are_emitted_in_place() -> None:
     assert "scratch->extra_fields" not in implementation
 
 
-def test_wide_rows_repeat_under_low_budget_without_output_drift(tmp_path: Path) -> None:
+def test_wide_rows_repeat_under_low_budget_without_output_drift(
+    tmp_path: Path, require_native: None
+) -> None:
     """Lazy state and in-place fields preserve ownership and exact output."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     _write_wide_jsonl(source, 3_000)
 

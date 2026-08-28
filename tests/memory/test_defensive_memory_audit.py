@@ -6,20 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import require_native
-
-
-class _CapsuleStream:
-    """Expose an owned Arrow C Stream capsule to PyArrow."""
-
-    def __init__(self, capsule: Any):
-        """Retain the capsule for the downstream consumer."""
-        self._capsule = capsule
-
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
-        """Return the wrapped Arrow C Stream capsule."""
-        del requested_schema
-        return self._capsule
+from _support.resource_fakes import CapsuleStream
 
 
 def test_generator_replay_retains_no_python_row_batch() -> None:
@@ -46,9 +33,8 @@ def test_generator_replay_retains_no_python_row_batch() -> None:
         reader.close()
 
 
-def test_arrow_direct_rejects_large_absolute_offset() -> None:
+def test_arrow_direct_rejects_large_absolute_offset(require_native: None) -> None:
     """A small slice beyond the derived slot budget must be rejected."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -71,9 +57,8 @@ def test_arrow_direct_rejects_large_absolute_offset() -> None:
         pa.RecordBatchReader.from_stream(output).read_all()
 
 
-def test_coalescer_rejects_large_absolute_offset() -> None:
+def test_coalescer_rejects_large_absolute_offset(require_native: None) -> None:
     """The coalescer validates offsets against its derived slot budget."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.native_symbols import COALESCING_STREAM_WRAP
@@ -92,7 +77,7 @@ def test_coalescer_rejects_large_absolute_offset() -> None:
     capsule = COALESCING_STREAM_WRAP(source, 1)
     assert capsule is not None
     with pytest.raises(pa.ArrowMemoryError, match="absolute logical range"):
-        pa.RecordBatchReader.from_stream(_CapsuleStream(capsule)).read_all()
+        pa.RecordBatchReader.from_stream(CapsuleStream(capsule)).read_all()
 
 
 def test_bump_arena_registers_new_blocks_exception_safely() -> None:
@@ -166,9 +151,8 @@ def test_arrow_direct_scalar_values_do_not_accumulate_heap_refs() -> None:
     assert "value_from_ref(&child)" not in values
 
 
-def test_sliced_fixed_size_list_round_trip() -> None:
+def test_sliced_fixed_size_list_round_trip(require_native: None) -> None:
     """A fixed-size-list slice must validate and read using its parent offset."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.execution import ExecutionContext

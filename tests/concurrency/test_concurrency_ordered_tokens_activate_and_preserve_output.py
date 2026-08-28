@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from benchmarks.concurrency.telemetry.support import consume_arrow_c_stream
@@ -63,9 +62,8 @@ def _consume_with_telemetry(source: Path) -> dict[str, object]:
     return context.performance_stats()
 
 
-def test_ordered_tokens_activate_and_preserve_output(tmp_path: Path) -> None:
+def test_ordered_tokens_activate_and_preserve_output(tmp_path: Path, require_native: None) -> None:
     """Exact plan order bypasses key hashing without changing output bytes."""
-    require_native()
     columns = _columns()
     rows = [{name: row + index for index, name in enumerate(columns)} for row in range(4_096)]
     source = tmp_path / "ordered.jsonl"
@@ -89,9 +87,10 @@ def test_ordered_tokens_activate_and_preserve_output(tmp_path: Path) -> None:
     assert counters["jsonl_token_rows_indexed"] == len(rows)
 
 
-def test_reordered_missing_and_escaped_keys_use_fallback(tmp_path: Path) -> None:
+def test_reordered_missing_and_escaped_keys_use_fallback(
+    tmp_path: Path, require_native: None
+) -> None:
     """Any positional mismatch returns to canonical lookup with exact parity."""
-    require_native()
     columns = _columns()
     lines: list[str] = []
     ordered_rows = 1_024

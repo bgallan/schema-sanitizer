@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution_policy import (
@@ -36,9 +35,10 @@ def _logical_jsonl_rows(path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def test_single_policy_forces_every_project_owned_parallel_limit_to_one() -> None:
+def test_single_policy_forces_every_project_owned_parallel_limit_to_one(
+    require_native: None,
+) -> None:
     """Single mode is the inline oracle regardless of host capacity or budget."""
-    require_native()
     policy = execution_policy("single", 512 * 1024 * 1024, available_cpus=128)
 
     assert policy.requested_mode == "single"
@@ -58,9 +58,8 @@ def test_single_policy_forces_every_project_owned_parallel_limit_to_one() -> Non
     assert policy.fallback_to_one_worker_reason == "single_requested"
 
 
-def test_multi_policy_is_bounded_and_can_fall_back_to_one_worker() -> None:
+def test_multi_policy_is_bounded_and_can_fall_back_to_one_worker(require_native: None) -> None:
     """Multi derives safe limits rather than exposing a worker-count knob."""
-    require_native()
     parallel = execution_policy("multi", 256 * 1024 * 1024, available_cpus=8)
     constrained = execution_policy("multi", 1, available_cpus=8)
 
@@ -201,7 +200,6 @@ def test_remote_prefetch_single_stages_inline_without_executor(
         """Fail if the multi-only remote coordinator is constructed."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            """Reject construction of the forbidden coordinator."""
             raise AssertionError("single mode constructed RemoteIoCoordinator")
 
     staged = SimpleNamespace(close=lambda: None)
@@ -210,7 +208,6 @@ def test_remote_prefetch_single_stages_inline_without_executor(
         """Provide one inline-stage manifest for the prefetch test."""
 
         def stage_chunk(self, start: int) -> object:
-            """Return the one staged test chunk."""
             assert start == 0
             return staged
 
@@ -228,9 +225,10 @@ def test_remote_prefetch_single_stages_inline_without_executor(
     assert iterator._coordinator is None
 
 
-def test_single_and_multi_produce_same_logical_jsonl_output(tmp_path: Path) -> None:
+def test_single_and_multi_produce_same_logical_jsonl_output(
+    tmp_path: Path, require_native: None
+) -> None:
     """The initial executors preserve ordered logical output and registry state."""
-    require_native()
     source = tmp_path / "input.jsonl"
     source.write_text(
         '{"id":1,"nested":{"name":"a"}}\n{"id":2,"nested":{"name":"b"}}\n',
@@ -257,9 +255,9 @@ def test_single_and_multi_produce_same_logical_jsonl_output(tmp_path: Path) -> N
 
 def test_single_local_conversion_does_not_add_host_threads_or_processes(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """A local single run preserves its thread baseline and creates no child process."""
-    require_native()
     proc_root = Path("/proc")
     if not sys.platform.startswith("linux") or not proc_root.is_dir():
         pytest.skip("host thread/process accounting requires Linux /proc")

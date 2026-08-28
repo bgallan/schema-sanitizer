@@ -131,11 +131,9 @@ def test_parquet_manifest_reuses_staging_and_cleanup_lifecycle(
         """Record closure of one staged or prepared resource."""
 
         def __init__(self, name: str) -> None:
-            """Store the resource label used by the assertion."""
             self.name = name
 
         def close(self) -> None:
-            """Append this resource to the observed close order."""
             closed.append(self.name)
 
     staged = SimpleNamespace(

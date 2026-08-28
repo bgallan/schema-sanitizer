@@ -20,11 +20,9 @@ class _FakeTable:
     """Minimal Arrow table used by stream-conversion tests."""
 
     def __init__(self, rows: int = 7) -> None:
-        """Store the table row count."""
         self.num_rows = rows
 
     def to_batches(self) -> list[object]:
-        """Return three logical batches for diagnostics."""
         return [object(), object(), object()]
 
 
@@ -32,7 +30,6 @@ class _FakePandasFrame:
     """Minimal pandas-like frame exposing a zero-copy row count."""
 
     def __init__(self, rows: int = 7) -> None:
-        """Expose a pandas-compatible index of the requested size."""
         self.index = range(rows)
 
 
@@ -40,7 +37,6 @@ class _FakePolarsFrame:
     """Minimal Polars-like frame exposing its height."""
 
     def __init__(self, rows: int = 7) -> None:
-        """Expose the Polars-compatible frame height."""
         self.height = rows
 
 
@@ -48,7 +44,6 @@ class _FakeBatch:
     """Minimal Arrow record batch preserving row-count metadata."""
 
     def __init__(self, rows: int) -> None:
-        """Store the record-batch row count."""
         self.num_rows = rows
 
 
@@ -59,28 +54,23 @@ class _FakeReader:
     schema = "schema"
 
     def __init__(self) -> None:
-        """Initialize reader operation and lifecycle telemetry."""
         self.closed = False
         self.read_all_calls = 0
         self.read_pandas_calls: list[dict[str, object]] = []
         self.batches = [_FakeBatch(2), _FakeBatch(2), _FakeBatch(3)]
 
     def read_all(self) -> _FakeTable:
-        """Materialize the fake reader as one table."""
         self.read_all_calls += 1
         return _FakeTable()
 
     def read_pandas(self, **kwargs: object) -> _FakePandasFrame:
-        """Record pandas conversion options and return a fake frame."""
         self.read_pandas_calls.append(dict(kwargs))
         return _FakePandasFrame()
 
     def __iter__(self):
-        """Yield the retained record batches in source order."""
         return iter(self.batches)
 
     def close(self) -> None:
-        """Mark the reader as closed."""
         self.closed = True
 
 
@@ -92,16 +82,13 @@ class _ConfigurableArrowRuntime:
     """PyArrow double exposing a verifiable process-global CPU pool width."""
 
     def __init__(self) -> None:
-        """Start serial and retain every admitted pool reconfiguration."""
         self._workers = 1
         self.configurations: list[int] = []
 
     def cpu_count(self) -> int:
-        """Return the currently configured worker-pool width."""
         return self._workers
 
     def set_cpu_count(self, workers: int) -> None:
-        """Apply and record the exact width selected by shared admission."""
         self._workers = int(workers)
         self.configurations.append(self._workers)
 
@@ -208,7 +195,6 @@ def test_polars_consumes_reader_without_arrow_table(
 
         @staticmethod
         def from_arrow(value: object, *, rechunk: bool) -> _FakePolarsFrame:
-            """Record the Arrow value and return a fake DataFrame."""
             assert rechunk is False
             seen.append(value)
             return _FakePolarsFrame()
@@ -410,13 +396,11 @@ def test_internal_adapter_sink_uses_stream_not_table(
         """Execution-context double exposing stream and forbidden table paths."""
 
         def to_sink(self, data: object, **kwargs: object) -> object:
-            """Return the stream sink and verify routing arguments."""
             assert data == "rows"
             assert kwargs["sink"] == "stream"
             return output
 
         def to_table(self, *_args: object, **_kwargs: object) -> object:
-            """Fail if the eager table path is called."""
             raise AssertionError("table barrier must not be used")
 
     monkeypatch.setattr(

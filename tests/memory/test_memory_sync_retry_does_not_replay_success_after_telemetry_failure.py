@@ -30,15 +30,12 @@ def test_sync_retry_does_not_replay_success_after_telemetry_failure(
         """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
         def success(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise RuntimeError("telemetry failed")
 
         def failure(self, _exc: BaseException) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise AssertionError("completed operation must not be marked failed")
 
         def release(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise AssertionError("completed operation must not be neutralized")
 
     monkeypatch.setattr(provider_throttle, "acquire_provider_request_sync", lambda _key: Lease())
@@ -72,15 +69,12 @@ def test_sync_retry_releases_throttle_on_control_flow_exception(
         """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
         def success(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise AssertionError
 
         def failure(self, _exc: BaseException) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise AssertionError
 
         def release(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             nonlocal released
             released += 1
 
@@ -123,12 +117,10 @@ class _CloseCounter:
     """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
     def __init__(self, *, fail_once: bool = False) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
         self.calls = 0
         self.fail_once = fail_once
 
     def close(self) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
         self.calls += 1
         if self.fail_once and self.calls == 1:
             raise OSError("transient close failure")
@@ -138,11 +130,9 @@ class _ReleaseCounter:
     """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
     def __init__(self) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
         self.calls = 0
 
     def release(self) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
         self.calls += 1
 
 
@@ -213,17 +203,14 @@ def test_operation_context_close_can_retry_and_blocks_new_work() -> None:
         """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
         def __init__(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             self.calls = 0
 
         def release(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("journal unavailable")
 
         def ensure_open(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise AssertionError("context-local close state must reject first")
 
     context = object.__new__(OperationExecutionContext)
@@ -288,11 +275,9 @@ def test_staged_path_keeps_lease_when_release_fails(tmp_path: Path) -> None:
         """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
         def __init__(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             self.calls = 0
 
         def release(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("coordination write failed")
@@ -402,7 +387,6 @@ def test_coordination_lock_times_out_instead_of_blocking_forever(
 
         @staticmethod
         def flock(_descriptor: int, operation: int) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             if operation != FakeFcntl.LOCK_UN:
                 raise BlockingIOError("busy")
 
@@ -435,7 +419,6 @@ def test_coordination_lock_unlocks_after_control_flow_exception(
 
         @staticmethod
         def flock(_descriptor: int, operation: int) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             operations.append(operation)
 
     class StopNow(BaseException):
@@ -526,12 +509,10 @@ def test_temporary_pool_rejects_locally_before_shared_reservation(
 
         @staticmethod
         def filesystem(_path: object) -> tuple[int, Path, int]:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             return 7, tmp_path, 1 << 30
 
         @classmethod
         def reserve(cls, *_args: object, **_kwargs: object) -> int:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             cls.reserve_calls += 1
             raise AssertionError("shared reservation must not be attempted")
 
@@ -570,12 +551,10 @@ def test_temporary_lease_constructor_fails_before_shared_reservation(
 
         @staticmethod
         def filesystem(_path: object) -> tuple[int, Path, int]:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             return 7, tmp_path, 1 << 30
 
         @classmethod
         def reserve(cls, *_args: object, **_kwargs: object) -> int:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             cls.reserve_calls += 1
             return 7
 
@@ -602,7 +581,6 @@ def test_janitor_quarantine_never_scans_stale_directory_inline(
         """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
         def release(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise AssertionError("accepted ownership must retain the lease")
 
     janitor = module._TemporaryArtifactJanitor()
@@ -660,19 +638,16 @@ def test_failed_shared_storage_admission_leaves_inert_unpublished_lease(
 
         @staticmethod
         def filesystem(_path: object) -> tuple[int, Path, int]:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             return 7, tmp_path, 1 << 30
 
         @staticmethod
         def reserve(*_args: object, **_kwargs: object) -> int:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             raise OSError("shared admission failed")
 
         reserve_capability = reserve
 
         @classmethod
         def release(cls, *_args: object, **_kwargs: object) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             cls.release_calls += 1
 
     monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", Governor)
@@ -701,7 +676,6 @@ def test_operation_resource_final_close_is_serialized_once(
         """Provide a focused sync-retry-does-not-replay-success regression test helper."""
 
         def close(self) -> None:
-            """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
             self.calls += 1
             entered.set()
             assert unblock.wait(timeout=2.0)

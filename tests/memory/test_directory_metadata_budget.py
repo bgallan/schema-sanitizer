@@ -26,7 +26,6 @@ def _large_remote_file() -> RemoteFile:
 
 
 def test_directory_metadata_budget_is_shared_by_single_operation() -> None:
-    """Verify repeated provider calls cannot each consume a fresh allowance."""
     file = _large_remote_file()
     with OperationExecutionContext(
         threading_mode="single",
@@ -49,7 +48,6 @@ def test_directory_metadata_budget_is_shared_by_single_operation() -> None:
 def test_folder_listing_rejects_metadata_growth_before_retaining_every_file(
     tmp_path: Path,
 ) -> None:
-    """Verify one huge local listing is bounded even when files are empty."""
     folder = tmp_path / "many"
     folder.mkdir()
     for index in range(600):
@@ -68,7 +66,6 @@ def test_folder_listing_rejects_metadata_growth_before_retaining_every_file(
 
 
 def test_small_user_limit_keeps_fixed_directory_runtime_overhead() -> None:
-    """Verify one normal path can reach the parser under tiny test budgets."""
     budget = DirectoryMetadataBudget(128)
     budget.charge_file(RemoteFile("s3://bucket/row.json", "row.json", 1))
     assert budget.used_bytes > 0
@@ -81,17 +78,14 @@ class _SyncResponse:
     status = 200
 
     def __init__(self, payload: bytes) -> None:
-        """Initialize the helper state."""
         self.payload = payload
         self.requested: int | None = None
 
     def read(self, size: int = -1) -> bytes:
-        """Implement the minimal response protocol required by the test."""
         self.requested = size
         return self.payload if size < 0 else self.payload[:size]
 
     def getheaders(self) -> list[tuple[str, str]]:
-        """Implement the minimal response protocol required by the test."""
         return []
 
 
@@ -99,18 +93,15 @@ class _Connection:
     """Provide a minimal closeable HTTP connection test double."""
 
     def __init__(self) -> None:
-        """Initialize the helper state."""
         self.closed = False
 
     def close(self) -> None:
-        """Close the helper resource exactly once."""
         self.closed = True
 
 
 def test_sync_control_response_is_bounded_before_full_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify blocking HTTP control bodies read at most limit plus one byte."""
     response = _SyncResponse(b"x" * 128)
     connection = _Connection()
     monkeypatch.setattr(
@@ -134,7 +125,6 @@ def test_sync_control_response_is_bounded_before_full_materialization(
 
 
 def test_async_control_response_is_bounded_before_full_materialization() -> None:
-    """Verify aiohttp control bodies read at most limit plus one byte."""
 
     class Content:
         """Provide an asynchronous bounded-body reader test double."""
@@ -142,7 +132,6 @@ def test_async_control_response_is_bounded_before_full_materialization() -> None
         requested: int | None = None
 
         async def read(self, size: int = -1) -> bytes:
-            """Implement the minimal response protocol required by the test."""
             self.requested = size
             return b"x" * size
 

@@ -7,7 +7,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -63,10 +62,11 @@ def test_jsonl_formatters_default_to_quoted_output() -> None:
 
 
 def test_public_temporal_csv_single_multi_are_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
     """Parsed temporal cells retain exact bytes, order, and unquoted CSV text."""
-    require_native()
     monkeypatch.setattr(
         operation_context,
         "capture_operation_timestamps",
@@ -111,9 +111,8 @@ def test_public_temporal_csv_single_multi_are_identical(
     assert not first_data_row.startswith(b'"2026-01-01')
 
 
-def test_arrow_logical_csv_single_multi_are_identical(tmp_path: Path) -> None:
+def test_arrow_logical_csv_single_multi_are_identical(tmp_path: Path, require_native: None) -> None:
     """Binary, temporal, duration, and decimal arrays use the native direct path."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.csv_sink import write_csv_stream
 

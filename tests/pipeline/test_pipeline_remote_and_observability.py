@@ -1,17 +1,30 @@
 """Remote pipeline observability tests."""
 
-# ruff: noqa: F405
-
 from __future__ import annotations
 
-from _support.pipeline import *  # noqa: F403
+import json
+from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from schema_sanitizer.pipeline.observability import (
+    compact_stats_for_log,
+    cpu_io_wall_percentages,
+    estimate_cpu_io_wall_time,
+    format_duration,
+)
+from schema_sanitizer.pipeline.partition_execution import run_partitioned_to_parquet
+from schema_sanitizer.pipeline.registry_warmup import infer_warm_up_schema_registry
+from schema_sanitizer.pipeline.schemas import diff_flat_schema_paths, read_parquet_schema
+from schema_sanitizer.pipeline.types import PartitionRunPlan
 
 
 def test_pipeline_native_registry_stream_handles_normal_partition_drift(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Verify native registry streams update the registry when normal partitions drift."""
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.source_plan import registry as source_plan_registry_stream
 
@@ -68,7 +81,6 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Verify lazy remote warm-up chunks are not replayed into normal outputs."""
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.remote_impl import sync_backend
@@ -151,7 +163,6 @@ def test_pipeline_remote_warm_up_registry_does_not_inject_rows_into_normal_parti
 
 
 def test_partition_runner_passes_schema_registry_by_value(monkeypatch, tmp_path: Path) -> None:
-    """Verify partition registry state is passed as immutable JSON, not mutable dicts."""
     from schema_sanitizer.pipeline import partition_execution
 
     seen_registries: list[str] = []
@@ -193,7 +204,6 @@ def test_partition_runner_passes_schema_registry_by_value(monkeypatch, tmp_path:
 
 
 def test_pipeline_diff_flat_schema_paths_reports_added_removed_changed() -> None:
-    """Verify reusable schema drift diff logic."""
     diff = diff_flat_schema_paths(
         {"id": "int64", "dropped": "string", "value": "int64"},
         {"id": "int64", "added": "string", "value": "double"},
@@ -206,7 +216,6 @@ def test_pipeline_diff_flat_schema_paths_reports_added_removed_changed() -> None
 
 
 def test_pipeline_observability_helpers_are_reusable() -> None:
-    """Verify compact logging helpers are exported from the pipeline package."""
     assert format_duration(65.2) == "1m 5s"
     assert compact_stats_for_log({"input_rows": 3, "bytes_written": 42}) == "in=3 bytes_written=42"
     assert estimate_cpu_io_wall_time(4.0, 1.25) == pytest.approx((1.25, 2.75))
@@ -219,7 +228,6 @@ def test_pipeline_observability_helpers_are_reusable() -> None:
 
 
 def test_pipeline_read_parquet_schema_handles_local_paths(tmp_path) -> None:
-    """Verify reusable Parquet schema reads local output schemas."""
     pa = pytest.importorskip("pyarrow")
     pq = __import__("pyarrow.parquet").parquet
     target = tmp_path / "rows.parquet"

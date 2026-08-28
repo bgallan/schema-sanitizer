@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import semantic_stats
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 CSV_WRITER = ROOT / "cpp/src/internal/csv/csv_stream_writer.cc"
@@ -38,9 +37,10 @@ def test_csv_estimator_uses_csv_cells_and_keeps_interleave_margin() -> None:
     assert "estimate_jsonl_row_bytes(root, array, row, cap)" in source
 
 
-def test_csv_single_multi_and_stream_adapter_bytes_are_identical(tmp_path: Path) -> None:
+def test_csv_single_multi_and_stream_adapter_bytes_are_identical(
+    tmp_path: Path, require_native: None
+) -> None:
     """Direct scalar/string rendering preserves quoting, nulls, and row order."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.csv_sink import write_csv_stream
 

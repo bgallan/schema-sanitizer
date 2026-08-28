@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from conftest import require_native
+import pytest
 
 from schema_sanitizer.core_impl.native_runtime import native_core
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 def test_high_core_mixed_lanes_drain_without_extra_workers() -> None:
     """Signal coalescing cannot strand compatible work or oversubscribe."""
-    require_native()
     _elapsed_ns, stolen, started, peak, finished, queued, submitted = (
         native_core.operation_task_arena_mixed_lane_probe(16, 4_000)
     )
@@ -24,7 +25,6 @@ def test_high_core_mixed_lanes_drain_without_extra_workers() -> None:
 
 def test_output_priority_survives_wake_coalescing() -> None:
     """A running target still allows a real idle high-lane helper to wake."""
-    require_native()
     promoted, outputs, broad, stolen, started, queued, submitted = (
         native_core.operation_task_arena_output_steal_probe(16)
     )

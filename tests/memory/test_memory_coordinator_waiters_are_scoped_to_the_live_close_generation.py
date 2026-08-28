@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.resource_fakes import DeadThread
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
 
 pytestmark = pytest.mark.skipif(
@@ -26,16 +27,6 @@ _NATIVE_STUB_MODULES = (
     "schema_sanitizer.api_impl.source_plan.attached",
     "schema_sanitizer.api_impl.source_plan.remote",
 )
-
-
-class _DeadThread:
-    ident = None
-
-    def is_alive(self) -> bool:
-        return False
-
-    def join(self, timeout: float | None = None) -> None:
-        return None
 
 
 class _GenerationRelease:
@@ -85,7 +76,7 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     coordinator._permit_registration = owner
     coordinator._thread_lease = None
     coordinator._runtime_registration = None
-    coordinator._thread = _DeadThread()
+    coordinator._thread = DeadThread()
     coordinator._protocol_violations = 0
 
     with pytest.raises(OSError, match="first generation"):

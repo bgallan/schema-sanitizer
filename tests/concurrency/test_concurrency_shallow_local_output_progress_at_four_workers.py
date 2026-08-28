@@ -6,19 +6,18 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 pytestmark = pytest.mark.usefixtures("fixed_operation_clock")
+pytestmark = [pytestmark, pytest.mark.usefixtures("require_native")]
 
 _MEMORY_LIMIT = 128 * 1024 * 1024
 
 
 def test_shallow_local_output_progress_at_four_workers() -> None:
     """One shallow output wave drains without exceeding its task count."""
-    require_native()
     promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(4)
     )
@@ -33,7 +32,6 @@ def test_shallow_local_output_progress_at_four_workers() -> None:
 
 def test_second_output_wave_restores_fifo_fairness() -> None:
     """Two output waves and the broad wave drain within the worker budget."""
-    require_native()
     for workers in (4, 5, 8, 16):
         promoted, outputs, broad, started, queued, _elapsed_us = (
             native_core.operation_task_arena_output_preference_probe(workers, 2)
@@ -52,7 +50,6 @@ def test_shallow_remote_output_steal_preserves_thread_budget(
     workers: int,
 ) -> None:
     """Idle low-core helpers can recover front output without deep scanning."""
-    require_native()
     promoted, outputs, broad, stolen, started, queued, submitted = (
         native_core.operation_task_arena_output_steal_probe(workers)
     )
@@ -73,7 +70,6 @@ def test_single_and_multi_jsonl_outputs_remain_byte_identical(
     tmp_path: Path,
 ) -> None:
     """Bounded output scheduling does not alter exact output."""
-    require_native()
     source = tmp_path / "source.jsonl"
     rows = [{f"field_{column}": row + column for column in range(8)} for row in range(12_000)]
     source.write_text(

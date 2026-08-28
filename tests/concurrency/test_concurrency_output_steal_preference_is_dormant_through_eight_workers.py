@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
-
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 
-def test_output_steal_preference_is_dormant_through_eight_workers() -> None:
+def test_output_steal_preference_is_dormant_through_eight_workers(require_native: None) -> None:
     """The eight-worker stealing path uses the low-worker reverse scan."""
-    require_native()
     promoted, outputs, broad, stolen, started, queued, submitted = (
         native_core.operation_task_arena_output_steal_probe(8)
     )
@@ -26,9 +23,8 @@ def test_output_steal_preference_is_dormant_through_eight_workers() -> None:
     assert blocker_count <= started <= 8
 
 
-def test_idle_high_worker_steals_front_output_before_later_broad_work() -> None:
+def test_idle_high_worker_steals_front_output_before_later_broad_work(require_native: None) -> None:
     """An idle high worker no longer hides front output behind back broad work."""
-    require_native()
     promoted, outputs, broad, stolen, started, queued, submitted = (
         native_core.operation_task_arena_output_steal_probe(16)
     )

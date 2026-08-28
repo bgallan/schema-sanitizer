@@ -3,29 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from _support.remote_harness import BoundedResponse as _Response
 
+from schema_sanitizer.core_impl.uris import (
+    location_kind,
+    looks_like_supported_uri,
+    remote_provider,
+)
+from schema_sanitizer.input_impl.directory_inputs import (
+    DirectoryDiscoveryBuilder,
+    split_parent_child,
+)
+from schema_sanitizer.input_impl.selection import looks_like_uri_string
+from schema_sanitizer.sources import RemoteFile
 
-class _BoundedContent:
-    """Minimal aiohttp-style response body that only permits sized reads."""
-
-    def __init__(self, body: str) -> None:
-        """Encode one deterministic response body."""
-        self._body = body.encode()
-        self._offset = 0
-
-    async def read(self, size: int) -> bytes:
-        """Return no more than the caller's explicit byte ceiling."""
-        end = min(len(self._body), self._offset + size)
-        chunk = self._body[self._offset : end]
-        self._offset = end
-        return chunk
-
-    def at_eof(self) -> bool:
-        """Report whether the full fake body has been consumed."""
-        return self._offset == len(self._body)
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
@@ -38,28 +36,23 @@ def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
         """Model aiohttp's response, whose read method accepts no size."""
 
         async def read(self) -> bytes:
-            """Fail if the context-manager return value is used for streaming."""
             raise AssertionError("chunk reads must use the streaming-body wrapper")
 
     class StreamingBody:
         """Model aiobotocore's wrapper around an aiohttp response."""
 
         def __init__(self) -> None:
-            """Create deterministic chunks and record requested sizes."""
             self.chunks = [b"first", b"second", b""]
             self.read_sizes: list[int] = []
             self.exited = False
 
         async def __aenter__(self) -> RawResponse:
-            """Return the wrapped response, as aiobotocore does."""
             return RawResponse()
 
         async def __aexit__(self, _exc_type, _exc, _tb) -> None:
-            """Record release of the response body."""
             self.exited = True
 
         async def read(self, size: int) -> bytes:
-            """Return one chunk through the sized wrapper API."""
             self.read_sizes.append(size)
             return self.chunks.pop(0)
 
@@ -69,7 +62,6 @@ def test_s3_chunked_download_reads_through_streaming_body(tmp_path) -> None:
         """Return the streaming response for one S3 object."""
 
         async def get_object(self, **kwargs) -> dict[str, object]:
-            """Validate the parsed S3 reference."""
             assert kwargs == {"Bucket": "bucket", "Key": "input/data.json"}
             return {"Body": body}
 
@@ -104,23 +96,19 @@ def test_azure_uses_default_sdk_credential_chain(monkeypatch: pytest.MonkeyPatch
         """Record explicit credential cleanup."""
 
         def __init__(self) -> None:
-            """Initialize close accounting."""
             self.close_calls = 0
 
         async def close(self) -> None:
-            """Record one credential close."""
             self.close_calls += 1
 
     class FakeService:
         """Record service construction and transport cleanup."""
 
         def __init__(self, *, account_url: str, credential: object) -> None:
-            """Capture the SDK constructor arguments."""
             captured.update(account_url=account_url, credential=credential)
             self.close_calls = 0
 
         async def close(self) -> None:
-            """Record one service close."""
             self.close_calls += 1
 
     def fake_import(name: str) -> object:
@@ -172,38 +160,19 @@ def test_gcs_list_directory_retries_and_paginates(monkeypatch: pytest.MonkeyPatc
         (200, '{"items":[{"name":"root/b.json","size":"5"}]}'),
     ]
 
-    class FakeResponse:
-        """Provide a lightweight test double."""
-
-        def __init__(self, status: int, body: str) -> None:
-            """Implement the test-double protocol method."""
-            self.status = status
-            self.content = _BoundedContent(body)
-
-        async def __aenter__(self):
-            """Implement the test-double protocol method."""
-            return self
-
-        async def __aexit__(self, _exc_type, _exc, _tb):
-            """Implement the test-double protocol method."""
-            return False
-
     class FakeSession:
         """Provide a lightweight test double."""
 
         async def __aenter__(self):
-            """Implement the test-double protocol method."""
             return self
 
         async def __aexit__(self, _exc_type, _exc, _tb):
-            """Implement the test-double protocol method."""
             return False
 
         def get(self, _url: str, *, params: dict[str, str]):
-            """Provide a test helper implementation."""
             requests.append(dict(params))
             status, body = responses.pop(0)
-            return FakeResponse(status, body)
+            return _Response(status, body=body)
 
     async def fake_open_session(_headers, **_kwargs):
         """Provide a test helper implementation."""
@@ -233,40 +202,20 @@ def test_gcs_permission_errors_do_not_retry(monkeypatch: pytest.MonkeyPatch) -> 
 
     attempts = 0
 
-    class FakeResponse:
-        """Provide a lightweight test double."""
-
-        status = 403
-
-        def __init__(self) -> None:
-            """Expose the permission response through a sized body reader."""
-            self.content = _BoundedContent("forbidden")
-
-        async def __aenter__(self):
-            """Implement the test-double protocol method."""
-            return self
-
-        async def __aexit__(self, _exc_type, _exc, _tb):
-            """Implement the test-double protocol method."""
-            return False
-
     class FakeSession:
         """Provide a lightweight test double."""
 
         async def __aenter__(self):
-            """Implement the test-double protocol method."""
             return self
 
         async def __aexit__(self, _exc_type, _exc, _tb):
-            """Implement the test-double protocol method."""
             return False
 
         def get(self, _url: str, *, params: dict[str, str]):
-            """Provide a test helper implementation."""
             del params
             nonlocal attempts
             attempts += 1
-            return FakeResponse()
+            return _Response(403, body="forbidden")
 
     async def fake_open_session(_headers, **_kwargs):
         """Provide a test helper implementation."""
@@ -314,3 +263,132 @@ def test_gcs_adc_scope_supports_pipeline_uploads(monkeypatch: pytest.MonkeyPatch
 
     assert gcs.access_token() == "token"
     assert captured["scopes"] == ["https://www.googleapis.com/auth/devstorage.read_write"]
+
+
+def test_azure_directory_downloads_reuse_one_service(monkeypatch, tmp_path: Path) -> None:
+    """A staged Azure directory does not create one SDK service per child."""
+    from schema_sanitizer.remote_impl import directory_downloads
+    from schema_sanitizer.remote_impl.providers import azure
+
+    opened: list[str] = []
+    downloaded: list[tuple[str, str]] = []
+    requested_concurrency: list[int] = []
+
+    class FakeStream:
+        async def chunks(self):
+            yield b"payload"
+
+    class FakeBlob:
+        def __init__(self, container: str, blob: str) -> None:
+            self.container = container
+            self.blob = blob
+
+        async def download_blob(self, *, max_concurrency: int = 1) -> FakeStream:
+            requested_concurrency.append(max_concurrency)
+            downloaded.append((self.container, self.blob))
+            return FakeStream()
+
+    class FakeService:
+        closed = False
+
+        def get_blob_client(self, container: str, blob: str) -> FakeBlob:
+            return FakeBlob(container, blob)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    service = FakeService()
+
+    async def fake_open_service(ref: Any) -> FakeService:
+        opened.append(ref.account_url)
+        return service
+
+    monkeypatch.setattr(azure, "open_service", fake_open_service)
+    files = [
+        RemoteFile("https://acct.blob.core.windows.net/container/a.parquet", "a.parquet"),
+        RemoteFile("https://acct.blob.core.windows.net/container/b.parquet", "b.parquet"),
+    ]
+
+    async def exercise() -> None:
+        context = await directory_downloads.provider_client_for_downloads(files)
+        assert context is not None
+        for file in files:
+            await directory_downloads.download_file_to_path(
+                context, file, str(tmp_path / file.name)
+            )
+        await directory_downloads.close_provider_client(context)
+
+    asyncio.run(exercise())
+    assert opened == ["https://acct.blob.core.windows.net"]
+    assert downloaded == [("container", "a.parquet"), ("container", "b.parquet")]
+    assert requested_concurrency == [1, 1]
+    assert service.closed is True
+    assert (tmp_path / "a.parquet").read_bytes() == b"payload"
+    assert (tmp_path / "b.parquet").read_bytes() == b"payload"
+
+
+def test_bulk_discovery_reuses_unique_uri_classifications(monkeypatch) -> None:
+    """Directory grouping consumes preclassified locations without reparsing."""
+    import schema_sanitizer.pipeline.source_discovery as source_discovery
+
+    source_locations = {
+        "https://example.test/a.json": "http",
+        "https://example.test/b.json": "http",
+        "https://example.test/c.json": "http",
+    }
+
+    def fail_classification(_uri: str):
+        raise AssertionError("location classification must be reused")
+
+    monkeypatch.setattr(source_discovery, "location_kind", fail_classification)
+    checked = asyncio.run(
+        source_discovery._discover_directories(
+            source_locations,
+            extensions=("json",),
+            input_format="json",
+            exists_by_uri={},
+            discovered_by_uri={},
+        )
+    )
+    assert checked == set()
+
+
+def test_cloud_extra_declares_direct_blocking_s3_dependency() -> None:
+    """The blocking S3 backend declares Botocore instead of relying on transitivity."""
+    extras = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "optional-dependencies"
+    ]
+    assert "botocore>=1.34" in extras["cloud"]
+    assert "botocore>=1.34" in extras["all"]
+
+
+def test_remote_directory_discovery_is_deterministic() -> None:
+    """The shared accumulator preserves keys and sorts each completed group."""
+    builder = DirectoryDiscoveryBuilder[RemoteFile].from_uris(("gs://bucket/b", "gs://bucket/a"))
+    builder.add(("gs://bucket/b",), RemoteFile("gs://bucket/b/z.parquet", "z.parquet", 2))
+    builder.add(("gs://bucket/b",), RemoteFile("gs://bucket/b/a.parquet", "a.parquet", 1))
+
+    result = builder.finish()
+
+    assert result.exists_by_uri == {"gs://bucket/b": True, "gs://bucket/a": False}
+    assert [file.name for file in result.files_by_uri["gs://bucket/b"]] == [
+        "a.parquet",
+        "z.parquet",
+    ]
+    assert split_parent_child("year=2026/month=07/") == ("year=2026", "month=07")
+
+
+def test_remote_uri_classification_is_canonical() -> None:
+    """Public classifiers agree across paths, file URIs, and remote providers."""
+    assert location_kind("C:\\data\\rows.json") == "path"
+    assert location_kind("file:///tmp/rows.json") == "file"
+    assert location_kind("gs://bucket/rows.json") == "gcs"
+    assert remote_provider("gcs://bucket/path") == "gcs"
+    assert remote_provider("s3://bucket/path") == "s3"
+    assert remote_provider("abfss://container@account.dfs.core.windows.net/path") == "azure"
+    assert remote_provider("https://account.blob.core.windows.net/container/path") == "azure"
+    assert remote_provider("https://example.test/data.json") == "http"
+    assert remote_provider("hdfs://cluster/path") is None
+    assert looks_like_uri_string("file:///tmp/data.json")
+    assert looks_like_supported_uri("wasbs://container@account.blob.core.windows.net/path")
+    assert not looks_like_supported_uri("hdfs://cluster/path")

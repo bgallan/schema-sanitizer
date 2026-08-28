@@ -13,7 +13,6 @@ from _support.threading_goldens import (
     assert_logical_files_equivalent,
     semantic_stats,
 )
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -89,9 +88,8 @@ def _consume_strict_jsonl(
     )
 
 
-def test_wide_fixed_jsonl_matches_single_oracle(tmp_path: Path) -> None:
+def test_wide_fixed_jsonl_matches_single_oracle(tmp_path: Path, require_native: None) -> None:
     """Disjoint column owners preserve every logical row and diagnostic."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     _write_wide_jsonl(source, 12_000)
 
@@ -115,9 +113,10 @@ def test_wide_fixed_jsonl_matches_single_oracle(tmp_path: Path) -> None:
     assert results["multi"].stats["materialized_rows"] == 12_000
 
 
-def test_partitioned_first_error_is_row_then_column_ordinal(tmp_path: Path) -> None:
+def test_partitioned_first_error_is_row_then_column_ordinal(
+    tmp_path: Path, require_native: None
+) -> None:
     """A later low column cannot overtake an earlier high-column failure."""
-    require_native()
     contract = _strict_contract(tmp_path)
     rows = [
         {name: row_index + column for column, name in enumerate(_COLUMNS)}
@@ -145,9 +144,8 @@ def test_partitioned_first_error_is_row_then_column_ordinal(tmp_path: Path) -> N
         run("multi")
 
 
-def test_row_validation_precedes_same_row_conversion(tmp_path: Path) -> None:
+def test_row_validation_precedes_same_row_conversion(tmp_path: Path, require_native: None) -> None:
     """Strict extra-field validation keeps serial priority within one row."""
-    require_native()
     contract = _strict_contract(tmp_path)
     rows = [
         {name: row_index + column for column, name in enumerate(_COLUMNS)}
@@ -175,9 +173,10 @@ def test_row_validation_precedes_same_row_conversion(tmp_path: Path) -> None:
         run("multi")
 
 
-def test_earlier_conversion_precedes_later_row_validation(tmp_path: Path) -> None:
+def test_earlier_conversion_precedes_later_row_validation(
+    tmp_path: Path, require_native: None
+) -> None:
     """Complete row validation cannot reorder a later strict error forward."""
-    require_native()
     contract = _strict_contract(tmp_path)
     rows = [
         {name: row_index + column for column, name in enumerate(_COLUMNS)}
@@ -205,9 +204,10 @@ def test_earlier_conversion_precedes_later_row_validation(tmp_path: Path) -> Non
         run("multi")
 
 
-def test_later_scanner_parse_error_matches_single_stage_oracle(tmp_path: Path) -> None:
+def test_later_scanner_parse_error_matches_single_stage_oracle(
+    tmp_path: Path, require_native: None
+) -> None:
     """Scanner-stage failures retain the established single-mode precedence."""
-    require_native()
     contract = _strict_contract(tmp_path)
     lines = [
         json.dumps(
@@ -237,9 +237,10 @@ def test_later_scanner_parse_error_matches_single_stage_oracle(tmp_path: Path) -
         run("multi")
 
 
-def test_earlier_json_parse_error_precedes_later_conversion(tmp_path: Path) -> None:
+def test_earlier_json_parse_error_precedes_later_conversion(
+    tmp_path: Path, require_native: None
+) -> None:
     """Raw fallback keeps a malformed earlier row as the global first error."""
-    require_native()
     contract = _strict_contract(tmp_path)
     lines = [
         json.dumps(
@@ -269,9 +270,10 @@ def test_earlier_json_parse_error_precedes_later_conversion(tmp_path: Path) -> N
         run("multi")
 
 
-def test_observed_nested_value_falls_back_without_reordering(tmp_path: Path) -> None:
+def test_observed_nested_value_falls_back_without_reordering(
+    tmp_path: Path, require_native: None
+) -> None:
     """A scalar contract with nested observed data returns to the serial oracle."""
-    require_native()
     contract = _strict_contract(tmp_path)
     rows = [
         {name: row_index + column for column, name in enumerate(_COLUMNS)}
@@ -296,9 +298,10 @@ def test_observed_nested_value_falls_back_without_reordering(tmp_path: Path) -> 
     assert_exceptions_equivalent(lambda: run("single"), lambda: run("multi"))
 
 
-def test_empty_containers_preserve_duplicate_and_strict_semantics(tmp_path: Path) -> None:
+def test_empty_containers_preserve_duplicate_and_strict_semantics(
+    tmp_path: Path, require_native: None
+) -> None:
     """Empty containers stay ignorable and cannot mask a later scalar duplicate."""
-    require_native()
     contract = _strict_contract(tmp_path)
     rows = [
         json.dumps(
@@ -336,9 +339,10 @@ def test_empty_containers_preserve_duplicate_and_strict_semantics(tmp_path: Path
     assert decoded[_COLUMNS[0]] == 7
 
 
-def test_low_budget_repeated_consumption_preserves_arrow_ownership(tmp_path: Path) -> None:
+def test_low_budget_repeated_consumption_preserves_arrow_ownership(
+    tmp_path: Path, require_native: None
+) -> None:
     """Merged children survive producer reuse and release exactly once."""
-    require_native()
     source = tmp_path / "bounded.jsonl"
     _write_wide_jsonl(source, 4_000)
     single = tmp_path / "bounded-single.jsonl"

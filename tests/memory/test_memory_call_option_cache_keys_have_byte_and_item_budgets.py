@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -67,9 +66,8 @@ def test_registry_schema_parser_shares_logical_schema_safety_budgets() -> None:
     assert "nesting exceeds safety limit" in source
 
 
-def test_native_registry_rejects_excessive_field_cardinality() -> None:
+def test_native_registry_rejects_excessive_field_cardinality(require_native: None) -> None:
     """A hostile canonical schema fails before its field vector grows further."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     field = '{"name":"f","type":{"kind":"null"}}'

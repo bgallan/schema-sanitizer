@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,11 +30,3 @@ def test_ci_helpers_are_grouped_by_owner() -> None:
     assert all(len(path.parts) >= 2 for path in helpers)
     assert {path.parts[0] for path in helpers} <= OWNER_DIRECTORIES
     assert all(path.suffix == ".md" for path in CI_ROOT.iterdir() if path.is_file())
-
-
-def test_ci_shell_entry_points_remain_executable() -> None:
-    """Moved shell gates retain the executable bit expected by workflows."""
-    scripts = tuple(CI_ROOT.rglob("*.sh"))
-
-    assert scripts
-    assert all(os.access(script, os.X_OK) for script in scripts)

@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -17,9 +16,9 @@ _MEMORY_LIMIT = 128 * 1024 * 1024
 
 def test_string_runs_preserve_exact_single_multi_json_escaping(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Run appends preserve UTF-8 and every JSON control escape exactly."""
-    require_native()
     values = (
         "ordinary-mañana-café-漢字-🙂-abcdefghijklmnopqrstuvwxyz",
         'quoted"value\\path',

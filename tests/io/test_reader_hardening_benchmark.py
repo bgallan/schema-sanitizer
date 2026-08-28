@@ -5,16 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import require_native
-
 from benchmarks.readers import hardening_ab
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_reader_hardening_ab_benchmark_runs_isolated_trees() -> None:
+def test_reader_hardening_ab_benchmark_runs_isolated_trees(require_native: None) -> None:
     """A tiny same-tree comparison validates all four valid-reader probes."""
-    require_native()
     report = hardening_ab.compare(ROOT, ROOT, rows=16, width=2, repeats=1)
     names = {item["name"] for item in report["comparisons"]}
     assert names == {

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.resource_fakes import CountingLease, DeadThread
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
 
 pytestmark = pytest.mark.skipif(
@@ -32,29 +33,11 @@ _NATIVE_STUB_MODULES = (
 )
 
 
-class _DeadThread:
-    ident = None
-
-    def is_alive(self) -> bool:
-        return False
-
-    def join(self, timeout: float | None = None) -> None:
-        return None
-
-
-class _SubmissionOwner:
-    def __init__(self) -> None:
-        self.released = False
-
-    def release(self) -> None:
-        self.released = True
-
-
 class _Governor:
-    def __init__(self, owner: _SubmissionOwner) -> None:
+    def __init__(self, owner: CountingLease) -> None:
         self.owner = owner
 
-    def reserve_submission(self) -> _SubmissionOwner:
+    def reserve_submission(self) -> CountingLease:
         return self.owner
 
     async def acquire(self, *_args: Any, **_kwargs: Any) -> Any:
@@ -91,7 +74,7 @@ def test_coordinator_close_waits_for_submission_callback_registration(
 ) -> None:
     from schema_sanitizer.remote_impl import io_coordinator as module
 
-    owner = _SubmissionOwner()
+    owner = CountingLease()
     created: list[_BlockingCallbackFuture] = []
     future_created = Event()
 
@@ -134,7 +117,7 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     coordinator._permit_registration = None
     coordinator._thread_lease = None
     coordinator._runtime_registration = None
-    coordinator._thread = _DeadThread()
+    coordinator._thread = DeadThread()
 
     submitted: list[Future[Any]] = []
     submitter = Thread(
@@ -492,7 +475,7 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
 ) -> None:
     from schema_sanitizer.remote_impl import io_coordinator as module
 
-    owner = _SubmissionOwner()
+    owner = CountingLease()
     created: list[_RejectingCallbackFuture] = []
 
     def submit_bridge(coroutine: Any, _loop: Any) -> _RejectingCallbackFuture:
@@ -535,7 +518,7 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     coordinator._permit_registration = None
     coordinator._thread_lease = None
     coordinator._runtime_registration = None
-    coordinator._thread = _DeadThread()
+    coordinator._thread = DeadThread()
 
     with pytest.raises(RuntimeError, match="callback registration failed"):
         coordinator.submit(lambda _context: asyncio.sleep(0))

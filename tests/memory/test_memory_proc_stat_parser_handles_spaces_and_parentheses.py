@@ -23,13 +23,11 @@ class _FailOnceClose:
     """Close double that fails once with a configurable exception type."""
 
     def __init__(self, error_type: type[BaseException] = OSError) -> None:
-        """Initialize one pending failure."""
         self.error_type = error_type
         self.calls = 0
         self.closed = False
 
     def close(self) -> None:
-        """Fail once and then commit closure."""
         self.calls += 1
         if self.calls == 1:
             raise self.error_type("transient cleanup failure")
@@ -40,7 +38,6 @@ class _Staged(_FailOnceClose):
     """Staged chunk with a minimal source-count manifest."""
 
     def __init__(self, *, fail_once: bool = True) -> None:
-        """Initialize staged ownership and manifest metadata."""
         super().__init__()
         if not fail_once:
             self.calls = 1
@@ -159,7 +156,6 @@ def test_parquet_telemetry_does_not_trust_exception_text() -> None:
         """Exception whose string conversion is unsafe."""
 
         def __str__(self) -> str:
-            """Raise while telemetry attempts to render the error."""
             raise RuntimeError("hostile __str__")
 
     telemetry.reset_parquet_stream_factory_observability()
@@ -265,15 +261,12 @@ def test_remote_provider_retains_failed_context_exit(
         """Context whose exit fails once."""
 
         def __init__(self) -> None:
-            """Initialize one pending failure."""
             self.calls = 0
 
         def __enter__(self) -> Any:
-            """Return an exhausted iterator."""
             return iter(())
 
         def __exit__(self, *_exc: object) -> None:
-            """Fail once before committing exit."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("exit busy")

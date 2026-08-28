@@ -1,14 +1,21 @@
 """Pipeline registry state tests."""
 
-# ruff: noqa: F405
-
 from __future__ import annotations
 
-from _support.pipeline import *  # noqa: F403
+from datetime import date
+from types import SimpleNamespace
+
+import pytest
+
+from schema_sanitizer.pipeline.partition_execution import (
+    parse_final_schema_registry,
+    run_partitioned_to_parquet_registry_json,
+    run_partitioned_to_parquet_registry_state,
+)
+from schema_sanitizer.pipeline.types import PartitionRunPlan, SchemaRegistryState
 
 
 def test_pipeline_runner_carries_registry_forward(monkeypatch, tmp_path) -> None:
-    """Verify the reusable runner passes registry JSON to later partitions."""
     from schema_sanitizer.pipeline import partition_execution
 
     seen_registries: list[str] = []
@@ -136,7 +143,6 @@ def test_pipeline_runner_attributes_discovery_and_transfer_time_to_io(
 
 
 def test_pipeline_json_registry_runner_carries_registry_json_forward(monkeypatch, tmp_path) -> None:
-    """Verify the JSON-native runner passes registry strings between partitions."""
     from schema_sanitizer.pipeline import partition_execution
 
     seen_registries = []
@@ -175,7 +181,6 @@ def test_pipeline_json_registry_runner_carries_registry_json_forward(monkeypatch
 
 
 def test_pipeline_runner_carries_native_registry_state_forward(monkeypatch, tmp_path) -> None:
-    """Verify partition runs pass the previous native registry state when available."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 
@@ -210,7 +215,6 @@ def test_pipeline_runner_carries_native_registry_state_forward(monkeypatch, tmp_
 
 
 def test_pipeline_runner_accepts_initial_schema_registry_state(monkeypatch, tmp_path) -> None:
-    """Verify the state-based runner seeds the first partition with native state."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 
@@ -249,7 +253,6 @@ def test_pipeline_runner_accepts_initial_schema_registry_state(monkeypatch, tmp_
 
 
 def test_pipeline_runner_compiles_initial_registry_json_state(monkeypatch, tmp_path) -> None:
-    """Verify JSON-only bootstrap can seed the first partition with native state."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 
@@ -335,7 +338,6 @@ def test_pipeline_runner_keeps_parquet_writer_options_out_of_registry_compile(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Verify Parquet writer options do not leak into schema option normalization."""
     from schema_sanitizer.pipeline import partition_execution
 
     seen_to_parquet_kwargs = []
@@ -386,7 +388,6 @@ def test_pipeline_runner_keeps_parquet_writer_options_out_of_registry_compile(
 
 
 def test_pipeline_runner_clears_stale_native_registry_state(monkeypatch, tmp_path) -> None:
-    """Verify JSON updates without a capsule do not reuse an older native state."""
     from schema_sanitizer.core_impl.schema_registry import current_native_registry_state
     from schema_sanitizer.pipeline import partition_execution
 

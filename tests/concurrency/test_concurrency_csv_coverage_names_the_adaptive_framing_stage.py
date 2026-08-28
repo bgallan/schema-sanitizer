@@ -6,7 +6,6 @@ import csv
 from pathlib import Path
 
 from _support.diagnostics import assert_diagnostics_semantically_equal
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.concurrency_coverage import (
@@ -90,9 +89,9 @@ def test_csv_scanner_is_adaptive_without_private_threads() -> None:
 
 def test_csv_chunk_boundaries_preserve_exact_single_multi_values(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Escaped quotes, CRLF, and multiline fields survive chunk transitions."""
-    require_native()
     chunk_bytes = 1 << 20
     header = "id,text\n"
     prefix = '1,"'
@@ -139,9 +138,9 @@ def test_csv_chunk_boundaries_preserve_exact_single_multi_values(
 
 def test_wide_csv_keeps_parallel_decode_and_exact_probe_parity(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Adaptive framing continues feeding real input tasks in multi mode."""
-    require_native()
     source = tmp_path / "wide.csv"
     columns = [f"field_{index:02d}" for index in range(12)]
     payload = "abcdefghijklmnopqrstuvwxyz0123456789" * 8

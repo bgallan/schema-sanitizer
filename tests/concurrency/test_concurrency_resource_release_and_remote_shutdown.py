@@ -246,11 +246,9 @@ class _ClosingClient:
     """Track cleanup of a client created during pool shutdown."""
 
     def __init__(self) -> None:
-        """Initialize close accounting."""
         self.close_calls = 0
 
     async def close(self) -> None:
-        """Record final close."""
         self.close_calls += 1
 
 
@@ -258,17 +256,14 @@ class _ClosingManager:
     """Track entry and exit of a manager created during pool shutdown."""
 
     def __init__(self) -> None:
-        """Initialize lifecycle accounting."""
         self.enter_calls = 0
         self.exit_calls = 0
 
     async def __aenter__(self) -> object:
-        """Record entry and return one value."""
         self.enter_calls += 1
         return object()
 
     async def __aexit__(self, *_exc: object) -> None:
-        """Record final exit."""
         self.exit_calls += 1
 
 
@@ -346,18 +341,16 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
         """Record cleanup of one staging result completed after abandonment."""
 
         def close(self) -> None:
-            """Record staging cleanup."""
             staged_closed.set()
 
     class Session:
         """Provide a lightweight shared staging session."""
 
         async def __aenter__(self) -> Session:
-            """Return the session."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Close the session."""
+            pass
 
     from schema_sanitizer.api_impl.input.directory_preparation import (
         RemoteNativeDirectorySourceManifest,
@@ -372,7 +365,6 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
         """Expose one cancellation-resistant remote chunk."""
 
         def open_staging_session(self) -> Session:
-            """Create the explicit shared session."""
             return Session()
 
         def try_acquire_storage_lease(self, _start: int) -> Lease:
@@ -384,7 +376,6 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
             _session: Session,
             storage_lease: object | None = None,
         ) -> Staged:
-            """Delay successful staging until after iterator close returns."""
             assert storage_lease is not None
             started.set()
             while not release.is_set():

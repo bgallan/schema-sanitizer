@@ -143,12 +143,13 @@ def test_direct_row_scratch_is_retired_after_every_attempt() -> None:
     assert "JsonDirectScratchReset scratch_reset(doc);" in text
 
 
-def test_direct_csv_scratch_cleanup_preserves_decoded_values(tmp_path: Path) -> None:
+def test_direct_csv_scratch_cleanup_preserves_decoded_values(
+    tmp_path: Path, require_native: None
+) -> None:
     """Quoted CSV values are copied into builders before row scratch is retired."""
     pa = pytest.importorskip("pyarrow")
-    from conftest import read_test_csv, require_native
+    from conftest import read_test_csv
 
-    require_native()
     path = tmp_path / "direct.csv"
     path.write_bytes(b'payload\n"alpha""beta"\n"line one\r\nline two"\n')
     result = read_test_csv(
@@ -161,12 +162,13 @@ def test_direct_csv_scratch_cleanup_preserves_decoded_values(tmp_path: Path) -> 
     ]
 
 
-def test_direct_json_scratch_cleanup_preserves_decoded_values(tmp_path: Path) -> None:
+def test_direct_json_scratch_cleanup_preserves_decoded_values(
+    tmp_path: Path, require_native: None
+) -> None:
     """Escaped JSON strings remain valid after the on-demand arena is released."""
     pa = pytest.importorskip("pyarrow")
-    from conftest import read_test_jsonl, require_native
+    from conftest import read_test_jsonl
 
-    require_native()
     path = tmp_path / "direct.jsonl"
     path.write_text(
         '{"payload":"alpha\\nbeta"}\n{"payload":"snowman \\u2603"}\n',

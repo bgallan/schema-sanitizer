@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.uris import local_path_from_file_uri
@@ -19,9 +18,8 @@ from schema_sanitizer.pipeline import (
 )
 
 
-def test_hive_pipeline_executes_local_end_to_end(tmp_path: Path) -> None:
+def test_hive_pipeline_executes_local_end_to_end(tmp_path: Path, require_native: None) -> None:
     """The high-level facade discovers and writes one real local partition."""
-    require_native()
     pytest.importorskip("pyarrow")
     logical_date = date(2026, 1, 2)
     source_root = tmp_path / "raw"

@@ -81,19 +81,15 @@ class _StorageReservationSpy:
     """Record disk-admission calls made by a streamed writer."""
 
     def __init__(self) -> None:
-        """Initialize this helper."""
         self.events: list[tuple[str, int]] = []
 
     def reset_after_truncate(self) -> None:
-        """Implement the internal reset_after_truncate helper."""
         self.events.append(("reset", 0))
 
     def before_write(self, chunk_bytes: int) -> None:
-        """Implement the internal before_write helper."""
         self.events.append(("reserve", chunk_bytes))
 
     def finalize(self, actual_size_bytes: int) -> None:
-        """Implement the internal finalize helper."""
         self.events.append(("finalize", actual_size_bytes))
 
 
@@ -329,7 +325,6 @@ def test_operation_diagnostics_separate_live_and_completed_operations() -> None:
         """Expose a bound-method snapshot without global retention."""
 
         def snapshot(self) -> dict[str, object]:
-            """Return one live operation payload."""
             return {"operation_id": operation_id, "state": "running", "workers": 2}
 
     owner = Owner()
@@ -399,11 +394,9 @@ def test_staged_path_retains_lease_when_cleanup_fails(
         """Track whether capacity was returned prematurely."""
 
         def __init__(self) -> None:
-            """Initialize this helper."""
             self.releases = 0
 
         def release(self) -> None:
-            """Implement the internal release helper."""
             self.releases += 1
 
     lease = Lease()
@@ -452,11 +445,9 @@ def test_temporary_janitor_releases_only_after_actual_deletion(tmp_path: Path) -
         """Count exact lease releases."""
 
         def __init__(self) -> None:
-            """Initialize this helper."""
             self.releases = 0
 
         def release(self) -> None:
-            """Implement the internal release helper."""
             self.releases += 1
 
     lease = Lease()

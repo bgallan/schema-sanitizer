@@ -12,12 +12,10 @@ class _FailOnceClose:
     """Close double that fails once before committing."""
 
     def __init__(self) -> None:
-        """Initialize one pending failure."""
         self.calls = 0
         self.closed = False
 
     def close(self) -> None:
-        """Fail once and then close successfully."""
         self.calls += 1
         if self.calls == 1:
             raise OSError("transient close failure")
@@ -28,11 +26,9 @@ class _CloseCounter:
     """Idempotent close counter."""
 
     def __init__(self) -> None:
-        """Initialize the counter."""
         self.calls = 0
 
     def close(self) -> None:
-        """Record one close call."""
         self.calls += 1
 
 
@@ -97,12 +93,10 @@ def test_registry_wrapper_does_not_double_close_wrapped_raw() -> None:
         """Minimal wrapper that owns one raw backend."""
 
         def __init__(self) -> None:
-            """Retain the wrapped backend."""
             self._raw = raw
             self.calls = 0
 
         def close(self) -> None:
-            """Close the backend exactly once."""
             self.calls += 1
             self._raw.close()
 
@@ -482,11 +476,9 @@ def test_schema_cache_enforces_utf8_bytes_not_character_count() -> None:
         """Schema text double."""
 
         def __init__(self, text: str) -> None:
-            """Store one textual key."""
             self.text = text
 
         def to_string(self, **_kwargs: object) -> str:
-            """Return the key."""
             return self.text
 
     cache = SchemaDecisionCache(max_size=4, max_key_bytes=4)

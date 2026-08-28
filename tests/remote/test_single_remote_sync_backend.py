@@ -22,27 +22,24 @@ class _BlockingObjectHandler(BaseHTTPRequestHandler):
     uploaded = b""
 
     def do_HEAD(self) -> None:  # noqa: N802
-        """Return stable object metadata."""
         self.send_response(200)
         self.send_header("Content-Length", str(len(self.payload)))
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
-        """Return the complete object body."""
         self.send_response(200)
         self.send_header("Content-Length", str(len(self.payload)))
         self.end_headers()
         self.wfile.write(self.payload)
 
     def do_PUT(self) -> None:  # noqa: N802
-        """Store the complete uploaded object body."""
         size = int(self.headers.get("Content-Length", "0"))
         type(self).uploaded = self.rfile.read(size)
         self.send_response(204)
         self.end_headers()
 
     def log_message(self, _format: str, *_args: object) -> None:
-        """Suppress loopback server logging."""
+        pass
 
 
 @contextmanager
@@ -115,23 +112,19 @@ def test_s3_blocking_download_writes_each_chunk_once(tmp_path: Path) -> None:
         """Return two chunks followed by EOF."""
 
         def __init__(self) -> None:
-            """Initialize the deterministic chunk iterator."""
             self._chunks = iter((b"abc", b"def", b""))
 
         def read(self, _size: int) -> bytes:
-            """Return the next body chunk and record its thread."""
             calls.append(threading.get_ident())
             return next(self._chunks)
 
         def close(self) -> None:
-            """Record same-thread body closure."""
             calls.append(threading.get_ident())
 
     class Client:
         """Expose the blocking get_object operation."""
 
         def get_object(self, **kwargs: object) -> dict[str, object]:
-            """Return one blocking body after validating the object key."""
             calls.append(threading.get_ident())
             assert kwargs == {"Bucket": "bucket", "Key": "source.bin"}
             return {"Body": Body()}
@@ -160,7 +153,6 @@ def test_s3_blocking_upload_uses_no_transfer_manager(monkeypatch, tmp_path: Path
         """Capture one direct SDK upload."""
 
         def put_object(self, **kwargs: object) -> None:
-            """Consume one direct upload body on the caller thread."""
             calls.append(threading.get_ident())
             assert kwargs["Bucket"] == "bucket"
             assert kwargs["Key"] == "target.bin"
@@ -192,7 +184,6 @@ def test_azure_blocking_transfers_force_sdk_concurrency_one(tmp_path: Path) -> N
         """Yield blocking download chunks."""
 
         def chunks(self) -> tuple[bytes, ...]:
-            """Return deterministic blocking Azure chunks."""
             calls.append(("chunks", threading.get_ident(), None))
             return (b"azure-", b"download")
 
@@ -200,12 +191,10 @@ def test_azure_blocking_transfers_force_sdk_concurrency_one(tmp_path: Path) -> N
         """Capture Azure Blob SDK options."""
 
         def download_blob(self, *, max_concurrency: int) -> Stream:
-            """Capture the requested Azure download concurrency."""
             calls.append(("download", threading.get_ident(), max_concurrency))
             return Stream()
 
         def upload_blob(self, body: Any, **kwargs: object) -> None:
-            """Capture and validate one Azure upload call."""
             calls.append(("upload", threading.get_ident(), int(kwargs["max_concurrency"])))
             assert kwargs["overwrite"] is True
             assert kwargs["length"] == len(b"azure-upload")
@@ -215,7 +204,6 @@ def test_azure_blocking_transfers_force_sdk_concurrency_one(tmp_path: Path) -> N
         """Return one blocking blob client."""
 
         def get_blob_client(self, container: str, blob: str) -> Blob:
-            """Return the fake client for one container/blob pair."""
             calls.append((f"client:{container}/{blob}", threading.get_ident(), None))
             return Blob()
 
@@ -284,12 +272,10 @@ def test_s3_single_download_retries_from_an_empty_destination(
         """Fail one stream after a partial chunk, then return a complete body."""
 
         def __init__(self, *, fail: bool) -> None:
-            """Configure whether this stream fails after its first chunk."""
             self._fail = fail
             self._reads = 0
 
         def read(self, _size: int) -> bytes:
-            """Return one chunk or raise the synthetic transient failure."""
             self._reads += 1
             if self._fail:
                 if self._reads == 1:
@@ -298,13 +284,12 @@ def test_s3_single_download_retries_from_an_empty_destination(
             return b"complete" if self._reads == 1 else b""
 
         def close(self) -> None:
-            """Close the fake body."""
+            pass
 
     class Client:
         """Return one interrupted and one successful body."""
 
         def get_object(self, **_kwargs: object) -> dict[str, object]:
-            """Return the interrupted body first and successful body second."""
             nonlocal attempts
             attempts += 1
             return {"Body": Body(fail=attempts == 1)}
@@ -341,7 +326,6 @@ def test_s3_single_upload_reopens_spool_for_retry(monkeypatch, tmp_path: Path) -
         """Fail after consuming the first direct upload body."""
 
         def put_object(self, **kwargs: object) -> None:
-            """Consume the body and fail only the first response."""
             body = kwargs["Body"]
             attempts.append(body.read())  # type: ignore[union-attr]
             if len(attempts) == 1:

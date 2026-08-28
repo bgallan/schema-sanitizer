@@ -188,7 +188,6 @@ def test_callable_partition_options_preserve_original_evaluation_order(
         """Fail if a dynamic options pipeline attempts speculative preparation."""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """Reject speculative controller construction."""
             raise AssertionError("callable options unexpectedly enabled lookahead")
 
     monkeypatch.setattr(execution_module, "PartitionSourceLookahead", ForbiddenLookahead)
@@ -266,11 +265,9 @@ def test_prefetched_remote_prefix_resumes_after_retained_file_count(monkeypatch)
         """Return one later staged packet for the remaining manifest."""
 
         def __enter__(self):
-            """Return the staged remainder iterator."""
             return iter([later])
 
         def __exit__(self, *_exc: object) -> None:
-            """Leave the fake staging context."""
             return None
 
     def open_chunks(_manifest: object, *, start: int = 0) -> Context:
@@ -463,7 +460,6 @@ def test_manifest_carrier_closes_retained_remote_lookahead() -> None:
         """Track release of retained remote lookahead state."""
 
         def close(self) -> None:
-            """Record one manifest close."""
             closed.append("remote")
 
     carrier = NativeDirectoryManifestCarrier()

@@ -24,13 +24,11 @@ class _FailingRelease:
     """Release owner that succeeds after a configured number of failures."""
 
     def __init__(self, failures: int = 1) -> None:
-        """Initialize one retryable owner."""
         self.failures = failures
         self.calls = 0
         self.released = False
 
     def release(self) -> None:
-        """Fail transiently and then commit exactly once."""
         self.calls += 1
         if self.calls <= self.failures:
             raise OSError("transient release failure")
@@ -120,7 +118,6 @@ def test_failed_staging_storage_release_is_retained(native_stub: None) -> None:
         """Minimal submit-only coordinator."""
 
         def submit(self, *_args: Any, **_kwargs: Any) -> Future[Any]:
-            """Return the controlled future."""
             return submitted
 
     lease = _FailingRelease()
@@ -198,7 +195,6 @@ def test_submit_failure_preserves_primary_and_retains_lease(native_stub: None) -
         """Coordinator double that rejects submission synchronously."""
 
         def submit(self, *_args: Any, **_kwargs: Any) -> Future[Any]:
-            """Reject the operation before publishing a Future."""
             raise RuntimeError("submission rejected")
 
     lease = _FailingRelease()
@@ -231,11 +227,10 @@ def test_close_retries_retained_cleanup_without_reopening_runtime(native_stub: N
         ident = None
 
         def is_alive(self) -> bool:
-            """Report that event-loop execution has already ended."""
             return False
 
         def join(self, timeout: float | None = None) -> None:
-            """Accept a bounded join without side effects."""
+            pass
 
     owner = _FailingRelease()
     coordinator = object.__new__(RemoteIoCoordinator)

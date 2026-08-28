@@ -24,7 +24,6 @@ class FakeGcsClient:
     """In-memory exact-generation GCS client for one integration process."""
 
     def __init__(self, objects: list[tuple[RemoteFile, bytes]]) -> None:
-        """Store source generations and initialize publication telemetry."""
         self._objects = {remote.content_identity: payload for remote, payload in objects}
         self._listing = tuple(remote for remote, _payload in objects)
         self.list_calls = 0
@@ -36,14 +35,12 @@ class FakeGcsClient:
         *,
         memory_limit_bytes: int | None,
     ) -> tuple[RemoteFile, ...]:
-        """Return all configured source generations in one listing call."""
         del memory_limit_bytes
         self.list_calls += 1
         return self._listing
 
     @contextmanager
     def schema_sanitizer_download_scope(self):
-        """Route both supported staging modes into this fake object store."""
         original_sync = sync_backend.download_files_to_directory
         original_open = directory_downloads.provider_client_for_downloads
         original_close = directory_downloads.close_provider_client
@@ -105,7 +102,6 @@ class FakeGcsClient:
         *,
         memory_limit_bytes: int | None,
     ) -> int:
-        """Commit bytes only after the complete local file has been read."""
         del memory_limit_bytes
         payload = Path(local_path).read_bytes()
         self.published[destination_uri] = payload
@@ -116,16 +112,13 @@ class FakeBigQueryClient:
     """In-memory target schema and external-table update recorder."""
 
     def __init__(self, schema: Any) -> None:
-        """Store the expected final schema."""
         self.schema = schema
         self.replace_calls: list[dict[str, Any]] = []
 
     def read_target_schema(self, _target_table: str) -> Any:
-        """Return the configured existing table schema."""
         return self.schema
 
     def replace_external_table(self, target_table: str, **kwargs: Any) -> None:
-        """Record the one allowed post-publication table update."""
         self.replace_calls.append({"target_table": target_table, **kwargs})
 
 
