@@ -14,6 +14,8 @@ from typing import Any
 import pytest
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
+from benchmarks.concurrency.assets import load_probe
+
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
 )
@@ -269,6 +271,7 @@ def test_lookahead_retries_context_only_cleanup(native_stub: None) -> None:
     owner._close_condition = Condition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False
@@ -314,25 +317,31 @@ def test_prepared_partition_attempts_both_cleanups_and_keeps_primary(
     assert any("context-secondary" in note for note in caught.value.__notes__)
 
 
-def test_provider_lease_restores_active_state_after_release_failure() -> None:
-    from schema_sanitizer.remote_impl.provider_throttle import ProviderRequestLease
+def test_provider_lease_restores_active_state_after_release_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
-    class Governor:
-        calls = 0
+    governor = ProviderThrottleGovernor()
+    lease, _delay = governor.try_acquire("provider")
+    assert lease is not None
+    original_release = governor._release_lease
+    calls = 0
 
-        def release(self, *_args: Any, **_kwargs: Any) -> None:
-            self.calls += 1
-            if self.calls == 1:
-                raise OSError("transient")
+    def release(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("transient")
+        original_release(*args, **kwargs)
 
-    governor = Governor()
-    lease = ProviderRequestLease(governor, "provider", _active=True)
+    monkeypatch.setattr(governor, "_release_lease", release)
     with pytest.raises(OSError, match="transient"):
         lease.release()
     assert lease._state == "active"
     lease.release()
     assert lease._state == "released"
-    assert governor.calls == 2
+    assert calls == 2
 
 
 def test_janitor_retries_worker_start_without_external_activity(
@@ -342,8 +351,6 @@ def test_janitor_retries_worker_start_without_external_activity(
 
     source = tmp_path / "source"
     source.write_text("owned")
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
 
     class StorageLease:
         released = Event()
@@ -365,7 +372,6 @@ def test_janitor_retries_worker_start_without_external_activity(
         return ThreadLease()
 
     janitor = module._TemporaryArtifactJanitor()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
     monkeypatch.setattr(module, "acquire_project_threads", acquire)
     monkeypatch.setattr(module, "_RETRY_SECONDS", 0.01)
     lease = StorageLease()
@@ -427,8 +433,8 @@ def test_task_arena_plan_no_longer_owns_runtime_state() -> None:
     detach_position = source.index("worker->detach();")
     assert clear_position < detach_position
     assert "detached_worker_age_millis" in header
-    assert "benchmarks/probes/concurrency/lifecycle/arena-lifecycle-tsan.cc" not in source
-    probe = (root / "benchmarks/probes/concurrency/lifecycle/arena-lifecycle-tsan.cc").read_text()
+    assert "benchmarks/" not in source
+    probe = load_probe("lifecycle/arena-lifecycle-tsan.cc")
     assert "VerifyQueuedClosuresAreReleasedBeforeWorkerDetach" in probe
     assert "VerifyConcurrentPublicCallsAgainstShutdown" in probe
     assert "VerifyInlineAdmissionOutlivesBoundedShutdownSafely" in probe
@@ -518,24 +524,27 @@ def test_provider_registry_evicts_inactive_keys_without_full_scan() -> None:
 
 
 def test_remote_permit_restores_ownership_after_release_failure() -> None:
-    from schema_sanitizer.remote_impl.io_permits import RemoteIoPermit
+    from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
-    class Governor:
-        calls = 0
+    governor = RemoteIoPermitGovernor(1)
+    permit = asyncio.run(governor.acquire(label="cancelled-bridge-retains-submission-until-real"))
+    real_release = governor._release_permit
+    calls = 0
 
-        def _release(self, _weight: int) -> None:
-            self.calls += 1
-            if self.calls == 1:
-                raise OSError("retry")
+    def flaky_release(owner: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("retry")
+        real_release(owner)  # type: ignore[arg-type]
 
-    governor = Governor()
-    permit = RemoteIoPermit(governor, 1, "cancelled-bridge-retains-submission-until-real")
+    governor._release_permit = flaky_release  # type: ignore[method-assign]
     with pytest.raises(OSError, match="retry"):
         permit.release()
     assert permit._released is False
     permit.release()
     assert permit._released is True
-    assert governor.calls == 2
+    assert calls == 2
 
 
 class _CallbackRejectingCancelledFuture(Future[Any]):
@@ -631,6 +640,7 @@ def test_lookahead_timed_out_close_auto_resumes_after_last_admission(
     owner._close_condition = Condition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False

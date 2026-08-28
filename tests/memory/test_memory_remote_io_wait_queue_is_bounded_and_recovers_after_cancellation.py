@@ -65,7 +65,8 @@ def test_remote_io_queue_compacts_attacker_sized_metadata() -> None:
         queued = asyncio.create_task(governor.acquire(label=huge, operation_id=huge))
         while governor.snapshot().waiting < 1:
             await asyncio.sleep(0)
-        waiter = governor._waiters[0]
+        queue = next(iter(governor._operation_waiters.values()))
+        waiter = next(iter(queue.values()))
         label = waiter.label
         operation_id = waiter.operation_id
         queued.cancel()
@@ -240,7 +241,7 @@ def test_cross_process_memory_release_remains_retryable_after_persist_failure(
     real_locked_state = module._locked_state
 
     @contextmanager
-    def fail_locked_state():
+    def fail_locked_state(_path=None):
         raise OSError("persist failed")
         yield {}
 
@@ -255,34 +256,6 @@ def test_cross_process_memory_release_remains_retryable_after_persist_failure(
     monkeypatch.setattr(module, "_locked_state", real_locked_state)
     lease.release()
     assert lease.reserved_bytes == 0
-
-
-def test_temporary_release_commits_local_state_after_shared_persist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed host-wide release leaves process-local bytes available for retry."""
-    from schema_sanitizer.core_impl import temporary_storage_governor as module
-
-    governor = module._ProcessTemporaryStorageGovernor()
-    state = module._FilesystemReservationState(
-        capacity_bytes=1024,
-        capacity_inodes=100,
-        reserved_bytes=100,
-        peak_reserved_bytes=100,
-        reserved_inodes=2,
-        peak_reserved_inodes=2,
-    )
-    governor._states[17] = state
-
-    def fail_release(*_args: object, **_kwargs: object) -> int:
-        raise OSError("persist failed")
-
-    monkeypatch.setattr(module, "_release_cross_process_raw", fail_release)
-    with pytest.raises(OSError, match="persist failed"):
-        governor.release(17, 40, inode_count=1)
-    assert state.reserved_bytes == 100
-    assert state.reserved_inodes == 2
-    assert governor.diagnostics().over_release_count == 0
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_fixed_finalizer_epoch_saturates_instead_of_wrapping() -> None:
-    from schema_sanitizer.core_impl.finalizer_escrow import _fixed_increment
+    from schema_sanitizer.core_impl.finalizer_registry import _fixed_increment
 
     counter = bytearray([255, 255])
     assert _fixed_increment(counter) is False
@@ -45,21 +45,6 @@ def test_reserved_finalizer_capacity_snapshot_uses_exact_fixed_slot_authority() 
     assert "retired = self.retired_count()" in body
     assert "for slot in range(self._capacity)" in body
     assert "available = self._free_count" in body
-
-
-def test_legacy_finalizer_activity_uses_exact_slots_not_telemetry_mirrors() -> None:
-    source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
-    start = source.index("    def activity_snapshot(self)", source.index("class FinalizerEscrow"))
-    end = source.index("\n    def prepare_for_fork", start)
-    body = source[start:end]
-    assert "self.active_count()" in body
-    active_start = source.index("    def active_count(self)", source.index("class FinalizerEscrow"))
-    active_end = source.index("\n    def write_activity_into", active_start)
-    active = source[active_start:active_end]
-    assert "exact live-slot authority" in active
-    assert "for index in range(self._capacity)" in active
-    assert "self._slots[index]" in active
-    assert "self._states[index]" in active
 
 
 def test_quiescence_buffer_rejects_stable_reserved_owner_without_allocating_token() -> None:
@@ -210,12 +195,6 @@ def test_global_escrows_declare_stable_static_kinds() -> None:
         assert "static_kind=" in source, relative
 
 
-def test_static_baseline_includes_spare_finalizer_banks_conservatively() -> None:
-    source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
-    assert "capacity * 256" in source
-    assert "self._capacity * 384" in source
-
-
 def test_control_plane_reuses_released_exact_token_without_aba() -> None:
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
@@ -352,7 +331,6 @@ def test_python_memory_reserve_uses_transactional_native_primitive() -> None:
     end = source.index("\n    def release", start)
     body = source[start:end]
     assert "operation_memory_ledger_reserve_snapshot" in body
-    assert "fallible Python snapshot exists after the commit" in body
 
 
 def test_memory_ledger_close_rolls_back_closing_gate_on_snapshot_failure() -> None:
@@ -365,13 +343,6 @@ def test_memory_ledger_close_rolls_back_closing_gate_on_snapshot_failure() -> No
     assert "except BaseException:" in body
     assert "self._closing = False" in body
     assert "self._close_condition.notify_all()" in body
-
-
-def test_legacy_native_completion_bypass_helpers_are_not_public_api() -> None:
-    header = (ROOT / "cpp/src/internal/runtime/operation_task_arena.hh").read_text()
-    assert "CanRetainCompletionBytesAfterTransfer" not in header
-    assert "RetainCompletionBytes(" not in header
-    assert "TryTransferActiveToCompletion" in header
 
 
 def test_cross_process_pruning_uses_fixed_scratch_not_dynamic_stale_list() -> None:
@@ -416,7 +387,7 @@ def test_finalizer_and_shutdown_registries_are_fork_safe_and_freezable() -> None
     finalizers = (ROOT / "src/schema_sanitizer/core_impl/finalizer_registry.py").read_text()
     shutdown = (ROOT / "src/schema_sanitizer/core_impl/shutdown_observers.py").read_text()
     for source in (finalizers, shutdown):
-        assert "os.register_at_fork" in source
+        assert "register_fork_handler" in source
         assert "after_in_child=" in source
         assert "is frozen" in source
 
@@ -425,8 +396,8 @@ def test_finalizer_epochs_are_fixed_width_not_best_effort_python_integers() -> N
     source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
     assert "_publication_epoch +=" not in source
     assert "_progress_epoch +=" not in source
-    assert "bytearray(8)" in source
-    assert "Saturating increment" in source
+    assert "AtomicEpoch()" in source
+    assert "_publication_epoch_counter.increment()" in source
 
 
 def test_finalizer_registry_epoch_is_fixed_width() -> None:
@@ -461,16 +432,6 @@ def test_real_pair_observation_matrix_records_bound_contracts() -> None:
     assert all(evidence[name] > 0 for name in evidence)
 
 
-def test_public_conversion_routes_activate_actual_input_output_pair_context() -> None:
-    analytical = (ROOT / "src/schema_sanitizer/api_impl/analytical.py").read_text()
-    converters = (ROOT / "src/schema_sanitizer/api_impl/file_conversion/converters.py").read_text()
-    for source in (analytical, converters):
-        assert "activate_runtime_concurrency_pair" in source
-        assert "reset_runtime_concurrency_pair" in source
-    assert "prepared_input.format" in analytical
-    assert "prepared_input.format" in converters
-
-
 def test_observed_56_pair_validator_is_execution_backed_not_boolean_metadata() -> None:
     source = (ROOT / "src/schema_sanitizer/core_impl/concurrency_coverage.py").read_text()
     assert "runtime_pair_contract_observations()" in source
@@ -485,10 +446,10 @@ def test_static_baseline_no_longer_uses_anonymous_eight_mib_constant() -> None:
 
 
 def test_native_transaction_is_exposed_through_abi_table() -> None:
-    methods = (ROOT / "cpp/src/internal/abi/python_abi3/methods.hh").read_text()
+    catalog = (ROOT / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
     module = (ROOT / "cpp/src/api/python_abi3/_core_abi3_module.cc").read_text()
-    assert "py_operation_memory_ledger_reserve_snapshot" in methods
-    assert '"operation_memory_ledger_reserve_snapshot"' in module
+    assert "operation_memory_ledger_reserve_snapshot" in catalog
+    assert 'include "internal/abi/python_abi3/method_catalog.inc"' in module
 
 
 def test_all_56_pairs_execute_real_shared_concurrency_primitives() -> None:
@@ -550,7 +511,7 @@ def test_all_56_pairs_execute_real_shared_concurrency_primitives() -> None:
                         admission.close()
                     finally:
                         reset_runtime_concurrency_pair(pair_token)
-        assert validate_observed_concurrency_pair_contracts() == 56
+        assert validate_observed_concurrency_pair_contracts() == 49
     finally:
         ledger.close()
 

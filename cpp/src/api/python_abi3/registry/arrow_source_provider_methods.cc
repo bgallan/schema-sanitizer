@@ -4,9 +4,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include <cstdint>
-#include <cstring>
 #include <memory>
-#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -77,45 +75,8 @@ py_context_to_registry_sink_arrow_source_chunk_provider_registry_state(
                                         &state->timestamp_columns)) {
     return nullptr;
   }
-  Py_INCREF(provider_obj);
-  state->chunk_provider = provider_obj;
-
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    close_arrow_chunk_provider(state.get());
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &arrow_sources_get_schema;
-  stream->get_next = &arrow_sources_get_next;
-  stream->get_last_error = &arrow_sources_last_error;
-  stream->release = &arrow_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    close_arrow_chunk_provider(state.get());
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(registry_plan->registry_json);
-  outputs.drifts_json = dup_cstr(registry_plan->drifts_json);
-  outputs.conversion_timestamp = dup_cstr(registry_plan->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    close_arrow_chunk_provider(state.get());
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      provider_obj, outputs.main_stream, outputs.diagnostics,
-      outputs.registry_json, outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_arrow_source_registry_stream(provider_obj, std::move(state),
+                                           provider_obj);
 }
 
 PyObject *py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry(
@@ -160,12 +121,11 @@ PyObject *py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry(
     return nullptr;
   }
 
-  char *err = nullptr;
-  const int valid = validate_registry_sink_mode(
-      schema_mode, registry_json, &err,
+  const auto valid = validate_registry_sink_mode(
+      schema_mode, registry_json,
       "context_to_registry_sink_arrow_source_chunk_provider_auto_registry");
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
 
@@ -173,14 +133,12 @@ PyObject *py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry(
       ctx, probe_provider_obj, prepared_options, registry_json,
       field_name_policy ? field_name_policy : "");
   if (!merged_r.ok()) {
-    raise_status_error(code_for_status(merged_r.status()),
-                       dup_cstr(merged_r.status().ToString()));
+    raise_status_error(merged_r.status());
     return nullptr;
   }
   auto plan_r = make_native_registry_plan(std::move(merged_r).ValueOrDie());
   if (!plan_r.ok()) {
-    raise_status_error(code_for_status(plan_r.status()),
-                       dup_cstr(plan_r.status().ToString()));
+    raise_status_error(plan_r.status());
     return nullptr;
   }
   auto registry_plan = std::move(plan_r).ValueOrDie();
@@ -242,13 +200,12 @@ py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry_state(
     return nullptr;
   }
 
-  char *err = nullptr;
-  const int valid = validate_registry_sink_mode(
-      schema_mode, base_registry_plan->registry_json.c_str(), &err,
+  const auto valid = validate_registry_sink_mode(
+      schema_mode, base_registry_plan->registry_json,
       "context_to_registry_sink_arrow_source_chunk_provider_auto_registry_"
       "state");
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
 
@@ -257,14 +214,12 @@ py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry_state(
       base_registry_plan->registry_json.c_str(),
       field_name_policy ? field_name_policy : "", &base_registry_plan->schema);
   if (!merged_r.ok()) {
-    raise_status_error(code_for_status(merged_r.status()),
-                       dup_cstr(merged_r.status().ToString()));
+    raise_status_error(merged_r.status());
     return nullptr;
   }
   auto plan_r = make_native_registry_plan(std::move(merged_r).ValueOrDie());
   if (!plan_r.ok()) {
-    raise_status_error(code_for_status(plan_r.status()),
-                       dup_cstr(plan_r.status().ToString()));
+    raise_status_error(plan_r.status());
     return nullptr;
   }
   auto registry_plan = std::move(plan_r).ValueOrDie();

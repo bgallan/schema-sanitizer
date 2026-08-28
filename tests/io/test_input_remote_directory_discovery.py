@@ -40,8 +40,8 @@ class FakeResponse:
 
 def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
     """Verify GCS remote directory listing follows nextPageToken pages."""
+    from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import gcs as gcs_listing
-    from schema_sanitizer.remote_impl.transport import run_sync
     from schema_sanitizer.sources import RemoteFile
 
     class FakeSession:
@@ -88,8 +88,8 @@ def test_remote_gcs_directory_listing_reads_all_pages(monkeypatch) -> None:
 
 def test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes(monkeypatch) -> None:
     """Verify GCS source discovery can check sibling partition directories in one listing."""
+    from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import gcs as gcs_bulk_discovery
-    from schema_sanitizer.remote_impl.transport import run_sync
 
     class FakeSession:
         """Minimal aiohttp-like session with one parent-prefix listing."""
@@ -152,8 +152,8 @@ def test_remote_gcs_bulk_directory_discovery_groups_parent_prefixes(monkeypatch)
 
 def test_remote_s3_bulk_directory_discovery_groups_parent_prefixes(monkeypatch) -> None:
     """Verify S3 source discovery can check sibling partition directories in one listing."""
+    from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import s3 as s3_discovery
-    from schema_sanitizer.remote_impl.transport import run_sync
 
     class FakeS3Client:
         """Minimal async S3 client with one parent-prefix listing."""
@@ -220,8 +220,8 @@ def test_remote_azure_bulk_directory_discovery_groups_parent_prefixes(monkeypatc
     """Verify Azure source discovery can check sibling partition directories in one listing."""
     from types import SimpleNamespace
 
+    from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import azure as azure_discovery
-    from schema_sanitizer.remote_impl.transport import run_sync
 
     class FakeContainer:
         """Minimal async Azure container client."""
@@ -289,8 +289,8 @@ def test_remote_azure_bulk_directory_discovery_groups_parent_prefixes(monkeypatc
 
 def test_remote_s3_directory_listing_reads_all_pages(monkeypatch) -> None:
     """Verify S3 remote directory listing follows continuation tokens."""
+    from schema_sanitizer.remote_impl.async_bridge import run_sync
     from schema_sanitizer.remote_impl.providers import s3 as s3_discovery
-    from schema_sanitizer.remote_impl.transport import run_sync
     from schema_sanitizer.sources import RemoteFile
 
     class FakeS3Client:

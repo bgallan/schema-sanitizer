@@ -12,8 +12,6 @@ from threading import Lock
 from ..errors import SchemaSanitizerResourceError
 from .cross_process_storage import (
     CrossProcessStorageAccount,
-    _release_cross_process_raw,
-    _reserve_cross_process_raw,
     close_cross_process_storage_account,
     cross_process_storage_directory,
     cross_process_storage_enabled,
@@ -82,11 +80,6 @@ class _FilesystemReservationState:
     peak_reserved_bytes: int = 0
     reserved_inodes: int = 0
     peak_reserved_inodes: int = 0
-    # Compatibility amount-based reservations are isolated from exact
-    # capability owners. They remain an authority only for legacy callers and
-    # can never retire bytes belonging to a capability.
-    legacy_reserved_bytes: int | None = None
-    legacy_reserved_inodes: int | None = None
     cross_reserved_bytes: int = 0
     cross_reserved_inodes: int = 0
     cross_process_enabled: bool = False
@@ -95,15 +88,6 @@ class _FilesystemReservationState:
     users: int = 0
     corrupted: bool = False
     lock: object = field(default_factory=Lock, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        # Older amount-based constructors supplied only aggregate reserved
-        # fields. Preserve those bytes as explicit legacy authority rather than
-        # letting exact capability reconciliation erase them.
-        if self.legacy_reserved_bytes is None:
-            self.legacy_reserved_bytes = self.reserved_bytes
-        if self.legacy_reserved_inodes is None:
-            self.legacy_reserved_inodes = self.reserved_inodes
 
 
 class ProcessTemporaryStorageCapability:
@@ -150,8 +134,6 @@ class _ProcessTemporaryStorageGovernor:
         self._states: dict[int, _FilesystemReservationState] = {}
         self._capabilities: dict[int, ProcessTemporaryStorageCapability] = {}
         self._next_capability = 1
-        self._over_release_count = 0
-        self._over_release_bytes = 0
         self._protocol_violations = 0
         self._orphaned_capability_hint = False
         self._fork_banks: tuple[
@@ -251,20 +233,8 @@ class _ProcessTemporaryStorageGovernor:
         self, device: int, state: _FilesystemReservationState
     ) -> bool:
         """Repair per-device caches from exact capabilities and quarantine drift."""
-        legacy_bytes = state.legacy_reserved_bytes
-        legacy_inodes = state.legacy_reserved_inodes
-        if (
-            type(legacy_bytes) is not int
-            or legacy_bytes < 0
-            or type(legacy_inodes) is not int
-            or legacy_inodes < 0
-        ):
-            state.corrupted = True
-            self._protocol_violations += 1
-            legacy_bytes = max(0, legacy_bytes) if type(legacy_bytes) is int else 0
-            legacy_inodes = max(0, legacy_inodes) if type(legacy_inodes) is int else 0
-        exact_bytes = legacy_bytes
-        exact_inodes = legacy_inodes
+        exact_bytes = 0
+        exact_inodes = 0
         with self._lock:
             for capability in self._capabilities.values():
                 if capability.active and capability.device == device:
@@ -311,16 +281,18 @@ class _ProcessTemporaryStorageGovernor:
             },
         )
 
-    def reserve(
+    def _reserve_capability_growth(
         self,
+        capability: ProcessTemporaryStorageCapability,
         size_bytes: int,
         *,
         path: str | Path | None,
         label: str,
         inode_count: int = 0,
-        _capability: ProcessTemporaryStorageCapability | None = None,
-    ) -> int:
-        """Reserve bytes on one device without stalling unrelated devices."""
+    ) -> None:
+        """Commit initial authority or growth for one prepublished capability."""
+        if capability.governor is not self:
+            raise RuntimeError("temporary-storage capability belongs to another governor")
         if type(size_bytes) is not int or type(inode_count) is not int:
             raise TypeError("temporary storage sizes must be exact integers")
         if size_bytes < 0 or inode_count < 0:
@@ -331,20 +303,16 @@ class _ProcessTemporaryStorageGovernor:
         free_inodes = self.free_inodes(target)
         capability_target_bytes = requested
         capability_target_inodes = requested_inodes
-        if _capability is not None:
-            # Initial publication and in-place growth both commit capability +
-            # aggregate counters under the same device lock.
-            if _capability.active:
-                if _capability.device != device:
-                    raise RuntimeError("temporary-storage growth changed device")
-                capability_target_bytes = _capability.reserved_bytes + requested
-                capability_target_inodes = _capability.reserved_inodes + requested_inodes
-            else:
-                _capability.device = device
-                _capability.reserved_bytes = requested
-                _capability.reserved_inodes = requested_inodes
+        if capability.active:
+            if capability.device != device:
+                raise RuntimeError("temporary-storage growth changed device")
+            capability_target_bytes = capability.reserved_bytes + requested
+            capability_target_inodes = capability.reserved_inodes + requested_inodes
         if requested == 0 and requested_inodes == 0:
-            return device
+            capability.device = device
+            capability.active = True
+            capability.orphaned = False
+            return
         state = self._borrow_state(device)
         if state is None:
             cross_process_enabled = cross_process_storage_enabled()
@@ -418,22 +386,6 @@ class _ProcessTemporaryStorageGovernor:
                             inode_capacity=effective_inode_capacity,
                             enabled=True,
                             coordination_directory=state.coordination_directory,
-                            _reserve_impl=_reserve_cross_process_raw,
-                        )
-                    else:
-                        # Preserve the private raw-coordinator seam even when
-                        # coordination is disabled. The production helper is a
-                        # cheap no-op with enabled=False, while fault injection
-                        # can still prove that this per-device transaction never
-                        # serializes unrelated filesystem states.
-                        _reserve_cross_process_raw(
-                            device,
-                            cross_growth,
-                            effective_capacity,
-                            inode_count=cross_inode_growth,
-                            inode_capacity=effective_inode_capacity,
-                            enabled=False,
-                            coordination_directory=state.coordination_directory,
                         )
                 except OSError as exc:
                     if "inode" in str(exc).lower():
@@ -454,38 +406,23 @@ class _ProcessTemporaryStorageGovernor:
                         cross_process=True,
                         message=str(exc),
                     )
-                next_legacy_bytes = state.legacy_reserved_bytes
-                next_legacy_inodes = state.legacy_reserved_inodes
-                if _capability is None:
-                    assert type(next_legacy_bytes) is int and type(next_legacy_inodes) is int
-                    next_legacy_bytes += requested
-                    next_legacy_inodes += requested_inodes
                 state.cross_reserved_bytes += cross_growth
                 state.cross_reserved_inodes += cross_inode_growth
-                # Commit legacy authority before its aggregate cache. An async
-                # interruption can therefore only leave a conservative mismatch
-                # that the next admission quarantines/rebuilds.
-                state.legacy_reserved_bytes = next_legacy_bytes
-                state.legacy_reserved_inodes = next_legacy_inodes
                 state.reserved_bytes = next_reserved
                 state.peak_reserved_bytes = max(state.peak_reserved_bytes, next_reserved)
                 state.reserved_inodes = next_inodes
                 state.peak_reserved_inodes = max(state.peak_reserved_inodes, next_inodes)
-                if _capability is not None:
-                    # Ownership publication is part of the same device-lock tail
-                    # as aggregate counters; no concurrent admission can observe
-                    # one side of an in-place growth without the other.
-                    _capability.reserved_bytes = capability_target_bytes
-                    _capability.reserved_inodes = capability_target_inodes
-                    _capability.active = True
-                    _capability.orphaned = False
+                capability.device = device
+                capability.reserved_bytes = capability_target_bytes
+                capability.reserved_inodes = capability_target_inodes
+                capability.active = True
+                capability.orphaned = False
         finally:
             self._return_state(device, state)
         record_resource_telemetry(
             temporary_free_floor_bytes=max(_MINIMUM_FREE_BYTES, requested),
             source="temporary_reservation",
         )
-        return device
 
     def _prepublish_capability(self) -> ProcessTemporaryStorageCapability:
         """Allocate and root exact release authority before aggregate commit."""
@@ -571,12 +508,12 @@ class _ProcessTemporaryStorageGovernor:
         self._drain_one_orphaned_capability_noexcept()
         capability = self._prepublish_capability()
         try:
-            self.reserve(
+            self._reserve_capability_growth(
+                capability,
                 size_bytes,
                 path=path,
                 label=label,
                 inode_count=inode_count,
-                _capability=capability,
             )
         except BaseException as primary:
             if capability.active:
@@ -630,6 +567,9 @@ class _ProcessTemporaryStorageGovernor:
         device = capability.device
         amount = capability.reserved_bytes
         amount_inodes = capability.reserved_inodes
+        if amount == 0 and amount_inodes == 0:
+            self._finish_capability_mutation(capability, retire=True)
+            return True
         try:
             state = self._borrow_state(device)
         except BaseException:
@@ -664,38 +604,27 @@ class _ProcessTemporaryStorageGovernor:
                 next_cross_bytes = max(next_reserved, state.cross_reserved_bytes - release_bytes)
                 next_cross_inodes = max(next_inodes, state.cross_reserved_inodes - release_inodes)
                 # All Python arithmetic is complete before the host-wide commit.
-                if release_bytes or release_inodes or not state.cross_process_enabled:
-                    if state.cross_process_enabled:
-                        account = state.cross_account
-                        if account is None:
-                            raise RuntimeError("missing cross-process storage capability")
-                        try:
-                            release_cross_process_account(
-                                account,
-                                release_bytes,
-                                inode_count=release_inodes,
-                                enabled=True,
-                                coordination_directory=state.coordination_directory,
-                                _release_impl=_release_cross_process_raw,
-                            )
-                        except BaseException as exc:
-                            if not self._cross_release_committed(
-                                account, next_cross_bytes, next_cross_inodes
-                            ):
-                                raise
-                            # Lower exact authority committed before its fallible
-                            # host tail failed. Finish this capability's commit so
-                            # a caller retry cannot debit a different owner, then
-                            # propagate the original cancellation/error below.
-                            post_commit_error = exc
-                    else:
-                        _release_cross_process_raw(
-                            device,
+                if state.cross_process_enabled and (release_bytes or release_inodes):
+                    account = state.cross_account
+                    if account is None:
+                        raise RuntimeError("missing cross-process storage capability")
+                    try:
+                        release_cross_process_account(
+                            account,
                             release_bytes,
                             inode_count=release_inodes,
-                            enabled=False,
+                            enabled=True,
                             coordination_directory=state.coordination_directory,
                         )
+                    except BaseException as exc:
+                        if not self._cross_release_committed(
+                            account, next_cross_bytes, next_cross_inodes
+                        ):
+                            raise
+                        # Lower exact authority committed before its fallible host
+                        # tail failed. Finish this capability's commit so a caller
+                        # retry cannot debit a different owner.
+                        post_commit_error = exc
                 # Noexcept commit tail: install only values prepared above and
                 # revoke exact authority in the same critical section.
                 state.cross_reserved_bytes = next_cross_bytes
@@ -784,14 +713,12 @@ class _ProcessTemporaryStorageGovernor:
             return capability
         if delta > 0:
             try:
-                # reserve() performs all capacity and host-wide checks before its
-                # aggregate commit. The exact capability is already rooted.
-                self.reserve(
+                self._reserve_capability_growth(
+                    capability,
                     delta,
                     path=path,
                     label=label,
                     inode_count=0,
-                    _capability=capability,
                 )
             finally:
                 self._finish_capability_mutation(capability, retire=False)
@@ -824,34 +751,24 @@ class _ProcessTemporaryStorageGovernor:
                     else 0
                 )
                 next_cross_bytes = max(next_reserved, state.cross_reserved_bytes - release_bytes)
-                if release_bytes or not state.cross_process_enabled:
-                    if state.cross_process_enabled:
-                        account = state.cross_account
-                        if account is None:
-                            raise RuntimeError("missing cross-process storage capability")
-                        try:
-                            release_cross_process_account(
-                                account,
-                                release_bytes,
-                                inode_count=0,
-                                enabled=True,
-                                coordination_directory=state.coordination_directory,
-                                _release_impl=_release_cross_process_raw,
-                            )
-                        except BaseException as exc:
-                            if not self._cross_release_committed(
-                                account, next_cross_bytes, state.cross_reserved_inodes
-                            ):
-                                raise
-                            post_commit_error = exc
-                    else:
-                        _release_cross_process_raw(
-                            device,
+                if state.cross_process_enabled and release_bytes:
+                    account = state.cross_account
+                    if account is None:
+                        raise RuntimeError("missing cross-process storage capability")
+                    try:
+                        release_cross_process_account(
+                            account,
                             release_bytes,
                             inode_count=0,
-                            enabled=False,
+                            enabled=True,
                             coordination_directory=state.coordination_directory,
                         )
+                    except BaseException as exc:
+                        if not self._cross_release_committed(
+                            account, next_cross_bytes, state.cross_reserved_inodes
+                        ):
+                            raise
+                        post_commit_error = exc
                 state.cross_reserved_bytes = next_cross_bytes
                 state.reserved_bytes = next_reserved
                 capability.reserved_bytes = next_capability
@@ -896,129 +813,10 @@ class _ProcessTemporaryStorageGovernor:
             },
         )
 
-    def release(self, device: int, size_bytes: int, *, inode_count: int = 0) -> None:
-        """Release one device without serializing unrelated filesystems."""
-        if type(device) is not int or type(size_bytes) is not int or type(inode_count) is not int:
-            raise TypeError("temporary storage release values must be exact integers")
-        if size_bytes < 0 or inode_count < 0:
-            raise ValueError("temporary storage release sizes must be >= 0")
-        amount = size_bytes
-        amount_inodes = inode_count
-        if amount == 0 and amount_inodes == 0:
-            return
-        state = self._borrow_state(device)
-        if state is None:
-            with self._lock:
-                self._over_release_count += 1
-                self._over_release_bytes += amount
-            return
-        excess = 0
-        excess_inodes = False
-        post_commit_error: BaseException | None = None
-        try:
-            with state.lock:  # type: ignore[attr-defined]
-                self._reconcile_state_authority_locked(device, state)
-                legacy_bytes = state.legacy_reserved_bytes
-                legacy_inodes = state.legacy_reserved_inodes
-                assert type(legacy_bytes) is int and type(legacy_inodes) is int
-                # Bare amount cleanup owns only the legacy subledger. It may not
-                # debit exact capability reservations even when the aggregate is
-                # large enough to hide a duplicate/stale release.
-                released = min(amount, legacy_bytes)
-                excess = max(0, amount - legacy_bytes)
-                released_inodes = min(amount_inodes, legacy_inodes)
-                excess_inodes = amount_inodes > legacy_inodes
-                next_legacy_bytes = legacy_bytes - released
-                next_legacy_inodes = legacy_inodes - released_inodes
-                next_reserved = state.reserved_bytes - released
-                next_inodes = state.reserved_inodes - released_inodes
-                # Cross-process capacity is aggregated per process/device.  Shrink
-                # conservatively in chunks to avoid one file-lock/journal/fsync cycle
-                # per local lease release, but always reconcile completely at zero.
-                byte_slack = max(0, state.cross_reserved_bytes - next_reserved)
-                inode_slack = max(0, state.cross_reserved_inodes - next_inodes)
-                release_bytes = (
-                    byte_slack
-                    if next_reserved == 0 or byte_slack >= _CROSS_PROCESS_SHRINK_QUANTUM_BYTES
-                    else 0
-                )
-                release_inodes = (
-                    inode_slack
-                    if next_inodes == 0 or inode_slack >= _CROSS_PROCESS_SHRINK_QUANTUM_INODES
-                    else 0
-                )
-                if release_bytes or release_inodes or not state.cross_process_enabled:
-                    # Even when host-wide coordination is disabled, keep the
-                    # release helper in the transaction. The helper is a cheap
-                    # no-op in that mode, while tests/control doubles and future
-                    # implementations can still fail before local state commits.
-                    if state.cross_process_enabled:
-                        account = state.cross_account
-                        if account is None:
-                            raise RuntimeError("missing cross-process storage capability")
-                        target_cross_bytes = max(
-                            next_reserved, state.cross_reserved_bytes - release_bytes
-                        )
-                        target_cross_inodes = max(
-                            next_inodes, state.cross_reserved_inodes - release_inodes
-                        )
-                        try:
-                            release_cross_process_account(
-                                account,
-                                release_bytes,
-                                inode_count=release_inodes,
-                                enabled=True,
-                                coordination_directory=state.coordination_directory,
-                                _release_impl=_release_cross_process_raw,
-                            )
-                        except BaseException as exc:
-                            if not self._cross_release_committed(
-                                account, target_cross_bytes, target_cross_inodes
-                            ):
-                                raise
-                            post_commit_error = exc
-                    else:
-                        # Keep the private raw coordinator hook in the commit
-                        # sequence even when host-wide coordination is disabled.
-                        # The real implementation is a no-op in this mode, but
-                        # resolving the module variable at call time preserves
-                        # fault injection/instrumentation without exposing the
-                        # amount-based API publicly.
-                        _release_cross_process_raw(
-                            device,
-                            release_bytes,
-                            inode_count=release_inodes,
-                            enabled=False,
-                            coordination_directory=state.coordination_directory,
-                        )
-                    state.cross_reserved_bytes = max(
-                        next_reserved, state.cross_reserved_bytes - release_bytes
-                    )
-                    state.cross_reserved_inodes = max(
-                        next_inodes, state.cross_reserved_inodes - release_inodes
-                    )
-                state.legacy_reserved_bytes = next_legacy_bytes
-                state.legacy_reserved_inodes = next_legacy_inodes
-                state.reserved_bytes = next_reserved
-                state.reserved_inodes = next_inodes
-        finally:
-            self._return_state(device, state)
-        if post_commit_error is not None:
-            raise post_commit_error
-        if excess or excess_inodes:
-            with self._lock:
-                if excess:
-                    self._over_release_count += 1
-                    self._over_release_bytes += excess
-                if excess_inodes:
-                    self._over_release_count += 1
-
     def diagnostics(self) -> ProcessTemporaryStorageDiagnostics:
         """Return aggregate process-governor cleanup anomalies."""
         with self._lock:
-            return ProcessTemporaryStorageDiagnostics(
-                self._over_release_count, self._over_release_bytes, self._protocol_violations
-            )
+            return ProcessTemporaryStorageDiagnostics(0, 0, self._protocol_violations)
 
     def snapshot(self, path: str | Path | None) -> ProcessTemporaryStorageSnapshot:
         """Return one device snapshot without blocking other filesystems."""
@@ -1087,8 +885,6 @@ class _ProcessTemporaryStorageGovernor:
         self._next_capability = 1
         self._fork_bank_index = 1 - self._fork_bank_index
         self._fork_prepared = None
-        self._over_release_count = 0
-        self._over_release_bytes = 0
 
 
 _PROCESS_TEMPORARY_STORAGE = _ProcessTemporaryStorageGovernor()

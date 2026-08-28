@@ -37,6 +37,11 @@ inside pre-commit environments; do not require separate system executables or
 duplicate those packages in the `dev` extra. After changing either pin, use a
 fresh `PRE_COMMIT_HOME` to verify that a cold hook bootstrap succeeds.
 
+Pytest, mypy, Ruff, coverage, and local native builds keep their regenerable
+state below the ignored `.work/` directory. Deleting it clears those caches,
+reports, and builds without touching environments, release artifacts, or source
+files.
+
 Tests are grouped by domain under [`tests/`](../../tests/README.md):
 
 ```bash
@@ -69,8 +74,8 @@ and error selection across both modes.
 Build the standalone CMake target while iterating on C++:
 
 ```bash
-cmake -S . -B build/dev -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/dev --parallel
+cmake -S . -B .work/build/dev -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build .work/build/dev --parallel
 ```
 
 Build a distributable wheel with:

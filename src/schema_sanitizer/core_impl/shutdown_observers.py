@@ -112,7 +112,6 @@ def _reset_fork() -> None:
     _FORK_LOCK_BANK_INDEX = 1 - _FORK_LOCK_BANK_INDEX
 
 
-# os.register_at_fork compatibility breadcrumb: fork handling is centralized in pass50.
 from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
 
 _register_fork_handler(

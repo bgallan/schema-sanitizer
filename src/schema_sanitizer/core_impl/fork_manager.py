@@ -180,8 +180,6 @@ def _before() -> None:
         if handler is None:
             continue
         callback = handler.before
-        # pass50 compatibility breadcrumb: if handler.before is None and not handler.child_safe_without_prepare
-        # is represented by the prepared bit below rather than re-evaluated in child.
         if callback is None:
             if handler.mode == "child_safe" and handler.child_safe_without_prepare:
                 _FORK_PREPARED[index] = 1

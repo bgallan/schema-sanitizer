@@ -32,7 +32,6 @@ class RootedFinalizerAuthority:
         "arg10",
         "arg11",
         "ticket",
-        "_escrow_armed",
         "_escrow_armed_ticket",
         "_ack_only",
     )
@@ -54,10 +53,6 @@ class RootedFinalizerAuthority:
         self.arg10: object | None = None
         self.arg11: object | None = None
         self.ticket = 0
-        self._escrow_armed = False
-        # The generation, not a process-global boolean, is the durable arm
-        # authority.  ``_escrow_armed`` remains as a compatibility mirror for
-        # older focused doubles/source contracts.
         self._escrow_armed_ticket = 0
         self._ack_only = False
 
@@ -83,7 +78,6 @@ class RootedFinalizerAuthority:
     def make_ack_only(self) -> None:
         """Irreversibly disarm primary cleanup before secondary bookkeeping."""
         self._ack_only = True
-        self._escrow_armed = False
         self._escrow_armed_ticket = 0
 
     def arm_for_ticket(self, ticket: int) -> None:
@@ -92,17 +86,15 @@ class RootedFinalizerAuthority:
         if exact <= 0:
             raise ValueError("rooted finalizer arm ticket must be positive")
         self._escrow_armed_ticket = exact
-        self._escrow_armed = True
 
     def disarm_ticket(self, ticket: int | None = None) -> None:
         """Disarm the matching generation without affecting a newer arm."""
         if ticket is not None and self._escrow_armed_ticket != int(ticket):
             return
         self._escrow_armed_ticket = 0
-        self._escrow_armed = False
 
     def is_armed_for(self, ticket: int) -> bool:
-        return bool(self._escrow_armed and self._escrow_armed_ticket == int(ticket))
+        return self._escrow_armed_ticket == int(ticket)
 
 
 class FinalizerReplayCapability:

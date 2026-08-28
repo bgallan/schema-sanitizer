@@ -49,8 +49,6 @@ def test_example_readme_uses_current_optional_dependency_groups() -> None:
     assert {"gcs", "bigquery", "polars"} <= extras.keys()
     assert 'pip install "schema-sanitizer[gcs,bigquery]"' in readme
     assert 'pip install "schema-sanitizer[polars,gcs,bigquery]"' in readme
-    assert "schema-sanitizer[pyarrow,cloud]" not in readme
-    assert "schema-sanitizer[polars,pyarrow,cloud]" not in readme
 
 
 def test_example_readme_links_every_executable_entrypoint() -> None:

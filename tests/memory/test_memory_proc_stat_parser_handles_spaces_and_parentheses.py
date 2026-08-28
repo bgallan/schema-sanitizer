@@ -14,7 +14,6 @@ _NATIVE_STUB_MODULES = (
     "schema_sanitizer.api_impl.input.directory_preparation",
     "schema_sanitizer.api_impl.source_plan.attached",
     "schema_sanitizer.api_impl.source_plan.remote_cleanup",
-    "schema_sanitizer.api_impl.source_plan.remote_runtime.provider",
     "schema_sanitizer.api_impl.source_plan.remote_runtime",
     "schema_sanitizer.api_impl.source_plan.remote",
 )
@@ -229,10 +228,10 @@ def test_remote_provider_retains_current_after_planning_cleanup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Planning failure cannot discard a staged chunk whose close also failed."""
+    from schema_sanitizer.api_impl.source_plan import remote_runtime as remote_provider
     from schema_sanitizer.api_impl.source_plan.remote import (
         RemotePathSourceChunkProvider,
     )
-    from schema_sanitizer.api_impl.source_plan.remote_runtime import provider as remote_provider
 
     staged = _Staged()
     provider = RemotePathSourceChunkProvider(
@@ -355,10 +354,10 @@ def test_remote_provider_rejects_child_before_touching_resources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fork child cannot consume inherited staged chunks or iterators."""
+    from schema_sanitizer.api_impl.source_plan import remote_runtime as remote_provider
     from schema_sanitizer.api_impl.source_plan.remote import (
         RemotePathSourceChunkProvider,
     )
-    from schema_sanitizer.api_impl.source_plan.remote_runtime import provider as remote_provider
 
     provider = RemotePathSourceChunkProvider(
         retained_chunks=[object()],

@@ -141,10 +141,8 @@ def read_test_json(path, *, output_format: str = "pyarrow", **options):
 
 
 def read_test_jsonl(path, *, output_format: str = "pyarrow", **options):
-    """Read JSONL or NDJSON through the new analytical API."""
-    suffix = str(path).lower().split("?", 1)[0]
-    input_format = "ndjson" if suffix.endswith(".ndjson") else "jsonl"
-    return read_test_path(path, input_format=input_format, output_format=output_format, **options)
+    """Read JSONL through the analytical API."""
+    return read_test_path(path, input_format="jsonl", output_format=output_format, **options)
 
 
 def read_test_json_folder(path, *, output_format: str = "pyarrow", **options):

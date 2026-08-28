@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import heapq
 import math
 import os
 import random
@@ -35,8 +34,6 @@ from .process_resources import (
 )
 from .safe_errors import clear_exception_traceback, safe_exception_summary
 from .terminal_ownership import publish_terminal_owner, retire_terminal_category
-
-_ORIGINAL_HEAPPUSH = heapq.heappush
 
 _MAX_PENDING_RETRIES = 8192
 _MAX_PENDING_BYTES = 32 * 1024 * 1024
@@ -239,11 +236,6 @@ class _ScheduledRetry:
         self.callback = _noop
         return callback
 
-    def discard_payload(self) -> None:
-        """Compatibility helper for already-detached/off-lock callers."""
-        self.callback = _noop
-        self.retained_bytes = 0
-
 
 @dataclass(slots=True)
 class _GuardedRelease:
@@ -271,7 +263,7 @@ class _BoundedDeadlineIndex:
 
     The backing list never grows after construction. Every item stores its heap
     index in ``deadline_slot``, so replace/remove are O(log n), peek is O(1),
-    and stale historical nodes are structurally impossible.
+    and stale nodes are structurally impossible.
     """
 
     __slots__ = ("_slots", "_count", "_capacity")
@@ -368,10 +360,6 @@ class _BoundedDeadlineIndex:
             raise RuntimeError("retry deadline owner already indexed")
         if self._count >= self._capacity:
             raise RuntimeError("retry deadline index capacity exhausted")
-        # Keep the historical fault-injection seam entirely before commit.
-        if heapq.heappush is not _ORIGINAL_HEAPPUSH:
-            scratch: list[_ScheduledRetry] = []
-            heapq.heappush(scratch, item)
         index = self._count
         self._slots[index] = item
         item.deadline_slot = index
@@ -384,9 +372,6 @@ class _BoundedDeadlineIndex:
             raise RuntimeError("retry deadline replacement lost source owner")
         if new.deadline_slot >= 0:
             raise RuntimeError("retry deadline replacement target already indexed")
-        if heapq.heappush is not _ORIGINAL_HEAPPUSH:
-            scratch: list[_ScheduledRetry] = []
-            heapq.heappush(scratch, new)
         self._slots[index] = new
         new.deadline_slot = index
         old.deadline_slot = -1
@@ -513,14 +498,10 @@ class _ReleaseGuardian:
         self._pid = pid
         self._condition = threading.Condition()
         self._items: dict[int, _GuardedRelease] = {}
-        # One authoritative owner map; the compatibility alias cannot diverge.
-        self._owner_index = self._items
         self._generations: dict[int, int] = {}
-        self._generation_sequence = 0
         self._dead_letters: list[_GuardedRelease | None] = [None] * _MAX_DEAD_LETTERS
         self._dead_letter_count = 0
         self._dead_letter_bytes = 0
-        self._order: deque[int] = deque()  # compatibility only; pass51 scans owner states
         self._retained_bytes = 0
         self._active_releases = 0
         self._workers: set[threading.Thread] = set()
@@ -639,7 +620,6 @@ class _ReleaseGuardian:
                 except BaseException:
                     self._generations.pop(owner_id, None)
                     raise
-                self._generation_sequence = max(self._generation_sequence, generation)
                 self._retained_bytes += charge
                 accepted = True
                 self._mark_progress_locked()
@@ -1117,7 +1097,7 @@ class _RetryScheduler:
 
     A key can own at most one running callback and one coalesced successor.  The
     CLAIMED -> RUNNING transition and cancellation decision share the scheduler
-    condition lock, closing the pass37 check-then-call race.
+    condition lock, closing the check-then-call race.
     """
 
     def __init__(self) -> None:
@@ -1142,10 +1122,6 @@ class _RetryScheduler:
         self._active_retries = 0
         self._active_bytes = 0
         self._generation_pool = BoundedGenerationPool(_MAX_PENDING_RETRIES)
-        # Compatibility diagnostics: these mirror the latest reusable token;
-        # they are no longer lifetime-monotonic namespaces.
-        self._token_sequence = 0
-        self._heap_sequence = 0
         self._subsystem_counts: dict[Hashable, int] = {}
         self._subsystem_bytes: dict[Hashable, int] = {}
         self._timer_worker: threading.Thread | None = None
@@ -1252,25 +1228,10 @@ class _RetryScheduler:
         except BaseException:
             pass
 
-    def _next_token_locked(self, *, commit: bool = True) -> int:
-        token = self._generation_pool.acquire()
-        if token is None:
-            raise RuntimeError("retry token generation capacity exhausted")
-        if commit:
-            self._token_sequence = token
-        return token
-
     def _release_retry_generation_locked(self, item: _ScheduledRetry) -> None:
         token = item.token
         if token and self._generation_pool.release_for(item):
             item.token = 0
-
-    def _release_generation_token_noexcept_locked(self, token: int) -> None:
-        """Return one unpublished generation without masking a primary failure."""
-        try:
-            self._generation_pool.release(token)
-        except BaseException as exc:
-            clear_exception_traceback(exc)
 
     @staticmethod
     def _deadline_from_delay(delay_seconds: int | float) -> int:
@@ -1399,20 +1360,8 @@ class _RetryScheduler:
         if not self._has_key_locked(key):
             self._key_generations.pop(key, None)
 
-    def _compact_heap_locked(self, *, force: bool = False) -> None:
-        """Compatibility hook: pass51 deadline storage never contains stale nodes."""
-        # pass35/pass50 compatibility: self._heap.insert(item) used to
-        # require stale-node compaction. The bounded deadline index has exactly
-        # one physical node per current key, so there is nothing to rebuild.
-        return
-
-    def _compact_ready_locked(self, *, force: bool = False) -> None:
-        """Compatibility hook: the ready map is the sole physical ready index."""
-        return
-
     def _enqueue_ready_locked(self, item: _ScheduledRetry) -> None:
-        # ``_ready_by_key`` is authoritative in pass51. No growable deque/index
-        # publication occurs after a retry leaves the deadline index.
+        # No growable queue is published after a retry leaves the deadline index.
         item.state = _RetryItemState.READY
 
     def _take_ready_locked(self) -> _ScheduledRetry | None:
@@ -1579,10 +1528,6 @@ class _RetryScheduler:
             self._detach_locked(successor, detached)
         return removed
 
-    # Compatibility name retained for pass36/private tests.
-    def _remove_existing_locked(self, key: Hashable, detached: list[Callable[[], None]]) -> None:
-        self._remove_scheduled_locked(key, detached)
-
     def _install_successor_locked(
         self, item: _ScheduledRetry, detached: list[Callable[[], None]]
     ) -> None:
@@ -1703,8 +1648,6 @@ class _RetryScheduler:
         jitter_fraction: float = 0.0,
     ) -> bool:
         """Install or replace one retry with a prepare -> publish -> retire protocol."""
-        # pass50 compatibility breadcrumb: heapq.heappush(self._heap, item)
-        # preceded self._current[key] = item; pass51 uses the fixed index insert.
         self._ensure_process()
         ensure_runtime_fork_safe()
         key = _normalize_retry_key(key)
@@ -1804,7 +1747,7 @@ class _RetryScheduler:
                     self._rejected_bytes += charge
                 self._mark_progress_locked()
                 return False
-            # Pass85 owner-first generation admission. Construct the retry owner
+            # Construct the retry owner before generation admission;
             # before the namespace commits; an interrupted token handoff can be
             # rolled back by item identity even when ``token = CALL`` never stored.
             control_ticket = reserve_control_plane("retry_item", 384)
@@ -2008,16 +1951,6 @@ class _RetryScheduler:
                 accepted = True
 
             if accepted:
-                self._token_sequence = token
-                self._heap_sequence = token
-                try:
-                    self._compact_heap_locked()
-                except BaseException:
-                    pass
-                try:
-                    self._compact_ready_locked()
-                except BaseException:
-                    pass
                 self._mark_progress_locked()
                 try:
                     self._condition.notify_all()
@@ -2054,8 +1987,6 @@ class _RetryScheduler:
             if removed:
                 self._mark_progress_locked()
             self._maybe_prune_generation_locked(key)
-            self._compact_heap_locked()
-            self._compact_ready_locked()
             self._condition.notify_all()
         detached.clear()
 
@@ -2359,8 +2290,7 @@ class _RetryScheduler:
             if not defer_governed_thread_retirement(current, owned_lease.release):
                 self._adopt_failed_lease(owned_lease)
         else:
-            # Focused test/control leases are not physical project permits and
-            # preserve the historical synchronous release contract.
+            # Non-project leases are retired synchronously.
             try:
                 owned_lease.release()
             except BaseException:
@@ -2399,8 +2329,6 @@ class _RetryScheduler:
                 if active is not None and active.state is _RetryItemState.CLAIMED:
                     self._key_generations[key] = 0
                     active.state = _RetryItemState.CANCELLED
-            self._compact_heap_locked(force=True)
-            self._compact_ready_locked(force=True)
             self._condition.notify_all()
         detached.clear()
 

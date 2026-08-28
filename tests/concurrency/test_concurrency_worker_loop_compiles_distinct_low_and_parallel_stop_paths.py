@@ -4,11 +4,11 @@ from pathlib import Path
 
 from conftest import require_native
 
+from benchmarks.concurrency.assets import load_evidence
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-BENCH = ROOT / "benchmarks/evidence/concurrency/lifecycle/stop-token-worker-loop.json"
 
 
 def test_worker_loop_compiles_distinct_low_and_parallel_stop_paths() -> None:
@@ -55,6 +55,5 @@ def test_native_cancellation_remains_exact() -> None:
 
 def test_documentation_and_benchmark_record_threshold_and_matrix() -> None:
     """Verify the named concurrency regression contract."""
-    benchmark = BENCH.read_text(encoding="utf-8")
-    for workers in ('"4"', '"5"', '"8"', '"16"'):
-        assert workers in benchmark
+    evidence = load_evidence("stop-token-worker-loop")
+    assert {"4", "5", "8", "16"} <= set(evidence)

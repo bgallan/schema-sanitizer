@@ -3,7 +3,7 @@
 The ledger intentionally stores no payload objects.  It centralizes the answer
 to "does terminal ownership still exist?" without becoming a second owner graph.
 
-Pass 55 hardening keeps the authoritative terminal records in one preallocated
+The authoritative terminal records live in one preallocated
 fixed-capacity bank.  Publishing or retiring terminal ownership therefore never
 needs to grow a dict/list at the exact point where the runtime may already be
 under memory pressure.  Metadata overhead is also reported explicitly in bytes
@@ -209,8 +209,6 @@ class TerminalOwnershipLedger:
                 diagnostic_transition()
                 return False
             next_owners = authoritative + 1
-            # pass76 ordering breadcrumb: next_owners = self._owners + 1
-            # The authoritative slot count supersedes the old cache expression.
             slot.category = category
             slot.token = token
             slot.retained_bytes = retained_bytes

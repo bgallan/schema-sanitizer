@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/layout/arena-writer-domain-cacheline.json"
-PROBE = ROOT / "benchmarks/probes/concurrency/layout/arena-writer-domain-cacheline-tsan.cc"
 
 
 def test_isolates_independent_arena_writer_domains() -> None:
@@ -36,7 +35,7 @@ def test_isolates_independent_arena_writer_domains() -> None:
 
 def test_probe_stresses_all_cursor_domains_and_exact_drain() -> None:
     """The native/TSan probe submits concurrently through all lane cursors."""
-    source = PROBE.read_text(encoding="utf-8")
+    source = load_probe("layout/arena-writer-domain-cacheline-tsan.cc")
     compact = source.replace(" ", "").replace("\n", "")
 
     assert "std::barrier" in source
@@ -52,7 +51,7 @@ def test_probe_stresses_all_cursor_domains_and_exact_drain() -> None:
 
 def test_evidence_is_positive_and_narrowly_scoped() -> None:
     """The evidence covers realistic independent writers without overclaiming."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("arena-writer-domain-cacheline")
 
     assert evidence["pair_count"] == 15
     assert "does not measure parsing" in evidence["scope"]

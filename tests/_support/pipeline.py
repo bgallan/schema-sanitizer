@@ -58,7 +58,7 @@ def _write_warm_up_source(
         path.write_text(f'{{"{field_name}": 1}}', encoding="utf-8")
     elif input_format == "json_array":
         path.write_text(f'[{{"{field_name}": 1}}]', encoding="utf-8")
-    elif input_format in {"jsonl", "ndjson"}:
+    elif input_format == "jsonl":
         path.write_text(f'{{"{field_name}": 1}}\n', encoding="utf-8")
     elif input_format == "xml":
         path.write_text(f"<row><{field_name}>1</{field_name}></row>", encoding="utf-8")

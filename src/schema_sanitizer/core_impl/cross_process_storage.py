@@ -6,7 +6,6 @@ import json
 import os
 import tempfile
 from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
@@ -20,7 +19,7 @@ from .coordination_journal import (
     recover_locked_payload,
 )
 from .fork_safety import quarantine_inherited_state
-from .process_identity import process_identity_matches, process_start_token
+from .process_identity import process_is_alive, process_start_token
 
 try:  # pragma: no cover - exercised on POSIX CI
     import fcntl
@@ -46,9 +45,6 @@ _register_static_control_plane(
 )
 # stale_keys are stored in this fixed scratch buffer; no per-prune list allocation.
 _MAX_LOCAL_ACCOUNTS = 4096
-_COORDINATION_DIRECTORY_OVERRIDE: ContextVar[Path | None] = ContextVar(
-    "schema_sanitizer_storage_coordination_directory_override", default=None
-)
 
 
 @dataclass(slots=True)
@@ -106,23 +102,13 @@ def open_cross_process_storage_account(device: int) -> CrossProcessStorageAccoun
     return account
 
 
-def _enabled() -> bool:
+def cross_process_storage_enabled() -> bool:
     """Return whether cross-process coordination is explicitly enabled."""
     value = os.getenv(_ENV_ENABLED, "").strip().lower()
     return fcntl is not None and value in {"1", "true", "yes", "on"}
 
 
-def cross_process_storage_enabled() -> bool:
-    """Return the configuration snapshot used by a new process-local device state."""
-    return _enabled()
-
-
 def cross_process_storage_directory() -> Path:
-    """Return the coordination directory captured by a new device state."""
-    return _coordination_directory()
-
-
-def _coordination_directory() -> Path:
     """Return the shared host directory used for reservation state."""
     configured = os.getenv(_ENV_DIRECTORY)
     path = Path(configured) if configured else Path(tempfile.gettempdir())
@@ -130,28 +116,9 @@ def _coordination_directory() -> Path:
     return path
 
 
-def _process_start_token(pid: int) -> str:
-    """Return the shared PID-reuse-safe process start token."""
-    return process_start_token(pid)
-
-
 def _nonnegative_int(value: object) -> int:
     """Return a non-negative JSON integer, rejecting every other type."""
     return max(0, value) if type(value) is int else 0
-
-
-def _process_alive(pid: int, start_token: str) -> bool:
-    """Return whether the recorded process still owns its PID instance."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    current = _process_start_token(pid)
-    return process_identity_matches(start_token, current)
 
 
 def _decode_state(raw: bytes) -> dict[str, object]:
@@ -166,24 +133,29 @@ def _decode_state(raw: bytes) -> dict[str, object]:
         raise OSError("cross-process temporary-storage state is corrupt") from exc
     if not isinstance(decoded, dict):
         raise OSError("cross-process temporary-storage state root must be an object")
-    version = decoded.get("version", 1)
-    if version != 1:
+    if set(decoded) != {"version", "processes"}:
+        raise OSError("cross-process temporary-storage state has unknown or missing fields")
+    version = decoded["version"]
+    if type(version) is not int or version != 1:
         raise OSError(f"unsupported cross-process temporary-storage state version: {version!r}")
-    processes = decoded.get("processes", {})
+    processes = decoded["processes"]
     if not isinstance(processes, dict):
         raise OSError("cross-process temporary-storage processes must be an object")
     return {"version": 1, "processes": processes}
 
 
 def _encode_state(state: object) -> bytes:
-    """Return the canonical representation shared with legacy writers."""
+    """Return the canonical coordination-state representation."""
     return json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
 
 
 @contextmanager
-def _locked_state(device: int) -> Iterator[tuple[object, dict[str, object]]]:
+def _locked_state(
+    device: int,
+    directory: Path | None = None,
+) -> Iterator[tuple[object, dict[str, object]]]:
     """Lock and transactionally update one device reservation document."""
-    directory = _COORDINATION_DIRECTORY_OVERRIDE.get() or _coordination_directory()
+    directory = cross_process_storage_directory() if directory is None else directory
     path = directory / f"schema-sanitizer-temp-{device}.json"
     with open_coordination_file(path) as handle:
         with coordination_file_lock(handle):
@@ -191,9 +163,7 @@ def _locked_state(device: int) -> Iterator[tuple[object, dict[str, object]]]:
                 path,
                 handle,
                 max_payload_bytes=_MAX_STATE_BYTES,
-                validate=_decode_state,
-                canonicalize=_encode_state,
-                process_alive=_process_alive,
+                process_alive=process_is_alive,
             )
             state = _decode_state(raw)
             baseline = _encode_state(state)
@@ -219,19 +189,8 @@ def _locked_state(device: int) -> Iterator[tuple[object, dict[str, object]]]:
                             before=raw,
                             after=payload,
                             max_payload_bytes=_MAX_STATE_BYTES,
-                            process_start=_process_start_token(os.getpid()),
+                            process_start=process_start_token(os.getpid()),
                         )
-
-
-@contextmanager
-def _locked_state_for(device: int, directory: Path) -> Iterator[tuple[object, dict[str, object]]]:
-    """Use one reservation-lifetime directory with the legacy lock hook."""
-    token = _COORDINATION_DIRECTORY_OVERRIDE.set(directory)
-    try:
-        with _locked_state(device) as value:
-            yield value
-    finally:
-        _COORDINATION_DIRECTORY_OVERRIDE.reset(token)
 
 
 def _clean_processes(state: dict[str, object]) -> dict[str, dict[str, object]]:
@@ -264,10 +223,12 @@ def _clean_processes(state: dict[str, object]) -> dict[str, dict[str, object]]:
                 raise OSError(f"invalid temporary-storage process entry: {key!r}")
             if pid <= 0 or reserved < 0 or inodes < 0:
                 raise OSError(f"invalid temporary-storage process entry: {key!r}")
+            if key != f"{pid}:{token}":
+                raise OSError(f"invalid temporary-storage process identity: {key!r}")
             alive = True
             if reserved or inodes:
                 if liveness_checks < _MAX_LIVENESS_CHECKS_PER_TRANSACTION:
-                    alive = _process_alive(pid, token)
+                    alive = process_is_alive(pid, token)
                     liveness_checks += 1
             if not (reserved or inodes) or not alive:
                 _STALE_KEY_SCRATCH[stale_count] = key
@@ -312,18 +273,15 @@ def _reserve_cross_process_raw(
         raise ValueError("cross-process storage accounting values must be >= 0")
     requested = size_bytes
     requested_inodes = inode_count
-    coordinated = _enabled() if enabled is None else bool(enabled and fcntl is not None)
+    coordinated = (
+        cross_process_storage_enabled() if enabled is None else bool(enabled and fcntl is not None)
+    )
     if not coordinated or (requested == 0 and requested_inodes == 0):
         return 0
     pid = os.getpid()
-    start = _process_start_token(pid)
+    start = process_start_token(pid)
     owner = f"{pid}:{start}"
-    state_context = (
-        _locked_state_for(device, coordination_directory)
-        if coordination_directory is not None
-        else _locked_state(device)
-    )
-    with state_context as (_handle, state):
+    with _locked_state(device, coordination_directory) as (_handle, state):
         processes = _clean_processes(state)
         total = sum(_nonnegative_int(item.get("reserved")) for item in processes.values())
         next_total = total + requested
@@ -367,18 +325,15 @@ def _release_cross_process_raw(
         raise ValueError("cross-process storage release values must be >= 0")
     amount = size_bytes
     amount_inodes = inode_count
-    coordinated = _enabled() if enabled is None else bool(enabled and fcntl is not None)
+    coordinated = (
+        cross_process_storage_enabled() if enabled is None else bool(enabled and fcntl is not None)
+    )
     if not coordinated or (amount == 0 and amount_inodes == 0):
         return 0
     pid = os.getpid()
-    start = _process_start_token(pid)
+    start = process_start_token(pid)
     owner = f"{pid}:{start}"
-    state_context = (
-        _locked_state_for(device, coordination_directory)
-        if coordination_directory is not None
-        else _locked_state(device)
-    )
-    with state_context as (_handle, state):
+    with _locked_state(device, coordination_directory) as (_handle, state):
         processes = _clean_processes(state)
         current = processes.get(owner)
         if current is not None:
@@ -407,18 +362,15 @@ def _reconcile_cross_process_account_raw(
     grow one.  This makes ambiguous interruption windows conservatively
     overcharged instead of manufacturing shared headroom.
     """
-    coordinated = _enabled() if enabled is None else bool(enabled and fcntl is not None)
+    coordinated = (
+        cross_process_storage_enabled() if enabled is None else bool(enabled and fcntl is not None)
+    )
     if not coordinated:
         return 0
     pid = os.getpid()
-    start = _process_start_token(pid)
+    start = process_start_token(pid)
     owner = f"{pid}:{start}"
-    state_context = (
-        _locked_state_for(device, coordination_directory)
-        if coordination_directory is not None
-        else _locked_state(device)
-    )
-    with state_context as (_handle, state):
+    with _locked_state(device, coordination_directory) as (_handle, state):
         processes = _clean_processes(state)
         current = processes.get(owner)
         current_bytes = 0 if current is None else _nonnegative_int(current.get("reserved"))
@@ -507,16 +459,6 @@ def _authenticate_account_locked(account: CrossProcessStorageAccount) -> None:
         _authenticate_account_registry_unlocked(account)
 
 
-def _authenticate_account(account: CrossProcessStorageAccount) -> None:
-    """Compatibility authentication with close/reserve serialization."""
-    if type(account) is not CrossProcessStorageAccount:
-        raise TypeError("cross-process storage account must be exact")
-    if account.pid != os.getpid():
-        raise RuntimeError("cross-process storage account cannot be reused after fork")
-    with account.lock:
-        _authenticate_account_locked(account)
-
-
 def reserve_cross_process_account(
     account: CrossProcessStorageAccount,
     size_bytes: int,
@@ -526,7 +468,6 @@ def reserve_cross_process_account(
     inode_capacity: int | None = None,
     enabled: bool | None = None,
     coordination_directory: Path | None = None,
-    _reserve_impl=None,
 ) -> int:
     """Grow an authenticated process contribution; bytes alone are not authority."""
     if type(account) is not CrossProcessStorageAccount:
@@ -537,7 +478,6 @@ def reserve_cross_process_account(
         raise TypeError("cross-process storage reservation values must be exact integers")
     if size_bytes < 0 or inode_count < 0:
         raise ValueError("cross-process storage reservation values must be >= 0")
-    impl = _reserve_cross_process_raw if _reserve_impl is None else _reserve_impl
     with account.lock:
         _authenticate_account_locked(account)
         _reconcile_account_locked(
@@ -551,7 +491,7 @@ def reserve_cross_process_account(
         with _ACCOUNT_LOCK:
             _authenticate_account_registry_unlocked(account)
             try:
-                total = impl(
+                total = _reserve_cross_process_raw(
                     account.device,
                     size_bytes,
                     capacity_bytes,
@@ -575,7 +515,6 @@ def release_cross_process_account(
     inode_count: int = 0,
     enabled: bool | None = None,
     coordination_directory: Path | None = None,
-    _release_impl=None,
 ) -> int:
     """Shrink only bytes owned by the exact authenticated contribution."""
     if type(account) is not CrossProcessStorageAccount:
@@ -586,7 +525,6 @@ def release_cross_process_account(
         raise TypeError("cross-process storage release values must be exact integers")
     if size_bytes < 0 or inode_count < 0:
         raise ValueError("cross-process storage release values must be >= 0")
-    impl = _release_cross_process_raw if _release_impl is None else _release_impl
     with account.lock:
         _authenticate_account_locked(account)
         _reconcile_account_locked(
@@ -605,7 +543,7 @@ def release_cross_process_account(
             account.reserved_inodes = next_inodes
             account.reconciliation_pending = True
             try:
-                total = impl(
+                total = _release_cross_process_raw(
                     account.device,
                     size_bytes,
                     inode_count=inode_count,
@@ -645,7 +583,7 @@ def close_cross_process_storage_account(account: CrossProcessStorageAccount) -> 
 
 def cross_process_reserved_bytes(device: int) -> int:
     """Return live host-wide reservations for one filesystem device."""
-    if not _enabled():
+    if not cross_process_storage_enabled():
         return 0
     with _locked_state(device) as (_handle, state):
         processes = _clean_processes(state)

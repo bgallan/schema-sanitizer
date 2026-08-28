@@ -402,7 +402,7 @@ def test_input_text_encoding_streams_non_utf8_path_csv(
     path.write_bytes("name\ncafé\nmañana\n".encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
@@ -443,7 +443,7 @@ def test_execution_context_streams_non_utf8_path_csv(
     path.write_bytes("name\ncafé\n".encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
@@ -467,7 +467,7 @@ def test_input_text_encoding_streams_non_utf8_path_jsonl(
     path.write_bytes('{"name":"café"}\n{"name":"mañana"}\n'.encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
@@ -486,7 +486,7 @@ def test_input_text_encoding_streams_non_utf8_path_json_array(
     path.write_bytes('[{"name":"café"},{"name":"mañana"}]\n'.encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)

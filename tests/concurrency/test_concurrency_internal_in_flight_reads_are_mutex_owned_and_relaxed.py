@@ -26,12 +26,6 @@ def test_internal_in_flight_reads_are_mutex_owned_and_relaxed():
     assert "return in_flight_.load(std::memory_order_acquire);" in header
 
 
-def test_dead_completed_counter_is_removed():
-    """The unread completed counter and all of its writes remain absent."""
-    source = EXECUTOR.read_text()
-    assert "completed_count_" not in source
-
-
 def test_native_cancellation_drain_stays_exact():
     """Native cancellation leaves no active or queued arena work."""
     require_native()

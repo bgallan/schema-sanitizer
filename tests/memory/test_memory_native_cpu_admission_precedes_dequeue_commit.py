@@ -46,9 +46,9 @@ def test_async_results_support_pre_materialization_credit_and_reconcile_after_fe
     body = source[start:end]
     reserve = body.index('stage="async_result_preflight"')
     fetch = body.index("value = await fetch(index)")
-    reconcile = body.index("resize(retained_size)")
+    reconcile = body.index("resize(retained_bound)")
     assert reserve < fetch < reconcile
-    assert "expected_retained_bytes" in source
+    assert "preflight_bytes" in source
 
 
 def test_async_result_estimator_extrapolates_unvisited_items_conservatively() -> None:
@@ -59,12 +59,12 @@ def test_async_result_estimator_extrapolates_unvisited_items_conservatively() ->
     assert estimate >= sum(len(item) for item in payload)
 
 
-def test_async_terminal_debt_is_preallocated_owns_late_queue_and_has_no_unbounded_fallback() -> (
-    None
-):
+def test_async_terminal_debt_preallocates_exact_result_owners_without_unbounded_fallback() -> None:
     source = _source("core_impl/async_scheduler.py")
     assert "_AsyncTerminalDebt() for _ in range(_ASYNC_TERMINAL_DEBT_CAPACITY)" in source
-    assert "self.result_queue = result_queue" in source
+    assert "debt.result_slots = result_slots" in source
+    assert "debt.pending_slots = pending_slots" in source
+    assert "debt.building_tasks = tasks" in source
     assert "async terminal debt capacity must cover every live task slot" in source
     stop = source[
         source.index("async def _stop_workers") : source.index("async def ordered_indexed_results")
@@ -259,8 +259,8 @@ def test_physical_thread_observation_is_cross_platform_and_fail_closed() -> None
     assert "ProcessPhysicalThreadCount()" not in permit
     assert "TryAcquireProcessThreadPermitsUpTo" in permit
     assert "EffectiveProcessThreadCapacity performs the authoritative fail-closed" in permit
-    module = (CPP / "api/python_abi3/_core_abi3_module.cc").read_text()
-    assert '"process_physical_thread_count"' in module
+    catalog = (CPP / "internal/abi/python_abi3/method_catalog.inc").read_text()
+    assert "process_physical_thread_count," in catalog
 
 
 def test_thread_capacity_uses_live_memory_headroom_not_only_ceiling() -> None:
@@ -394,7 +394,7 @@ def test_async_production_callers_supply_predictable_result_preflight_sizes() ->
         "remote_impl/providers/azure.py",
     ]
     for relative in expected:
-        assert "expected_retained_bytes=" in _source(relative), relative
+        assert "AsyncResultMemoryContract" in _source(relative), relative
 
 
 def test_sources_keep_cmake43_and_compile() -> None:
@@ -419,7 +419,8 @@ def test_thread_stack_reservations_consume_live_headroom_on_python_and_cpp() -> 
     ]
     assert "virtual_stack_reserved" in hard
     assert "governed_in_use" in hard
-    assert "_CONSERVATIVE_THREAD_STACK_BYTES" in hard
+    assert "stack_bytes = _thread_stack_reservation_bytes()" in hard
+    assert "_CONSERVATIVE_THREAD_STACK_BYTES" in process
 
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text()
     assert "ManagedThreadMemoryCapacity" in arena
@@ -464,11 +465,11 @@ def test_python_and_cpp_share_one_physical_thread_permit_domain(
     cpp = (CPP / "internal/runtime/operation_task_arena.cc").read_text()
     assert "g_process_physical_thread_permits" in cpp
     assert "TryAcquireProcessPhysicalThreadPermitsUpTo" in cpp
-    module = (CPP / "api/python_abi3/_core_abi3_module.cc").read_text()
+    catalog = (CPP / "internal/abi/python_abi3/method_catalog.inc").read_text()
     for method in (
         "process_physical_thread_permits_acquire",
         "process_physical_thread_permits_release",
         "process_physical_thread_mark_running",
         "process_physical_thread_mark_stopped",
     ):
-        assert f'"{method}"' in module
+        assert f"{method}," in catalog

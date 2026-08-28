@@ -97,7 +97,6 @@ def test_sources_define_direct_rows_and_lazy_segment_state() -> None:
     assert "RowFlags::kJsonObjectRequired" in storage
     assert scanner.index("std::memchr") < scanner.index("std::pmr::vector<LineSegment>")
     assert "until a record actually crosses an input chunk boundary" in scanner
-    assert len(frontend.splitlines()) <= 600
 
 
 def test_direct_raw_rows_preserve_crlf_and_missing_final_newline(

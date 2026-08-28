@@ -23,6 +23,7 @@ RELEASE_WHEEL_PLATFORM_TAGS = {
 }
 
 _SCRATCH_PARTS = {
+    ".work",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
@@ -74,6 +75,8 @@ _SDIST_REQUIRED = {
     "meta/VERSION",
     "meta/ci/README.md",
     "meta/ci/fuzz/check_fuzz_corpus.py",
+    "meta/ci/fuzz/corpus_io.py",
+    "meta/ci/fuzz/pack_fuzz_regressions.py",
     "meta/ci/fuzz/run_fuzz_regressions.py",
     "meta/ci/native/check_cpp_documentation.py",
     "meta/ci/native/check_no_arrow_cpp.sh",
@@ -101,6 +104,8 @@ _SDIST_REQUIRED = {
     "pyproject.toml",
     "src/schema_sanitizer/py.typed",
 }
+_SDIST_EXCLUDED_PREFIXES = (".github/", "benchmarks/", "examples/", "fuzz/corpus/")
+_SDIST_EXCLUDED_SUFFIXES = (".sha1.zip",)
 
 
 def _source_date_epoch() -> int | None:
@@ -191,6 +196,14 @@ def _validate_sdist(path: Path, names: list[str]) -> None:
     if scratch:
         preview = scratch[:20]
         raise AssertionError(f"{path.name}: contains scratch/build files: {preview}")
+
+    bulky = sorted(
+        name
+        for name in relative
+        if name.startswith(_SDIST_EXCLUDED_PREFIXES) or name.endswith(_SDIST_EXCLUDED_SUFFIXES)
+    )
+    if bulky:
+        raise AssertionError(f"{path.name}: contains repository-only assets: {bulky[:20]}")
 
     if not any(name.startswith("cpp/src/") for name in relative):
         raise AssertionError(f"{path.name}: native sources are missing")

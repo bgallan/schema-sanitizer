@@ -2,8 +2,7 @@
 
 Completed transitions leave an even epoch.  Writers that need to expose a
 multi-step mutation can use :func:`diagnostic_write` so readers reject the odd
-in-flight epoch.  Legacy one-shot transition sites advance by two and therefore
-remain completed writes.
+in-flight epoch. One-shot transitions advance by two and remain completed writes.
 """
 
 from __future__ import annotations

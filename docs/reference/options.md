@@ -19,7 +19,7 @@ at the end of this document.
 |---|---:|---|
 | `input_path` | required | Local path, `file://` URI, supported remote URI, `SourceManifest`, or Python dictionary iterable. |
 | `output_path` | file outputs only | Local or supported remote destination. |
-| `input_format` | `None` | Required for files: `csv`, `json`, `json_array`, `jsonl`, `ndjson`, `xml`, or `parquet`; omit or use `python` for Python rows. |
+| `input_format` | `None` | Required for files: `csv`, `json`, `json_array`, `jsonl`, `xml`, or `parquet`; omit or use `python` for Python rows. |
 | `input_mode` | `"single_file"` | `single_file` or non-recursive `directory`. |
 | `schema_mode` | `"additive"` | `additive`, or `strict` when an existing contract must reject unexpected fields. |
 | `schema_registry` | `None` | Previous registry mapping or JSON; `None` starts a registry. |

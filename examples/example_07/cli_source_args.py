@@ -12,7 +12,7 @@ def add_source_args(parser: argparse.ArgumentParser) -> None:
     """Add source/output URI planning arguments."""
     parser.add_argument(
         "--input-format",
-        choices=("csv", "json", "json_array", "jsonl", "ndjson", "xml", "parquet"),
+        choices=("csv", "json", "json_array", "jsonl", "xml", "parquet"),
         default="json_array",
         help=(
             "Source format passed to schema_sanitizer.to_parquet. It also controls "

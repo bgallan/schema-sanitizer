@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ..core_impl.async_scheduler import drain_ordered_indexed_results, retry_async
+from ..core_impl.async_scheduler import (
+    AsyncResultMemoryContract,
+    drain_ordered_indexed_results,
+    retry_async,
+)
 from ..core_impl.execution_policy import execution_policy
 from ..core_impl.memory_budget import memory_budget
 from ..core_impl.temporary_storage import (
@@ -275,7 +279,7 @@ async def _download_files_with_context(
         len(files),
         fetch,
         window=max(1, window),
-        expected_retained_bytes=64,
+        memory_contract=AsyncResultMemoryContract(preflight_bytes=64),
     )
 
 

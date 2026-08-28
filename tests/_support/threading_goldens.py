@@ -138,7 +138,7 @@ def logical_file_rows(path: Path) -> tuple[tuple[str, ...], list[dict[str, Any]]
 
         table = pq.read_table(path, use_threads=False)
         return tuple(table.schema.names), normalized_rows(table)
-    if suffix in {".jsonl", ".ndjson"}:
+    if suffix == ".jsonl":
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
         names = tuple(rows[0]) if rows else ()
         return names, [normalize_row(row) for row in rows]

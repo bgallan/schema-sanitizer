@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -127,10 +126,9 @@ def test_notifier_hard_deadline_is_dispatch_barrier(
     )
     event = module.AvailabilityEvent.RETRY_SCHEDULER
     assert governor.register_availability_event(event)
-    generation = governor._availability_events[event]
-    delivery = module._AvailabilityDelivery(governor, event, generation)
+    delivery = governor._availability_events[event]
     delivery.next_attempt_ns = time.monotonic_ns() + 150_000_000
-    assert notifier.publish((delivery,)) == ()
+    assert notifier.publish_one(delivery)
     assert not notifier.close(deadline_seconds=0.01)
     with notifier._condition:
         assert notifier._condition.wait_for(
@@ -153,20 +151,20 @@ def test_level_triggered_availability_closes_release_before_register_gap(
         availability_dispatcher=lambda _event: None,
     )
     notifier = module._AVAILABILITY_NOTIFIER
-    real_publish = notifier.publish
+    real_publish_one = notifier.publish_one
     published: list[Any] = []
 
-    def capture_target_and_forward_others(deliveries: tuple[Any, ...]) -> tuple[Any, ...]:
-        target = tuple(delivery for delivery in deliveries if delivery.governor is governor)
-        others = tuple(delivery for delivery in deliveries if delivery.governor is not governor)
-        published.extend(target)
-        return real_publish(others) if others else ()
+    def capture_target_and_forward_others(delivery: Any) -> bool:
+        if delivery.governor is governor:
+            published.append(delivery)
+            return True
+        return real_publish_one(delivery)
 
     # Existing process services may publish concurrently.  Route their work to
     # the real notifier while accepting only this governor's canonical delivery
     # synchronously; replacing the module-global notifier would let unrelated
     # owners contaminate this unit test's queue and shutdown result.
-    monkeypatch.setattr(notifier, "publish", capture_target_and_forward_others)
+    monkeypatch.setattr(notifier, "publish_one", capture_target_and_forward_others)
 
     lease = governor.acquire(1, timeout_seconds=0)
     lease.release()
@@ -196,7 +194,7 @@ def test_notifier_rearm_during_execution_is_not_lost(
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            assert notifier.publish((delivery,)) == ()
+            assert notifier.publish_one(delivery)
         else:
             completed.set()
 
@@ -204,8 +202,8 @@ def test_notifier_rearm_during_execution_is_not_lost(
         1, "guardian-close-never-requeues-active-owner-rearm", availability_dispatcher=dispatch
     )
     assert governor.register_availability_event(event)
-    delivery = module._AvailabilityDelivery(governor, event, governor._availability_events[event])
-    assert notifier.publish((delivery,)) == ()
+    delivery = governor._availability_events[event]
+    assert notifier.publish_one(delivery)
     assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
     deadline = time.monotonic() + 1
     while governor.snapshot().availability_callbacks and time.monotonic() < deadline:
@@ -220,7 +218,14 @@ def test_uncertain_fd_close_retains_capacity_debt(
 ) -> None:
     from schema_sanitizer.core_impl import path_identity, process_resources
 
-    monkeypatch.setattr(process_resources, "_UNCERTAIN_FD_CLOSE_DEBTS", {})
+    monkeypatch.setattr(
+        process_resources,
+        "_UNCERTAIN_FD_CLOSE_DEBTS",
+        [
+            process_resources._UncertainFdCloseDebtSlot()
+            for _ in range(process_resources._FD_GOVERNOR.capacity)
+        ],
+    )
     monkeypatch.setattr(process_resources, "_UNCERTAIN_FD_CLOSE_REJECTED", 0)
 
     governor = process_resources._FD_GOVERNOR
@@ -315,18 +320,3 @@ def test_native_reaper_shutdown_is_biphasic_and_terminal_states_are_visible() ->
         "SaturatingAtomicSubtract(state_->active, 1U)"
         in Path("cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
     )
-
-
-def test_native_snapshot_parser_accepts_twenty_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import sys
-
-    from schema_sanitizer.core_impl import runtime_diagnostics as module
-
-    native = SimpleNamespace(operation_task_arena_runtime_snapshot=lambda: tuple(range(20)))
-    monkeypatch.setitem(sys.modules, "schema_sanitizer._core_abi3", native)
-    snapshot = module._native_arena_snapshot()
-    assert snapshot["available"] is True
-    assert snapshot["reaper_terminal_states"] == 16
-    assert snapshot["reaper_stopping_lanes"] == 19

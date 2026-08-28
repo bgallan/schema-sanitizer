@@ -20,7 +20,7 @@ from _support.parquet_contracts import (
 
 def test_parquet_contract_certification_status_certifies_native_writer_contract() -> None:
     """Verify the combined certificate accepts a stable schema-sanitizer-native file."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (
@@ -55,7 +55,7 @@ def test_parquet_contract_certification_status_certifies_native_writer_contract(
 
 def test_parquet_contract_certification_status_certifies_external_pyarrow_fallback() -> None:
     """Verify the combined certificate accepts external files when PyArrow covers them."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (
@@ -90,7 +90,7 @@ def test_parquet_contract_certification_status_certifies_external_pyarrow_fallba
 
 def test_parquet_contract_certification_status_fails_native_nested_drift() -> None:
     """Verify schema-sanitizer-native nested drift fails the combined certificate."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (
@@ -127,7 +127,7 @@ def test_parquet_contract_certification_status_fails_native_nested_drift() -> No
 
 def test_parquet_contract_certification_status_fails_projection_drift() -> None:
     """Verify optional projection contract audits participate in the certificate."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (
@@ -161,7 +161,7 @@ def test_parquet_contract_certification_status_public_gate(
 ) -> None:
     """Verify the public combined certificate wires writer/preflight/projection gates."""
     from schema_sanitizer.adapters.parquet import status as parquet_runtime
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
 
@@ -196,7 +196,7 @@ def test_parquet_contract_certification_status_public_gate(
 
 def test_native_parquet_writer_contract_status_enforces_runtime_batch_size() -> None:
     """Verify preflight native certification uses the same row-group batch contract as runtime."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
 
@@ -227,7 +227,7 @@ def test_native_parquet_writer_contract_status_enforces_runtime_batch_size() -> 
 
 def test_parquet_contract_certification_status_fails_native_batch_size_contract() -> None:
     """Verify certificates fail schema-sanitizer-native files that cannot satisfy runtime batch semantics."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (
@@ -308,7 +308,7 @@ def test_parquet_preflight_contract_status_passes_batch_size_to_writer_gate(
 
 def test_native_parquet_writer_contract_status_rejects_runtime_filters() -> None:
     """Verify native-writer certification models the runtime filter fallback contract."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
 
@@ -334,7 +334,7 @@ def test_native_parquet_writer_contract_status_rejects_runtime_filters() -> None
 
 def test_parquet_contract_certification_status_fails_native_filter_contract() -> None:
     """Verify filters keep the pipeline safe through PyArrow but fail the native guarantee."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (

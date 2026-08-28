@@ -16,7 +16,6 @@ def test_list_of_dicts_is_supported() -> None:
     result = read_test_python([{"a": 1}, {"a": 2}])
 
     assert result.clean_data.to_pylist() == [{"a": 1}, {"a": 2}]
-    assert last_python_rows_route() == "native_batch"
 
 
 def test_python_rows_jsonl_reader_is_replayable_and_chunked() -> None:
@@ -176,7 +175,6 @@ def test_format_specific_readers_are_supported(tmp_path) -> None:
     json_path = tmp_path / "data.json"
     json_folder = tmp_path / "json-folder"
     jsonl_path = tmp_path / "data.jsonl"
-    ndjson_path = tmp_path / "data.ndjson"
     xml_path = tmp_path / "data.xml"
     xml_folder = tmp_path / "xml-folder"
     csv_path.write_text("a;b\n1;yes\n", encoding="utf-8")
@@ -184,7 +182,6 @@ def test_format_specific_readers_are_supported(tmp_path) -> None:
     json_folder.mkdir()
     (json_folder / "row.json").write_text('{"a": 1}', encoding="utf-8")
     jsonl_path.write_text('{"a": 1}\n', encoding="utf-8")
-    ndjson_path.write_text('{"a": 1}\n', encoding="utf-8")
     xml_path.write_text("<rows><row><a>1</a></row></rows>", encoding="utf-8")
     xml_folder.mkdir()
     (xml_folder / "row.xml").write_text("<row><a>1</a></row>", encoding="utf-8")
@@ -194,7 +191,6 @@ def test_format_specific_readers_are_supported(tmp_path) -> None:
     assert read_test_json(json_path).clean_data.to_pylist() == [{"a": 1}]
     assert read_test_json_folder(json_folder).clean_data.to_pylist() == [{"a": 1}]
     assert read_test_jsonl(jsonl_path).clean_data.to_pylist() == [{"a": 1}]
-    assert read_test_jsonl(ndjson_path).clean_data.to_pylist() == [{"a": 1}]
     assert read_test_xml(xml_path, xml_row_tag="row").clean_data.to_pylist() == [{"a": "1"}]
     assert read_test_xml_folder(xml_folder).clean_data.to_pylist() == [{"a": "1"}]
     assert read_test_python([{"a": "yes"}], true_tokens=("yes",)).clean_data.to_pylist() == [
@@ -237,10 +233,6 @@ def test_read_json_folder_uses_native_path_sources(tmp_path) -> None:
     """Verify low-level table reads use native path sources."""
     pytest.importorskip("pyarrow")
     require_native()
-    from schema_sanitizer.core_impl.execution import last_sink_source_route
-    from schema_sanitizer.input_impl.source_plan import (
-        last_native_multisource_route,
-    )
 
     folder = tmp_path / "events"
     folder.mkdir()
@@ -250,8 +242,6 @@ def test_read_json_folder_uses_native_path_sources(tmp_path) -> None:
     result = read_test_json_folder(folder)
 
     assert result.clean_data.to_pylist() == [{"id": 1}, {"id": 2}]
-    assert last_sink_source_route() == "path_sources"
-    assert last_native_multisource_route() == "cxx_path_sources"
 
 
 def test_folder_listing_accepts_suffixes_without_leading_dot(tmp_path) -> None:
@@ -438,9 +428,6 @@ def test_read_xml_folder_compacts_non_recursive_xml_files(tmp_path) -> None:
     """Verify read xml folder compacts direct xml children only."""
     pytest.importorskip("pyarrow")
     require_native()
-    from schema_sanitizer.input_impl.source_plan import (
-        last_native_multisource_route,
-    )
 
     folder = tmp_path / "events"
     nested = folder / "nested"
@@ -459,7 +446,6 @@ def test_read_xml_folder_compacts_non_recursive_xml_files(tmp_path) -> None:
         {"id": "1", "country": "ES"},
         {"id": "2", "country": "US"},
     ]
-    assert last_native_multisource_route() == "cxx_path_sources"
 
 
 def test_read_xml_folder_propagates_native_root_tag_failure(tmp_path, monkeypatch) -> None:

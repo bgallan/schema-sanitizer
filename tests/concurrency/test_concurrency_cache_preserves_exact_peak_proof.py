@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/telemetry/worker-local-peak-cache.json"
 
 
 def test_cache_preserves_exact_peak_proof() -> None:
@@ -22,9 +22,7 @@ def test_cache_preserves_exact_peak_proof() -> None:
 
 def test_tsan_probe_exercises_repeated_real_arena_streaks() -> None:
     """The standalone probe checks exact peaks and repeated park/wake waves."""
-    source = (
-        ROOT / "benchmarks/probes/concurrency/telemetry/worker-local-peak-cache-tsan.cc"
-    ).read_text(encoding="utf-8")
+    source = load_probe("telemetry/worker-local-peak-cache-tsan.cc")
 
     assert "OperationTaskArena::Make(workers)" in source
     assert "for (const auto workers : {4U, 8U, 16U})" in source
@@ -36,7 +34,7 @@ def test_tsan_probe_exercises_repeated_real_arena_streaks() -> None:
 
 def test_evidence_is_scoped_to_peak_bookkeeping() -> None:
     """The benchmark records paired evidence without claiming pipeline speedup."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("worker-local-peak-cache")
 
     assert evidence["pair_count"] == 15
     assert "peak-active bookkeeping" in evidence["scope"]

@@ -226,14 +226,9 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
     freeze_finalizer_registry()
     # Allocate both quiescence buffers before teardown starts. From Phase 1 on,
     # the correctness barrier only mutates these fixed-size buffers.
-    # pass48 compatibility note: finalizer_activity_token() was the allocating
-    # predecessor of the fixed-buffer barrier below.
     activity_size = finalizer_activity_buffer_size()
     finalizer_activity_a = bytearray(activity_size)
     finalizer_activity_b = bytearray(activity_size)
-    # Legacy source-contract names remain documented here; their callbacks are
-    # now supplied by the frozen observer registry rather than imported during
-    # teardown: process_remote_io_permit_snapshot, process_provider_throttle_snapshot.
     terminal_observers = freeze_shutdown_observers()
     # Phase 1: stop external producers, but keep the dedicated teardown
     # reserve open.  Cleanup workers and descriptor-relative janitor work may
@@ -411,8 +406,8 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
     orphaned_startup_snapshot = observer_snapshots.get("orphaned_remote_startups")
     terminal_snapshot = observer_snapshots.get("terminal_ownership")
 
-    # Authoritative ownership domains introduced by pass45. Unloaded optional
-    # modules cannot own state; loaded modules are represented by observers.
+    # Unloaded optional modules cannot own state; loaded modules are represented
+    # by observers.
     authoritative: dict[str, object] = {}
 
     # Finalizer domains are already registered; observing them must not import
@@ -541,7 +536,6 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
         # Once terminal metadata publication has overflowed, the process can no
         # longer prove that every terminal owner is represented even if later
         # entries retire. Treat the lost observation as fail-closed.
-        # Compatibility breadcrumb: terminal_ownership:publication_rejected=
         observability_failures.append("terminal_ownership:publication_rejected")
 
     def tuple_value(name: str, index: int) -> int:

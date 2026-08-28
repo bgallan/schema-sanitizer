@@ -17,12 +17,11 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/planning/options_schema_serialization.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/logical_schema.hh"
@@ -162,7 +161,7 @@ sanitize::Result<std::vector<std::string>> paths_from_py(PyObject *paths_obj) {
 }
 
 sanitize::Result<sanitize::PreparedIngest>
-prepare_probe(schema_sanitizer_context *ctx, const char *frontend_name,
+prepare_probe(NativeContext *ctx, const char *frontend_name,
               sanitize::ChunkSourcePtr src,
               sanitize::PreparedOptionsPtr prepared_options);
 
@@ -239,7 +238,7 @@ struct ProviderCloseGuard {
   }
 };
 PyObject *registry_probe_path_sources_or_raise(
-    schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
+    NativeContext *ctx, const std::vector<PathSourceSpec> &sources,
     sanitize::PreparedOptionsPtr prepared_options, const char *registry_json,
     const char *field_name_policy, const char *schema_mode, const char *where,
     bool skip_invalid_json_sources) {
@@ -247,11 +246,10 @@ PyObject *registry_probe_path_sources_or_raise(
     PyErr_SetString(PyExc_RuntimeError, "context is null");
     return nullptr;
   }
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, registry_json, &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid =
+      validate_registry_sink_mode(schema_mode, registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   auto probe =
@@ -266,7 +264,7 @@ PyObject *registry_probe_path_sources_or_raise(
   return pack_registry_probe(std::move(value.merged), value.diagnostics);
 }
 PyObject *registry_probe_path_sources_state_or_raise(
-    schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
+    NativeContext *ctx, const std::vector<PathSourceSpec> &sources,
     sanitize::PreparedOptionsPtr prepared_options,
     std::shared_ptr<const NativeRegistryPlan> base_registry_plan,
     const char *field_name_policy, const char *schema_mode, const char *where,
@@ -280,11 +278,10 @@ PyObject *registry_probe_path_sources_state_or_raise(
                     "native registry state does not contain a compiled plan");
     return nullptr;
   }
-  char *err = nullptr;
-  const int valid = validate_registry_sink_mode(
-      schema_mode, base_registry_plan->registry_json.c_str(), &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid = validate_registry_sink_mode(
+      schema_mode, base_registry_plan->registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   auto probe = merge_path_source_schemas(
@@ -299,7 +296,7 @@ PyObject *registry_probe_path_sources_state_or_raise(
   return pack_registry_probe(std::move(value.merged), value.diagnostics);
 }
 PyObject *registry_probe_path_source_provider_or_raise(
-    schema_sanitizer_context *ctx, PyObject *provider,
+    NativeContext *ctx, PyObject *provider,
     sanitize::PreparedOptionsPtr prepared_options, const char *registry_json,
     const char *field_name_policy, const char *schema_mode, const char *where,
     bool skip_invalid_json_sources,
@@ -316,11 +313,10 @@ PyObject *registry_probe_path_source_provider_or_raise(
   const char *base_registry_json =
       base_registry_plan ? base_registry_plan->registry_json.c_str()
                          : registry_json;
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, base_registry_json, &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid =
+      validate_registry_sink_mode(schema_mode, base_registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   ProviderCloseGuard close_provider(provider);
@@ -428,7 +424,7 @@ chunk_source_from_source_py(const char *source_name, PyObject *payload_obj,
 }
 
 sanitize::Result<sanitize::PreparedIngest>
-prepare_probe(schema_sanitizer_context *ctx, const char *frontend_name,
+prepare_probe(NativeContext *ctx, const char *frontend_name,
               sanitize::ChunkSourcePtr src,
               sanitize::PreparedOptionsPtr prepared_options) {
   auto fe = sanitize::make_builtin_frontend(frontend_name, std::move(src),
@@ -443,7 +439,7 @@ PyObject *raise_status(const sanitize::Status &status, const char *where) {
   return nullptr;
 }
 
-PyObject *schema_probe_or_raise(schema_sanitizer_context *ctx,
+PyObject *schema_probe_or_raise(NativeContext *ctx,
                                 const char *frontend_name,
                                 sanitize::ChunkSourcePtr src,
                                 sanitize::PreparedOptionsPtr prepared_options,
@@ -462,7 +458,7 @@ PyObject *schema_probe_or_raise(schema_sanitizer_context *ctx,
   return pack_schema_probe(ingest.logical_schema, *ingest.diagnostics);
 }
 
-PyObject *registry_probe_or_raise(schema_sanitizer_context *ctx,
+PyObject *registry_probe_or_raise(NativeContext *ctx,
                                   const char *frontend_name,
                                   sanitize::ChunkSourcePtr src,
                                   sanitize::PreparedOptionsPtr prepared_options,
@@ -473,11 +469,10 @@ PyObject *registry_probe_or_raise(schema_sanitizer_context *ctx,
     PyErr_SetString(PyExc_RuntimeError, "context is null");
     return nullptr;
   }
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, registry_json, &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid =
+      validate_registry_sink_mode(schema_mode, registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   auto prepared = call_without_gil([&] {

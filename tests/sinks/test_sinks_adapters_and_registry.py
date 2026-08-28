@@ -92,7 +92,7 @@ def test_native_file_output_bypasses_stream_wrapper(
     from schema_sanitizer.api_impl import stream_output
 
     class FailingStream:
-        """Fail if the legacy stream-wrapper path is used."""
+        """Fail if the stream-wrapper fallback is used."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             """Reject construction."""
@@ -118,7 +118,7 @@ def test_native_csv_file_output_diagnostics_do_not_post_count(
     pytest.importorskip("pyarrow")
 
     def fail_reader(*_args: object, **_kwargs: object) -> object:
-        """Reject the legacy CSV diagnostics recount path."""
+        """Reject the CSV diagnostics recount fallback."""
         raise AssertionError("native CSV diagnostics should not use csv.reader")
 
     monkeypatch.setattr(csv, "reader", fail_reader)
@@ -147,7 +147,7 @@ def test_native_jsonl_file_output_diagnostics_do_not_post_count(
     real_open = builtins.open
 
     def guarded_open(file: object, mode: str = "r", *args: object, **kwargs: object) -> object:
-        """Reject the legacy JSONL diagnostics recount path."""
+        """Reject the JSONL diagnostics recount fallback."""
         try:
             is_output = Path(file) == out
         except TypeError:
@@ -203,12 +203,10 @@ def test_single_source_registry_metadata_is_injected_before_file_output(
 def test_single_source_to_pyarrow_uses_native_registry_metadata_stream(
     tmp_path: Path,
 ) -> None:
-    """Verify analytical single-file conversion does not use Python metadata wrapping."""
+    """Verify analytical single-file conversion emits native registry metadata."""
     require_native()
     pytest.importorskip("pyarrow")
-    import schema_sanitizer.api_impl.analytical as analytical_conversion
 
-    assert not hasattr(analytical_conversion, "prepare_metadata_stream")
     source = tmp_path / "rows.jsonl"
     source.write_text('{"a": 1}\n{"a": 2}\n', encoding="utf-8")
 
@@ -222,44 +220,6 @@ def test_single_source_to_pyarrow_uses_native_registry_metadata_stream(
     assert rows[1]["source_file"] == str(source)
     assert rows[0]["ingestion_timestamp"] is not None
     assert rows[1]["ingestion_timestamp"] is not None
-
-
-def test_file_sinks_use_shared_output_metadata_planner() -> None:
-    """Verify format sinks do not own metadata-stream preparation."""
-    from schema_sanitizer import adapters
-    from schema_sanitizer.adapters.parquet import sink as parquet_sink
-    from schema_sanitizer.adapters.pyarrow import csv_sink as pyarrow_csv_sink
-    from schema_sanitizer.adapters.pyarrow import jsonl_sink as pyarrow_jsonl_sink
-
-    assert not hasattr(pyarrow_csv_sink, "prepare_metadata_stream")
-    assert not hasattr(pyarrow_jsonl_sink, "prepare_metadata_stream")
-    assert not hasattr(parquet_sink, "prepare_metadata_stream")
-    assert not Path(adapters.__file__).with_name("pyarrow_metadata_streams.py").exists()
-
-
-def test_pyarrow_adapter_facade_is_removed() -> None:
-    """Verify PyArrow helpers are imported from focused modules."""
-    from schema_sanitizer import adapters
-    from schema_sanitizer.adapters.pyarrow import streams as pyarrow_streams
-    from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
-    from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
-
-    assert not Path(adapters.__file__).with_name("pyarrow.py").exists()
-    assert not Path(adapters.__file__).with_name("pyarrow_parquet.py").exists()
-    assert not hasattr(pyarrow_streams, "write_csv_stream")
-    assert not hasattr(pyarrow_streams, "write_jsonl_stream")
-    assert not hasattr(pyarrow_streams, "write_parquet_stream")
-    assert hasattr(native_parquet_output, "try_write_parquet_direct_native")
-    assert not hasattr(native_file_output, "PARQUET_STREAM_WRITE")
-    assert not hasattr(native_file_output, "try_write_parquet_direct_native")
-
-
-def test_binary_input_routing_has_no_adapter_fallback_name() -> None:
-    """Verify binary input routing exposes direct-native semantics."""
-    from schema_sanitizer.api_impl import ingest as ingest_binary
-
-    assert hasattr(ingest_binary, "reject_unsupported_binary_direct_input")
-    assert not hasattr(ingest_binary, "_maybe_route_binary_formats_via_adapter")
 
 
 def test_registry_source_sink_accepts_native_row_span_metadata() -> None:

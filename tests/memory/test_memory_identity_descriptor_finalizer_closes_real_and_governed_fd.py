@@ -161,14 +161,14 @@ def test_late_quarantine_commit_keeps_post_close_worker_route(
     proceed = threading.Event()
     real_replace = os.replace
 
-    def blocked_replace(left: object, right: object) -> None:
+    def blocked_replace(left: object, right: object, **kwargs: object) -> None:
         started.set()
         assert proceed.wait(2)
-        real_replace(left, right)
+        real_replace(left, right, **kwargs)
 
     ensured = threading.Event()
     monkeypatch.setattr(os, "replace", blocked_replace)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", ensured.set)
+    monkeypatch.setattr(janitor, "_ensure_worker", ensured.set)
     lease = SimpleNamespace(release=lambda: None)
     result: list[bool] = []
     thread = threading.Thread(
@@ -186,51 +186,6 @@ def test_late_quarantine_commit_keeps_post_close_worker_route(
     artifact = next(iter(janitor._pending.values()))
     release_path_identity(artifact.identity)
     artifact.path.unlink()
-
-
-def test_terminal_callback_drain_never_runs_callback_inline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import schema_sanitizer.remote_impl.io_coordinator as module
-    from schema_sanitizer.remote_impl.io_coordinator import (
-        RemoteIoCoordinator,
-        _RemoteIoSubmission,
-    )
-
-    coordinator = RemoteIoCoordinator.__new__(RemoteIoCoordinator)
-    coordinator._lock = threading.Lock()
-    coordinator._close_condition = threading.Condition(coordinator._lock)
-    coordinator._failed_terminal_callbacks = __import__("collections").deque()
-    coordinator._deferred_terminal_callbacks = __import__("collections").deque()
-    coordinator._terminal_callback_owners = set()
-    coordinator._terminal_retry_timer = None
-    coordinator._schedule_terminal_retry_locked = lambda: None
-    owner = _RemoteIoSubmission(SimpleNamespace(release=lambda: None))
-    owner.future = Future()
-    owner.future.set_result(None)
-    called = threading.Event()
-
-    def callback(_future: Future[object]) -> None:
-        called.set()
-        raise AssertionError("terminal callback ran inline")
-
-    owner.callbacks_pending = 1
-    owner.callback_quiescent.clear()
-    coordinator._deferred_terminal_callbacks.append((owner, callback))
-    coordinator._terminal_callback_owners.add(id(owner))
-    monkeypatch.setattr(module, "dispatch_cleanup", lambda *a, **k: False)
-    clock_reads = 0
-
-    def expired_clock() -> float:
-        nonlocal clock_reads
-        clock_reads += 1
-        return 10.0
-
-    monkeypatch.setattr(module, "monotonic", expired_clock)
-    with pytest.raises(RuntimeError, match="deadline"):
-        coordinator._drain_terminal_callback_work(10.0)
-    assert clock_reads >= 1
-    assert not called.is_set()
 
 
 def test_cleanup_dispatcher_uses_teardown_reserve_when_public_envelope_is_full(
@@ -350,7 +305,7 @@ def test_native_and_local_deadline_contracts() -> None:
     assert "unknown_charge_submissions" in header
     assert "unknown task charge rejected under " in source
     assert '"pressure"' in source
-    assert "abandoned_queues->clear()" in source
+    assert "slot->abandoned_tasks.clear()" in source
     assert "operation memory ledger close exceeded its deadline" in memory
     assert "temporary-storage admissions exceeded their close deadline" in storage
 

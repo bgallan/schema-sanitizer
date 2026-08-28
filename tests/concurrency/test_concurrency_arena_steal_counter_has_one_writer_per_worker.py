@@ -17,7 +17,7 @@ TELEMETRY_JSON = ROOT / "cpp/src/internal/runtime/performance_telemetry_json.cc.
 
 
 def test_arena_steal_counter_has_one_writer_per_worker() -> None:
-    """A successful steal no longer writes one operation-global atomic."""
+    """Each worker publishes steals through its own counter."""
     arena = ARENA.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
 

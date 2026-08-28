@@ -11,15 +11,6 @@ from _support.public_input_modes import data_rows as _data_rows
 import schema_sanitizer as ss
 
 
-def test_auto_input_format_is_rejected(tmp_path: Path) -> None:
-    """Verify the removed auto selector is not accepted."""
-    path = tmp_path / "rows.jsonl"
-    path.write_text('{"a":1}\n', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="auto"):
-        ss.to_pyarrow(path, input_format="auto")
-
-
 def test_none_input_format_is_rejected(tmp_path: Path) -> None:
     """Verify the default None selector never infers from the extension."""
     path = tmp_path / "rows.jsonl"
@@ -31,7 +22,7 @@ def test_none_input_format_is_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("input_format", "failure"),
-    [("jsonl", MemoryError), (" NDJSON ", KeyboardInterrupt)],
+    [("jsonl", MemoryError), (" parquet ", KeyboardInterrupt)],
 )
 def test_format_normalization_fault_cannot_abandon_prepared_ownership(
     monkeypatch: pytest.MonkeyPatch,
@@ -66,7 +57,7 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
 
     with pytest.raises(failure, match="format-normalization fault"):
         public_input.prepare_public_input(
-            "unused.ndjson",
+            "unused.jsonl",
             input_format=input_format,
             input_mode="single_file",
             input_text_encoding="utf-8",
@@ -85,8 +76,7 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
         ("csv", "rows.jsonl"),
         ("json", "rows.jsonl"),
         ("json_array", "rows.jsonl"),
-        ("jsonl", "rows.ndjson"),
-        ("ndjson", "rows.jsonl"),
+        ("jsonl", "rows.json"),
         ("xml", "rows.json"),
         ("parquet", "rows.json"),
     ],
@@ -419,15 +409,12 @@ def test_native_path_source_probe_state_feeds_materialization(tmp_path: Path) ->
         assert stream.to_table().to_pylist() == [{"id": 1, "source_file": str(source)}]
 
 
-@pytest.mark.parametrize(("input_format", "suffix"), [("jsonl", ".jsonl"), ("ndjson", ".ndjson")])
-def test_line_delimited_json_formats_share_content_model(
-    tmp_path: Path, input_format: str, suffix: str
-) -> None:
-    """Verify JSONL and NDJSON differ only by extension validation."""
-    path = tmp_path / f"rows{suffix}"
+def test_jsonl_materializes_line_delimited_objects(tmp_path: Path) -> None:
+    """Verify JSONL materializes one object per line."""
+    path = tmp_path / "rows.jsonl"
     path.write_text('{"a":1}\n{"a":2}\n', encoding="utf-8")
 
-    assert _data_rows(ss.to_pyarrow(path, input_format=input_format)) == [{"a": 1}, {"a": 2}]
+    assert _data_rows(ss.to_pyarrow(path, input_format="jsonl")) == [{"a": 1}, {"a": 2}]
 
 
 def test_directory_mode_is_non_recursive_and_deterministic(tmp_path: Path) -> None:
@@ -439,7 +426,7 @@ def test_directory_mode_is_non_recursive_and_deterministic(tmp_path: Path) -> No
     nested = folder / "nested"
     nested.mkdir()
     (nested / "ignored.jsonl").write_text('{"a":99}\n', encoding="utf-8")
-    (folder / "ignored.ndjson").write_text('{"a":98}\n', encoding="utf-8")
+    (folder / "ignored.txt").write_text('{"a":98}\n', encoding="utf-8")
 
     result = ss.to_pyarrow(folder, input_format="jsonl", input_mode="directory")
     assert _data_rows(result) == [{"a": 1}, {"a": 2}]

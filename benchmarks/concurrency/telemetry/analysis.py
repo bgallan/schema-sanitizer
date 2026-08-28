@@ -47,13 +47,13 @@ def parse_perf_stat(path: Path) -> dict[str, Any]:
 
 
 def load_dram_payload(path: Path | None) -> dict[str, Any]:
-    """Load optional platform DRAM measurements in legacy or workload form."""
+    """Load optional per-workload platform DRAM measurements."""
     if path is None:
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("dram-bandwidth-json must contain an object")
-    for workload, mapping in _workload_mappings(payload).items():
+    for workload, mapping in payload.items():
         if not isinstance(mapping, dict):
             raise ValueError(f"DRAM mapping for {workload!r} must be an object")
         for workers, entry in mapping.items():
@@ -68,18 +68,9 @@ def load_dram_payload(path: Path | None) -> dict[str, Any]:
     return payload
 
 
-def _workload_mappings(payload: dict[str, Any]) -> dict[str, Any]:
-    if not payload:
-        return {}
-    if all(str(key).isdigit() for key in payload):
-        return {"*": payload}
-    return payload
-
-
 def dram_entry(payload: dict[str, Any], workload: str, workers: int) -> dict[str, Any] | None:
-    """Return one DRAM entry, accepting the legacy worker-only shape."""
-    mappings = _workload_mappings(payload)
-    mapping = mappings.get(workload, mappings.get("*", {}))
+    """Return one DRAM entry from the workload-keyed measurement payload."""
+    mapping = payload.get(workload, {})
     entry = mapping.get(str(workers)) if isinstance(mapping, dict) else None
     return entry if isinstance(entry, dict) else None
 

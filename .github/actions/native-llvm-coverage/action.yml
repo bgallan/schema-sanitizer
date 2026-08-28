@@ -35,43 +35,12 @@ runs:
     - name: Run native coverage suites
       shell: bash
       run: |
-        mkdir -p coverage-native/raw/regular
-        pytest -q \
-          tests/io/test_api.py \
-          tests/io/test_input_xml_and_public_api.py \
-          tests/sinks/test_sinks_csv_jsonl.py \
-          tests/pipeline/test_csv_header_modes.py \
-          tests/pipeline/test_csv_union_projection.py
-        mv coverage-native/raw/schema-sanitizer-*.profraw \
-          coverage-native/raw/regular/
-        mkdir -p coverage-native/raw/adversarial
-        pytest -q \
-          tests/io/test_contracts.py \
-          tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py \
-          tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py \
-          tests/concurrency/test_runtime_resource_close_and_finalization.py \
-          tests/sinks/test_streaming_writer_lifecycle.py \
-          tests/remote/test_async_remote_scheduler.py \
-          tests/quality/test_high_risk_coverage_gaps.py \
-          tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
-        mv coverage-native/raw/schema-sanitizer-*.profraw \
-          coverage-native/raw/adversarial/
-        mkdir -p coverage-native/raw/integration
-        pytest -q \
-          tests/io/test_input_remote_file_and_directory_staging.py \
-          tests/io/test_input_remote_directory_discovery.py \
-          tests/io/test_input_remote_lazy_json_plans.py \
-          tests/remote/test_cloud_emulator_configuration.py \
-          tests/remote/test_bigquery_integration.py \
-          tests/pipeline/test_modified_time_csv_discovery.py \
-          tests/pipeline/test_modified_time_csv_planning.py \
-          tests/pipeline/test_source_manifest_inputs.py \
-          tests/pipeline/test_modified_time_csv_schema.py \
-          tests/pipeline/test_example_08_orchestration.py \
-          tests/pipeline/test_example_08_fake_cloud.py \
-          tests/pipeline/test_modified_time_csv_contracts.py
-        mv coverage-native/raw/schema-sanitizer-*.profraw \
-          coverage-native/raw/integration/
+        for suite in regular adversarial integration; do
+          mkdir -p "coverage-native/raw/${suite}"
+          python meta/ci/quality/run_coverage_suite.py native "${suite}"
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            "coverage-native/raw/${suite}/"
+        done
     - name: Render LLVM reports
       shell: bash
       run: |

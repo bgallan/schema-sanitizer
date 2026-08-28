@@ -54,7 +54,8 @@ def test_external_runtime_construction_native_exception_rolls_back_standalone_cl
             cls.value = value
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            del minimum
             with governor._condition:
                 logical_lease_ids.extend(
                     lease_id
@@ -62,9 +63,6 @@ def test_external_runtime_construction_native_exception_rolls_back_standalone_cl
                     if entry.amount == desired
                 )
             raise RuntimeError("injected native acquisition failure")
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            raise AssertionError("no native acquisition committed")
 
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
@@ -107,11 +105,9 @@ def test_external_runtime_construction_native_exception_rolls_back_parent_borrow
             cls.value = value
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            del desired, minimum
             raise RuntimeError("injected borrowed native failure")
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            raise AssertionError("no physical claim committed")
 
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
@@ -162,12 +158,21 @@ def test_external_runtime_construction_alignment_failure_escrows_both_sides(
             self.amount = 0
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            events.append(("native-acquire", desired))
-            return 4
+        class Receipt:
+            amount = 4
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            events.append(("native-release", amount))
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            del minimum
+            events.append(("native-acquire", desired))
+            return self.Receipt(), 4
+
+        def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            return receipt.amount
+
+        def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            events.append(("native-release", receipt.amount - target))
+            receipt.amount = target
+            return target
 
     logical = Logical()
     monkeypatch.setattr(
@@ -239,12 +244,21 @@ def test_fresh_runtime_generation_can_reexpand_after_prior_low_water_mark(
             cls.value = value
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            native_calls.append(("acquire", desired, minimum))
-            return desired
+        class Receipt:
+            def __init__(self, amount: int) -> None:
+                self.amount = amount
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            native_calls.append(("release", amount, amount))
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            native_calls.append(("acquire", desired, minimum))
+            return self.Receipt(desired), desired
+
+        def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            return receipt.amount
+
+        def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            native_calls.append(("release", receipt.amount - target, receipt.amount - target))
+            receipt.amount = target
+            return target
 
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
@@ -303,12 +317,19 @@ def test_configurable_standalone_runtime_degrades_partially_not_to_serial(
             cls.value = value
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            assert (desired, minimum) == (4, 2)
-            return 4
+        class Receipt:
+            amount = 4
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            pass
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            assert (desired, minimum) == (4, 2)
+            return self.Receipt(), 4
+
+        def exact_permit_lease_amount(self, receipt: Receipt) -> int:
+            return receipt.amount
+
+        def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
+            receipt.amount = target
+            return target
 
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
@@ -410,16 +431,19 @@ def test_route_profiles_are_orthogonal_and_payload_contract_backed() -> None:
         "stream",
         "analytical_adapter",
     }
+    registered = contracts.runtime_concurrency_contracts()
+    assert registered
+    contract_name = next(iter(registered))
     pair_token = contracts.activate_runtime_concurrency_pair("csv", "csv")
     route_token = contracts._CURRENT_ROUTE_PROFILES.set(("local_path", "local_file"))
     try:
-        contracts.observe_runtime_concurrency_contract("native_payload_core_call")
+        contracts.observe_runtime_concurrency_contract(contract_name)
     finally:
         contracts._CURRENT_ROUTE_PROFILES.reset(route_token)
         contracts.reset_runtime_concurrency_pair(pair_token)
     observed = contracts.runtime_route_profile_contract_observations()
-    assert observed["local_path"]["native_payload_core_call"] >= 1
-    assert observed["local_file"]["native_payload_core_call"] >= 1
+    assert observed["local_path"][contract_name] >= 1
+    assert observed["local_file"][contract_name] >= 1
     source = (SRC / "core_impl/concurrency_coverage.py").read_text(encoding="utf-8")
     assert "validate_route_profile_runtime_contracts()" in source
     assert "validate_safety_critical_runtime_contracts()" in source
@@ -511,9 +535,9 @@ def test_native_runtime_separates_external_pool_permits_and_surfaces_completion_
     assert "g_process_external_runtime_thread_permits" in arena
     assert "unaccounted_external" in arena
     assert "g_completion_memory_protocol_violations.fetch_add" in arena
-    assert "process_external_runtime_thread_permits_acquire" in probe
+    assert "py_process_external_runtime_thread_permit_lease_acquire" in probe
     assert "completion_memory_protocol_violations" in diagnostics
-    assert "25" in diagnostics
+    assert "if len(values) != 30" in diagnostics
 
 
 def test_external_runtime_uses_one_coordinator_not_split_logical_physical_ledgers() -> None:

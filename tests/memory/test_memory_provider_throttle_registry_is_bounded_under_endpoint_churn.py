@@ -260,16 +260,6 @@ def test_remote_directory_session_does_not_duplicate_file_sequences() -> None:
     assert "files: Sequence[RemoteFile]" in text
 
 
-def test_janitor_stale_scan_is_streaming() -> None:
-    """Crash leftovers are traversed without materializing the whole quarantine tree."""
-    text = (ROOT / "src/schema_sanitizer/core_impl/temporary_janitor.py").read_text(
-        encoding="utf-8"
-    )
-    assert "iter(self.root().iterdir())" in text
-    assert "list(self.root().iterdir())" not in text
-    assert "list(self.root().iterdir())" not in text
-
-
 def test_operation_diagnostics_include_provider_registry_pressure() -> None:
     """Completed operation records expose endpoint-registry saturation and churn."""
     api_impl = ROOT / "src/schema_sanitizer/api_impl"

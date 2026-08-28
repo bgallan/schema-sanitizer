@@ -43,15 +43,16 @@ def test_supported_internal_parquet_stream_skips_replay(
 ) -> None:
     """Verify operation-owned streams reach native Parquet without IPC replay."""
     from schema_sanitizer.api_impl import stream_output
+    from schema_sanitizer.api_impl.file_conversion.direct_writers import FileWriteOutcome
     from schema_sanitizer.core_impl.native_results import SinkOutput
 
     raw = SinkOutput(sink="stream")
     calls: list[tuple[Any, bool]] = []
 
-    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> bool:
+    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> FileWriteOutcome:
         """Record the direct native writer invocation."""
         calls.append((raw_arg, kwargs["parquet_retry_is_safe"]))
-        return True
+        return FileWriteOutcome({}, "native_direct", "none")
 
     monkeypatch.setattr(stream_output, "try_write_raw_native_file_output", fake_native)
     monkeypatch.setattr(
@@ -89,12 +90,11 @@ def test_internal_parquet_replay_is_created_only_after_safe_decline(
         assert isinstance(stream, _ReplayStream)
         return {"materialized_rows": 0}
 
-    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> bool:
+    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> None:
         """Decline safely before consuming the internal stream."""
         assert raw_arg is raw
         assert kwargs["parquet_retry_is_safe"] is False
         events.append("native-decline")
-        return False
 
     def fake_replay(raw_arg: Any, *, feature: str, memory_limit_bytes: int | None) -> _Replay:
         """Create and record the fallback replay."""

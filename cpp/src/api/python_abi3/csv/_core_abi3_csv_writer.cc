@@ -26,31 +26,6 @@ namespace {
 
 namespace csv = sanitize::internal::csv_stream_writer;
 
-PyObject *csv_stats_to_dict(const csv::WriteStats &stats) {
-  PyObject *dict = PyDict_New();
-  if (!dict) {
-    return nullptr;
-  }
-  PyObject *rows = PyLong_FromLongLong(stats.materialized_rows);
-  PyObject *batches = PyLong_FromLongLong(stats.batches);
-  if (!rows || !batches) {
-    Py_XDECREF(rows);
-    Py_XDECREF(batches);
-    Py_DECREF(dict);
-    return nullptr;
-  }
-  if (PyDict_SetItemString(dict, "materialized_rows", rows) < 0 ||
-      PyDict_SetItemString(dict, "batches", batches) < 0) {
-    Py_DECREF(rows);
-    Py_DECREF(batches);
-    Py_DECREF(dict);
-    return nullptr;
-  }
-  Py_DECREF(rows);
-  Py_DECREF(batches);
-  return dict;
-}
-
 class FileCsvOutput final : public csv::Output {
 public:
   // Opens a local output path.
@@ -162,7 +137,8 @@ PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
   }
-  return csv_stats_to_dict(result.ValueOrDie());
+  const auto &stats = result.ValueOrDie();
+  return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
 PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
@@ -188,9 +164,9 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
+  auto wrapped = own_arrow_stream(make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns, memory_limit_bytes);
+      timestamp_columns, memory_limit_bytes));
   if (!wrapped) {
     return nullptr;
   }
@@ -198,19 +174,18 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
       sanitize::internal::ordered_text_output::threading_mode_from_int(
           threading_mode_value);
   if (!mode_result.ok()) {
-    schema_sanitizer_stream_free(wrapped);
     PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
     return nullptr;
   }
   auto result = csv_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)),
+      wrapped.get(), std::string(path, static_cast<std::size_t>(path_len)),
       memory_limit_bytes, mode_result.ValueOrDie());
-  schema_sanitizer_stream_free(wrapped);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
   }
-  return csv_stats_to_dict(result.ValueOrDie());
+  const auto &stats = result.ValueOrDie();
+  return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
 PyObject *py_csv_schema_supported(PyObject *, PyObject *args) {

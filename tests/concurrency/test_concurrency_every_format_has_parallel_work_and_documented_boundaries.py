@@ -91,7 +91,7 @@ def test_coverage_matrix_declares_real_json_and_pandas_parallel_stages() -> None
 
 
 def test_json_sources_defer_authoritative_parse_to_workers() -> None:
-    """JSON document arrays no longer parse each row in both coordinator and worker."""
+    """JSON document arrays parse each row exactly once."""
     source = PARALLEL_SOURCE.read_text(encoding="utf-8")
     pipeline = TEXT_PIPELINE.read_text(encoding="utf-8")
     direct = DIRECT_ROWS.read_text(encoding="utf-8")

@@ -181,7 +181,7 @@ def _synthetic_report(budget: dict[str, object], *, ratios: dict[str, float]) ->
 
 
 def test_static_latency_gate_catches_constant_30x_regression_with_linear_slope() -> None:
-    """Linear-but-slow readers must fail even when the old slope gate stays green."""
+    """Linear-but-slow readers fail even when normalized growth stays green."""
     budget = linear_scaling.load_latency_budget(BUDGET)
     report = linear_scaling.evaluate_report(
         _synthetic_report(budget, ratios={"xml_single": 30.0}),

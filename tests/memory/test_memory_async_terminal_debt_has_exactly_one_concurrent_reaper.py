@@ -154,6 +154,9 @@ def test_cross_process_shrink_failure_does_not_resurrect_logical_owner(
                 raise OSError("injected shrink failure")
             self.size = value
 
+        def _set_capacity(self, _value: int) -> None:
+            return None
+
     coordinator = _ProcessCrossMemoryCoordinator(16 << 20)
     coordinator._generation_pool = BoundedGenerationPool(1)
     physical = FakePhysical()
@@ -238,18 +241,16 @@ def test_async_result_memory_contract_is_explicit_for_externally_governed_result
     from schema_sanitizer.core_impl.async_scheduler import (
         AsyncResultMemoryContract,
         AsyncResultOwnershipMode,
-        _resolve_async_result_memory_contract,
+        _contract_estimators,
     )
 
     contract = AsyncResultMemoryContract(
         preflight_bytes=512,
         ownership_mode=AsyncResultOwnershipMode.EXTERNALLY_GOVERNED,
     )
-    postflight, preflight = _resolve_async_result_memory_contract(None, None, contract)
+    postflight, preflight = _contract_estimators(contract)
     assert postflight is None
     assert preflight == 512
-    with pytest.raises(TypeError):
-        _resolve_async_result_memory_contract(None, 1, contract)
 
     discovery = _source("pipeline/source_discovery.py")
     assert "AsyncResultOwnershipMode.EXTERNALLY_GOVERNED" in discovery
@@ -311,7 +312,8 @@ def test_s3_multipart_manifest_keeps_memory_ownership_until_commit() -> None:
 def test_native_backpressure_has_dynamic_deadline_fairness_and_lost_wakeup_guards() -> None:
     source = _cpp_source("internal/runtime/operation_task_arena.cc")
     assert "std::lock_guard retained_lock(retained_wait_mutex)" in source
-    assert "retained_ready.notify_one()" in source
+    assert "retained_ready.notify_all()" in source
+    assert "retained_ready.notify_one()" not in source
     assert "backpressure_timeout_ns.load" in source
     assert "backpressure_deadline_ns.load" in source
     assert "backpressure_waiters.fetch_add" in source

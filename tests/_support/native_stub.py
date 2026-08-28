@@ -24,10 +24,66 @@ def native_stub(
     request: pytest.FixtureRequest,
 ) -> Iterator[None]:
     """Provide isolated import-time native metadata for Python-only tests."""
-    from schema_sanitizer.core_impl import native_runtime
+    from schema_sanitizer.core_impl import finalizer_registry, native_runtime
+
+    with finalizer_registry._REGISTRY_LOCK:
+        finalizer_registry_state = (
+            tuple(finalizer_registry._REGISTRY),
+            dict(finalizer_registry._REGISTRY_NAMES),
+            bytes(finalizer_registry._REGISTRY_EPOCH),
+            finalizer_registry._REGISTRY_CORRUPTED,
+            finalizer_registry._REGISTRY_FROZEN,
+            finalizer_registry._FROZEN_DOMAINS,
+            finalizer_registry._FROZEN_ESCROWS,
+            finalizer_registry._FROZEN_ACTIVITY_NATIVE_CAPSULES,
+        )
 
     class Stub:
         """Minimal native metadata provider."""
+
+        def __init__(self) -> None:
+            self._memory_ledgers: dict[int, list[int]] = {}
+
+        def process_resident_memory_stats(self) -> tuple[int, int, int]:
+            """Return the current resident-memory snapshot contract."""
+            return (1 << 40, 0, 0)
+
+        def process_physical_thread_permits_acquire(self, amount: int, minimum: int) -> int:
+            """Grant the exact physical-thread request used by governed hosts."""
+            return amount if amount >= minimum else 0
+
+        def process_physical_thread_permits_release(self, _amount: int) -> None:
+            """Release a governed-host permit."""
+            return None
+
+        def process_file_descriptor_permits_snapshot(
+            self,
+        ) -> tuple[int, int, int, int, int, int]:
+            """Return the current native descriptor-accounting contract."""
+            return (0, 0, 4096, 0, 0, 0)
+
+        def operation_memory_ledger_create(self, limit_bytes: int) -> object:
+            """Create one exact in-memory ledger capsule for Python-only tests."""
+            capsule = object()
+            self._memory_ledgers[id(capsule)] = [limit_bytes, 0, 0]
+            return capsule
+
+        def operation_memory_ledger_reserve_snapshot(
+            self, capsule: object, amount: int, _stage: str
+        ) -> tuple[int, int, int]:
+            """Reserve bytes and return the current three-field snapshot."""
+            values = self._memory_ledgers[id(capsule)]
+            values[1] += amount
+            values[2] = max(values[2], values[1])
+            return tuple(values)  # type: ignore[return-value]
+
+        def operation_memory_ledger_release(self, capsule: object, amount: int) -> None:
+            """Release bytes from one exact in-memory ledger capsule."""
+            self._memory_ledgers[id(capsule)][1] -= amount
+
+        def operation_memory_ledger_snapshot(self, capsule: object) -> tuple[int, int, int]:
+            """Return the exact in-memory ledger snapshot."""
+            return tuple(self._memory_ledgers[id(capsule)])  # type: ignore[return-value]
 
         def options_catalog(self) -> tuple[object, ...]:
             """Return an empty option catalog."""
@@ -73,3 +129,23 @@ def native_stub(
             parent = sys.modules.get(parent_name)
             if parent is not None:
                 setattr(parent, attribute, module)
+        (
+            registered,
+            registered_names,
+            registry_epoch,
+            registry_corrupted,
+            registry_frozen,
+            frozen_domains,
+            frozen_escrows,
+            frozen_activity_capsules,
+        ) = finalizer_registry_state
+        with finalizer_registry._REGISTRY_LOCK:
+            finalizer_registry._REGISTRY[:] = registered
+            finalizer_registry._REGISTRY_NAMES.clear()
+            finalizer_registry._REGISTRY_NAMES.update(registered_names)
+            finalizer_registry._REGISTRY_EPOCH[:] = registry_epoch
+            finalizer_registry._REGISTRY_CORRUPTED = registry_corrupted
+            finalizer_registry._REGISTRY_FROZEN = registry_frozen
+            finalizer_registry._FROZEN_DOMAINS = frozen_domains
+            finalizer_registry._FROZEN_ESCROWS = frozen_escrows
+            finalizer_registry._FROZEN_ACTIVITY_NATIVE_CAPSULES = frozen_activity_capsules

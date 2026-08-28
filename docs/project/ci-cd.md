@@ -193,11 +193,8 @@ four platforms:
 | `memory-parquet` | `tests/memory`, `tests/parquet`, `tests/quality`, and `tests/sinks` | Compiled-wheel Parquet certification. |
 | `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | Reader linear-scaling benchmark. |
 
-The former `remaining` label meant all directories outside `concurrency` and
-`memory`; it was not a lower-priority or optional test class. The explicit new
-names make every workload's ownership visible. The topology contract derives
-the repository's test directories and fails if a new one is not assigned
-exactly once. Separate hosted runners provide real parallelism without
+The topology contract derives the repository's test directories and fails if a
+new one is not assigned exactly once. Separate hosted runners provide real parallelism without
 oversubscribing a single runner's native concurrency tests. Three shards incur
 one more checkout, Python setup, dependency installation, and hosted runner per
 platform than the previous two-way split, but reduce the slowest functional

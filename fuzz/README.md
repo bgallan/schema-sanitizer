@@ -5,14 +5,14 @@ Parquet fuzz targets in `cpp/fuzz`.
 
 - `corpus/<target>/` contains small, descriptive seeds chosen to exercise
   useful parser grammar and boundary conditions.
-- `regressions/<target>/` contains minimized failures that must execute once
-  before every mutation campaign.
+- `regressions/<target>/` contains the small descriptive fixtures shipped in
+  source distributions. Content-addressed failures live in the adjacent
+  deterministic `regressions/<target>.sha1.zip` archive.
 
-Keep both layouts flat. The regression runner intentionally discovers regular
-files directly inside each target directory; nested directories are not part
-of the regression contract. A seed and a regression may contain identical
-bytes while serving different purposes, so do not remove those semantic
-duplicates.
+Keep target directories flat. The runner presents loose and archived inputs as
+one sorted logical collection and stages their exact bytes outside the checkout
+before execution. A seed and a regression may contain identical bytes while
+serving different purposes, so do not remove those semantic duplicates.
 
 ## Byte integrity
 
@@ -28,10 +28,18 @@ path-and-content fingerprint:
 python meta/ci/fuzz/check_fuzz_corpus.py
 ```
 
-Promote a minimized failure by copying it unchanged into the matching
-`regressions/<target>/` directory. Deliberate corpus changes require reviewing
-the complete inventory and updating the expected counts and tree fingerprint
-in `meta/ci/fuzz/check_fuzz_corpus.py`; run the checker immediately afterward.
+Promote a minimized failure by copying it unchanged, under its lowercase SHA-1
+name, into the matching `regressions/<target>/` directory, then repack and
+validate it:
+
+```console
+python meta/ci/fuzz/pack_fuzz_regressions.py --remove-loose
+python meta/ci/fuzz/check_fuzz_corpus.py
+```
+
+The packer validates names and bytes, updates all four archives atomically, and
+is safe to rerun. Deliberate additions or removals also require reviewing the
+expected counts and logical tree fingerprint in the checker.
 
 ## Running regressions and campaigns
 

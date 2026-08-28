@@ -60,7 +60,6 @@ def test_parquet_native_file_output_writes_float_statistics_without_nan_bounds(
     assert zero_stats.max == 0.0
     assert math.copysign(1.0, zero_stats.min) == -1.0
     assert math.copysign(1.0, zero_stats.max) == 1.0
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_skips_column_index_without_page_bounds(
@@ -92,7 +91,6 @@ def test_parquet_native_file_output_skips_column_index_without_page_bounds(
     rows = pq.read_table(out).to_pylist()
     assert len(rows) == 2
     assert all(math.isnan(row["value"]) for row in rows)
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_splits_large_batches_into_row_groups(
@@ -134,7 +132,6 @@ def test_parquet_native_file_output_splits_large_batches_into_row_groups(
     assert pq.read_table(out).to_pylist() == [
         {"id": index + 1, "name": f"name-{index}"} for index in range(row_count)
     ]
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_respects_uncompressed_override(
@@ -161,7 +158,6 @@ def test_parquet_native_file_output_respects_uncompressed_override(
     parquet_file = pq.ParquetFile(out)
     assert parquet_file.metadata.row_group(0).column(0).compression == "UNCOMPRESSED"
     assert pq.read_table(out).to_pylist() == [{"text": "same"}] * 32
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_snappy_reduces_repeated_payload(
@@ -191,7 +187,6 @@ def test_parquet_native_snappy_reduces_repeated_payload(
     assert column.compression == "SNAPPY"
     assert column.total_compressed_size < column.total_uncompressed_size
     assert pq.read_table(out).column("text").to_pylist() == values
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_defaults_to_gzip_when_available(
@@ -222,7 +217,6 @@ def test_parquet_native_file_output_defaults_to_gzip_when_available(
         pytest.skip("native Parquet writer was built without zlib")
     assert compression == "GZIP"
     assert pq.read_table(out).to_pylist() == [{"text": "compressible"}] * 128
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_accepts_gzip_level(
@@ -280,7 +274,7 @@ def test_parquet_native_file_output_rejects_invalid_gzip_level(
 def test_parquet_native_file_output_rejects_unknown_compression(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compression: str
 ) -> None:
-    """Verify unknown or removed compression names do not fall back to PyArrow."""
+    """Verify unsupported compression names do not fall back to PyArrow."""
     require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
@@ -295,7 +289,6 @@ def test_parquet_native_file_output_rejects_unknown_compression(
             feature="test_parquet_native_file_output_rejects_unknown_compression",
             parquet_compression=compression,
         )
-    assert native_file_output.last_parquet_stream_route() == "none"
 
 
 def test_to_parquet_public_compression_option_writes_uncompressed(tmp_path: Path) -> None:
@@ -307,10 +300,12 @@ def test_to_parquet_public_compression_option_writes_uncompressed(tmp_path: Path
     source.write_text('{"text":"same"}\n{"text":"same"}\n', encoding="utf-8")
     out = tmp_path / "public-uncompressed.parquet"
 
-    ss.to_parquet(source, out, input_format="jsonl", parquet_compression="uncompressed")
+    result = ss.to_parquet(source, out, input_format="jsonl", parquet_compression="uncompressed")
 
     parquet_file = pq.ParquetFile(out)
     assert parquet_file.metadata.row_group(0).column(0).compression == "UNCOMPRESSED"
+    assert result.stats["file_output_route"] == "native_direct"
+    assert result.stats["file_metadata_route"] == "none"
 
 
 def test_to_parquet_public_gzip_level_option_writes_gzip(tmp_path: Path) -> None:

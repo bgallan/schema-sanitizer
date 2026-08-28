@@ -60,7 +60,7 @@ def test_lazy_worker_state_is_encoded_in_sources() -> None:
 
 
 def test_plan_ordered_fields_are_emitted_in_place() -> None:
-    """The JSON frontend no longer stages and recopies all wide-row fields."""
+    """The JSON frontend defers wide-row field materialization."""
     root = Path(__file__).resolve().parents[2]
     scratch = (root / "cpp/src/frontends/json/text_row_materializer.hh").read_text(encoding="utf-8")
     implementation = (root / "cpp/src/frontends/json/text_row_materializer.cc").read_text(

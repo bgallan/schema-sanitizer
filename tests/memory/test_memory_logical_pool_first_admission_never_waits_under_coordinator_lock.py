@@ -72,30 +72,45 @@ def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     class Native:
         supports_resident_attribution = True
         supports_stack_debt = True
+        supports_atomic_residency_update = True
 
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            return desired
+        def __init__(self) -> None:
+            self.leases: dict[object, int] = {}
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            events.append(("claim-release", amount))
+        def acquire_exact_permit_lease(
+            self, desired: int, minimum: int
+        ) -> tuple[object, int] | None:
+            if desired < minimum:
+                return None
+            receipt = object()
+            self.leases[receipt] = desired
+            return receipt, desired
 
-        def external_runtime_resident_threads_add(self, amount: int) -> None:
-            events.append(("identity-add", amount))
+        def exact_permit_lease_amount(self, receipt: object) -> int:
+            return self.leases[receipt]
 
-        def external_runtime_resident_threads_release(self, amount: int) -> None:
-            events.append(("identity-release", amount))
+        def resize_exact_permit_lease(self, receipt: object, target: int) -> int:
+            current = self.leases[receipt]
+            if current > target:
+                events.append(("claim-release", current - target))
+            self.leases[receipt] = target
+            return target
 
-        def external_runtime_stack_debt_threads_add(self, amount: int) -> None:
-            events.append(("debt-add", amount))
-
-        def external_runtime_stack_debt_threads_release(self, amount: int) -> None:
-            events.append(("debt-release", amount))
+        def external_runtime_residency_update(self, identity_delta: int, debt_delta: int) -> None:
+            if identity_delta > 0:
+                events.append(("identity-add", identity_delta))
+            elif identity_delta < 0:
+                events.append(("identity-release", -identity_delta))
+            if debt_delta > 0:
+                events.append(("debt-add", debt_delta))
+            elif debt_delta < 0:
+                events.append(("debt-release", -debt_delta))
 
     monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
 
     first = module._acquire_shared_external_native_thread_permits(Runtime, 1)
     assert first.amount == 1 and first.owner is not None
-    first.owner.process_physical_thread_permits_release(1)
+    first.owner.release()
     snap = module.external_runtime_pool_snapshot()
     assert snap["resident_width"] == 3
     assert snap["resident_stack_debt"] == 3
@@ -103,7 +118,7 @@ def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     state[0] = -1
     second = module._acquire_shared_external_native_thread_permits(Runtime, 1)
     assert second.amount == 1 and second.owner is not None
-    second.owner.process_physical_thread_permits_release(1)
+    second.owner.release()
     snap = module.external_runtime_pool_snapshot()
     assert snap["resident_width"] == 3
     assert snap["resident_stack_debt"] == 3
@@ -113,7 +128,7 @@ def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     state[0] = 0
     third = module._acquire_shared_external_native_thread_permits(Runtime, 1)
     assert third.amount == 1 and third.owner is not None
-    third.owner.process_physical_thread_permits_release(1)
+    third.owner.release()
     assert ("debt-release", 3) in events
     assert module.external_runtime_pool_snapshot()["coordinator_entries"] == 0
 
@@ -179,7 +194,11 @@ def test_allocation_after_commit_critical_helpers_return_single_preallocated_own
     ]
     assert "return result" in shared
     assert "return permit, granted_width" not in shared
-    resize = storage[storage.index("    def _resize(\n") : storage.index("    def _resize_lease")]
+    resize = storage[
+        storage.index("    def _resize_lease(\n") : storage.index(
+            "    def _release_lease_authority"
+        )
+    ]
     assert "result = _StorageResizeResult" in resize
     assert "return result" in resize
     assert "return requested, target_key, target_path" not in resize
@@ -199,17 +218,7 @@ def test_production_finalizer_paths_use_single_capsule_api() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
-            assert node.func.id not in forbidden_calls, f"legacy tuple finalizer call in {path}"
-            if node.func.id == "prepare_owner_finalizer_cleanup":
-                assert path.name == "path_identity.py"
-
-    path_identity = (SRC / "core_impl/path_identity.py").read_text(encoding="utf-8")
-    hook = path_identity[
-        path_identity.index("def prepare_owner_finalizer_cleanup") : path_identity.index(
-            "_OWNER_XATTR"
-        )
-    ]
-    assert "return reserve_owner_finalizer_cleanup()" in hook
+            assert node.func.id not in forbidden_calls, f"tuple finalizer call in {path}"
 
     finalizers = (SRC / "core_impl/finalizer_cleanup.py").read_text(encoding="utf-8")
     reserve = finalizers[
@@ -310,7 +319,7 @@ def test_native_stack_pid_memory_fd_and_fifo_contracts() -> None:
     probe = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
 
     assert "std::max<std::uint64_t>(kDefault" in arena
-    assert "ProcessRlimitThreadCapacity" in arena
+    assert "ProcessRlimitThreadHeadroom" in arena
     assert 'effective_headroom(\n        "pids", "pids.max", "pids.current")' in arena
     assert "GlobalMemoryStatusEx" in arena
     assert "host_statistics64" in arena
@@ -364,7 +373,7 @@ def test_release_gate_requires_stack_debt_schema(monkeypatch: pytest.MonkeyPatch
     missing = dict(base)
     missing.pop("external_runtime_stack_debt_threads")
     monkeypatch.setattr(runtime_diagnostics, "_native_arena_snapshot", lambda: missing)
-    with pytest.raises(RuntimeError, match="stack-debt"):
+    with pytest.raises(RuntimeError, match="external_runtime_stack_debt_threads"):
         coverage.validate_native_concurrency_protocol_health()
 
     underaccounted = dict(base, external_runtime_stack_debt_threads=1)
@@ -388,7 +397,7 @@ def test_shutdown_and_debug_snapshots_include_external_runtime_pool_domain() -> 
 
 def test_runtime_diagnostics_accepts_30_field_native_snapshot() -> None:
     source = (SRC / "core_impl/runtime_diagnostics.py").read_text(encoding="utf-8")
-    assert "29, 30" in source or "29,30" in source
+    assert "len(values) != 30" in source
     assert '"external_runtime_stack_debt_threads"' in source
 
 

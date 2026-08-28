@@ -44,7 +44,8 @@ def test_async_terminal_reaping_keeps_authority_until_cleanup_commits() -> None:
         scheduler._reap_one_async_terminal_debt()
     assert scheduler._ASYNC_TERMINAL_DEBT_COUNT == before
     assert any(
-        debt.state == scheduler._ASYNC_DEBT_REAPING for debt in scheduler._ASYNC_TERMINAL_DEBTS
+        debt.state == scheduler._ASYNC_DEBT_RETRY_PENDING
+        for debt in scheduler._ASYNC_TERMINAL_DEBTS
     )
     assert admission.stage_admission is owner
 
@@ -150,7 +151,7 @@ def test_async_terminal_publication_uses_preallocated_slots_not_result_queue_put
     assert "result_slot.publish(" in worker
     assert "results.put(" not in worker
     assert "_ASYNC_TERMINAL_TASK_BANK" in source
-    assert "_ASYNC_DEBT_REAPING" in source
+    assert "_ASYNC_DEBT_RETRY_PENDING" in source
     assert "async_terminal_ownership_banks" in source
 
 
@@ -297,7 +298,10 @@ def test_prebounded_async_results_still_run_concurrently_without_terminal_queue(
             return [
                 value
                 async for _index, value in scheduler.unordered_indexed_results(
-                    12, fetch, window=4, expected_retained_bytes=64
+                    12,
+                    fetch,
+                    window=4,
+                    memory_contract=scheduler.AsyncResultMemoryContract(preflight_bytes=64),
                 )
             ]
 
@@ -323,7 +327,6 @@ def test_native_cgroup_and_backpressure_contracts_are_hardened() -> None:
     header = (CPP / "internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
     ordered = (CPP / "internal/runtime/ordered_executor.hh").read_text(encoding="utf-8")
 
-    assert "Never fabricate mountpoint + unrelated membership" in cgroup
     assert "membership_after" in cgroup
     assert "cancel_requested" in arena
     assert "backpressure_deadline_ns" in arena

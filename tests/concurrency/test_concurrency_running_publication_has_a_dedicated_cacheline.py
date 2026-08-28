@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/layout/running-publication-cacheline.json"
 
 
 def test_running_publication_has_a_dedicated_cacheline() -> None:
@@ -39,7 +39,7 @@ def test_does_not_change_running_memory_orders_or_wake_logic() -> None:
 
 def test_evidence_is_positive_and_scoped() -> None:
     """The paired benchmark is positive and avoids throughput claims."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("running-publication-cacheline")
 
     assert evidence["pair_count"] == 15
     assert "cache-line ownership" in evidence["scope"]
@@ -53,9 +53,7 @@ def test_evidence_is_positive_and_scoped() -> None:
 
 def test_real_arena_probe_covers_multiple_worker_counts() -> None:
     """The native probe validates exact completion and drain."""
-    source = (
-        ROOT / "benchmarks/probes/concurrency/layout/running-publication-cacheline-tsan.cc"
-    ).read_text(encoding="utf-8")
+    source = load_probe("layout/running-publication-cacheline-tsan.cc")
     compact = source.replace(" ", "").replace("\n", "")
 
     assert "{2U,4U,8U,16U}" in compact

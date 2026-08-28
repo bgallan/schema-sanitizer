@@ -144,8 +144,8 @@ def test_parquet_contract_runtime_suite_selection_detects_missing_group() -> Non
     assert any("required runtime contract group is missing" in issue for issue in status["issues"])
 
 
-def test_parquet_contract_runtime_suite_selection_detects_stale_nodeid() -> None:
-    """Verify the runtime suite fails closed if a selected test is renamed/removed."""
+def test_parquet_contract_runtime_suite_selection_detects_a_missing_nodeid() -> None:
+    """Verify the runtime suite fails closed if a selected test is missing."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import (
         _validate_runtime_suite_selection,
     )
@@ -153,14 +153,14 @@ def test_parquet_contract_runtime_suite_selection_detects_stale_nodeid() -> None
     status = _validate_runtime_suite_selection(
         groups={
             "safe_pyarrow_fallback": (
-                "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_this_runtime_contract_test_no_longer_exists",
+                "tests/parquet/test_parquet_native_scalar_paths_and_staging.py::test_missing_contract",
             )
         },
         required_groups=("safe_pyarrow_fallback",),
     )
 
     assert status["satisfied"] is False
-    assert any("runtime contract test no longer exists" in issue for issue in status["issues"])
+    assert any("runtime contract test is missing" in issue for issue in status["issues"])
 
 
 def test_parquet_contract_runtime_suite_fails_closed_when_selection_is_invalid(

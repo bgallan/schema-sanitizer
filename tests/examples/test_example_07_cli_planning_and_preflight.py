@@ -140,10 +140,6 @@ def test_example_07_parser_lives_in_cli_module() -> None:
     assert args.parquet_enable_list_inference is True
     assert args.multi_threading is False
     assert args.memory_limit_bytes is None
-    assert not hasattr(args, "batch_memory_limit_bytes")
-    assert not hasattr(args, "read_chunk_bytes")
-    assert not hasattr(args, "thread_limit")
-    assert not hasattr(args, "max_workers")
     registry_order = registry_order_sql(
         hive_partition_columns(
             args.hive_partition_column,

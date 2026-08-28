@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ...errors import SchemaSanitizerResourceError
-from .contract_gates.native import (
+from .contract_gates import (
     _NATIVE_PARQUET_WRITER_CREATED_BY,
     _native_nested_contract_diagnostics,
     _native_nested_contract_status_from_summary,

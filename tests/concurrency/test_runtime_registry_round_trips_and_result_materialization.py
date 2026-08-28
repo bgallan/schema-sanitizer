@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import require_native
@@ -195,8 +196,8 @@ def test_registry_probe_arrow_sources_uses_native_registry_state(monkeypatch) ->
             """Fail if the JSON-registry path is used."""
             raise AssertionError("JSON Arrow-source registry probe should not be used")
 
-    ctx = execution_context.ExecutionContext.__new__(execution_context.ExecutionContext)
-    ctx._capsule = "ctx"
+    monkeypatch.setattr(execution_context, "_native", SimpleNamespace(context_new=lambda: "ctx"))
+    ctx = execution_context.ExecutionContext()
     monkeypatch.setattr(probe_dependencies, "_native", FakeNative)
     monkeypatch.setattr(
         probe_dependencies, "_options_capsule", lambda options: f"prepared:{options}"

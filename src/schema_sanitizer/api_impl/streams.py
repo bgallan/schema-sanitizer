@@ -50,6 +50,7 @@ _DIAGNOSTIC_INT_KEYS = (
     "errors",
     "soft_errors",
 )
+_DIAGNOSTIC_STRING_KEYS = ("file_output_route", "file_metadata_route")
 
 
 def diagnostics_raw_json(raw: Any) -> str:
@@ -61,6 +62,10 @@ def diagnostics_raw_json(raw: Any) -> str:
     payload: dict[str, Any] = {}
     missing = object()
     for key in _DIAGNOSTIC_INT_KEYS:
+        value = getattr(raw, key, missing)
+        if value is not missing:
+            payload[key] = value
+    for key in _DIAGNOSTIC_STRING_KEYS:
         value = getattr(raw, key, missing)
         if value is not missing:
             payload[key] = value
@@ -146,6 +151,8 @@ def diagnostics_stats(raw: Any) -> dict[str, Any]:
     out["cancellation_reason"] = str(
         getattr(raw, "cancellation_reason", payload.get("cancellation_reason", "")) or ""
     )
+    for key in _DIAGNOSTIC_STRING_KEYS:
+        out[key] = str(getattr(raw, key, payload.get(key, "")) or "")
     compressed = out.get("compressed_bytes", 0)
     decompressed = out.get("decompressed_bytes", 0)
     out["decompression_ratio"] = float(decompressed) / float(compressed) if compressed > 0 else 0.0

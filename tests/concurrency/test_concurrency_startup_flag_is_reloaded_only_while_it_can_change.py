@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/scheduler/initialized-worker-park-snapshot.json"
 
 
 def test_startup_flag_is_reloaded_only_while_it_can_change() -> None:
@@ -38,9 +38,7 @@ def test_local_recheck_and_wait_capture_remove_epoch_reloads() -> None:
 
 def test_real_arena_probe_exercises_repeated_park_wake_waves() -> None:
     """The standalone probe requires exact activity and zero-drain waves."""
-    source = (
-        ROOT / "benchmarks/probes/concurrency/scheduler/initialized-worker-park-snapshot-tsan.cc"
-    ).read_text(encoding="utf-8")
+    source = load_probe("scheduler/initialized-worker-park-snapshot-tsan.cc")
 
     assert "OperationTaskArena::Make(workers)" in source
     assert "for (const auto workers : {2U, 4U, 8U, 16U})" in source
@@ -53,7 +51,7 @@ def test_real_arena_probe_exercises_repeated_park_wake_waves() -> None:
 
 def test_evidence_is_positive_and_scoped_to_snapshot_bookkeeping() -> None:
     """Evidence avoids claims about condition variables or full pipelines."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("initialized-worker-park-snapshot")
 
     assert evidence["pair_count"] == 15
     assert "park/wake atomic snapshot bookkeeping" in evidence["scope"]

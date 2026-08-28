@@ -81,10 +81,10 @@ def _read_all(reader: PythonRowsJsonlByteReader, chunk_bytes: int = 16_381) -> b
 
 
 def test_every_input_output_pair_has_an_integral_parallel_contract() -> None:
-    """All eight inputs combine explicitly with all seven outputs."""
+    """All seven inputs combine explicitly with all seven outputs."""
     pairs = concurrency_pair_guarantees()
     assert set(pairs) == set(INPUT_CONCURRENCY_COVERAGE)
-    assert sum(len(outputs) for outputs in pairs.values()) == 56
+    assert sum(len(outputs) for outputs in pairs.values()) == 49
     for input_name, outputs in pairs.items():
         assert set(outputs) == set(OUTPUT_CONCURRENCY_COVERAGE)
         for contract in outputs.values():
@@ -101,7 +101,7 @@ def test_every_input_output_pair_has_an_integral_parallel_contract() -> None:
 def test_sequence_rows_are_encoded_once_across_repeated_replays(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reusable sequence no longer pays a second native object walk."""
+    """A reusable sequence pays for one native object walk."""
     require_native()
     original = python_rows.PYTHON_ROWS_JSONL_BYTES
     encoded_ranges: list[tuple[int, int]] = []

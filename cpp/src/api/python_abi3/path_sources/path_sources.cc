@@ -17,9 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "frontends/builtin_frontends.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/runtime/process_fd_governor.hh"
 #include "sanitize/ingest/chunk_source.hh"
 #include "sanitize/registry/registry.hh"
@@ -66,11 +64,10 @@ bool path_has_extension(const std::string &path, std::string_view extension) {
                       extension) == 0;
 }
 
-bool is_json_lines_path_source(const PathSourceSpec &source) {
+bool is_jsonl_path_source(const PathSourceSpec &source) {
   return source.frontend == "jsonl" ||
          (source.frontend == "json" &&
-          (path_has_extension(source.path, ".jsonl") ||
-           path_has_extension(source.path, ".ndjson")));
+          path_has_extension(source.path, ".jsonl"));
 }
 
 sanitize::Result<std::optional<char>>
@@ -135,8 +132,7 @@ json_source_can_stream_concat(const PathSourceSpec &source) {
   if (!is_json_path_source(source)) {
     return false;
   }
-  if (path_has_extension(source.path, ".jsonl") ||
-      path_has_extension(source.path, ".ndjson")) {
+  if (path_has_extension(source.path, ".jsonl")) {
     return true;
   }
   SAN_ASSIGN_OR_RAISE(auto first, first_non_ws_byte(source.path));
@@ -354,8 +350,7 @@ path_source_input(const sanitize::PreparedOptionsPtr &prepared,
                             source.path, prepared->spec.input_text_encoding,
                             prepared->spec.memory_limit_bytes));
     PathSourceInput input;
-    input.frontend =
-        is_json_lines_path_source(source) ? "jsonl" : source.frontend;
+    input.frontend = is_jsonl_path_source(source) ? "jsonl" : source.frontend;
     input.input_size_hint_bytes =
         input_size_hint_from_paths(std::vector<std::string>{source.path});
     input.chunk_source = std::move(chunk_source);
@@ -390,13 +385,13 @@ next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
     SAN_ASSIGN_OR_RAISE(const std::size_t end,
                         json_path_source_group_end(sources, start));
     if (end > start + 1) {
-      const bool all_json_lines =
+      const bool all_jsonl =
           std::all_of(sources.begin() + static_cast<std::ptrdiff_t>(start),
                       sources.begin() + static_cast<std::ptrdiff_t>(end),
-                      is_json_lines_path_source);
+                      is_jsonl_path_source);
       return PathSourceGroupPlan{.start = start,
                                  .end = end,
-                                 .frontend = all_json_lines ? "jsonl" : "json",
+                                 .frontend = all_jsonl ? "jsonl" : "json",
                                  .grouped = true,
                                  .source_file_in_inner = true};
     }

@@ -25,7 +25,6 @@ from schema_sanitizer.core_impl.execution import (
     PythonRowsJsonlByteReader,
 )
 from schema_sanitizer.core_impl.native_runtime import native_core
-from schema_sanitizer.core_impl.python_rows import last_python_rows_route
 from schema_sanitizer.input_impl.selection import resolve_source_and_format
 
 _GENERATED_COLUMNS = {
@@ -74,7 +73,7 @@ def _materialization_tasks() -> int:
 def test_python_is_a_first_class_concurrency_input() -> None:
     """Pure-Python rows declare honest parallel work and their GIL boundary."""
     guarantees = concurrency_guarantees()
-    assert len(INPUT_CONCURRENCY_COVERAGE) == 8
+    assert len(INPUT_CONCURRENCY_COVERAGE) == 7
     assert len(OUTPUT_CONCURRENCY_COVERAGE) == 7
     assert INPUT_CONCURRENCY_COVERAGE["python"] == (
         "native_iterator_batching",
@@ -136,7 +135,6 @@ def test_generator_reader_batches_replays_and_preserves_ordinal_errors() -> None
     reader = PythonRowsJsonlByteReader(source(), memory_limit_bytes=32 << 20)
     first = reader.read(1 << 20)
     assert first.count(b"\n") > 1
-    assert last_python_rows_route() == "native_iterator_batch"
     while reader.read(1 << 20):
         pass
     reader.seek(0)
@@ -284,6 +282,11 @@ def test_python_input_reaches_every_analytical_output_without_adapter_import(
     """Each analytical API opens the same native Python-row stream before its adapter."""
     require_native()
     from schema_sanitizer.api_impl import analytical
+    from schema_sanitizer.api_impl.duckdb_relation import (
+        _DuckDBConnectionOwner,
+        _OwnedDuckDBRelation,
+    )
+    from schema_sanitizer.api_impl.results import Result
 
     seen: list[tuple[str, str]] = []
 
@@ -291,7 +294,24 @@ def test_python_input_reaches_every_analytical_output_without_adapter_import(
         """Record the adapter boundary and close the already-built native stream."""
         seen.append((target, threading_mode))
         opened.close()  # type: ignore[attr-defined]
-        return SimpleNamespace(clean_data=target, execution_policy=None)
+        if target == "duckdb":
+
+            class Relation:
+                def __eq__(self, other: object) -> bool:
+                    return other == "duckdb"
+
+            class Connection:
+                def close(self) -> None:
+                    pass
+
+            return Result(
+                SimpleNamespace(diagnostics=None),
+                clean_data=_OwnedDuckDBRelation(
+                    Relation(),
+                    _DuckDBConnectionOwner(Connection()),
+                ),
+            )
+        return Result(SimpleNamespace(diagnostics=None), clean_data=target)
 
     monkeypatch.setattr(analytical, "materialize_opened_registry_stream", materialize)
     converter = getattr(ss, converter_name)

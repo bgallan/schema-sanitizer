@@ -39,7 +39,6 @@ def test_parquet_native_file_output_splits_large_pages_without_dictionary(
     assert metadata.dictionary_page_offset is None
     assert metadata.has_column_index
     assert metadata.has_offset_index
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_splits_row_groups_by_byte_budget(
@@ -66,7 +65,6 @@ def test_parquet_native_file_output_splits_row_groups_by_byte_budget(
     )
     assert pq.read_table(out).to_pylist() == batch.to_pylist()
     assert pq.ParquetFile(out).metadata.num_row_groups > 1
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_skips_delta_encoding_on_int64_overflow(
@@ -92,7 +90,6 @@ def test_parquet_native_file_output_skips_delta_encoding_on_int64_overflow(
 
     metadata = pq.ParquetFile(out).metadata.row_group(0).column(0)
     assert "DELTA_BINARY_PACKED" not in metadata.encodings
-    assert native_file_output.last_parquet_stream_route() == "native"
     assert pq.read_table(out).to_pylist() == [
         {"value": values[0]},
         {"value": values[1]},
@@ -165,7 +162,6 @@ def test_parquet_native_file_output_preserves_sliced_batch_offsets(
     )
 
     assert pq.read_table(out).to_pylist() == rows[1:3]
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_is_duckdb_readable_across_row_groups(
@@ -224,4 +220,3 @@ def test_parquet_native_file_output_is_duckdb_readable_across_row_groups(
             """,
             [str(out)],
         ).fetchone() == ("payload-3",)
-    assert native_file_output.last_parquet_stream_route() == "native"

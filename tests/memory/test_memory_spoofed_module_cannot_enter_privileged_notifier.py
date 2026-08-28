@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import os
-import sys
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -17,24 +15,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def _delivery(module: object, governor: object, event: object) -> object:
-    generation = governor._availability_events[event]
-    return module._AvailabilityDelivery(governor, event, generation)
-
-
-def test_spoofed_module_cannot_enter_privileged_notifier() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    governor = module._Governor(
-        1, "spoofed-module-cannot-enter-privileged-notifier-forged-callback"
-    )
-
-    def hostile() -> None:
-        raise AssertionError("must never run")
-
-    hostile.__module__ = "schema_sanitizer.fake"
-    assert not governor.register_availability_callback(hostile)
-    assert governor.snapshot().availability_callbacks == 0
-    assert governor.snapshot().rejected_callbacks == 1
+    del module
+    return governor._availability_events[event]
 
 
 def test_notifier_close_is_terminal_and_rejects_late_publication() -> None:
@@ -48,7 +30,7 @@ def test_notifier_close_is_terminal_and_rejects_late_publication() -> None:
     delivery = _delivery(module, governor, module.AvailabilityEvent.RETRY_SCHEDULER)
     assert notifier.close(deadline_seconds=0.2)
     assert notifier.snapshot().lifecycle_state == "STOPPED"
-    assert notifier.publish((delivery,)) == (delivery,)
+    assert not notifier.publish_one(delivery)
     assert notifier.snapshot().worker_alive is False
 
 
@@ -78,7 +60,7 @@ def test_notifier_retries_failed_event_and_acks_only_after_success(
     )
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
     delivery = _delivery(module, governor, module.AvailabilityEvent.RETRY_SCHEDULER)
-    assert notifier.publish((delivery,)) == ()
+    assert notifier.publish_one(delivery)
     assert completed.wait(2)
     deadline = time.monotonic() + 2
     while governor.snapshot().availability_callbacks and time.monotonic() < deadline:
@@ -257,14 +239,18 @@ def test_fork_capsule_is_single_and_bounded(monkeypatch: pytest.MonkeyPatch) -> 
     from schema_sanitizer.core_impl import fork_safety as module
 
     monkeypatch.setattr(module, "_FORK_GENERATION", 1)
-    monkeypatch.setattr(module, "_FORK_INHERITED_CAPSULE", {})
     monkeypatch.setattr(module, "_MAX_FORK_CAPSULE_ENTRIES", 2)
+    monkeypatch.setattr(module, "_FORK_CAPSULE_COUNTS", [0, 0])
+    monkeypatch.setattr(module, "_FORK_CAPSULE_COUNT", 0)
+    monkeypatch.setattr(module, "_FORK_LABELS", [None] * 4)
+    monkeypatch.setattr(module, "_FORK_OWNERS", [None] * 32)
     monkeypatch.setattr(module, "_REJECTED_FORK_CAPSULE_ENTRIES", 0)
+    monkeypatch.setattr(module, "_REJECTED_FORK_CAPSULE_OVERFLOWED", False)
     assert module.quarantine_inherited_state("a", object())
     assert module.quarantine_inherited_state("b", object())
     assert not module.quarantine_inherited_state("c", object())
     snapshot = module.fork_inherited_capsule_snapshot()
-    assert snapshot == {"entries": 2, "capacity": 2, "rejected": 1, "generation": 1}
+    assert snapshot == {"entries": 2, "capacity": 4, "rejected": 1, "generation": 1}
 
 
 def test_native_reaper_reserves_lane_before_start_and_promotes_parking() -> None:
@@ -276,7 +262,7 @@ def test_native_reaper_reserves_lane_before_start_and_promotes_parking() -> None
     assert "PromoteParked(index)" in source
     assert "kLaneCount * kMaxQueuedStates" in source
     assert "reaper_thread_start_failures" in header
-    assert "PyTuple_New(16)" in abi
+    assert "PyTuple_New(30)" in abi
     shutdown = source[source.index("void OperationTaskArena::Shutdown() noexcept") :]
     assert "Every accepted arena reserved" in shutdown
     assert (
@@ -297,18 +283,6 @@ def test_native_accounting_uses_saturating_subtraction_for_retained_bytes() -> N
     assert "queued_bytes.fetch_sub" not in source
     assert "queued_bytes.fetch_sub" not in runtime
     assert "SaturatingAtomicSubtract(state_->retained_bytes_total, bytes_)" in runtime
-
-
-def test_native_snapshot_parser_accepts_extended_tuple(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import runtime_diagnostics as module
-
-    native = SimpleNamespace(operation_task_arena_runtime_snapshot=lambda: tuple(range(16)))
-    monkeypatch.setitem(sys.modules, "schema_sanitizer._core_abi3", native)
-    snapshot = module._native_arena_snapshot()
-    assert snapshot["available"] is True
-    assert snapshot["reaper_over_capacity"] == 15
 
 
 def test_runtime_registry_reopens_circuit_after_capacity_drains() -> None:
@@ -349,4 +323,3 @@ def test_shutdown_accounts_for_terminal_notifier_hosts_and_native_states() -> No
     native = Path("cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     promote = native[native.index("void PromoteParked") : native.index("const bool enabled_")]
     assert "for (std::size_t i = 0; i < parked_.size(); ++i)" in promote
-    assert "candidate->reaper_self = candidate" in promote

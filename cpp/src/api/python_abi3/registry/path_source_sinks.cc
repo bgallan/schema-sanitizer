@@ -14,7 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
@@ -22,7 +21,7 @@
 #include "api/python_abi3/registry/path_source_sinks_internal.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
 #include "internal/memory/memory_budget.hh"
@@ -39,6 +38,7 @@
 namespace core_abi3_internal::path_registry_detail {
 
 NativePathSourcesStreamState::~NativePathSourcesStreamState() {
+  close_chunk_provider(this);
   if (telemetry) {
     telemetry->Finish();
   }
@@ -98,9 +98,8 @@ void merge_materialization_diagnostics(
   }
 }
 
-bool bind_path_source_diagnostics(
-    NativePathSourcesStreamState *state,
-    schema_sanitizer_diagnostics *diagnostics) noexcept {
+bool bind_path_source_diagnostics(NativePathSourcesStreamState *state,
+                                  NativeDiagnostics *diagnostics) noexcept {
   if (!state || !diagnostics) {
     return false;
   }
@@ -246,61 +245,39 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
       return sanitize::Status::Invalid(
           path_source_error_message(source, out_r.status().ToString()));
     }
-    auto out = std::move(out_r).ValueOrDie();
-    state->inner = out.stream.release();
-    state->diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-    if (!state->diagnostics) {
-      schema_sanitizer_stream_free(state->inner);
-      state->inner = nullptr;
-      return sanitize::Status::OutOfMemory(
-          "context_to_registry_sink_from_path_sources: diagnostics allocation "
-          "failed");
+    auto sink = native_sink_from_ingest_stream(std::move(out_r).ValueOrDie());
+    if (!sink.ok()) {
+      return sanitize::Status::Invalid(
+          path_source_error_message(source, sink.status().ToString()));
     }
-    state->diagnostics->diagnostics = std::move(out.diagnostics);
+    auto output = std::move(sink).ValueOrDie();
+    state->inner = output.stream.release();
+    state->diagnostics = output.diagnostics.release();
   } else if (state->registry_enabled) {
-    PyRegistrySinkOutputs outputs;
-    int st = context_to_registry_sink_from_source_internal(
-        state->ctx, state->sink_name.c_str(), input.frontend.c_str(),
-        std::move(input.chunk_source), state->prepared,
-        state->registry_json.c_str(), state->field_name_policy.c_str(),
-        state->schema_mode.c_str(),
-        ::RegistrySinkOutputs{
-            .sink = SinkOutputs{.stream = &outputs.main_stream,
-                                .diagnostics = &outputs.diagnostics},
-            .registry_json = &outputs.registry_json,
-            .drifts_json = &outputs.drifts_json,
-            .conversion_timestamp = &outputs.conversion_timestamp},
-        &outputs.err, "context_to_registry_sink_from_path_sources");
-    if (st != SCHEMA_SANITIZER_STATUS_OK) {
-      std::string message = path_source_error_message(
-          source, outputs.err ? outputs.err : "native source failed");
-      release_registry_outputs(&outputs);
-      schema_sanitizer_free_string(outputs.err);
-      return sanitize::Status::Invalid(message);
+    auto result = native_registry_sink_from_source(
+        state->ctx, state->sink_name, input.frontend,
+        std::move(input.chunk_source), state->prepared, state->registry_json,
+        state->field_name_policy, state->schema_mode,
+        "context_to_registry_sink_from_path_sources");
+    if (!result.ok()) {
+      return sanitize::Status::Invalid(
+          path_source_error_message(source, result.status().ToString()));
     }
-    schema_sanitizer_free_string(outputs.registry_json);
-    schema_sanitizer_free_string(outputs.drifts_json);
-    schema_sanitizer_free_string(outputs.conversion_timestamp);
-    state->inner = outputs.main_stream;
-    state->diagnostics = outputs.diagnostics;
+    auto output = std::move(result).ValueOrDie();
+    state->inner = output.sink.stream.release();
+    state->diagnostics = output.sink.diagnostics.release();
   } else {
-    ArrowArrayStream *main_stream = nullptr;
-    schema_sanitizer_diagnostics *diagnostics = nullptr;
-    char *err = nullptr;
-    int st = context_to_sink_from_source_internal(
-        state->ctx, state->sink_name.c_str(), input.frontend.c_str(),
-        std::move(input.chunk_source), state->prepared,
-        SinkOutputs{.stream = &main_stream, .diagnostics = &diagnostics}, &err,
-        "context_to_sink_from_path_sources");
-    if (st != SCHEMA_SANITIZER_STATUS_OK) {
-      std::string message =
-          path_source_error_message(source, err ? err : "native source failed");
-      release_sink_outputs(main_stream, diagnostics);
-      schema_sanitizer_free_string(err);
-      return sanitize::Status::Invalid(message);
+    auto result =
+        native_sink_from_source(state->ctx, state->sink_name, input.frontend,
+                                std::move(input.chunk_source), state->prepared,
+                                "context_to_sink_from_path_sources");
+    if (!result.ok()) {
+      return sanitize::Status::Invalid(
+          path_source_error_message(source, result.status().ToString()));
     }
-    state->inner = main_stream;
-    state->diagnostics = diagnostics;
+    auto output = std::move(result).ValueOrDie();
+    state->inner = output.stream.release();
+    state->diagnostics = output.diagnostics.release();
   }
   state->metadata = std::make_unique<MetadataStreamState>();
   configure_metadata_stream_budget(state->metadata.get(),
@@ -340,9 +317,7 @@ bool *path_sources_first_row_pending(void *state) noexcept {
 }
 
 void path_sources_destroy_state(void *state) noexcept {
-  auto *typed = static_cast<NativePathSourcesStreamState *>(state);
-  close_chunk_provider(typed);
-  delete typed;
+  delete static_cast<NativePathSourcesStreamState *>(state);
 }
 
 const NativeMultiSourceStreamOps kPathSourcesOps{
@@ -374,8 +349,58 @@ int path_sources_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   return native_multi_source_get_next(stream, out, kPathSourcesOps);
 }
 
+PyObject *pack_path_source_registry_stream(
+    PyObject *keepalive, std::unique_ptr<NativePathSourcesStreamState> state,
+    PyObject *chunk_provider) {
+  if (!state || !state->registry_plan) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "path-source stream has no compiled registry plan");
+    return nullptr;
+  }
+
+  if (chunk_provider) {
+    Py_INCREF(chunk_provider);
+    state->chunk_provider = chunk_provider;
+  }
+
+  auto *stream = new (std::nothrow) ArrowArrayStream();
+  if (!stream) {
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  std::memset(stream, 0, sizeof(*stream));
+  stream->get_schema = &path_sources_get_schema;
+  stream->get_next = &path_sources_get_next;
+  stream->get_last_error = &path_sources_last_error;
+  stream->release = &path_sources_release;
+
+  PyRegistrySinkOutputs outputs;
+  outputs.main_stream = stream;
+  outputs.diagnostics = new (std::nothrow) NativeDiagnostics();
+  if (!outputs.diagnostics) {
+    release_arrow_stream(stream);
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
+    release_registry_outputs(&outputs);
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  outputs.registry_json = state->registry_json;
+  outputs.drifts_json = state->drifts_json;
+  outputs.conversion_timestamp = state->conversion_timestamp;
+
+  auto registry_plan = state->registry_plan;
+  stream->private_data = state.release();
+  return pack_registry_stream_result_with_state(
+      keepalive, outputs.main_stream, outputs.diagnostics,
+      outputs.registry_json, outputs.drifts_json, outputs.conversion_timestamp,
+      std::move(registry_plan));
+}
+
 PyObject *pack_chunk_provider_registry_stream(
-    PyObject *ctx_obj, schema_sanitizer_context *ctx, const char *sink_name,
+    PyObject *ctx_obj, NativeContext *ctx, const char *sink_name,
     PyObject *stream_provider_obj,
     const sanitize::PreparedOptionsPtr &prepared_options,
     std::shared_ptr<NativeRegistryPlan> registry_plan,
@@ -398,48 +423,8 @@ PyObject *pack_chunk_provider_registry_stream(
   }
   append_registry_first_row_columns(&state->first_row_columns,
                                     state->registry_json, state->drifts_json);
-
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &path_sources_get_schema;
-  stream->get_next = &path_sources_get_next;
-  stream->get_last_error = &path_sources_last_error;
-  stream->release = &path_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(state->registry_json);
-  outputs.drifts_json = dup_cstr(state->drifts_json);
-  outputs.conversion_timestamp = dup_cstr(state->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-
-  Py_INCREF(stream_provider_obj);
-  state->chunk_provider = stream_provider_obj;
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      ctx_obj, outputs.main_stream, outputs.diagnostics, outputs.registry_json,
-      outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_path_source_registry_stream(ctx_obj, std::move(state),
+                                          stream_provider_obj);
 }
 
 } // namespace core_abi3_internal::path_registry_detail

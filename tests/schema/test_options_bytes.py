@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from conftest import require_native
 
@@ -201,14 +199,6 @@ def test_logical_schema_payload_rejects_invalid_nullable_byte() -> None:
 
     with pytest.raises(ValueError, match="invalid logical field nullable"):
         _logical_schema.LogicalSchemaPayload(payload)
-
-
-def test_logical_schema_payload_has_no_python_decoder() -> None:
-    """Verify logical-schema binary grammar is owned only by the native codec."""
-    from schema_sanitizer.core_impl import logical_schema
-
-    assert not hasattr(logical_schema, "_decode_logical_schema_payload")
-    assert not (Path(logical_schema.__file__).with_name("logical_schema")).exists()
 
 
 def test_raw_options_reject_unknown_attributes() -> None:

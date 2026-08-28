@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import gc
 import os
 import threading
-import weakref
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -40,152 +39,27 @@ def _runtime_pool_state(module: Any, runtime: object) -> tuple[int, int, int, in
         )
 
 
-def test_external_runtime_shrink_partial_failure_keeps_finalizer_exact() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
+class _ExactNative:
+    """Minimal current exact-receipt native API used by runtime-pool tests."""
 
-    module.drain_finalizer_cleanup()
-    native_releases: list[int] = []
+    def __init__(self, calls: list[tuple[str, int]]) -> None:
+        self.calls = calls
 
-    class Native:
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            native_releases.append(amount)
+    def acquire_exact_permit_lease(self, desired: int, minimum: int):
+        assert desired >= minimum
+        self.calls.append(("acquire", desired))
+        return SimpleNamespace(amount=desired), desired
 
-    class FlakyBudget:
-        def __init__(self) -> None:
-            self.borrowed = 4
-            self.calls = 0
+    def resize_exact_permit_lease(self, receipt: object, target: int) -> int:
+        previous = int(receipt.amount)  # type: ignore[attr-defined]
+        receipt.amount = target  # type: ignore[attr-defined]
+        if previous != target:
+            self.calls.append(("release", previous - target))
+        return target
 
-        def release(self, amount: int) -> None:
-            self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("injected borrow release failure")
-            assert amount <= self.borrowed
-            self.borrowed -= amount
-
-    budget = FlakyBudget()
-    runtime = module.ExternalRuntimeConcurrencyLease(
-        None,
-        workers=4,
-        parallel=True,
-        parent_lease=object(),  # type: ignore[arg-type]
-        borrow_budget=budget,  # type: ignore[arg-type]
-        borrowed=4,
-        native=Native(),
-        native_amount=4,
-    )
-    with pytest.raises(RuntimeError, match="injected borrow release failure"):
-        runtime.shrink_to(2)
-
-    state = runtime._cleanup_state
-    assert state is not None
-    assert runtime._native_amount == 2
-    assert state.native_amount == 2
-    assert runtime._borrowed == 4
-    assert state.borrowed == 4
-    assert native_releases == [2]
-
-    ref = weakref.ref(runtime)
-    del runtime
-    gc.collect()
-    module.drain_finalizer_cleanup()
-    assert ref() is None
-    # GC returns only the still-owned native suffix, never the original 4 again.
-    assert native_releases == [2, 2]
-    assert budget.borrowed == 0
-
-
-def test_external_runtime_shrink_native_failure_preserves_full_retry_state() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    module.drain_finalizer_cleanup()
-    events: list[str] = []
-
-    class Native:
-        attempts = 0
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            self.attempts += 1
-            events.append(f"native:{amount}:{self.attempts}")
-            if self.attempts == 1:
-                raise RuntimeError("injected native release failure")
-
-    class Lease:
-        amount = 4
-
-        def release(self) -> None:
-            events.append("lease")
-
-    runtime = module.ExternalRuntimeConcurrencyLease(
-        Lease(), workers=4, parallel=True, native=Native(), native_amount=4
-    )
-    with pytest.raises(RuntimeError, match="injected native release failure"):
-        runtime.shrink_to(2)
-    state = runtime._cleanup_state
-    assert state is not None
-    assert runtime._native_amount == 4
-    assert state.native_amount == 4
-
-    del runtime
-    gc.collect()
-    module.drain_finalizer_cleanup()
-    assert events == ["native:2:1", "native:4:2", "lease"]
-
-
-def test_external_runtime_shrink_lease_failure_retries_only_uncommitted_suffix() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    module.drain_finalizer_cleanup()
-    native_releases: list[int] = []
-    lease_events: list[str] = []
-
-    class Native:
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            native_releases.append(amount)
-
-    class Lease:
-        amount = 4
-        attempts = 0
-
-        def shrink(self, amount: int) -> None:
-            self.attempts += 1
-            lease_events.append(f"shrink:{amount}:{self.attempts}")
-            if self.attempts == 1:
-                raise RuntimeError("injected lease shrink failure")
-            self.amount = amount
-
-        def release(self) -> None:
-            lease_events.append("release")
-            self.amount = 0
-
-    budget = module._OperationThreadBorrowBudget(4)
-    assert budget.try_borrow(4)
-    runtime = module.ExternalRuntimeConcurrencyLease(
-        Lease(),
-        workers=4,
-        parallel=True,
-        parent_lease=object(),  # type: ignore[arg-type]
-        borrow_budget=budget,
-        borrowed=4,
-        native=Native(),
-        native_amount=4,
-    )
-    with pytest.raises(RuntimeError, match="injected lease shrink failure"):
-        runtime.shrink_to(2)
-
-    state = runtime._cleanup_state
-    assert state is not None
-    # Native + borrow commits succeeded and were mirrored before the lease failed.
-    assert runtime._native_amount == state.native_amount == 2
-    assert runtime._borrowed == state.borrowed == 2
-    assert budget.borrowed == 2
-    assert native_releases == [2]
-
-    del runtime
-    gc.collect()
-    module.drain_finalizer_cleanup()
-    assert native_releases == [2, 2]
-    assert budget.borrowed == 0
-    assert lease_events == ["shrink:2:1", "release"]
+    @staticmethod
+    def exact_permit_lease_amount(receipt: object) -> int:
+        return int(receipt.amount)  # type: ignore[attr-defined]
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
@@ -285,22 +159,14 @@ def test_process_global_runtime_pool_shares_logical_and_native_envelope(
     )
     calls: list[tuple[str, int]] = []
 
-    class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            assert desired == minimum
-            calls.append(("acquire", desired))
-            return desired
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(("release", amount))
-
     class Runtime:
         pass
 
     runtime_identity = Runtime()
+    native = _ExactNative(calls)
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
-    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
     monkeypatch.setattr(concurrency_contracts, "current_runtime_execution_lease", lambda: None)
 
     first = module.acquire_external_runtime_threads(
@@ -333,18 +199,11 @@ def test_shared_runtime_pool_releases_only_unshared_suffix(monkeypatch: pytest.M
     )
     calls: list[tuple[str, int]] = []
 
-    class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            calls.append(("acquire", desired))
-            return desired
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(("release", amount))
-
     runtime_identity = object()
+    native = _ExactNative(calls)
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
-    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
     monkeypatch.setattr(concurrency_contracts, "current_runtime_execution_lease", lambda: None)
 
     first = module.acquire_external_runtime_threads(
@@ -379,18 +238,11 @@ def test_live_global_runtime_pool_never_reexpands_for_overlapping_claim(
     )
     calls: list[tuple[str, int]] = []
 
-    class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            calls.append(("acquire", desired))
-            return desired
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(("release", amount))
-
     runtime_identity = object()
+    native = _ExactNative(calls)
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
-    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
     monkeypatch.setattr(concurrency_contracts, "current_runtime_execution_lease", lambda: None)
 
     first = module.acquire_external_runtime_threads(
@@ -430,17 +282,10 @@ def test_operation_borrow_shares_already_constrained_global_pool(
     operation = governor.try_acquire_up_to(9, minimum=9)
     calls: list[tuple[str, int]] = []
 
-    class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            calls.append(("acquire", desired))
-            return desired
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(("release", amount))
-
     runtime_identity = object()
+    native = _ExactNative(calls)
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
-    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
     monkeypatch.setattr(concurrency_contracts, "current_runtime_execution_lease", lambda: operation)
 
     first = module.acquire_external_runtime_threads(
@@ -481,18 +326,11 @@ def test_standalone_claim_aligns_to_pool_preconstrained_by_operation_borrow(
     calls: list[tuple[str, int]] = []
     active_parent: list[object | None] = [operation]
 
-    class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            calls.append(("acquire", desired))
-            return desired
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(("release", amount))
-
     runtime_identity = object()
+    native = _ExactNative(calls)
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
-    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
     monkeypatch.setattr(
         concurrency_contracts, "current_runtime_execution_lease", lambda: active_parent[0]
     )
@@ -568,7 +406,7 @@ def test_complex_finalizers_use_named_state_for_external_runtime_and_result() ->
     result = (SRC / "api_impl/results.py").read_text(encoding="utf-8")
     parquet = (SRC / "adapters/parquet/record_batch_factory.py").read_text(encoding="utf-8")
     assert "class _ExternalRuntimeCleanupState" in process
-    assert "state.native_amount" in process
+    assert "state.native" in process
     assert "capsule.arg5 = self._lease" not in process
     assert "class _ResultFinalizerState" in result
     assert "state.resource_owner" in result

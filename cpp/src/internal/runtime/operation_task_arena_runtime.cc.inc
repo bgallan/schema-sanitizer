@@ -685,8 +685,8 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
   TaskTelemetryBatch telemetry_batch(telemetry, index, state->worker_count);
   while (!stop.stop_requested()) {
     if constexpr (CheckGlobalStopping) {
-      // Two- and three-worker arenas retain the historical direct shutdown
-      // check; their short stages did not amortize a specialized fast path.
+      // Two- and three-worker arenas check shutdown directly because their
+      // short stages do not amortize a specialized fast path.
       if (state->stopping.load(std::memory_order_acquire)) {
         return;
       }
@@ -793,9 +793,9 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
     const std::shared_ptr<OperationTaskArena::State> &state,
     std::size_t index) noexcept {
   // The extra acquire is worthwhile once a stage can sustain four workers;
-  // smaller arenas retain the historical start-mutex path. The published bit
-  // is authoritative because ensure_worker_started sets it only after the
-  // jthread owner is installed under start_mutex.
+  // smaller arenas use the start-mutex path. The published bit is authoritative
+  // because ensure_worker_started sets it only after the jthread owner is
+  // installed under start_mutex.
   if (state->scalable_scan) {
     return state->started_dynamic.Test(index);
   }

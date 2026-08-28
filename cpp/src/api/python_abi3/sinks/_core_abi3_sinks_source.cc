@@ -7,14 +7,16 @@
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <string>
 #include <utility>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "sanitize/ingest/chunk_source.hh"
 
 namespace core_abi3_internal {
 namespace {
@@ -68,15 +70,16 @@ bool wrap_sink_stream_with_metadata(ArrowArrayStream **main_stream,
 }
 
 PyObject *pack_sink_or_raise_with_metadata(
-    int status, PyObject *keepalive, ArrowArrayStream *main_stream,
-    schema_sanitizer_diagnostics *diagnostics, char *err,
+    sanitize::Result<NativeSinkOutput> result, PyObject *keepalive,
     PyObject *first_row_columns, PyObject *all_row_columns,
     PyObject *timestamp_columns) {
-  if (status != SCHEMA_SANITIZER_STATUS_OK) {
-    release_sink_outputs(main_stream, diagnostics);
-    raise_status_error(status, err);
+  if (!result.ok()) {
+    raise_status_error(result.status());
     return nullptr;
   }
+  auto output = std::move(result).ValueOrDie();
+  ArrowArrayStream *main_stream = output.stream.release();
+  NativeDiagnostics *diagnostics = output.diagnostics.release();
   if (!wrap_sink_stream_with_metadata(&main_stream, first_row_columns,
                                       all_row_columns, timestamp_columns)) {
     release_sink_outputs(main_stream, diagnostics);
@@ -109,77 +112,87 @@ PyObject *py_context_to_sink_from_source(PyObject *, PyObject *args) {
   if (!ctx)
     return nullptr;
 
-  auto *prepared = unwrap_prepared_options(prepared_obj);
-  if (prepared_obj != Py_None && !prepared)
+  sanitize::PreparedOptionsPtr prepared;
+  if (!resolve_prepared_options(prepared_obj, &prepared)) {
     return nullptr;
-
-  ArrowArrayStream *main_stream = nullptr;
-  schema_sanitizer_diagnostics *diagnostics = nullptr;
-  char *err = nullptr;
-
-  switch (parse_python_source_kind(source_name)) {
-  case PythonSourceKind::kPath: {
-    PyObject *path_bytes = fsencode_path(payload_obj);
-    if (!path_bytes)
-      return nullptr;
-    const char *path = PyBytes_AsString(path_bytes);
-    int st = call_without_gil([&] {
-      return schema_sanitizer_context_to_sink_path(
-          ctx, sink_name, frontend_name, path, prepared, &main_stream,
-          &diagnostics, &err);
-    });
-    Py_DECREF(path_bytes);
-
-    return pack_sink_or_raise_with_metadata(st, ctx_obj, main_stream,
-                                            diagnostics, err, first_row_columns,
-                                            all_row_columns, timestamp_columns);
   }
 
-  case PythonSourceKind::kText: {
-    const char *data = nullptr;
-    Py_ssize_t data_len = 0;
-    if (!bytes_or_str_view(payload_obj, &data, &data_len))
-      return nullptr;
-
-    int st = call_without_gil([&] {
-      return schema_sanitizer_context_to_sink_text(
-          ctx, sink_name, frontend_name,
-          reinterpret_cast<const std::uint8_t *>(data),
-          static_cast<std::size_t>(data_len), prepared, &main_stream,
-          &diagnostics, &err);
-    });
-
-    return pack_sink_or_raise_with_metadata(st, ctx_obj, main_stream,
-                                            diagnostics, err, first_row_columns,
-                                            all_row_columns, timestamp_columns);
-  }
-
-  case PythonSourceKind::kStream: {
-    if (!python_reader_has_read_seek(payload_obj)) {
-      set_python_reader_type_error();
-      return nullptr;
+  try {
+    switch (parse_python_source_kind(source_name)) {
+    case PythonSourceKind::kPath: {
+      PyObject *path_bytes = fsencode_path(payload_obj);
+      if (!path_bytes) {
+        return nullptr;
+      }
+      const char *path = PyBytes_AsString(path_bytes);
+      if (!path) {
+        Py_DECREF(path_bytes);
+        return nullptr;
+      }
+      std::string path_copy(path);
+      Py_DECREF(path_bytes);
+      auto result = call_without_gil([&] {
+        auto source = sanitize::chunk_source_from_path_with_encoding(
+            std::move(path_copy), prepared->spec.input_text_encoding,
+            prepared->spec.memory_limit_bytes);
+        if (!source.ok()) {
+          return sanitize::Result<NativeSinkOutput>(source.status());
+        }
+        return native_sink_from_source(ctx, sink_name, frontend_name,
+                                       std::move(source).ValueOrDie(), prepared,
+                                       "context_to_sink_from_source[path]");
+      });
+      return pack_sink_or_raise_with_metadata(
+          std::move(result), ctx_obj, first_row_columns, all_row_columns,
+          timestamp_columns);
     }
 
-    sanitize::PreparedOptionsPtr prepared_shared;
-    if (!resolve_prepared_options(prepared_obj, &prepared_shared)) {
-      return nullptr;
+    case PythonSourceKind::kText: {
+      const char *data = nullptr;
+      Py_ssize_t data_len = 0;
+      if (!bytes_or_str_view(payload_obj, &data, &data_len)) {
+        return nullptr;
+      }
+      std::string bytes(data, static_cast<std::size_t>(data_len));
+      auto result = call_without_gil([&] {
+        return native_sink_from_source(
+            ctx, sink_name, frontend_name,
+            sanitize::chunk_source_from_bytes(std::move(bytes)), prepared,
+            "context_to_sink_from_source[text]");
+      });
+      return pack_sink_or_raise_with_metadata(
+          std::move(result), ctx_obj, first_row_columns, all_row_columns,
+          timestamp_columns);
     }
 
-    auto src = make_python_reader_chunk_source(payload_obj);
-    int st = call_without_gil([&] {
-      return schema_sanitizer_context_to_sink_from_source(
-          ctx, sink_name, frontend_name, std::move(src), prepared_shared,
-          &main_stream, &diagnostics, &err,
-          "schema_sanitizer_context_to_sink_from_source");
-    });
+    case PythonSourceKind::kStream: {
+      if (!python_reader_has_read_seek(payload_obj)) {
+        set_python_reader_type_error();
+        return nullptr;
+      }
+      auto source = make_python_reader_chunk_source(payload_obj);
+      auto result = call_without_gil([&] {
+        return native_sink_from_source(ctx, sink_name, frontend_name,
+                                       std::move(source), prepared,
+                                       "context_to_sink_from_source[stream]");
+      });
+      return pack_sink_or_raise_with_metadata(
+          std::move(result), payload_obj, first_row_columns, all_row_columns,
+          timestamp_columns);
+    }
 
-    return pack_sink_or_raise_with_metadata(st, payload_obj, main_stream,
-                                            diagnostics, err, first_row_columns,
-                                            all_row_columns, timestamp_columns);
-  }
-
-  case PythonSourceKind::kUnknown:
-    break;
+    case PythonSourceKind::kUnknown:
+      break;
+    }
+  } catch (const std::bad_alloc &) {
+    PyErr_NoMemory();
+    return nullptr;
+  } catch (const std::exception &error) {
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+    return nullptr;
+  } catch (...) {
+    PyErr_SetString(PyExc_RuntimeError, "unknown source sink error");
+    return nullptr;
   }
 
   PyErr_SetString(PyExc_ValueError,

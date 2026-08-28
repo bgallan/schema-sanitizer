@@ -17,8 +17,6 @@ from schema_sanitizer.core_impl.concurrency_route_evidence import (
 from schema_sanitizer.core_impl.concurrency_stage_evidence import (
     observe_successful_input_runtime_stage,
 )
-
-# reset_runtime_concurrency_pair is performed by the pair admission scope.
 from schema_sanitizer.core_impl.execution_policy import (
     threading_mode_from_multi_threading,
 )
@@ -39,10 +37,7 @@ from ..options_impl.call_options import (
     normalize_call_options_or_none,
     unwrap_options,
 )
-from ..options_impl.options import (
-    CsvHeaderMode,
-    require_implemented_csv_header_mode,
-)
+from ..options_impl.options import CsvHeaderMode, normalize_csv_header_mode
 from .analytical_registry import open_single_source_registry_stream
 from .batch_streaming import lazy_stream_from_opened
 from .execution_context import default_pool
@@ -89,21 +84,16 @@ def _retain_lazy_analytical_resources(
                 existing,
             )
         )
-    clean_data = getattr(result, "_clean_data_cache", None)
-    if isinstance(clean_data, _OwnedDuckDBRelation):
-        # A caller may retain ``result.clean_data`` without retaining Result.
-        # Publish the complete lazy operation on the relation's shared lifetime
-        # so derived DuckDB relations inherit the same exact ownership chain.
-        clean_data._attach_keepalive(keepalive)
-        if existing is not None:
-            result._keepalive = None
-        result._sync_finalizer_capsule()
-    else:
-        # Compatibility path for test doubles and non-owned adapter results.
-        result._keepalive = keepalive
-        sync_finalizer = getattr(result, "_sync_finalizer_capsule", None)
-        if callable(sync_finalizer):
-            sync_finalizer()
+    clean_data = result._clean_data_cache
+    if not isinstance(clean_data, _OwnedDuckDBRelation):
+        raise RuntimeError("DuckDB materialization did not publish its lazy resource owner")
+    # A caller may retain ``result.clean_data`` without retaining Result.
+    # Publish the complete lazy operation on the relation's shared lifetime so
+    # derived DuckDB relations inherit the same exact ownership chain.
+    clean_data._attach_keepalive(keepalive)
+    if existing is not None:
+        result._keepalive = None
+    result._sync_finalizer_capsule()
     if (
         payload_owner is not None
         and getattr(pair_scope, "payload_admission", None) is payload_owner
@@ -118,24 +108,11 @@ def _result_retains_lazy_analytical_resources(
     operation_context: OperationExecutionContext,
 ) -> bool:
     """Recover a committed handoff after an asynchronous Python unwind."""
-    clean_data = getattr(result, "_clean_data_cache", None)
-    if isinstance(clean_data, _OwnedDuckDBRelation) and clean_data._retains_resources(
+    clean_data = result._clean_data_cache
+    return isinstance(clean_data, _OwnedDuckDBRelation) and clean_data._retains_resources(
         prepared_input,
         operation_context,
-    ):
-        return True
-    keepalive = getattr(result, "_keepalive", None)
-    items = getattr(keepalive, "_items", None)
-    if not isinstance(items, list):
-        return False
-    found_prepared = False
-    found_context = False
-    for item in items:
-        if item is prepared_input:
-            found_prepared = True
-        elif item is operation_context:
-            found_context = True
-    return found_prepared and found_context
+    )
 
 
 def _stream_retains_lazy_analytical_resources(
@@ -160,7 +137,7 @@ def convert_analytical_with_options(
     schema_registry: Mapping[str, Any] | str | None,
 ) -> Result | Stream:
     """Sanitize one public input into an in-memory analytical object."""
-    require_implemented_csv_header_mode(options.get("csv_header_mode", "exact"))
+    normalize_csv_header_mode(options.get("csv_header_mode", "exact"))
     registry_json = _normalize_registry_json(schema_registry)
     schema_mode = str(options.get("schema_mode", "additive")).strip().lower()
     threading_mode = threading_mode_from_multi_threading(options.get("multi_threading", False))
@@ -215,8 +192,7 @@ def convert_analytical_with_options(
         )
         pair_scope.transfer_to_output()
         # Keep the pair identity alive through the complete writer/conversion
-        # path. The structural bootstrap credit was retired at the handoff, so
-        # only real downstream admissions count as pass51 payload evidence.
+        # path after the structural bootstrap credit is retired at handoff.
         if prepared_input.xml_row_tag is not None:
             options = dict(options)
             options["xml_row_tag"] = prepared_input.xml_row_tag

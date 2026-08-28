@@ -22,11 +22,11 @@ from schema_sanitizer.core_impl.memory_budget import (
     process_resident_memory_snapshot,
 )
 from schema_sanitizer.core_impl.temporary_storage import (
-    _MINIMUM_FREE_BYTES,
     _PROCESS_TEMPORARY_STORAGE,
     TemporaryStoragePermitPool,
     process_temporary_storage_snapshot,
 )
+from schema_sanitizer.core_impl.temporary_storage_governor import _MINIMUM_FREE_BYTES
 from schema_sanitizer.errors import SchemaSanitizerResourceError
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 from schema_sanitizer.remote_impl.transport import read_bounded_response_text
@@ -119,14 +119,14 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
 
     ledger._close_condition = ObservedCloseCondition(ledger._lock)  # noqa: SLF001
 
-    def reserve(capsule: object, size: int, stage: str) -> None:
+    def reserve(capsule: object, size: int, stage: str) -> tuple[int, int, int]:
         """Pause the native reserve while the Python ledger lock is held."""
         entered.set()
         assert release.wait(timeout=2)
-        original.operation_memory_ledger_reserve(capsule, size, stage)
+        return original.operation_memory_ledger_reserve_snapshot(capsule, size, stage)
 
     ledger._native = SimpleNamespace(  # noqa: SLF001
-        operation_memory_ledger_reserve=reserve,
+        operation_memory_ledger_reserve_snapshot=reserve,
         operation_memory_ledger_release=original.operation_memory_ledger_release,
         operation_memory_ledger_snapshot=original.operation_memory_ledger_snapshot,
     )
@@ -248,6 +248,10 @@ def test_bounded_response_text_accounts_final_unicode_object() -> None:
         async def read(self, _maximum: int) -> bytes:
             """Return deterministic multibyte text."""
             return "áβ中".encode() * 64
+
+        def at_eof(self) -> bool:
+            """Confirm that the bounded read consumed the complete response."""
+            return True
 
     response = SimpleNamespace(content=Content(), charset="utf-8")
     ledger = OperationMemoryLedger(8 << 20)

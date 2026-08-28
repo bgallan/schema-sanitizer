@@ -17,9 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "frontends/builtin_frontends.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/memory/arena.hh"
 #include "internal/memory/pool_resource.hh"
 #include "internal/parsing/csv_parse.hh"

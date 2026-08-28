@@ -101,7 +101,7 @@ def _ordered_build_dirs(
 def _build_candidate_dirs() -> list[pathlib.Path]:
     """Return compatible checkout builds with configured/fresh builds first."""
     repo_root = pathlib.Path(__file__).resolve().parents[3]
-    build_dirs = _ordered_build_dirs((repo_root / "build", repo_root.parent / "build"))
+    build_dirs = _ordered_build_dirs((repo_root / ".work" / "build",))
     candidate_dirs: list[pathlib.Path] = []
     for build_dir in build_dirs:
         candidate_dirs.extend((build_dir, build_dir / "schema_sanitizer"))

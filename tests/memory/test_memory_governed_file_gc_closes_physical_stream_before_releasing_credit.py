@@ -237,23 +237,10 @@ def test_coordination_and_atomic_control_fds_use_teardown_authority() -> None:
 
 
 def test_directory_file_objects_carry_metadata_owner_after_charge() -> None:
-    from threading import Lock
-
     from schema_sanitizer.input_impl.directory_inputs import FolderFile
-    from schema_sanitizer.input_impl.directory_metadata_budget import (
-        DirectoryMetadataBudget,
-        RetainedDirectoryMetadata,
-    )
+    from schema_sanitizer.input_impl.directory_metadata_budget import DirectoryMetadataBudget
 
-    # Build the compatibility-path budget without invoking the unavailable
-    # native memory-budget extension in this source-only test environment.
-    budget = object.__new__(DirectoryMetadataBudget)
-    budget.limit_bytes = 2 * 1024 * 1024
-    budget._operation_memory_ledger = None
-    budget._retention_owner = RetainedDirectoryMetadata()
-    budget._used_bytes = 0
-    budget._lock = Lock()
-    budget._close_started = False
+    budget = DirectoryMetadataBudget(2 * 1024 * 1024)
     file = FolderFile("a", "a", 1, lambda: None)  # type: ignore[arg-type]
     budget.charge_file(file)
     assert file._metadata_owner is budget.retention_owner

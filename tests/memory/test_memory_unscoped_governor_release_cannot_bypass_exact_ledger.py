@@ -13,26 +13,6 @@ import pytest
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
-def test_unscoped_governor_release_cannot_bypass_exact_ledger() -> None:
-    from schema_sanitizer.core_impl.process_resources import _Governor
-
-    governor = _Governor(2, "unscoped-governor-release-cannot-bypass-exact-ledger")
-    first = governor.acquire(1)
-    second = governor.acquire(1)
-    governor.release(2)
-    snapshot = governor.snapshot()
-    assert snapshot.in_use == 2
-    assert snapshot.active_leases == 2
-    assert snapshot.compatibility_release_attempts == 1
-    with pytest.raises(AttributeError):
-        first._amount = 2
-    with pytest.raises(AttributeError):
-        first._governor = _Governor(2, "other")
-    first.release()
-    second.release()
-    assert governor.snapshot().in_use == 0
-
-
 def test_lease_finalizer_authenticates_after_weakref_clear() -> None:
     import gc
 
@@ -234,6 +214,12 @@ def test_transactional_thread_publication_never_releases_live_worker_permit(
     lease = Lease()
     monkeypatch.setattr(module, "reserve_runtime_service", lambda *_a, **_k: Registration())
     monkeypatch.setattr(module, "Thread", Thread)
+
+    def start_governed_thread(thread: Thread, *, registration: Registration) -> None:
+        thread.start()
+        registration.activate()
+
+    monkeypatch.setattr(module, "start_governed_thread", start_governed_thread)
     with pytest.raises(MemoryError, match="publish"):
         module.ThreadPoolExecutor(
             max_workers=1,

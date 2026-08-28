@@ -48,8 +48,8 @@ ordered_lane_candidates(std::uint64_t candidates, std::size_t begin,
 
 // Advance a previously normalized lane origin by a bounded delta. Callers use
 // delta == 1 or the precompiled half-lane alternative, so delta never exceeds
-// width. The overflow fallback preserves the historical unsigned
-// `(ticket + delta) % width` sequence exactly at size_t wraparound.
+// width. The overflow fallback preserves unsigned `(ticket + delta) % width`
+// semantics exactly at size_t wraparound.
 [[nodiscard]] constexpr std::size_t
 advance_normalized_lane_origin(std::size_t ticket, std::size_t origin,
                                std::size_t delta, std::size_t width) noexcept {

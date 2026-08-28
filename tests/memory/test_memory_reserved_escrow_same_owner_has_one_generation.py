@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Condition, Lock
+from threading import Lock
 
 import pytest
 
@@ -55,7 +55,6 @@ def test_reserved_escrow_rollback_clears_stale_ticket_and_arm(monkeypatch) -> No
 
     assert owner.ticket == 0
     assert owner._escrow_armed_ticket == 0
-    assert not owner._escrow_armed
     assert stale_ticket > 0
     assert escrow.publish_rooted(stale_ticket, owner)
     assert not escrow.overflowed
@@ -153,14 +152,7 @@ def test_operation_memory_exact_release_replay_is_ack(monkeypatch) -> None:
 def test_temporary_storage_exact_release_replay_is_ack(monkeypatch, tmp_path: Path) -> None:
     from schema_sanitizer.core_impl import temporary_storage as module
 
-    pool = object.__new__(module.TemporaryStoragePermitPool)
-    pool._lock = Lock()
-    pool._condition = Condition(pool._lock)
-    pool._leases = {}
-    pool._unknown_lease_releases = 0
-    pool._resize_inflight = 0
-    pool._pending_resize_growth = 0
-    pool._protocol_violations = 0
+    pool = module.TemporaryStoragePermitPool(None)
     capability = module.FinalizerReplayCapability()
     lease_id = 9
     owner_id = 11
@@ -171,7 +163,7 @@ def test_temporary_storage_exact_release_replay_is_ack(monkeypatch, tmp_path: Pa
         0,
         tmp_path,
         0,
-        None,
+        module.ProcessTemporaryStorageCapability(module._PROCESS_TEMPORARY_STORAGE),
         None,
         process_released=True,
         local_released=True,
@@ -244,7 +236,7 @@ def test_source_contract_replay_capabilities_and_exact_arms() -> None:
     cross = (root / "cross_process_memory.py").read_text(encoding="utf-8")
     path = (root / "path_identity.py").read_text(encoding="utf-8")
 
-    assert "_escrow_armed_ticket" in rooted
+    assert "is_armed_for" in rooted
     assert "reserved finalizer owner already has an active generation" in escrow
     assert "recycle_pending" in escrow
     assert "FinalizerReplayCapability()" in memory

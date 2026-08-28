@@ -7,6 +7,7 @@ import os
 import select
 from collections import OrderedDict, deque
 from concurrent.futures import Future
+from threading import Condition, RLock
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,14 +33,8 @@ def test_remote_io_closed_loop_delivery_storm_is_iterative() -> None:
     governor = module.RemoteIoPermitGovernor(capacity=1, max_waiters=1200)
     with governor._lock:
         for index in range(1100):
-            governor._waiters.append(
-                module._Waiter(
-                    ClosedLoop(),
-                    SimpleNamespace(),
-                    1,
-                    "label",
-                    f"operation-{index}",
-                )
+            governor._enqueue_waiter_locked(
+                module._Waiter(ClosedLoop(), SimpleNamespace(), 1, "label", f"operation-{index}")
             )
         deliveries = governor._grant_ready_locked()
 
@@ -212,6 +207,7 @@ def test_operation_registry_compacts_attacker_sized_ids() -> None:
 
 def _bare_remote_prefetch_iterator(module: Any, manifest: Any) -> Any:
     iterator = object.__new__(module.RemoteChunkPrefetchIterator)
+    iterator._pid = os.getpid()
     iterator._manifest = manifest
     iterator._policy = SimpleNamespace(async_concurrency=1)
     iterator._prefetch_chunks = 1
@@ -220,15 +216,30 @@ def _bare_remote_prefetch_iterator(module: Any, manifest: Any) -> Any:
     iterator._owns_coordinator = False
     iterator._download_session = None
     iterator._futures = deque()
+    iterator._failed_storage_leases = deque()
+    iterator._callbackless_storage_futures = {}
     iterator._next_start = 0
+    iterator._close_lock = RLock()
+    iterator._close_condition = Condition(iterator._close_lock)
+    iterator._close_in_progress = False
+    iterator._cleanup_callbacks_inflight = 0
+    iterator._admissions_inflight = 0
+    iterator._consumers_inflight = 0
+    iterator._protocol_violations = 0
+    iterator._starting = False
+    iterator._fill_in_progress = False
+    iterator._close_started = False
+    iterator._session_closer = None
     iterator._closed = False
     iterator._started = True
+    iterator._remote_timeout_seconds = 0.1
+    iterator._finalizer_ticket = None
+    iterator._finalizer_capsule = None
     return iterator
 
 
 def test_remote_prefetch_next_chunk_failure_releases_lease_and_preserves_cursor(
     monkeypatch: pytest.MonkeyPatch,
-    native_stub: None,
 ) -> None:
     """Planning failure cannot leak disk capacity or skip a chunk on retry."""
     from schema_sanitizer.api_impl.source_plan import remote as module
@@ -247,7 +258,7 @@ def test_remote_prefetch_next_chunk_failure_releases_lease_and_preserves_cursor(
         next_chunk_start=lambda _start: (_ for _ in ()).throw(RuntimeError("planning failed")),
     )
     iterator = _bare_remote_prefetch_iterator(module, manifest)
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 1)
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 1)
 
     with pytest.raises(RuntimeError, match="planning failed"):
         iterator._fill_prefetch_window()
@@ -258,14 +269,18 @@ def test_remote_prefetch_next_chunk_failure_releases_lease_and_preserves_cursor(
 
 def test_remote_prefetch_submission_failure_preserves_cursor(
     monkeypatch: pytest.MonkeyPatch,
-    native_stub: None,
 ) -> None:
     """Admission overload cannot advance the manifest before submission commits."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
-    manifest = SimpleNamespace(files=(object(),), chunk_size=1)
+    manifest = SimpleNamespace(
+        files=(object(),),
+        chunk_size=1,
+        next_chunk_start=lambda start: start + 1,
+    )
     iterator = _bare_remote_prefetch_iterator(module, manifest)
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 1)
+    iterator._coordinator = None
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 1)
     monkeypatch.setattr(
         iterator,
         "_submit_stage",
@@ -278,12 +293,10 @@ def test_remote_prefetch_submission_failure_preserves_cursor(
     assert not iterator._futures
 
 
-def test_remote_prefetch_cancelled_drain_still_exits_shared_session(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_cancelled_drain_still_exits_shared_session() -> None:
     """Cancelling the drain task must execute the separate session's __aexit__."""
     from schema_sanitizer.api_impl.source_plan import remote as module
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     captured: list[Any] = []
 
@@ -305,8 +318,7 @@ def test_remote_prefetch_cancelled_drain_still_exits_shared_session(
     running.set_running_or_notify_cancel()
     setattr(running, "_schema_sanitizer_staged_ownership", StagedResultOwnership())
     session = Session()
-    iterator = object.__new__(module.RemoteChunkPrefetchIterator)
-    iterator._closed = False
+    iterator = _bare_remote_prefetch_iterator(module, SimpleNamespace(files=()))
     iterator._futures = deque([running])
     iterator._coordinator = Coordinator()
     iterator._owns_coordinator = False
@@ -335,6 +347,7 @@ def test_native_options_cache_reset_discards_inherited_capsules(
     old_lock = module._PREPARED_OPTIONS_CACHE_LOCK
     module._PREPARED_OPTIONS_CACHE = OrderedDict([(b"one", object())])
     module._PREPARED_OPTIONS_CACHE_BYTES = 3
+    module._prepare_options_cache_for_fork()
     module._reset_prepared_options_cache_after_fork()
 
     assert module._PREPARED_OPTIONS_CACHE == OrderedDict()
@@ -342,9 +355,7 @@ def test_native_options_cache_reset_discards_inherited_capsules(
     assert module._PREPARED_OPTIONS_CACHE_LOCK is not old_lock
 
 
-def test_remote_inline_stage_base_exception_releases_storage_lease(
-    native_stub: None,
-) -> None:
+def test_remote_inline_stage_base_exception_releases_storage_lease() -> None:
     """Inline control-flow failures must return their pre-acquired disk reservation."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
@@ -414,12 +425,10 @@ def test_native_options_actual_fork_replaces_inherited_locked_cache(
     assert payload == "0:0:1"
 
 
-def test_remote_prefetch_refill_failure_closes_consumed_chunk(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_refill_failure_closes_consumed_chunk() -> None:
     """A chunk not yet returned to the caller must retain a cleanup owner."""
     from schema_sanitizer.api_impl.source_plan import remote as module
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     class Staged:
         def __init__(self) -> None:
@@ -434,11 +443,8 @@ def test_remote_prefetch_refill_failure_closes_consumed_chunk(
     future.set_result(ownership.publish(staged))
     setattr(future, "_schema_sanitizer_staged_ownership", ownership)
 
-    iterator = object.__new__(module.RemoteChunkPrefetchIterator)
-    iterator._started = True
-    iterator._closed = False
+    iterator = _bare_remote_prefetch_iterator(module, SimpleNamespace(files=()))
     iterator._futures = deque([future])
-    iterator._remote_timeout_seconds = 0.1
     iterator._ensure_started = lambda: None
     iterator._fill_prefetch_window = lambda: (_ for _ in ()).throw(RuntimeError("refill failed"))
     close_calls = 0
@@ -455,22 +461,17 @@ def test_remote_prefetch_refill_failure_closes_consumed_chunk(
     assert close_calls == 1
 
 
-def test_remote_prefetch_unexpected_stop_iteration_still_closes(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_unexpected_stop_iteration_still_closes() -> None:
     """A provider-originated StopIteration cannot bypass iterator cleanup."""
     from schema_sanitizer.api_impl.source_plan import remote as module
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     future: Future[Any] = Future()
     future.set_exception(StopIteration("provider stopped"))
     setattr(future, "_schema_sanitizer_staged_ownership", StagedResultOwnership())
 
-    iterator = object.__new__(module.RemoteChunkPrefetchIterator)
-    iterator._started = True
-    iterator._closed = False
+    iterator = _bare_remote_prefetch_iterator(module, SimpleNamespace(files=()))
     iterator._futures = deque([future])
-    iterator._remote_timeout_seconds = 0.1
     iterator._ensure_started = lambda: None
     close_calls = 0
 

@@ -310,9 +310,9 @@ def test_python_generator_spool_checks_temp_disk_capacity(monkeypatch: Any) -> N
 
         free = 0
 
-    from schema_sanitizer.core_impl import replay_spool
+    from schema_sanitizer.core_impl import python_rows
 
-    monkeypatch.setattr(replay_spool.shutil, "disk_usage", lambda path: _DiskUsage())
+    monkeypatch.setattr(python_rows.shutil, "disk_usage", lambda path: _DiskUsage())
     try:
         import pytest
 

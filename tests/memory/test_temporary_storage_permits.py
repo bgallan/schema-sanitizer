@@ -97,6 +97,20 @@ def test_temporary_storage_pool_rejects_one_oversized_artifact() -> None:
     }
 
 
+def test_zero_temporary_storage_capability_can_grow_and_release(tmp_path: Path) -> None:
+    """A zero-byte, zero-inode lease still owns an exact resizable capability."""
+    require_native()
+    from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
+
+    pool = TemporaryStoragePermitPool(16 << 20)
+    lease = pool.acquire(0, label="zero-capability", path=tmp_path, artifact_count=0)
+    lease.resize(4096)
+    assert lease.reserved_bytes == 4096
+    assert pool.snapshot().reserved_bytes == 4096
+    lease.release()
+    assert pool.snapshot().reserved_bytes == 0
+
+
 def test_staged_path_resizes_and_releases_its_permit(tmp_path: Path) -> None:
     """Exact staged bytes replace the estimate and disappear on cleanup."""
     require_native()
@@ -223,6 +237,10 @@ def test_remote_prefetch_waits_for_temporary_storage_release() -> None:
             return start + 1
 
         @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            return 160 << 20
+
+        @staticmethod
         def try_acquire_storage_lease(start: int) -> object | None:
             """Reserve 160 MiB from a 256 MiB operation spool window."""
             return operation.temporary_storage.try_acquire(
@@ -300,6 +318,10 @@ def test_remote_prefetch_failure_releases_reserved_packet() -> None:
             return start + 1
 
         @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            return 8 << 20
+
+        @staticmethod
         def try_acquire_storage_lease(start: int) -> object | None:
             """Reserve one packet from the operation pool."""
             return operation.temporary_storage.try_acquire(
@@ -363,6 +385,10 @@ def test_cancelled_prefetch_future_releases_preacquired_permit() -> None:
         memory_limit_bytes = 16 << 20
         files = (object(),)
         chunk_size = 1
+
+        @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            return 8 << 20
 
         @staticmethod
         async def stage_chunk_async(*_args: object, **_kwargs: object) -> None:

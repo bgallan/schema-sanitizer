@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from contextlib import suppress
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any
@@ -214,11 +213,7 @@ class _OwnedDuckDBRelation:
         return lifetime is not None and lifetime.retains(first, second)
 
     def __arrow_c_stream__(self, requested_schema: object | None = None) -> Any:
-        exporter = getattr(self._relation, "__arrow_c_stream__")
-        if requested_schema is not None:
-            with suppress(TypeError):
-                return exporter(requested_schema)
-        return exporter()
+        return self._relation.__arrow_c_stream__(requested_schema)
 
     def __len__(self) -> int:
         return len(self._relation)
@@ -296,31 +291,20 @@ class _OwnedDuckDBRelation:
 
 def _duckdb_from_arrow_serial(duckdb: Any, value: Any) -> tuple[Any, Any | None]:
     """Bind Arrow to a private one-thread DuckDB connection."""
-    connect = getattr(duckdb, "connect", None)
-    if callable(connect):
-        try:
-            connection = connect(database=":memory:", config={"threads": 1})
-        except TypeError:
-            connection = connect(database=":memory:")
-            execute = getattr(connection, "execute", None)
-            if callable(execute):
-                execute("SET threads=1")
-        try:
-            owner = _DuckDBConnectionOwner(connection)
-        except BaseException:
-            close = getattr(connection, "close", None)
-            if callable(close):
-                close()
-            raise
-        try:
-            relation = connection.from_arrow(value)
-        except BaseException:
-            owner.close()
-            raise
-        try:
-            return _OwnedDuckDBRelation(relation, owner), None
-        except BaseException:
-            relation = None
-            owner.close()
-            raise
-    return duckdb.from_arrow(value), None
+    connection = duckdb.connect(database=":memory:", config={"threads": 1})
+    try:
+        owner = _DuckDBConnectionOwner(connection)
+    except BaseException:
+        connection.close()
+        raise
+    try:
+        relation = connection.from_arrow(value)
+    except BaseException:
+        owner.close()
+        raise
+    try:
+        return _OwnedDuckDBRelation(relation, owner), None
+    except BaseException:
+        relation = None
+        owner.close()
+        raise

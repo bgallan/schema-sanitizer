@@ -88,8 +88,6 @@ def reserve_static_control_plane(kind: str, amount: int) -> bool:
                 raise RuntimeError("static control-plane registry is frozen")
             if len(_ENTRIES) >= _MAX_STATIC_CONTROL_KINDS:
                 raise RuntimeError("static control-plane registry capacity exhausted")
-            # pass50 ordering breadcrumb: next_total = _TOTAL + amount
-            # Pass77 derives the transition from the authoritative bounded sum.
             next_total = authoritative + amount
             _ENTRIES[kind] = amount
             _TOTAL = next_total
@@ -141,7 +139,6 @@ def rollback_static_control_plane(kind: str, amount: int) -> bool:
             # The exact registration is the cleanup authority.  A corrupt
             # aggregate closes future reserve(), but must not strand an exact
             # failed-construction rollback or manufacture capacity from _TOTAL.
-            # pass76 breadcrumb: if _TOTAL < amount was the former narrow guard.
             if authoritative < amount:
                 return False
             next_total = authoritative - amount

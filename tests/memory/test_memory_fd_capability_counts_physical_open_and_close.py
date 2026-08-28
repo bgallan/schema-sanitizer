@@ -143,7 +143,7 @@ def test_duckdb_stream_handoff_has_no_full_batch_list_barrier() -> None:
             "raise AssertionError", results.index('if target == "duckdb":')
         )
     ]
-    assert "duckdb.from_arrow(reader)" in duckdb
+    assert "_duckdb_from_arrow_serial(duckdb, reader)" in duckdb
     assert "list(reader)" not in results
     assert "reader_transferred = True" in duckdb
     assert "record_batch_reader_direct_duckdb_handoff" in coverage
@@ -233,7 +233,7 @@ def test_bounded_http_reader_handles_fragmented_aiohttp_without_third_full_copy(
             "async def read_bounded_response_text"
         )
     ]
-    assert 'at_eof = getattr(content, "at_eof", None)' in bounded
+    assert "if content.at_eof():" in bounded
     assert "while len(payload_buffer) <= limit" in bounded
     assert "remaining = limit + 1 - len(payload_buffer)" in bounded
     assert "retained = _BudgetedBytes(payload_buffer, lease)" in bounded

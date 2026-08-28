@@ -370,18 +370,6 @@ _PROBE_STARTED_RESULT_INDEX = {
     "operation_task_arena_output_preference_probe": 3,
     "operation_task_arena_output_steal_probe": 4,
 }
-_EXPLICIT_PREWARM_STARTED_ASSERTIONS = {
-    (
-        "tests/concurrency/test_concurrency_output_preference_is_dormant_through_eight_workers.py",
-        "test_output_preference_is_dormant_through_eight_workers",
-        "started == 8",
-    ),
-    (
-        "tests/concurrency/test_concurrency_shallow_local_output_progress_at_four_workers.py",
-        "test_shallow_local_output_progress_at_four_workers",
-        "started == 4",
-    ),
-}
 
 
 def _worker_name_roles(name: str) -> set[str]:
@@ -526,6 +514,39 @@ def _lazy_worker_exact_equalities(path: Path) -> tuple[tuple[str, int, str], ...
                     ):
                         violations.append((scope_name, node.lineno, ast.unparse(comparison)))
     return tuple(dict.fromkeys(violations))
+
+
+def _is_explicit_prewarm_equality(path: Path, function_name: str, expression: str) -> bool:
+    """Recognize exact starts guaranteed by the output-preference prewarm probe."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    scope = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ),
+        None,
+    )
+    if scope is None:
+        return False
+    prewarmed = {
+        call.args[0].value
+        for call in ast.walk(scope)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, (ast.Name, ast.Attribute))
+        and (call.func.id if isinstance(call.func, ast.Name) else call.func.attr)
+        == "operation_task_arena_output_preference_probe"
+        and call.args
+        and isinstance(call.args[0], ast.Constant)
+        and type(call.args[0].value) is int
+    }
+    compared = {
+        node.value
+        for node in ast.walk(ast.parse(expression, mode="eval"))
+        if isinstance(node, ast.Constant) and type(node.value) is int
+    }
+    return bool(prewarmed & compared)
 
 
 def _scope_nodes(
@@ -1068,8 +1089,7 @@ def test_tests_do_not_require_every_lazy_worker_to_start() -> None:
         f"{path.relative_to(ROOT)}:{line}: {expression}"
         for path in sorted(TESTS.rglob("test_*.py"))
         for function, line, expression in _lazy_worker_exact_equalities(path)
-        if (path.relative_to(ROOT).as_posix(), function, expression)
-        not in _EXPLICIT_PREWARM_STARTED_ASSERTIONS
+        if not _is_explicit_prewarm_equality(path, function, expression)
     ]
     assert not violations, (
         "lazy worker startup is scheduler-dependent; compare actual starts to "
@@ -1078,42 +1098,9 @@ def test_tests_do_not_require_every_lazy_worker_to_start() -> None:
     )
 
 
-def test_exact_started_aliases_are_limited_to_explicit_prewarm_probes() -> None:
-    """Only the probe that blocks every low-core lane may require exact starts."""
-    observed = {
-        (path.relative_to(ROOT).as_posix(), function, expression)
-        for path in sorted((TESTS / "concurrency").glob("test_*.py"))
-        for function, _line, expression in _lazy_worker_exact_equalities(path)
-    }
-    assert observed == _EXPLICIT_PREWARM_STARTED_ASSERTIONS
-
-    expected_calls = {
-        (path, function): int(expression.rpartition(" ")[2])
-        for path, function, expression in _EXPLICIT_PREWARM_STARTED_ASSERTIONS
-    }
-    for (relative_path, function_name), expected_workers in expected_calls.items():
-        tree = ast.parse((ROOT / relative_path).read_text(encoding="utf-8"))
-        function = next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == function_name
-        )
-        calls = [
-            call
-            for call in ast.walk(function)
-            if isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and call.func.attr == "operation_task_arena_output_preference_probe"
-        ]
-        assert len(calls) == 1
-        assert calls[0].args
-        assert isinstance(calls[0].args[0], ast.Constant)
-        assert calls[0].args[0].value == expected_workers
-
-    probe = (ROOT / "cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc").read_text(
-        encoding="utf-8"
-    )
+def test_output_preference_probe_guarantees_exact_prewarm_counts() -> None:
+    """The one probe exempt from lazy-start bounds blocks every requested lane."""
+    probe = (ROOT / "cpp/src/api/python_abi3/runtime/test_probes.cc").read_text(encoding="utf-8")
     probe_function = probe.index("py_operation_task_arena_output_preference_probe")
     prewarm = probe[
         probe.index("// The low-core contract reports", probe_function) : probe.index(

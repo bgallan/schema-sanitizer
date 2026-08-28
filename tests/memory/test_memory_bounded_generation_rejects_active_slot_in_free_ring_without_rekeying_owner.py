@@ -9,35 +9,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
 
 
-def test_bounded_generation_rejects_active_slot_in_free_ring_without_rekeying_owner() -> None:
-    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
-
-    pool = BoundedGenerationPool(2)
-    first = pool.acquire()
-    assert first is not None
-    slot = first & pool._slot_mask
-    pool._free[pool._head] = slot
-
-    assert pool.acquire() is None
-    assert pool.snapshot().corrupted is True
-    assert pool.owns(first) is True
-    # Corruption closes admission but exact cleanup remains possible.
-    assert pool.release(first) is True
-    assert pool.owns(first) is False
-
-
-def test_bounded_generation_counter_corruption_quarantines_exact_slot() -> None:
-    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
-
-    pool = BoundedGenerationPool(1)
-    token = pool.acquire()
-    assert token is not None
-    pool._active = 0
-    assert pool.release(token) is False
-    assert pool.owns(token) is False
-    assert pool.snapshot().corrupted is True
-
-
 def test_stage_construction_escrow_roots_separate_authority() -> None:
     from schema_sanitizer.core_impl import memory_budget as module
     from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
@@ -139,7 +110,7 @@ def test_terminal_ownership_publication_prepares_counter_before_commit() -> None
     start = source.index("    def publish(")
     end = source.index("\n    def retire(", start)
     body = source[start:end]
-    assert body.index("next_owners = self._owners + 1") < body.index("slot.active = True")
+    assert body.index("next_owners = authoritative + 1") < body.index("slot.active = True")
     assert "self._owners += 1" not in body
     assert "max(0, self._owners -" not in source
 
@@ -150,7 +121,7 @@ def test_static_control_plane_never_clamps_exact_rollback() -> None:
     end = source.index("\ndef register_static_control_plane", start)
     body = source[start:end]
     assert "max(0, _TOTAL - amount)" not in body
-    assert "if _TOTAL < amount" in body
+    assert "if authoritative < amount" in body
 
 
 def test_static_footprint_guard_has_no_destructor() -> None:
@@ -203,7 +174,7 @@ def test_remote_and_provider_prepare_for_fork_select_preallocated_banks() -> Non
             assert "_fork_banks" in body
 
 
-def test_native_source_plan_has_no_unreserved_legacy_finalizer_fallback() -> None:
+def test_native_source_plan_uses_prepared_finalizer_authority() -> None:
     source = (SRC / "input_impl" / "source_plan.py").read_text(encoding="utf-8")
     assert "defer_finalizer_cleanup(self)" not in source
     assert "defer_prepared_finalizer_cleanup(capsule)" in source

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import gc
 import json
-import os
 import sys
 import tempfile
 import threading
@@ -50,37 +48,6 @@ def test_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_fail
     assert second is not None
     assert escrow.release_ticket(first)
     assert escrow.release_ticket(second)
-
-
-def test_operation_memory_constructor_keeps_owner_when_registration_and_rollback_fail(
-    monkeypatch,
-) -> None:
-    from schema_sanitizer.core_impl import memory_budget as module
-
-    class Ledger:
-        def __init__(self) -> None:
-            self.reserved = 0
-            self.release_calls = 0
-
-        def reserve(self, amount: int, *, stage: str) -> None:
-            self.reserved += amount
-
-        def _register_python_lease(self, _owner, _size):
-            raise MemoryError("registration fault")
-
-        def release(self, amount: int) -> None:
-            self.release_calls += 1
-            if self.release_calls == 1:
-                raise MemoryError("rollback fault")
-            self.reserved -= amount
-
-    ledger = Ledger()
-    with pytest.raises(MemoryError, match="registration fault"):
-        module.OperationMemoryLease(ledger, 123, "reserved-finalizer-processed-owner-cannot-stick")
-    gc.collect()
-    module.drain_abandoned_memory_finalizers()
-    assert ledger.reserved == 0
-    assert ledger.release_calls >= 2
 
 
 def test_cross_process_growth_repairs_journal_when_local_commit_fails(
@@ -365,24 +332,6 @@ def test_inflight_latches_prepare_allocating_counters_before_publish() -> None:
     assert take.index("next_submissions =") < take.index("self._consumer_inflight = True")
 
 
-def test_release_ticket_authority_is_not_destroyed_before_retirement_commit() -> None:
-    memory = (SRC / "core_impl/memory_budget.py").read_text(encoding="utf-8")
-    temp = (SRC / "core_impl/temporary_storage.py").read_text(encoding="utf-8")
-    cross = (SRC / "core_impl/cross_process_memory.py").read_text(encoding="utf-8")
-    assert (
-        "if _MEMORY_LEASE_FINALIZER_ESCROW.release_ticket(ticket):\n                    self._finalizer_ticket = None"
-        in memory
-    )
-    assert (
-        "if _TEMP_STORAGE_FINALIZER_ESCROW.release_ticket(ticket):\n                    self._finalizer_ticket = -1"
-        in temp
-    )
-    assert (
-        "if _DIRECT_CROSS_MEMORY_FINALIZER_ESCROW.release_ticket(ticket):\n                    self._finalizer_ticket = -1"
-        in cross
-    )
-
-
 def test_finalizer_success_tail_has_owner_free_recycle_state() -> None:
     source = (SRC / "core_impl/finalizer_escrow.py").read_text(encoding="utf-8")
     body = source[
@@ -464,8 +413,10 @@ def test_temporary_storage_failed_post_commit_rollback_remains_globally_rooted(m
     zero = governor.reserve_capability(
         0, path=tempfile.gettempdir(), label="reserved-finalizer-processed-owner-cannot-stick-drain"
     )
-    assert zero.active is False
+    assert zero.active is True
     assert governor.authoritative_snapshot().reserved_bytes == 0
+    assert tuple(governor._capabilities.values()) == (zero,)
+    assert governor.release_capability(zero)
     assert not governor._capabilities
 
 
@@ -514,46 +465,6 @@ def test_temporary_storage_control_ticket_failure_does_not_repeat_physical_relea
         assert lease_id not in pool._leases
     assert module._PROCESS_TEMPORARY_STORAGE.authoritative_snapshot().reserved_bytes == 0
     pool.close()
-
-
-def test_memory_lease_post_release_observation_fault_cannot_double_debit() -> None:
-    from threading import Lock
-
-    from schema_sanitizer.core_impl import memory_budget as module
-
-    class Native:
-        def __init__(self) -> None:
-            self.releases = 0
-
-        def operation_memory_ledger_release(self, _capsule, amount):
-            assert amount == 9
-            self.releases += 1
-
-        def operation_memory_ledger_snapshot(self, _capsule):
-            raise MemoryError("reserved-finalizer-processed-owner-cannot-stick observation fault")
-
-    ledger = object.__new__(module.OperationMemoryLedger)
-    ledger._pid = os.getpid()
-    ledger._lock = Lock()
-    ledger._cross_process_io_lock = Lock()
-    ledger._capsule = object()
-    ledger._native = Native()
-    ledger._close_started = False
-    ledger._post_release_observation_failures = 0
-    ledger._python_lease_sequence = 1
-    cap = object()
-    entry = module._PythonMemoryLeaseEntry(id(ledger), cap, 9, None)
-    # Use a tiny owner shell whose identity is authenticated by the entry.
-    owner = types.SimpleNamespace(_lease_id=1, _capability=cap)
-    entry.owner_id = id(owner)
-    ledger._python_leases = {1: entry}
-    ledger._unknown_python_lease_releases = 0
-    ledger._finalizer_ticket = None
-
-    ledger._release_python_lease(owner)
-    assert ledger._native.releases == 1
-    assert 1 not in ledger._python_leases
-    assert entry.physical_released is True
 
 
 def test_remote_io_control_tail_failure_retains_exact_owner_without_double_release(

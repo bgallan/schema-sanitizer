@@ -32,15 +32,12 @@ std::string_view trim_ascii_whitespace(std::string_view value) {
 
 PyObject *pack_registry_stream_result_with_state(
     PyObject *keepalive, ArrowArrayStream *main_stream,
-    schema_sanitizer_diagnostics *diagnostics, char *registry_json,
-    char *drifts_json, char *conversion_timestamp,
+    NativeDiagnostics *diagnostics, std::string_view registry_json,
+    std::string_view drifts_json, std::string_view conversion_timestamp,
     std::shared_ptr<const NativeRegistryPlan> registry_plan) {
   PyObject *state = wrap_native_registry_state(std::move(registry_plan));
   if (!state) {
     release_sink_outputs(main_stream, diagnostics);
-    schema_sanitizer_free_string(registry_json);
-    schema_sanitizer_free_string(drifts_json);
-    schema_sanitizer_free_string(conversion_timestamp);
     return nullptr;
   }
   PyObject *out = pack_registry_stream_result(

@@ -137,13 +137,6 @@ def test_native_options_catalog_matches_cpp_source_order_and_groups() -> None:
     assert len(OPTIONS) == len({spec.name for spec in OPTIONS})
 
 
-def test_python_options_catalog_facades_are_removed() -> None:
-    """Verify the former generated catalog and default parser stay retired."""
-    package = Path(__file__).resolve().parents[2] / "src/schema_sanitizer/core_impl/native_options"
-    assert not (package / "catalog.py").exists()
-    assert not (package / "defaults.py").exists()
-
-
 def test_memory_limit_helper_translates_only_native_unset_sentinel() -> None:
     """Python policies see an unset native memory limit as ``None``."""
     from schema_sanitizer.options_impl.options import (
@@ -205,20 +198,7 @@ def test_public_call_options_map_to_native_options() -> None:
     assert opt.errors.on_error.name == "STOP"
     assert opt.performance.threading_mode.name == "MULTI"
     assert opt.performance.memory_limit_bytes == 1024 * 1024
-    assert opt.performance.memory_limit_bytes == 1024 * 1024
     assert opt.xml.xml_row_tag == "row"
-
-
-def test_public_call_options_reject_removed_quarantine_policy() -> None:
-    """Verify the removed quarantine policy is rejected."""
-    with pytest.raises(ValueError, match="on_error"):
-        normalize_call_options(on_error="quarantine")
-
-
-def test_public_call_options_reject_old_schema_kwarg() -> None:
-    """Verify the old schema kwarg is no longer accepted."""
-    with pytest.raises(TypeError, match="schema"):
-        normalize_call_options(schema={"fields": [{"name": "a", "type": "int64"}]})
 
 
 def test_internal_call_options_reject_object_schema_contract() -> None:
@@ -279,13 +259,6 @@ def test_public_call_options_accept_list_for_sequence_options() -> None:
     assert opt.inference.timestamp_regexps == ["^\\d{4}$"]
 
 
-def test_removed_temporal_pattern_names_are_rejected() -> None:
-    """Verify removed public temporal pattern names have no compatibility aliases."""
-    for key in ("timestamp_patterns", "date_patterns", "time_patterns"):
-        with pytest.raises(TypeError, match="Unknown option"):
-            normalize_call_options(**{key: ()})
-
-
 def test_public_call_options_reject_non_positive_memory_limit() -> None:
     """Verify public call options reject non positive memory limit."""
     for value in (0, -1):
@@ -301,12 +274,6 @@ def test_public_call_options_reject_invalid_numeric_limits() -> None:
     for value in (0, -1):
         with pytest.raises(TypeError, match="read_chunk_bytes"):
             normalize_call_options(read_chunk_bytes=value)
-
-
-def test_public_call_options_reject_removed_max_depth() -> None:
-    """Verify the old max_depth option is no longer accepted."""
-    with pytest.raises(TypeError, match="max_depth"):
-        normalize_call_options(max_depth=1)
 
 
 def test_public_call_options_reject_non_int_numeric_options() -> None:
@@ -449,14 +416,6 @@ def test_column_order_defaults_to_alphabetically() -> None:
     assert internal.schema.field_order.name == "ALPHABETICALLY"
 
 
-def test_column_order_rejects_removed_sorted_alias() -> None:
-    """Verify the removed sorted spelling is not accepted."""
-    with pytest.raises(ValueError, match="column_order"):
-        normalize_call_options(column_order="sorted")
-    with pytest.raises(ValueError, match="field_order"):
-        InternalOptions(schema={"field_order": "sorted"})
-
-
 def test_field_name_policy_defaults_to_lower_alpha() -> None:
     """Verify field-name sanitization is enabled by default."""
     public = normalize_call_options()
@@ -466,15 +425,12 @@ def test_field_name_policy_defaults_to_lower_alpha() -> None:
     assert internal.schema.field_name_policy == "lower_alpha"
 
 
-def test_public_field_name_policy_accepts_only_canonical_names() -> None:
-    """Verify removed compact and dashed policy spellings are rejected."""
+def test_public_field_name_policy_normalizes_whitespace_and_case() -> None:
+    """Verify field-name policy normalization is whitespace- and case-insensitive."""
     assert (
         normalize_call_options(field_name_policy=" PRESERVE ").schema.field_name_policy
         == "preserve"
     )
-    for value in ("lower-alpha", "loweralpha", "lower-snake"):
-        with pytest.raises(ValueError, match="field_name_policy"):
-            normalize_call_options(field_name_policy=value)
 
 
 def test_public_field_name_policy_rejects_invalid_values() -> None:

@@ -22,9 +22,6 @@ The package is alpha software. A 0.x minor release may change APIs when that
 simplifies the contract or fixes a security or correctness problem. Release
 notes must describe any required migration.
 
-Aliases for retired names and modules are not retained. Documentation always
-uses the current path, and consumers are expected to update to it.
-
 ## [Runtime platforms](#index)
 
 Release wheels use the CPython 3.11 stable ABI and support CPython 3.11, 3.12,
@@ -67,6 +64,9 @@ Only surfaces listed in the [Python API guide](python-api.md) are public:
 - `schema_sanitizer.sources`;
 - `schema_sanitizer.pipeline` and `schema_sanitizer.pipeline.advanced`;
 - `schema_sanitizer.integrations.bigquery` and its `advanced` namespace.
+
+The public API is current-only. Names and module paths outside those documented
+surfaces are not provided as compatibility aliases.
 
 The `api_impl`, `core_impl`, `input_impl`, `options_impl`, `remote_impl`, and
 `adapters` packages are internal. Their names, signatures, and file layout may

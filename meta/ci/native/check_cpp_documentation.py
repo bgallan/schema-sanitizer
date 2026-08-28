@@ -28,9 +28,9 @@ def _find_clang_doc() -> str:
 
 def _find_compile_database() -> Path:
     """Return the most recently modified compile database."""
-    candidates = sorted((_REPO_ROOT / "build").glob("*/compile_commands.json"))
+    candidates = sorted((_REPO_ROOT / ".work" / "build").glob("*/compile_commands.json"))
     if not candidates:
-        raise FileNotFoundError("no build/*/compile_commands.json file was found")
+        raise FileNotFoundError("no .work/build/*/compile_commands.json file was found")
     return max(candidates, key=lambda path: path.stat().st_mtime_ns)
 
 

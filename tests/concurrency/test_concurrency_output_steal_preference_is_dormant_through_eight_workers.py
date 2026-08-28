@@ -10,7 +10,7 @@ from schema_sanitizer.core_impl.native_runtime import native_core
 
 
 def test_output_steal_preference_is_dormant_through_eight_workers() -> None:
-    """The eight-worker stealing path remains the legacy reverse scan."""
+    """The eight-worker stealing path uses the low-worker reverse scan."""
     require_native()
     promoted, outputs, broad, stolen, started, queued, submitted = (
         native_core.operation_task_arena_output_steal_probe(8)
@@ -47,7 +47,7 @@ def test_steal_preference_is_constant_time_and_high_core_only() -> None:
     """The extension adds no queue scan, global index, or low-core branch."""
     root = Path(__file__).resolve().parents[2]
     runtime = (root / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
-    probe = (root / "cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc").read_text()
+    probe = (root / "cpp/src/api/python_abi3/runtime/test_probes.cc").read_text()
 
     assert "template <bool PreferDedicatedOutput>\nbool steal_compatible" in runtime
     assert "dedicated_high_output(candidate.tasks.front()" in runtime

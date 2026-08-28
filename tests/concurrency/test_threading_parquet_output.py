@@ -28,7 +28,6 @@ def _write_native(table: object, path: Path, *, mode: str, compression: str) -> 
         memory_limit_bytes=256 << 20,
         threading_mode=mode,
     )
-    assert writers.last_parquet_stream_route() == "native"
 
 
 def _assert_logically_equal(left: Path, right: Path) -> None:

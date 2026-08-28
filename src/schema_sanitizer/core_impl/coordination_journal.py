@@ -1,9 +1,8 @@
 """Crash-recoverable in-place updates for interprocess coordination documents.
 
-The main document remains the lock target and is still rewritten in place so
-older schema-sanitizer processes can coordinate through the same inode.  A
-small sidecar journal makes a crash between ``truncate`` and ``write``
-recoverable without switching the lock protocol to rename-based publication.
+The main document remains the lock target while a small sidecar journal makes
+a crash between ``truncate`` and ``write`` recoverable without switching the
+lock protocol to rename-based publication.
 """
 
 from __future__ import annotations
@@ -407,33 +406,20 @@ def recover_locked_payload(
     handle: BinaryIO,
     *,
     max_payload_bytes: int,
-    validate: Callable[[bytes], object],
-    canonicalize: Callable[[object], bytes],
     process_alive: Callable[[int, str], bool],
 ) -> bytes:
     """Recover an interrupted transaction while the main inode is locked.
 
     A prepared transaction owned by a still-live process is rolled back because
     its caller may retry after the failed write.  A dead owner's transaction and
-    every committed transaction are completed.  A different valid main document
-    is treated as a newer write from a journal-unaware process and preserved.
+    every committed transaction are completed. Intermediate main-file bytes are
+    replaced from the authenticated journal transaction.
     """
     handle.seek(0)
     current = handle.read(max_payload_bytes + 1)
     record = _read_record(path, max_payload_bytes)
     if record is None:
         return current
-
-    current_is_known = current == record.before or current == record.after
-    if not current_is_known:
-        try:
-            decoded = validate(current)
-            current_is_canonical = bool(current) and canonicalize(decoded) == current
-        except OSError:
-            current_is_canonical = False
-        if current_is_canonical:
-            _remove_journal(path)
-            return current
 
     owner_alive = process_alive(record.pid, record.start)
     if record.phase == _PHASE_COMMITTED or not owner_alive:

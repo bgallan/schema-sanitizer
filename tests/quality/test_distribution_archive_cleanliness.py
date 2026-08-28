@@ -78,7 +78,7 @@ def test_release_filename_validator_requires_expected_project_and_version() -> N
 
 
 @pytest.mark.parametrize(
-    ("old", "new", "message"),
+    ("canonical", "replacement", "message"),
     [
         ("cp311-abi3-win_amd64", "cp312-abi3-win_amd64", "only cp311-abi3"),
         ("cp311-abi3-win_amd64", "cp311-cp311-win_amd64", "only cp311-abi3"),
@@ -95,13 +95,13 @@ def test_release_filename_validator_requires_expected_project_and_version() -> N
     ],
 )
 def test_release_filename_validator_rejects_noncanonical_wheel_tags(
-    old: str,
-    new: str,
+    canonical: str,
+    replacement: str,
     message: str,
 ) -> None:
     """Release wheels use only the audited cp311-abi3 platform tags."""
     validator = _load_validator()
-    filenames = [name.replace(old, new) for name in _release_filenames()]
+    filenames = [name.replace(canonical, replacement) for name in _release_filenames()]
 
     with pytest.raises(AssertionError, match=message):
         validator.validate_release_filenames(filenames)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import shutil
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "meta" / "ci" / "fuzz" / "check_fuzz_corpus.py"
 RUNNER = ROOT / "meta" / "ci" / "fuzz" / "run_fuzz_regressions.py"
+PACKER = ROOT / "meta" / "ci" / "fuzz" / "pack_fuzz_regressions.py"
 
 
 def _module(path: Path, name: str):
@@ -53,6 +55,15 @@ def test_repository_fuzz_tree_has_valid_content_addresses() -> None:
     assert inventory.regression_inputs == 275
     assert inventory.content_addressed_inputs == 265
     assert inventory.unique_campaign_inputs == 295
+
+
+def test_deep_json_seed_keeps_its_boundary_without_generated_whitespace() -> None:
+    """The depth-limit seed stays compact while retaining 513 nested members."""
+    data = (ROOT / "fuzz" / "corpus" / "json" / "depth-513.json").read_bytes()
+
+    assert len(data) < 4_096
+    assert data.count(b'{"n":') == 513
+    assert data.count(b"{") == data.count(b"}") == 514
 
 
 def test_fuzz_checker_rejects_hash_drift_and_nested_inputs(tmp_path: Path) -> None:
@@ -117,11 +128,7 @@ def test_fuzz_checker_rejects_deleted_content_addressed_input(tmp_path: Path) ->
     """Exact per-target counts prevent silent regression-case removal."""
     checker = _module(CHECKER, "check_fuzz_corpus_deleted_regression")
     fuzz_root = _copy_repository_fuzz_tree(tmp_path)
-    target_root = fuzz_root / "regressions" / "csv"
-    fixture = next(
-        path for path in sorted(target_root.iterdir()) if checker.SHA1_NAME.fullmatch(path.name)
-    )
-    fixture.unlink()
+    (fuzz_root / "regressions" / "csv.sha1.zip").unlink()
 
     with pytest.raises(checker.FuzzCorpusError) as raised:
         checker.check_fuzz_tree(fuzz_root)
@@ -129,6 +136,33 @@ def test_fuzz_checker_rejects_deleted_content_addressed_input(tmp_path: Path) ->
     message = str(raised.value)
     assert "unexpected input count under regressions/csv" in message
     assert "fuzz tree fingerprint mismatch" in message
+
+
+def test_fuzz_packer_is_deterministic_and_removes_only_hashed_files(tmp_path: Path) -> None:
+    """Packed regressions retain stable names and byte-exact contents."""
+    packer = _module(PACKER, "pack_fuzz_regressions_determinism")
+    regression_root = tmp_path / "regressions"
+    target = packer.TARGETS[0]
+    target_root = regression_root / target
+    target_root.mkdir(parents=True)
+    expected: dict[str, bytes] = {}
+    for data in (b"first regression", b"second regression"):
+        name = hashlib.sha1(data, usedforsecurity=False).hexdigest()
+        expected[name] = data
+        (target_root / name).write_bytes(data)
+    descriptive = target_root / "hand-maintained.json"
+    descriptive.write_bytes(b"descriptive")
+
+    assert packer.pack_target(regression_root, target, remove_loose=True) == 2
+    archive = regression_root / f"{target}.sha1.zip"
+    first_bytes = archive.read_bytes()
+    assert packer.pack_target(regression_root, target, remove_loose=True) == 2
+    assert archive.read_bytes() == first_bytes
+    assert descriptive.read_bytes() == b"descriptive"
+    assert sorted(path.name for path in target_root.iterdir()) == [descriptive.name]
+    with zipfile.ZipFile(archive) as packed:
+        assert packed.namelist() == sorted(expected)
+        assert {name: packed.read(name) for name in packed.namelist()} == expected
 
 
 @pytest.mark.parametrize(

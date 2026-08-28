@@ -10,6 +10,7 @@ from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.core_impl import async_scheduler
 from schema_sanitizer.core_impl.async_scheduler import (
+    AsyncResultMemoryContract,
     drain_ordered_iterable_results,
     ordered_indexed_results,
     retry_async,
@@ -59,7 +60,10 @@ def test_ordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None:
 
         with pytest.raises(RuntimeError, match="boom"):
             async for _index, _payload in ordered_indexed_results(
-                3, fetch, window=3, expected_retained_bytes=1024
+                3,
+                fetch,
+                window=3,
+                memory_contract=AsyncResultMemoryContract(preflight_bytes=1024),
             ):
                 raise AssertionError("failed first task should not yield")
 
@@ -97,7 +101,10 @@ def test_unordered_indexed_results_uses_bounded_task_window() -> None:
 
         results: list[tuple[int, int]] = []
         async for index, value in unordered_indexed_results(
-            5, fetch, window=2, expected_retained_bytes=256
+            5,
+            fetch,
+            window=2,
+            memory_contract=AsyncResultMemoryContract(preflight_bytes=256),
         ):
             results.append((index, value))
             if index == 1:
@@ -131,7 +138,10 @@ def test_unordered_indexed_results_cancels_prefetched_tasks_on_failure() -> None
 
         with pytest.raises(RuntimeError, match="boom"):
             async for _index, _value in unordered_indexed_results(
-                3, fetch, window=2, expected_retained_bytes=256
+                3,
+                fetch,
+                window=2,
+                memory_contract=AsyncResultMemoryContract(preflight_bytes=256),
             ):
                 raise AssertionError("failed task should not yield")
 
@@ -166,7 +176,10 @@ def test_unordered_indexed_results_reuses_fixed_worker_tasks(
         values = [
             value
             async for _index, value in unordered_indexed_results(
-                100, fetch, window=4, expected_retained_bytes=256
+                100,
+                fetch,
+                window=4,
+                memory_contract=AsyncResultMemoryContract(preflight_bytes=256),
             )
         ]
         assert sorted(values) == list(range(100))
@@ -226,7 +239,10 @@ def test_completed_worker_pool_stops_without_terminal_debt_deadline(
         values = [
             value
             async for _index, value in unordered_indexed_results(
-                100, fetch, window=4, expected_retained_bytes=256
+                100,
+                fetch,
+                window=4,
+                memory_contract=AsyncResultMemoryContract(preflight_bytes=256),
             )
         ]
         assert sorted(values) == list(range(100))
@@ -362,7 +378,10 @@ def test_ordered_indexed_results_reports_earliest_ordinal_failure() -> None:
 
         with pytest.raises(ValueError, match="earlier"):
             async for _index, _value in ordered_indexed_results(
-                2, fetch, window=2, expected_retained_bytes=256
+                2,
+                fetch,
+                window=2,
+                memory_contract=AsyncResultMemoryContract(preflight_bytes=256),
             ):
                 raise AssertionError("failing work must not yield")
 

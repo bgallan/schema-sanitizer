@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,22 +65,6 @@ def test_secure_cleanup_wipes_transcoding_input_scratch() -> None:
     assert "secure_memory_cleanup_enabled" in source
     assert "secure_zero_memory(value_->data(), value_->size())" in source
     assert "SensitiveStringGuard raw_guard(&raw)" in source
-
-
-def test_removed_chunk_parameter_is_not_accepted(tmp_path: Path) -> None:
-    """Chunk sizing is derived internally and is no longer a public knob."""
-    require_native()
-    import schema_sanitizer as ss
-
-    source = tmp_path / "row.jsonl"
-    source.write_text('{"value":1}\n', encoding="utf-8")
-    with pytest.raises(TypeError, match="read_chunk_bytes"):
-        ss.to_jsonl(
-            source,
-            tmp_path / "out.jsonl",
-            input_format="jsonl",
-            read_chunk_bytes=1,
-        )
 
 
 def test_utf16_round_trip_under_explicit_budget(tmp_path: Path) -> None:

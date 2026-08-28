@@ -573,38 +573,6 @@ py_process_external_runtime_thread_permit_lease_amount(PyObject *,
   return PyLong_FromSize_t(receipt->lease.amount());
 }
 
-PyObject *py_process_external_runtime_thread_permits_acquire(PyObject *,
-                                                             PyObject *args) {
-  unsigned long long desired = 0U;
-  unsigned long long minimum = 0U;
-  if (!PyArg_ParseTuple(args,
-                        "KK:process_external_runtime_thread_permits_acquire",
-                        &desired, &minimum)) {
-    return nullptr;
-  }
-  const auto granted =
-      sanitize::internal::acquire_process_external_runtime_thread_permits(
-          static_cast<std::size_t>(desired), static_cast<std::size_t>(minimum));
-  PyObject *result = PyLong_FromSize_t(granted);
-  if (!result && granted != 0U) {
-    sanitize::internal::release_process_external_runtime_thread_permits(
-        granted);
-  }
-  return result;
-}
-
-PyObject *py_process_external_runtime_thread_permits_release(PyObject *,
-                                                             PyObject *args) {
-  unsigned long long amount = 0U;
-  if (!PyArg_ParseTuple(
-          args, "K:process_external_runtime_thread_permits_release", &amount)) {
-    return nullptr;
-  }
-  sanitize::internal::release_process_external_runtime_thread_permits(
-      static_cast<std::size_t>(amount));
-  Py_RETURN_NONE;
-}
-
 PyObject *py_process_external_runtime_resident_threads_add(PyObject *,
                                                            PyObject *args) {
   unsigned long long amount = 0U;
@@ -965,45 +933,6 @@ PyObject *py_process_file_descriptor_permit_lease_amount(PyObject *,
   return PyLong_FromSize_t(receipt->lease.amount());
 }
 
-PyObject *py_process_file_descriptor_permits_acquire(PyObject *,
-                                                     PyObject *args) {
-  unsigned long long desired = 0U;
-  unsigned long long minimum = 0U;
-  if (!PyArg_ParseTuple(args, "KK:process_file_descriptor_permits_acquire",
-                        &desired, &minimum)) {
-    return nullptr;
-  }
-  const auto granted =
-      sanitize::internal::acquire_process_file_descriptor_permits(
-          static_cast<std::size_t>(desired), static_cast<std::size_t>(minimum));
-  PyObject *result = PyLong_FromSize_t(granted);
-  if (!result && granted != 0U) {
-    sanitize::internal::release_process_file_descriptor_permits(granted);
-  }
-  return result;
-}
-
-PyObject *py_process_file_descriptor_permits_acquire_wait(PyObject *,
-                                                          PyObject *args) {
-  unsigned long long desired = 0U;
-  unsigned long long minimum = 0U;
-  unsigned long long timeout_millis = 0U;
-  if (!PyArg_ParseTuple(args,
-                        "KKK:process_file_descriptor_permits_acquire_wait",
-                        &desired, &minimum, &timeout_millis)) {
-    return nullptr;
-  }
-  const auto granted =
-      sanitize::internal::acquire_process_file_descriptor_permits_wait(
-          static_cast<std::size_t>(desired), static_cast<std::size_t>(minimum),
-          static_cast<std::uint64_t>(timeout_millis));
-  PyObject *result = PyLong_FromSize_t(granted);
-  if (!result && granted != 0U) {
-    sanitize::internal::release_process_file_descriptor_permits(granted);
-  }
-  return result;
-}
-
 PyObject *py_process_file_descriptor_mark_opened(PyObject *, PyObject *args) {
   unsigned long long amount = 0U;
   if (!PyArg_ParseTuple(args, "K:process_file_descriptor_mark_opened",
@@ -1022,18 +951,6 @@ PyObject *py_process_file_descriptor_mark_closed(PyObject *, PyObject *args) {
     return nullptr;
   }
   sanitize::internal::mark_process_file_descriptors_closed(
-      static_cast<std::size_t>(amount));
-  Py_RETURN_NONE;
-}
-
-PyObject *py_process_file_descriptor_permits_release(PyObject *,
-                                                     PyObject *args) {
-  unsigned long long amount = 0U;
-  if (!PyArg_ParseTuple(args, "K:process_file_descriptor_permits_release",
-                        &amount)) {
-    return nullptr;
-  }
-  sanitize::internal::release_process_file_descriptor_permits(
       static_cast<std::size_t>(amount));
   Py_RETURN_NONE;
 }
@@ -1096,9 +1013,7 @@ PyObject *py_process_physical_thread_mark_stopped(PyObject *, PyObject *) {
 PyObject *py_operation_task_arena_runtime_snapshot(PyObject *, PyObject *) {
   const auto snapshot =
       sanitize::internal::OperationTaskArena::RuntimeSnapshot();
-  // Historical source-contract markers: PyTuple_New(16), PyTuple_New(27).
-  // Pass69 breadcrumb: PyTuple_New(29). Pass70 adds resident stack debt.
-  // The Python parser remains backward-compatible with older payloads.
+  // Keep this tuple synchronized with the runtime snapshot decoder.
   PyObject *out = PyTuple_New(30);
   if (!out) {
     return nullptr;

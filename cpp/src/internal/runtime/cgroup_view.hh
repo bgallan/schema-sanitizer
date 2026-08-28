@@ -161,8 +161,8 @@ inline void unescape_mount_field(char *value) noexcept {
       ++relative;
     }
   } else {
-    // Pass57: this mount does not contain the process membership subtree.
-    // Never fabricate mountpoint + unrelated membership and accidentally read
+    // This mount does not contain the process membership subtree. Never
+    // fabricate mountpoint + unrelated membership and accidentally read
     // another cgroup that happens to exist at that path.
     return false;
   }

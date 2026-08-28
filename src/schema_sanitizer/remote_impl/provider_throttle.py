@@ -109,7 +109,7 @@ class _ExpiryNode:
 
 
 class _ExpiryHeap:
-    """One mutable heap node per tracked key; no historical expiry entries."""
+    """One mutable heap node per tracked key, with no stale expiry entries."""
 
     __slots__ = ("_nodes", "_positions", "peak_entries")
 
@@ -207,17 +207,16 @@ def _release_provider_capsule(capsule: PreparedFinalizerCleanup) -> None:
     governor = capsule.arg0
     lease_id = capsule.arg1
     capability = capsule.arg2
-    release = getattr(governor, "_release_lease_capability", None)
-    if callable(release) and type(lease_id) is int and lease_id > 0:
-        release(lease_id, capability)
+    if type(lease_id) is int and lease_id > 0:
+        if not isinstance(governor, ProviderThrottleGovernor):
+            raise RuntimeError("provider request finalizer lost its governor")
+        governor._release_lease_capability(lease_id, capability)
 
 
 class ProviderRequestLease:
     """Exactly-once provider slot that feeds AIMD outcome telemetry."""
 
-    def __init__(
-        self, governor: "ProviderThrottleGovernor", key: str, *, _active: bool = False
-    ) -> None:
+    def __init__(self, governor: "ProviderThrottleGovernor", key: str) -> None:
         """Initialize this helper."""
         self._finalizer_ticket = 0
         self._finalizer_capsule: PreparedFinalizerCleanup | None = None
@@ -232,14 +231,14 @@ class ProviderRequestLease:
         self._lock = Lock()
         self._lease_id = 0
         self._capability: object | None = None
-        self._state = "active" if _active else "inactive"
+        self._state = "inactive"
 
     @property
     def key(self) -> str:
         """Return the immutable normalized endpoint key."""
         return self._key
 
-    def _activate(self, *, lease_id: int = 0, capability: object | None = None) -> None:
+    def _activate(self, *, lease_id: int, capability: object) -> None:
         """Publish this preconstructed owner after accounting commits."""
         self._lease_id = lease_id
         self._capability = capability
@@ -284,22 +283,12 @@ class ProviderRequestLease:
                 return False
             self._state = "releasing"
         try:
-            release = getattr(self._governor, "_release_lease", None)
-            if callable(release) and self._lease_id:
-                release(
-                    self,
-                    outcome=outcome,
-                    throttled=throttled,
-                    retry_after_seconds=retry_after_seconds,
-                )
-            else:
-                # Compatibility for historical focused governor doubles.
-                self._governor.release(
-                    self._key,
-                    outcome=outcome,
-                    throttled=throttled,
-                    retry_after_seconds=retry_after_seconds,
-                )
+            self._governor._release_lease(
+                self,
+                outcome=outcome,
+                throttled=throttled,
+                retry_after_seconds=retry_after_seconds,
+            )
         except BaseException:
             with self._lock:
                 if self._state == "releasing":
@@ -478,14 +467,13 @@ class ProviderThrottleGovernor:
                 return None, min(1.0, state.circuit_open_until - now)
             if state.in_flight >= state.window:
                 return None, 0.05
-            # pass50 compatibility breadcrumb: self._lease_sequence >= (1 << 63) - 1
             lease_id = next_reusable_token(self._lease_sequence, self._active_leases)
             if lease_id is None:
                 self._saturation_rejections += 1
                 return None, 0.05
             control_ticket = reserve_control_plane("provider_request_lease", 384)
             try:
-                lease = ProviderRequestLease(self, normalized, _active=False)
+                lease = ProviderRequestLease(self, normalized)
             except BaseException:
                 release_control_plane(control_ticket)
                 self._construction_rollbacks += 1
@@ -589,26 +577,6 @@ class ProviderThrottleGovernor:
             ):
                 self._active_leases.pop(lease_id, None)
 
-    def release(
-        self,
-        key: str,
-        *,
-        outcome: str,
-        throttled: bool,
-        retry_after_seconds: float | None,
-    ) -> None:
-        """Release one slot after validating the terminal outcome atomically."""
-        if outcome not in {"success", "failure", "neutral"}:
-            raise ValueError(f"unknown provider throttle outcome: {outcome}")
-        normalized = _normalize_key(key)
-        with self._condition:
-            self._release_locked(
-                normalized,
-                outcome=outcome,
-                throttled=throttled,
-                retry_after_seconds=retry_after_seconds,
-            )
-
     def _release_locked(
         self,
         key: str,
@@ -623,6 +591,8 @@ class ProviderThrottleGovernor:
         physical slot is returned. Once ``in_flight`` is decremented the lease is
         committed and no derived-index/notification failure is allowed to escape.
         """
+        if outcome not in {"success", "failure", "neutral"}:
+            raise ValueError(f"unknown provider throttle outcome: {outcome}")
         now = monotonic()
         state = self._states.get(key)
         if state is None:
@@ -751,12 +721,7 @@ class ProviderThrottleGovernor:
         self._fork_prepared = None
 
     def reset_after_fork(self) -> None:
-        """Swap preallocated child state without touching parent capabilities.
-
-        Historical source contract breadcrumbs: ``self._condition = Condition()``
-        and ``self._active_leases = {}``. Pass50 performs those allocations in
-        ``prepare_for_fork`` instead.
-        """
+        """Swap preallocated child state without touching parent capabilities."""
         prepared = self._fork_prepared
         if prepared is None:
             from ..core_impl.fork_safety import runtime_fork_poisoned

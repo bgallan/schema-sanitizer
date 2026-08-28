@@ -14,7 +14,14 @@ def _root() -> Path:
 class _Owner:
     def __init__(self) -> None:
         self.ticket = 0
-        self._escrow_armed = False
+        self._escrow_armed_ticket = 0
+
+    def arm_for_ticket(self, ticket: int) -> None:
+        self._escrow_armed_ticket = int(ticket)
+
+    def disarm_ticket(self, ticket: int | None = None) -> None:
+        if ticket is None or self._escrow_armed_ticket == int(ticket):
+            self._escrow_armed_ticket = 0
 
 
 def test_generation_owner_first_acquire_rolls_back_after_internal_interrupt(monkeypatch) -> None:
@@ -125,7 +132,7 @@ def test_reserved_escrow_claim_failure_restores_publishable_owner() -> None:
     owner = _Owner()
     ticket = escrow.reserve_rooted(owner)
     assert ticket is not None
-    owner._escrow_armed = True
+    owner.arm_for_ticket(ticket)
 
     calls = 0
 
@@ -154,7 +161,7 @@ def test_reserved_escrow_processed_marker_prevents_callback_replay(monkeypatch) 
     owner = _Owner()
     ticket = escrow.reserve_rooted(owner)
     assert ticket is not None
-    owner._escrow_armed = True
+    owner.arm_for_ticket(ticket)
 
     original = module.ReservedFinalizerEscrow._bump_progress
     failed = False
@@ -184,24 +191,6 @@ def test_reserved_escrow_processed_marker_prevents_callback_replay(monkeypatch) 
     assert escrow.process_one(processor)
     assert calls == 1
     assert escrow.active_count() == 0
-
-
-def test_legacy_finalizer_processor_exception_never_strands_claimed_slot() -> None:
-    import schema_sanitizer.core_impl.finalizer_escrow as module
-
-    escrow: module.FinalizerEscrow[object] = module.FinalizerEscrow(1)
-    owner = object()
-    assert escrow.try_publish(owner)
-
-    with pytest.raises(KeyboardInterrupt, match="legacy claimed"):
-        escrow.process_one(
-            lambda _value: (_ for _ in ()).throw(KeyboardInterrupt("legacy claimed"))
-        )
-
-    assert module._CLAIMED not in escrow._states
-    seen: list[object] = []
-    assert escrow.process_one(seen.append)
-    assert seen == [owner]
 
 
 def test_physical_claim_target_zero_retires_slot_even_after_dict_mirror_was_lost() -> None:
@@ -277,7 +266,5 @@ def test_production_rooted_finalizers_reserve_owner_before_ticket_handoff() -> N
     for path in paths:
         source = path.read_text(encoding="utf-8")
         assert ".reserve_rooted(" in source
-        # Naked reserve_ticket -> root_reserved handoff is no longer a
-        # production construction pattern. Historical compatibility helpers may
-        # still mention/call root_reserved for injected legacy tickets.
+        # Every construction roots authority in the same operation.
         assert "reserve_ticket()\n" not in source

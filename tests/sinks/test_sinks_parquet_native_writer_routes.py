@@ -17,7 +17,6 @@ def test_parquet_native_file_output_uses_native_writer_when_available(
     """Verify Parquet output prefers the native writer when one is exported."""
     require_native()
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
@@ -52,8 +51,6 @@ def test_parquet_native_file_output_uses_native_writer_when_available(
     )
 
     assert out.read_bytes() == b"native-parquet"
-    assert native_file_output.last_parquet_stream_route() == "native"
-    assert last_metadata_route() == "none"
 
 
 def test_parquet_native_file_output_falls_back_when_gzip_lacks_zlib(
@@ -99,7 +96,6 @@ def test_parquet_native_file_output_falls_back_when_gzip_lacks_zlib(
 
     assert fallback_calls == [out]
     assert out.read_bytes() == b"pyarrow-parquet"
-    assert native_file_output.last_parquet_stream_route() == "pyarrow"
 
 
 def test_parquet_native_file_output_retries_pyarrow_after_native_failure(
@@ -142,7 +138,6 @@ def test_parquet_native_file_output_retries_pyarrow_after_native_failure(
     )
 
     assert pq.read_table(out).column("a").to_pylist() == ["1", "2", "3"]
-    assert native_file_output.last_parquet_stream_route() == "pyarrow"
     assert "retrying Parquet output with PyArrow" in caplog.text
 
 
@@ -188,7 +183,6 @@ def test_raw_parquet_file_output_retries_pyarrow_after_native_failure(
     )
 
     assert pq.read_table(out).column("a").to_pylist() == ["1", "2", "3"]
-    assert native_file_output.last_parquet_stream_route() == "pyarrow"
 
 
 def test_parquet_native_file_output_writes_metadata_without_pyarrow_sink(
@@ -197,7 +191,6 @@ def test_parquet_native_file_output_writes_metadata_without_pyarrow_sink(
     """Verify native Parquet output can receive native metadata arguments."""
     require_native()
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import direct_writers as native_parquet_output
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
@@ -253,8 +246,6 @@ def test_parquet_native_file_output_writes_metadata_without_pyarrow_sink(
         "row_span_columns": {},
         "timestamp_columns": ("ingestion_timestamp",),
     }
-    assert native_file_output.last_parquet_stream_route() == "native"
-    assert last_metadata_route() == "native"
 
 
 def test_parquet_native_file_output_writes_supported_flat_stream(
@@ -264,7 +255,6 @@ def test_parquet_native_file_output_writes_supported_flat_stream(
     require_native()
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
@@ -358,5 +348,3 @@ def test_parquet_native_file_output_writes_supported_flat_stream(
     assert big_amount_stats.null_count == 1
     assert big_amount_stats.min == Decimal("-1.0000")
     assert big_amount_stats.max == Decimal("123456789012345678901234567890.1234")
-    assert native_file_output.last_parquet_stream_route() == "native"
-    assert last_metadata_route() == "none"

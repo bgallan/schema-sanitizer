@@ -65,7 +65,6 @@ def test_parquet_native_file_output_writes_integer_width_logical_types(
             "u64": 2**63 + 5,
         },
     ]
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_writes_timestamp_nanos(
@@ -100,7 +99,6 @@ def test_parquet_native_file_output_writes_timestamp_nanos(
     assert table.to_pylist() == batch.to_pylist()
     parquet_file = pq.ParquetFile(out)
     assert "Timestamp" in str(parquet_file.schema)
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_writes_schema_sanitizer_logical_surface(
@@ -183,7 +181,6 @@ def test_parquet_native_file_output_writes_schema_sanitizer_logical_surface(
     parquet_schema = str(pq.ParquetFile(out).schema)
     assert "Null" in parquet_schema
     assert "Time(isAdjustedToUTC=false, timeUnit=milliseconds)" in parquet_schema
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_writes_nested_stream(
@@ -271,7 +268,6 @@ def test_parquet_native_file_output_writes_nested_stream(
     )
 
     assert pq.read_table(out).to_pylist() == rows
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_writes_map_stream(
@@ -316,7 +312,6 @@ def test_parquet_native_file_output_writes_map_stream(
     )
 
     assert pq.read_table(out).to_pylist() == rows
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_writes_fixed_size_list_stream(
@@ -355,7 +350,6 @@ def test_parquet_native_file_output_writes_fixed_size_list_stream(
     )
 
     assert pq.read_table(out).to_pylist() == rows
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_writes_generated_metadata(
@@ -365,7 +359,6 @@ def test_parquet_native_file_output_writes_generated_metadata(
     require_native()
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
     monkeypatch.setattr(native_file_output, "_write_parquet_stream", fail_pyarrow_sink)
@@ -395,5 +388,3 @@ def test_parquet_native_file_output_writes_generated_metadata(
     assert rows[1]["schema_registry"] is None
     assert rows[1]["source_file"] == "/tmp/source.jsonl"
     assert rows[1]["ingestion_timestamp"] is not None
-    assert native_file_output.last_parquet_stream_route() == "native"
-    assert last_metadata_route() == "native"

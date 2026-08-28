@@ -10,7 +10,15 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-TARGETS = ("json", "csv", "xml", "parquet")
+try:
+    from meta.ci.fuzz.corpus_io import (
+        TARGETS,
+        FuzzInput,
+        target_inputs,
+    )
+except ModuleNotFoundError:
+    from corpus_io import TARGETS, FuzzInput, target_inputs
+
 DEFAULT_MAX_INPUT_MS = 5_000
 DEFAULT_MAX_RSS_MB = 2_048
 ENGINES = ("standalone", "libfuzzer")
@@ -32,14 +40,14 @@ def guard_arguments(engine: str, *, max_input_ms: int, max_rss_mb: int) -> list[
     raise ValueError(f"unsupported fuzz engine: {engine}")
 
 
-def regression_cases(regression_root: Path, target: str) -> list[Path]:
-    """Return stable regular-file inputs for one fuzzer target."""
-    root = regression_root / target
-    if not root.is_dir() or root.is_symlink():
-        raise FileNotFoundError(f"missing regular fuzz target directory: {root}")
-    return sorted(
-        path for path in root.iterdir() if path.is_file() and not path.name.startswith(".")
-    )
+def regression_cases(regression_root: Path, target: str) -> list[FuzzInput]:
+    """Return stable logical inputs from loose files or a packed archive."""
+    try:
+        return target_inputs(regression_root, target)
+    except ValueError as error:
+        if "missing regular fuzz target directory" in str(error):
+            raise FileNotFoundError(str(error)) from error
+        raise
 
 
 def _stage_campaign_corpus(
@@ -58,7 +66,7 @@ def _stage_campaign_corpus(
         if not cases:
             raise RuntimeError(f"no fuzz inputs found under {source_root / target}")
         for case in cases:
-            data = case.read_bytes()
+            data = case.data
             digest = hashlib.sha256(data).digest()
             if digest in seen:
                 continue
@@ -85,29 +93,37 @@ def run_regressions(
 ) -> int:
     """Run every promoted input once and return the number executed."""
     executed = 0
-    for target in TARGETS:
-        binary = fuzzer_binary(build_root, target)
-        if not binary.is_file():
-            raise FileNotFoundError(f"missing fuzzer binary: {binary}")
-        cases = regression_cases(regression_root, target)
-        if not cases:
-            raise RuntimeError(f"no fuzz regression inputs found under {regression_root / target}")
-        for case in cases:
-            print(f"[fuzz-regression] {target}: {case.name}", flush=True)
-            subprocess.run(
-                [
-                    os.fspath(binary),
-                    "-runs=1",
-                    *guard_arguments(
-                        engine,
-                        max_input_ms=max_input_ms,
-                        max_rss_mb=max_rss_mb,
-                    ),
-                    os.fspath(case),
-                ],
-                check=True,
-            )
-            executed += 1
+    with tempfile.TemporaryDirectory(prefix="schema-sanitizer-regressions-") as temporary:
+        staging_root = Path(temporary)
+        for target in TARGETS:
+            binary = fuzzer_binary(build_root, target)
+            if not binary.is_file():
+                raise FileNotFoundError(f"missing fuzzer binary: {binary}")
+            cases = regression_cases(regression_root, target)
+            if not cases:
+                raise RuntimeError(
+                    f"no fuzz regression inputs found under {regression_root / target}"
+                )
+            staged_target = staging_root / target
+            staged_target.mkdir()
+            for case in cases:
+                staged = staged_target / case.name
+                staged.write_bytes(case.data)
+                print(f"[fuzz-regression] {target}: {case.name}", flush=True)
+                subprocess.run(
+                    [
+                        os.fspath(binary),
+                        "-runs=1",
+                        *guard_arguments(
+                            engine,
+                            max_input_ms=max_input_ms,
+                            max_rss_mb=max_rss_mb,
+                        ),
+                        os.fspath(staged),
+                    ],
+                    check=True,
+                )
+                executed += 1
     return executed
 
 

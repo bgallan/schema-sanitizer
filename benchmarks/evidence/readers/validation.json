@@ -179,8 +179,7 @@
         "hosted_ci": "Cannot be executed from the local container; workflow topology and locally executable jobs are tested."
       },
       "architecture_refactors": [
-        "Operation input lifetime and ledger ownership moved to api_impl/input_lifetime.py.",
-        "Analytical adapter materialization moved to api_impl/table_adapter_sink.py.",
+        "Operation input ownership and analytical adapter materialization are cohesive in api_impl/execution_context.py.",
         "Discovery ledger context moved to pipeline/source_discovery_budget.py.",
         "Parquet page scratch and budgeting moved to footer_reader_page_scratch.cc.inc.",
         "JSON frontend factories compacted within their existing owner."

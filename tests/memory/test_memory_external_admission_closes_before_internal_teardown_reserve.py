@@ -60,8 +60,8 @@ def test_notifier_rejection_reinstalls_accepted_callback(
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
     monkeypatch.setattr(
         module._AVAILABILITY_NOTIFIER,
-        "publish",
-        lambda deliveries: tuple(deliveries),
+        "publish_one",
+        lambda _delivery: False,
     )
     lease.release()
     snapshot = governor.snapshot()
@@ -78,10 +78,7 @@ def test_notifier_schedules_autonomous_restart_after_start_failure(
     notifier = module._AvailabilityNotifier()
     governor = module._Governor(1, "external-admission-closes-before-internal-teardown-restart")
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
-    generation = governor._availability_events[module.AvailabilityEvent.RETRY_SCHEDULER]
-    delivery = module._AvailabilityDelivery(
-        governor, module.AvailabilityEvent.RETRY_SCHEDULER, generation
-    )
+    delivery = governor._availability_events[module.AvailabilityEvent.RETRY_SCHEDULER]
     scheduled = threading.Event()
 
     class Exhausted:
@@ -94,7 +91,7 @@ def test_notifier_schedules_autonomous_restart_after_start_failure(
 
     monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", Exhausted())
     monkeypatch.setattr(retry_scheduler, "schedule_retry", schedule)
-    assert notifier.publish((delivery,)) == ()
+    assert notifier.publish_one(delivery)
     assert scheduled.wait(1)
     assert notifier.snapshot().pending_callbacks == 1
     assert notifier.snapshot().worker_start_failures == 1
@@ -238,7 +235,7 @@ def test_quarantine_rejects_replaced_root_without_targeting_replacement(
     source.write_bytes(b"payload")
 
     janitor = module._TemporaryArtifactJanitor()
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
 
     class Lease:
         def release(self) -> None:

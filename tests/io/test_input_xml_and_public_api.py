@@ -211,14 +211,12 @@ def test_file_like_payload_is_rejected_by_format_reader() -> None:
         read_test_csv(io.BytesIO(b"a,b\n1,2\n"))
 
 
-def test_public_selector_arguments_must_be_strings(tmp_path) -> None:
-    """Verify public selector arguments must be strings."""
+def test_public_input_mode_must_be_a_string(tmp_path) -> None:
+    """Verify the public input-mode selector must be a string."""
     path = tmp_path / "data.jsonl"
     path.write_text('{"a": 1}\n', encoding="utf-8")
     out = tmp_path / "out.jsonl"
 
-    with pytest.raises(ValueError, match="auto"):
-        ss.to_jsonl(path, out, input_format="auto")
     with pytest.raises(TypeError, match="input_mode"):
         ss.to_jsonl(path, out, input_format="jsonl", input_mode=None)
 

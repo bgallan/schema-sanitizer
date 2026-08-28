@@ -195,12 +195,12 @@ def test_partition_runner_passes_schema_registry_by_value(monkeypatch, tmp_path:
 def test_pipeline_diff_flat_schema_paths_reports_added_removed_changed() -> None:
     """Verify reusable schema drift diff logic."""
     diff = diff_flat_schema_paths(
-        {"id": "int64", "old": "string", "value": "int64"},
-        {"id": "int64", "new": "string", "value": "double"},
+        {"id": "int64", "dropped": "string", "value": "int64"},
+        {"id": "int64", "added": "string", "value": "double"},
     )
 
-    assert diff.added_paths == ["new"]
-    assert diff.removed_paths == ["old"]
+    assert diff.added_paths == ["added"]
+    assert diff.removed_paths == ["dropped"]
     assert diff.changed_paths == ["value"]
     assert diff.has_changes
 

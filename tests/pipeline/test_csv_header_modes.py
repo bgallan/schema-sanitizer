@@ -17,7 +17,7 @@ from schema_sanitizer.options_impl.options import (
     Options as InternalOptions,
 )
 from schema_sanitizer.options_impl.options import (
-    require_implemented_csv_header_mode,
+    normalize_csv_header_mode,
 )
 
 PUBLIC_CONVERTERS = (
@@ -86,7 +86,7 @@ def _business_rows(path: Path) -> list[dict[str, object]]:
 
 
 def test_exact_default_and_explicit_mode_materialize_the_same_rows(tmp_path: Path) -> None:
-    """Spelling out exact mode leaves the historical successful path unchanged."""
+    """Spelling out exact mode materializes the same rows as the default."""
     folder = tmp_path / "input"
     folder.mkdir()
     (folder / "a.csv").write_text("id,name\n1,Ana\n", encoding="utf-8")
@@ -138,7 +138,7 @@ def test_native_catalog_validates_csv_header_mode() -> None:
         validate_options(InternalOptions(csv={"csv_header_mode": "merge"}).raw)
 
 
-def test_both_header_modes_are_implemented() -> None:
-    """The native reader accepts both public reconciliation policies."""
-    assert require_implemented_csv_header_mode("exact") == "exact"
-    assert require_implemented_csv_header_mode("union") == "union"
+def test_both_header_modes_normalize() -> None:
+    """Both public reconciliation policies normalize to canonical values."""
+    assert normalize_csv_header_mode("exact") == "exact"
+    assert normalize_csv_header_mode("union") == "union"

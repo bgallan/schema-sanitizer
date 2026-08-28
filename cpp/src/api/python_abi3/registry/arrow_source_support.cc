@@ -14,7 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
@@ -22,7 +21,7 @@
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/options_schema_serialization.hh"
@@ -44,9 +43,8 @@ struct PassthroughArrowStreamState {
 
 void release_registry_outputs(PyRegistrySinkOutputs *outputs) {
   release_sink_outputs(outputs->main_stream, outputs->diagnostics);
-  schema_sanitizer_free_string(outputs->registry_json);
-  schema_sanitizer_free_string(outputs->drifts_json);
-  schema_sanitizer_free_string(outputs->conversion_timestamp);
+  outputs->main_stream = nullptr;
+  outputs->diagnostics = nullptr;
 }
 
 bool dict_set_steal(PyObject *dict, const char *key, PyObject *value) {

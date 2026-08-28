@@ -99,7 +99,7 @@ def test_control_plane_stale_live_capability_fails_closed() -> None:
 
     assert budget.release(stale) is False
     assert ticket.released is False
-    assert budget._owners[ticket.token][0] is ticket
+    assert budget._owners[ticket.token].ticket_ref() is ticket
     assert budget.snapshot().reserved_bytes >= 256
 
     assert budget.release(ticket) is True
@@ -113,7 +113,7 @@ def test_control_plane_failed_tail_can_be_retried_from_ledger_root() -> None:
     budget = _ProcessControlPlaneBudget(include_static_baseline=False)
     ticket = budget.reserve("prepared-finalizer-pre-root-survives-publish_deferred", 256)
     assert budget.request_retirement(ticket)
-    assert budget._owners[ticket.token][0] is ticket
+    assert budget._owners[ticket.token].ticket_ref() is ticket
     assert ticket.retire_requested is True
 
     assert budget.drain_requested_retirements(limit=1) == 1
@@ -169,11 +169,11 @@ def test_cross_process_reservation_uses_separate_pre_rooted_finalizer_owner() ->
     # whose __del__ must remain reachable when user ownership disappears.
     assert escrow._slots[slot] is owner
     assert escrow._slots[slot] is not reservation
-    assert owner._escrow_armed is False
+    assert not owner.is_armed_for(ticket)
 
     del reservation
     gc.collect()
-    assert owner._escrow_armed is True
+    assert owner.is_armed_for(ticket)
     coordinator.reconcile_pending()
     assert token not in coordinator._contributions
 

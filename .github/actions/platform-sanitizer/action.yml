@@ -43,19 +43,20 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        mkdir -p .work/bin
         read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
         read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
         clang++-18 -std=c++17 -fsanitize=address,undefined \
           -fno-omit-frame-pointer -fno-sanitize-recover=all \
           "${python_embed_cflags[@]}" \
           meta/ci/sanitizers/asan_python_launcher.cc \
-          -o python-asan \
+          -o .work/bin/python-asan \
           "${python_embed_ldflags[@]}"
     - name: Exercise malformed input, lifecycle, and nested Parquet
       if: inputs.mode == 'linux-full'
       shell: bash
       run: >-
-        ./python-asan -m pytest -q
+        .work/bin/python-asan -m pytest -q
         tests/io/test_input_python_and_local.py
         tests/schema/test_options_bytes.py
         tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py
@@ -72,7 +73,7 @@ runs:
         SANITIZER: ${{ inputs.sanitizer }}
       shell: bash
       run: >-
-        cmake -S . -B build/platform-sanitizer -G Ninja
+        cmake -S . -B .work/build/platform-sanitizer -G Ninja
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
         -DCMAKE_C_COMPILER=clang-18
         -DCMAKE_CXX_COMPILER=clang++-18
@@ -89,7 +90,7 @@ runs:
         SANITIZER: ${{ inputs.sanitizer }}
       shell: bash
       run: >-
-        cmake -S . -B build/platform-sanitizer
+        cmake -S . -B .work/build/platform-sanitizer
         -A x64
         -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
         -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
@@ -104,7 +105,7 @@ runs:
         SANITIZER: ${{ inputs.sanitizer }}
       shell: bash
       run: >-
-        cmake -S . -B build/platform-sanitizer -G Ninja
+        cmake -S . -B .work/build/platform-sanitizer -G Ninja
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
         -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
         -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
@@ -116,7 +117,7 @@ runs:
     - name: Build native concurrency and fuzz targets
       shell: bash
       run: >-
-        cmake --build build/platform-sanitizer
+        cmake --build .work/build/platform-sanitizer
         --config RelWithDebInfo
         --target schema_sanitizer_sanitized_ordered_executor
         schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
@@ -126,7 +127,7 @@ runs:
       if: runner.os != 'Windows'
       shell: bash
       run: >-
-        build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor
+        .work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor
         --require-cpu-capacity 3
     - name: Run repeated sanitized concurrency probe
       # MSVC ASan can hang outside the probe watchdog. Windows still builds
@@ -135,7 +136,7 @@ runs:
       if: inputs.mode == 'native' && runner.os != 'Windows'
       shell: bash
       run: >-
-        ctest --test-dir build/platform-sanitizer
+        ctest --test-dir .work/build/platform-sanitizer
         -C RelWithDebInfo
         -R schema_sanitizer_sanitized_ordered_executor
         --repeat until-fail:2
@@ -145,7 +146,7 @@ runs:
       shell: bash
       run: >-
         python meta/ci/fuzz/run_fuzz_regressions.py
-        --build-root build/platform-sanitizer/fuzz
+        --build-root .work/build/platform-sanitizer/fuzz
         --campaign-runs 500
         --seed 15172026
         --max-len 262144
@@ -154,7 +155,7 @@ runs:
       shell: bash
       run: >-
         python meta/ci/fuzz/run_fuzz_regressions.py
-        --build-root build/platform-sanitizer/fuzz
+        --build-root .work/build/platform-sanitizer/fuzz
         --engine libfuzzer
         --campaign-runs 1000
         --seed 15172026

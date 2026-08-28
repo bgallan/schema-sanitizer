@@ -31,9 +31,8 @@ from .file_conversion.writers import (
 from .ingest import native_ingest_plan, normalize_options
 from .input.memory_limits import enforce_materialized_input_limit
 from .parquet.direct_routes import (
-    last_parquet_direct_route,
-    parquet_direct_registry_sink_raw_or_none,
-    parquet_direct_stream_factory_or_none,
+    parquet_direct_registry_sink,
+    parquet_direct_stream_factory,
 )
 from .parquet.errors import unsupported_direct_parquet_ingestion
 from .results import Result
@@ -46,7 +45,7 @@ def write_registry_raw_stream_to_file(
     raw: Any,
     out_path: Any,
     *,
-    writer: Callable[..., None],
+    writer: Callable[..., Any],
     feature: str,
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None = None,
@@ -103,7 +102,7 @@ def _try_write_direct_parquet_registry_to_file(
     out_path: Any,
     *,
     source: _Source,
-    writer: Callable[..., None],
+    writer: Callable[..., Any],
     feature: str,
     call_options: Options | None,
     first_row_columns: dict[str, Any] | None,
@@ -123,7 +122,7 @@ def _try_write_direct_parquet_registry_to_file(
         if call_options is not None
         else "single"
     )
-    raw = parquet_direct_registry_sink_raw_or_none(
+    direct_outcome = parquet_direct_registry_sink(
         default_pool().get()._raw,
         data,
         source=source,
@@ -133,17 +132,19 @@ def _try_write_direct_parquet_registry_to_file(
         field_name_policy=field_name_policy,
         schema_mode=schema_mode,
     )
+    raw = direct_outcome.raw
     fallback_registry_json: str | None = None
     fallback_drifts_json: str | None = None
     if raw is None:
-        if last_parquet_direct_route() != "pyarrow_registry_unavailable":
+        if direct_outcome.route != "pyarrow_registry_unavailable":
             return None
-        raw = parquet_direct_stream_factory_or_none(
+        factory_outcome = parquet_direct_stream_factory(
             data,
             source=source,
             feature=feature,
             call_options=call_options,
         )
+        raw = factory_outcome.raw
         if raw is None:
             return None
         fallback_registry_json = schema_registry_json
@@ -173,7 +174,7 @@ def _write_registry_file(
     options: Options | dict[str, Any] | None,
     format: _Format,
     source: _Source,
-    writer: Callable[..., None],
+    writer: Callable[..., Any],
     feature: str,
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None,

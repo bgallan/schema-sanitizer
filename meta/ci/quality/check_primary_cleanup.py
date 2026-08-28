@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 CRITICAL_PATHS = (
     "src/schema_sanitizer/api_impl/execution_context.py",
-    "src/schema_sanitizer/api_impl/input/manifest_preparation.py",
+    "src/schema_sanitizer/api_impl/input/preparation.py",
     "src/schema_sanitizer/pipeline/partition_lookahead.py",
     "src/schema_sanitizer/pipeline/registry_warmup.py",
     "src/schema_sanitizer/remote_impl/staging.py",

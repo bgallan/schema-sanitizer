@@ -2,11 +2,10 @@
 
 from pathlib import Path
 
+from benchmarks.concurrency.assets import load_evidence
+
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-BENCH = (
-    ROOT / "benchmarks/evidence/concurrency/scheduler/initialized-worker-admission-snapshot.json"
-)
 
 
 def test_idle_selection_uses_initialized_snapshot_without_started_reload() -> None:
@@ -21,6 +20,5 @@ def test_idle_selection_uses_initialized_snapshot_without_started_reload() -> No
 
 def test_documentation_and_benchmark_cover_matrix_and_host_limit() -> None:
     """Verify the named concurrency regression contract."""
-    benchmark = BENCH.read_text(encoding="utf-8")
-    for workers in ('"2"', '"4"', '"5"', '"8"', '"16"'):
-        assert workers in benchmark
+    evidence = load_evidence("initialized-worker-admission-snapshot")
+    assert {"2", "4", "5", "8", "16"} <= set(evidence)

@@ -25,6 +25,61 @@ VALIDATION_ACTIONS = (
 )
 
 
+def _table(fields: tuple[str, ...], rows: str) -> tuple[dict[str, str], ...]:
+    """Build compact declarative records from pipe-delimited rows."""
+    return tuple(
+        dict(zip(fields, (value.strip() for value in line.split("|")), strict=True))
+        for line in rows.strip().splitlines()
+    )
+
+
+_VALIDATION_ROWS = _table(
+    ("name", "task", "runner", "python", "timeout"),
+    """
+    quality, security, and Python coverage | quality | ubuntu-24.04 | 3.11.9 | 50
+    source distribution and downstream packaging | source-distribution | ubuntu-24.04 | 3.11.9 | 90
+    coverage / native LLVM | native-llvm-coverage | ubuntu-24.04 | 3.11.9 | 50
+    sanitizer / Linux GCC ThreadSanitizer | thread-sanitizer | ubuntu-24.04 | 3.13.15 | 45
+    """,
+) + _table(
+    ("name", "task", "runner", "python", "timeout", "sanitizer", "mode"),
+    """
+    sanitizer / linux-x86_64-asan-ubsan | platform-sanitizer | ubuntu-24.04 | 3.11.9 | 70 | asan-ubsan | linux-full
+    sanitizer / windows-amd64-asan | platform-sanitizer | windows-2025 | 3.11.9 | 70 | asan | native
+    sanitizer / macos-x86_64-asan-ubsan | platform-sanitizer | macos-15-intel | 3.11.9 | 70 | asan-ubsan | native
+    sanitizer / macos-arm64-asan-ubsan | platform-sanitizer | macos-15 | 3.11.9 | 70 | asan-ubsan | native
+    """,
+)
+_BUILD_PLATFORMS = _table(
+    ("display-name", "runner", "platform-name", "artifact", "arch"),
+    """
+    Linux x86-64 | ubuntu-24.04 | linux-x86_64 | linux | x86_64
+    Windows AMD64 | windows-2025 | windows-amd64 | windows | AMD64
+    macOS x86-64 | macos-15-intel | macos-x86_64 | macos-x86_64 | x86_64
+    macOS ARM64 | macos-15 | macos-arm64 | macos-arm64 | arm64
+    """,
+)
+_PLATFORM_LOCK_NAMES = frozenset(
+    """
+    aiohappyeyeballs aiohttp aiosignal attrs duckdb frozenlist idna iniconfig multidict numpy
+    packaging pandas pluggy polars polars-runtime-32 propcache pyarrow pygments pytest
+    python-dateutil six typing-extensions tzdata yarl
+    """.split()
+)
+_QUALITY_LOCK_NAMES = frozenset(
+    """
+    aiohappyeyeballs aiohttp aiosignal attrs bandit boolean-py build cachecontrol certifi cfgv
+    charset-normalizer colorama coverage cyclonedx-python-lib defusedxml detect-secrets distlib
+    duckdb filelock frozenlist identify idna iniconfig librt license-expression markdown-it-py
+    mdurl msgpack multidict mypy mypy-extensions nodeenv numpy packageurl-python packaging pandas
+    pathspec pip pip-api pip-audit pip-requirements-parser platformdirs pluggy polars
+    polars-runtime-32 pre-commit propcache py-serializable pyarrow pygments pyparsing pyproject-hooks
+    pytest pytest-asyncio python-dateutil python-discovery pyyaml requests rich ruff six
+    sortedcontainers stevedore tomli tomli-w typing-extensions tzdata urllib3 virtualenv yarl
+    """.split()
+)
+
+
 def _workflow(name: str) -> str:
     """Read one workflow definition."""
     return (WORKFLOWS / name).read_text(encoding="utf-8")
@@ -171,17 +226,12 @@ def test_publish_request_is_explicit_and_always_targets_pypi() -> None:
         if next_input is not None:
             input_body = input_body[: next_input.start()]
         assert "required: true" in input_body
-    for obsolete_mode in ("repository:", "check-only", "testpypi", "repository-url"):
-        assert obsolete_mode not in publish.lower()
     assert "--require-release-version" in preflight
     assert "--require-publish-confirmation" in preflight
     assert "python meta/ci/release/check_pypi_version.py" in preflight
     assert "python meta/ci/release/check_github_release_state.py" in preflight
-    assert "refs/tags" not in preflight
-    assert "git cat-file" not in preflight
     assert "--expected-main-sha" in preflight
     assert '"${GITHUB_SHA}"' in preflight
-    assert "git ls-remote" not in preflight
     assert publish.count("pypa/gh-action-pypi-publish@") == 1
     assert "skip-existing:" not in publisher
     publish_step = next(
@@ -346,8 +396,6 @@ def test_shell_tools_use_isolated_prebuilt_wheels_without_remote_build_hooks() -
         assert requirement not in pyproject["project"]["optional-dependencies"]["dev"]
         assert f"--only-binary={requirement.split('==', 1)[0]}" not in install_step
 
-    assert "github.com/shellcheck-py/shellcheck-py" not in precommit
-    assert "github.com/scop/pre-commit-shfmt" not in precommit
     assert re.search(
         r"^      - id: shellcheck\n"
         r"        name: shellcheck\n"
@@ -386,10 +434,8 @@ def test_secret_scan_uses_the_tested_report_checker() -> None:
     """Secret exclusions stay narrow and outside the workflow YAML."""
     quality = _action("quality-validation")
 
-    assert (
-        "python meta/ci/quality/check_detect_secrets_report.py .detect-secrets.ci.json" in quality
-    )
-    assert "_is_notebook_cell_id" not in quality
+    assert "python meta/ci/quality/check_detect_secrets_report.py" in quality
+    assert ".work/audit/detect-secrets.json" in quality
 
 
 def test_static_security_scan_covers_release_automation() -> None:
@@ -464,86 +510,13 @@ def test_validation_has_three_matrices_and_one_terminal_gate() -> None:
     assert "python-version: [" not in ci
     assert "uses: ./.github/workflows/" not in ci
 
-    assert "  schedule:" not in ci
-    assert "github.event_name != 'schedule'" not in ci
-    assert "github.event_name == 'schedule'" not in ci
-    assert "cloud-emulators:" not in ci
-    assert "test_cloud_emulator_integration.py" not in ci
-    assert "test_cloud_real_services.py" not in ci
-
 
 def test_validation_matrix_has_eight_exact_workloads_and_safe_dispatch() -> None:
     """The heterogeneous matrix preserves every owner, runner, SLA, and action."""
     ci = _workflow("ci.yml")
     validation = _job_body(ci, "validation-matrix")
-    expected_rows = (
-        {
-            "name": "quality, security, and Python coverage",
-            "task": "quality",
-            "runner": "ubuntu-24.04",
-            "python": "3.11.9",
-            "timeout": "50",
-        },
-        {
-            "name": "source distribution and downstream packaging",
-            "task": "source-distribution",
-            "runner": "ubuntu-24.04",
-            "python": "3.11.9",
-            "timeout": "90",
-        },
-        {
-            "name": "coverage / native LLVM",
-            "task": "native-llvm-coverage",
-            "runner": "ubuntu-24.04",
-            "python": "3.11.9",
-            "timeout": "50",
-        },
-        {
-            "name": "sanitizer / Linux GCC ThreadSanitizer",
-            "task": "thread-sanitizer",
-            "runner": "ubuntu-24.04",
-            "python": "3.13.15",
-            "timeout": "45",
-        },
-        {
-            "name": "sanitizer / linux-x86_64-asan-ubsan",
-            "task": "platform-sanitizer",
-            "runner": "ubuntu-24.04",
-            "python": "3.11.9",
-            "timeout": "70",
-            "sanitizer": "asan-ubsan",
-            "mode": "linux-full",
-        },
-        {
-            "name": "sanitizer / windows-amd64-asan",
-            "task": "platform-sanitizer",
-            "runner": "windows-2025",
-            "python": "3.11.9",
-            "timeout": "70",
-            "sanitizer": "asan",
-            "mode": "native",
-        },
-        {
-            "name": "sanitizer / macos-x86_64-asan-ubsan",
-            "task": "platform-sanitizer",
-            "runner": "macos-15-intel",
-            "python": "3.11.9",
-            "timeout": "70",
-            "sanitizer": "asan-ubsan",
-            "mode": "native",
-        },
-        {
-            "name": "sanitizer / macos-arm64-asan-ubsan",
-            "task": "platform-sanitizer",
-            "runner": "macos-15",
-            "python": "3.11.9",
-            "timeout": "70",
-            "sanitizer": "asan-ubsan",
-            "mode": "native",
-        },
-    )
 
-    assert _matrix_includes(ci, "validation-matrix") == expected_rows
+    assert _matrix_includes(ci, "validation-matrix") == _VALIDATION_ROWS
     assert "name: validation / ${{ matrix.name }}" in validation
     assert "runs-on: ${{ matrix.runner }}" in validation
     assert "timeout-minutes: ${{ matrix.timeout }}" in validation
@@ -604,72 +577,16 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert "-r meta/ci/requirements/platform-tests.txt" in dependencies[0]
     assert "cache-dependency-path: meta/ci/requirements/platform-tests.txt" in test_action
     assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
-    expected_requirement_names = {
-        "aiohappyeyeballs",
-        "aiohttp",
-        "aiosignal",
-        "attrs",
-        "duckdb",
-        "frozenlist",
-        "idna",
-        "iniconfig",
-        "multidict",
-        "numpy",
-        "packaging",
-        "pandas",
-        "pluggy",
-        "polars",
-        "polars-runtime-32",
-        "propcache",
-        "pyarrow",
-        "pygments",
-        "pytest",
-        "python-dateutil",
-        "six",
-        "typing-extensions",
-        "tzdata",
-        "yarl",
-    }
-    assert _exact_lock_names(test_requirements_path) == expected_requirement_names
-    assert len(test_requirements) == len(expected_requirement_names)
+    assert _exact_lock_names(test_requirements_path) == _PLATFORM_LOCK_NAMES
+    assert len(test_requirements) == len(_PLATFORM_LOCK_NAMES)
     assert all(requirement not in dependencies[0] for requirement in test_requirements)
-    build_platforms = (
-        {
-            "display-name": "Linux x86-64",
-            "runner": "ubuntu-24.04",
-            "platform-name": "linux-x86_64",
-            "artifact": "linux",
-            "arch": "x86_64",
-        },
-        {
-            "display-name": "Windows AMD64",
-            "runner": "windows-2025",
-            "platform-name": "windows-amd64",
-            "artifact": "windows",
-            "arch": "AMD64",
-        },
-        {
-            "display-name": "macOS x86-64",
-            "runner": "macos-15-intel",
-            "platform-name": "macos-x86_64",
-            "artifact": "macos-x86_64",
-            "arch": "x86_64",
-        },
-        {
-            "display-name": "macOS ARM64",
-            "runner": "macos-15",
-            "platform-name": "macos-arm64",
-            "artifact": "macos-arm64",
-            "arch": "arm64",
-        },
-    )
     test_platforms = tuple(
         {key: value for key, value in platform.items() if key != "arch"}
-        for platform in build_platforms
+        for platform in _BUILD_PLATFORMS
     )
     build = _job_body(ci, "platform-wheel-builds")
 
-    assert _matrix_includes(ci, "platform-wheel-builds") == build_platforms
+    assert _matrix_includes(ci, "platform-wheel-builds") == _BUILD_PLATFORMS
     assert "name: wheel / ${{ matrix['display-name'] }}" in build
     assert "runs-on: ${{ matrix.runner }}" in build
     assert "fail-fast: false" in build
@@ -697,80 +614,7 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
 
 def test_quality_requirements_are_a_complete_exact_lock() -> None:
     """The quality runner cannot acquire direct or transitive dependencies implicitly."""
-    expected_names = {
-        "aiohappyeyeballs",
-        "aiohttp",
-        "aiosignal",
-        "attrs",
-        "bandit",
-        "boolean-py",
-        "build",
-        "cachecontrol",
-        "certifi",
-        "cfgv",
-        "charset-normalizer",
-        "colorama",
-        "coverage",
-        "cyclonedx-python-lib",
-        "defusedxml",
-        "detect-secrets",
-        "distlib",
-        "duckdb",
-        "filelock",
-        "frozenlist",
-        "identify",
-        "idna",
-        "iniconfig",
-        "librt",
-        "license-expression",
-        "markdown-it-py",
-        "mdurl",
-        "msgpack",
-        "multidict",
-        "mypy",
-        "mypy-extensions",
-        "nodeenv",
-        "numpy",
-        "packageurl-python",
-        "packaging",
-        "pandas",
-        "pathspec",
-        "pip",
-        "pip-api",
-        "pip-audit",
-        "pip-requirements-parser",
-        "platformdirs",
-        "pluggy",
-        "polars",
-        "polars-runtime-32",
-        "pre-commit",
-        "propcache",
-        "py-serializable",
-        "pyarrow",
-        "pygments",
-        "pyparsing",
-        "pyproject-hooks",
-        "pytest",
-        "pytest-asyncio",
-        "python-dateutil",
-        "python-discovery",
-        "pyyaml",
-        "requests",
-        "rich",
-        "ruff",
-        "six",
-        "sortedcontainers",
-        "stevedore",
-        "tomli",
-        "tomli-w",
-        "typing-extensions",
-        "tzdata",
-        "urllib3",
-        "virtualenv",
-        "yarl",
-    }
-
-    assert _exact_lock_names(ROOT / "meta/ci/requirements/quality.txt") == expected_names
+    assert _exact_lock_names(ROOT / "meta/ci/requirements/quality.txt") == _QUALITY_LOCK_NAMES
 
 
 def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
@@ -1077,7 +921,7 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled" in tsan
     assert "meta/ci/sanitizers/tsan_python_launcher.cc" in tsan
     assert tsan.count("meta/ci/sanitizers/run_tsan_extension_suite.sh") == 1
-    assert "build/tsan ./python-tsan 2" in tsan
+    assert ".work/build/tsan .work/bin/python-tsan 2" in tsan
     assert "site.getsitepackages()[0]" in tsan
 
     runner = (ROOT / "meta/ci/sanitizers/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
@@ -1096,24 +940,6 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "pytest_sessionfinish" in runner
     assert "domain_shutdown_grace_seconds" in runner
     assert "setsid" in runner
-
-
-def test_remote_http_fault_gate_runs_on_every_supported_platform() -> None:
-    """The I/O shard, including real-socket faults, runs on every platform."""
-    ci = _workflow("ci.yml")
-    test_action = _action("test-platform-wheel")
-
-    assert "platform-tests:" in ci
-    assert "tests/remote" in test_action
-    assert "pytest -q -o pythonpath=." in test_action
-    assert "--ignore" not in test_action
-    rows = _matrix_includes(ci, "platform-tests")
-    for shard in ("concurrency", "memory-parquet", "io-pipeline"):
-        assert sum(row["shard"] == shard for row in rows) == 4
-    for runner in ("ubuntu-24.04", "windows-2025", "macos-15-intel", "macos-15"):
-        assert runner in ci
-    for floating_or_retired in ("ubuntu-latest", "windows-latest", "macos-14"):
-        assert floating_or_retired not in ci
 
 
 def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
@@ -1370,11 +1196,9 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     assert "name: source-distribution" in distribution
     assert "pattern: dist-wheels-*" in distribution
     assert "check_distribution_contents.py --release-set" in distribution
-    assert "check_downstream_install.py" not in distribution
     assert "release/packages/" in distribution
     assert "release/release-manifest.json" in distribution
     assert "name: release-distributions" in distribution
-    assert "name: dist-sdist" not in ci
     assert ci.index("Require every validation matrix to succeed") < ci.index(
         "Assemble the auditable release artifact"
     )

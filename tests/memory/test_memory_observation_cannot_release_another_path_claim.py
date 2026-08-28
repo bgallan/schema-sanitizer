@@ -257,10 +257,11 @@ def test_memory_cross_process_io_does_not_hold_local_ledger_lock() -> None:
     class Native:
         reserved = 0
 
-        def operation_memory_ledger_reserve(
+        def operation_memory_ledger_reserve_snapshot(
             self, _capsule: object, amount: int, _stage: str
-        ) -> None:
+        ) -> tuple[int, int, int]:
             self.reserved += amount
+            return 1024, self.reserved, self.reserved
 
         def operation_memory_ledger_release(self, _capsule: object, amount: int) -> None:
             self.reserved -= amount
@@ -307,51 +308,23 @@ def test_memory_cross_process_io_does_not_hold_local_ledger_lock() -> None:
 
 def test_storage_resize_journal_runs_outside_pool_lock(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     import schema_sanitizer.core_impl.temporary_storage as module
 
     entered = threading.Event()
     release = threading.Event()
+    pool = module.TemporaryStoragePermitPool(64 * 1024 * 1024)
+    lease = pool.acquire(10, label="test", path=tmp_path)
+    original_resize = module._PROCESS_TEMPORARY_STORAGE.resize_capability
 
-    class ProcessStorage:
-        def filesystem(self, path: object) -> tuple[int, Path, int]:
-            return 1, Path(str(path)), 1 << 30
+    def blocking_resize(*args: object, **kwargs: object) -> object:
+        entered.set()
+        assert release.wait(3)
+        return original_resize(*args, **kwargs)
 
-        def reserve(self, amount: int, **_kwargs: object) -> int:
-            return 1
-
-        def release(self, _key: int, _amount: int, **_kwargs: object) -> None:
-            entered.set()
-            assert release.wait(3)
-
-    monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", ProcessStorage())
-    pool = module.TemporaryStoragePermitPool.__new__(module.TemporaryStoragePermitPool)
-    pool.limit_bytes = 64 * 1024 * 1024
-    pool._lock = threading.Lock()
-    pool._condition = threading.Condition(pool._lock)
-    pool._reserved_bytes = 10
-    pool._pending_reserved_bytes = 0
-    pool._pending_active_leases = 0
-    pool._resize_inflight = 0
-    pool._pending_resize_growth = 0
-    pool._peak_reserved_bytes = 10
-    pool._active_leases = 1
-    pool._closed = False
-    pool._close_complete = False
-    pool._close_outstanding_bytes = 0
-    pool._close_active_leases = 0
-    pool._over_release_count = 0
-    pool._over_release_bytes = 0
-    thread = threading.Thread(
-        target=lambda: pool._resize(
-            10,
-            5,
-            filesystem_key=1,
-            label="test",
-            path=Path("/tmp/observation-cannot-release-another-path-claim"),
-            inode_count=1,
-        )
-    )
+    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "resize_capability", blocking_resize)
+    thread = threading.Thread(target=lambda: lease.resize(5))
     thread.start()
     assert entered.wait(2)
     assert pool.snapshot().reserved_bytes == 10
@@ -359,6 +332,7 @@ def test_storage_resize_journal_runs_outside_pool_lock(
     thread.join(2)
     assert not thread.is_alive()
     assert pool.snapshot().reserved_bytes == 5
+    lease.release()
 
 
 def test_native_teardown_and_active_byte_contracts() -> None:

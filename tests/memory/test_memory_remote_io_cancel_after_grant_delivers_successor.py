@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import os
 from pathlib import Path
-from threading import Event, Lock, Thread
-from typing import Any
+from threading import Event, Thread
 
 import pytest
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
@@ -182,46 +180,6 @@ def test_provider_throttle_release_uses_authoritative_endpoint() -> None:
     second.release()
 
 
-def test_operation_memory_release_uses_authoritative_per_lease_amount() -> None:
-    from schema_sanitizer.core_impl.memory_budget import OperationMemoryLease, OperationMemoryLedger
-
-    class FakeLedger:
-        _register_python_lease = OperationMemoryLedger._register_python_lease
-        _python_lease_entry = OperationMemoryLedger._python_lease_entry
-        _python_lease_entry_authority = OperationMemoryLedger._python_lease_entry_authority
-        _python_lease_size = OperationMemoryLedger._python_lease_size
-        _resize_python_lease = OperationMemoryLedger._resize_python_lease
-        _release_python_lease = OperationMemoryLedger._release_python_lease
-        _release_python_lease_authority = OperationMemoryLedger._release_python_lease_authority
-        _maybe_finish_deferred_close = OperationMemoryLedger._maybe_finish_deferred_close
-
-        def __init__(self) -> None:
-            self._pid = os.getpid()
-            self._lock = Lock()
-            self._python_lease_sequence = 0
-            self._python_leases: dict[int, tuple[int, object, int]] = {}
-            self._unknown_python_lease_releases = 0
-            self.total = 0
-
-        def reserve(self, size_bytes: int, *, stage: str) -> None:
-            self.total += size_bytes
-
-        def release(self, size_bytes: int, *, _release_entry: Any = None) -> None:
-            self.total -= size_bytes
-            if _release_entry is not None:
-                _release_entry.physical_released = True
-
-    ledger = FakeLedger()
-    first = OperationMemoryLease(ledger, 10, "remote-io-cancel-after-grant-delivers")  # type: ignore[arg-type]
-    second = OperationMemoryLease(ledger, 10, "remote-io-cancel-after-grant-delivers")  # type: ignore[arg-type]
-    first._size_bytes = 20
-    first.release()
-    assert ledger.total == 10
-    assert second.reserved_bytes == 10
-    second.release()
-    assert ledger.total == 0
-
-
 def test_direct_cross_process_memory_uses_authoritative_local_amount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,6 +308,7 @@ def test_temporary_storage_finalizer_only_publishes_preallocated_owner(
 def test_temporary_storage_cross_process_shrink_is_coalesced(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from schema_sanitizer.core_impl import cross_process_storage
     from schema_sanitizer.core_impl import temporary_storage_governor as module
 
     governor = module._ProcessTemporaryStorageGovernor()
@@ -360,26 +319,26 @@ def test_temporary_storage_cross_process_shrink_is_coalesced(
     reserve_calls: list[tuple[int, int]] = []
     release_calls: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        module,
+        cross_process_storage,
         "_reserve_cross_process_raw",
         lambda _device, amount, _capacity, *, inode_count, **_kwargs: reserve_calls.append(
             (amount, inode_count)
         ),
     )
     monkeypatch.setattr(
-        module,
+        cross_process_storage,
         "_release_cross_process_raw",
         lambda _device, amount, *, inode_count, **_kwargs: release_calls.append(
             (amount, inode_count)
         ),
     )
     one_mib = 1 << 20
-    governor.reserve(one_mib, path=tmp_path, label="a", inode_count=1)
-    governor.reserve(one_mib, path=tmp_path, label="b", inode_count=1)
+    first = governor.reserve_capability(one_mib, path=tmp_path, label="a", inode_count=1)
+    second = governor.reserve_capability(one_mib, path=tmp_path, label="b", inode_count=1)
     assert reserve_calls == [(one_mib, 1), (one_mib, 1)]
-    governor.release(7, one_mib, inode_count=1)
+    assert governor.release_capability(first)
     assert release_calls == []
-    governor.release(7, one_mib, inode_count=1)
+    assert governor.release_capability(second)
     assert release_calls == [(2 * one_mib, 2)]
     snapshot = governor.authoritative_snapshot()
     assert snapshot.reserved_bytes == 0

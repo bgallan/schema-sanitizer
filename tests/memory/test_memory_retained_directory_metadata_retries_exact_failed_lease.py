@@ -317,34 +317,61 @@ def test_python_fd_lease_bridges_to_native_process_authority(
     from schema_sanitizer.core_impl import native_runtime, process_resources
 
     class NativeFdApi:
+        class Receipt:
+            def __init__(self, amount: int) -> None:
+                self.receipt_id = 1
+                self.generation = 1
+                self.amount = amount
+                self.opened = 0
+
         def __init__(self) -> None:
             self.acquires: list[tuple[int, int]] = []
-            self.releases: list[int] = []
+            self.resize_targets: list[int] = []
 
-        def process_file_descriptor_permits_acquire(self, desired: int, minimum: int) -> int:
+        def process_file_descriptor_permit_lease_acquire_wait(
+            self, desired: int, minimum: int, timeout_ms: int
+        ):
+            del timeout_ms
             self.acquires.append((desired, minimum))
-            return desired
+            return self.Receipt(desired), desired
 
-        def process_file_descriptor_permits_release(self, amount: int) -> None:
-            self.releases.append(amount)
+        def process_file_descriptor_permit_lease_metadata(self, receipt: Receipt):
+            return receipt.receipt_id, receipt.generation, receipt.amount, receipt.opened
+
+        @staticmethod
+        def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int, int, int]:
+            return (1024, 0, 0, 0, 0, 0)
+
+        @staticmethod
+        def process_resident_memory_stats() -> tuple[int, int, int]:
+            return (1 << 40, 0, 0)
+
+        def process_file_descriptor_permit_lease_resize(
+            self, receipt: Receipt, target: int, generation: int
+        ):
+            assert generation == receipt.generation
+            self.resize_targets.append(target)
+            receipt.amount = target
+            receipt.generation += 1
+            return receipt.generation, receipt.amount, receipt.opened
 
     fake = NativeFdApi()
     monkeypatch.setattr(native_runtime, "native_core", fake)
     lease = process_resources.acquire_file_descriptors(1, timeout_seconds=0.1)
     lease.release()
     assert fake.acquires[-1] == (1, 1)
-    assert fake.releases[-1] == 1
+    assert fake.resize_targets[-1] == 0
 
 
 def test_native_fd_abi_and_raii_cover_user_data_file_handles() -> None:
     header = (CPP / "internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
-    methods = (CPP / "internal/abi/python_abi3/methods.hh").read_text(encoding="utf-8")
+    catalog = (CPP / "internal/abi/python_abi3/method_catalog.inc").read_text(encoding="utf-8")
     module = (CPP / "api/python_abi3/_core_abi3_module.cc").read_text(encoding="utf-8")
     assert "class ProcessFdPermitLease" in header
     assert "acquire_process_file_descriptor_permits" in arena
-    assert "process_file_descriptor_permits_acquire" in methods
-    assert "process_file_descriptor_permits_acquire" in module
+    assert "process_file_descriptor_permit_lease_acquire_wait" in catalog
+    assert 'include "internal/abi/python_abi3/method_catalog.inc"' in module
 
     for relative in (
         "ingest/chunk_source_file.cc",
@@ -369,7 +396,7 @@ def test_native_fd_abi_and_raii_cover_user_data_file_handles() -> None:
     assert parquet_public.count("ProcessFdPermitLease") >= 4
 
 
-def test_externally_governed_results_reject_boolean_proofs_and_require_capability() -> None:
+def test_externally_governed_results_require_runtime_capability() -> None:
     from schema_sanitizer.core_impl.async_scheduler import (
         AsyncResultMemoryContract,
         AsyncResultOwnershipMode,
@@ -377,13 +404,12 @@ def test_externally_governed_results_reject_boolean_proofs_and_require_capabilit
     )
     from schema_sanitizer.core_impl.memory_budget import no_retained_result_ownership_capability
 
-    forged = AsyncResultMemoryContract(
+    missing = AsyncResultMemoryContract(
         preflight_bytes=1,
         ownership_mode=AsyncResultOwnershipMode.EXTERNALLY_GOVERNED,
-        external_ownership_proof=lambda _value: True,
     )
-    with pytest.raises(RuntimeError, match="runtime-issued"):
-        _assert_async_result_ownership(object(), forged)
+    with pytest.raises(RuntimeError, match="authenticated ownership capability"):
+        _assert_async_result_ownership(object(), missing)
 
     authenticated = AsyncResultMemoryContract(
         preflight_bytes=1,

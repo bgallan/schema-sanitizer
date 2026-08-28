@@ -145,7 +145,7 @@ class ControlPlaneTicket:
 
 
 class _ControlPlaneOwnerEntry:
-    """Ledger-rooted capability plus a weak compatibility view of its wrapper."""
+    """Ledger-rooted capability plus a weak view of its caller wrapper."""
 
     __slots__ = ("capability", "amount", "ticket_ref")
 
@@ -155,18 +155,6 @@ class _ControlPlaneOwnerEntry:
         self.capability = capability
         self.amount = amount
         self.ticket_ref = weakref.ref(ticket)
-
-    def __getitem__(self, index: int) -> object:
-        # Historical focused tests treated owner entries as
-        # ``(ticket, capability, amount)``. Preserve that read-only shape without
-        # strongly rooting the wrapper and reopening commit->handoff leaks.
-        if index == 0:
-            return self.ticket_ref()
-        if index == 1:
-            return self.capability
-        if index == 2:
-            return self.amount
-        raise IndexError(index)
 
 
 class _ProcessControlPlaneBudget:
@@ -340,34 +328,19 @@ class _ProcessControlPlaneBudget:
 
     def prewarm_native_shadow(self) -> bool:
         """Resolve/create the zero-byte native shadow outside admission locks."""
-        if getattr(self, "_native_shadow_capsule", None) is not None:
+        if self._native_shadow_capsule is not None:
             return True
         with self._native_init_lock:
-            if self._native_shadow_capsule is not None:
+            initialized: object | None = getattr(self, "_native_shadow_capsule")
+            if initialized is not None:
                 return True
-            try:
-                from types import ModuleType
+            from .native_runtime import native_core
 
-                from .native_runtime import native_core
-
-                if not isinstance(native_core, ModuleType):
-                    return False
-                create = getattr(native_core, "operation_memory_ledger_create", None)
-                reserve_snapshot = getattr(
-                    native_core, "operation_memory_ledger_reserve_snapshot", None
-                )
-                release = getattr(native_core, "operation_memory_ledger_release", None)
-                snapshot = getattr(native_core, "operation_memory_ledger_snapshot", None)
-                if (
-                    not callable(create)
-                    or not callable(reserve_snapshot)
-                    or not callable(release)
-                    or not callable(snapshot)
-                ):
-                    return False
-                capsule = create(_MAX_CAPACITY_BYTES)
-            except BaseException:
-                return False
+            create = native_core.operation_memory_ledger_create
+            reserve_snapshot = native_core.operation_memory_ledger_reserve_snapshot
+            release = native_core.operation_memory_ledger_release
+            snapshot = native_core.operation_memory_ledger_snapshot
+            capsule = create(_MAX_CAPACITY_BYTES)
             self._native_create = create
             self._native_reserve_snapshot = reserve_snapshot
             self._native_release = release
@@ -378,22 +351,15 @@ class _ProcessControlPlaneBudget:
             return True
 
     def _sync_native_shadow_locked(self, target: int) -> bool:
-        """Mirror ``target`` governed bytes into the exact native process pool.
-
-        This method is called only while the process governed-admission lock is
-        held. Focused source-only tests intentionally lack the ABI3 extension and
-        keep the previous independently bounded Python-only behavior.
-        """
-        if self._native_shadow_capsule is None and not self.prewarm_native_shadow():
-            return False
+        """Mirror ``target`` governed bytes into the exact native process pool."""
+        if self._native_shadow_capsule is None:
+            self.prewarm_native_shadow()
         reserve_snapshot = self._native_reserve_snapshot
         release = self._native_release
         snapshot = self._native_snapshot
-        if not callable(reserve_snapshot) or not callable(release) or not callable(snapshot):
-            return False
         capsule = self._native_shadow_capsule
-        if capsule is None:
-            return False
+        if reserve_snapshot is None or release is None or snapshot is None or capsule is None:
+            raise RuntimeError("native control-plane shadow was not initialized")
         if self._native_shadow_dirty:
             values = snapshot(capsule)
             if not isinstance(values, tuple) or len(values) != 3:
@@ -463,7 +429,7 @@ class _ProcessControlPlaneBudget:
             raise TypeError("control-plane reservation metadata must be exact")
         if amount < _MIN_TICKET_BYTES:
             raise ValueError(f"control-plane reservation must be >= {_MIN_TICKET_BYTES} bytes")
-        from .memory_budget import _optional_process_resident_memory_snapshot
+        from .memory_budget import _raw_process_resident_memory_snapshot
 
         self.prewarm_native_shadow()
         ticket = ControlPlaneTicket(amount, kind, os.getpid())
@@ -503,16 +469,13 @@ class _ProcessControlPlaneBudget:
                     or (self._free_token_count == 0 and self._sequence >= _MAX_TICKET_TOKEN)
                 )
                 if not exhausted:
-                    resident = _optional_process_resident_memory_snapshot()
-                    if resident is not None:
-                        combined = resident.reserved_bytes + (
-                            amount if native_shadow_active else next_governed_control
-                        )
-                        if combined > resident.capacity_bytes:
-                            exhausted = True
-                            limit_name = "process_governed_memory_bytes"
-                            limit_bytes = resident.capacity_bytes
-                            actual_bytes = combined
+                    resident = _raw_process_resident_memory_snapshot()
+                    combined = resident.reserved_bytes + amount
+                    if combined > resident.capacity_bytes:
+                        exhausted = True
+                        limit_name = "process_governed_memory_bytes"
+                        limit_bytes = resident.capacity_bytes
+                        actual_bytes = combined
                 if exhausted:
                     try:
                         self._rejected += 1
@@ -690,7 +653,6 @@ class _ProcessControlPlaneBudget:
                 # membership or manufacture headroom.
                 self._release_native_shadow_locked(authoritative_amount)
                 if can_recycle:
-                    # pass50 compatibility breadcrumb: self._free_tokens[self._free_token_tail]
                     self._free_tokens[recycle_tail] = token
                     self._free_token_tail = next_recycle_tail
                     self._free_token_count = next_recycle_count
@@ -806,12 +768,8 @@ def register_static_control_plane(kind: str, amount: int) -> None:
 
     register(kind, amount)
     # Registration is a mutation, so shadow reconciliation belongs here rather
-    # than in diagnostic snapshots. Early import/source-only runtimes simply
-    # defer reconciliation until the first governed admission.
-    try:
-        synchronize_control_plane_native_shadow()
-    except BaseException:
-        pass
+    # than in diagnostic snapshots.
+    synchronize_control_plane_native_shadow()
 
 
 from .static_control_plane import (  # noqa: E402

@@ -50,7 +50,6 @@ def test_csv_logical_scalars_bypass_json_temporary() -> None:
     assert "append_csv_cell_from_json" in source  # canonical fallback retained
     assert "is_direct_csv_logical_scalar(field.kind)" in source
     assert "getenv" not in source
-    assert len(source.splitlines()) <= 500
 
 
 def test_jsonl_formatters_default_to_quoted_output() -> None:

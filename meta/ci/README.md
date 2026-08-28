@@ -9,7 +9,7 @@ workflow or configuration file.
 
 | Directory | Owner | Typical entry points |
 |---|---|---|
-| [`quality/`](quality/) | Source, secret, cleanup, coverage, and runner-evidence policy | `check_detect_secrets_report.py`, `check_primary_cleanup.py`, `record_runner_environment.py`, `report_risk_coverage.py` |
+| [`quality/`](quality/) | Source, secret, cleanup, coverage, and runner-evidence policy | `check_detect_secrets_report.py`, `check_primary_cleanup.py`, `record_runner_environment.py`, `report_risk_coverage.py`, `run_coverage_suite.py` |
 | [`native/`](native/) | Native source and binary linkage policy | `check_no_arrow_cpp.sh`, `check_no_libarrow_linkage.sh`, the manual CMake documentation target |
 | [`parquet/`](parquet/) | Installed-wheel and runtime Parquet certification | compression and fail-closed contract suites |
 | [`fuzz/`](fuzz/) | Corpus integrity and bounded regression campaigns | `check_fuzz_corpus.py`, `run_fuzz_regressions.py` |

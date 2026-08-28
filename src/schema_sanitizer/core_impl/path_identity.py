@@ -43,12 +43,6 @@ from .rooted_finalizer import (
 )
 from .safe_errors import add_bounded_note
 
-
-def prepare_owner_finalizer_cleanup() -> PreparedFinalizerCleanup:
-    """Compatibility injection hook backed by the single-capsule safe API."""
-    return reserve_owner_finalizer_cleanup()
-
-
 _OWNER_XATTR = b"user.schema_sanitizer_owner"
 _CLAIM_DIRECTORY = "schema-sanitizer-path-claims"
 _COORDINATION_ENV = "SCHEMA_SANITIZER_COORDINATION_DIR"
@@ -116,20 +110,11 @@ def _release_path_claim_admission_owner(authority: RootedFinalizerAuthority) -> 
         return was_live
 
 
-def _retire_path_claim_finalizer_ticket(
-    ticket: int, authority: RootedFinalizerAuthority | None = None
-) -> bool:
+def _retire_path_claim_finalizer_ticket(ticket: int, authority: RootedFinalizerAuthority) -> bool:
     """Retire one rooted path-claim generation or publish ACK-only state."""
     global _PATH_CLAIM_FINALIZER_OVERFLOWS, _PATH_CLAIM_FINALIZER_OVERFLOWED
     if ticket < 0:
         return True
-    if authority is None:
-        # Compatibility for old synthetic callers. Production owns a rooted
-        # authority from admission onward.
-        try:
-            return bool(_PATH_CLAIM_FINALIZER_ESCROW.release_ticket(ticket))
-        except BaseException:
-            return False
     try:
         retired = retire_or_ack_rooted_finalizer_authority(
             cast(
@@ -139,7 +124,7 @@ def _retire_path_claim_finalizer_ticket(
             ticket,
             authority,
         )
-        return retired or authority._escrow_armed
+        return retired or authority.is_armed_for(ticket)
     except BaseException:
         _PATH_CLAIM_FINALIZER_OVERFLOWED = True
         try:
@@ -198,9 +183,8 @@ class _PathClaimAdmission:
         if counted or retired_counted:
             authority.arg1 = False
         if ticket >= 0 and not counted:
-            # Construction rollback retains the historical release_ticket fault
-            # injection surface, but the separately rooted authority guarantees
-            # that a failed retirement can only publish ACK-only ownership.
+            # The separately rooted authority guarantees that a failed ticket
+            # retirement can only publish ACK-only ownership.
             authority.make_ack_only()
             try:
                 retired = _PATH_CLAIM_FINALIZER_ESCROW.release_ticket(ticket)
@@ -300,7 +284,7 @@ class _IdentityDescriptorOwner:
         # using bind_opened() therefore cannot create an unowned descriptor if
         # finalizer admission fails.
         self._condition = Condition(self.lock)
-        self._finalizer_capsule = prepare_owner_finalizer_cleanup()
+        self._finalizer_capsule = reserve_owner_finalizer_cleanup()
         self._finalizer_ticket = self._finalizer_capsule.ticket
         self._physical_opened = False
         self._state = (
@@ -534,7 +518,7 @@ class _ScandirCleanupOwner:
 
     def __post_init__(self) -> None:
         self._condition = Condition(self.lock)
-        self._finalizer_capsule = prepare_owner_finalizer_cleanup()
+        self._finalizer_capsule = reserve_owner_finalizer_cleanup()
         self._finalizer_ticket = self._finalizer_capsule.ticket
         self._physical_opened = False
         self._state = (
@@ -692,7 +676,7 @@ def _release_scandir_owner(owner: _ScandirCleanupOwner | None) -> None:
                 return
         except BaseException:
             pass
-        # The fallback descriptor registry accepts any release-compatible owner.
+        # The bounded descriptor registry accepts any owner with release semantics.
         with _ABANDONED_DESCRIPTOR_LOCK:
             if len(_ABANDONED_DESCRIPTOR_OWNERS) < _MAX_ABANDONED_DESCRIPTOR_OWNERS:
                 _ABANDONED_DESCRIPTOR_OWNERS[id(owner)] = owner
@@ -715,21 +699,12 @@ def _private_claim_root() -> Path:
     base.mkdir(parents=True, exist_ok=True)
     getuid = getattr(os, "geteuid", None)
     uid = getuid() if getuid is not None else None
-    root = base / _CLAIM_DIRECTORY
-
-    # Preserve a securely owned legacy default root so an in-flight process from
-    # an earlier version still shares claim authority.  A system-wide temporary
-    # directory can also contain the same legacy name owned by another account
-    # (for example, root ran first).  That unrelated owner must not deny service
-    # to every other UID, so new default roots are isolated by effective UID.
-    if configured_base is None and uid is not None:
-        try:
-            legacy_metadata = os.lstat(root)
-        except FileNotFoundError:
-            root = base / f"{_CLAIM_DIRECTORY}-{uid}"
-        else:
-            if not stat.S_ISDIR(legacy_metadata.st_mode) or legacy_metadata.st_uid != uid:
-                root = base / f"{_CLAIM_DIRECTORY}-{uid}"
+    root_name = (
+        f"{_CLAIM_DIRECTORY}-{uid}"
+        if configured_base is None and uid is not None
+        else _CLAIM_DIRECTORY
+    )
+    root = base / root_name
 
     try:
         os.mkdir(root, 0o700)
@@ -965,35 +940,35 @@ def _serialize_claim(record: _ExternalClaim) -> bytes:
 
 
 def _parse_claim(raw: bytes) -> _ExternalClaim | None:
-    """Parse the current record while accepting the pass31 legacy form."""
+    """Parse one canonical external claim record."""
     try:
         decoded = raw.decode("utf-8").strip()
     except UnicodeError:
         return None
-    if decoded.startswith("{"):
-        try:
-            payload = json.loads(decoded)
-            if not isinstance(payload, dict):
-                return None
-            checksum = str(payload.pop("checksum"))
-            if checksum != _claim_checksum(payload):
-                return None
-            if int(payload.get("version", 0)) != _CLAIM_VERSION:
-                return None
-            marker = bytes.fromhex(str(payload["marker"]))
-            return _ExternalClaim(
-                int(payload["pid"]),
-                str(payload["process_token"]),
-                marker,
-                int(payload["created_at_ns"]),
-            )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return None
     try:
-        pid_text, marker_hex = decoded.split(":", 1)
-        pid = int(pid_text)
-        return _ExternalClaim(pid, "unknown", bytes.fromhex(marker_hex), 0)
-    except ValueError:
+        payload = json.loads(decoded)
+        if not isinstance(payload, dict) or set(payload) != {
+            "checksum",
+            "created_at_ns",
+            "marker",
+            "pid",
+            "process_token",
+            "version",
+        }:
+            return None
+        checksum = str(payload.pop("checksum"))
+        if checksum != _claim_checksum(payload):
+            return None
+        if type(payload["version"]) is not int or payload["version"] != _CLAIM_VERSION:
+            return None
+        marker = bytes.fromhex(str(payload["marker"]))
+        return _ExternalClaim(
+            int(payload["pid"]),
+            str(payload["process_token"]),
+            marker,
+            int(payload["created_at_ns"]),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
@@ -1007,10 +982,6 @@ def _claim_process_alive(record: _ExternalClaim) -> bool:
     except PermissionError:
         return True
     except OSError:
-        return True
-    if record.process_token == "unknown":
-        # Legacy pass31 claims cannot distinguish PID reuse, but an actually
-        # live legacy writer must never be stolen by a newer process.
         return True
     return process_identity_matches(record.process_token, process_start_token(record.pid))
 
@@ -1038,7 +1009,7 @@ def _sweep_external_claims(root: Path, *, limit: int = _CLAIM_SWEEP_LIMIT) -> No
     root_key = str(root)
     retired_owner: _ScandirCleanupOwner | None = None
 
-    # Detach an iterator for an old coordination root first.  Its potentially
+    # Detach an iterator for a previous coordination root first. Its potentially
     # blocking close/release is performed outside the cursor lock.
     with _CLAIM_SWEEP_LOCK:
         if _CLAIM_SWEEP_ITERATOR is not None and _CLAIM_SWEEP_ROOT != root_key:
@@ -2059,11 +2030,12 @@ def _release_claim_owner(owner: PathClaimOwner) -> None:
                 authority.clear()
     else:
         ticket = owner.finalizer_ticket
-        if isinstance(authority, RootedFinalizerAuthority):
+        if ticket >= 0:
+            if not isinstance(authority, RootedFinalizerAuthority):
+                raise RuntimeError("path identity finalizer authority is missing")
             authority.make_ack_only()
-        if ticket >= 0 and _retire_path_claim_finalizer_ticket(ticket, authority):
-            owner.finalizer_ticket = -1
-            if isinstance(authority, RootedFinalizerAuthority):
+            if _retire_path_claim_finalizer_ticket(ticket, authority):
+                owner.finalizer_ticket = -1
                 authority.clear()
     with _ABANDONED_CLAIM_LOCK:
         _ABANDONED_CLAIM_OWNERS.pop(id(owner), None)

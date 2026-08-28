@@ -12,15 +12,6 @@ from conftest import require_native
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_call_option_cache_keys_have_byte_and_item_budgets() -> None:
-    """Large strings and huge empty sequences must bypass the process cache."""
-    from schema_sanitizer.options_impl import call_options
-
-    assert call_options._call_options_cache_key({"default_key_name": "x" * 65_537}) is None
-    assert call_options._call_options_cache_key({"true_tokens": [""] * 4097}) is None
-    assert call_options._call_options_cache_key({"true_tokens": ["yes", "true"]}) is not None
-
-
 def test_prepared_options_cache_is_bounded_by_aggregate_key_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -203,7 +203,7 @@ def test_async_result_queue_charges_retained_payload_bytes(
     assert charged == [1088, 1089]  # payload plus conservative bytes-object overhead
 
 
-def test_async_result_queue_accepts_exact_retained_bytes_estimator(
+def test_async_result_queue_accepts_exact_postflight_estimator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from schema_sanitizer.core_impl import async_scheduler as scheduler
@@ -231,7 +231,13 @@ def test_async_result_queue_accepts_exact_retained_bytes_estimator(
         return [
             value
             async for _index, value in scheduler.ordered_indexed_results(
-                2, fetch, window=1, retained_bytes=lambda _value: 2 << 20
+                2,
+                fetch,
+                window=1,
+                memory_contract=scheduler.AsyncResultMemoryContract(
+                    preflight_bytes=None,
+                    postflight_bytes=lambda _value: 2 << 20,
+                ),
             )
         ]
 
@@ -261,16 +267,16 @@ def test_thread_and_fd_hard_caps_can_reach_zero_under_external_pressure(
     monkeypatch.setattr(module, "resource", Resource)
     monkeypatch.setattr(module, "_fd_requested_capacity", lambda: 128)
     monkeypatch.setattr(module, "_open_fd_count", lambda: 60)
-    assert module._fd_hard_capacity(governed_in_use=0) == 0
+    assert module._fd_hard_capacity() == 0
 
 
 def test_native_physical_thread_envelope_counts_external_and_pending_threads() -> None:
     source = (ROOT / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     assert '"/proc/self/task"' in source
     assert "g_managed_running_threads" in source
-    assert "external_threads" in source
-    assert "process_managed_capacity" in source
-    assert "g_process_physical_thread_permits.compare_exchange_weak" in source
+    assert "g_process_external_runtime_resident_threads" in source
+    assert "const auto process_capacity" in source
+    assert "g_process_total_thread_permits.compare_exchange_weak" in source
     assert "if (*configured == '-')" in source
     assert "StartGovernedNativeThread" in source
 
@@ -355,7 +361,7 @@ def test_stage_concurrency_admission_is_distinct_and_rolls_back_extra_domains(
         def release(self) -> None:
             released.append(self.name)
 
-    base = module.CompositeParallelAdmission(2, 64)
+    base = module.StageConcurrencyAdmission(2, 64)
     monkeypatch.setattr(module, "acquire_parallel_admission", lambda *args, **kwargs: base)
 
     def fail(_slots: int) -> object:

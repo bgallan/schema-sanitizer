@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from _support.parquet_runtime import pa, pq, sample_table
@@ -13,6 +14,34 @@ from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
 from conftest import read_test_parquet, require_native
 
 import schema_sanitizer as ss
+
+
+def test_parquet_buffer_reader_receives_original_bytes_like_object() -> None:
+    """Buffered fallback avoids copying a contiguous bytes-like input."""
+    from schema_sanitizer.adapters.parquet.record_batch_factory import open_parquet_source
+
+    payload = memoryview(b"PAR1payloadPAR1")
+    received: list[Any] = []
+
+    class FakePa:
+        @staticmethod
+        def BufferReader(value: Any) -> Any:
+            received.append(value)
+            return value
+
+    opened, owned = open_parquet_source(payload, source="text", feature="test", pa=FakePa)
+    assert opened is owned is payload
+    assert received == [payload]
+
+    non_contiguous = memoryview(bytearray(b"abcdef"))[::2]
+    opened, owned = open_parquet_source(
+        non_contiguous,
+        source="text",
+        feature="test",
+        pa=FakePa,
+    )
+    assert opened == owned == b"ace"
+    assert received[-1] == b"ace"
 
 
 @_requires_pyarrow
@@ -63,7 +92,6 @@ def test_read_parquet_retries_pyarrow_after_native_reader_failure(
 ) -> None:
     """Verify native Parquet reader failure falls back to a PyArrow stream."""
     from schema_sanitizer.api_impl.parquet import direct_routes as parquet_direct_routes
-    from schema_sanitizer.api_impl.parquet.direct_routes import last_parquet_direct_route
 
     require_native()
     path = tmp_path / "data.parquet"
@@ -79,7 +107,6 @@ def test_read_parquet_retries_pyarrow_after_native_reader_failure(
     result = read_test_parquet(path)
 
     assert result.clean_data.to_pylist() == sample_table(pa).to_pylist()
-    assert last_parquet_direct_route() == "pyarrow"
     assert "retrying input with PyArrow" in caplog.text
 
 
@@ -256,10 +283,10 @@ def test_spark_flavored_nested_parquet_uses_pyarrow_fallback(tmp_path: Path) -> 
 
 
 @_requires_pyarrow
-def test_pyarrow_legacy_nested_list_map_encoding_uses_pyarrow_fallback(
+def test_pyarrow_deprecated_nested_list_map_encoding_uses_pyarrow_fallback(
     tmp_path: Path,
 ) -> None:
-    """Verify legacy nested encodings use the canonical sanitized representation."""
+    """Verify deprecated nested encodings use the canonical sanitized representation."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
@@ -267,7 +294,7 @@ def test_pyarrow_legacy_nested_list_map_encoding_uses_pyarrow_fallback(
     )
 
     require_native()
-    path = tmp_path / "pyarrow-legacy-nested-list-map.parquet"
+    path = tmp_path / "pyarrow-deprecated-nested-list-map.parquet"
     item_type = pa.struct(
         [
             pa.field("sku", pa.string()),

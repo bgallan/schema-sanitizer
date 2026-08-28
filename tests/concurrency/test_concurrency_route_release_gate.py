@@ -42,9 +42,6 @@ def _prepare_sources(root: Path) -> dict[str, tuple[Any, dict[str, Any], int]]:
     jsonl_path = root / "input.jsonl"
     jsonl_path.write_text('{"a":1,"b":"x"}\n{"a":2,"b":"y"}\n', encoding="utf-8")
 
-    ndjson_path = root / "input.ndjson"
-    ndjson_path.write_text('{"a":1,"b":"x"}\n{"a":2,"b":"y"}\n', encoding="utf-8")
-
     xml_path = root / "input.xml"
     xml_path.write_text(
         "<root><row><a>1</a><b>x</b></row><row><a>2</a><b>y</b></row></root>",
@@ -66,7 +63,6 @@ def _prepare_sources(root: Path) -> dict[str, tuple[Any, dict[str, Any], int]]:
         "json": (json_path, {}, 1),
         "json_array": (json_array_path, {}, 2),
         "jsonl": (jsonl_path, {}, 2),
-        "ndjson": (ndjson_path, {}, 2),
         "xml": (xml_path, {"xml_row_tag": "row"}, 2),
         "parquet": (parquet_path, {}, 2),
         # A fresh immutable list is safe to reuse; the public Python-input path
@@ -145,7 +141,7 @@ def test_release_gate_executes_real_public_8x7_format_matrix(tmp_path: Path) -> 
 
     # Transport/lifetime profiles are an orthogonal release dimension and are
     # certified by the strict global gate after their own real integrations run.
-    assert validate_format_pair_release_contracts() == 56
+    assert validate_format_pair_release_contracts() == 49
     evidence = payload_observed_concurrency_pair_guarantees()
     assert all(
         all(count > 0 for count in evidence[input_name][output_name].values())
@@ -190,7 +186,7 @@ def test_global_release_gate_still_requires_orthogonal_route_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The strict release gate cannot silently skip transport/lifetime proof."""
-    monkeypatch.setattr(coverage, "validate_format_pair_release_contracts", lambda: 56)
+    monkeypatch.setattr(coverage, "validate_format_pair_release_contracts", lambda: 49)
 
     def reject_missing_routes() -> int:
         """Represent an incomplete real route-profile integration run."""

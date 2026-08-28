@@ -40,10 +40,10 @@ def test_high_core_output_lane_bypasses_local_broad_backlog() -> None:
 
 
 def test_scheduler_uses_compile_time_low_core_specialization() -> None:
-    """One-through-eight workers retain the legacy front/pop-front hot path."""
+    """One-through-eight workers use the front/pop-front hot path."""
     root = Path(__file__).resolve().parents[2]
     runtime = (root / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
-    probe = (root / "cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc").read_text()
+    probe = (root / "cpp/src/api/python_abi3/runtime/test_probes.cc").read_text()
 
     assert "template <bool PreferDedicatedOutput, bool CheckGlobalStopping>" in runtime
     assert "worker_loop<true, false>(state, index, stop)" in runtime

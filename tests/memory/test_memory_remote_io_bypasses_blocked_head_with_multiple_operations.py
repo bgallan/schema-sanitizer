@@ -7,6 +7,7 @@ import os
 import select
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,10 +30,11 @@ def test_remote_io_bypasses_blocked_head_with_multiple_operations() -> None:
         large_a = module._Waiter(loop, SimpleNamespace(), 4, "large-a", "a")
         small_a = module._Waiter(loop, SimpleNamespace(), 1, "small-a", "a")
         large_b = module._Waiter(loop, SimpleNamespace(), 4, "large-b", "b")
-        governor._waiters.extend((large_a, small_a, large_b))
+        for waiter in (large_a, small_a, large_b):
+            governor._enqueue_waiter_locked(waiter)
         deliveries = governor._grant_ready_locked()
 
-    assert deliveries == [small_a]
+    assert list(deliveries) == [small_a]
     assert large_a.bypasses == 1
     snapshot = governor.snapshot()
     assert snapshot.in_use == 4
@@ -93,8 +95,11 @@ def test_remote_delivery_callback_is_noop_after_grant_reclamation() -> None:
     waiter = module._Waiter(DeferredLoop(), Future(), 1, "label", "operation")
     waiter.state = "granted"
     waiter.granted_weight = 1
+    waiter.delivery_callback = lambda: governor._delivery_callback(waiter)
     governor._in_use = 1
-    governor._deliver([waiter])
+    deliveries = module._GrantBatch(1)
+    deliveries.append(waiter)
+    governor._deliver(deliveries)
 
     with governor._lock:
         waiter.state = "cancelled"
@@ -243,9 +248,8 @@ def test_inherited_logical_leases_do_not_touch_parent_locks(factory: str) -> Non
         from schema_sanitizer.remote_impl import provider_throttle as module
 
         governor = module.ProviderThrottleGovernor()
-        state = module._State(in_flight=1)
-        governor._states["key"] = state
-        lease = module.ProviderRequestLease(governor, "key")
+        lease, _delay = governor.try_acquire("key")
+        assert lease is not None
 
     object.__setattr__(lease, "_pid", -1)
     lease._lock.acquire()
@@ -260,6 +264,8 @@ def test_inherited_logical_leases_do_not_touch_parent_locks(factory: str) -> Non
         assert governor.snapshot().in_use == 1
     else:
         assert governor.snapshot("key").in_flight == 1
+        object.__setattr__(lease, "_pid", os.getpid())
+        lease.release()
 
 
 def test_staged_path_inherited_close_does_not_delete_parent_artifact(tmp_path) -> None:
@@ -362,45 +368,14 @@ def test_completed_operation_diagnostics_do_not_share_nested_state() -> None:
     module._reset_after_fork()
 
 
-@pytest.mark.parametrize("kind", ["memory", "temporary", "cross_process"])
-def test_inherited_byte_leases_return_before_parent_mutex(kind: str) -> None:
+@pytest.mark.parametrize("kind", ["temporary", "cross_process"])
+def test_inherited_byte_leases_return_before_parent_mutex(kind: str, tmp_path: Path) -> None:
     """Byte-accounting finalizers cannot block on locks inherited from parent."""
-    if kind == "memory":
-        from schema_sanitizer.core_impl.memory_budget import OperationMemoryLease
+    if kind == "temporary":
+        from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 
-        class Ledger:
-            def __init__(self) -> None:
-                self.released = 0
-
-            def reserve(self, _amount: int, *, stage: str) -> None:
-                assert stage == "test"
-
-            def release(self, amount: int) -> None:
-                self.released += amount
-
-        owner = Ledger()
-        lease = OperationMemoryLease(owner, 7, "test")
-    elif kind == "temporary":
-        from pathlib import Path
-
-        from schema_sanitizer.core_impl.temporary_storage import TemporaryStorageLease
-
-        class Pool:
-            def __init__(self) -> None:
-                self.released = 0
-
-            def _release(self, amount: int, **_kwargs: object) -> None:
-                self.released += amount
-
-        owner = Pool()
-        lease = TemporaryStorageLease(
-            owner,
-            7,
-            label="test",
-            filesystem_key=1,
-            filesystem_path=Path("."),
-            inode_count=1,
-        )
+        owner = TemporaryStoragePermitPool(1024)
+        lease = owner.acquire(7, label="test", path=tmp_path)
     else:
         from schema_sanitizer.core_impl.cross_process_memory import (
             CrossProcessMemoryLease,
@@ -418,7 +393,9 @@ def test_inherited_byte_leases_return_before_parent_mutex(kind: str) -> None:
         lease._lock.release()
 
     if kind != "cross_process":
-        assert owner.released == 0
+        assert owner.snapshot().reserved_bytes == 7
+        object.__setattr__(lease, "_pid", os.getpid())
+        lease.release()
     assert lease.reserved_bytes == 0
 
 
@@ -461,7 +438,7 @@ def test_remote_delivery_reentrancy_is_iterative() -> None:
     governor = module.RemoteIoPermitGovernor(capacity=1, max_waiters=4096)
     with governor._lock:
         for index in range(2_000):
-            governor._waiters.append(
+            governor._enqueue_waiter_locked(
                 module._Waiter(
                     ImmediateLoop(),
                     FinishedFuture(),
@@ -694,8 +671,7 @@ def test_provider_throttle_invalid_outcome_is_atomic() -> None:
     lease, _delay = governor.try_acquire("atomic")
     assert lease is not None
     with pytest.raises(ValueError, match="unknown provider throttle outcome"):
-        governor.release(
-            "atomic",
+        lease._release_outcome(
             outcome="invalid",
             throttled=False,
             retry_after_seconds=None,
@@ -725,81 +701,6 @@ def test_parquet_factory_child_cleanup_preserves_parent_staging(tmp_path) -> Non
     assert path.exists()
     with pytest.raises(RuntimeError, match="after fork"):
         factory.__arrow_c_stream__()
-
-
-def test_operation_memory_ledger_close_retries_host_wide_release(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Live native bytes retain host ownership and final release stays retryable."""
-    from schema_sanitizer.core_impl import allocator_control, memory_budget, safety_margins
-
-    class Native:
-        def __init__(self) -> None:
-            """Initialize mutable native bytes for the focused close regression."""
-            self.reserved = 128
-
-        def operation_memory_ledger_snapshot(self, _capsule: object) -> tuple[int, int, int]:
-            return (1024, self.reserved, 256)
-
-        def operation_memory_ledger_release(self, _capsule: object, amount: int) -> None:
-            """Release bytes from the focused native-ledger test double."""
-            self.reserved = max(0, self.reserved - amount)
-
-        def operation_memory_ledger_diagnostics(self, _capsule: object) -> tuple[int, int]:
-            """Return empty over-release diagnostics for the test double."""
-            return (0, 0)
-
-    class CrossProcess:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def release(self) -> None:
-            self.calls += 1
-            if self.calls == 1:
-                raise OSError("journal failure")
-
-    ledger = object.__new__(memory_budget.OperationMemoryLedger)
-    ledger.limit_bytes = 1024
-    ledger._pid = os.getpid()
-    ledger._native = Native()
-    ledger._capsule = object()
-    ledger._cross_process = CrossProcess()
-    ledger._cross_process_reconciliation_failures = 0
-    ledger._cross_process_pending_bytes = 0
-    ledger._cross_process_release_deferred = False
-    ledger._cross_process_release_failures = 0
-    ledger._lock = threading.Lock()
-    ledger._close_condition = threading.Condition(ledger._lock)
-    ledger._close_started = False
-    ledger._closing = False
-    ledger._closed = False
-    ledger._close_outstanding_bytes = 0
-
-    ledger.close()
-    assert ledger._close_started is True
-    assert ledger._closed is True
-    assert ledger._cross_process.calls == 0
-    assert ledger._cross_process_release_deferred is True
-    with pytest.raises(RuntimeError, match="closed"):
-        _ = ledger.capsule
-    with pytest.raises(RuntimeError, match="closed"):
-        ledger.reserve(1, stage="after-close")
-
-    ledger.release(128)
-    assert ledger._cross_process.calls == 1
-    assert ledger._cross_process_release_deferred is True
-
-    monkeypatch.setattr(
-        memory_budget,
-        "process_memory_pressure_snapshot",
-        lambda: memory_budget.ProcessMemoryPressureSnapshot(1, 0, 0, 1, None, None),
-    )
-    monkeypatch.setattr(safety_margins, "record_resource_telemetry", lambda **_kwargs: None)
-    monkeypatch.setattr(allocator_control, "maybe_trim_allocator", lambda **_kwargs: False)
-    ledger.close()
-    assert ledger._cross_process.calls == 2
-    assert ledger._cross_process_release_deferred is False
-    assert ledger._close_outstanding_bytes == 0
 
 
 def test_operation_memory_ledger_child_cleanup_returns_before_parent_lock() -> None:

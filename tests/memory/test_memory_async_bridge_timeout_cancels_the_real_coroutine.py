@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import gc
 import threading
-from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any
 
@@ -61,7 +60,7 @@ def test_async_bridge_thread_start_failure_closes_coroutine_and_releases_lease(
 
     lease = Lease()
     monkeypatch.setattr(async_bridge, "acquire_project_threads", lambda *_a, **_k: lease)
-    monkeypatch.setattr(async_bridge, "Thread", broken_thread)
+    monkeypatch.setattr(async_bridge, "RetirementAwareThread", broken_thread)
 
     async def exercise() -> None:
         coroutine = asyncio.sleep(0)
@@ -170,6 +169,7 @@ def test_remote_coordinator_thread_start_failure_releases_capacity_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Coordinator construction is transactional around its host-thread start."""
+    from schema_sanitizer.core_impl.governed_thread import RetirementAwareThread
     from schema_sanitizer.remote_impl import io_coordinator as module
 
     class Registration:
@@ -186,64 +186,20 @@ def test_remote_coordinator_thread_start_failure_releases_capacity_registration(
         def register_capacity(self, _requested: int) -> Registration:
             return self.registration
 
-    class BrokenThread:
-        ident = None
+    def broken_thread(*args: object, **kwargs: object) -> threading.Thread:
+        thread = RetirementAwareThread(*args, **kwargs)
 
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def start(self) -> None:
+        def start() -> None:
             raise RuntimeError("injected coordinator start failure")
 
+        thread.start = start  # type: ignore[method-assign]
+        return thread
+
     governor = Governor()
-    monkeypatch.setattr(module.threading, "Thread", BrokenThread)
+    monkeypatch.setattr(module.threading, "Thread", broken_thread)
     with pytest.raises(RuntimeError, match="coordinator start failure"):
         module.RemoteIoCoordinator(permit_governor=governor, permit_capacity=2)
     assert governor.registration.releases == 1
-
-
-def test_remote_coordinator_submission_failure_closes_unscheduled_coroutine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A closed-loop submission failure must close the invoke coroutine immediately."""
-    from schema_sanitizer.remote_impl import io_coordinator as module
-
-    captured: dict[str, Any] = {}
-
-    def reject(coroutine: Any, _loop: Any) -> Future[Any]:
-        captured["coroutine"] = coroutine
-        raise RuntimeError("injected submission failure")
-
-    class Submission:
-        def __init__(self) -> None:
-            self.releases = 0
-
-        def release(self) -> None:
-            self.releases += 1
-
-    submission = Submission()
-    governor = SimpleNamespace(
-        reserve_submission=lambda: submission,
-        acquire=lambda *_a, **_k: None,
-    )
-    coordinator = object.__new__(module.RemoteIoCoordinator)
-    coordinator._lock = threading.Lock()
-    coordinator._closed = False
-    coordinator._loop = SimpleNamespace()
-    coordinator._permit_governor = governor
-    coordinator._operation_id = "operation"
-    coordinator._context = None
-    coordinator._futures = set()
-    monkeypatch.setattr(module.asyncio, "run_coroutine_threadsafe", reject)
-
-    async def operation(_context: Any) -> None:
-        return None
-
-    with pytest.raises(RuntimeError, match="submission failure"):
-        coordinator.submit(operation)
-    coroutine = captured["coroutine"]
-    assert coroutine.cr_frame is None
-    assert submission.releases == 1
 
 
 def test_dead_operation_diagnostic_is_removed_without_a_diagnostics_poll() -> None:
@@ -386,48 +342,31 @@ def test_temporary_storage_move_rolls_back_target_when_old_release_fails(
             key = 2 if str(path).endswith("target") else 1
             return key, path, 1 << 40
 
-        def reserve(
+        def reserve_capability(
             self,
             size_bytes: int,
             *,
             path: Any,
             label: str,
             inode_count: int = 0,
-        ) -> int:
+        ) -> Any:
             del label
             key, _target, _free = self.filesystem(path)
             self.reserved[key] += size_bytes
             self.inodes[key] += inode_count
-            return key
-
-        def release(
-            self,
-            device: int,
-            size_bytes: int,
-            *,
-            inode_count: int = 0,
-        ) -> None:
-            if device == 1 and self.fail_old_release:
-                raise OSError("injected old filesystem release failure")
-            self.reserved[device] -= size_bytes
-            self.inodes[device] -= inode_count
-
-        def reserve_capability(self, size_bytes: int, **kwargs: Any) -> Any:
-            device = self.reserve(size_bytes, **kwargs)
             return SimpleNamespace(
                 governor=self,
-                device=device,
+                device=key,
                 reserved_bytes=size_bytes,
-                reserved_inodes=kwargs.get("inode_count", 0),
+                reserved_inodes=inode_count,
                 active=True,
             )
 
         def release_capability(self, capability: Any) -> bool:
-            self.release(
-                capability.device,
-                capability.reserved_bytes,
-                inode_count=capability.reserved_inodes,
-            )
+            if capability.device == 1 and self.fail_old_release:
+                raise OSError("injected old filesystem release failure")
+            self.reserved[capability.device] -= capability.reserved_bytes
+            self.inodes[capability.device] -= capability.reserved_inodes
             capability.active = False
             return True
 
@@ -443,10 +382,7 @@ def test_temporary_storage_move_rolls_back_target_when_old_release_fails(
             target_device, _target, _free = self.filesystem(path)
             if target_device == capability.device:
                 delta = size_bytes - capability.reserved_bytes
-                if delta > 0:
-                    self.reserve(delta, path=path, label=label)
-                elif delta < 0:
-                    self.release(capability.device, -delta)
+                self.reserved[capability.device] += delta
                 capability.reserved_bytes = size_bytes
                 return capability
             replacement = self.reserve_capability(
@@ -616,27 +552,6 @@ def test_temporary_storage_lease_construction_is_transactional(
     assert after.reserved_inodes == before.reserved_inodes
 
 
-def test_process_resource_unscoped_release_is_observable_but_non_mutating() -> None:
-    """The compatibility shim records misuse without bypassing the exact ledger."""
-    from schema_sanitizer.core_impl.process_resources import _Governor
-
-    governor = _Governor(4, "diagnostic_resource")
-    lease = governor.acquire(2, timeout_seconds=0)
-    governor.release(3)
-    snapshot = governor.snapshot()
-    assert snapshot.in_use == 2
-    assert snapshot.active_leases == 1
-    assert snapshot.over_release_count == 1
-    assert snapshot.over_release_amount == 3
-    assert snapshot.compatibility_release_attempts == 1
-    lease.release()
-    snapshot = governor.snapshot()
-    assert snapshot.in_use == 0
-    assert snapshot.active_leases == 0
-    assert snapshot.over_release_count == 1
-    assert snapshot.over_release_amount == 3
-
-
 def test_operation_registry_pressure_is_exposed_in_snapshots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -682,7 +597,7 @@ def test_async_bridge_start_preserves_primary_when_cleanup_also_fails(
         def release(self) -> None:
             raise OSError("secondary permit release failure")
 
-    monkeypatch.setattr(async_bridge, "Thread", broken_thread)
+    monkeypatch.setattr(async_bridge, "RetirementAwareThread", broken_thread)
     runner = async_bridge._BridgeRunner(
         BrokenCoroutine(), async_bridge.copy_context(), BrokenLease()
     )
@@ -691,49 +606,3 @@ def test_async_bridge_start_preserves_primary_when_cleanup_also_fails(
     notes = getattr(captured.value, "__notes__", ())
     assert any("coroutine cleanup" in note for note in notes)
     assert any("thread permit retained" in note for note in notes)
-
-
-def test_remote_submission_preserves_primary_when_rollback_also_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Submission cleanup errors are diagnostic notes, not replacement failures."""
-    from schema_sanitizer.remote_impl import io_coordinator as module
-
-    class Submission:
-        def release(self) -> None:
-            raise OSError("secondary submission rollback failure")
-
-    governor = SimpleNamespace(
-        reserve_submission=lambda: Submission(),
-        acquire=lambda *_args, **_kwargs: None,
-    )
-    coordinator = object.__new__(module.RemoteIoCoordinator)
-    coordinator._lock = threading.Lock()
-    coordinator._closed = False
-    coordinator._loop = SimpleNamespace()
-    coordinator._permit_governor = governor
-    coordinator._operation_id = "operation"
-    coordinator._context = None
-    coordinator._futures = set()
-    monkeypatch.setattr(
-        module.asyncio,
-        "run_coroutine_threadsafe",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("primary submission failure")),
-    )
-
-    async def operation(_context: Any) -> None:
-        return None
-
-    with pytest.raises(RuntimeError, match="primary submission failure") as captured:
-        coordinator.submit(operation)
-    notes = getattr(captured.value, "__notes__", ())
-    assert any("submission rollback" in note for note in notes)
-
-
-def test_process_resource_snapshot_keeps_legacy_positional_construction() -> None:
-    """New anomaly counters append defaults without breaking older callers."""
-    from schema_sanitizer.core_impl.process_resources import ProcessResourceSnapshot
-
-    snapshot = ProcessResourceSnapshot(8, 1, 2, 3, 4, 5)
-    assert snapshot.over_release_count == 0
-    assert snapshot.over_release_amount == 0

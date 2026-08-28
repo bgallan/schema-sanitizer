@@ -119,10 +119,23 @@ manylinux-x86_64-image = "manylinux_2_28"
 [tool.cibuildwheel.macos]
 environment = {MACOSX_DEPLOYMENT_TARGET = "11.0"}
 
+[tool.coverage.html]
+directory = ".work/coverage/html"
+
+[tool.coverage.json]
+output = ".work/coverage/coverage.json"
+
+[tool.coverage.run]
+data_file = ".work/coverage/.coverage"
+
+[tool.coverage.xml]
+output = ".work/coverage/coverage.xml"
+
 [tool.mypy]
 python_version = "3.11"
 files = ["src/schema_sanitizer"]
-exclude = ["build", "dist", "wheelhouse", "cpp"]
+exclude = [".work", "build", "dist", "wheelhouse", "cpp"]
+cache_dir = ".work/mypy"
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unreachable = true
@@ -133,6 +146,7 @@ show_error_codes = true
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "tests"]
+cache_dir = ".work/pytest"
 markers = [
   "native_stress: high-volume native concurrency coverage run explicitly in CI"
 ]
@@ -140,6 +154,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+cache-dir = ".work/ruff"
 
 [tool.ruff.lint]
 select = ["F", "E", "I"]
@@ -150,7 +165,7 @@ ignore = ["E501"]
 
 [tool.scikit-build]
 # Keep builds predictable and fast.
-build-dir = "build/{wheel_tag}"
+build-dir = ".work/build/{wheel_tag}"
 
 [tool.scikit-build.build]
 verbose = true
@@ -188,14 +203,17 @@ exclude = [
   "**/__pycache__/",
   "**/*.pyc",
   "**/*.pyo",
-  "/.pytest_cache/",
-  "/.mypy_cache/",
-  "/.ruff_cache/",
+  "/.github/",
+  "/.work/",
+  "/benchmarks/",
   "/build/",
   "/build-*/",
   "/cmake-build-*/",
   "/.build*/",
   "/dist/",
+  "/examples/",
+  "/fuzz/corpus/",
+  "/fuzz/regressions/*.sha1.zip",
   "/release-dist/",
   "/wheelhouse/"
 ]

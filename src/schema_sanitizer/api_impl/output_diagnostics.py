@@ -234,8 +234,20 @@ def patch_file_output_diagnostics(
     feature: str,
     *,
     native_stats: Any = None,
+    file_output_route: str | None = None,
+    file_metadata_route: str | None = None,
 ) -> None:
     """Patch output diagnostics using the cheapest format-specific source."""
+    routes = {
+        key: value
+        for key, value in (
+            ("file_output_route", file_output_route),
+            ("file_metadata_route", file_metadata_route),
+        )
+        if value is not None
+    }
+    if routes:
+        patch_diagnostics_values(_diagnostics_target(result), routes)
     if feature == "to_parquet":
         _patch_parquet_file_diagnostics(result, path)
     elif feature == "to_jsonl":

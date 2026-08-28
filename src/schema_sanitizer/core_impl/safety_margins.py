@@ -19,7 +19,7 @@ from .coordination_journal import (
     open_coordination_file,
     recover_locked_payload,
 )
-from .process_identity import process_identity_matches, process_start_token
+from .process_identity import process_is_alive, process_start_token
 
 try:  # pragma: no cover - POSIX CI path
     import fcntl
@@ -63,25 +63,6 @@ def _should_fsync() -> bool:
         return True
 
 
-def _process_start_token(pid: int) -> str:
-    """Return the shared PID-reuse-safe process start token."""
-    return process_start_token(pid)
-
-
-def _process_alive(pid: int, start_token: str) -> bool:
-    """Return whether a journal owner still represents the same process."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    current = _process_start_token(pid)
-    return process_identity_matches(start_token, current)
-
-
 def _decode_profile(raw: bytes) -> dict[str, object]:
     """Decode advisory telemetry without replacing corrupt or future state."""
     if not raw:
@@ -122,9 +103,7 @@ def _locked_profile(
                 path,
                 handle,
                 max_payload_bytes=_MAX_FILE_BYTES,
-                validate=_decode_profile,
-                canonicalize=_encode_profile,
-                process_alive=_process_alive,
+                process_alive=process_is_alive,
             )
             profile = _decode_profile(raw)
             baseline = _encode_profile(profile)
@@ -149,7 +128,7 @@ def _locked_profile(
                             before=raw,
                             after=payload,
                             max_payload_bytes=_MAX_FILE_BYTES,
-                            process_start=_process_start_token(os.getpid()),
+                            process_start=process_start_token(os.getpid()),
                         )
 
 

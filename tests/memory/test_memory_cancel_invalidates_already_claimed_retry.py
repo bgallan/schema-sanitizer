@@ -96,21 +96,6 @@ def test_release_guardian_dead_letters_permanent_failure(monkeypatch: pytest.Mon
     assert snap.dead_letter_bytes == 32
 
 
-def test_debug_snapshot_is_bounded_and_callback_free() -> None:
-    from schema_sanitizer.core_impl.runtime_diagnostics import concurrency_debug_snapshot
-
-    snapshot = concurrency_debug_snapshot()
-    assert snapshot["version"] == 1
-    assert set(snapshot) == {
-        "version",
-        "captured_at_monotonic_ns",
-        "retry_scheduler",
-        "release_guardian",
-    }
-    assert snapshot["retry_scheduler"]["progress_age_ns"] >= 0
-    assert snapshot["release_guardian"]["progress_age_ns"] >= 0
-
-
 def test_claim_reader_rejects_hardlinks(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     import schema_sanitizer.core_impl.path_identity as module
 

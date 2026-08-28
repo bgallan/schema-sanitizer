@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 TELEMETRY_HEADER = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 TELEMETRY_SOURCE = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
 TELEMETRY_JSON = ROOT / "cpp/src/internal/runtime/performance_telemetry_json.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/telemetry/active-streak-shards.json"
 
 
 def test_worker_shard_publishes_exact_cumulative_snapshot() -> None:
@@ -39,9 +39,7 @@ def test_json_aggregates_global_and_worker_streak_totals() -> None:
 
 def test_tsan_probe_exercises_exact_real_arena_streaks() -> None:
     """The real arena probe checks concurrent shards and exact JSON totals."""
-    source = (
-        ROOT / "benchmarks/probes/concurrency/telemetry/active-streak-shards-tsan.cc"
-    ).read_text(encoding="utf-8")
+    source = load_probe("telemetry/active-streak-shards-tsan.cc")
 
     assert "OperationTaskArena::Make(workers, telemetry)" in source
     assert "for (const auto workers : {2U, 4U, 8U, 16U})" in source
@@ -53,7 +51,7 @@ def test_tsan_probe_exercises_exact_real_arena_streaks() -> None:
 
 def test_evidence_is_scoped_and_consistently_positive() -> None:
     """The benchmark reports only isolated telemetry publication evidence."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("active-streak-shards")
 
     assert evidence["pair_count"] == 15
     assert "active-streak telemetry publication" in evidence["scope"]

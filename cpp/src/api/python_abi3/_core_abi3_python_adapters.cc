@@ -8,33 +8,34 @@
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
 
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_state.hh"
 #include "sanitize/core/status.hh"
 
 namespace core_abi3_internal {
 
-void raise_status_error(int status, char *err) {
+void raise_status_error(const sanitize::Status &status) {
   if (PyErr_Occurred()) {
-    if (err) {
-      schema_sanitizer_free_string(err);
-    }
     return;
   }
-
-  // Prefer the detailed error string.
-  const char *msg = (err && err[0] != 0) ? err : nullptr;
-
-  if (msg) {
-    PyErr_Format(PyExc_RuntimeError, "schema-sanitizer error (status=%d): %s",
-                 status, msg);
-  } else {
-    PyErr_Format(PyExc_RuntimeError, "schema-sanitizer error (status=%d)",
-                 status);
+  int code = 3;
+  switch (status.code()) {
+  case sanitize::StatusCode::kOK:
+    code = 0;
+    break;
+  case sanitize::StatusCode::kInvalid:
+    code = 1;
+    break;
+  case sanitize::StatusCode::kOutOfMemory:
+    code = 2;
+    break;
+  case sanitize::StatusCode::kCancelled:
+  case sanitize::StatusCode::kIOError:
+  case sanitize::StatusCode::kNotImplemented:
+    break;
   }
-
-  if (err) {
-    schema_sanitizer_free_string(err);
-  }
+  const auto message = status.ToString();
+  PyErr_Format(PyExc_RuntimeError, "schema-sanitizer error (status=%d): %s",
+               code, message.c_str());
 }
 
 // Convert a Python path-like object to filesystem-encoded bytes.
@@ -142,7 +143,7 @@ int readonly_buffer_view(PyObject *obj, const std::uint8_t **out_ptr,
 
 bool check_python_signals() { return PyErr_CheckSignals() == 0; }
 
-void install_python_interrupt_check(schema_sanitizer_context *ctx) {
+void install_python_interrupt_check(NativeContext *ctx) {
   if (!ctx || !ctx->ctx) {
     return;
   }

@@ -177,9 +177,9 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
+  auto wrapped = own_arrow_stream(make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns, memory_limit_bytes);
+      timestamp_columns, memory_limit_bytes));
   if (!wrapped) {
     return nullptr;
   }
@@ -187,7 +187,6 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
       sanitize::internal::ordered_text_output::threading_mode_from_int(
           threading_mode_value);
   if (!mode_result.ok()) {
-    schema_sanitizer_stream_free(wrapped);
     PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
     return nullptr;
   }
@@ -198,8 +197,8 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
       .threading_mode = mode_result.ValueOrDie(),
   };
   auto st = parquet_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)), options);
-  schema_sanitizer_stream_free(wrapped);
+      wrapped.get(), std::string(path, static_cast<std::size_t>(path_len)),
+      options);
   if (!st.ok()) {
     PyErr_SetString(PyExc_RuntimeError, st.message().c_str());
     return nullptr;

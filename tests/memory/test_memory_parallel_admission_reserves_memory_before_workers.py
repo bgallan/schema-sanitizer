@@ -209,7 +209,10 @@ def test_ordered_async_pending_storage_is_fixed_ring_and_handles_out_of_order(
         values = [
             value
             async for _index, value in scheduler.ordered_indexed_results(
-                8, fetch, window=2, expected_retained_bytes=64
+                8,
+                fetch,
+                window=2,
+                memory_contract=scheduler.AsyncResultMemoryContract(preflight_bytes=64),
             )
         ]
         return values, completion_order

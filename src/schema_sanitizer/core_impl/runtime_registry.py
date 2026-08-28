@@ -160,7 +160,6 @@ class _RuntimeServiceRegistry:
         self._condition = threading.Condition(self._lock)
         self._entries: dict[int, _ServiceEntry] = {}
         self._token_pool = BoundedGenerationPool(256)
-        self._sequence = 0  # compatibility: latest bounded slot+generation token
         self._generation = 1
         self._progress_epoch = 0
         self._last_progress_ns = monotonic_ns()
@@ -178,12 +177,7 @@ class _RuntimeServiceRegistry:
         self._progress_epoch = min((1 << 63) - 1, self._progress_epoch + 1)
         self._last_progress_ns = monotonic_ns()
         diagnostic_transition()
-        try:
-            self._condition.notify_all()
-        except RuntimeError:
-            # Every production transition holds the condition lock. Keep the
-            # diagnostic helper robust for narrowly constructed test doubles.
-            pass
+        self._condition.notify_all()
 
     def _mark_progress_noexcept_locked(self) -> None:
         """Publish diagnostics after an irreversible lifecycle commit."""
@@ -302,8 +296,8 @@ class _RuntimeServiceRegistry:
                 self._mark_progress_noexcept_locked()
                 raise RuntimeError("runtime service registry capacity exhausted")
             generation = self._generation
-            # Pass85 owner-first admission: construct the registry entry before
-            # asking the bounded namespace for a generation.  An interruption
+            # Construct the registry entry before asking the bounded namespace
+            # for a generation. An interruption
             # after acquire_for() returns but before token STORE is recoverable
             # with release_for(entry).
             control_ticket = reserve_control_plane("runtime_service", 512)
@@ -345,7 +339,6 @@ class _RuntimeServiceRegistry:
                     )
                 release_control_plane(control_ticket)
                 raise
-            self._sequence = token
         return registration
 
     def register(
@@ -589,6 +582,7 @@ class _RuntimeServiceRegistry:
                 self._capacity,
                 self._rejected_services,
                 self._circuit_open,
+                self._post_commit_failures,
             )
 
     def reset_after_fork(self) -> None:

@@ -47,15 +47,8 @@ def test_operation_memory_lease_release_is_thread_safe() -> None:
     ledger.close()
 
 
-def test_temporary_storage_lease_release_is_thread_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_temporary_storage_lease_release_is_thread_safe() -> None:
     """Concurrent release cannot underflow bytes or active-lease accounting."""
-    monkeypatch.setattr(
-        TemporaryStoragePermitPool,
-        "_ensure_filesystem_capacity",
-        staticmethod(lambda *_args, **_kwargs: None),
-    )
     pool = TemporaryStoragePermitPool(64 << 20)
     lease = pool.acquire(8 << 20, label="release race")
     barrier = threading.Barrier(17)
@@ -80,15 +73,8 @@ def test_temporary_storage_lease_release_is_thread_safe(
     pool.close()
 
 
-def test_temporary_storage_resize_and_release_are_serialized(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_temporary_storage_resize_and_release_are_serialized() -> None:
     """A resize racing final cleanup leaves no retained permit or drift."""
-    monkeypatch.setattr(
-        TemporaryStoragePermitPool,
-        "_ensure_filesystem_capacity",
-        staticmethod(lambda *_args, **_kwargs: None),
-    )
     for _ in range(64):
         pool = TemporaryStoragePermitPool(64 << 20)
         lease = pool.acquire(4 << 20, label="resize race")
@@ -373,21 +359,33 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
         async def __aexit__(self, *_exc: object) -> None:
             """Close the session."""
 
-    class Manifest:
-        """Expose one cancellation-resistant remote chunk."""
+    from schema_sanitizer.api_impl.input.directory_preparation import (
+        RemoteNativeDirectorySourceManifest,
+    )
+    from schema_sanitizer.sources.models import RemoteFile
 
-        files = (object(),)
-        chunk_size = 1
-        memory_limit_bytes = 64 << 20
-        threading_mode = "multi"
-        operation_context = SimpleNamespace(remote_coordinator=coordinator)
+    class Lease:
+        def release(self) -> None:
+            pass
+
+    class Manifest(RemoteNativeDirectorySourceManifest):
+        """Expose one cancellation-resistant remote chunk."""
 
         def open_staging_session(self) -> Session:
             """Create the explicit shared session."""
             return Session()
 
-        async def stage_chunk_async(self, _start: int, _session: Session) -> Staged:
+        def try_acquire_storage_lease(self, _start: int) -> Lease:
+            return Lease()
+
+        async def stage_chunk_async(
+            self,
+            _start: int,
+            _session: Session,
+            storage_lease: object | None = None,
+        ) -> Staged:
             """Delay successful staging until after iterator close returns."""
+            assert storage_lease is not None
             started.set()
             while not release.is_set():
                 try:
@@ -396,7 +394,16 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
                     continue
             return Staged()
 
-    iterator = RemoteChunkPrefetchIterator(Manifest())
+    iterator = RemoteChunkPrefetchIterator(
+        Manifest(
+            files=[RemoteFile("gs://bucket/part.jsonl", "part.jsonl", size=1)],
+            input_format="jsonl",
+            memory_limit_bytes=64 << 20,
+            threading_mode="multi",
+            chunk_size=1,
+            operation_context=SimpleNamespace(remote_coordinator=coordinator),
+        )
+    )
     iterator.__enter__()
     assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     close_timeouts: list[float] = []

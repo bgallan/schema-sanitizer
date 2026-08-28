@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 SELECTION = ROOT / "cpp/src/internal/runtime/operation_task_arena_selection.hh"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/scheduler/sparse-round-robin-selection.json"
 
 
 def test_selection_visits_only_ordered_set_bits() -> None:
@@ -49,9 +49,7 @@ def test_preserves_startup_cas_and_running_acquire() -> None:
 
 def test_probe_checks_equivalence_and_real_arena() -> None:
     """The native probe covers exact ordering and live scheduler execution."""
-    source = (
-        ROOT / "benchmarks/probes/concurrency/scheduler/sparse-round-robin-selection-tsan.cc"
-    ).read_text(encoding="utf-8")
+    source = load_probe("scheduler/sparse-round-robin-selection-tsan.cc")
     compact = source.replace(" ", "").replace("\n", "")
 
     assert "verify_exhaustive_round_robin_equivalence" in source
@@ -68,7 +66,7 @@ def test_probe_checks_equivalence_and_real_arena() -> None:
 
 def test_evidence_is_positive_and_narrowly_scoped() -> None:
     """The paired evidence covers three widths without throughput claims."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("sparse-round-robin-selection")
 
     assert evidence["pair_count"] == 15
     assert "round-robin worker selection" in evidence["scope"]

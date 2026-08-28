@@ -66,7 +66,7 @@ def test_csv_coverage_names_the_adaptive_framing_stage() -> None:
             assert contract["eligible_multi_benefit"] is True
             assert contract["parallel_stages"]
             assert contract["benefit_proof"]
-    assert len(INPUT_CONCURRENCY_COVERAGE) == 8
+    assert len(INPUT_CONCURRENCY_COVERAGE) == 7
     assert len(OUTPUT_CONCURRENCY_COVERAGE) == 7
 
 

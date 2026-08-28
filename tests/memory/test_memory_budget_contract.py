@@ -30,14 +30,6 @@ _PUBLIC_OPERATIONS = (
     discover_existing_source_plans_async,
 )
 _REFERENCE_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
-_REMOVED_RESOURCE_OPTIONS = {
-    "batch_memory_limit_bytes",
-    "read_chunk_bytes",
-    "max_spool_bytes",
-    "prefetch_chunks",
-    "concurrency",
-    "io_chunk_bytes",
-}
 _ENV_ACCESS_TOKENS = (
     "os." + "getenv",
     "os." + "environ",
@@ -54,16 +46,7 @@ def test_public_api_has_one_memory_control() -> None:
         parameters = inspect.signature(operation).parameters
         assert "memory_limit_bytes" in parameters
         assert parameters["memory_limit_bytes"].default is None
-        assert not (_REMOVED_RESOURCE_OPTIONS & parameters.keys())
-
-
-def test_removed_resource_options_are_rejected() -> None:
-    """Removed knobs do not survive as aliases or compatibility facades."""
-    from schema_sanitizer.options_impl.call_options import normalize_call_options
-
-    for option in sorted(_REMOVED_RESOURCE_OPTIONS):
-        with pytest.raises(TypeError, match="Unknown option"):
-            normalize_call_options(**{option: 1})
+        assert {name for name in parameters if "memory" in name} == {"memory_limit_bytes"}
 
 
 def test_native_budget_is_the_python_source_of_truth() -> None:
@@ -193,7 +176,7 @@ def test_invalid_memory_limits_fail_before_native_execution() -> None:
 def test_repository_environment_access_is_limited_to_resource_hardening() -> None:
     """Only documented resource owners and the release preflight inspect the environment."""
     root = Path(__file__).resolve().parents[2]
-    ignored = {".git", "__pycache__", ".pytest_cache"}
+    ignored = {".git", ".work", "__pycache__", ".pytest_cache"}
     offenders: list[str] = []
     for path in root.rglob("*"):
         if path == Path(__file__).resolve():

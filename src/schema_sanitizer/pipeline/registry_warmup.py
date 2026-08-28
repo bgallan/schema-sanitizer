@@ -30,17 +30,10 @@ from .observability import estimate_cpu_io_wall_time
 from .types import PartitionRunPlan, SchemaRegistryState
 
 SUPPORTED_WARM_UP_INPUT_FORMATS = frozenset(
-    {"csv", "json", "json_array", "jsonl", "ndjson", "parquet", "xml"}
+    {"csv", "json", "json_array", "jsonl", "parquet", "xml"}
 )
 WarmUpProgressCallback = Callable[[int, int, PartitionRunPlan, float, float, float], None]
 WarmUpSchemaDriftCallback = Callable[[int, int, PartitionRunPlan, str], None]
-
-_LAST_WARM_UP_ROUTE = "none"
-
-
-def last_warm_up_route() -> str:
-    """Return the route used by the most recent schema warm-up inference."""
-    return _LAST_WARM_UP_ROUTE
 
 
 def prepare_schema_warm_up_input(
@@ -244,7 +237,6 @@ def _infer_partitioned_warm_up_state(
     operation_context: OperationExecutionContext,
 ) -> SchemaRegistryState:
     """Probe partitions sequentially so each progress event has real CPU/I/O timing."""
-    global _LAST_WARM_UP_ROUTE
     current_registry_json = registry_json
     current_native_registry_state: Any = None
     total = len(plans)
@@ -295,7 +287,6 @@ def _infer_partitioned_warm_up_state(
             raw = probe.raw
             current_registry_json = raw.schema_registry_json or current_registry_json
             current_native_registry_state = raw.native_registry_state
-            _LAST_WARM_UP_ROUTE = probe.route_name
             if after_schema_drifts is not None:
                 after_schema_drifts(
                     index,
@@ -354,8 +345,6 @@ def infer_warm_up_schema_registry_state(
     after_schema_drifts: WarmUpSchemaDriftCallback | None = None,
 ) -> SchemaRegistryState:
     """Run additive schema warm-up and return JSON plus native registry state."""
-    global _LAST_WARM_UP_ROUTE
-    _LAST_WARM_UP_ROUTE = "none"
     if not plans:
         raise ValueError("Schema warm-up requires at least one source partition")
     options = dict(options)
@@ -411,7 +400,6 @@ def infer_warm_up_schema_registry_state(
                 operation_context=operation_context,
             )
             raw = probe.raw
-            _LAST_WARM_UP_ROUTE = probe.route_name
             return SchemaRegistryState(
                 schema_registry_json=raw.schema_registry_json or "{}",
                 native_registry_state=raw.native_registry_state,

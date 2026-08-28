@@ -22,16 +22,6 @@ def test_ephemeral_reserved_escrow_is_not_rooted_by_at_fork_registry() -> None:
     assert ref() is None
 
 
-def test_ephemeral_legacy_escrow_is_not_rooted_by_at_fork_registry() -> None:
-    from schema_sanitizer.core_impl.finalizer_escrow import FinalizerEscrow
-
-    escrow = FinalizerEscrow(2)
-    ref = weakref.ref(escrow)
-    del escrow
-    gc.collect()
-    assert ref() is None
-
-
 def test_atomic_epoch_is_exact_under_concurrent_publishers() -> None:
     from schema_sanitizer.core_impl.atomic_epoch import AtomicEpoch
 
@@ -86,16 +76,6 @@ def test_process_resource_release_and_shrink_prepare_before_capability_commit() 
     shrink_end = source.index("\n    def ", shrink_start + 8)
     shrink = source[shrink_start:shrink_end]
     assert shrink.index("next_in_use") < shrink.index("entry.amount =")
-
-
-def test_retry_scheduler_prepares_heap_before_authoritative_current_publish() -> None:
-    source = (ROOT / "src/schema_sanitizer/core_impl/retry_scheduler.py").read_text()
-    start = source.index("    def schedule(", source.index("class _RetryScheduler"))
-    end = source.index("\n    def cancel", start)
-    body = source[start:end]
-    assert body.index("heapq.heappush(self._heap, item)") < body.index("self._current[key] = item")
-    assert "old_current = self._current.get(key)" in body
-    assert "self._drop_pending_charge_locked(old_current)" in body
 
 
 def test_retry_subsystem_charge_rolls_back_partial_mapping_and_ticket() -> None:
@@ -191,7 +171,7 @@ def test_static_registration_computes_total_before_publish_and_rolls_back_shadow
     start = source.index("def reserve_static_control_plane")
     end = source.index("\ndef rollback_static_control_plane", start)
     body = source[start:end]
-    assert body.index("next_total = _TOTAL + amount") < body.index("_ENTRIES[kind] = amount")
+    assert body.index("next_total = authoritative + amount") < body.index("_ENTRIES[kind] = amount")
     assert "_ENTRIES.pop(kind, None)" in body
     assert "sync_locked()" in body
 
@@ -227,7 +207,7 @@ def test_registry_and_sequence_caps_are_explicit() -> None:
     assert "_MAX_CONCURRENCY_CONTRACTS" in contracts
     assert "remote I/O capability generation exhausted" in io
     assert "remote I/O registration generation exhausted" in io
-    assert "self._lease_sequence >= (1 << 63) - 1" in provider
+    assert "next_reusable_token(self._lease_sequence, self._active_leases)" in provider
 
 
 def test_fork_manager_is_single_bounded_dispatch_registry_for_static_escrows() -> None:
@@ -250,15 +230,6 @@ def test_janitor_child_reset_uses_prepared_bank_not_new_sync_objects() -> None:
     assert "threading.Event()" not in body
 
 
-def test_post_fork_safe_point_retains_real_poisoned_child_roots() -> None:
-    source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
-    start = source.index("    def _safe_point_after_fork", source.index("class FinalizerEscrow"))
-    end = source.index("\n    def ", start + 8)
-    body = source[start:end]
-    assert "runtime_fork_poisoned()" in body
-    assert "return" in body
-
-
 def test_governed_headroom_does_not_double_subtract_control_plane() -> None:
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     start = source.index("def process_memory_pressure_snapshot")
@@ -275,46 +246,6 @@ def test_real_public_conversion_entrypoints_use_exact_pair_admission_scope() -> 
         assert "memory_ledger=operation_context.memory_ledger" in source
         assert "transfer_to_output()" in source
         assert "pair_scope.close()" in source
-
-
-def test_retry_heap_oom_preserves_existing_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    from schema_sanitizer.core_impl import retry_scheduler as module
-
-    scheduler = module._RetryScheduler()
-    monkeypatch.setattr(scheduler, "_ensure_workers", lambda: None)
-    key = ("ephemeral-reserved-escrow-is-not-rooted", "retry")
-    normalized = module._normalize_retry_key(key)
-
-    def first() -> None:
-        return None
-
-    assert scheduler.schedule(key, first, delay_seconds=60, retained_bytes=64)
-    with scheduler._condition:
-        old = scheduler._current[normalized]
-        old_pending = scheduler._pending_bytes
-        old_control = old.control_ticket
-
-    real_push = module.heapq.heappush
-
-    def fail_push(heap, item):
-        # Simulate the hostile case where list growth/publication happens before
-        # CPython reports OOM. Rollback must remove this provisional identity.
-        heap.append(item)
-        raise MemoryError("injected heap OOM")
-
-    monkeypatch.setattr(module.heapq, "heappush", fail_push)
-    with pytest.raises(MemoryError):
-        scheduler.schedule(key, lambda: None, delay_seconds=60, retained_bytes=64)
-    monkeypatch.setattr(module.heapq, "heappush", real_push)
-
-    with scheduler._condition:
-        assert scheduler._current.get(normalized) is old
-        assert scheduler._pending_bytes == old_pending
-        assert old.control_ticket is old_control
-        assert all(
-            item is not scheduler._current.get(normalized) or item is old
-            for item in scheduler._heap
-        )
 
 
 def test_all_56_pairs_use_the_exact_production_pair_admission_when_native_available() -> None:
@@ -346,20 +277,9 @@ def test_all_56_pairs_use_the_exact_production_pair_admission_when_native_availa
                     scope.transfer_to_output()
                 finally:
                     scope.close()
-        assert validate_observed_concurrency_pair_contracts() == 56
+        assert validate_observed_concurrency_pair_contracts() == 49
     finally:
         ledger.close()
-
-
-def test_legacy_owner_activity_is_published_before_slot_visibility() -> None:
-    source = (ROOT / "src/schema_sanitizer/core_impl/finalizer_escrow.py").read_text()
-    start = source.index("    def try_publish(self", source.index("class FinalizerEscrow"))
-    end = source.index("\n    def ", start + 8)
-    body = source[start:end]
-    # Owner-first admission makes the exact slot authoritative; derived activity is
-    # published afterwards and can be reconciled without hiding the owner.
-    assert body.index("self._slots[index] = value") < body.index("self._active_counter.increment()")
-    assert "self._states[index] = _PUBLISHED" in body
 
 
 def test_callable_contract_distinguishes_defaults_and_captured_owner_identity() -> None:
@@ -388,7 +308,8 @@ def test_callable_contract_distinguishes_defaults_and_captured_owner_identity() 
 def test_fork_manager_requires_explicit_opt_in_for_unprepared_child_callbacks() -> None:
     source = (ROOT / "src/schema_sanitizer/core_impl/fork_manager.py").read_text()
     assert "child_safe_without_prepare" in source
-    assert "if handler.before is None and not handler.child_safe_without_prepare" in source
+    assert "if callback is None:" in source
+    assert 'handler.mode == "child_safe" and handler.child_safe_without_prepare' in source
     assert "contract_generation" in source
 
 

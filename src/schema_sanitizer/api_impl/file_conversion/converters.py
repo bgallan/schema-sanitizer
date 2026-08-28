@@ -35,7 +35,7 @@ from ...options_impl.call_options import (
     call_options_from_locals,
     normalize_call_options_or_none,
 )
-from ...options_impl.options import CsvHeaderMode, require_implemented_csv_header_mode
+from ...options_impl.options import CsvHeaderMode, normalize_csv_header_mode
 from ...remote_impl.staging import (
     cleanup_output_target,
     finalize_output_target,
@@ -126,7 +126,7 @@ def convert_file_with_options(
     writer_options: Mapping[str, Any] | None = None,
 ) -> Result:
     """Normalize file conversion options and invoke a streaming writer."""
-    require_implemented_csv_header_mode(options.get("csv_header_mode", "exact"))
+    normalize_csv_header_mode(options.get("csv_header_mode", "exact"))
     from ...core_impl.schema_registry import _normalize_registry_json
 
     registry_json = _normalize_registry_json(schema_registry)
@@ -210,7 +210,7 @@ def convert_file_with_options(
         pair_scope.transfer_to_output()
         # Keep the pair identity alive through the complete writer/conversion
         # path. The structural bootstrap credit was retired at the handoff, so
-        # only real downstream admissions count as pass51 payload evidence.
+        # only real downstream admissions count as payload evidence.
         if prepared_input.xml_row_tag is not None:
             options = dict(options)
             options["xml_row_tag"] = prepared_input.xml_row_tag

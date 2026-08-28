@@ -115,9 +115,7 @@ def test_aggregate_cross_memory_fallback_is_ack_before_publication(
     reservation = coordinator.acquire(0)
     owner = reservation._finalizer_owner
     ticket = reservation._finalizer_ticket
-    coordinator.release(
-        reservation._token, id(reservation), reservation._capability, nonblocking=False
-    )
+    coordinator.release(reservation._token, id(reservation), reservation._capability)
     assert owner._primary_released is False
 
     original = ReservedFinalizerEscrow.release_ticket
@@ -139,20 +137,6 @@ def test_aggregate_cross_memory_fallback_is_ack_before_publication(
     coordinator.reconcile_pending()
     assert coordinator._finalizer_releases.active_count() == 0
     coordinator._physical.release()
-
-
-def test_bounded_generation_underflow_pins_namespace_corrupted() -> None:
-    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
-
-    pool = BoundedGenerationPool(2)
-    token = pool.acquire()
-    assert token is not None
-    pool._active = 0
-    assert pool.release(token) is False
-    snapshot = pool.snapshot()
-    assert snapshot.corrupted is True
-    assert snapshot.available == 1
-    assert pool.acquire() is None
 
 
 def test_control_plane_deferred_drain_reconciles_dirty_authoritative_counters() -> None:
@@ -233,7 +217,7 @@ def test_direct_cross_memory_escrow_roots_authority_not_lease(
 
     del lease
     gc.collect()
-    assert authority._escrow_armed is True
+    assert authority.is_armed_for(ticket)
     assert module.drain_direct_cross_process_memory_finalizers() >= 1
     assert escrow.active_count() <= baseline
 

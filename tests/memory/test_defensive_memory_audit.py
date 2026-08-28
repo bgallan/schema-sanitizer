@@ -95,20 +95,6 @@ def test_coalescer_rejects_large_absolute_offset() -> None:
         pa.RecordBatchReader.from_stream(_CapsuleStream(capsule)).read_all()
 
 
-def test_coalescer_has_only_one_memory_control() -> None:
-    """The removed row and byte knobs cannot bypass the central budget."""
-    require_native()
-    pa = pytest.importorskip("pyarrow")
-
-    from schema_sanitizer.core_impl.native_symbols import COALESCING_STREAM_WRAP
-
-    batch = pa.record_batch([pa.array([1])], names=["value"])
-    source = pa.RecordBatchReader.from_batches(batch.schema, [batch])
-
-    with pytest.raises(TypeError):
-        COALESCING_STREAM_WRAP(source, 1024, 1024)
-
-
 def test_bump_arena_registers_new_blocks_exception_safely() -> None:
     """A failed ownership-vector growth must free the just-allocated block."""
     root = Path(__file__).resolve().parents[2]
@@ -128,13 +114,13 @@ def test_foreign_arrow_release_callbacks_are_suppressed() -> None:
     values = (
         root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.cc"
     ).read_text()
-    c_bridge = (root / "cpp/src/api/c/schema_sanitizer_c_sink_diagnostics.cc").read_text()
+    capsules = (root / "cpp/src/api/python_abi3/context/_core_abi3_capsules.cc").read_text()
     coalescer = (root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc").read_text()
     payload = (root / "cpp/src/api/python_abi3/logical_schema/payload.cc").read_text()
 
     assert "void release_stream_nothrow" in callbacks
     assert "release_array_nothrow(&array)" in values
-    assert "release_stream_nothrow(stream)" in c_bridge
+    assert "release_stream_nothrow(stream)" in capsules
     assert "release_array_nothrow(\n      &state->pending_array)" in coalescer
     assert "release_schema_nothrow(schema)" in payload
 

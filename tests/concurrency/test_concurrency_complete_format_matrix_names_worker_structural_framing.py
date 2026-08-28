@@ -68,7 +68,7 @@ def _write_object_array(path: Path, *, rows: int = 8_192) -> None:
 def test_complete_format_matrix_names_worker_structural_framing() -> None:
     """JSON gains framing acceleration without weakening any format contract."""
     guarantees = concurrency_guarantees()
-    assert len(INPUT_CONCURRENCY_COVERAGE) == 8
+    assert len(INPUT_CONCURRENCY_COVERAGE) == 7
     assert len(OUTPUT_CONCURRENCY_COVERAGE) == 7
     for name in ("json", "json_array"):
         assert "worker_authoritative_structural_framing" in INPUT_CONCURRENCY_COVERAGE[name]

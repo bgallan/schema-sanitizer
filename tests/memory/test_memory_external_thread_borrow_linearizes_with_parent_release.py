@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import gc
 import os
 import threading
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
@@ -31,14 +31,14 @@ def test_external_thread_borrow_linearizes_with_parent_release(
 
     entered = threading.Event()
     continue_borrow = threading.Event()
-    original = module._OperationThreadBorrowBudget.try_borrow_up_to
+    original = module._OperationThreadBorrowBudget.try_borrow_up_to_exact
 
-    def blocked(self: object, desired: int, *, minimum: int = 1) -> int:
+    def blocked(self: object, desired: int, *, minimum: int = 1, exact: bool = False) -> object:
         entered.set()
         assert continue_borrow.wait(SCHEDULER_TIMEOUT_SECONDS)
-        return original(self, desired, minimum=minimum)
+        return original(self, desired, minimum=minimum, exact=exact)
 
-    monkeypatch.setattr(module._OperationThreadBorrowBudget, "try_borrow_up_to", blocked)
+    monkeypatch.setattr(module._OperationThreadBorrowBudget, "try_borrow_up_to_exact", blocked)
     result: list[object] = []
     acquire_thread = threading.Thread(
         target=lambda: result.append(
@@ -110,16 +110,12 @@ def test_parent_shrink_cannot_invalidate_live_external_borrow(
 def test_fd_opening_state_prevents_credit_release_before_opener_returns(tmp_path: Path) -> None:
     from schema_sanitizer.core_impl import process_resources as module
 
-    released = threading.Event()
     entered = threading.Event()
     continue_open = threading.Event()
-
-    class Lease:
-        def release(self) -> None:
-            released.set()
-
-    capability = module.FileDescriptorCapability(
-        Lease(), 1, label="external-thread-borrow-linearizes-with-parent-opening"
+    capability = module.acquire_file_descriptor_capability(
+        1,
+        timeout_seconds=2,
+        label="external-thread-borrow-linearizes-with-parent-opening",
     )
     path = tmp_path / "x"
     path.write_bytes(b"x")
@@ -145,48 +141,12 @@ def test_fd_opening_state_prevents_credit_release_before_opener_returns(tmp_path
     assert capability.opening == 1
     with pytest.raises(RuntimeError, match="descriptors are opening"):
         capability.release()
-    assert not released.is_set()
     continue_open.set()
     thread.join(2)
     assert not errors
     assert capability.opening == 0
     assert capability.opened == 0
     capability.release()
-    assert released.is_set()
-
-
-def test_external_runtime_gc_finalizer_returns_all_components() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    calls: list[str] = []
-
-    class Native:
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(f"native:{amount}")
-
-    class Lease:
-        def release(self) -> None:
-            calls.append("lease")
-
-    budget = module._OperationThreadBorrowBudget(2)
-    assert budget.try_borrow(2)
-    runtime = module.ExternalRuntimeConcurrencyLease(
-        Lease(),
-        workers=2,
-        parallel=True,
-        parent_lease=object(),
-        borrow_budget=budget,
-        borrowed=2,
-        native=Native(),
-        native_amount=2,
-    )
-    ref = weakref.ref(runtime)
-    del runtime
-    gc.collect()
-    module.drain_finalizer_cleanup()
-    assert ref() is None
-    assert budget.borrowed == 0
-    assert calls == ["native:2", "lease"]
 
 
 def test_external_runtime_shrinks_logical_and_native_envelope_to_real_pool(
@@ -199,12 +159,21 @@ def test_external_runtime_shrinks_logical_and_native_envelope_to_real_pool(
     native_calls: list[tuple[str, int]] = []
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            assert desired >= minimum
             native_calls.append(("acquire", desired))
-            return desired
+            return SimpleNamespace(amount=desired), desired
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            native_calls.append(("release", amount))
+        @staticmethod
+        def exact_permit_lease_amount(receipt: object) -> int:
+            return int(receipt.amount)  # type: ignore[attr-defined]
+
+        @staticmethod
+        def resize_exact_permit_lease(receipt: object, target: int) -> int:
+            previous = int(receipt.amount)  # type: ignore[attr-defined]
+            receipt.amount = target  # type: ignore[attr-defined]
+            native_calls.append(("release", previous - target))
+            return target
 
     class Runtime:
         @staticmethod
@@ -217,7 +186,8 @@ def test_external_runtime_shrinks_logical_and_native_envelope_to_real_pool(
 
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
-    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    native = Native()
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
     monkeypatch.setattr(concurrency_contracts, "current_runtime_execution_lease", lambda: None)
     lease = module.acquire_external_runtime_threads(8, allow_parallel=True)
     logical_claim = lease._lease

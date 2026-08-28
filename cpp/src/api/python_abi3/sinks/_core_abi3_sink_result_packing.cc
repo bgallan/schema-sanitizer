@@ -8,7 +8,7 @@
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
 
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_state.hh"
 
 namespace core_abi3_internal {
 namespace {
@@ -26,18 +26,18 @@ PyObject *wrap_optional_stream(PyObject *keepalive, ArrowArrayStream *stream) {
 
 // Releases native stream and diagnostics handles after a failed sink call.
 void release_sink_outputs(ArrowArrayStream *main_stream,
-                          schema_sanitizer_diagnostics *diagnostics) {
-  schema_sanitizer_stream_free(main_stream);
-  schema_sanitizer_diagnostics_free(diagnostics);
+                          NativeDiagnostics *diagnostics) {
+  release_arrow_stream(main_stream);
+  delete diagnostics;
 }
 
 // Packs a normal sink result into the Python ABI tuple shape.
-PyObject *
-pack_stream_and_diagnostics(PyObject *keepalive, ArrowArrayStream *main_stream,
-                            schema_sanitizer_diagnostics *diagnostics) {
+PyObject *pack_stream_and_diagnostics(PyObject *keepalive,
+                                      ArrowArrayStream *main_stream,
+                                      NativeDiagnostics *diagnostics) {
   PyObject *py_main = wrap_optional_stream(keepalive, main_stream);
   if (!py_main) {
-    schema_sanitizer_diagnostics_free(diagnostics);
+    delete diagnostics;
     return nullptr;
   }
 
@@ -69,52 +69,43 @@ pack_stream_and_diagnostics(PyObject *keepalive, ArrowArrayStream *main_stream,
 // The sixth slot receives a borrowed native registry state or None.
 PyObject *pack_registry_stream_result(PyObject *keepalive,
                                       ArrowArrayStream *main_stream,
-                                      schema_sanitizer_diagnostics *diagnostics,
-                                      char *registry_json, char *drifts_json,
-                                      char *conversion_timestamp,
+                                      NativeDiagnostics *diagnostics,
+                                      std::string_view registry_json,
+                                      std::string_view drifts_json,
+                                      std::string_view conversion_timestamp,
                                       PyObject *native_registry_state) {
   PyObject *py_main = wrap_optional_stream(keepalive, main_stream);
   if (!py_main) {
-    schema_sanitizer_diagnostics_free(diagnostics);
-    schema_sanitizer_free_string(registry_json);
-    schema_sanitizer_free_string(drifts_json);
-    schema_sanitizer_free_string(conversion_timestamp);
+    delete diagnostics;
     return nullptr;
   }
 
   PyObject *py_diag = wrap_diagnostics_capsule(diagnostics);
   if (!py_diag) {
     Py_DECREF(py_main);
-    schema_sanitizer_free_string(registry_json);
-    schema_sanitizer_free_string(drifts_json);
-    schema_sanitizer_free_string(conversion_timestamp);
     return nullptr;
   }
 
-  PyObject *py_registry =
-      PyUnicode_FromString(registry_json ? registry_json : "{}");
-  schema_sanitizer_free_string(registry_json);
+  PyObject *py_registry = PyUnicode_FromStringAndSize(
+      registry_json.data(), static_cast<Py_ssize_t>(registry_json.size()));
   if (!py_registry) {
     Py_DECREF(py_diag);
     Py_DECREF(py_main);
-    schema_sanitizer_free_string(drifts_json);
-    schema_sanitizer_free_string(conversion_timestamp);
     return nullptr;
   }
 
-  PyObject *py_drifts = PyUnicode_FromString(drifts_json ? drifts_json : "[]");
-  schema_sanitizer_free_string(drifts_json);
+  PyObject *py_drifts = PyUnicode_FromStringAndSize(
+      drifts_json.data(), static_cast<Py_ssize_t>(drifts_json.size()));
   if (!py_drifts) {
     Py_DECREF(py_registry);
     Py_DECREF(py_diag);
     Py_DECREF(py_main);
-    schema_sanitizer_free_string(conversion_timestamp);
     return nullptr;
   }
 
-  PyObject *py_timestamp =
-      PyUnicode_FromString(conversion_timestamp ? conversion_timestamp : "");
-  schema_sanitizer_free_string(conversion_timestamp);
+  PyObject *py_timestamp = PyUnicode_FromStringAndSize(
+      conversion_timestamp.data(),
+      static_cast<Py_ssize_t>(conversion_timestamp.size()));
   if (!py_timestamp) {
     Py_DECREF(py_drifts);
     Py_DECREF(py_registry);

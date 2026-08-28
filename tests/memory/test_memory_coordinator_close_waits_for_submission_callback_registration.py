@@ -65,6 +65,9 @@ class _StoppedLoop:
     def is_running(self) -> bool:
         return False
 
+    def is_closed(self) -> bool:
+        return True
+
 
 class _BlockingCallbackFuture(Future[Any]):
     def __init__(self, coroutine: Any) -> None:
@@ -110,8 +113,14 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     coordinator._loop = _StoppedLoop()
     coordinator._context = None
     coordinator._futures = set()
+    coordinator._submissions = {}
     coordinator._failed_submissions = module.deque()
+    coordinator._failed_permits = module.deque()
     coordinator._callbackless_submissions = {}
+    coordinator._deferred_terminal_callbacks = module.deque()
+    coordinator._terminal_callback_owners = set()
+    coordinator._failed_terminal_callbacks = module.deque()
+    coordinator._shutdown_future = None
     coordinator._submission_callbacks_inflight = 0
     coordinator._closed = False
     coordinator._closing = False
@@ -124,6 +133,7 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     coordinator._protocol_violations = 0
     coordinator._permit_registration = None
     coordinator._thread_lease = None
+    coordinator._runtime_registration = None
     coordinator._thread = _DeadThread()
 
     submitted: list[Future[Any]] = []
@@ -196,17 +206,15 @@ def test_janitor_deletes_dangling_symlink_before_releasing_lease(
 
     lease = Lease()
     janitor = module._TemporaryArtifactJanitor()
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    quarantine = janitor.root()
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     assert janitor.quarantine(link, is_dir=False, lease=lease)
     assert lease.calls == 0
     assert janitor.snapshot().pending_artifacts == 1
     janitor.sweep()
     assert lease.calls == 1
     assert janitor.snapshot().pending_artifacts == 0
-    assert not any((tmp_path / "quarantine").iterdir())
+    assert not any(quarantine.iterdir())
 
 
 def test_janitor_retains_lease_when_quarantined_inode_is_replaced(
@@ -225,10 +233,8 @@ def test_janitor_retains_lease_when_quarantined_inode_is_replaced(
 
     lease = Lease()
     janitor = module._TemporaryArtifactJanitor()
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    quarantine = janitor.root()
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     assert janitor.quarantine(source, is_dir=False, lease=lease)
     retained = next(iter(quarantine.iterdir()))
     retained.unlink()
@@ -291,6 +297,7 @@ def test_lookahead_close_does_not_reenter_under_callback_registration(
     owner._close_condition = Condition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False
@@ -299,6 +306,7 @@ def test_lookahead_close_does_not_reenter_under_callback_registration(
     owner._future = future
     owner._future_context = None
     owner._executor = executor
+    owner._close_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     closer = Thread(target=owner.close)
     closer.start()
     closer.join(SCHEDULER_TIMEOUT_SECONDS)
@@ -506,8 +514,14 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     coordinator._loop = _StoppedLoop()
     coordinator._context = None
     coordinator._futures = set()
+    coordinator._submissions = {}
     coordinator._failed_submissions = module.deque()
+    coordinator._failed_permits = module.deque()
     coordinator._callbackless_submissions = {}
+    coordinator._deferred_terminal_callbacks = module.deque()
+    coordinator._terminal_callback_owners = set()
+    coordinator._failed_terminal_callbacks = module.deque()
+    coordinator._shutdown_future = None
     coordinator._submission_callbacks_inflight = 0
     coordinator._closed = False
     coordinator._closing = False
@@ -520,6 +534,7 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     coordinator._protocol_violations = 0
     coordinator._permit_registration = None
     coordinator._thread_lease = None
+    coordinator._runtime_registration = None
     coordinator._thread = _DeadThread()
 
     with pytest.raises(RuntimeError, match="callback registration failed"):
@@ -579,6 +594,8 @@ def test_lookahead_close_waits_for_trigger_commit(
     child = ChildContext()
 
     class ParentContext:
+        memory_ledger = None
+
         def fork(self) -> ChildContext:
             return child
 
@@ -594,6 +611,7 @@ def test_lookahead_close_waits_for_trigger_commit(
             self.shutdown_called = True
 
     executor = BlockingExecutor()
+    executor._thread_lease = object()
     owner = object.__new__(module.PartitionSourceLookahead)
     owner._pid = os.getpid()
     owner.enabled = True
@@ -602,6 +620,7 @@ def test_lookahead_close_waits_for_trigger_commit(
     owner._close_condition = WaitObservedCondition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False
@@ -610,8 +629,14 @@ def test_lookahead_close_waits_for_trigger_commit(
     owner._future = None
     owner._future_context = None
     owner._executor = executor
+    owner._close_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     owner._current_options = lambda: object()
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 2)
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 2)
+    monkeypatch.setattr(
+        module,
+        "acquire_stage_concurrency_admission",
+        lambda *_a, **_k: SimpleNamespace(slots=2, close=lambda: None),
+    )
 
     trigger = Thread(target=owner.trigger)
     trigger.start()
@@ -645,6 +670,10 @@ def test_prefetch_close_waits_for_external_storage_admission(
         files = ("one",)
         chunk_size = 1
 
+        @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            return 1
+
         def try_acquire_storage_lease(self, _start: int) -> None:
             acquire_entered.set()
             assert allow_acquire.wait(2)
@@ -662,6 +691,7 @@ def test_prefetch_close_waits_for_external_storage_admission(
     owner._download_session = None
     owner._futures = deque()
     owner._failed_storage_leases = deque()
+    owner._callbackless_storage_futures = {}
     owner._next_start = 0
     owner._close_lock = RLock()
     owner._close_condition = WaitObservedCondition(owner._close_lock)
@@ -669,13 +699,16 @@ def test_prefetch_close_waits_for_external_storage_admission(
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
     owner._consumers_inflight = 0
+    owner._protocol_violations = 0
     owner._starting = False
     owner._fill_in_progress = False
     owner._close_started = False
     owner._session_closer = None
+    owner._finalizer_ticket = None
+    owner._finalizer_capsule = None
     owner._closed = False
     owner._started = True
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 1)
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 1)
 
     filler = Thread(target=owner._fill_prefetch_window)
     filler.start()
@@ -724,16 +757,20 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
     owner._download_session = None
     owner._futures = deque((future,))
     owner._failed_storage_leases = deque()
+    owner._callbackless_storage_futures = {}
     owner._close_lock = RLock()
     owner._close_condition = WaitObservedCondition(owner._close_lock)
     owner._close_in_progress = False
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
     owner._consumers_inflight = 0
+    owner._protocol_violations = 0
     owner._starting = False
     owner._fill_in_progress = False
     owner._close_started = False
     owner._session_closer = None
+    owner._finalizer_ticket = None
+    owner._finalizer_capsule = None
     owner._closed = False
     owner._started = True
     owner._ensure_started = lambda: None
@@ -802,6 +839,10 @@ def test_prefetch_retains_storage_owner_when_callback_registration_fails(
             return future
 
     class Manifest:
+        @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            return 1
+
         async def stage_chunk_async(self, *_args: Any, **_kwargs: Any) -> Any:
             raise AssertionError("the synthetic Future owns execution")
 
@@ -827,6 +868,7 @@ def test_prefetch_retains_storage_owner_when_callback_registration_fails(
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
     owner._consumers_inflight = 0
+    owner._protocol_violations = 0
     owner._starting = False
     owner._fill_in_progress = False
 
@@ -855,6 +897,7 @@ def test_lookahead_callback_registration_failure_remains_retryable(
     owner._close_condition = Condition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False
@@ -863,6 +906,7 @@ def test_lookahead_callback_registration_failure_remains_retryable(
     owner._future = future
     owner._future_context = None
     owner._executor = executor
+    owner._close_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
 
     with pytest.raises(RuntimeError, match="callback registration rejected"):
         owner.close()
@@ -950,50 +994,3 @@ def test_staged_path_restores_replacement_captured_by_cleanup_rename(
     assert not lease.released
     assert not owner._closed
     assert not list(tmp_path.glob(".schema-sanitizer-delete-*"))
-
-
-def test_janitor_restores_replacement_captured_by_quarantine_rename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from schema_sanitizer.core_impl import temporary_janitor as module
-    from schema_sanitizer.core_impl.path_identity import claim_path_identity
-
-    source = tmp_path / "janitor-race"
-    source.write_text("original")
-    expected = claim_path_identity(source)
-    assert expected is not None
-
-    class Lease:
-        released = False
-
-        def release(self) -> None:
-            self.released = True
-
-    lease = Lease()
-    janitor = module._TemporaryArtifactJanitor()
-    quarantine = tmp_path / "quarantine-race"
-    quarantine.mkdir()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
-    real_replace = module.os.replace
-    raced = False
-
-    def replace_after_substitution(source_path: Any, target_path: Any) -> None:
-        nonlocal raced
-        if not raced:
-            raced = True
-            Path(source_path).unlink()
-            Path(source_path).write_text("replacement")
-        real_replace(source_path, target_path)
-
-    monkeypatch.setattr(module.os, "replace", replace_after_substitution)
-    assert not janitor.quarantine(
-        source,
-        is_dir=False,
-        lease=lease,
-        expected_identity=expected,
-    )
-    assert source.read_text() == "replacement"
-    assert not lease.released
-    assert not any(quarantine.iterdir())
-    assert janitor.snapshot().identity_mismatches == 1

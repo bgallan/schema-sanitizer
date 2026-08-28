@@ -14,7 +14,7 @@ import schema_sanitizer as ss
 
 def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> None:
     """Verify remote chunk prefetch overlaps staging and closes unused chunks."""
-    from schema_sanitizer.api_impl.source_plan.remote import iter_staged_remote_chunks
+    from schema_sanitizer.api_impl.source_plan.remote import open_staged_remote_chunks
 
     class FakeStaged:
         """Fake staged chunk with cleanup tracking."""
@@ -35,6 +35,7 @@ def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> Non
         files = [object(), object()]
         input_format = "json"
         memory_limit_bytes = 1
+        threading_mode = "single"
 
         def __init__(self) -> None:
             """Initialize call tracking."""
@@ -51,8 +52,12 @@ def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> Non
             self.staged[start] = staged
             return staged
 
+        @staticmethod
+        def next_chunk_start(start: int) -> int:
+            return start + 1
+
     manifest = FakeManifest()
-    with iter_staged_remote_chunks(manifest) as chunks:
+    with open_staged_remote_chunks(manifest) as chunks:
         first = next(chunks)
         assert first.start == 0
         assert manifest.second_started.wait(timeout=2.0)

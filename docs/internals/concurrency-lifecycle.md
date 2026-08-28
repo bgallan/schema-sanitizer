@@ -117,9 +117,9 @@ and creator PID; IDs and generations fail closed instead of wrapping. Receipt
 destruction after `fork()` is harmless, while mutation or inspection from the
 wrong process is rejected.
 
-Python fields such as byte counts, configured width, permit amount, or opened
-count mirror these receipts for diagnostics and older test doubles. Production
-cleanup queries or mutates the receipt; it never infers authority from a mirror.
+Python diagnostic views expose byte counts, configured width, permit amount, and
+opened count. Production cleanup queries or mutates the receipt directly; it
+never infers authority from a diagnostic view.
 
 ## [Rooted finalizers and replay safety](#index)
 
@@ -419,9 +419,9 @@ admission, cancellation, native payload entry, file-descriptor admission, and
 external-runtime claims. Validation fails if a required implementation is
 missing or if execution did not observe it.
 
-The public matrix contains eight inputs (`csv`, `json`, `json_array`, `jsonl`,
-`ndjson`, `xml`, `parquet`, and `python`) and seven outputs (`csv`, `jsonl`,
-`parquet`, `pyarrow`, `pandas`, `polars`, and `duckdb`). All 56 pairs must
+The public matrix contains seven inputs (`csv`, `json`, `json_array`, `jsonl`,
+`xml`, `parquet`, and `python`) and seven outputs (`csv`, `jsonl`, `parquet`,
+`pyarrow`, `pandas`, `polars`, and `duckdb`). All 49 pairs must
 exercise their real payload and format-specific primary stages. Bootstrap-only
 activity cannot certify a payload path.
 

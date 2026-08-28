@@ -28,7 +28,7 @@ def test_every_extra_is_installed_and_imported_in_isolation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The compact job preserves the former one-environment-per-extra guarantee."""
+    """The compact job gives every extra its own isolated environment."""
     module = _module()
     wheel = tmp_path / "schema_sanitizer-0.4.0-cp311-abi3-linux.whl"
     wheel.write_bytes(b"wheel")

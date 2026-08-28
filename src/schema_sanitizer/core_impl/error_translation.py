@@ -38,7 +38,7 @@ def reader_error_context(
     """Build privacy-safe reader context without copying in-memory payloads."""
     detail: dict[str, Any] = {}
     normalized_format = str(format_name or "").strip().lower()
-    if normalized_format in {"jsonl", "json_lines", "json-lines"}:
+    if normalized_format == "jsonl":
         normalized_format = "json"
     if normalized_format:
         detail["format"] = normalized_format

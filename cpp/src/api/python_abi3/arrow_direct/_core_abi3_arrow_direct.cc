@@ -20,7 +20,6 @@
 #include <utility>
 #include <vector>
 
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/memory/memory_budget.hh"
 #include "internal/planning/plan_compile.hh"

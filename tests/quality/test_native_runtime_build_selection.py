@@ -21,12 +21,12 @@ def _write_cache(build_dir: Path, sanitizer: str) -> None:
 
 
 def test_unsanitized_and_unknown_builds_are_compatible(tmp_path: Path) -> None:
-    """Ordinary or legacy build directories remain eligible."""
+    """Ordinary or unconfigured build directories remain eligible."""
     plain = tmp_path / "plain"
     _write_cache(plain, "none")
 
     assert native_runtime._build_runtime_is_compatible(plain)
-    assert native_runtime._build_runtime_is_compatible(tmp_path / "legacy")
+    assert native_runtime._build_runtime_is_compatible(tmp_path / "unconfigured")
 
 
 def test_configured_checkout_build_precedes_newer_wheel_staging(

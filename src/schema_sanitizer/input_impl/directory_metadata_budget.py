@@ -27,11 +27,6 @@ _DIRECTORY_METADATA_FIXED_OVERHEAD_BYTES = 64 * 1024
 _DIRECTORY_METADATA_CLOSE_TIMEOUT_SECONDS = 30.0
 
 
-def _utf8_size_bounded(value: str, maximum_bytes: int) -> int:
-    """Compatibility wrapper for the shared allocation-bounded UTF-8 meter."""
-    return utf8_size_bounded(value, maximum_bytes)
-
-
 class RetainedDirectoryMetadata:
     """Lifetime owner for metadata that escapes the discovery call scope."""
 
@@ -332,33 +327,6 @@ class DirectoryMetadataBudget:
         if amount == 0:
             return
 
-        # Compatibility for focused historical doubles constructed with
-        # ``object.__new__``. Production instances always own ``_memory_lease``.
-        if not hasattr(self, "_memory_lease"):
-            owner = self._operation_memory_ledger
-            if owner is not None:
-                owner.reserve(amount, stage="directory_metadata")
-            try:
-                with self._lock:
-                    if self._close_started:
-                        raise RuntimeError("directory metadata budget is closed")
-                    next_used = self._used_bytes + amount
-                    if next_used > self.limit_bytes:
-                        raise self._limit_error(next_used, observed)
-                    self._used_bytes = next_used
-            except BaseException as primary:
-                if owner is not None:
-                    try:
-                        owner.release(amount)
-                    except BaseException as cleanup_error:
-                        add_bounded_note(
-                            primary,
-                            "directory metadata reservation rollback also failed",
-                            cleanup_error,
-                        )
-                raise
-            return
-
         with self._admission_lock:
             with self._lock:
                 if self._close_started:
@@ -397,16 +365,6 @@ class DirectoryMetadataBudget:
         """Rollback bytes retained only by a failed or temporary materialization."""
         amount = max(0, int(size))
         if amount == 0:
-            return
-
-        if not hasattr(self, "_memory_lease"):
-            with self._lock:
-                released = min(amount, self._used_bytes)
-            owner = self._operation_memory_ledger
-            if released and owner is not None:
-                owner.release(released)
-            with self._lock:
-                self._used_bytes = max(0, self._used_bytes - released)
             return
 
         with self._admission_lock:
@@ -471,18 +429,10 @@ class DirectoryMetadataBudget:
             self._closing = True
 
         try:
-            if hasattr(self, "_memory_lease"):
-                with self._admission_lock:
-                    lease = self._memory_lease
-                    if lease is not None:
-                        lease.close()
-            else:
-                # Historical injected owner: release exactly the retained debit.
-                owner = self._operation_memory_ledger
-                with self._lock:
-                    used = self._used_bytes
-                if owner is not None and used:
-                    owner.release(used)
+            with self._admission_lock:
+                lease = self._memory_lease
+                if lease is not None:
+                    lease.close()
         except BaseException:
             with self._close_condition:
                 self._closing = False
@@ -490,8 +440,7 @@ class DirectoryMetadataBudget:
             raise
 
         with self._close_condition:
-            if hasattr(self, "_memory_lease"):
-                self._memory_lease = None
+            self._memory_lease = None
             self._used_bytes = 0
             self._closed = True
             self._closing = False

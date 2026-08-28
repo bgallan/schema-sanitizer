@@ -272,7 +272,7 @@ def test_cross_process_memory_reclaims_dead_owner(
             {
                 "version": 1,
                 "leases": {
-                    "999999:dead:x": {
+                    "999999:dead": {
                         "pid": 999999,
                         "start": "dead",
                         "reserved": 90,
@@ -413,7 +413,7 @@ def test_staged_path_retains_lease_when_cleanup_fails(
         """Provide a deterministic test or worker helper."""
         raise OSError("busy")
 
-    def capture(path: Path, *, is_dir: bool, lease: object, expected_identity: object) -> None:
+    def capture(path: Path, *, is_dir: bool, lease: object, expected_identity: object) -> bool:
         """Provide a deterministic test or worker helper."""
         captured.update(
             path=path,
@@ -421,6 +421,7 @@ def test_staged_path_retains_lease_when_cleanup_fails(
             lease=lease,
             expected_identity=expected_identity,
         )
+        return True
 
     monkeypatch.setattr(staging_paths.shutil, "rmtree", fail_delete)
     monkeypatch.setattr(staging_paths, "quarantine_temporary_artifact", capture)
@@ -461,7 +462,7 @@ def test_temporary_janitor_releases_only_after_actual_deletion(tmp_path: Path) -
     lease = Lease()
     janitor = _TemporaryArtifactJanitor()
     janitor._scanned = True  # avoid unrelated global quarantine leftovers
-    janitor._ensure_thread_locked = lambda: None  # type: ignore[method-assign]
+    janitor._ensure_worker = lambda: None  # type: ignore[method-assign]
     outcomes = iter((False, True))
 
     def delete_owned(path, _is_dir, identity):

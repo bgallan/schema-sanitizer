@@ -450,7 +450,7 @@ def test_json_surrogate_pair_crossing_chunk_boundary(tmp_path: Path, multi_threa
 
 
 @pytest.mark.parametrize("multi_threading", [False, True])
-def test_json_lines_error_policy_recovers_without_losing_offsets(
+def test_jsonl_error_policy_recovers_without_losing_offsets(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """JSONL malformed rows stop, skip, or emit null as requested."""

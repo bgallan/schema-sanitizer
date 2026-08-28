@@ -8,7 +8,7 @@ import time
 from concurrent.futures import Future
 from contextvars import copy_context
 from pathlib import Path
-from threading import Event, Thread
+from threading import Condition, Event, RLock, Thread
 from types import SimpleNamespace
 from typing import Any
 
@@ -54,8 +54,15 @@ def test_path_identity_charges_fd_and_removes_claim(tmp_path: Path) -> None:
 
 def test_async_bridge_retains_thread_lease_until_real_finally(
     native_stub: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from schema_sanitizer.remote_impl.async_bridge import _BridgeRunner
+    from schema_sanitizer.remote_impl import async_bridge as module
+
+    def start_governed_thread(thread: Thread, *, registration: Any) -> None:
+        thread.start()
+        registration.activate()
+
+    monkeypatch.setattr(module, "start_governed_thread", start_governed_thread)
 
     started = Event()
     cancellation_observed = Event()
@@ -81,7 +88,7 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
             finalized.set()
 
     lease = Lease()
-    runner = _BridgeRunner(stubborn(), copy_context(), lease)
+    runner = module._BridgeRunner(stubborn(), copy_context(), lease)
     runner.start()
     assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     runner.cancel()
@@ -186,6 +193,8 @@ def test_callbackless_storage_waits_for_real_terminal(
             self.releases += 1
 
     iterator = object.__new__(RemoteChunkPrefetchIterator)
+    iterator._close_lock = RLock()
+    iterator._close_condition = Condition(iterator._close_lock)
     iterator._callbackless_storage_futures = {}
     iterator._failed_storage_leases = __import__("collections").deque()
     future: Future[Any] = Future()
@@ -225,7 +234,7 @@ def test_janitor_filesystem_claim_does_not_hold_global_lock(
 
     janitor = module._TemporaryArtifactJanitor()
     monkeypatch.setattr(module, "claim_path_identity", blocked_claim)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     worker = Thread(
         target=lambda: janitor.quarantine(tmp_path / "missing", is_dir=False, lease=Lease())
     )

@@ -9,6 +9,14 @@ from __future__ import annotations
 from _support.parquet_contracts import list_projection_field, recursive_projection_field
 
 
+def test_duplicate_projection_names_are_sorted_and_unique() -> None:
+    """The shared duplicate detector accepts iterables and is deterministic."""
+    from schema_sanitizer.adapters.parquet.projection.audits.summary import duplicate_names
+
+    assert duplicate_names(["b", "a", "b", "c", "a", "b"]) == ["a", "b"]
+    assert duplicate_names(iter(["only", "once"])) == []
+
+
 def test_native_recursive_projection_partition_contract_audit_recomposes_full_layout() -> None:
     """Verify disjoint projected roots recombine to the full recursive contract."""
     from schema_sanitizer.adapters.parquet.layout.reducer import (

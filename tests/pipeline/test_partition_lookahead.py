@@ -157,23 +157,9 @@ def test_lookahead_error_is_retained_until_its_partition_ordinal(
     assert not Path(plans[1].output_uri).exists()
 
 
-def test_single_pipeline_never_constructs_partition_lookahead_worker(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_single_pipeline_prepares_partitions_on_the_caller(tmp_path: Path) -> None:
     """Strict single mode keeps partition preparation on the caller thread."""
-    from schema_sanitizer.pipeline import partition_lookahead as lookahead_module
-
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(2)]
-
-    class ForbiddenExecutor:
-        """Fail if single mode attempts to create a helper thread."""
-
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """Reject construction immediately."""
-            raise AssertionError("single mode created a partition lookahead worker")
-
-    monkeypatch.setattr(lookahead_module, "ThreadPoolExecutor", ForbiddenExecutor)
     result = run_partitioned_to_parquet(
         plans,
         initial_schema_registry={},
@@ -417,22 +403,13 @@ def test_worker_creation_failure_falls_back_to_ordered_preparation(
 
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(2)]
 
-    class UnavailableExecutor:
-        """Model an environment that refuses the optional lookahead worker."""
-
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """Create the unavailable executor double."""
-            self.closed = False
-
-        def submit(self, *_args: Any, **_kwargs: Any) -> Any:
-            """Reject optional work submission."""
-            raise RuntimeError("worker creation unavailable")
-
-        def shutdown(self, **_kwargs: Any) -> None:
-            """Record deterministic fallback cleanup."""
-            self.closed = True
-
-    monkeypatch.setattr(lookahead_module, "ThreadPoolExecutor", UnavailableExecutor)
+    monkeypatch.setattr(
+        lookahead_module._DaemonThreadPoolExecutor,
+        "submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("worker creation unavailable")
+        ),
+    )
     result = run_partitioned_to_parquet(
         plans,
         initial_schema_registry={},

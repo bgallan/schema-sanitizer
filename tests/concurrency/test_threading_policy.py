@@ -172,16 +172,7 @@ def test_run_sync_single_refuses_to_create_async_helper_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An active event loop cannot silently force a helper host thread in single mode."""
-    from schema_sanitizer.remote_impl import async_bridge, transport
-
-    class ForbiddenThread:
-        """Fail if the extracted async bridge constructs a host thread."""
-
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            """Reject construction of the forbidden helper thread."""
-            raise AssertionError("single mode constructed async helper thread")
-
-    monkeypatch.setattr(async_bridge, "Thread", ForbiddenThread)
+    from schema_sanitizer.remote_impl import async_bridge
 
     async def run() -> None:
         """Exercise the synchronous bridge from an active event loop."""
@@ -191,7 +182,7 @@ def test_run_sync_single_refuses_to_create_async_helper_thread(
             return 1
 
         with pytest.raises(RuntimeError, match="helper host thread"):
-            transport.run_sync(value(), threading_mode="single")
+            async_bridge.run_sync(value(), threading_mode="single")
 
     asyncio.run(run())
 
@@ -200,7 +191,11 @@ def test_remote_prefetch_single_stages_inline_without_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The remote source-plan prefetcher owns no pool in single mode."""
+    from schema_sanitizer.api_impl.input.directory_preparation import (
+        RemoteNativeDirectorySourceManifest,
+    )
     from schema_sanitizer.api_impl.source_plan import remote
+    from schema_sanitizer.sources import RemoteFile
 
     class ForbiddenCoordinator:
         """Fail if the multi-only remote coordinator is constructed."""
@@ -211,13 +206,8 @@ def test_remote_prefetch_single_stages_inline_without_executor(
 
     staged = SimpleNamespace(close=lambda: None)
 
-    class Manifest:
+    class Manifest(RemoteNativeDirectorySourceManifest):
         """Provide one inline-stage manifest for the prefetch test."""
-
-        files = ("a",)
-        chunk_size = 1
-        memory_limit_bytes = 512 * 1024 * 1024
-        threading_mode = "single"
 
         def stage_chunk(self, start: int) -> object:
             """Return the one staged test chunk."""
@@ -225,7 +215,14 @@ def test_remote_prefetch_single_stages_inline_without_executor(
             return staged
 
     monkeypatch.setattr(remote, "RemoteIoCoordinator", ForbiddenCoordinator)
-    iterator = remote.RemoteChunkPrefetchIterator(Manifest())
+    iterator = remote.RemoteChunkPrefetchIterator(
+        Manifest(
+            [RemoteFile("s3://bucket/a.csv", "a.csv", 1)],
+            "csv",
+            memory_limit_bytes=512 * 1024 * 1024,
+            chunk_size=1,
+        )
+    )
     assert next(iterator) is staged
     iterator.close()
     assert iterator._coordinator is None

@@ -18,10 +18,7 @@ from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.api_impl.file_conversion.writers import write_jsonl_native_first_stream
 from schema_sanitizer.api_impl.stream_output import write_raw_stream_to_file
 from schema_sanitizer.core_impl.schema_registry import schema_contract_from_registry_json
-from schema_sanitizer.input_impl.selection import (
-    native_input_format,
-    normalize_format_selector,
-)
+from schema_sanitizer.input_impl.selection import normalize_format_selector
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 pytestmark = pytest.mark.usefixtures("fixed_operation_clock")
@@ -157,12 +154,9 @@ def test_sources_balance_and_submit_the_critical_path_first() -> None:
     assert "line_delimited && stop_on_error" in json_frontend
 
 
-def test_jsonl_aliases_reach_the_dedicated_native_frontend() -> None:
+def test_jsonl_reaches_the_dedicated_native_frontend() -> None:
     """Do not collapse line-delimited JSON back into the generic JSON scanner."""
     assert normalize_format_selector("jsonl") == "jsonl"
-    assert normalize_format_selector("ndjson") == "jsonl"
-    assert native_input_format("jsonl") == "jsonl"
-    assert native_input_format("ndjson") == "jsonl"
 
 
 def test_clustered_mixed_wide_rows_preserve_exact_output(tmp_path: Path) -> None:

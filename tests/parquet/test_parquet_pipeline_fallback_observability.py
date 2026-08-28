@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from schema_sanitizer.adapters.parquet import telemetry as recording
 
 
-def _make_native_try_factory(factory_module: object) -> object:
-    """Build a minimal ParquetRecordBatchStreamFactory for _try_native_stream tests."""
-    factory = object.__new__(factory_module.ParquetRecordBatchStreamFactory)
-    factory._filters = None
-    factory._local_path = "native-candidate.parquet"
-    factory._source = "path"
-    factory._native_source_kind = "path"
-    factory._columns = None
-    factory._batch_size = 1024
-    factory._memory_limit_bytes = None
-    factory._keepalive = ()
-    return factory
+def _native_try_state() -> object:
+    """Build the state consumed by the native-stream decision helper."""
+    return SimpleNamespace(
+        _filters=None,
+        _local_path="native-candidate.parquet",
+        _source="path",
+        _native_source_kind="path",
+        _columns=None,
+        _batch_size=1024,
+        _memory_limit_bytes=None,
+        _keepalive=(),
+    )
 
 
 def test_parquet_stream_factory_observability_counts_are_defensive() -> None:
@@ -168,7 +170,7 @@ def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
-    factory = _make_native_try_factory(stream_factory)
+    factory = _native_try_state()
 
     monkeypatch.setattr(
         stream_factory,
@@ -184,7 +186,7 @@ def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
     )
     monkeypatch.setattr(stream_factory, "PARQUET_STREAM_READ", lambda *args: "capsule")
 
-    assert factory._try_native_stream() == "capsule"
+    assert stream_factory.ParquetRecordBatchStreamFactory._try_native_stream(factory) == "capsule"
 
     snapshot = observability.parquet_stream_factory_observability()
     assert snapshot["last_route"] == "native_parquet_stream"
@@ -212,7 +214,7 @@ def test_parquet_native_reader_non_runtime_errors_fall_back(
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
-    factory = _make_native_try_factory(stream_factory)
+    factory = _native_try_state()
 
     monkeypatch.setattr(
         stream_factory,
@@ -232,7 +234,7 @@ def test_parquet_native_reader_non_runtime_errors_fall_back(
 
     monkeypatch.setattr(stream_factory, "PARQUET_STREAM_READ", failing_native_read)
 
-    assert factory._try_native_stream() is None
+    assert stream_factory.ParquetRecordBatchStreamFactory._try_native_stream(factory) is None
 
     diagnostics = observability.last_parquet_native_reader_diagnostics()
     assert diagnostics["attempted"] is True
@@ -253,7 +255,7 @@ def test_parquet_native_footer_errors_fall_back(monkeypatch: pytest.MonkeyPatch)
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
-    factory = _make_native_try_factory(stream_factory)
+    factory = _native_try_state()
 
     def failing_footer_info(*args: object, **kwargs: object) -> object:
         """Internal test helper."""
@@ -262,7 +264,7 @@ def test_parquet_native_footer_errors_fall_back(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(stream_factory, "native_parquet_stream_preflight_info", failing_footer_info)
     monkeypatch.setattr(stream_factory, "PARQUET_STREAM_READ", object())
 
-    assert factory._try_native_stream() is None
+    assert stream_factory.ParquetRecordBatchStreamFactory._try_native_stream(factory) is None
 
     diagnostics = observability.last_parquet_native_reader_diagnostics()
     assert diagnostics["attempted"] is True

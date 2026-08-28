@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from schema_sanitizer.api_impl import execution_context
 from schema_sanitizer.api_impl import results as result_adapters
-from schema_sanitizer.api_impl import table_adapter_sink
 from schema_sanitizer.api_impl.source_plan import registry as registry_streams
 from schema_sanitizer.core_impl.concurrency_coverage import (
     INPUT_CONCURRENCY_COVERAGE,
@@ -203,8 +203,13 @@ def test_polars_consumes_reader_without_arrow_table(
         """Minimal Polars module accepting Arrow reader inputs."""
 
         @staticmethod
-        def from_arrow(value: object) -> _FakePolarsFrame:
+        def thread_pool_size() -> int:
+            return 1
+
+        @staticmethod
+        def from_arrow(value: object, *, rechunk: bool) -> _FakePolarsFrame:
             """Record the Arrow value and return a fake DataFrame."""
+            assert rechunk is False
             seen.append(value)
             return _FakePolarsFrame()
 
@@ -235,13 +240,26 @@ def test_duckdb_binds_reader_directly_without_full_batch_list(
 ) -> None:
     """DuckDB receives the lazy reader directly and retains its lifetime."""
     duckdb_inputs: list[object] = []
-    relation = object()
+    connect_options: list[tuple[str, dict[str, int]]] = []
+
+    class Relation:
+        pass
+
+    relation = Relation()
+
+    class Connection:
+        def from_arrow(self, value: object) -> object:
+            duckdb_inputs.append(value)
+            return relation
+
+        def close(self) -> None:
+            pass
 
     class FakeDuckDB:
         @staticmethod
-        def from_arrow(value: object) -> object:
-            duckdb_inputs.append(value)
-            return relation
+        def connect(*, database: str, config: dict[str, int]) -> Connection:
+            connect_options.append((database, config))
+            return Connection()
 
     monkeypatch.setattr(
         result_adapters,
@@ -257,8 +275,9 @@ def test_duckdb_binds_reader_directly_without_full_batch_list(
     )
 
     reader = reader_factory[-1]
+    assert connect_options == [(":memory:", {"threads": 1})]
     assert duckdb_inputs == [reader]
-    assert conversion.clean_data is relation
+    assert conversion.clean_data._relation is relation
     assert conversion.route == "record_batch_reader_to_duckdb"
     assert conversion.diagnostics_shape.num_rows == 0
     assert conversion.diagnostics_shape.batch_count == 3
@@ -378,7 +397,7 @@ def test_materializer_rolls_back_unpublished_adapter_owner(
 def test_internal_adapter_sink_uses_stream_not_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ExecutionContext adapter sinks no longer force context.to_table first."""
+    """ExecutionContext adapter sinks consume the stream directly."""
     output = SimpleNamespace(raw="native-stream", closed=False)
 
     def close() -> None:
@@ -397,11 +416,11 @@ def test_internal_adapter_sink_uses_stream_not_table(
             return output
 
         def to_table(self, *_args: object, **_kwargs: object) -> object:
-            """Fail if the removed eager table path is called."""
+            """Fail if the eager table path is called."""
             raise AssertionError("table barrier must not be used")
 
     monkeypatch.setattr(
-        table_adapter_sink,
+        execution_context,
         "convert_arrow_stream_output",
         lambda *_args, **_kwargs: result_adapters.AnalyticalOutputConversion(
             "adapter-value",
@@ -410,7 +429,7 @@ def test_internal_adapter_sink_uses_stream_not_table(
         ),
     )
 
-    value = table_adapter_sink.materialize_table_adapter_sink(
+    value = execution_context.materialize_table_adapter_sink(
         FakeContext(),
         "rows",
         sink="polars",
@@ -424,10 +443,10 @@ def test_internal_adapter_sink_uses_stream_not_table(
 
 
 def test_every_pair_declares_its_terminal_handoff_and_table_barrier() -> None:
-    """All 56 pairs distinguish native sinks from direct analytical readers."""
+    """All 49 pairs distinguish native sinks from direct analytical readers."""
     pairs = concurrency_pair_guarantees()
     assert set(pairs) == set(INPUT_CONCURRENCY_COVERAGE)
-    assert sum(len(outputs) for outputs in pairs.values()) == 56
+    assert sum(len(outputs) for outputs in pairs.values()) == 49
     for outputs in pairs.values():
         assert set(outputs) == set(OUTPUT_CONCURRENCY_COVERAGE)
         for output_name, contract in outputs.items():

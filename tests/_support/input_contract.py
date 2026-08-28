@@ -25,7 +25,6 @@ from conftest import (
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution import PythonRowsJsonlByteReader
-from schema_sanitizer.core_impl.python_rows import last_python_rows_route
 
 
 class _TrackingByteReader:
@@ -92,7 +91,6 @@ __all__ = [
     "inspect",
     "io",
     "json",
-    "last_python_rows_route",
     "pytest",
     "read_test_csv",
     "read_test_json",

@@ -367,15 +367,7 @@ def _reset_prepared_options_cache_after_fork() -> None:
     global _PREPARED_OPTIONS_CACHE_LOCK, _FORK_PREPARED_OPTIONS_STATE, _FORK_OPTIONS_BANK_INDEX
     prepared = _FORK_PREPARED_OPTIONS_STATE
     if prepared is None:
-        from .fork_safety import runtime_fork_poisoned
-
-        if runtime_fork_poisoned():
-            return
-        # Legacy/direct reset calls run in an ordinary process, not inside an
-        # at-fork callback. Reuse the already allocated child bank and clear it
-        # here rather than allocating a fresh OrderedDict/Lock.
-        prepared = _FORK_OPTIONS_BANKS[_FORK_OPTIONS_BANK_INDEX]
-        prepared[0].clear()
+        return
     quarantine_inherited_state(
         "native-options-cache", _PREPARED_OPTIONS_CACHE, _PREPARED_OPTIONS_CACHE_LOCK
     )

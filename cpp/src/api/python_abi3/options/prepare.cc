@@ -3,10 +3,11 @@
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_state.hh"
 #include "internal/memory/memory_pool.hh"
 #include "internal/runtime/process_identity.hh"
 #include "sanitize/options/options.hh"
+#include "sanitize/options/options_io.hh"
 
 #include <atomic>
 #include <cstdint>
@@ -193,14 +194,27 @@ PyObject *py_options_prepare_bytes(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  schema_sanitizer_prepared_options *out = nullptr;
-  char *error = nullptr;
-  const int status = schema_sanitizer_options_prepare_bytes(
-      data, static_cast<std::size_t>(size), &out, &error);
+  sanitize::Result<sanitize::PreparedOptionsPtr> prepared =
+      default_prepared_options();
+  if (size != 0) {
+    auto options = sanitize::deserialize_options(std::string_view(
+        reinterpret_cast<const char *>(data), static_cast<std::size_t>(size)));
+    if (!options.ok()) {
+      Py_DECREF(view_owner);
+      raise_status_error(options.status());
+      return nullptr;
+    }
+    prepared = sanitize::prepare_options(std::move(options).ValueOrDie());
+  }
   Py_DECREF(view_owner);
-
-  if (status != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(status, error);
+  if (!prepared.ok()) {
+    raise_status_error(prepared.status());
+    return nullptr;
+  }
+  auto *out = new (std::nothrow)
+      NativePreparedOptions{.prepared = std::move(prepared).ValueOrDie()};
+  if (!out) {
+    PyErr_NoMemory();
     return nullptr;
   }
   return wrap_prepared_options_capsule(out);
@@ -220,8 +234,8 @@ PyObject *py_options_with_detected_at(PyObject *, PyObject *args) {
   }
   auto cloned = std::make_shared<sanitize::PreparedOptions>(*prepared);
   cloned->operation_detected_at = detected_at ? detected_at : "";
-  auto *out = new (std::nothrow)
-      schema_sanitizer_prepared_options{.prepared = std::move(cloned)};
+  auto *out =
+      new (std::nothrow) NativePreparedOptions{.prepared = std::move(cloned)};
   if (!out) {
     PyErr_NoMemory();
     return nullptr;
@@ -579,8 +593,8 @@ PyObject *py_options_with_operation_context(PyObject *, PyObject *args) {
   auto cloned = std::make_shared<sanitize::PreparedOptions>(*prepared);
   cloned->operation_detected_at = detected_at ? detected_at : "";
   cloned->operation_memory_ledger = std::static_pointer_cast<void>(ledger);
-  auto *out = new (std::nothrow)
-      schema_sanitizer_prepared_options{.prepared = std::move(cloned)};
+  auto *out =
+      new (std::nothrow) NativePreparedOptions{.prepared = std::move(cloned)};
   if (!out) {
     PyErr_NoMemory();
     return nullptr;

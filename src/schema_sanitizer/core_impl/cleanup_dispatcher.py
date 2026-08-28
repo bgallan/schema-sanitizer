@@ -149,7 +149,6 @@ class _CleanupDispatcher:
         self._queues: dict[CleanupSubsystem, deque[_CleanupCall]] = {}
         self._ready_subsystems: deque[CleanupSubsystem] = deque()
         self._deficits: dict[CleanupSubsystem, int] = {}
-        self._delayed_heap: list[tuple[int, int, _CleanupCall]] = []  # compatibility only
         self._owned_index: dict[int, _CleanupCall] = {}
         self._delayed_calls = 0
         self._delayed_bytes = 0
@@ -188,7 +187,6 @@ class _CleanupDispatcher:
         self._dead_letters: list[_CleanupCall | None] = [None] * _MAX_DEAD_LETTER_CALLS
         self._dead_letter_count = 0
         self._dead_letter_bytes = 0
-        self._parked: deque[_CleanupCall] = deque()  # compatibility only
         self._parked_calls = 0
         self._oldest_active_ns = 0
         self._active_started_ns: dict[int, int] = {}
@@ -656,17 +654,6 @@ class _CleanupDispatcher:
                 id(call),
                 retained_bytes=call.retained_bytes,
             )
-
-    def _requeue_call_locked(self, call: _CleanupCall) -> None:
-        """Compatibility helper: delayed work is never put in runnable queues."""
-        if call.parked:
-            call.state = _CleanupState.PARKED
-            self._parked_calls += 1
-            self._publish_terminal_call_locked(call)
-        elif call.next_attempt_ns > time.monotonic_ns():
-            self._enqueue_delayed_locked(call)
-        else:
-            self._enqueue_runnable_locked(call)
 
     def _run(self, lease: Any) -> None:
         current = threading.current_thread()

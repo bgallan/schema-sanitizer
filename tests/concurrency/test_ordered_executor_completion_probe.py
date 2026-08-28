@@ -76,7 +76,7 @@ def test_completion_probe_is_worker_count_deterministic() -> None:
 
 @pytest.mark.native_stress
 def test_completion_probe_sustains_many_ring_generations() -> None:
-    """One explicit heavy case retains the former maximum 16-worker load."""
+    """One explicit heavy case exercises the maximum 16-worker load."""
     require_native()
     assert_ring_generations(STRESS_WORKERS, STRESS_TASKS, minimum=781)
 

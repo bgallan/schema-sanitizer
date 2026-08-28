@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA_TELEMETRY = ROOT / "cpp/src/internal/runtime/operation_task_telemetry.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/telemetry/completion-shards.json"
 
 
 def test_every_multiworker_range_uses_worker_completion_shards() -> None:
@@ -28,9 +28,7 @@ def test_every_multiworker_range_uses_worker_completion_shards() -> None:
 
 def test_tsan_probe_covers_real_mid_and_high_core_arenas() -> None:
     """The focused real-arena probe validates 5, 8, and 16 worker drains."""
-    source = (ROOT / "benchmarks/probes/concurrency/telemetry/completion-shards-tsan.cc").read_text(
-        encoding="utf-8"
-    )
+    source = load_probe("telemetry/completion-shards-tsan.cc")
 
     assert "OperationTaskArena::Make(workers, telemetry)" in source
     assert "for (const auto workers : {5U, 8U, 16U})" in source
@@ -41,7 +39,7 @@ def test_tsan_probe_covers_real_mid_and_high_core_arenas() -> None:
 
 def test_evidence_covers_mid_and_high_worker_policies() -> None:
     """Evidence records both widened gates and avoids throughput overclaims."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("completion-shards")
 
     scenarios = {int(item["workers"]): item for item in evidence["scenarios"]}
     assert set(scenarios) == {5, 8, 16}

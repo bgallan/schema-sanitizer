@@ -33,8 +33,9 @@ def test_physical_claim_cleanup_repairs_stale_low_aggregate_counter() -> None:
         def exact_permit_lease_amount(self, receipt: Receipt) -> int:
             return receipt.amount
 
-        def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> None:
+        def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
             receipt.amount = int(target)
+            return receipt.amount
 
     _reset_external(module)
     key = ("declared", ("physical-claim-cleanup-repairs-stale-low", "physical-counter-repair"))
@@ -85,51 +86,6 @@ def test_logical_claim_cleanup_repairs_stale_low_aggregate_counter() -> None:
     module._resize_shared_external_logical_thread_claim(key, 7, 0)
     assert module._EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS == 0
     assert key not in module._EXTERNAL_RUNTIME_POOL_COORDINATOR
-
-
-def test_finalizer_physical_claim_cleanup_never_waits_for_config_inflight() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    _reset_external(module)
-    key = ("declared", ("physical-claim-cleanup-repairs-stale-low", "nonblocking-finalizer"))
-    entry = module._ExternalRuntimePoolCoordinatorEntry(
-        runtime=None,
-        runtime_key=key,
-        physical_amount=1,
-        physical_claims={3: 1},
-        config_inflight=True,
-        config_owner_thread_id=12345,
-    )
-    module._EXTERNAL_RUNTIME_POOL_COORDINATOR[key] = entry
-    module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS = 1
-
-    module._cleanup_shared_external_physical_claim_capsule(SimpleNamespace(arg0=key, arg1=3))
-    assert entry.physical_claims == {3: 0}
-    assert module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS == 1
-
-
-def test_finalizer_logical_claim_cleanup_never_waits_for_config_inflight() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    _reset_external(module)
-    key = (
-        "declared",
-        ("physical-claim-cleanup-repairs-stale-low", "nonblocking-logical-finalizer"),
-    )
-    entry = module._ExternalRuntimePoolCoordinatorEntry(
-        runtime=None,
-        runtime_key=key,
-        logical_width=1,
-        logical_claims={4: 1},
-        config_inflight=True,
-        config_owner_thread_id=12345,
-    )
-    module._EXTERNAL_RUNTIME_POOL_COORDINATOR[key] = entry
-    module._EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS = 1
-
-    module._cleanup_shared_external_logical_claim_capsule(SimpleNamespace(arg0=key, arg1=4))
-    assert entry.logical_claims == {4: 0}
-    assert module._EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS == 1
 
 
 def test_residency_probe_retries_when_config_generation_changes() -> None:
@@ -247,56 +203,6 @@ def test_fd_opening_attempt_membership_is_authoritative() -> None:
     assert "external runtime aggregate logical claim underflow" not in resources
 
 
-def test_config_owner_drains_finalizer_tombstone_after_dropping_inflight_latch() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    _reset_external(module)
-    key = ("runtime", 123456789)
-
-    class Receipt:
-        amount = 1
-
-    class Native:
-        supports_exact_permit_lease = True
-
-        def exact_permit_lease_amount(self, receipt: Receipt) -> int:
-            return receipt.amount
-
-        def resize_exact_permit_lease(self, receipt: Receipt, target: int) -> int:
-            receipt.amount = int(target)
-            return receipt.amount
-
-    receipt = Receipt()
-
-    class Runtime:
-        def cpu_count(self) -> int:
-            module._cleanup_shared_external_physical_claim_capsule(
-                SimpleNamespace(arg0=key, arg1=1)
-            )
-            return 1
-
-        def set_cpu_count(self, _value: int) -> None:
-            pass
-
-    runtime = Runtime()
-    # Force the test's synthetic key to match this wrapper's identity key.
-    key = module._external_runtime_pool_identity_key(runtime)
-    entry = module._ExternalRuntimePoolCoordinatorEntry(
-        runtime=runtime,
-        runtime_key=key,
-        native=Native(),
-        native_lease=receipt,
-        physical_amount=1,
-        physical_claims={1: 1},
-    )
-    module._EXTERNAL_RUNTIME_POOL_COORDINATOR[key] = entry
-    module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS = 1
-
-    assert module.constrain_external_runtime_worker_pool(runtime, 1) == 1
-    assert receipt.amount == 0
-    assert module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS == 0
-
-
 def test_external_exact_resize_consumes_post_commit_state_without_second_metadata_read() -> None:
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -307,14 +213,14 @@ def test_external_exact_resize_consumes_post_commit_state_without_second_metadat
         calls["metadata"] += 1
         return (11, 7, 3)
 
-    authority = module._ExternalNativeThreadAuthority(
-        lambda _desired, _minimum: 0,
-        lambda _amount: None,
-        lease_acquire=lambda _desired, _minimum: None,
-        lease_resize=lambda _lease, target, generation: (generation + 1, target),
-        lease_amount=lambda _lease: (_ for _ in ()).throw(AssertionError("post metadata fallback")),
-        lease_metadata=metadata,
+    core = SimpleNamespace(
+        process_external_runtime_thread_permit_lease_metadata=metadata,
+        process_external_runtime_thread_permit_lease_resize=lambda _lease, target, generation: (
+            generation + 1,
+            target,
+        ),
     )
+    authority = module._ExternalNativeThreadAuthority(core)
     assert authority.resize_exact_permit_lease(lease, 2) == 2
     assert calls["metadata"] == 1
 

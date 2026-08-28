@@ -28,7 +28,6 @@ def test_to_csv_writes_file(tmp_path: Path) -> None:
     """Verify to csv writes file."""
     require_native()
     pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.csv_sink import last_csv_stream_route
 
     out = tmp_path / "out.csv"
     result = ss.to_csv(
@@ -42,14 +41,14 @@ def test_to_csv_writes_file(tmp_path: Path) -> None:
     with out.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
     assert _without_generated_metadata_rows(rows) == [{"a": "1", "b": "2"}]
-    assert last_csv_stream_route() == "native"
+    assert result.stats["file_output_route"] == "native_direct"
+    assert result.stats["file_metadata_route"] == "none"
 
 
 def test_to_csv_json_stringifies_nested_fields(tmp_path: Path) -> None:
     """Verify to csv json stringifies nested fields."""
     require_native()
     pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.csv_sink import last_csv_stream_route
 
     data = [
         {"id": 1, "payload": {"a": 1, "b": "x"}, "items": [1, 2, 3]},
@@ -61,7 +60,7 @@ def test_to_csv_json_stringifies_nested_fields(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     out = tmp_path / "nested.csv"
-    ss.to_csv(source, out, input_format="jsonl")
+    result = ss.to_csv(source, out, input_format="jsonl")
 
     with out.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -71,7 +70,7 @@ def test_to_csv_json_stringifies_nested_fields(tmp_path: Path) -> None:
     assert rows[0]["id"] == "1"
     assert json.loads(rows[0]["payload"]) == {"a": 1, "b": "x"}
     assert json.loads(rows[0]["items"]) == [1, 2, 3]
-    assert last_csv_stream_route() == "native"
+    assert result.stats["file_output_route"] == "native_direct"
 
 
 def test_jsonl_native_file_output_writes_metadata_without_pyarrow_sink(
@@ -80,8 +79,6 @@ def test_jsonl_native_file_output_writes_metadata_without_pyarrow_sink(
     """Verify native JSONL output composes metadata injection without PyArrow sink fallback."""
     require_native()
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
-    from schema_sanitizer.adapters.pyarrow.jsonl_sink import last_jsonl_stream_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
     def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
@@ -106,8 +103,6 @@ def test_jsonl_native_file_output_writes_metadata_without_pyarrow_sink(
         {"a": "1", "schema_registry": "{}", "source_file": "/tmp/source.jsonl"},
         {"a": "2", "schema_registry": None, "source_file": "/tmp/source.jsonl"},
     ]
-    assert last_jsonl_stream_route() == "native"
-    assert last_metadata_route() == "native"
 
 
 def test_csv_native_file_output_writes_metadata_without_pyarrow_sink(
@@ -116,8 +111,6 @@ def test_csv_native_file_output_writes_metadata_without_pyarrow_sink(
     """Verify native CSV output composes metadata injection without PyArrow sink fallback."""
     require_native()
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.csv_sink import last_csv_stream_route
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
     def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
@@ -143,8 +136,6 @@ def test_csv_native_file_output_writes_metadata_without_pyarrow_sink(
         {"a": "1", "schema_registry": "{}", "source_file": "/tmp/source.csv"},
         {"a": "2", "schema_registry": "", "source_file": "/tmp/source.csv"},
     ]
-    assert last_csv_stream_route() == "native"
-    assert last_metadata_route() == "native"
 
 
 def test_native_jsonl_schema_support_check_uses_native_parser() -> None:
@@ -250,6 +241,8 @@ def test_to_jsonl_writes_file(tmp_path: Path) -> None:
     assert result.clean_data is None
     row = json.loads(out.read_text(encoding="utf-8").strip())
     assert _without_generated_metadata(row) == {"a": "1", "b": "2"}
+    assert result.stats["file_output_route"] == "native_direct"
+    assert result.stats["file_metadata_route"] == "none"
 
 
 def test_to_jsonl_preserves_nested_fields(tmp_path: Path) -> None:

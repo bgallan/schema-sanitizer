@@ -27,7 +27,7 @@ def _native_arena_snapshot() -> dict[str, int | bool]:
         values = tuple(method())
     except Exception:
         return {"available": True, "snapshot_failed": True}
-    if len(values) not in (8, 16, 20, 23, 25, 27, 29, 30):
+    if len(values) != 30:
         return {"available": True, "snapshot_failed": True}
     names = (
         "live_arenas",
@@ -194,50 +194,6 @@ def concurrency_runtime_debug_snapshot() -> dict[str, Any]:
     }
 
 
-def concurrency_debug_snapshot() -> dict[str, Any]:
-    """Return the stable pass37 compatibility snapshot.
-
-    Use :func:`concurrency_runtime_debug_snapshot` for the integral pass39 view.
-    """
-    from . import path_identity, retry_scheduler
-
-    consistent = False
-    retry = retry_scheduler.retry_scheduler_snapshot()
-    guardian = retry_scheduler.release_guardian_snapshot()
-    for _attempt in range(3):
-        retry_after = retry_scheduler.retry_scheduler_snapshot()
-        guardian_after = retry_scheduler.release_guardian_snapshot()
-        consistent = (
-            retry.progress_epoch == retry_after.progress_epoch
-            and guardian.progress_epoch == guardian_after.progress_epoch
-        )
-        retry, guardian = retry_after, guardian_after
-        if consistent:
-            break
-    now = monotonic_ns()
-    capture_epoch = f"{retry.progress_epoch}:{guardian.progress_epoch}"
-    common = {
-        "capture_epoch": capture_epoch,
-        "consistent": consistent,
-        "fork_quarantine_generations": retry_scheduler._FORKED_RETRY_GENERATIONS,
-    }
-    return {
-        "version": 1,
-        "captured_at_monotonic_ns": now,
-        "retry_scheduler": {
-            **asdict(retry),
-            **common,
-            "path_fork_quarantine_generations": path_identity._FORKED_PATH_GENERATIONS,
-            "progress_age_ns": _age(now, retry.last_progress_ns),
-        },
-        "release_guardian": {
-            **asdict(guardian),
-            **common,
-            "progress_age_ns": _age(now, guardian.last_progress_ns),
-        },
-    }
-
-
 from .shutdown_observers import (  # noqa: E402
     register_shutdown_observer as _register_shutdown_observer,
 )
@@ -246,6 +202,5 @@ _register_shutdown_observer("native_arena", _native_arena_snapshot)
 
 
 __all__ = [
-    "concurrency_debug_snapshot",
     "concurrency_runtime_debug_snapshot",
 ]

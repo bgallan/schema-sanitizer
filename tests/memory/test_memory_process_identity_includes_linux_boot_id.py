@@ -8,26 +8,13 @@ import stat
 from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
-from threading import Lock
+from threading import Condition, Lock, RLock
 from typing import Any
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
-)
-
-_NATIVE_STUB_MODULES = (
-    "schema_sanitizer.core_impl.native_options",
-    "schema_sanitizer.core_impl.execution_policy",
-    "schema_sanitizer.api_impl.operation_context",
-    "schema_sanitizer.api_impl.input.directory_preparation",
-    "schema_sanitizer.api_impl.source_plan.attached",
-    "schema_sanitizer.api_impl.source_plan.remote_cleanup",
-    "schema_sanitizer.api_impl.source_plan.remote_runtime.provider",
-    "schema_sanitizer.api_impl.source_plan.remote_runtime",
-    "schema_sanitizer.api_impl.source_plan.remote",
-    "schema_sanitizer.pipeline.partition_lookahead",
 )
 
 
@@ -81,27 +68,27 @@ def test_process_identity_includes_linux_boot_id(
     assert module.process_start_token(42) == ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:12345")
 
 
-def test_process_identity_comparison_supports_legacy_but_rejects_reboot() -> None:
-    """Rolling deployments accept start-only tokens while new boot IDs are strict."""
+def test_process_identity_comparison_requires_the_canonical_composite_token() -> None:
+    """Persisted identities match exactly while unknown probes remain conservative."""
     from schema_sanitizer.core_impl.process_identity import process_identity_matches
 
-    assert process_identity_matches("12345", "boot-a:12345")
-    assert process_identity_matches("boot-a:12345", "12345")
+    assert not process_identity_matches("12345", "boot-a:12345")
+    assert not process_identity_matches("boot-a:12345", "12345")
     assert process_identity_matches("boot-a:12345", "boot-a:12345")
     assert not process_identity_matches("boot-a:12345", "boot-b:12345")
     assert process_identity_matches("unknown", "boot-b:12345")
 
 
-def test_cross_process_alive_rejects_same_tick_from_another_boot(
+def test_process_liveness_rejects_same_tick_from_another_boot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Persistent coordination state is not attributed to a rebooted PID twin."""
-    from schema_sanitizer.core_impl import cross_process_memory as module
+    from schema_sanitizer.core_impl import process_identity as module
 
     monkeypatch.setattr(module.os, "kill", lambda *_args: None)
-    monkeypatch.setattr(module, "_process_start_token", lambda _pid: "boot-b:77")
-    assert not module._process_alive(123, "boot-a:77")
-    assert module._process_alive(123, "77")
+    monkeypatch.setattr(module, "process_start_token", lambda _pid: "boot-b:77")
+    assert not module.process_is_alive(123, "boot-a:77")
+    assert not module.process_is_alive(123, "77")
 
 
 def test_janitor_retries_lease_release_after_artifact_deletion() -> None:
@@ -136,43 +123,9 @@ def test_janitor_retries_lease_release_after_artifact_deletion() -> None:
     assert janitor.snapshot().deleted_artifacts == 1
 
 
-def test_janitor_retains_thread_permit_after_failed_retirement() -> None:
-    """A failed permit return remains owned and is retried before replacement."""
-    from schema_sanitizer.core_impl import temporary_janitor as module
-
-    class Lease:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def release(self) -> None:
-            self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("governor unavailable")
-
-    janitor = module._TemporaryArtifactJanitor()
-    lease = Lease()
-    janitor._thread = __import__("threading").current_thread()
-    janitor._thread_lease = lease
-    with janitor._lock:
-        janitor._retire_current_thread_locked()
-    assert janitor._thread is None
-    assert janitor._thread_lease is lease
-
-    janitor._closed = True
-    with janitor._lock:
-        janitor._ensure_thread_locked()
-    assert lease.calls == 1
-    janitor._closed = False
-    with janitor._lock:
-        janitor._ensure_thread_locked()
-    assert lease.calls == 2
-    assert janitor._thread_lease is None or janitor._thread is not None
-    janitor.close()
-
-
 def test_staged_result_ownership_retries_failed_abandon_cleanup() -> None:
     """An abandoned staged result remains reachable until close succeeds."""
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     staged = _FailingClose(1)
     ownership = StagedResultOwnership()
@@ -186,7 +139,7 @@ def test_staged_result_ownership_retries_failed_abandon_cleanup() -> None:
 
 def test_staged_result_published_after_abandon_retains_failed_cleanup() -> None:
     """Late future completion cannot drop a staged result whose close failed."""
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     staged = _FailingClose(1)
     ownership = StagedResultOwnership()
@@ -202,6 +155,12 @@ def _bare_lookahead(module: Any, future: Future[Any], context: Any, executor: An
     owner = object.__new__(module.PartitionSourceLookahead)
     owner._pid = os.getpid()
     owner._close_lock = Lock()
+    owner._close_condition = Condition(owner._close_lock)
+    owner._close_in_progress = False
+    owner._submissions_inflight = 0
+    owner._protocol_violations = 0
+    owner._consumer_inflight = False
+    owner._close_timeout_seconds = 1.0
     owner._close_started = False
     owner._late_close_registered = False
     owner._closed = False
@@ -210,12 +169,13 @@ def _bare_lookahead(module: Any, future: Future[Any], context: Any, executor: An
     owner._future = future
     owner._future_context = context
     owner._executor = executor
+    owner._runtime_registration = None
+    owner._finalizer_owner = None
+    owner._finalizer_ticket = -1
     return owner
 
 
-def test_partition_lookahead_close_retains_cancelled_context_on_failure(
-    native_stub: None,
-) -> None:
+def test_partition_lookahead_close_retains_cancelled_context_on_failure() -> None:
     """Cancelled speculative work keeps its child context until close commits."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
@@ -245,9 +205,7 @@ def test_partition_lookahead_close_retains_cancelled_context_on_failure(
     assert owner._closed
 
 
-def test_partition_lookahead_late_completion_finishes_close(
-    native_stub: None,
-) -> None:
+def test_partition_lookahead_late_completion_finishes_close() -> None:
     """A running future retains the controller until its callback drains ownership."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
@@ -269,19 +227,14 @@ def test_partition_lookahead_late_completion_finishes_close(
     assert prepared.closed
 
 
-def test_partition_take_next_keeps_failed_exception_context_for_retry(
-    native_stub: None,
-) -> None:
+def test_partition_take_next_keeps_failed_exception_context_for_retry() -> None:
     """A failed future does not orphan its child context when context close fails."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
     future: Future[Any] = Future()
     future.set_exception(ValueError("prepare failed"))
     context = _FailingContext(1)
-    owner = object.__new__(module.PartitionSourceLookahead)
-    owner.enabled = True
-    owner._future = future
-    owner._future_context = context
+    owner = _bare_lookahead(module, future, context, None)
     owner._current_options = lambda: object()
 
     with pytest.raises(ValueError, match="prepare failed") as caught:
@@ -366,20 +319,32 @@ def _bare_remote_iterator(module: Any) -> Any:
     """Construct a remote prefetch owner without starting an event loop."""
     iterator = object.__new__(module.RemoteChunkPrefetchIterator)
     iterator._pid = os.getpid()
-    iterator._close_lock = Lock()
+    iterator._close_lock = RLock()
+    iterator._close_condition = Condition(iterator._close_lock)
+    iterator._close_in_progress = False
+    iterator._cleanup_callbacks_inflight = 0
+    iterator._admissions_inflight = 0
+    iterator._consumers_inflight = 0
+    iterator._protocol_violations = 0
+    iterator._starting = False
+    iterator._fill_in_progress = False
     iterator._close_started = False
     iterator._session_closer = None
     iterator._closed = False
     iterator._futures = deque()
+    iterator._failed_storage_leases = deque()
+    iterator._callbackless_storage_futures = {}
     iterator._coordinator = None
     iterator._owns_coordinator = False
     iterator._download_session = None
+    iterator._remote_timeout_seconds = 0.1
+    iterator._started = True
+    iterator._finalizer_ticket = None
+    iterator._finalizer_capsule = None
     return iterator
 
 
-def test_remote_prefetch_close_retains_session_across_timeout(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_close_retains_session_across_timeout() -> None:
     """A bounded session timeout leaves all owners reachable for a later retry."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
@@ -415,12 +380,10 @@ def test_remote_prefetch_close_retains_session_across_timeout(
     assert coordinator.submissions == 1
 
 
-def test_remote_prefetch_close_retains_failed_staged_result(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_close_retains_failed_staged_result() -> None:
     """A failed staged close keeps its future in the iterator for explicit retry."""
     from schema_sanitizer.api_impl.source_plan import remote as module
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     staged = _FailingClose(2)
     ownership = StagedResultOwnership()
@@ -441,9 +404,7 @@ def test_remote_prefetch_close_retains_failed_staged_result(
     assert staged.closed
 
 
-def test_remote_prefetch_close_retains_owned_coordinator_on_failure(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_close_retains_owned_coordinator_on_failure() -> None:
     """Coordinator ownership is cleared only after its close commits."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
@@ -472,22 +433,25 @@ def test_janitor_stale_scan_is_bounded_and_interleavable(
     """Crash-leftover discovery yields after one bounded batch."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
-    stale = tmp_path / "quarantine"
-    stale.mkdir()
-    for index in range(module._SWEEP_BATCH_SIZE + 7):
-        (stale / f"artifact-stale-{index}").write_text("x")
-
     janitor = module._TemporaryArtifactJanitor()
-    monkeypatch.setattr(janitor, "root", lambda: stale)
+    stale = janitor.root()
+    created = {stale / f"artifact-stale-{index}" for index in range(module._SWEEP_BATCH_SIZE + 7)}
+    for path in created:
+        path.write_text("x")
+
     deleted: list[Path] = []
 
-    def delete(path: Path, _is_dir: bool, _identity: object | None = None) -> bool:
+    def delete(
+        path: Path,
+        _is_dir: bool,
+        identity: object | None = None,
+    ) -> tuple[bool, Path, object | None, bool]:
         """Record one bounded stale deletion."""
         deleted.append(path)
         path.unlink(missing_ok=True)
-        return True
+        return True, path, identity, False
 
-    monkeypatch.setattr(janitor, "_delete", delete)
+    monkeypatch.setattr(janitor, "_delete_owned", delete)
     janitor._scan_stale()
     assert len(deleted) == module._SWEEP_BATCH_SIZE
     assert not janitor._scanned
@@ -510,14 +474,11 @@ def test_janitor_stale_scan_is_bounded_and_interleavable(
     assert janitor.snapshot().pending_artifacts == 0
 
     janitor._scan_stale()
-    stale_deleted = [path for path in deleted if path.parent == stale]
-    assert len(stale_deleted) == module._SWEEP_BATCH_SIZE + 7
+    assert all(not path.exists() for path in created)
     assert janitor._scanned
 
 
-def test_remote_prefetch_close_start_blocks_new_submissions(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_close_start_blocks_new_submissions() -> None:
     """A close attempt prevents a concurrent refill from admitting new work."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
@@ -571,8 +532,8 @@ def test_janitor_idle_worker_finishes_all_stale_batches(
     """An idle worker does not retire after only the first stale batch."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
-    stale = tmp_path / "quarantine"
-    stale.mkdir()
+    janitor = module._TemporaryArtifactJanitor()
+    stale = janitor.root()
     count = module._SWEEP_BATCH_SIZE * 2 + 3
     for index in range(count):
         (stale / f"artifact-stale-{index}").write_text("x")
@@ -581,10 +542,8 @@ def test_janitor_idle_worker_finishes_all_stale_batches(
         def release(self) -> None:
             return None
 
-    janitor = module._TemporaryArtifactJanitor()
     janitor._thread = __import__("threading").current_thread()
     janitor._thread_lease = Lease()
-    monkeypatch.setattr(janitor, "root", lambda: stale)
     monkeypatch.setattr(module, "_RETRY_SECONDS", 0.0)
     janitor._run()
     assert janitor._scanned
@@ -610,6 +569,7 @@ def test_janitor_rejects_symlink_quarantine_root(
 
 def test_janitor_unlinks_symlink_artifact_without_following_target(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A quarantined symlink is removed without deleting its directory target."""
     from schema_sanitizer.core_impl import temporary_janitor as module
@@ -618,10 +578,10 @@ def test_janitor_unlinks_symlink_artifact_without_following_target(
     target.mkdir()
     marker = target / "keep"
     marker.write_text("safe")
-    link = tmp_path / "artifact-link"
+    link = module._TemporaryArtifactJanitor.root() / "artifact-link"
     link.symlink_to(target, target_is_directory=True)
 
-    assert module._TemporaryArtifactJanitor._delete(link, True)
+    assert module._TemporaryArtifactJanitor._delete_owned(link, True)[0]
     assert not link.exists()
     assert marker.read_text() == "safe"
 
@@ -667,8 +627,9 @@ def test_janitor_new_worker_reopens_completed_shared_scan(
     janitor._scan_entries = iter(())
     monkeypatch.setattr(module, "acquire_project_threads", lambda *_a, **_k: Lease())
     monkeypatch.setattr(module.threading, "Thread", Thread)
+    monkeypatch.setattr(module, "start_governed_thread", lambda thread: thread.start())
     with janitor._lock:
-        janitor._ensure_thread_locked()
+        janitor._ensure_worker()
     assert not janitor._scanned
     assert janitor._scan_entries is None
     assert janitor._thread is not None
@@ -681,8 +642,8 @@ def test_janitor_scan_does_not_follow_symlink_directory(
     """Stale discovery unlinks a symlink without traversing its target."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
+    janitor = module._TemporaryArtifactJanitor()
+    quarantine = janitor.root()
     target = tmp_path / "external"
     target.mkdir()
     marker = target / "keep"
@@ -690,8 +651,6 @@ def test_janitor_scan_does_not_follow_symlink_directory(
     link = quarantine / "artifact-linked-directory"
     link.symlink_to(target, target_is_directory=True)
 
-    janitor = module._TemporaryArtifactJanitor()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
     janitor._scan_stale()
     janitor._scan_stale()
     assert not link.exists()
@@ -711,8 +670,10 @@ def test_staged_ownership_rejects_post_fork_use_before_lock(
         def __exit__(self, *_exc: object) -> None:
             return None
 
-    ownership = module.StagedResultOwnership()
-    ownership._lock = ForbiddenLock()
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
+
+    ownership = StagedResultOwnership()
+    ownership._condition = ForbiddenLock()  # type: ignore[assignment]
     monkeypatch.setattr(module.os, "getpid", lambda: ownership._pid + 1)
     with pytest.raises(RuntimeError, match="after fork"):
         ownership.publish(object())
@@ -740,7 +701,6 @@ def test_shared_session_closer_skips_parent_lock_after_fork(
 
 
 def test_remote_prefetch_rejects_post_fork_admission_before_lock(
-    native_stub: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An inherited iterator cannot submit or consume work through parent state."""
@@ -762,9 +722,7 @@ def test_remote_prefetch_rejects_post_fork_admission_before_lock(
         next(iterator)
 
 
-def test_lookahead_worker_shutdown_retries_failed_exit_permit(
-    native_stub: None,
-) -> None:
+def test_lookahead_worker_shutdown_retries_failed_exit_permit() -> None:
     """Explicit shutdown reclaims a permit whose worker-exit release failed once."""
     from schema_sanitizer.pipeline.partition_lookahead_worker import ThreadPoolExecutor
 
@@ -789,7 +747,6 @@ def test_lookahead_worker_shutdown_retries_failed_exit_permit(
 
 
 def test_lookahead_worker_rejects_post_fork_use_before_lock(
-    native_stub: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Inherited submit and shutdown paths do not acquire the parent worker lock."""
@@ -819,9 +776,7 @@ def test_lookahead_worker_rejects_post_fork_use_before_lock(
     executor.shutdown(wait=True)
 
 
-def test_lookahead_worker_retries_startup_permit_without_thread(
-    native_stub: None,
-) -> None:
+def test_lookahead_worker_retries_startup_permit_without_thread() -> None:
     """A failed Thread constructor does not make its retained permit unreachable."""
     from schema_sanitizer.pipeline import partition_lookahead_worker as module
 

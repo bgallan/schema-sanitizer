@@ -23,7 +23,6 @@ from ...input_impl.selection import (
     FORMAT_SUFFIXES,
     folder_file_source,
     is_utf8_encoding,
-    native_input_format,
     native_text_encoding_supported,
     unsupported_native_directory_ingestion,
 )
@@ -204,7 +203,7 @@ def native_directory_prepared_from_files_or_none(
     setattr(carrier, "native_multisource_manifest", manifest)
     return PreparedPublicInput(
         carrier,
-        native_input_format(input_format),
+        input_format,
         "stream",
         carrier,
         xml_row_tag=effective_xml_row_tag,

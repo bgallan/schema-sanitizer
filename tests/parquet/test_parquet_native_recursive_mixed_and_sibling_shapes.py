@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _support.parquet_runtime import pa
+from _support.parquet_runtime import pa, write_read_native_parquet
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
 from conftest import require_native
 
@@ -14,16 +14,6 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes deeper generated recursive map/list shapes."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     map_type = pa.map_(pa.string(), pa.int64())
@@ -191,14 +181,7 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
     for name, item_type, values in cases:
         path = tmp_path / f"native-{name}.parquet"
         table = pa.table({"items": pa.array(values, type=item_type)})
-        write_parquet_native_first_stream(
-            pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-            path,
-            feature="test",
-            parquet_compression="uncompressed",
-        )
-
-        info = native_parquet_footer_info(path)
+        info = write_read_native_parquet(table, path)
 
         assert info is not None
         assert info["native_reader_ready"] == 1
@@ -216,13 +199,6 @@ def test_native_parquet_stream_materializes_deep_recursive_mixed_shapes(
                 range(max_repetition_level)
             ), name
             assert all(layout["decoded"] == 1 for layout in layouts), name
-        factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-        reader = pa.RecordBatchReader.from_stream(factory)
-        out = reader.read_all()
-
-        assert out.schema.equals(table.schema), name
-        assert out.to_pylist() == table.to_pylist(), name
-        assert last_parquet_stream_factory_route() == "native_parquet_stream"
     assert deepest_reported_repeated_layout_count > 3
 
 
@@ -231,16 +207,6 @@ def test_native_parquet_stream_materializes_required_and_optional_root_structs(
     tmp_path: Path,
 ) -> None:
     """Verify root structs use the generic recursive struct materializer."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     root_struct = pa.struct(
@@ -282,25 +248,11 @@ def test_native_parquet_stream_materializes_required_and_optional_root_structs(
         schema=schema,
     )
     path = tmp_path / "native-required-optional-root-structs.parquet"
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
     assert info["native_reader_blockers"] == []
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-    out = reader.read_all()
-
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -308,16 +260,6 @@ def test_native_parquet_stream_materializes_recursive_sibling_repeated_branches(
     tmp_path: Path,
 ) -> None:
     """Verify sibling repeated subtrees keep independent recursive layout cursors."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-recursive-sibling-repeated-branches.parquet"
@@ -385,14 +327,7 @@ def test_native_parquet_stream_materializes_recursive_sibling_repeated_branches(
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -405,10 +340,3 @@ def test_native_parquet_stream_materializes_recursive_sibling_repeated_branches(
         )
         > 3
     )
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-    out = reader.read_all()
-
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"

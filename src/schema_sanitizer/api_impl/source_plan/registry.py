@@ -15,7 +15,6 @@ from schema_sanitizer.input_impl.source_plan import (
     SEQUENCE,
     NativeSourcePlan,
     _flatten_path_source_sequence_or_none,
-    _mark_native_path_sources_route,
     _open_path_sources_auto_registry_stream,
 )
 
@@ -45,7 +44,8 @@ from ..results import (
 )
 from ..stream_output import write_raw_stream_to_file
 from ..streams import Stream
-from .remote import RemotePathSourceChunkProvider, prefetched_remote_chunks
+from .remote import RemotePathSourceChunkProvider
+from .remote_cleanup import take_prefetched_chunks
 
 
 def _cleanup_opened_registry_stream_capsule(capsule: PreparedFinalizerCleanup) -> None:
@@ -238,7 +238,7 @@ def _open_remote_registry_stream(
         plan.payload.threading_mode,
         plan.payload.memory_limit_bytes,
     )
-    retained_chunks, remaining_start = prefetched_remote_chunks(plan.payload)
+    retained_chunks, remaining_start = take_prefetched_chunks(plan.payload)
     probe_provider = RemotePathSourceChunkProvider(
         retained_chunks=retained_chunks,
         remaining_manifest=plan.payload,
@@ -264,7 +264,6 @@ def _open_remote_registry_stream(
             native_registry_state=native_registry_state,
             skip_invalid_json_sources=True,
         )
-        _mark_native_path_sources_route()
     except BaseException as exc:
         for label, provider in (("probe", probe_provider), ("stream", stream_provider)):
             _cleanup_with_note(

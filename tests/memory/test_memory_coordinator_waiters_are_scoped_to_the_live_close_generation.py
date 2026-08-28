@@ -69,9 +69,22 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     coordinator._shutdown_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     coordinator._loop = None
     coordinator._futures = set()
+    coordinator._submissions = {}
     coordinator._failed_submissions = deque()
+    coordinator._failed_permits = deque()
+    coordinator._callbackless_submissions = {}
+    coordinator._submission_callbacks_inflight = 0
+    coordinator._deferred_terminal_callbacks = deque()
+    coordinator._terminal_callback_owners = set()
+    coordinator._failed_terminal_callbacks = deque()
+    coordinator._shutdown_future = None
+    coordinator._close_generation = 0
+    coordinator._completed_close_generation = 0
+    coordinator._close_results = {}
+    coordinator._close_waiters = {}
     coordinator._permit_registration = owner
     coordinator._thread_lease = None
+    coordinator._runtime_registration = None
     coordinator._thread = _DeadThread()
     coordinator._protocol_violations = 0
 
@@ -132,7 +145,9 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
 
     iterator = object.__new__(RemoteChunkPrefetchIterator)
     iterator._pid = os.getpid()
-    iterator._manifest = SimpleNamespace()
+    iterator._manifest = SimpleNamespace(estimated_chunk_bytes=lambda _start: 1)
+    iterator._policy = SimpleNamespace(async_concurrency=1)
+    iterator._io_chunk_bytes = 1
     iterator._coordinator = Coordinator()
     iterator._owns_coordinator = False
     iterator._download_session = None
@@ -142,8 +157,18 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
     iterator._close_started = False
     iterator._closed = False
     iterator._failed_storage_leases = deque()
+    iterator._callbackless_storage_futures = {}
     iterator._futures = deque()
     iterator._remote_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
+    iterator._close_in_progress = False
+    iterator._cleanup_callbacks_inflight = 0
+    iterator._admissions_inflight = 0
+    iterator._consumers_inflight = 0
+    iterator._protocol_violations = 0
+    iterator._starting = False
+    iterator._fill_in_progress = False
+    iterator._finalizer_ticket = None
+    iterator._finalizer_capsule = None
 
     lease = _BlockingRetryLease()
     future = iterator._submit_stage(0, lease)
@@ -292,13 +317,13 @@ def test_permit_release_never_samples_system_pressure(
     from schema_sanitizer.remote_impl import io_permits as module
 
     governor = module.RemoteIoPermitGovernor(4)
-    governor._in_use = 1
+    permit = asyncio.run(governor.acquire())
     monkeypatch.setattr(
         module,
         "system_pressure_snapshot",
         lambda: (_ for _ in ()).throw(AssertionError("release sampled pressure")),
     )
-    governor._release(1)
+    permit.release()
     assert governor._in_use == 0
 
 

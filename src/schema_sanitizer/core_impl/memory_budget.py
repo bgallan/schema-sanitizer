@@ -91,48 +91,24 @@ def process_resident_memory_snapshot() -> ProcessResidentMemorySnapshot:
     )
 
     # Read raw resident bytes and control ownership under the same admission
-    # barrier. This function is observational only: no shadow reserve/release is
-    # performed from a snapshot path.
+    # barrier so the current native shadow is included in the same observation.
     with _GOVERNED_MEMORY_ADMISSION_LOCK:
-        control, shadow_active, shadow_bytes = _PROCESS_CONTROL_PLANE_BUDGET.snapshot_with_shadow()
-        raw = _raw_process_resident_memory_snapshot()
-    if shadow_active:
-        # The shared native pool already contains every governed control byte.
-        # Subtract that private shadow from the public payload view while keeping
-        # one owner charge unavailable for the next ``OperationMemoryLease``.
-        payload_reserved = max(0, raw.reserved_bytes - shadow_bytes)
-        payload_capacity = raw.capacity_bytes - shadow_bytes - _OPERATION_MEMORY_LEASE_CONTROL_BYTES
-        payload_peak = max(payload_reserved, raw.peak_reserved_bytes - shadow_bytes)
-    else:
-        # Source-only/native-double fallback: composition remains enforced in
-        # Python even though there is no native shared pool to mirror into.
-        payload_reserved = raw.reserved_bytes
-        payload_capacity = (
-            raw.capacity_bytes - control.governed_bytes - _OPERATION_MEMORY_LEASE_CONTROL_BYTES
+        _PROCESS_CONTROL_PLANE_BUDGET.ensure_native_shadow_under_admission_lock()
+        _control, _shadow_active, shadow_bytes = (
+            _PROCESS_CONTROL_PLANE_BUDGET.snapshot_with_shadow()
         )
-        payload_peak = raw.peak_reserved_bytes
+        raw = _raw_process_resident_memory_snapshot()
+    # The shared native pool already contains every governed control byte.
+    # Subtract that private shadow from the public payload view while keeping
+    # one owner charge unavailable for the next ``OperationMemoryLease``.
+    payload_reserved = max(0, raw.reserved_bytes - shadow_bytes)
+    payload_capacity = raw.capacity_bytes - shadow_bytes - _OPERATION_MEMORY_LEASE_CONTROL_BYTES
+    payload_peak = max(payload_reserved, raw.peak_reserved_bytes - shadow_bytes)
     return ProcessResidentMemorySnapshot(
         max(payload_reserved, payload_capacity),
         payload_reserved,
         payload_peak,
     )
-
-
-def _optional_process_resident_memory_snapshot() -> ProcessResidentMemorySnapshot | None:
-    """Return the aggregate native envelope only when the real ABI3 module is loaded.
-
-    Python-only lifecycle tests and source-tree tooling intentionally use lightweight
-    native doubles.  Those environments still receive hard local payload/control
-    limits, but cannot provide an authoritative process-global native envelope.
-    An actual loaded extension must still satisfy the strict snapshot contract.
-    """
-    from types import ModuleType
-
-    from .native_runtime import native_core
-
-    if not isinstance(native_core, ModuleType):
-        return None
-    return _raw_process_resident_memory_snapshot()
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,8 +214,8 @@ class _PythonMemoryLeaseEntry:
     # capability. Shrink never exposes headroom before the logical authority is
     # updated; reclaimed bytes are returned when the lease retires.
     physical_size_bytes: int = 0
-    # Pass80: authoritative native receipt. When present, this object—not the
-    # mirrored integer above—owns the physical reservation and survives any
+    # The authoritative native receipt—not the mirrored integer above—owns the
+    # physical reservation and survives any
     # Python publication interruption.
     native_receipt: object | None = None
 
@@ -315,7 +291,7 @@ def no_retained_result_ownership_capability() -> GovernedResultOwnership:
 
 def _run_operation_memory_lease_finalizer(authority: RootedFinalizerAuthority) -> None:
     """Release a Python memory lease from exact ledger identity, never the wrapper."""
-    ledger = authority.arg0
+    ledger = cast("OperationMemoryLedger | None", authority.arg0)
     if ledger is None:
         return
     lease_id_value = authority.arg1
@@ -324,21 +300,9 @@ def _run_operation_memory_lease_finalizer(authority: RootedFinalizerAuthority) -
     owner_id_value = authority.arg3
     owner_id = owner_id_value if isinstance(owner_id_value, int) else 0
     if lease_id > 0 and capability is not None:
-        release_exact = getattr(ledger, "_release_python_lease_authority", None)
-        if not callable(release_exact):
-            raise RuntimeError("operation memory ledger lacks exact finalizer release")
-        release_exact(lease_id, owner_id, capability)
+        ledger._release_python_lease_authority(lease_id, owner_id, capability)
         authority.arg1 = 0
         authority.arg2 = None
-        return
-    amount_value = authority.arg4
-    amount = amount_value if isinstance(amount_value, int) else 0
-    if amount > 0:
-        release = getattr(ledger, "release", None)
-        if not callable(release):
-            raise RuntimeError("operation memory ledger lacks finalizer release")
-        release(amount)
-        authority.arg4 = 0
 
 
 class OperationMemoryLease:
@@ -365,134 +329,46 @@ class OperationMemoryLease:
             raise
         self._finalizer_owner.arg0 = ledger
         self._finalizer_owner.arg3 = id(self)
-        self._finalizer_owner.arg4 = size_bytes
         self.stage = stage
         self._pid = os.getpid()
         self._lock = Lock()
-        # Pass80 publishes authenticated zero-byte ownership before the first
-        # physical commit. The native reservation receipt then becomes the
-        # authority in the same C call that charges the ledger.
         self._released = True
-        prepare = getattr(ledger, "_prepare_python_lease", None)
-        commit = getattr(ledger, "_commit_python_lease_reservation", None)
-        if callable(prepare) and callable(commit):
-            try:
-                registration = prepare(self)
-                self._lease_id = registration.lease_id
-                self._capability = registration.capability
-                self._finalizer_owner.arg1 = self._lease_id
-                self._finalizer_owner.arg2 = self._capability
-                # From here on the rooted finalizer can safely retire the exact
-                # entry even if no physical bytes have committed yet.
-                self._released = False
-                commit(self, size_bytes, stage=stage)
-                self._size_bytes = size_bytes
-                self._finalizer_owner.arg4 = 0
-                return
-            except BaseException as primary:
-                if self._lease_id and self._capability is not None:
-                    try:
-                        ledger._release_python_lease_authority(
-                            self._lease_id, id(self), self._capability
-                        )
-                    except BaseException as cleanup_error:
-                        add_bounded_note(
-                            primary,
-                            "operation-memory exact constructor rollback also failed",
-                            cleanup_error,
-                        )
-                ticket = getattr(self, "_finalizer_ticket", None)
-                owner = getattr(self, "_finalizer_owner", None)
-                if ticket is not None and isinstance(owner, RootedFinalizerAuthority):
-                    try:
-                        owner.make_ack_only()
-                        if _MEMORY_LEASE_FINALIZER_ESCROW.release_ticket(ticket):
-                            self._finalizer_ticket = None
-                    except BaseException as cleanup_error:
-                        add_bounded_note(
-                            primary,
-                            "operation-memory finalizer rollback also failed",
-                            cleanup_error,
-                        )
-                self._released = True
-                raise
-
-        # Compatibility path for deliberately minimal historical test doubles.
-        # Production OperationMemoryLedger always takes the receipt path above.
         try:
-            ledger.reserve(size_bytes, stage=stage)
+            registration = ledger._prepare_python_lease(self)
+            self._lease_id = registration.lease_id
+            self._capability = registration.capability
+            self._finalizer_owner.arg1 = self._lease_id
+            self._finalizer_owner.arg2 = self._capability
+            self._released = False
+            ledger._commit_python_lease_reservation(self, size_bytes, stage=stage)
+            self._size_bytes = size_bytes
         except BaseException as primary:
-            ticket = getattr(self, "_finalizer_ticket", None)
-            owner = getattr(self, "_finalizer_owner", None)
-            if ticket is None and isinstance(owner, RootedFinalizerAuthority):
-                ticket = owner.ticket or None
-            if ticket is not None and isinstance(owner, RootedFinalizerAuthority):
+            if self._lease_id and self._capability is not None:
                 try:
-                    retire_or_ack_rooted_finalizer_authority(
-                        _MEMORY_LEASE_ROOTED_FINALIZER_ESCROW, ticket, owner
+                    ledger._release_python_lease_authority(
+                        self._lease_id, id(self), self._capability
                     )
-                    self._finalizer_ticket = None
+                except BaseException as cleanup_error:
+                    add_bounded_note(
+                        primary,
+                        "operation-memory exact constructor rollback also failed",
+                        cleanup_error,
+                    )
+            ticket = self._finalizer_ticket
+            owner = self._finalizer_owner
+            if ticket is not None:
+                try:
+                    owner.make_ack_only()
+                    if _MEMORY_LEASE_FINALIZER_ESCROW.release_ticket(ticket):
+                        self._finalizer_ticket = None
                 except BaseException as cleanup_error:
                     add_bounded_note(
                         primary,
                         "operation-memory finalizer rollback also failed",
                         cleanup_error,
                     )
+            self._released = True
             raise
-        register = getattr(ledger, "_register_python_lease", None)
-        if callable(register):
-            try:
-                registration = register(self, size_bytes)
-            except BaseException as primary:
-                rollback_committed = False
-                try:
-                    ledger.release(size_bytes)
-                    rollback_committed = True
-                except BaseException as cleanup_error:
-                    recovered_registration = None
-                    try:
-                        recovered_registration = register(self, size_bytes)
-                    except BaseException as recovery_error:
-                        add_bounded_note(
-                            primary,
-                            "operation-memory exact registration recovery also failed",
-                            recovery_error,
-                        )
-                    if recovered_registration is not None:
-                        self._lease_id = recovered_registration.lease_id
-                        self._capability = recovered_registration.capability
-                        self._finalizer_owner.arg1 = self._lease_id
-                        self._finalizer_owner.arg2 = self._capability
-                    self._size_bytes = size_bytes
-                    self._released = False
-                    add_bounded_note(
-                        primary,
-                        "operation-memory lease registration rollback failed",
-                        cleanup_error,
-                    )
-                if rollback_committed:
-                    self._finalizer_owner.make_ack_only()
-                    try:
-                        retired = _MEMORY_LEASE_FINALIZER_ESCROW.release_ticket(
-                            self._finalizer_ticket
-                        )
-                    except BaseException as cleanup_error:
-                        add_bounded_note(
-                            primary,
-                            "operation-memory finalizer-ticket rollback failed",
-                            cleanup_error,
-                        )
-                    else:
-                        if retired:
-                            self._finalizer_ticket = None
-                raise
-            self._lease_id = registration.lease_id
-            self._capability = registration.capability
-            self._finalizer_owner.arg1 = self._lease_id
-            self._finalizer_owner.arg2 = self._capability
-        self._size_bytes = size_bytes
-        self._finalizer_owner.arg4 = size_bytes
-        self._released = False
 
     @property
     def reserved_bytes(self) -> int:
@@ -502,12 +378,7 @@ class OperationMemoryLease:
         with self._lock:
             if self._released:
                 return 0
-            authoritative = getattr(self._ledger, "_python_lease_size", None)
-            return (
-                authoritative(self)
-                if getattr(self, "_lease_id", 0) and callable(authoritative)
-                else self._size_bytes
-            )
+            return self._ledger._python_lease_size(self)
 
     def resize(self, size_bytes: int) -> None:
         """Resize this retained reservation without racing final cleanup."""
@@ -520,24 +391,8 @@ class OperationMemoryLease:
         with self._lock:
             if self._released:
                 raise RuntimeError("operation memory lease is already released")
-            resize = getattr(self._ledger, "_resize_python_lease", None)
-            if getattr(self, "_lease_id", 0) and callable(resize):
-                resize(self, size_bytes, stage=self.stage)
-            else:
-                if bool(getattr(self._ledger, "_requires_exact_python_lease_authority", False)):
-                    raise RuntimeError(
-                        "production operation memory lease lost exact resize authority"
-                    )
-                current = self._size_bytes
-                growth = size_bytes - current
-                if growth > 0:
-                    self._ledger.reserve(growth, stage=self.stage)
-                elif growth < 0:
-                    self._ledger.release(-growth)
+            self._ledger._resize_python_lease(self, size_bytes, stage=self.stage)
             self._size_bytes = size_bytes
-            owner = getattr(self, "_finalizer_owner", None)
-            if isinstance(owner, RootedFinalizerAuthority):
-                owner.arg4 = size_bytes
 
     def transfer_stage(self, stage: str) -> "OperationMemoryLease":
         """Transfer resident-byte ownership to a new generation/handle.
@@ -553,13 +408,7 @@ class OperationMemoryLease:
         with self._lock:
             if self._released:
                 raise RuntimeError("operation memory lease is already released")
-            ledger = getattr(self, "_ledger", None)
-            transfer = getattr(ledger, "_transfer_python_lease", None)
-            if not getattr(self, "_lease_id", 0) or not callable(transfer):
-                # Legacy focused test doubles cannot authenticate generation
-                # handoff; retain the historical diagnostic-only behavior.
-                self.stage = stage
-                return self
+            ledger = self._ledger
 
             successor_owner = RootedFinalizerAuthority(_run_operation_memory_lease_finalizer)
             try:
@@ -592,34 +441,30 @@ class OperationMemoryLease:
                 successor_owner.arg1 = successor._lease_id
                 successor_owner.arg2 = successor._capability
                 successor_owner.arg3 = id(successor)
-                successor_owner.arg4 = successor._size_bytes
                 successor._released = False
-                transfer(self, successor)
+                ledger._transfer_python_lease(self, successor)
                 successor_owner.arg1 = successor._lease_id
                 successor_owner.arg2 = successor._capability
-                successor_owner.arg4 = successor._size_bytes
             except BaseException as primary:
                 # Transfer can be interrupted after the authoritative owner swap
                 # but before this wrapper publishes completion. Never disarm the
                 # successor until the ledger proves the swap did not commit.
                 successor_committed: bool | None = None
                 if successor is not None:
-                    probe = getattr(ledger, "_python_lease_authority_owned_by", None)
-                    if callable(probe):
-                        try:
-                            successor_committed = bool(
-                                probe(
-                                    successor._lease_id,
-                                    id(successor),
-                                    successor._capability,
-                                )
+                    try:
+                        successor_committed = bool(
+                            ledger._python_lease_authority_owned_by(
+                                successor._lease_id,
+                                id(successor),
+                                successor._capability,
                             )
-                        except BaseException as inspect_error:
-                            add_bounded_note(
-                                primary,
-                                "operation-memory transfer ownership probe also failed",
-                                inspect_error,
-                            )
+                        )
+                    except BaseException as inspect_error:
+                        add_bounded_note(
+                            primary,
+                            "operation-memory transfer ownership probe also failed",
+                            inspect_error,
+                        )
 
                 if successor_committed is True:
                     # The ledger already belongs to successor. Keep its rooted
@@ -680,7 +525,7 @@ class OperationMemoryLease:
             if self._released:
                 ticket = getattr(self, "_finalizer_ticket", None)
                 if ticket is not None and isinstance(owner, RootedFinalizerAuthority):
-                    if owner._escrow_armed:
+                    if owner.is_armed_for(ticket):
                         self._finalizer_ticket = None
                         return
                     owner.make_ack_only()
@@ -693,16 +538,10 @@ class OperationMemoryLease:
                             "operation-memory finalizer slot retirement did not commit"
                         )
                 return
-            release = getattr(self._ledger, "_release_python_lease", None)
-            if getattr(self, "_lease_id", 0) and callable(release):
-                release(self)
-                if isinstance(owner, RootedFinalizerAuthority):
-                    owner.arg1 = 0
-                    owner.arg2 = None
-            else:
-                self._ledger.release(self._size_bytes)
-                if isinstance(owner, RootedFinalizerAuthority):
-                    owner.arg4 = 0
+            self._ledger._release_python_lease(self)
+            if isinstance(owner, RootedFinalizerAuthority):
+                owner.arg1 = 0
+                owner.arg2 = None
             self._released = True
             self._size_bytes = 0
             ticket = getattr(self, "_finalizer_ticket", None)
@@ -749,9 +588,6 @@ class OperationMemoryLease:
                     self._finalizer_ticket = None
                     return
                 _mark_memory_finalizer_overflow(ticket)
-                return
-            if not getattr(self, "_released", True):
-                _publish_abandoned_memory_lease(ticket, self)
         except BaseException:
             pass
 
@@ -764,10 +600,6 @@ class _MemoryLeaseRegistration:
     def __init__(self) -> None:
         self.lease_id = 0
         self.capability: object | None = None
-
-    def __iter__(self):  # legacy test/internal unpacking only
-        yield self.lease_id
-        yield self.capability
 
 
 class OperationMemoryLedger:
@@ -811,9 +643,6 @@ class OperationMemoryLedger:
         self._close_outstanding_bytes = 0
         self._python_lease_sequence = 0
         self._python_leases: dict[int, _PythonMemoryLeaseEntry] = {}
-        # Production ledgers require authenticated per-lease mutation. Amount-
-        # based resize remains only for deliberately minimal historical doubles.
-        self._requires_exact_python_lease_authority = True
         self._unknown_python_lease_releases = 0
         # Root an authority object that does not reference this wrapper.  The
         # ledger itself therefore remains collectible while native/cross-process
@@ -898,38 +727,29 @@ class OperationMemoryLedger:
         with self._lock:
             return self._python_lease_entry(owner).size_bytes
 
-    def _native_reservation_metadata(self, receipt: object) -> tuple[int, int, int] | None:
-        method = getattr(self._native, "operation_memory_reservation_metadata", None)
-        if not callable(method):
-            return None
-        values = method(receipt)
+    def _native_reservation_metadata(self, receipt: object) -> tuple[int, int, int]:
+        values = self._native.operation_memory_reservation_metadata(receipt)
         if not isinstance(values, tuple) or len(values) != 3:
             raise RuntimeError("operation memory reservation returned invalid metadata")
         return tuple(int(value) for value in values)  # type: ignore[return-value]
 
     def _native_reservation_resize(
         self, receipt: object, requested: int, stage: str
-    ) -> tuple[int, int] | None:
+    ) -> tuple[int, int]:
         metadata = self._native_reservation_metadata(receipt)
-        if metadata is None:
-            result = self._native.operation_memory_reservation_resize(receipt, requested, stage)
-        else:
-            result = self._native.operation_memory_reservation_resize(
-                receipt, requested, stage, metadata[1]
-            )
-        if isinstance(result, tuple) and len(result) == 2:
-            return int(result[0]), max(0, int(result[1]))
-        return None
+        result = self._native.operation_memory_reservation_resize(
+            receipt, requested, stage, metadata[1]
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise RuntimeError("operation memory reservation resize returned invalid metadata")
+        return int(result[0]), max(0, int(result[1]))
 
-    def _native_reservation_release(self, receipt: object) -> tuple[int, int] | None:
+    def _native_reservation_release(self, receipt: object) -> tuple[int, int]:
         metadata = self._native_reservation_metadata(receipt)
-        if metadata is None:
-            result = self._native.operation_memory_reservation_release(receipt)
-        else:
-            result = self._native.operation_memory_reservation_release(receipt, metadata[1])
-        if isinstance(result, tuple) and len(result) == 2:
-            return int(result[0]), max(0, int(result[1]))
-        return None
+        result = self._native.operation_memory_reservation_release(receipt, metadata[1])
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise RuntimeError("operation memory reservation release returned invalid metadata")
+        return int(result[0]), max(0, int(result[1]))
 
     def _resize_python_lease(
         self, owner: OperationMemoryLease, requested: int, *, stage: str
@@ -948,30 +768,12 @@ class OperationMemoryLedger:
             current = entry.size_bytes
             receipt = entry.native_receipt
             if receipt is None:
-                # Historical focused doubles have no native receipt. Keep their
-                # conservative high-watermark behavior; production entries are
-                # created only through _commit_python_lease_reservation.
-                current = entry.size_bytes
-                physical = max(entry.size_bytes, entry.physical_size_bytes)
-                if requested <= physical:
-                    entry.size_bytes = requested
-                    return
-                growth = requested - physical
-            else:
-                growth = 0
-        if receipt is None:
-            if growth > 0:
-                self.reserve(growth, stage=stage)
-            with self._lock:
-                entry = self._python_lease_entry(owner)
-                entry.size_bytes = requested
-                entry.physical_size_bytes = requested
-            return
+                raise RuntimeError("operation memory lease has no native reservation receipt")
         # The native receipt updates its exact authority before returning from
         # the mutating C call. A signal after CALL but before the Python mirror
         # therefore cannot orphan growth or cause a retry to double-release.
         committed_state = self._native_reservation_resize(receipt, requested, stage)
-        committed_bytes = requested if committed_state is None else committed_state[1]
+        committed_bytes = committed_state[1]
         with self._lock:
             entry = self._python_lease_entry(owner)
             entry.size_bytes = committed_bytes
@@ -992,7 +794,7 @@ class OperationMemoryLedger:
                 # reconciliation/cancellation failure.
                 try:
                     rollback_state = self._native_reservation_resize(receipt, current, stage)
-                    rollback_bytes = current if rollback_state is None else rollback_state[1]
+                    rollback_bytes = rollback_state[1]
                     with self._lock:
                         entry = self._python_lease_entry(owner)
                         entry.size_bytes = rollback_bytes
@@ -1079,9 +881,6 @@ class OperationMemoryLedger:
             if receipt is not None:
                 # The receipt retires itself idempotently before returning to
                 # Python. Aggregate integers are observation only in this path.
-                # Compatibility/source-contract marker: the legacy direct form
-                # was ``operation_memory_reservation_release(receipt)``; production
-                # now routes through the generation-authenticated helper below.
                 self._native_reservation_release(receipt)
                 with self._lock:
                     current = self._python_lease_entry_authority(lease_id, owner_id, capability)
@@ -1094,7 +893,7 @@ class OperationMemoryLedger:
                 except BaseException:
                     self._cross_process_reconciliation_failures += 1
             else:
-                # A prepared pass80 owner may still be zero-byte if physical
+                # A prepared owner may still be zero-byte if physical
                 # commit never happened. Retiring that exact empty authority is
                 # a state transition, not an aggregate release.
                 if amount == 0:
@@ -1102,9 +901,7 @@ class OperationMemoryLedger:
                         current = self._python_lease_entry_authority(lease_id, owner_id, capability)
                         current.physical_released = True
                 else:
-                    # Legacy/source doubles created before pass80 retain the
-                    # amount path; production committed receipts never enter it.
-                    self.release(amount, _release_entry=entry)
+                    raise RuntimeError("operation memory lease lost its native reservation receipt")
             with self._lock:
                 current = self._python_lease_entry_authority(lease_id, owner_id, capability)
                 if current is not entry or not entry.physical_released:
@@ -1150,18 +947,6 @@ class OperationMemoryLedger:
         """Reject use of native ledger state inherited by a forked child."""
         if os.getpid() != self._pid:
             raise RuntimeError("operation memory ledger cannot be reused after fork")
-
-    def _ensure_cross_process_io_lock(self) -> Lock:
-        """Lazily create the single-flight lock for legacy focused test owners."""
-        io_lock = getattr(self, "_cross_process_io_lock", None)
-        if io_lock is not None:
-            return io_lock
-        with self._lock:
-            io_lock = getattr(self, "_cross_process_io_lock", None)
-            if io_lock is None:
-                io_lock = Lock()
-                self._cross_process_io_lock = io_lock
-        return io_lock
 
     @property
     def capsule(self) -> Any:
@@ -1221,16 +1006,9 @@ class OperationMemoryLedger:
         """Finish a previously deferred close after the last exact owner retires."""
         if os.getpid() != self._pid:
             return
-        # Focused legacy tests construct a minimal ledger shell. Fast-exit before
-        # touching close-only synchronization state when close never started.
-        if not getattr(self, "_close_started", False) or not getattr(
-            self, "_cross_process_release_deferred", False
-        ):
+        if not self._close_started or not self._cross_process_release_deferred:
             return
-        close_condition = getattr(self, "_close_condition", None)
-        if close_condition is None:
-            return
-        with close_condition:
+        with self._close_condition:
             if self._closing or self._python_leases:
                 return
         # ``close`` rechecks the native snapshot under the normal close protocol
@@ -1275,7 +1053,7 @@ class OperationMemoryLedger:
         if max(0, int(values[1])) != 0:
             raise RuntimeError("deferred memory close retry still owns native bytes")
         peak = max(0, int(values[2]))
-        with self._ensure_cross_process_io_lock():
+        with self._cross_process_io_lock:
             self._release_cross_process_after_close(strict=True)
         # Cross-process ownership is now gone; prevent fallback finalizer replay.
         authority.arg2 = None
@@ -1374,7 +1152,7 @@ class OperationMemoryLedger:
             raise TypeError("operation memory stage must be an exact string")
         if size_bytes < 0:
             raise ValueError("operation memory reservation must be >= 0")
-        if size_bytes == 0:
+        if size_bytes == 0 and not _exact_receipt:
             return None
         # Preserve the closed-ledger fast path before touching process/native
         # admission state.  The authoritative check is repeated below while
@@ -1384,11 +1162,10 @@ class OperationMemoryLedger:
             if self._close_started:
                 raise RuntimeError("operation memory ledger is closed")
         try:
-            with self._ensure_cross_process_io_lock():
+            with self._cross_process_io_lock:
                 from .control_plane_budget import (
                     _GOVERNED_MEMORY_ADMISSION_LOCK,
                     _synchronize_control_plane_native_shadow_under_admission_lock,
-                    process_control_plane_snapshot,
                 )
 
                 # Payload and dynamic control metadata share one process envelope.
@@ -1396,28 +1173,10 @@ class OperationMemoryLedger:
                 # concurrent payload/control reservations cannot each observe the
                 # same headroom and oversubscribe the combined process budget.
                 with _GOVERNED_MEMORY_ADMISSION_LOCK:
-                    shadow_active, _shadow_bytes = (
-                        _synchronize_control_plane_native_shadow_under_admission_lock()
-                    )
-                    resident = _optional_process_resident_memory_snapshot()
-                    control = process_control_plane_snapshot()
-                    # With the pass49 native shadow, resident.reserved_bytes
-                    # already includes control.governed_bytes. Source-only doubles
-                    # retain the explicit composition below. Contract breadcrumb:
-                    # resident.reserved_bytes + control.governed_bytes + size_bytes
-                    # Legacy diagnostic name retained for source-contract tooling:
-                    # process_governed_memory_bytes
-                    combined_reserved = (
-                        resident.reserved_bytes
-                        if shadow_active and resident is not None
-                        else (resident.reserved_bytes + control.governed_bytes)
-                        if resident is not None
-                        else 0
-                    )
-                    if (
-                        resident is not None
-                        and combined_reserved + size_bytes > resident.capacity_bytes
-                    ):
+                    _synchronize_control_plane_native_shadow_under_admission_lock()
+                    resident = _raw_process_resident_memory_snapshot()
+                    combined_reserved = resident.reserved_bytes
+                    if combined_reserved + size_bytes > resident.capacity_bytes:
                         raise MemoryError("process resident memory governed envelope exceeded")
                     with self._lock:
                         if self._close_started:
@@ -1425,31 +1184,17 @@ class OperationMemoryLedger:
                         capsule = self._capsule
                         receipt = None
                         if _exact_receipt:
-                            create_receipt = getattr(
-                                self._native, "operation_memory_reservation_create", None
+                            receipt = self._native.operation_memory_reservation_create(
+                                capsule, size_bytes, stage
                             )
-                            if not callable(create_receipt):
-                                raise RuntimeError(
-                                    "production native core lacks exact memory reservation receipts"
-                                )
-                            receipt = create_receipt(capsule, size_bytes, stage)
                             values = self._native.operation_memory_ledger_snapshot(capsule)
                         else:
-                            reserve_snapshot = getattr(
-                                self._native, "operation_memory_ledger_reserve_snapshot", None
+                            # The ABI rolls the reservation back if CPython cannot
+                            # allocate the returned observation, leaving no fallible
+                            # Python snapshot step after the commit.
+                            values = self._native.operation_memory_ledger_reserve_snapshot(
+                                capsule, size_bytes, stage
                             )
-                            if callable(reserve_snapshot):
-                                # The ABI method rolls the native reservation back if
-                                # CPython cannot allocate the returned observation. No
-                                # fallible Python snapshot exists after the commit.
-                                values = reserve_snapshot(capsule, size_bytes, stage)
-                            else:
-                                # Compatibility for focused native doubles only. The
-                                # shipped ABI always exposes the transactional method.
-                                self._native.operation_memory_ledger_reserve(
-                                    capsule, size_bytes, stage
-                                )
-                                values = self._native.operation_memory_ledger_snapshot(capsule)
                         if (
                             not isinstance(values, tuple)
                             or len(values) != 3
@@ -1565,7 +1310,7 @@ class OperationMemoryLedger:
             return
         advisory_peak: int | None = None
         finalizer_ticket: int | None = None
-        with self._ensure_cross_process_io_lock():
+        with self._cross_process_io_lock:
             try:
                 with self._lock:
                     capsule = self._capsule
@@ -1695,7 +1440,7 @@ class OperationMemoryLedger:
 
         if must_release:
             try:
-                with self._ensure_cross_process_io_lock():
+                with self._cross_process_io_lock:
                     self._release_cross_process_after_close(strict=True)
             except BaseException:
                 with self._close_condition:
@@ -1805,37 +1550,14 @@ def _reserve_stage_admission_construction_authority() -> tuple[int, RootedFinali
 
 
 def _retire_stage_admission_construction_ticket(
-    ticket: int, authority: RootedFinalizerAuthority | None = None
+    ticket: int, authority: RootedFinalizerAuthority
 ) -> bool:
-    """Retire or publish an ACK-only construction authority.
-
-    ``authority is None`` is retained only for historical focused tests/tools
-    that reserve a naked ticket. Production construction paths always reserve
-    and root the authority before acquiring their first resource.
-    """
-    if authority is None:
-        # Historical naked-ticket path: preserve its release_ticket fault
-        # injection surface, then transfer only ACK authority if retirement did
-        # not commit. Production never enters this branch.
-        try:
-            if _STAGE_ADMISSION_CONSTRUCTION_ESCROW.release_ticket(ticket):
-                return True
-        except BaseException:
-            pass
-        authority = RootedFinalizerAuthority(_run_stage_admission_construction_finalizer)
-        authority.ticket = ticket
-        authority.make_ack_only()
-        try:
-            if not _STAGE_ADMISSION_CONSTRUCTION_ESCROW.root_reserved(ticket, authority):
-                return False
-            return bool(_STAGE_ADMISSION_CONSTRUCTION_ESCROW.publish_rooted(ticket, authority))
-        except BaseException:
-            return False
+    """Retire or publish an ACK-only construction authority."""
     try:
         retired = retire_or_ack_rooted_finalizer_authority(
             _STAGE_ADMISSION_CONSTRUCTION_ESCROW, ticket, authority
         )
-        return retired or authority._escrow_armed
+        return retired or authority.is_armed_for(ticket)
     except BaseException:
         _mark_memory_finalizer_overflow(ticket)
         return False
@@ -1849,34 +1571,6 @@ def _mark_memory_finalizer_overflow(ticket: int) -> None:
     except MemoryError:
         pass
     publish_terminal_owner("operation_memory_finalizer_overflow", ticket, retained_bytes=256)
-
-
-def _publish_abandoned_memory_lease(ticket: int, owner: OperationMemoryLease) -> None:
-    global _MEMORY_FINALIZER_OVERFLOWS, _MEMORY_FINALIZER_OVERFLOWED
-    if not _MEMORY_LEASE_FINALIZER_ESCROW.publish_reserved(ticket, owner):
-        _MEMORY_FINALIZER_OVERFLOWED = True
-        try:
-            _MEMORY_FINALIZER_OVERFLOWS += 1
-        except MemoryError:
-            pass
-        publish_terminal_owner("operation_memory_finalizer_overflow", id(owner), retained_bytes=256)
-
-
-def _publish_abandoned_memory_ledger(ticket: int, owner: object) -> None:
-    """Compatibility publisher for pre-pass75 owners."""
-    global _MEMORY_FINALIZER_OVERFLOWS, _MEMORY_FINALIZER_OVERFLOWED
-    publish = (
-        _MEMORY_LEDGER_FINALIZER_ESCROW.publish_rooted
-        if isinstance(owner, RootedFinalizerAuthority)
-        else _MEMORY_LEDGER_FINALIZER_ESCROW.publish_reserved
-    )
-    if not publish(ticket, owner):
-        _MEMORY_FINALIZER_OVERFLOWED = True
-        try:
-            _MEMORY_FINALIZER_OVERFLOWS += 1
-        except MemoryError:
-            pass
-        publish_terminal_owner("operation_memory_finalizer_overflow", ticket, retained_bytes=256)
 
 
 def drain_abandoned_memory_finalizers() -> int:
@@ -1913,8 +1607,8 @@ def drain_abandoned_memory_finalizers() -> int:
             except BaseException:
                 continue
 
-    # The compatibility overflow bank is physically preallocated. Safe-point
-    # draining removes one owner at a time and puts failures back in-place.
+    # The overflow bank is physically preallocated. Safe-point draining removes
+    # one owner at a time and puts failures back in-place.
     global _ABANDONED_MEMORY_EMERGENCY_COUNT
     emergency_attempts = _ABANDONED_MEMORY_EMERGENCY_COUNT
     for _ in range(emergency_attempts):
@@ -2190,14 +1884,7 @@ def adaptive_parallel_slots(
     check_operation_cancelled(stage="adaptive_concurrency")
     desired = pressure_adjusted_target(desired)
     snapshot = process_resident_memory_snapshot()
-    from .control_plane_budget import process_control_plane_snapshot
-
-    control = process_control_plane_snapshot()
-    # ``process_resident_memory_snapshot`` already discounts
-    # ``control.governed_bytes`` from its admission capacity.  Keep the legacy
-    # expression below as a contract breadcrumb for source-level compatibility:
-    # snapshot.capacity_bytes - snapshot.reserved_bytes - control.governed_bytes
-    del control
+    # The public snapshot has already discounted governed control bytes.
     headroom = max(0, snapshot.capacity_bytes - snapshot.reserved_bytes)
     if reserve_bytes is None:
         fallback_reserve = max(4 << 20, snapshot.capacity_bytes // 64)
@@ -2307,11 +1994,7 @@ class CompositeParallelAdmission:
 
     def transfer_stage(self, stage: str) -> "CompositeParallelAdmission":
         if self.memory_lease is not None:
-            successor = self.memory_lease.transfer_stage(stage)
-            # Historical focused doubles returned None; real pass48 leases return
-            # a new generation and must replace the upstream capability.
-            if successor is not None:
-                self.memory_lease = successor
+            self.memory_lease = self.memory_lease.transfer_stage(stage)
         return self
 
     def close(self) -> None:
@@ -2363,8 +2046,8 @@ class CompositeParallelAdmission:
             # repeated close() calls idempotent.
             self.execution_lease = None
 
-        # Resident bytes were acquired before helper-worker capacity in Pass 56.
-        # Release the worker first so the byte credit cannot be re-admitted while
+        # Resident bytes were acquired before helper-worker capacity. Release the
+        # worker first so byte credit cannot be re-admitted while
         # a helper that was protected by those bytes is still live.
         lease = self.memory_lease
         if lease is not None:
@@ -2388,10 +2071,6 @@ class _StageControlReservation:
     def __init__(self, control_bytes: int) -> None:
         self.ticket: ControlPlaneTicket | None = None
         self.control_bytes = control_bytes
-
-    def __iter__(self):  # compatibility; production uses direct fields
-        yield self.ticket
-        yield self.control_bytes
 
 
 _STAGE_ADMISSION_BASE_CONTROL_BYTES = 512
@@ -2434,13 +2113,7 @@ def acquire_parallel_admission(
     physical_threads: bool = True,
     _admission_type: type[CompositeParallelAdmission] | None = None,
 ) -> CompositeParallelAdmission:
-    """Acquire bytes/threads/control with construction ownership pre-rooted.
-
-    Pass69 reserves an escrow generation and allocates the construction owner
-    before the first resource acquisition. After each commit, ownership moves
-    immediately into an existing owner slot. Public-admission construction is
-    therefore no longer an allocation-after-commit proof gap.
-    """
+    """Acquire bytes/threads/control with construction ownership pre-rooted."""
     admission_type = CompositeParallelAdmission if _admission_type is None else _admission_type
     slots = adaptive_parallel_slots(
         desired, per_slot_bytes=per_slot_bytes, reserve_bytes=reserve_bytes
@@ -2608,10 +2281,9 @@ def acquire_parallel_admission(
 class StageConcurrencyAdmission(CompositeParallelAdmission):
     """A transactionally composed admission spanning every requested stage domain.
 
-    This is deliberately a distinct capability type rather than an alias for the
-    historical slot/byte admission. Callers can therefore distinguish a complete
-    stage envelope from a lower-level parallel admission while retaining the same
-    close/transfer surface.
+    This distinct capability lets callers distinguish a complete stage envelope
+    from a lower-level parallel admission while retaining the same close/transfer
+    surface.
     """
 
     __slots__ = ()
@@ -2642,41 +2314,6 @@ class StageConcurrencyAdmission(CompositeParallelAdmission):
         self.domain_leases = (*existing, (domain_name, lease))
         self.pending_domain_lease = None
         self.pending_domain_name = None
-
-
-def _promote_stage_admission(
-    base: CompositeParallelAdmission,
-) -> StageConcurrencyAdmission:
-    """Move one base admission into the distinct stage capability type."""
-    try:
-        stage = StageConcurrencyAdmission(
-            base.slots,
-            base.per_slot_bytes,
-            base.memory_lease,
-            base.execution_lease,
-            base.owns_execution_lease,
-            base.memory_enforced,
-            base.control_ticket,
-            base.control_bytes,
-            base.domain_leases,
-        )
-    except BaseException as primary:
-        try:
-            base.close()
-        except BaseException as cleanup_error:
-            add_bounded_note(
-                primary, "stage admission promotion rollback also failed", cleanup_error
-            )
-        raise
-    # Ownership is now represented only by ``stage``. The lower-level object has
-    # no finalizer, but clearing it makes accidental later cleanup harmless.
-    base.memory_lease = None
-    base.execution_lease = None
-    base.owns_execution_lease = False
-    base.control_ticket = None
-    base.control_bytes = 0
-    base.domain_leases = ()
-    return stage
 
 
 def acquire_stage_concurrency_admission(
@@ -2735,11 +2372,9 @@ def acquire_stage_concurrency_admission(
             physical_threads=physical_threads,
             _admission_type=StageConcurrencyAdmission,
         )
-        # Compatibility for focused tests/third-party monkeypatches that replace
-        # acquire_parallel_admission and still return the historical base type.
-        stage_admission = (
-            base if isinstance(base, StageConcurrencyAdmission) else _promote_stage_admission(base)
-        )
+        if not isinstance(base, StageConcurrencyAdmission):
+            raise RuntimeError("stage admission construction returned the wrong capability type")
+        stage_admission = base
         rollback_authority.arg0 = stage_admission
         if stage_admission.slots <= 0 or not ordered_domains:
             _observe_runtime_concurrency_contract_noexcept("stage_concurrency_admission")
@@ -2790,7 +2425,7 @@ def adaptive_concurrency_target(
     per_slot_bytes: int,
     reserve_bytes: int | None = None,
 ) -> int:
-    """Compatibility target that preserves one caller-owned progress slot."""
+    """Return a bounded target that preserves one caller-owned progress slot."""
     return max(
         1,
         adaptive_parallel_slots(

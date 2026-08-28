@@ -16,9 +16,8 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "frontends/builtin_frontends.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/memory/arena.hh"
 #include "internal/memory/pool_resource.hh"
 #include "internal/parsing/csv_parse.hh"
@@ -29,7 +28,7 @@
 namespace core_abi3_internal {
 
 sanitize::Result<sanitize::PreparedIngest>
-prepare_path_source_ingest(schema_sanitizer_context *ctx,
+prepare_path_source_ingest(NativeContext *ctx,
                            const sanitize::PreparedOptionsPtr &prepared,
                            const PathSourceSpec &source) {
   if (!ctx) {
@@ -51,7 +50,7 @@ bool json_group_failure_should_retry_per_source(
 }
 
 sanitize::Result<sanitize::PreparedIngest>
-prepare_path_source_group_ingest(schema_sanitizer_context *ctx,
+prepare_path_source_group_ingest(NativeContext *ctx,
                                  const sanitize::PreparedOptionsPtr &prepared,
                                  const std::vector<PathSourceSpec> &sources,
                                  std::size_t start, std::size_t end) {
@@ -84,7 +83,7 @@ prepare_path_source_group_ingest(schema_sanitizer_context *ctx,
 } // namespace
 
 sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
-    schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
+    NativeContext *ctx, const std::vector<PathSourceSpec> &sources,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources,
     const sanitize::LogicalSchema *previous_schema,

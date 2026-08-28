@@ -6,7 +6,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ..core_impl.execution_policy import execution_policy
 from ..core_impl.finalization import runtime_is_finalizing
@@ -24,6 +24,46 @@ _MIB = 1024 * 1024
 _S3_MIN_PART_BYTES = 5 * _MIB
 _GCS_CHUNK_ALIGNMENT = 256 * 1024
 _MAX_UPLOAD_PARTS = 10_000
+
+
+class TransientGcsUploadError(RuntimeError):
+    """A GCS resumable-upload response safe to retry."""
+
+
+def gcs_resumable_next_offset(
+    status: int,
+    headers: Mapping[str, Any],
+    body: str | bytes,
+    *,
+    operation: str,
+    total_bytes: int,
+    start: int | None = None,
+    end: int | None = None,
+) -> int:
+    """Validate a GCS resumable response and return its committed offset."""
+    if status in {200, 201}:
+        if end is not None and end != total_bytes - 1:
+            raise RuntimeError("GCS finalized a resumable upload before the final byte")
+        return total_bytes
+    if status == 308:
+        raw_range = headers.get("Range") or headers.get("range")
+        committed_end = -1
+        if isinstance(raw_range, str) and raw_range.startswith("bytes=0-"):
+            try:
+                committed_end = int(raw_range.removeprefix("bytes=0-"))
+            except ValueError:
+                pass
+        next_offset = committed_end + 1
+        if start is not None and end is not None and not start <= next_offset <= end + 1:
+            raise RuntimeError(
+                "GCS resumable upload returned an invalid committed range: "
+                f"start={start}, end={end}, next={next_offset}"
+            )
+        return next_offset
+    message = f"GCS resumable {operation} failed: status={status}, body={body[:1000]!r}"
+    if status == 429 or 500 <= status <= 599:
+        raise TransientGcsUploadError(message)
+    raise RuntimeError(message)
 
 
 class _BudgetedUploadBytes(bytes):
@@ -251,6 +291,8 @@ def read_upload_part(local_path: str, index: int, part_bytes: int, file_size: in
 
 __all__ = [
     "RemoteUploadPolicy",
+    "TransientGcsUploadError",
+    "gcs_resumable_next_offset",
     "read_upload_part",
     "release_upload_payload",
     "read_upload_range",

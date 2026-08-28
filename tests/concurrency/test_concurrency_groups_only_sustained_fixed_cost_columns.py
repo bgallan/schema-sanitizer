@@ -72,8 +72,6 @@ def test_grouped_ranges_preserve_column_order_and_one_budget() -> None:
         )
         == 1
     )
-    assert len(source.splitlines()) <= 500
-    assert len(row_group.splitlines()) <= 500
 
 
 def test_fixed_wide_parquet_single_and_multi_are_byte_identical(

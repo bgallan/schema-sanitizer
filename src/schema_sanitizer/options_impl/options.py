@@ -24,11 +24,6 @@ def normalize_csv_header_mode(value: object) -> CsvHeaderMode:
     return cast(CsvHeaderMode, normalized)
 
 
-def require_implemented_csv_header_mode(value: object) -> CsvHeaderMode:
-    """Return a validated CSV header mode supported by the native reader."""
-    return normalize_csv_header_mode(value)
-
-
 def normalize_csv_escape_char(value: object, delimiter: str) -> str:
     """Validate an opt-in one-byte escape used inside quoted CSV fields."""
     if value is None:

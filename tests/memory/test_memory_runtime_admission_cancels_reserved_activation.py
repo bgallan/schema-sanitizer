@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import gc
 import os
-from threading import Thread
 
 import pytest
 
@@ -113,34 +112,6 @@ def test_cleanup_separates_retained_from_already_reserved_bytes(
     assert snapshot.owned_reserved_bytes == 8 << 20
 
 
-def test_operation_memory_lease_finalizer_only_transfers_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import memory_budget as module
-
-    class Ledger:
-        def __init__(self) -> None:
-            self.reserved = 0
-            self.release_calls = 0
-
-        def reserve(self, amount: int, *, stage: str) -> None:
-            del stage
-            self.reserved += amount
-
-        def release(self, amount: int) -> None:
-            self.release_calls += 1
-            self.reserved -= amount
-
-    ledger = Ledger()
-    lease = module.OperationMemoryLease(ledger, 1, "runtime-admission-cancels-reserved-activation")  # type: ignore[arg-type]
-    module.OperationMemoryLease.__del__(lease)
-    assert ledger.release_calls == 0
-    assert module.operation_memory_finalizer_snapshot()[1] == 1
-    assert module.drain_abandoned_memory_finalizers() == 1
-    assert ledger.release_calls == 1
-    assert ledger.reserved == 0
-
-
 def test_process_cross_memory_aggregates_growth_and_coalesces_shrink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -154,6 +125,9 @@ def test_process_cross_memory_aggregates_growth_and_coalesces_shrink(
 
         def resize(self, value: int) -> None:
             self.calls.append(value)
+
+        def _set_capacity(self, _value: int) -> None:
+            return
 
     monkeypatch.setattr(module, "CrossProcessMemoryLease", Physical)
     coordinator = module._ProcessCrossMemoryCoordinator(64 << 20)
@@ -213,23 +187,6 @@ def test_terminal_ownership_ledger_is_metadata_only_and_bounded() -> None:
     assert ledger.snapshot().owners == 1
 
 
-def test_governed_runtime_thread_fallback_preserves_physical_start() -> None:
-    from schema_sanitizer.core_impl.governed_thread import start_governed_runtime_thread
-
-    activated: list[bool] = []
-
-    class Registration:
-        def activate(self) -> None:
-            activated.append(True)
-
-    ran: list[bool] = []
-    thread = Thread(target=lambda: ran.append(True))
-    start_governed_runtime_thread(Registration(), thread)
-    thread.join(timeout=1.0)
-    assert ran == [True]
-    assert activated == [True]
-
-
 def test_runtime_shutdown_success_requires_complete_observability() -> None:
     import inspect
 
@@ -237,7 +194,7 @@ def test_runtime_shutdown_success_requires_complete_observability() -> None:
 
     source = inspect.getsource(runtime_shutdown._perform_shutdown)
     assert "observability_complete = not observability_failures" in source
-    assert "terminal_ownership:publication_rejected=" in source
+    assert "terminal_ownership:publication_rejected" in source
     assert "resources_drained," in source
     assert "observability_complete," in source
 
@@ -266,15 +223,11 @@ def test_cross_process_memory_fork_reset_rebinds_inherited_locks() -> None:
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     old_process_lock = module._PROCESS_COORDINATOR_LOCK
-    old_abandoned_lock = module._ABANDONED_DIRECT_LOCK
     old_process_lock.acquire()
-    old_abandoned_lock.acquire()
     try:
         module._reset_cross_process_memory_after_fork()
         assert module._PROCESS_COORDINATOR_LOCK is not old_process_lock
-        assert module._ABANDONED_DIRECT_LOCK is not old_abandoned_lock
     finally:
-        old_abandoned_lock.release()
         old_process_lock.release()
 
 
@@ -288,31 +241,6 @@ def test_operation_memory_fork_reset_rebinds_abandoned_owner_lock() -> None:
         assert module._ABANDONED_MEMORY_LOCK is not old_lock
     finally:
         old_lock.release()
-
-
-def test_process_cross_memory_finalizer_mailbox_is_bounded_and_fail_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from queue import Queue
-
-    from schema_sanitizer.core_impl import cross_process_memory as module
-
-    class Physical:
-        def __init__(self, _capacity: int, _initial: int) -> None:
-            self._coordinated = False
-            self._coordination_path = None
-
-        def resize(self, _value: int) -> None:
-            return None
-
-    monkeypatch.setattr(module, "CrossProcessMemoryLease", Physical)
-    monkeypatch.setattr(module, "_PROCESS_FINALIZER_RELEASE_OVERFLOWS", 0)
-    coordinator = module._ProcessCrossMemoryCoordinator(64 << 20)
-    coordinator._finalizer_releases = Queue(maxsize=1)
-    coordinator.defer_release(1)
-    coordinator.defer_release(2)
-    assert module.cross_process_memory_finalizer_overflow_count() == 1
-    assert coordinator._finalizer_releases.qsize() == 1
 
 
 def test_operation_memory_stage_rejects_coercive_objects() -> None:

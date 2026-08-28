@@ -17,20 +17,9 @@ from typing import Callable, Generic, TypeAlias, TypeVar
 
 from .atomic_epoch import AtomicEpoch
 
-# Pass49 fallback used bytearray(8); pass50 uses ABI-backed atomic uint64 counters.
-
 T = TypeVar("T")
 _EMPTY = object()
 
-_LegacyForkBank: TypeAlias = tuple[
-    list[object],
-    bytearray,
-    list[Lock],
-    AtomicEpoch,
-    AtomicEpoch,
-    AtomicEpoch,
-    AtomicEpoch,
-]
 _ReservedForkBank: TypeAlias = tuple[
     list[object],
     bytearray,
@@ -74,21 +63,6 @@ def _list_storage_bytes(count: int, *, element_bytes: int = 0) -> int:
     return _LIST_BASE_BYTES + count * (_PTR_BYTES + element_bytes)
 
 
-# Compatibility breadcrumbs from pass49: capacity * 256; self._capacity * 384.
-# Pass51 replaces those coarse multipliers with a runtime-layout-derived bound.
-def _legacy_escrow_static_bytes(capacity: int) -> int:
-    per_bank = (
-        _list_storage_bytes(capacity)  # owner slots
-        + _BYTEARRAY_BASE_BYTES
-        + capacity
-        + _list_storage_bytes(capacity, element_bytes=_LOCK_BYTES)
-    )
-    counters = 4 * _ATOMIC_EPOCH_BYTES
-    roots = _list_storage_bytes(7 * _MAX_FORK_QUARANTINE_GENERATIONS)
-    raw = 3 * per_bank + counters * 3 + roots + 4096
-    return max(4096, raw + raw // 4)
-
-
 def _reserved_escrow_static_bytes(capacity: int) -> int:
     per_bank = (
         _list_storage_bytes(capacity)  # owner slots
@@ -107,59 +81,6 @@ def _reserved_escrow_static_bytes(capacity: int) -> int:
     # 25% allocator/alignment reserve keeps this a conservative footprint, not
     # the former unexplained bytes-per-slot heuristic.
     return max(4096, raw + raw // 4)
-
-
-def _fixed_increment(counter: bytearray) -> bool:
-    """Saturating increment of a little-endian fixed-width counter.
-
-    Exhaustion never wraps to zero: callers can fail closed while the terminal
-    value remains distinguishable from an untouched epoch.
-    """
-    all_max = True
-    for value in counter:
-        if value != 255:
-            all_max = False
-            break
-    if all_max:
-        return False
-    for index in range(len(counter)):
-        value = counter[index]
-        if value != 255:
-            counter[index] = value + 1
-            return True
-        counter[index] = 0
-    return False
-
-
-def _fixed_decrement(counter: bytearray) -> bool:
-    """Saturating decrement of a little-endian fixed-width counter in place."""
-    nonzero = False
-    for value in counter:
-        if value:
-            nonzero = True
-            break
-    if not nonzero:
-        return False
-    for index in range(len(counter)):
-        value = counter[index]
-        if value != 0:
-            counter[index] = value - 1
-            return True
-        counter[index] = 255
-    return False
-
-
-def _fixed_value(counter: bytearray) -> int:
-    """Materialize a diagnostic integer outside finalizer commit paths."""
-    return int.from_bytes(counter, "little", signed=False)
-
-
-def _write_fixed(counter: bytearray, target: bytearray, offset: int) -> int:
-    """Copy one fixed counter into a preallocated target without slicing."""
-    for value in counter:
-        target[offset] = value
-        offset += 1
-    return offset
 
 
 def _write_u64(value: int, target: bytearray, offset: int) -> int:
@@ -249,406 +170,6 @@ class FinalizerEscrowCapacitySnapshot:
             and 0 <= self.recycle_pending <= self.capacity
             and self.active + self.retired + self.available + self.recycle_pending == self.capacity
         )
-
-
-class FinalizerEscrow(Generic[T]):
-    """Fixed-capacity ring for legacy compact finalizer capsules.
-
-    Publication never waits on a shared lock.  Each slot owns one preallocated
-    lock, so contention on an unrelated producer/consumer cannot be mistaken
-    for capacity exhaustion.  Rich/physical owners should still prefer
-    :class:`ReservedFinalizerEscrow`, which removes even same-slot admission
-    contention by reserving a generation before external ownership exists.
-    """
-
-    __slots__ = (
-        "_capacity",
-        "_pid",
-        "_slots",
-        "_states",
-        "_slot_locks",
-        "_cursor",
-        "_consume_cursor",
-        "_overflowed",
-        "_active_counter",
-        "_publication_failures_counter",
-        "_publication_epoch_counter",
-        "_progress_epoch_counter",
-        "_fork_roots",
-        "_fork_root_count",
-        "_fork_prepare_index",
-        "_fork_fresh",
-        "_fork_spare2",
-        "_fork_prepare_exhausted",
-        "_fork_unusable_after_fork",
-        "_post_fork_quarantine_pending",
-        "__weakref__",
-    )
-
-    def __init__(self, capacity: int, *, static_kind: str | None = None) -> None:
-        if type(capacity) is not int:
-            raise TypeError("finalizer escrow capacity must be an exact integer")
-        if capacity <= 0:
-            raise ValueError("finalizer escrow capacity must be > 0")
-        self._capacity = capacity
-        self._pid = os.getpid()
-        static_guard = _static_footprint_guard(
-            static_kind,
-            prefix="legacy_finalizer_escrow",
-            amount=_legacy_escrow_static_bytes(capacity),
-        )
-        try:
-            self._slots: list[object] = [_EMPTY] * capacity
-            self._states = bytearray(capacity)
-            self._slot_locks: list[Lock] = [Lock() for _ in range(capacity)]
-            self._cursor = 0
-            self._consume_cursor = 0
-            self._overflowed = False
-            self._active_counter = AtomicEpoch()
-            self._publication_failures_counter = AtomicEpoch()
-            self._publication_epoch_counter = AtomicEpoch()
-            self._progress_epoch_counter = AtomicEpoch()
-            self._fork_roots: list[object | None] = [None] * (7 * _MAX_FORK_QUARANTINE_GENERATIONS)
-            self._fork_root_count = 0
-            self._fork_prepare_index = -1
-            self._fork_fresh: _LegacyForkBank | None
-            self._fork_spare2: _LegacyForkBank | None
-            self._fork_fresh = self._make_fresh_bank()
-            self._fork_spare2 = self._make_fresh_bank()
-            self._fork_prepare_exhausted = False
-            self._fork_unusable_after_fork = False
-            self._post_fork_quarantine_pending = False
-            if static_kind is not None:
-                from .fork_manager import register_fork_handler
-
-                register_fork_handler(
-                    f"legacy-finalizer:{static_kind}",
-                    before=self.prepare_for_fork,
-                    after_in_parent=self.clear_fork_preparation,
-                    after_in_child=self.reset_after_fork,
-                )
-            if static_guard is not None:
-                static_guard.commit()
-        except BaseException:
-            if static_guard is not None:
-                try:
-                    static_guard.rollback_now()
-                except BaseException:
-                    pass
-            raise
-
-    def _make_fresh_bank(self) -> _LegacyForkBank:
-        return (
-            [_EMPTY] * self._capacity,
-            bytearray(self._capacity),
-            [Lock() for _ in range(self._capacity)],
-            AtomicEpoch(),
-            AtomicEpoch(),
-            AtomicEpoch(),
-            AtomicEpoch(),
-        )
-
-    def _safe_point_after_fork(self) -> None:
-        """Release synthetic-test roots, but retain them in a real poisoned child."""
-        if not self._post_fork_quarantine_pending:
-            return
-        try:
-            from .fork_safety import runtime_fork_poisoned
-
-            if runtime_fork_poisoned():
-                return
-        except BaseException:
-            return
-        self._post_fork_quarantine_pending = False
-        limit = self._fork_root_count * 7
-        for index in range(limit):
-            self._fork_roots[index] = None
-        self._fork_root_count = 0
-
-    @property
-    def capacity(self) -> int:
-        return self._capacity
-
-    @property
-    def overflowed(self) -> bool:
-        return self._overflowed
-
-    def try_publish(self, value: T) -> bool:
-        """Publish one legacy owner without leaving an invisible partial slot.
-
-        Pass85 makes the fixed slot itself authoritative before counters/cursor.
-        If an asynchronous exception lands after owner publication, the slot is
-        forced to PUBLISHED so a safe point can still retire it.
-        """
-        if self._fork_unusable_after_fork:
-            return False
-        start = self._cursor
-        index = -1
-        owner_published = False
-        try:
-            for offset in range(self._capacity):
-                index = start + offset
-                if index >= self._capacity:
-                    index -= self._capacity
-                lock = self._slot_locks[index]
-                if not lock.acquire(blocking=False):
-                    continue
-                try:
-                    if self._states[index] != _FREE or self._slots[index] is not _EMPTY:
-                        continue
-                    next_cursor = index + 1
-                    if next_cursor == self._capacity:
-                        next_cursor = 0
-                    # Exact owner first; never leave owner in a FREE slot.
-                    self._slots[index] = value
-                    owner_published = True
-                    self._states[index] = _PUBLISHED
-                    if not self._active_counter.increment():
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-                    publication_ok = self._publication_epoch_counter.increment()
-                    progress_ok = self._progress_epoch_counter.increment()
-                    if not publication_ok or not progress_ok:
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-                    self._cursor = next_cursor
-                    return True
-                finally:
-                    lock.release()
-            self._overflowed = True
-            self._publication_failures_counter.increment()
-            return False
-        except BaseException:
-            if owner_published and index >= 0:
-                try:
-                    with self._slot_locks[index]:
-                        if self._slots[index] is value and self._states[index] == _FREE:
-                            self._states[index] = _PUBLISHED
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-                except BaseException:
-                    pass
-            raise
-
-    def process_one(self, processor: Callable[[T], object]) -> bool:
-        """Process one legacy owner with recoverable CLAIMED/PROCESSED states."""
-        if self._fork_unusable_after_fork:
-            return False
-        self._safe_point_after_fork()
-        index = -1
-        value: object = _EMPTY
-        try:
-            start = self._consume_cursor
-            for offset in range(self._capacity):
-                candidate = start + offset
-                if candidate >= self._capacity:
-                    candidate -= self._capacity
-                state = self._states[candidate]
-                if state == _PROCESSED:
-                    lock = self._slot_locks[candidate]
-                    if not lock.acquire(blocking=False):
-                        continue
-                    try:
-                        if self._states[candidate] != _PROCESSED:
-                            continue
-                        self._slots[candidate] = _EMPTY
-                        self._states[candidate] = _FREE
-                        if not self._active_counter.decrement():
-                            self._overflowed = True
-                            self._publication_failures_counter.increment()
-                        self._progress_epoch_counter.increment()
-                    finally:
-                        lock.release()
-                    return True
-                if state != _PUBLISHED:
-                    continue
-                lock = self._slot_locks[candidate]
-                if not lock.acquire(blocking=False):
-                    continue
-                try:
-                    if self._states[candidate] != _PUBLISHED:
-                        continue
-                    self._states[candidate] = _CLAIMED
-                    index = candidate
-                    value = self._slots[candidate]
-                    self._consume_cursor = candidate + 1
-                    if self._consume_cursor == self._capacity:
-                        self._consume_cursor = 0
-                    break
-                finally:
-                    lock.release()
-            if index < 0 or value is _EMPTY:
-                return False
-
-            processor(value)  # type: ignore[arg-type]
-            with self._slot_locks[index]:
-                if self._states[index] == _CLAIMED and self._slots[index] is value:
-                    self._states[index] = _PROCESSED
-                    self._progress_epoch_counter.increment()
-            with self._slot_locks[index]:
-                if self._states[index] == _PROCESSED and self._slots[index] is value:
-                    self._slots[index] = _EMPTY
-                    self._states[index] = _FREE
-                    if not self._active_counter.decrement():
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-                    if not self._progress_epoch_counter.increment():
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-            return True
-        except BaseException:
-            if index >= 0 and value is not _EMPTY:
-                try:
-                    with self._slot_locks[index]:
-                        if self._states[index] == _CLAIMED and self._slots[index] is value:
-                            self._states[index] = _PUBLISHED
-                            self._progress_epoch_counter.increment()
-                        # PROCESSED remains no-replay bookkeeping state.
-                except BaseException:
-                    self._overflowed = True
-            raise
-
-    def drain(self) -> tuple[T, ...]:
-        """Compatibility drain; critical cleanup uses :meth:`process_one`."""
-        items: list[T] = []
-        attempts = self.size()
-        for _ in range(attempts):
-            box: list[T] = []
-
-            def collect(value: T) -> None:
-                box.append(value)
-
-            try:
-                if not self.process_one(collect):
-                    break
-            except BaseException:
-                continue
-            items.extend(box)
-        return tuple(items)
-
-    def size(self) -> int:
-        if self._fork_unusable_after_fork:
-            return 0
-        self._safe_point_after_fork()
-        return sum(1 for state in self._states if state != _FREE)
-
-    def active_count(self) -> int:
-        """Return exact live-slot authority; atomic counters are mirrors only."""
-        if self._fork_unusable_after_fork:
-            return 0
-        active = 0
-        for index in range(self._capacity):
-            if self._slots[index] is not _EMPTY or self._states[index] in (
-                _PUBLISHED,
-                _CLAIMED,
-                _PROCESSED,
-            ):
-                active += 1
-        return active
-
-    def write_activity_into(self, target: bytearray, offset: int) -> int:
-        """Write activity without materializing counter values as Python ints."""
-        self._active_counter.write_into(target, offset)
-        self._publication_failures_counter.write_into(target, offset + 8)
-        self._publication_epoch_counter.write_into(target, offset + 16)
-        self._progress_epoch_counter.write_into(target, offset + 24)
-        return offset + 32
-
-    def activity_counters(self) -> tuple[AtomicEpoch, AtomicEpoch, AtomicEpoch, AtomicEpoch]:
-        return (
-            self._active_counter,
-            self._publication_failures_counter,
-            self._publication_epoch_counter,
-            self._progress_epoch_counter,
-        )
-
-    def activity_is_quiescent(self) -> bool:
-        if self._fork_unusable_after_fork:
-            return False
-        if self.active_count() != 0:
-            return False
-        if self._publication_failures_counter.value() != 0:
-            return False
-        return True
-
-    def activity_snapshot(self) -> tuple[int, int, int, int]:
-        """Return pending, irreversible failures, publication and progress epochs."""
-        return (
-            self.active_count(),
-            self._publication_failures_counter.value(),
-            self._publication_epoch_counter.value(),
-            self._progress_epoch_counter.value(),
-        )
-
-    def prepare_for_fork(self) -> None:
-        """Root one generation without ever raising from an at-fork callback.
-
-        CPython reports callback exceptions as unraisable and still performs the
-        fork. Exhaustion therefore records a sentinel; the child becomes an inert
-        fail-closed escrow instead of pretending the fork was aborted.
-        """
-        index = self._fork_root_count
-        self._fork_prepare_exhausted = False
-        if index >= _MAX_FORK_QUARANTINE_GENERATIONS or self._fork_fresh is None:
-            self._fork_prepare_index = -2
-            self._fork_prepare_exhausted = True
-            return
-        base = index * 7
-        self._fork_roots[base] = self._slots
-        self._fork_roots[base + 1] = self._states
-        self._fork_roots[base + 2] = self._slot_locks
-        self._fork_roots[base + 3] = self._active_counter
-        self._fork_roots[base + 4] = self._publication_failures_counter
-        self._fork_roots[base + 5] = self._publication_epoch_counter
-        self._fork_roots[base + 6] = self._progress_epoch_counter
-        self._fork_prepare_index = index
-
-    def clear_fork_preparation(self) -> None:
-        """Parent drops only the temporary newest roots, preserving ancestors."""
-        index = self._fork_prepare_index
-        if index >= 0:
-            base = index * 7
-            for offset in range(7):
-                self._fork_roots[base + offset] = None
-        self._fork_prepare_index = -1
-        self._fork_prepare_exhausted = False
-
-    def reset_after_fork(self) -> None:
-        """Swap once per child PID and defer inherited decrefs to a safe point."""
-        child_pid = os.getpid()
-        if self._pid == child_pid and self._fork_prepare_index < 0:
-            return
-        if self._fork_prepare_index == -2 or self._fork_prepare_exhausted:
-            self._pid = child_pid
-            self._fork_prepare_index = -1
-            self._fork_prepare_exhausted = False
-            self._fork_unusable_after_fork = True
-            self._post_fork_quarantine_pending = False
-            return
-        fresh = self._fork_fresh
-        if fresh is None:
-            fresh = self._make_fresh_bank()
-        (
-            self._slots,
-            self._states,
-            self._slot_locks,
-            self._active_counter,
-            self._publication_failures_counter,
-            self._publication_epoch_counter,
-            self._progress_epoch_counter,
-        ) = fresh
-        self._fork_fresh = self._fork_spare2
-        self._fork_spare2 = None
-        prepared = self._fork_prepare_index
-        if prepared >= 0 and prepared + 1 > self._fork_root_count:
-            self._fork_root_count = prepared + 1
-        self._fork_prepare_index = -1
-        self._post_fork_quarantine_pending = True
-        self._fork_unusable_after_fork = False
-        self._pid = child_pid
-        self._cursor = 0
-        self._consume_cursor = 0
-        self._overflowed = False
 
 
 class ReservedFinalizerEscrow(Generic[T]):
@@ -840,19 +361,9 @@ class ReservedFinalizerEscrow(Generic[T]):
     @staticmethod
     def _armed_ticket(value: object) -> int:
         try:
-            exact = int(getattr(value, "_escrow_armed_ticket", 0) or 0)
+            return max(0, int(value._escrow_armed_ticket))  # type: ignore[attr-defined]
         except BaseException:
-            exact = 0
-        if exact > 0:
-            return exact
-        # Compatibility for legacy rooted owner doubles that expose only the
-        # boolean arm bit. They are safe only for their current exact ticket.
-        try:
-            if bool(getattr(value, "_escrow_armed", False)):
-                return int(getattr(value, "ticket", 0) or 0)
-        except BaseException:
-            pass
-        return 0
+            return 0
 
     @classmethod
     def _is_armed_for(cls, value: object, ticket: int | None) -> bool:
@@ -861,19 +372,7 @@ class ReservedFinalizerEscrow(Generic[T]):
     @staticmethod
     def _arm_value_for(value: object, ticket: int) -> bool:
         try:
-            method = getattr(value, "arm_for_ticket", None)
-            if callable(method):
-                method(ticket)
-            else:
-                try:
-                    setattr(value, "_escrow_armed_ticket", int(ticket))
-                except (AttributeError, TypeError):
-                    # Legacy compact owners may be slot-constrained. Their
-                    # exact ``ticket`` plus the boolean arm mirror still binds
-                    # the arm to this one generation because duplicate owners
-                    # are rejected by reserve_rooted().
-                    pass
-                setattr(value, "_escrow_armed", True)
+            value.arm_for_ticket(ticket)  # type: ignore[attr-defined]
             return True
         except BaseException:
             return False
@@ -881,18 +380,7 @@ class ReservedFinalizerEscrow(Generic[T]):
     @staticmethod
     def _disarm_value_for(value: object, ticket: int | None = None) -> None:
         try:
-            method = getattr(value, "disarm_ticket", None)
-            if callable(method):
-                method(ticket)
-                return
-            exact = int(getattr(value, "_escrow_armed_ticket", 0) or 0)
-            if ticket is not None and exact not in (0, int(ticket)):
-                return
-            try:
-                setattr(value, "_escrow_armed_ticket", 0)
-            except BaseException:
-                pass
-            setattr(value, "_escrow_armed", False)
+            value.disarm_ticket(ticket)  # type: ignore[attr-defined]
         except BaseException:
             pass
 
@@ -939,25 +427,6 @@ class ReservedFinalizerEscrow(Generic[T]):
         self._free_tail = next_tail
         self._free_count = next_count
 
-    # Compatibility helpers retained for private tests; critical paths use the
-    # explicit prepare/commit operations above.
-    def _ring_pop_locked(self) -> int | None:
-        prepared = self._ring_prepare_pop_locked()
-        if prepared is None:
-            return None
-        slot, next_head, next_count = prepared
-        self._ring_commit_pop_locked(next_head, next_count)
-        return slot
-
-    def _ring_push_locked(self, slot: int) -> None:
-        prepared = self._ring_prepare_push_locked(slot)
-        if prepared is None:
-            self._overflowed = True
-            self._publication_failures_counter.increment()
-            return
-        tail, next_tail, next_count = prepared
-        self._ring_commit_push_locked(slot, tail, next_tail, next_count)
-
     def _recycle_one_pending_locked(self) -> bool:
         """Return one owner-free pending slot to the free ring.
 
@@ -985,8 +454,6 @@ class ReservedFinalizerEscrow(Generic[T]):
 
     def reserve_ticket(self) -> int | None:
         """Reserve one generation with every fallible value prepared pre-commit."""
-        # pass49 compatibility breadcrumb: _ring_pop_locked() was the previous
-        # non-transactional spelling; pass51 uses prepare/commit instead.
         if self._fork_unusable_after_fork:
             return None
         self._safe_point_after_fork()
@@ -1364,12 +831,7 @@ class ReservedFinalizerEscrow(Generic[T]):
             lock.release()
 
     def release_ticket(self, ticket: int) -> bool:
-        """Idempotently release an unarmed RESERVED generation.
-
-        This legacy-by-ticket operation now uses RECYCLE_PENDING so an
-        interruption after owner retirement cannot make the ticket replayable.
-        Production admission prefers :meth:`reserve_rooted`.
-        """
+        """Idempotently release an unarmed RESERVED generation."""
         if self._fork_unusable_after_fork:
             return False
         slot = self._ticket_slots.get(ticket, -1)
@@ -1660,11 +1122,7 @@ class ReservedFinalizerEscrow(Generic[T]):
         return retired
 
     def capacity_snapshot(self) -> FinalizerEscrowCapacitySnapshot:
-        """Return O(1) counters; observation never acquires a publisher slot lock.
-
-        Pass49 used ``_fixed_value(self._active_counter)`` here; pass50 replaces
-        that lock-free multibyte observation with one atomic uint64 read.
-        """
+        """Return counters without acquiring a publisher slot lock."""
         if self._fork_unusable_after_fork:
             return FinalizerEscrowCapacitySnapshot(self._capacity, 0, 0, 0, True, 0, 1, 0, 0, 0)
         self._safe_point_after_fork()
@@ -1820,4 +1278,4 @@ class ReservedFinalizerEscrow(Generic[T]):
         self._fork_spare2 = None
 
 
-__all__ = ["FinalizerEscrow", "FinalizerEscrowCapacitySnapshot", "ReservedFinalizerEscrow"]
+__all__ = ["FinalizerEscrowCapacitySnapshot", "ReservedFinalizerEscrow"]

@@ -21,7 +21,7 @@ from ..input_impl.directory_inputs import (
     directory_metadata_budget_scope,
 )
 from ..remote_impl import routing, sync_backend
-from ..remote_impl.transport import run_sync
+from ..remote_impl.async_bridge import run_sync
 from ..sources.models import RemoteFile, SourceManifest, remote_file_sort_key
 
 if TYPE_CHECKING:

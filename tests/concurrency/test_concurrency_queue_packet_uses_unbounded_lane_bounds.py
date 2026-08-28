@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/layout/compact-queued-task.json"
-PROBE = ROOT / "benchmarks/probes/concurrency/layout/compact-queued-task-tsan.cc"
 
 
 def test_queue_packet_uses_unbounded_lane_bounds() -> None:
-    """Queued lane metadata remains lossless beyond the historical 32-worker path."""
+    """Queued lane metadata remains lossless beyond 32 workers."""
     arena = ARENA.read_text(encoding="utf-8")
     packet = arena.split("struct QueuedTask final", 1)[1].split("};", 1)[0]
 
@@ -40,7 +39,7 @@ def test_workers_use_native_size_bounds_for_arithmetic() -> None:
 
 def test_probe_covers_every_lane_kind_and_boundary_width() -> None:
     """The real arena probe validates compact bounds through local and stolen work."""
-    source = PROBE.read_text(encoding="utf-8")
+    source = load_probe("layout/compact-queued-task-tsan.cc")
     compact = source.replace(" ", "").replace("\n", "")
 
     assert "{2U,3U,5U,8U,16U,32U}" in compact
@@ -56,7 +55,7 @@ def test_probe_covers_every_lane_kind_and_boundary_width() -> None:
 
 def test_evidence_is_positive_and_narrowly_scoped() -> None:
     """Fixed-affinity evidence records density wins without throughput claims."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("compact-queued-task")
 
     assert evidence["pair_count"] == 15
     assert evidence["baseline_packet_bytes"] == 72

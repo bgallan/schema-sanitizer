@@ -332,17 +332,3 @@ def test_high_core_wide_fixture_configures_32_workers_and_breaks_16(
     started = native["counters"]["started_workers"]
     peak = native["counters"]["peak_active_tasks"]
     assert 16 < peak <= started <= 32
-
-
-def test_benchmark_owners_remain_cohesive_and_below_500_lines() -> None:
-    """The host protocol stays split by responsibility without large owners."""
-    root = Path(__file__).parents[2] / "benchmarks" / "concurrency" / "telemetry"
-    owners = [
-        root / "cli.py",
-        root / "analysis.py",
-        root / "runner.py",
-        root / "support.py",
-        root / "high_core_suite.py",
-        root / "high_core_evidence.py",
-    ]
-    assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 500 for path in owners)

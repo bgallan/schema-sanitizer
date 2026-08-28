@@ -29,6 +29,7 @@ def test_regression_runner_discovers_stable_cases_and_commands(
     build_root = tmp_path / "build"
     regression_root = tmp_path / "regressions"
     calls: list[list[str]] = []
+    staged_inputs: list[tuple[Path, bytes]] = []
 
     for target in module.TARGETS:
         build_root.mkdir(exist_ok=True)
@@ -36,11 +37,12 @@ def test_regression_runner_discovers_stable_cases_and_commands(
         target_root = regression_root / target
         target_root.mkdir(parents=True)
         (target_root / "case.bin").write_bytes(target.encode())
-        (target_root / ".ignored").write_bytes(b"ignored")
 
     def fake_run(command: list[str], *, check: bool) -> None:
         """Capture one deterministic fuzzer invocation."""
         assert check is True
+        path = Path(command[-1])
+        staged_inputs.append((path, path.read_bytes()))
         calls.append(command)
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
@@ -53,7 +55,10 @@ def test_regression_runner_discovers_stable_cases_and_commands(
             f"-max_input_ms={module.DEFAULT_MAX_INPUT_MS}",
             f"-max_rss_mb={module.DEFAULT_MAX_RSS_MB}",
         ]
-        assert Path(command[4]) == regression_root / target / "case.bin"
+        assert Path(command[4]).name == "case.bin"
+        assert Path(command[4]).parent != regression_root / target
+    assert [data for _path, data in staged_inputs] == [target.encode() for target in module.TARGETS]
+    assert all(not path.exists() for path, _data in staged_inputs)
 
 
 def test_regression_runner_rejects_empty_regression_set(tmp_path: Path) -> None:

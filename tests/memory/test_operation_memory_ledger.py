@@ -124,10 +124,9 @@ def test_high_level_text_input_keeps_its_reservation_until_stream_close(
 ) -> None:
     """Materialized text and native stream allocations share one output lifetime."""
     from schema_sanitizer.api_impl import execution_context as module
-    from schema_sanitizer.api_impl import input_lifetime
 
     created: list[OperationExecutionContext] = []
-    real_factory = input_lifetime.OperationExecutionContext
+    real_factory = module.OperationExecutionContext
 
     def create_context(**kwargs):
         """Capture the operation context created by the public execution path."""
@@ -135,7 +134,7 @@ def test_high_level_text_input_keeps_its_reservation_until_stream_close(
         created.append(context)
         return context
 
-    monkeypatch.setattr(input_lifetime, "OperationExecutionContext", create_context)
+    monkeypatch.setattr(module, "OperationExecutionContext", create_context)
     payload = "a,b\n" + "1,2\n" * 2000
     output = module.ExecutionContext().to_sink(
         payload,

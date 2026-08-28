@@ -69,6 +69,8 @@ runs:
             for requirement in path.read_text(encoding="utf-8").splitlines()
             if requirement and not requirement.startswith("#")
         ]
+        audit_dir = Path(".work/audit")
+        audit_dir.mkdir(parents=True, exist_ok=True)
         for name, requirements in (
             ("runtime-requirements.txt", runtime),
             (
@@ -76,13 +78,13 @@ runs:
                 runtime + build + extras + ci_tools + ci_constraints,
             ),
         ):
-            Path(name).write_text(
+            (audit_dir / name).write_text(
                 "\n".join(dict.fromkeys(requirements)) + "\n",
                 encoding="utf-8",
             )
         PY
-        pip-audit -r runtime-requirements.txt --progress-spinner off
-        pip-audit -r full-requirements.txt --progress-spinner off
+        pip-audit -r .work/audit/runtime-requirements.txt --progress-spinner off
+        pip-audit -r .work/audit/full-requirements.txt --progress-spinner off
     - name: Static Python security scan
       shell: bash
       run: bandit -r src meta/ci -ll
@@ -91,9 +93,10 @@ runs:
       run: |
         detect-secrets scan \
           --no-verify \
-          --exclude-files '^(\.git/|build/|dist/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|fuzz/(corpus|regressions)/(csv|json|parquet|xml)/)' \
-          > .detect-secrets.ci.json
-        python meta/ci/quality/check_detect_secrets_report.py .detect-secrets.ci.json
+          --exclude-files '^(\.git/|\.work/|dist/|\.venv/|fuzz/(corpus|regressions)/(csv|json|parquet|xml)/)' \
+          > .work/audit/detect-secrets.json
+        python meta/ci/quality/check_detect_secrets_report.py \
+          .work/audit/detect-secrets.json
     - name: Benchmark harness smoke
       shell: bash
       run: python -m benchmarks.ingestion.cli --rows 8 --width 2 --repeats 1
@@ -101,35 +104,9 @@ runs:
       shell: bash
       run: |
         coverage erase
-        coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=regular -m pytest -q \
-          tests/io/test_api.py \
-          tests/io/test_input_python_and_local.py \
-          tests/io/test_input_xml_and_public_api.py \
-          tests/sinks/test_sinks_csv_jsonl.py \
-          tests/pipeline/test_modified_time_csv_discovery.py \
-          tests/pipeline/test_modified_time_csv_planning.py \
-          tests/pipeline/test_source_manifest_inputs.py \
-          tests/pipeline/test_csv_header_modes.py \
-          tests/pipeline/test_csv_union_projection.py \
-          tests/pipeline/test_modified_time_csv_schema.py \
-          tests/pipeline/test_modified_time_csv_contracts.py
-        coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=adversarial -m pytest -q \
-          tests/io/test_contracts.py \
-          tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py \
-          tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py \
-          tests/concurrency/test_runtime_resource_close_and_finalization.py \
-          tests/sinks/test_streaming_writer_lifecycle.py \
-          tests/remote/test_async_remote_scheduler.py \
-          tests/quality/test_high_risk_coverage_gaps.py \
-          tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
-        coverage run --source=src/schema_sanitizer --branch --parallel-mode --context=integration -m pytest -q \
-          tests/io/test_input_remote_file_and_directory_staging.py \
-          tests/io/test_input_remote_directory_discovery.py \
-          tests/io/test_input_remote_lazy_json_plans.py \
-          tests/remote/test_cloud_emulator_configuration.py \
-          tests/remote/test_bigquery_integration.py \
-          tests/pipeline/test_example_08_orchestration.py \
-          tests/pipeline/test_example_08_fake_cloud.py
+        for suite in regular adversarial integration; do
+          python meta/ci/quality/run_coverage_suite.py python "${suite}"
+        done
         coverage combine
         coverage report --fail-under=44
         coverage html --show-contexts -d coverage-python-html

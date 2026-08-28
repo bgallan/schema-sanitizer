@@ -125,29 +125,3 @@ def test_skip_row_does_not_partially_append_columns() -> None:
     assert t.column("a").to_pylist() == [1, 100]
     assert t.column("b").to_pylist() == [2, 200]
     assert t.column("c").to_pylist() == [3, 300]
-
-
-def test_result_does_not_expose_bad_rows() -> None:
-    """Verify removed bad row queue is not exposed on Result."""
-    schema = pa.schema([("a", pa.int64()), ("b", pa.int64()), ("c", pa.int64())])
-
-    rows = [
-        {"a": 1, "b": 2, "c": 3},
-        {"a": 10, "b": 20, "c": "BAD"},
-        {"a": 100, "b": 200, "c": 300},
-    ]
-
-    res = _read_python_with_contract(
-        rows,
-        schema_contract=schema,
-        schema_mode="strict",
-        on_error="skip_row",
-    )
-
-    t = res.clean_data
-    assert t is not None
-    assert t.schema == schema
-    # The bad row must be skipped.
-    assert t.num_rows == 2
-    assert res.stats["skipped_rows"] == 1
-    assert not hasattr(res, "bad_rows")

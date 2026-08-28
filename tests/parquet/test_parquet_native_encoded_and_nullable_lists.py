@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from _support.parquet_runtime import pa, pq
+from _support.parquet_runtime import pa, pq, write_read_native_parquet
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
 from conftest import require_native
 
@@ -19,16 +19,6 @@ def test_native_parquet_stream_materializes_plain_byte_array_lists(
     name: str,
 ) -> None:
     """Verify native reader materializes PLAIN byte-array list elements."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / f"native-plain-byte-array-{name}-list.parquet"
@@ -37,14 +27,7 @@ def test_native_parquet_stream_materializes_plain_byte_array_lists(
     else:
         array = pa.array([[b"only"]], type=pa.list_(pa.binary()))
     table = pa.table({"tags": array})
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -55,28 +38,12 @@ def test_native_parquet_stream_materializes_plain_byte_array_lists(
     assert column["repeated_level_layouts"][0]["offsets"] == [0, 1]
     assert column["pages"][0]["value_encoding"] == 0
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-
-    assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_simple_float_lists(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes simple top-level fixed-width lists."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-float-list.parquet"
@@ -88,14 +55,7 @@ def test_native_parquet_stream_materializes_simple_float_lists(
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -106,28 +66,12 @@ def test_native_parquet_stream_materializes_simple_float_lists(
     assert column["repeated_level_layouts"][0]["offsets"] == [0, 2, 2, 2, 3]
     assert column["repeated_level_layouts"][0]["validity_hex_preview"] == "0d"
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-
-    assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_simple_boolean_lists(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes simple top-level boolean lists."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-boolean-list.parquet"
@@ -139,14 +83,7 @@ def test_native_parquet_stream_materializes_simple_boolean_lists(
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -155,12 +92,6 @@ def test_native_parquet_stream_materializes_simple_boolean_lists(
     assert column["native_read_value_buffer_kind"] == "bit_packed_boolean"
     assert column["repeated_level_layouts"][0]["offsets"] == [0, 2, 2, 2, 3]
     assert column["repeated_level_layouts"][0]["validity_hex_preview"] == "0d"
-
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-
-    assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -181,16 +112,6 @@ def test_native_parquet_stream_materializes_logical_fixed_width_lists(
     expected_offsets: list[int],
 ) -> None:
     """Verify native lists preserve fixed-width logical scalar element types."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / f"native-logical-{name}-list.parquet"
@@ -222,14 +143,7 @@ def test_native_parquet_stream_materializes_logical_fixed_width_lists(
             type=pa.list_(pa.uint64()),
         )
     table = pa.table({"items": array})
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -240,14 +154,6 @@ def test_native_parquet_stream_materializes_logical_fixed_width_lists(
     assert column["repeated_level_layouts"][0]["offsets"] == expected_offsets
     assert column["repeated_level_layouts"][0]["validity_hex_preview"] == "0d"
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-
-    out = reader.read_all()
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 @pytest.mark.parametrize("name", ["int", "string", "bool"])
@@ -256,16 +162,6 @@ def test_native_parquet_stream_materializes_nullable_list_elements(
     name: str,
 ) -> None:
     """Verify native list reconstruction preserves null child elements."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / f"native-nullable-{name}-list.parquet"
@@ -285,14 +181,7 @@ def test_native_parquet_stream_materializes_nullable_list_elements(
             type=pa.list_(pa.bool_()),
         )
     table = pa.table({"items": array})
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -309,12 +198,6 @@ def test_native_parquet_stream_materializes_nullable_list_elements(
         2,
         3,
     ]
-
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-
-    assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
 
 
 @_requires_pyarrow
@@ -363,30 +246,13 @@ def test_native_parquet_stream_materializes_dictionary_string_lists(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes RLE dictionary string list elements."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-dict-string-list.parquet"
     table = pa.table(
         {"tags": pa.array([["same", "same"], None, [], ["same"]] * 200, type=pa.list_(pa.string()))}
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -396,40 +262,17 @@ def test_native_parquet_stream_materializes_dictionary_string_lists(
     assert column["repeated_level_layouts"][0]["offsets"][:5] == [0, 2, 2, 2, 3]
     assert column["repeated_level_layouts"][0]["validity_hex_preview"].startswith("dd")
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-
-    assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_dictionary_integer_lists(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes RLE dictionary fixed-width list elements."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-dict-integer-list.parquet"
     table = pa.table({"nums": pa.array([[7, 7], None, [], [7]] * 200, type=pa.list_(pa.int64()))})
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -439,9 +282,3 @@ def test_native_parquet_stream_materializes_dictionary_integer_lists(
     assert column["native_read_value_width_bytes"] == 8
     assert column["repeated_level_layouts"][0]["offsets"][:5] == [0, 2, 2, 2, 3]
     assert column["repeated_level_layouts"][0]["validity_hex_preview"].startswith("dd")
-
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-
-    assert reader.read_all().to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"

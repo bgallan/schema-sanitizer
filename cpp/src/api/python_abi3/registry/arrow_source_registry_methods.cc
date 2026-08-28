@@ -4,9 +4,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include <cstdint>
-#include <cstring>
 #include <memory>
-#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -63,17 +61,13 @@ PyObject *py_context_to_registry_sink_arrow_sources(PyObject *,
   if (!append_registry_metadata_columns(first_row_columns, timestamp_columns,
                                         &state->first_row_columns,
                                         &state->timestamp_columns)) {
-    decref_arrow_sources(&state->sources);
     return nullptr;
   }
 
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, registry_json, &err,
-                                  "context_to_registry_sink_arrow_sources");
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    decref_arrow_sources(&state->sources);
-    raise_status_error(valid, err);
+  const auto valid = validate_registry_sink_mode(
+      schema_mode, registry_json, "context_to_registry_sink_arrow_sources");
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
 
@@ -81,17 +75,13 @@ PyObject *py_context_to_registry_sink_arrow_sources(PyObject *,
       ctx, state->sources, state->prepared, state->registry_json.c_str(),
       state->field_name_policy.c_str());
   if (!merged_r.ok()) {
-    decref_arrow_sources(&state->sources);
-    raise_status_error(code_for_status(merged_r.status()),
-                       dup_cstr(merged_r.status().ToString()));
+    raise_status_error(merged_r.status());
     return nullptr;
   }
   auto merged = std::move(merged_r).ValueOrDie();
   auto plan_r = make_native_registry_plan(std::move(merged));
   if (!plan_r.ok()) {
-    decref_arrow_sources(&state->sources);
-    raise_status_error(code_for_status(plan_r.status()),
-                       dup_cstr(plan_r.status().ToString()));
+    raise_status_error(plan_r.status());
     return nullptr;
   }
   state->registry_plan = std::move(plan_r).ValueOrDie();
@@ -100,42 +90,7 @@ PyObject *py_context_to_registry_sink_arrow_sources(PyObject *,
                                     state->registry_json,
                                     state->registry_plan->drifts_json);
 
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    decref_arrow_sources(&state->sources);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &arrow_sources_get_schema;
-  stream->get_next = &arrow_sources_get_next;
-  stream->get_last_error = &arrow_sources_last_error;
-  stream->release = &arrow_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(state->registry_plan->registry_json);
-  outputs.drifts_json = dup_cstr(state->registry_plan->drifts_json);
-  outputs.conversion_timestamp =
-      dup_cstr(state->registry_plan->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  auto registry_plan = state->registry_plan;
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      sources_obj, outputs.main_stream, outputs.diagnostics,
-      outputs.registry_json, outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_arrow_source_registry_stream(sources_obj, std::move(state));
 }
 
 PyObject *
@@ -197,44 +152,10 @@ py_context_to_registry_sink_arrow_sources_registry_state(PyObject *,
   if (!append_registry_metadata_columns(first_row_columns, timestamp_columns,
                                         &state->first_row_columns,
                                         &state->timestamp_columns)) {
-    decref_arrow_sources(&state->sources);
     return nullptr;
   }
 
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    decref_arrow_sources(&state->sources);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &arrow_sources_get_schema;
-  stream->get_next = &arrow_sources_get_next;
-  stream->get_last_error = &arrow_sources_last_error;
-  stream->release = &arrow_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(registry_plan->registry_json);
-  outputs.drifts_json = dup_cstr(registry_plan->drifts_json);
-  outputs.conversion_timestamp = dup_cstr(registry_plan->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      ctx_obj, outputs.main_stream, outputs.diagnostics, outputs.registry_json,
-      outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_arrow_source_registry_stream(ctx_obj, std::move(state));
 }
 
 PyObject *
@@ -291,17 +212,14 @@ py_context_to_registry_sink_arrow_sources_auto_registry_state(PyObject *,
   if (!append_registry_metadata_columns(first_row_columns, timestamp_columns,
                                         &state->first_row_columns,
                                         &state->timestamp_columns)) {
-    decref_arrow_sources(&state->sources);
     return nullptr;
   }
 
-  char *err = nullptr;
-  const int valid = validate_registry_sink_mode(
-      state->schema_mode.c_str(), state->registry_json.c_str(), &err,
+  const auto valid = validate_registry_sink_mode(
+      state->schema_mode, state->registry_json,
       "context_to_registry_sink_arrow_sources_auto_registry_state");
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    decref_arrow_sources(&state->sources);
-    raise_status_error(valid, err);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
 
@@ -309,17 +227,13 @@ py_context_to_registry_sink_arrow_sources_auto_registry_state(PyObject *,
       ctx, state->sources, state->prepared, state->registry_json.c_str(),
       state->field_name_policy.c_str(), &base_registry_plan->schema);
   if (!merged_r.ok()) {
-    decref_arrow_sources(&state->sources);
-    raise_status_error(code_for_status(merged_r.status()),
-                       dup_cstr(merged_r.status().ToString()));
+    raise_status_error(merged_r.status());
     return nullptr;
   }
   auto merged = std::move(merged_r).ValueOrDie();
   auto plan_r = make_native_registry_plan(std::move(merged));
   if (!plan_r.ok()) {
-    decref_arrow_sources(&state->sources);
-    raise_status_error(code_for_status(plan_r.status()),
-                       dup_cstr(plan_r.status().ToString()));
+    raise_status_error(plan_r.status());
     return nullptr;
   }
   state->registry_plan = std::move(plan_r).ValueOrDie();
@@ -328,42 +242,7 @@ py_context_to_registry_sink_arrow_sources_auto_registry_state(PyObject *,
                                     state->registry_json,
                                     state->registry_plan->drifts_json);
 
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    decref_arrow_sources(&state->sources);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &arrow_sources_get_schema;
-  stream->get_next = &arrow_sources_get_next;
-  stream->get_last_error = &arrow_sources_last_error;
-  stream->release = &arrow_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(state->registry_plan->registry_json);
-  outputs.drifts_json = dup_cstr(state->registry_plan->drifts_json);
-  outputs.conversion_timestamp =
-      dup_cstr(state->registry_plan->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  auto registry_plan = state->registry_plan;
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      ctx_obj, outputs.main_stream, outputs.diagnostics, outputs.registry_json,
-      outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_arrow_source_registry_stream(ctx_obj, std::move(state));
 }
 
 } // namespace core_abi3_internal

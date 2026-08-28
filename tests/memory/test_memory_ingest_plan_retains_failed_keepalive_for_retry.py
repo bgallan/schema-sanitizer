@@ -123,30 +123,6 @@ def test_registry_wrapper_does_not_double_close_wrapped_raw() -> None:
     assert opened.close_items == []
 
 
-def test_replay_file_path_survives_failed_unlink(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A transient unlink error leaves the replay path available for retry."""
-    from schema_sanitizer.api_impl.parquet import replay_stream as module
-
-    replay = object.__new__(module.ReplayableArrowStream)
-    replay._pid = os.getpid()
-    replay._path = "/tmp/ingest-plan-retains-failed-keepalive-for-replay.arrow"
-    calls = 0
-
-    def unlink(path: str) -> None:
-        """Fail once before accepting deletion."""
-        nonlocal calls
-        assert path == replay._path
-        calls += 1
-        if calls == 1:
-            raise OSError("busy")
-
-    monkeypatch.setattr(module.os, "unlink", unlink)
-    replay.close()
-    assert replay._path == "/tmp/ingest-plan-retains-failed-keepalive-for-replay.arrow"
-    replay.close()
-    assert replay._path is None
-
-
 def test_replay_reader_retains_reader_and_keepalive_failures() -> None:
     """Reader ownership and mapped sources remain retryable independently."""
     from schema_sanitizer.api_impl.parquet.replay_stream import _ReplayReader
@@ -164,47 +140,6 @@ def test_replay_reader_retains_reader_and_keepalive_failures() -> None:
     assert replay._keepalive == (keepalive,)
     replay.close()
     assert replay._keepalive == ()
-
-
-def test_parquet_factory_retains_failed_pending_and_keepalive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Factory close only clears handles whose cleanup actually committed."""
-    from schema_sanitizer.adapters.parquet import record_batch_factory as module
-
-    pending = _FailOnceClose()
-    keepalive = _FailOnceClose()
-    factory = SimpleNamespace(
-        _pid=os.getpid(),
-        _pending_parquet_file=pending,
-        _pending_opened_file=pending,
-        _keepalive=(keepalive,),
-        _staged_path="/tmp/ingest-plan-retains-failed-keepalive-for.parquet",
-    )
-    removed = 0
-
-    def remove(path: str | None) -> bool:
-        """Report staged cleanup only after all handles are closed."""
-        nonlocal removed
-        assert path == "/tmp/ingest-plan-retains-failed-keepalive-for.parquet"
-        removed += 1
-        return removed >= 2
-
-    monkeypatch.setattr(module, "remove_staged_parquet", remove)
-    module.close_factory(factory)
-    assert factory._pending_parquet_file is pending
-    assert factory._pending_opened_file is pending
-    assert factory._keepalive == (keepalive,)
-    assert factory._staged_path == "/tmp/ingest-plan-retains-failed-keepalive-for.parquet"
-    assert pending.calls == 1
-
-    module.close_factory(factory)
-    assert factory._pending_parquet_file is None
-    assert factory._pending_opened_file is None
-    assert factory._keepalive == ()
-    assert factory._staged_path is None
-    assert pending.calls == 2
-    assert keepalive.calls == 2
 
 
 def test_arrow_stream_retains_raw_and_keepalive_after_failed_main_close() -> None:

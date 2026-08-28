@@ -78,8 +78,8 @@ def test_native_allocation_registry_is_flat_bounded_and_resident_accounted() -> 
     assert "live_allocation_registry_rejections" in registry
     assert "process_resident_governor_" in tracking
     assert "live_allocation_registry_metadata_capacity_bytes()" in tracking
-    module = (ROOT / "cpp/src/api/python_abi3/_core_abi3_module.cc").read_text()
-    assert '"allocation_registry_stats"' in module
+    catalog = (ROOT / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
+    assert "allocation_registry_stats," in catalog
 
 
 def test_environment_thread_and_fd_requests_are_clamped_to_absolute_hard_limits(
@@ -177,13 +177,10 @@ def test_cleanup_dispatcher_control_budget_calls_are_outside_dispatcher_lock() -
     assert "release_control_plane(release_ticket)" in submit
 
 
-def test_emergency_finalizer_roots_are_physically_preallocated() -> None:
+def test_memory_emergency_finalizer_roots_are_physically_preallocated() -> None:
     memory = _source("core_impl/memory_budget.py")
-    cross = _source("core_impl/cross_process_memory.py")
     assert "[None] * _MAX_ABANDONED_MEMORY_OWNERS" in memory
     assert "_ABANDONED_MEMORY_EMERGENCY.append(" not in memory
-    assert "[None] * _MAX_ABANDONED_DIRECT_LEASES" in cross
-    assert "_ABANDONED_DIRECT_EMERGENCY.append(" not in cross
 
 
 def test_stage_concurrency_admission_composes_control_plane_with_slots_and_bytes() -> None:

@@ -27,7 +27,7 @@ namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
 // Variable-width CSV uses a conservative fraction of the operation arena.
 // Wide fixed-cost schemas publish enough uniform packets to use half of it.
-// Both policies continue scaling beyond the historical 32-worker range.
+// Both policies scale with the operation worker count without a fixed ceiling.
 inline constexpr std::int64_t kMinimumCsvOutputWorkers = 4;
 
 [[nodiscard]] constexpr std::int64_t

@@ -19,7 +19,6 @@ _INPUT_PRIMARY_STAGE = {
     "json": "worker_authoritative_structural_framing",
     "json_array": "worker_authoritative_structural_framing",
     "jsonl": "row_validation",
-    "ndjson": "row_validation",
     "xml": "frontend_row_decode",
     "parquet": "column_decode",
     "python": "native_iterator_batching",

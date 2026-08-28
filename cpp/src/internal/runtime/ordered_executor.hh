@@ -495,9 +495,8 @@ public:
   sanitize::Status SubmitCharged(Packet packet, std::size_t retained_bytes) {
     retained_bytes = std::max<std::size_t>(1U, retained_bytes);
     // Above eight arena workers, reserve directly at the authoritative
-    // submission point. The legacy preliminary check would acquire the same
-    // executor mutex twice per packet and becomes visible under high-core
-    // submission pressure. One-through-eight workers keep the v47 path.
+    // submission point so each packet acquires the executor mutex only once.
+    // One-through-eight workers use the compact single-domain path below.
     if (worker_count_ > 8 && uses_arena_completion_slots()) {
       return submit_high_core_arena(std::move(packet), retained_bytes);
     }
@@ -850,9 +849,8 @@ private:
   // The high-core arena consumer also owns mutex_ while advancing the ordered
   // completion cursor. Every writer of in_flight_ is serialized by that mutex,
   // so the >8-worker path can publish the decrement with a single store instead
-  // of a locked atomic read-modify-write. Smaller executors retain the
-  // historical fetch_sub path because their short stages did not amortize the
-  // extra branch in earlier probes.
+  // of a locked atomic read-modify-write. Smaller executors use fetch_sub to
+  // avoid the extra branch on their short stages.
   void decrement_high_core_in_flight_locked() noexcept {
     const auto current = in_flight_.load(std::memory_order_relaxed);
     in_flight_.store(current - 1U, std::memory_order_release);

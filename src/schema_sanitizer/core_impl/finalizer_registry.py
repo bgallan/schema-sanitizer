@@ -11,15 +11,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Callable
 
-from .atomic_epoch import AtomicEpoch
 from .callable_contract import callable_contract
-from .finalizer_escrow import (
-    FinalizerEscrow,
-    ReservedFinalizerEscrow,
-    _fixed_increment,
-    _fixed_value,
-    _write_fixed,
-)
+from .finalizer_escrow import ReservedFinalizerEscrow
 from .fork_safety import quarantine_inherited_state
 
 
@@ -30,9 +23,7 @@ class FinalizerRuntimeDomain:
     name: str
     drain: Callable[[], int]
     snapshot: Callable[[], object]
-    activity: Callable[[], object] | None = None
     escrows: tuple[tuple[str, ReservedFinalizerEscrow[Any]], ...] = ()
-    legacy_escrows: tuple[tuple[str, FinalizerEscrow[Any]], ...] = ()
     contract_generation: int = 1
 
 
@@ -48,8 +39,30 @@ _REGISTRY_CORRUPTED = False
 _REGISTRY_FROZEN = False
 _FROZEN_DOMAINS: tuple[FinalizerRuntimeDomain, ...] | None = None
 _FROZEN_ESCROWS: tuple[tuple[str, ReservedFinalizerEscrow[Any]], ...] | None = None
-_FROZEN_ACTIVITY_COUNTERS: tuple[AtomicEpoch, ...] | None = None
 _FROZEN_ACTIVITY_NATIVE_CAPSULES: tuple[object, ...] | None = None
+
+
+def _fixed_increment(counter: bytearray) -> bool:
+    """Increment a fixed-width little-endian counter without wrapping."""
+    if all(value == 255 for value in counter):
+        return False
+    for index, value in enumerate(counter):
+        if value != 255:
+            counter[index] = value + 1
+            return True
+        counter[index] = 0
+    return False
+
+
+def _fixed_value(counter: bytearray) -> int:
+    return int.from_bytes(counter, "little", signed=False)
+
+
+def _write_fixed(counter: bytearray, target: bytearray, offset: int) -> int:
+    for value in counter:
+        target[offset] = value
+        offset += 1
+    return offset
 
 
 def _same_callable_contract(
@@ -84,9 +97,7 @@ def _same_domain(left: FinalizerRuntimeDomain, right: FinalizerRuntimeDomain) ->
         and left.contract_generation == right.contract_generation
         and _same_callable_contract(left.drain, right.drain)
         and _same_callable_contract(left.snapshot, right.snapshot)
-        and _same_callable_contract(left.activity, right.activity)
         and _same_escrow_contract(left.escrows, right.escrows)
-        and _same_escrow_contract(left.legacy_escrows, right.legacy_escrows)
     )
 
 
@@ -96,8 +107,6 @@ def register_finalizer_domain(
     drain: Callable[[], int],
     snapshot: Callable[[], object],
     escrows: tuple[tuple[str, ReservedFinalizerEscrow[Any]], ...] = (),
-    legacy_escrows: tuple[tuple[str, FinalizerEscrow[Any]], ...] = (),
-    activity: Callable[[], object] | None = None,
     contract_generation: int = 1,
 ) -> None:
     """Register a domain once while normal runtime allocation is still allowed."""
@@ -106,18 +115,14 @@ def register_finalizer_domain(
         raise ValueError("invalid finalizer runtime domain")
     if type(contract_generation) is not int or contract_generation <= 0:
         raise ValueError("finalizer domain contract_generation must be a positive exact integer")
-    domain = FinalizerRuntimeDomain(
-        name, drain, snapshot, activity, escrows, legacy_escrows, contract_generation
-    )
+    domain = FinalizerRuntimeDomain(name, drain, snapshot, escrows, contract_generation)
     with _REGISTRY_LOCK:
         existing = _REGISTRY_NAMES.get(name)
         if existing is not None:
             if existing is domain or (
                 existing.drain is domain.drain
                 and existing.snapshot is domain.snapshot
-                and existing.activity is domain.activity
                 and existing.escrows == domain.escrows
-                and existing.legacy_escrows == domain.legacy_escrows
             ):
                 return
             if not _same_domain(existing, domain):
@@ -155,12 +160,7 @@ def register_finalizer_domain(
 
 def freeze_finalizer_registry() -> tuple[FinalizerRuntimeDomain, ...]:
     """Freeze registration and prebuild immutable shutdown views exactly once."""
-    global \
-        _REGISTRY_FROZEN, \
-        _FROZEN_DOMAINS, \
-        _FROZEN_ESCROWS, \
-        _FROZEN_ACTIVITY_COUNTERS, \
-        _FROZEN_ACTIVITY_NATIVE_CAPSULES
+    global _REGISTRY_FROZEN, _FROZEN_DOMAINS, _FROZEN_ESCROWS, _FROZEN_ACTIVITY_NATIVE_CAPSULES
     with _REGISTRY_LOCK:
         if _FROZEN_DOMAINS is None:
             domains = tuple(_REGISTRY)
@@ -168,32 +168,18 @@ def freeze_finalizer_registry() -> tuple[FinalizerRuntimeDomain, ...]:
             for domain in domains:
                 escrows.extend(domain.escrows)
             frozen_escrows = tuple(escrows)
-            counters: list[AtomicEpoch] = []
             capsules: list[object] = []
-            native_complete = True
             for domain in domains:
                 for _name, reserved_escrow in domain.escrows:
                     for counter in reserved_escrow.activity_counters():
-                        counters.append(counter)
                         capsule = counter.native_capsule
                         if capsule is None:
-                            native_complete = False
-                        else:
-                            capsules.append(capsule)
-                for _name, legacy_escrow in domain.legacy_escrows:
-                    for counter in legacy_escrow.activity_counters():
-                        counters.append(counter)
-                        capsule = counter.native_capsule
-                        if capsule is None:
-                            native_complete = False
-                        else:
-                            capsules.append(capsule)
-            frozen_counters = tuple(counters)
-            frozen_capsules = tuple(capsules) if native_complete else None
+                            raise RuntimeError("finalizer activity counter lacks native authority")
+                        capsules.append(capsule)
+            frozen_capsules = tuple(capsules)
             # Publish every immutable view only after all allocations succeeded.
             _FROZEN_DOMAINS = domains
             _FROZEN_ESCROWS = frozen_escrows
-            _FROZEN_ACTIVITY_COUNTERS = frozen_counters
             _FROZEN_ACTIVITY_NATIVE_CAPSULES = frozen_capsules
         _REGISTRY_FROZEN = True
         return _FROZEN_DOMAINS
@@ -243,7 +229,6 @@ def finalizer_activity_token() -> tuple[object, ...]:
             publication_failures += snapshot.publication_failures
             publication_epoch += snapshot.publication_epoch
             progress_epoch += snapshot.progress_epoch
-        extra = domain.activity() if domain.activity is not None else None
         token.append(
             (
                 domain.name,
@@ -251,7 +236,6 @@ def finalizer_activity_token() -> tuple[object, ...]:
                 publication_failures,
                 publication_epoch,
                 progress_epoch,
-                extra,
             )
         )
     return tuple(token)
@@ -266,11 +250,6 @@ def finalizer_activity_is_quiescent(token: tuple[object, ...]) -> bool:
             return False
         if item[1] != 0 or item[2] != 0:
             return False
-        extra = item[5] if len(item) > 5 else None
-        if isinstance(extra, tuple) and extra:
-            # Legacy finalizer activity is (pending, failures, publication_epoch, progress_epoch).
-            if extra[0] != 0 or (len(extra) > 1 and extra[1] != 0):
-                return False
     return True
 
 
@@ -283,7 +262,7 @@ def finalizer_activity_buffer_size() -> int:
     domains = finalizer_domains()
     records = 0
     for domain in domains:
-        records += len(domain.escrows) + len(domain.legacy_escrows)
+        records += len(domain.escrows)
     return _REGISTRY_ACTIVITY_BYTES + records * _ACTIVITY_RECORD_BYTES
 
 
@@ -303,33 +282,12 @@ def write_finalizer_activity_into(target: bytearray) -> bool:
         offset += 1
         domains = _FROZEN_DOMAINS
         capsules = _FROZEN_ACTIVITY_NATIVE_CAPSULES
-        counters = _FROZEN_ACTIVITY_COUNTERS
-        if domains is None or counters is None:
+        if domains is None or capsules is None:
             return False
     quiescent = not corrupted
-    if capsules is not None:
-        try:
-            from .native_runtime import native_core
+    from .native_runtime import native_core
 
-            write = getattr(native_core, "atomic_epoch_write_activity", None)
-            if callable(write):
-                return bool(write(capsules, target, offset)) and quiescent
-        except BaseException:
-            return False
-    # Source-only fallback: fixed containers remain bounded, although the real
-    # production no-allocation guarantee belongs to the ABI path above.
-    for counter_index in range(0, len(counters), 4):
-        record_offset = offset
-        for relative in range(4):
-            counters[counter_index + relative].write_into(target, offset)
-            offset += 8
-        # Determine active/publication-failure state from the bytes just written
-        # instead of materializing the atomic values as Python integers.
-        for byte_index in range(record_offset, record_offset + 16):
-            if target[byte_index] != 0:
-                quiescent = False
-                break
-    return quiescent
+    return bool(native_core.atomic_epoch_write_activity(capsules, target, offset)) and quiescent
 
 
 def registered_finalizer_escrows() -> tuple[tuple[str, ReservedFinalizerEscrow[Any]], ...]:
@@ -374,7 +332,6 @@ def _reset_registry_after_fork() -> None:
     _FORK_LOCK_BANK_INDEX = 1 - _FORK_LOCK_BANK_INDEX
 
 
-# os.register_at_fork compatibility breadcrumb: fork handling is centralized in pass50.
 from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402
 
 _register_fork_handler(

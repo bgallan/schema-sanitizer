@@ -16,35 +16,6 @@ def _source(relative: str) -> str:
     return (SRC / relative).read_text(encoding="utf-8")
 
 
-def test_fd_capability_rejects_open_after_release_linearizes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    entered = threading.Event()
-    continue_release = threading.Event()
-
-    class Lease:
-        def release(self) -> None:
-            entered.set()
-            assert continue_release.wait(2)
-
-    capability = module.FileDescriptorCapability(
-        Lease(), 1, label="fd-capability-rejects-open-after-release"
-    )
-    monkeypatch.setattr(module, "record_physical_file_descriptors_opened", lambda _n=1: None)
-    thread = threading.Thread(target=capability.release)
-    thread.start()
-    assert entered.wait(2)
-    with pytest.raises(RuntimeError, match="being released"):
-        capability._mark_opened()
-    continue_release.set()
-    thread.join(2)
-    assert not thread.is_alive()
-    assert capability._lease is None
-    assert capability.opened == 0
-
-
 def test_physical_file_owner_close_commits_once_under_two_closers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -217,90 +188,11 @@ def test_factory_construction_failure_closes_previously_published_stage(
     assert artifact.closed
 
 
-def test_parquet_factory_keeps_each_published_stream_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from schema_sanitizer.adapters.parquet import record_batch_factory as module
-
-    class Runtime:
-        parallel = False
-        workers = 1
-        closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    class Reader:
-        def __arrow_c_stream__(self) -> object:
-            return object()
-
-        def close(self) -> None:
-            pass
-
-    class Scanner:
-        def to_reader(self) -> Reader:
-            return Reader()
-
-        def close(self) -> None:
-            pass
-
-    class Dataset:
-        def scanner(self, **_kwargs: object) -> Scanner:
-            return Scanner()
-
-    factory = SimpleNamespace(
-        _filters=None,
-        _dataset=Dataset(),
-        _columns=None,
-        _batch_size=16,
-        _dataset_error=None,
-        _pending_parquet_file=None,
-        _pending_opened_file=None,
-        _keepalive=[],
-        _pa=SimpleNamespace(),
-    )
-    runtimes: list[Runtime] = []
-
-    def runtime(_factory: object) -> Runtime:
-        value = Runtime()
-        runtimes.append(value)
-        return value
-
-    monkeypatch.setattr(module, "_external_runtime_threads", runtime)
-    monkeypatch.setattr(module, "record_parquet_fallback_attempt", lambda *_a, **_k: None)
-    monkeypatch.setattr(module, "record_parquet_fallback_success", lambda *_a, **_k: None)
-    module.pyarrow_fallback_arrow_stream(
-        factory,
-        record_batch_reader_from_iterable=lambda *_a, **_k: None,
-        logger=SimpleNamespace(debug=lambda *_a, **_k: None),
-    )
-    module.pyarrow_fallback_arrow_stream(
-        factory,
-        record_batch_reader_from_iterable=lambda *_a, **_k: None,
-        logger=SimpleNamespace(debug=lambda *_a, **_k: None),
-    )
-    assert len(factory._keepalive) == 2
-    assert all(not item.closed for item in runtimes)
-
-
 def test_transient_directory_grouping_credit_is_returned_on_finish() -> None:
-    from threading import Condition, Lock
-
     from schema_sanitizer.input_impl.directory_inputs import DirectoryDiscoveryBuilder
-    from schema_sanitizer.input_impl.directory_metadata_budget import (
-        DirectoryMetadataBudget,
-        RetainedDirectoryMetadata,
-    )
+    from schema_sanitizer.input_impl.directory_metadata_budget import DirectoryMetadataBudget
 
-    budget = object.__new__(DirectoryMetadataBudget)
-    budget.limit_bytes = 8 * 1024 * 1024
-    budget._operation_memory_ledger = None
-    budget._retention_owner = RetainedDirectoryMetadata()
-    budget._used_bytes = 0
-    budget._admission_lock = Lock()
-    budget._lock = Lock()
-    budget._close_condition = Condition(budget._lock)
-    budget._close_started = False
-    budget._closing = False
-    budget._closed = False
+    budget = DirectoryMetadataBudget(8 * 1024 * 1024)
     discovery = DirectoryDiscoveryBuilder.from_uris(["s3://bucket/a"], metadata_budget=budget)
     baseline = budget.used_bytes
     groups: list[str] = []
@@ -402,8 +294,8 @@ def test_fd_hard_capacity_subtracts_native_governed_opened(monkeypatch: pytest.M
 
     class Native:
         @staticmethod
-        def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int]:
-            return (10, 10, 100, 0)
+        def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int, int, int]:
+            return (10, 10, 100, 0, 0, 0)
 
     class Resource:
         RLIMIT_NOFILE = object()
@@ -432,13 +324,21 @@ def test_external_runtime_lease_preacquires_native_physical_threads(
     calls: list[tuple[str, int]] = []
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
             assert desired == minimum
             calls.append(("acquire", desired))
-            return desired
+            return SimpleNamespace(amount=desired), desired
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(("release", amount))
+        @staticmethod
+        def exact_permit_lease_amount(receipt: object) -> int:
+            return int(receipt.amount)  # type: ignore[attr-defined]
+
+        @staticmethod
+        def resize_exact_permit_lease(receipt: object, target: int) -> int:
+            previous = int(receipt.amount)  # type: ignore[attr-defined]
+            receipt.amount = target  # type: ignore[attr-defined]
+            calls.append(("release", previous - target))
+            return target
 
     native = Native()
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
@@ -471,7 +371,8 @@ def test_operation_lease_finalizer_capsule_refuses_live_external_borrow() -> Non
     lease = governor.try_acquire_up_to(2, minimum=2)
     assert lease is not None
     budget = module._OperationThreadBorrowBudget(1)
-    assert budget.try_borrow(1)
+    borrow = budget.try_borrow_up_to_exact(1, minimum=1, exact=True)
+    assert borrow is not None
     capsule = SimpleNamespace(
         arg0=governor,
         arg1=lease.lease_id,
@@ -482,48 +383,6 @@ def test_operation_lease_finalizer_capsule_refuses_live_external_borrow() -> Non
     with pytest.raises(RuntimeError, match="external runtime workers are borrowed"):
         module._release_process_lease_capsule(capsule)
     assert governor.snapshot().in_use == before == 2
-    budget.release(1)
+    borrow.release()
     lease.release()
     assert governor.snapshot().in_use == 0
-
-
-def test_external_runtime_close_retries_component_release_without_losing_owner() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    calls: list[str] = []
-
-    class Native:
-        attempts = 0
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            assert amount == 2
-            self.attempts += 1
-            calls.append(f"native:{self.attempts}")
-            if self.attempts == 1:
-                raise RuntimeError("retry native release")
-
-    class Lease:
-        released = 0
-
-        def release(self) -> None:
-            self.released += 1
-            calls.append("lease")
-
-    native = Native()
-    lease = Lease()
-    runtime = module.ExternalRuntimeConcurrencyLease(
-        lease, workers=2, parallel=True, native=native, native_amount=2
-    )
-    with pytest.raises(RuntimeError, match="retry native release"):
-        runtime.close()
-    assert lease.released == 0
-    assert runtime._native is native
-    assert runtime._native_amount == 2
-    assert runtime._lease is lease
-
-    runtime.close()
-    assert calls == ["native:1", "native:2", "lease"]
-    assert lease.released == 1
-    assert runtime._native is None
-    assert runtime._native_amount == 0
-    assert runtime._lease is None

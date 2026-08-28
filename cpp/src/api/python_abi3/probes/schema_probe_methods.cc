@@ -13,12 +13,10 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/planning/options_schema_serialization.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/logical_schema.hh"

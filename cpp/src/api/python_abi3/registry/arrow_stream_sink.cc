@@ -13,14 +13,13 @@
 #include <string_view>
 #include <utility>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 namespace core_abi3_internal {
 
 // Converts a Python Arrow C stream through registry-backed native sinks.
 PyObject *py_context_to_registry_sink_arrow_stream(PyObject *, PyObject *args) {
-  static constexpr const char *kWhere =
-      "schema_sanitizer_context_to_registry_sink_arrow_stream";
+  static constexpr const char *kWhere = "context_to_registry_sink_arrow_stream";
 
   PyObject *ctx_obj = nullptr;
   const char *sink_name = nullptr;
@@ -59,19 +58,12 @@ PyObject *py_context_to_registry_sink_arrow_stream(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  char *err = nullptr;
-  int rc =
-      validate_registry_sink_mode(schema_mode, registry_json, &err, kWhere);
-  if (rc != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(rc, err);
+  const auto valid =
+      validate_registry_sink_mode(schema_mode, registry_json, kWhere);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
-
-  ArrowArrayStream *main_stream = nullptr;
-  schema_sanitizer_diagnostics *diagnostics = nullptr;
-  char *out_registry_json = nullptr;
-  char *out_drifts_json = nullptr;
-  char *out_conversion_timestamp = nullptr;
 
   try {
     sanitize::LogicalSchema input_schema;
@@ -81,8 +73,7 @@ PyObject *py_context_to_registry_sink_arrow_stream(PyObject *, PyObject *args) {
             .timestamp_precision = prepared_options->spec.timestamp_precision,
             .memory_limit_bytes = prepared_options->spec.memory_limit_bytes});
     if (!frontend_r.ok()) {
-      raise_status_error(code_for_status(frontend_r.status()),
-                         dup_cstr(frontend_r.status().ToString()));
+      raise_status_error(frontend_r.status());
       return nullptr;
     }
     auto frontend = std::move(frontend_r).ValueOrDie();
@@ -93,46 +84,28 @@ PyObject *py_context_to_registry_sink_arrow_stream(PyObject *, PyObject *args) {
         prepared_options->spec.field_order,
         prepared_options->operation_detected_at));
     if (!merged_r.ok()) {
-      raise_status_error(code_for_status(merged_r.status()),
-                         dup_cstr(merged_r.status().ToString()));
+      raise_status_error(merged_r.status());
       return nullptr;
     }
     auto merged = std::move(merged_r).ValueOrDie();
-
-    RegistrySinkOutputs registry_outputs{.sink = SinkOutputs{},
-                                         .registry_json = &out_registry_json,
-                                         .drifts_json = &out_drifts_json,
-                                         .conversion_timestamp =
-                                             &out_conversion_timestamp};
-    rc = copy_registry_json_outputs(merged, registry_outputs, &err, kWhere);
-    if (rc != SCHEMA_SANITIZER_STATUS_OK) {
-      raise_status_error(rc, err);
-      return nullptr;
-    }
 
     auto out_r = ingest_direct_arrow_stream(
         std::move(frontend), std::move(merged.schema),
         std::move(prepared_options), ctx->ctx);
     if (!out_r.ok()) {
-      schema_sanitizer_free_string(out_registry_json);
-      schema_sanitizer_free_string(out_drifts_json);
-      schema_sanitizer_free_string(out_conversion_timestamp);
-      raise_status_error(code_for_status(out_r.status()),
-                         dup_cstr(out_r.status().ToString()));
+      raise_status_error(out_r.status());
       return nullptr;
     }
 
-    SinkOutputs outputs{.stream = &main_stream, .diagnostics = &diagnostics};
-    rc = ingest_stream_to_streams(std::move(out_r).ValueOrDie(), outputs, &err,
-                                  kWhere);
-    if (rc != SCHEMA_SANITIZER_STATUS_OK) {
-      release_sink_outputs(main_stream, diagnostics);
-      schema_sanitizer_free_string(out_registry_json);
-      schema_sanitizer_free_string(out_drifts_json);
-      schema_sanitizer_free_string(out_conversion_timestamp);
-      raise_status_error(rc, err);
+    auto sink = native_sink_from_ingest_stream(std::move(out_r).ValueOrDie());
+    if (!sink.ok()) {
+      raise_status_error(sink.status());
       return nullptr;
     }
+    auto output = std::move(sink).ValueOrDie();
+    return pack_registry_stream_result(
+        stream_obj, output.stream.release(), output.diagnostics.release(),
+        merged.registry_json, merged.drifts_json, merged.detected_at, nullptr);
   } catch (const std::bad_alloc &) {
     PyErr_NoMemory();
     return nullptr;
@@ -145,9 +118,7 @@ PyObject *py_context_to_registry_sink_arrow_stream(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  return pack_registry_stream_result(stream_obj, main_stream, diagnostics,
-                                     out_registry_json, out_drifts_json,
-                                     out_conversion_timestamp, nullptr);
+  return nullptr;
 }
 
 } // namespace core_abi3_internal

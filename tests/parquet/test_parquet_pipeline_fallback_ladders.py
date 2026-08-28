@@ -10,19 +10,6 @@ import pytest
 from schema_sanitizer.adapters.parquet import telemetry as recording
 
 
-def _make_native_try_factory(factory_module: object) -> object:
-    """Build a minimal ParquetRecordBatchStreamFactory for _try_native_stream tests."""
-    factory = object.__new__(factory_module.ParquetRecordBatchStreamFactory)
-    factory._filters = None
-    factory._local_path = "native-candidate.parquet"
-    factory._source = "path"
-    factory._native_source_kind = "path"
-    factory._columns = None
-    factory._batch_size = 1024
-    factory._keepalive = ()
-    return factory
-
-
 def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -38,6 +25,15 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
         def scanner(self, **kwargs: object) -> object:
             """Internal test helper."""
             raise ValueError("dataset scanner failed")
+
+    class DatasetOwner:
+        """Expose the current independently leased dataset contract."""
+
+        dataset = FailingDataset()
+
+        @staticmethod
+        def acquire() -> object:
+            return SimpleNamespace(close=lambda: None)
 
     class WorkingParquetFile:
         """Internal test helper class."""
@@ -76,20 +72,26 @@ def test_parquet_dataset_scanner_failure_ladders_to_iter_batches(
         "record_batch_reader_from_iterable",
         fake_record_batch_reader_from_iterable,
     )
-    factory = object.__new__(stream_factory.ParquetRecordBatchStreamFactory)
-    factory._dataset = FailingDataset()
-    factory._try_native_stream = lambda: None
-    factory._columns = None
-    factory._filters = None
-    factory._batch_size = 1024
-    factory._use_threads = False
-    factory._keepalive = ()
-    factory._pending_parquet_file = WorkingParquetFile()
-    factory._pending_opened_file = None
-    factory._pa = object()
-    factory.schema = object()
+    factory = SimpleNamespace(
+        _dataset=DatasetOwner.dataset,
+        _dataset_owner=DatasetOwner(),
+        _dataset_error=None,
+        _try_native_stream=lambda: None,
+        _ensure_owner_process=lambda: None,
+        _columns=None,
+        _filters=None,
+        _batch_size=1024,
+        _use_threads=False,
+        _keepalive=[],
+        _pending_parquet_file=WorkingParquetFile(),
+        _pending_opened_file=None,
+        _pa=object(),
+        schema=object(),
+    )
 
-    assert factory.__arrow_c_stream__() == "iter-stream"
+    assert (
+        stream_factory.ParquetRecordBatchStreamFactory.__arrow_c_stream__(factory) == "iter-stream"
+    )
 
     snapshot = observability.parquet_stream_factory_observability()
     assert snapshot["last_route"] == "pyarrow_parquetfile_iter_batches"
@@ -125,14 +127,16 @@ def test_parquet_dataset_filter_failure_is_observable() -> None:
         fallback_expected=True,
         fallback_route="pyarrow_dataset_scanner",
     )
-    factory = object.__new__(stream_factory.ParquetRecordBatchStreamFactory)
-    factory._dataset = None
-    factory._dataset_error = ValueError("dataset open failed")
-    factory._try_native_stream = lambda: None
-    factory._filters = object()
+    factory = SimpleNamespace(
+        _dataset=None,
+        _dataset_error=ValueError("dataset open failed"),
+        _try_native_stream=lambda: None,
+        _ensure_owner_process=lambda: None,
+        _filters=object(),
+    )
 
     with pytest.raises(ValueError, match="dataset open failed"):
-        factory.__arrow_c_stream__()
+        stream_factory.ParquetRecordBatchStreamFactory.__arrow_c_stream__(factory)
 
     diagnostics = observability.last_parquet_native_reader_diagnostics()
     assert diagnostics["fallback_attempted"] is True
@@ -293,23 +297,29 @@ def test_parquet_iter_batches_fallback_failure_is_observable() -> None:
             raise OSError("iter_batches failed")
 
     observability.reset_parquet_stream_factory_observability()
-    factory = object.__new__(stream_factory.ParquetRecordBatchStreamFactory)
-    factory._dataset = None
-    factory._pending_parquet_file = FailingParquetFile()
-    factory._pending_opened_file = None
-    factory._local_path = None
-    factory._source = "stream"
-    factory._native_source_kind = "stream"
-    factory._columns = None
-    factory._filters = None
-    factory._batch_size = 1024
-    factory._use_threads = False
-    factory._pa = object()
-    factory.schema = object()
-    factory._keepalive = ()
+    factory = SimpleNamespace(
+        _dataset=None,
+        _dataset_error=None,
+        _pending_parquet_file=FailingParquetFile(),
+        _pending_opened_file=None,
+        _local_path=None,
+        _source="stream",
+        _native_source_kind="stream",
+        _columns=None,
+        _filters=None,
+        _batch_size=1024,
+        _use_threads=False,
+        _pa=object(),
+        _keepalive=[],
+        _ensure_owner_process=lambda: None,
+        schema=object(),
+    )
+    factory._try_native_stream = lambda: (
+        stream_factory.ParquetRecordBatchStreamFactory._try_native_stream(factory)
+    )
 
     with pytest.raises(OSError, match="iter_batches failed"):
-        factory.__arrow_c_stream__()
+        stream_factory.ParquetRecordBatchStreamFactory.__arrow_c_stream__(factory)
 
     snapshot = observability.parquet_stream_factory_observability()
     assert snapshot["last_route"] == "none"

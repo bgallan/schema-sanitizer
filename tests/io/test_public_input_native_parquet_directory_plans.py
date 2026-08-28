@@ -47,7 +47,7 @@ def test_native_directory_source_plan_is_native_first(tmp_path: Path) -> None:
 def test_directory_conversion_uses_self_bootstrapping_native_path_sources(
     tmp_path: Path, monkeypatch, input_format: str
 ) -> None:
-    """Verify directory conversion avoids the old Python registry pre-probe."""
+    """Verify directory conversion avoids a redundant Python registry pre-probe."""
     from schema_sanitizer.api_impl.source_plan import probing as source_plan_probe
 
     folder = tmp_path / input_format
@@ -74,7 +74,7 @@ def test_directory_conversion_uses_self_bootstrapping_native_path_sources(
         expected_ids = ["1", "2"]
 
     def fail_python_probe(*_args, **_kwargs):
-        """Fail when the old Python registry pre-probe path is used."""
+        """Fail when directory conversion performs a redundant Python pre-probe."""
         raise AssertionError("directory conversion should self-bootstrap in native code")
 
     monkeypatch.setattr(
@@ -114,9 +114,6 @@ def test_parquet_directory_source_file_is_native_tracked(tmp_path: Path) -> None
     """Verify native Parquet directory conversion owns source_file tracking."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.api_impl.parquet.multisource import (
-        last_parquet_multisource_route,
-    )
 
     folder = tmp_path / "parquet"
     folder.mkdir()
@@ -131,7 +128,6 @@ def test_parquet_directory_source_file_is_native_tracked(tmp_path: Path) -> None
         str((folder / "a.parquet").resolve()),
         str((folder / "b.parquet").resolve()),
     ]
-    assert last_parquet_multisource_route() == "native_arrow_source_chunk_provider_auto_registry"
 
 
 def test_parquet_directory_writer_source_file_does_not_precount_rows(
@@ -167,9 +163,6 @@ def test_parquet_directory_writer_uses_arrow_source_auto_registry(
     """Verify Parquet directory file writers use native Arrow-source auto registry."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.api_impl.parquet.multisource import (
-        last_parquet_multisource_route,
-    )
 
     folder = tmp_path / "parquet-auto-registry"
     folder.mkdir()
@@ -182,7 +175,6 @@ def test_parquet_directory_writer_uses_arrow_source_auto_registry(
     generated = {"schema_registry", "schema_drifts", "source_file", "ingestion_timestamp"}
     rows = pq.read_table(out).to_pylist()
     assert result.schema_registry is not None
-    assert last_parquet_multisource_route() == "native_arrow_source_chunk_provider_auto_registry"
     assert [{key: value for key, value in row.items() if key not in generated} for row in rows] == [
         {"id": 1, "name": None},
         {"id": None, "name": "two"},

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Lock
 
 import pytest
 
@@ -79,7 +78,7 @@ def test_path_identity_prearms_cleanup_before_fd_admission_or_open(
         open_called = True
         return real_open(*args, **kwargs)
 
-    monkeypatch.setattr(module, "prepare_owner_finalizer_cleanup", fail_prepare)
+    monkeypatch.setattr(module, "reserve_owner_finalizer_cleanup", fail_prepare)
     monkeypatch.setattr(module, "acquire_file_descriptors", acquire)
     monkeypatch.setattr(module.os, "open", tracked_open)
 
@@ -87,32 +86,6 @@ def test_path_identity_prearms_cleanup_before_fd_admission_or_open(
         module._open_identity_fd(target)
     assert not lease_called
     assert not open_called
-
-
-def test_terminal_fd_debt_poison_prevents_release_and_reuse(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    class Lease:
-        amount = 1
-
-        def release(self) -> None:
-            raise AssertionError("terminal debt must never release its logical credit")
-
-    capability = module.FileDescriptorCapability(
-        Lease(), 1, label="governed-file-publication-failure-closes-owner-debt"
-    )
-    monkeypatch.setattr(module, "record_physical_file_descriptors_opened", lambda _n=1: None)
-    monkeypatch.setattr(module, "retain_uncertain_fd_close", lambda *_a, **_k: True)
-    capability._mark_opened()
-    capability._retain_uncertain(label="governed-file-publication-failure-closes-owner-debt")
-
-    assert capability.retained_as_debt
-    with pytest.raises(RuntimeError, match="terminal FD debt"):
-        capability.release()
-    with pytest.raises(RuntimeError, match="terminally poisoned"):
-        capability._mark_opened()
 
 
 def test_external_runtime_parallelism_requires_exact_thread_envelope(
@@ -175,7 +148,7 @@ def test_replay_spool_reserves_inode_bytes_and_fds_before_writes() -> None:
     assert "StreamingStorageReservation(" in replay
     assert "self._reservation.before_write(amount)" in replay
     assert "reservation.finalize(os.path.getsize(path))" in replay
-    assert 'open_governed_file(self._path, "rb")' in replay
+    assert 'open_governed_file(path, "rb")' in replay
     assert "memory_map(" not in replay
     assert "OSFile(" not in replay
 
@@ -201,30 +174,19 @@ def test_remote_and_local_grouping_graphs_share_directory_metadata_budget() -> N
     budget = _source("input_impl/directory_metadata_budget.py")
     assert "_DIRECTORY_METADATA_GROUP_ASSOCIATION_BYTES" in budget
     assert "def charge_group_associations" in budget
-    for provider in ("azure.py", "azure_sync.py", "gcs.py", "gcs_sync.py", "s3.py", "s3_sync.py"):
-        source = _source(f"remote_impl/providers/{provider}")
-        assert "metadata_budget=metadata_budget" in source
-        assert "metadata_budget.charge_group_associations()" in source
-        assert source.index("metadata_budget.charge_group_associations()") < source.index(
-            "groups.setdefault", source.index("metadata_budget.charge_group_associations()")
-        )
+    providers = _source("remote_impl/providers/__init__.py")
+    assert "discovery.publish_group_association(" in providers
+    assert providers.index("discovery.publish_group_association(") < providers.index(
+        "groups.setdefault", providers.index("discovery.publish_group_association(")
+    )
     local = _source("pipeline/source_discovery.py")
-    assert "metadata_budget.charge_group_associations()" in local
+    assert "discovery.publish_group_association(" in local
 
 
 def test_directory_group_charge_is_admitted_before_publish() -> None:
-    from schema_sanitizer.input_impl.directory_metadata_budget import (
-        DirectoryMetadataBudget,
-        RetainedDirectoryMetadata,
-    )
+    from schema_sanitizer.input_impl.directory_metadata_budget import DirectoryMetadataBudget
 
-    budget = object.__new__(DirectoryMetadataBudget)
-    budget.limit_bytes = 1024 * 1024
-    budget._operation_memory_ledger = None
-    budget._retention_owner = RetainedDirectoryMetadata()
-    budget._used_bytes = 0
-    budget._lock = Lock()
-    budget._close_started = False
+    budget = DirectoryMetadataBudget(1024 * 1024)
     before = budget.used_bytes
     budget.charge_group_associations(3)
     assert budget.used_bytes > before
@@ -236,7 +198,8 @@ def test_pyarrow_external_runtime_lease_is_reclaimed_on_baseexception(
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     class RuntimeLease:
-        parallel = True
+        parallel = False
+        workers = 1
         closed = False
 
         def close(self) -> None:
@@ -246,14 +209,27 @@ def test_pyarrow_external_runtime_lease_is_reclaimed_on_baseexception(
         def scanner(self, **_kwargs: object) -> object:
             raise KeyboardInterrupt("injected external runtime cancellation")
 
+    class DatasetLifetime:
+        def close(self) -> None:
+            pass
+
+    class DatasetOwner:
+        dataset = Dataset()
+
+        def acquire(self) -> DatasetLifetime:
+            return DatasetLifetime()
+
     class Factory:
         _filters = None
-        _dataset = Dataset()
+        _dataset = DatasetOwner.dataset
+        _dataset_owner = DatasetOwner()
         _columns = None
         _batch_size = 128
         _dataset_error = None
         _pending_parquet_file = None
         _pending_opened_file = None
+        _keepalive: list[object] = []
+        _pa = object()
 
     class Logger:
         def debug(self, *_args: object, **_kwargs: object) -> None:

@@ -28,17 +28,14 @@ FORMAT_SUFFIXES: dict[str, tuple[str, ...]] = {
     "json": (".json",),
     "json_array": (".json",),
     "jsonl": (".jsonl",),
-    "ndjson": (".ndjson",),
     "xml": (".xml",),
-    "parquet": (".parquet", ".pq"),
+    "parquet": (".parquet",),
 }
 PUBLIC_INPUT_FORMATS = frozenset((*FORMAT_SUFFIXES, "python"))
 PUBLIC_INPUT_MODES = frozenset({"single_file", "directory"})
 
 _AUTO_FORMAT_BY_SUFFIX = {
-    suffix: ("jsonl" if format_name in {"jsonl", "ndjson"} else format_name)
-    for format_name, suffixes in FORMAT_SUFFIXES.items()
-    for suffix in suffixes
+    suffix: format_name for format_name, suffixes in FORMAT_SUFFIXES.items() for suffix in suffixes
 }
 _SORTED_PATH_SUFFIXES = tuple(sorted(_AUTO_FORMAT_BY_SUFFIX))
 _SUPPORTED_PATH_EXTENSIONS = ", ".join(
@@ -48,7 +45,7 @@ _FILE_FORMATS = frozenset({"json", "jsonl", "json_array", "xml", "csv", "parquet
 _SOURCE_VALUES = frozenset({"auto", "path", "text", "python", "uri", "stream"})
 _SOURCE_SELECTOR_MESSAGE = "source must be 'auto', 'path', 'uri', 'stream', 'text', or 'python'"
 SUPPORTED_INPUT_MESSAGE = (
-    "Pass a local .json/.jsonl/.ndjson/.xml/.csv/.parquet file path, "
+    "Pass a local .json/.jsonl/.xml/.csv/.parquet file path, "
     "a supported remote URI, or an iterable of dict rows."
 )
 _NATIVE_TEXT_ENCODINGS = frozenset({"utf-8", "utf-16", "utf-16-le", "utf-16-be", "iso8859-1"})
@@ -154,11 +151,6 @@ def is_utf8_encoding(name: str) -> bool:
 def native_text_encoding_supported(name: str) -> bool:
     """Return whether native path readers support one canonical encoding."""
     return name in _NATIVE_TEXT_ENCODINGS
-
-
-def native_input_format(format_name: str) -> str:
-    """Return the canonical native frontend name for one public input format."""
-    return "jsonl" if format_name in {"jsonl", "ndjson"} else format_name
 
 
 def input_format_extensions(format_name: str) -> tuple[str, ...]:
@@ -272,7 +264,7 @@ def normalize_format_selector(format_name: _Format) -> _Format:
             "IPC/Arrow/Feather inputs are not supported. Use a .json, .jsonl, .xml, "
             ".csv, or .parquet file, or an iterable of dict rows."
         )
-    return "jsonl" if normalized in {"jsonl", "ndjson"} else normalized
+    return normalized
 
 
 def resolve_auto_format(data: Any, source: _Source) -> _Format:
@@ -358,7 +350,7 @@ def normalize_public_input_format(input_format: str | None) -> str:
     """Normalize an explicit public input format."""
     if input_format is None:
         raise ValueError(
-            "input_format is required; select csv, json, json_array, jsonl, ndjson, xml, parquet, or python"
+            "input_format is required; select csv, json, json_array, jsonl, xml, parquet, or python"
         )
     if not isinstance(input_format, str):
         raise TypeError("input_format must be a string")

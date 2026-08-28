@@ -12,7 +12,6 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
@@ -20,7 +19,7 @@
 #include "api/python_abi3/registry/path_source_sinks_internal.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/ingest/chunk_source.hh"
@@ -32,9 +31,8 @@ namespace core_abi3_internal::path_registry_detail {
 
 void release_registry_outputs(PyRegistrySinkOutputs *outputs) {
   release_sink_outputs(outputs->main_stream, outputs->diagnostics);
-  schema_sanitizer_free_string(outputs->registry_json);
-  schema_sanitizer_free_string(outputs->drifts_json);
-  schema_sanitizer_free_string(outputs->conversion_timestamp);
+  outputs->main_stream = nullptr;
+  outputs->diagnostics = nullptr;
 }
 
 bool registry_metadata_requested(PyObject *first_row_columns,
@@ -46,18 +44,18 @@ bool registry_metadata_requested(PyObject *first_row_columns,
 }
 
 PyObject *registry_first_row_columns(PyObject *first_row_columns,
-                                     const char *registry_json,
-                                     const char *drifts_json) {
+                                     std::string_view registry_json,
+                                     std::string_view drifts_json) {
   PyObject *merged = (first_row_columns && first_row_columns != Py_None)
                          ? PyDict_Copy(first_row_columns)
                          : PyDict_New();
   if (!merged) {
     return nullptr;
   }
-  PyObject *registry_value =
-      PyUnicode_FromString(registry_json ? registry_json : "{}");
-  PyObject *drifts_value =
-      PyUnicode_FromString(drifts_json ? drifts_json : "[]");
+  PyObject *registry_value = PyUnicode_FromStringAndSize(
+      registry_json.data(), static_cast<Py_ssize_t>(registry_json.size()));
+  PyObject *drifts_value = PyUnicode_FromStringAndSize(
+      drifts_json.data(), static_cast<Py_ssize_t>(drifts_json.size()));
   if (!registry_value || !drifts_value ||
       PyDict_SetItemString(merged, "schema_registry", registry_value) != 0 ||
       PyDict_SetItemString(merged, "schema_drifts", drifts_value) != 0) {
@@ -101,25 +99,32 @@ bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
 }
 
 PyObject *pack_registry_or_raise_with_metadata(
-    int status, PyObject *keepalive, PyRegistrySinkOutputs *outputs,
+    sanitize::Result<NativeRegistrySinkOutput> result, PyObject *keepalive,
     PyObject *first_row_columns, PyObject *all_row_columns,
     PyObject *row_span_columns, PyObject *timestamp_columns,
     std::int64_t memory_limit_bytes) {
-  if (status != SCHEMA_SANITIZER_STATUS_OK) {
-    release_registry_outputs(outputs);
-    raise_status_error(status, outputs->err);
+  if (!result.ok()) {
+    raise_status_error(result.status());
     return nullptr;
   }
+  auto native = std::move(result).ValueOrDie();
+  PyRegistrySinkOutputs outputs{
+      .main_stream = native.sink.stream.release(),
+      .diagnostics = native.sink.diagnostics.release(),
+      .registry_json = std::move(native.registry_json),
+      .drifts_json = std::move(native.drifts_json),
+      .conversion_timestamp = std::move(native.conversion_timestamp),
+  };
   if (!wrap_registry_stream_with_metadata(
-          outputs, first_row_columns, all_row_columns, row_span_columns,
+          &outputs, first_row_columns, all_row_columns, row_span_columns,
           timestamp_columns, memory_limit_bytes)) {
-    release_registry_outputs(outputs);
+    release_registry_outputs(&outputs);
     return nullptr;
   }
-  return pack_registry_stream_result(
-      keepalive, outputs->main_stream, outputs->diagnostics,
-      outputs->registry_json, outputs->drifts_json,
-      outputs->conversion_timestamp, nullptr);
+  return pack_registry_stream_result(keepalive, outputs.main_stream,
+                                     outputs.diagnostics, outputs.registry_json,
+                                     outputs.drifts_json,
+                                     outputs.conversion_timestamp, nullptr);
 }
 
 bool path_source_input_empty(const PathSourceInput &input) noexcept {
@@ -279,7 +284,7 @@ bool parse_next_provider_sources(PyObject *provider_obj,
 
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_path_source_provider_schemas(
-    schema_sanitizer_context *ctx, PyObject *provider_obj,
+    NativeContext *ctx, PyObject *provider_obj,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources,
     const sanitize::LogicalSchema *previous_schema,

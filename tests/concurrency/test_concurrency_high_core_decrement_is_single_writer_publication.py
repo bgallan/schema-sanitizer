@@ -4,13 +4,13 @@ from pathlib import Path
 
 from conftest import require_native
 
+from benchmarks.concurrency.assets import load_evidence
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 ROOT = Path(__file__).resolve().parents[2]
 EXECUTOR = ROOT / "cpp/src/internal/runtime/ordered_executor.hh"
 SUBMISSION = ROOT / "cpp/src/internal/runtime/ordered_executor_submission.cc.inc"
 COMPLETION = ROOT / "cpp/src/internal/runtime/ordered_executor_arena_completion.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/scheduler/high-core-inflight-consumption.json"
 
 
 def test_high_core_decrement_is_single_writer_publication():
@@ -59,9 +59,7 @@ def test_native_cancellation_still_drains():
 
 def test_evidence_and_scope_are_recorded():
     """The retained benchmark and design note document evidence and limits."""
-    import json
-
-    evidence = json.loads(EVIDENCE.read_text())
+    evidence = load_evidence("high-core-inflight-consumption")
     assert evidence["pair_count"] == 15
     assert evidence["candidate_wins"] == 15
     assert evidence["paired_median_reduction_percent"] > 80.0

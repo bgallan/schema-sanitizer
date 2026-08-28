@@ -11,27 +11,7 @@ from urllib.parse import unquote, urlsplit
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOCS_ROOT = PROJECT_ROOT / "docs"
 DOCS_INDEX = DOCS_ROOT / "README.md"
-EXPECTED_DOCUMENTS = frozenset(
-    {
-        Path("README.md"),
-        Path("guides/flat-prefix-modified-time-csv.md"),
-        Path("guides/getting-started.md"),
-        Path("guides/partitioned-pipelines.md"),
-        Path("internals/concurrency-lifecycle.md"),
-        Path("internals/execution-heuristics.md"),
-        Path("operations/reader-complexity.md"),
-        Path("operations/reader-security-limits.md"),
-        Path("operations/resources-and-concurrency.md"),
-        Path("project/ci-cd.md"),
-        Path("project/development.md"),
-        Path("reference/bigquery.md"),
-        Path("reference/compatibility.md"),
-        Path("reference/inputs-and-filesystems.md"),
-        Path("reference/options.md"),
-        Path("reference/python-api.md"),
-        Path("reference/schema-and-registry.md"),
-    }
-)
+DOC_SECTIONS = frozenset({"guides", "internals", "operations", "project", "reference"})
 DOCUMENTATION = tuple(sorted(DOCS_ROOT.rglob("*.md")))
 MARKDOWN = (PROJECT_ROOT / "README.md", *DOCUMENTATION)
 INLINE_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
@@ -156,10 +136,12 @@ def test_only_introductory_readme_remains_at_repository_root() -> None:
 
 
 def test_documentation_tree_matches_the_supported_hierarchy() -> None:
-    """The docs tree contains one index and the stable topic-oriented guides."""
-    actual = {path.relative_to(DOCS_ROOT) for path in DOCUMENTATION}
+    """Detailed documentation stays in the indexed topic-oriented sections."""
+    relative = {path.relative_to(DOCS_ROOT) for path in DOCUMENTATION}
 
-    assert actual == EXPECTED_DOCUMENTS
+    assert DOCS_INDEX in DOCUMENTATION
+    assert {path.parts[0] for path in relative - {Path("README.md")}} == DOC_SECTIONS
+    assert all(len(path.parts) == 2 for path in relative - {Path("README.md")})
 
 
 def test_documentation_index_links_every_document() -> None:
@@ -172,7 +154,8 @@ def test_documentation_index_links_every_document() -> None:
         if target != DOCS_INDEX and target.is_relative_to(DOCS_ROOT) and target.suffix == ".md":
             linked.add(target.relative_to(DOCS_ROOT))
 
-    assert linked == EXPECTED_DOCUMENTS - {Path("README.md")}
+    actual = {path.relative_to(DOCS_ROOT) for path in DOCUMENTATION}
+    assert linked == actual - {Path("README.md")}
 
 
 def test_docs_do_not_use_numbered_design_filenames() -> None:

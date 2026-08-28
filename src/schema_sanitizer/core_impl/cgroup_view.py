@@ -2,7 +2,7 @@
 
 The runtime must not assume that ``/sys/fs/cgroup`` itself is the process
 cgroup: systemd slices, Kubernetes pods and nested containers commonly place a
-process below that mount root.  Pass 55 also distinguishes three states for
+process below that mount root. It also distinguishes three states for
 limit reads -- VALUE, UNBOUNDED and UNKNOWN -- so an unreadable limit can never
 be mistaken for an unlimited one.
 """
@@ -184,14 +184,14 @@ def _join_mount_path(mountpoint: str, mount_root: str, cgroup_path: str) -> Path
     elif cgroup_path.startswith(mount_root.rstrip("/") + "/"):
         relative = cgroup_path[len(mount_root) :]
     else:
-        # Pass57: never concatenate an unrelated membership with this mount.
+        # Never concatenate an unrelated membership with this mount.
         return None
     return Path(mountpoint) / relative.lstrip("/")
 
 
 def _read_current_membership() -> tuple[str | None, dict[str, str]] | None:
     unified: str | None = None
-    legacy: dict[str, str] = {}
+    v1_memberships: dict[str, str] = {}
     try:
         for line in _iter_bounded_proc_lines(
             Path("/proc/self/cgroup"),
@@ -208,18 +208,18 @@ def _read_current_membership() -> tuple[str | None, dict[str, str]] | None:
                 continue
             for controller in controllers.split(","):
                 if controller:
-                    legacy[controller] = path or "/"
+                    v1_memberships[controller] = path or "/"
     except (OSError, _ProcReadLimitExceeded):
         return None
-    return unified, legacy
+    return unified, v1_memberships
 
 
 def _resolve_linux_cgroup_view_once(membership: tuple[str | None, dict[str, str]]) -> CgroupView:
-    unified, legacy = membership
+    unified, v1_memberships = membership
     unified_candidate: CgroupView | None = None
-    legacy_roots: dict[str, Path] = {}
-    legacy_mountpoints: dict[str, Path] = {}
-    legacy_complete: dict[str, bool] = {}
+    v1_roots: dict[str, Path] = {}
+    v1_mountpoints: dict[str, Path] = {}
+    v1_complete: dict[str, bool] = {}
     saw_cgroup_mount = False
     saw_unresolved_membership = False
     try:
@@ -267,14 +267,14 @@ def _resolve_linux_cgroup_view_once(membership: tuple[str | None, dict[str, str]
             if fs_type != "cgroup":
                 continue
             saw_cgroup_mount = True
-            if not legacy:
+            if not v1_memberships:
                 continue
             options = set(right_fields[2].split(","))
             decoded_mountpoint = Path(_unescape_mount_field(mountpoint))
             options.update(decoded_mountpoint.name.split(","))
             decoded_mount_root = _unescape_mount_field(mount_root) or "/"
             complete = decoded_mount_root == "/"
-            for controller, path in legacy.items():
+            for controller, path in v1_memberships.items():
                 if controller not in options:
                     continue
                 joined = _join_mount_path(mountpoint, mount_root, path)
@@ -283,25 +283,25 @@ def _resolve_linux_cgroup_view_once(membership: tuple[str | None, dict[str, str]
                     continue
                 # Replace an incomplete first candidate when a later complete
                 # hierarchy is visible for the same controller.
-                if controller not in legacy_roots or (complete and not legacy_complete[controller]):
-                    legacy_roots[controller] = joined
-                    legacy_mountpoints[controller] = decoded_mountpoint
-                    legacy_complete[controller] = complete
+                if controller not in v1_roots or (complete and not v1_complete[controller]):
+                    v1_roots[controller] = joined
+                    v1_mountpoints[controller] = decoded_mountpoint
+                    v1_complete[controller] = complete
     except (OSError, _ProcReadLimitExceeded):
         return CgroupView(0, None, resolution_known=False)
 
     if unified_candidate is not None:
         return unified_candidate
-    if legacy_roots:
+    if v1_roots:
         return CgroupView(
             1,
             None,
             None,
-            tuple(sorted(legacy_roots.items())),
-            tuple(sorted(legacy_mountpoints.items())),
+            tuple(sorted(v1_roots.items())),
+            tuple(sorted(v1_mountpoints.items())),
             True,
             True,
-            tuple(sorted(legacy_complete.items())),
+            tuple(sorted(v1_complete.items())),
         )
     return CgroupView(0, None, resolution_known=not (saw_cgroup_mount or saw_unresolved_membership))
 
@@ -471,7 +471,7 @@ def _parse_cgroup_integer(raw: str | None, *, path: Path | None) -> CgroupIntege
         # reach this parser also treat a negative sentinel as known-unbounded.
         return CgroupIntegerSample(CgroupValueState.UNBOUNDED, path=path)
     if value >= (1 << 62):
-        # Legacy cgroup-v1 memory controllers often encode "unlimited" as a huge
+        # Cgroup-v1 memory controllers often encode "unlimited" as a huge
         # positive sentinel near LONG_MAX rather than the v2 string "max".
         return CgroupIntegerSample(CgroupValueState.UNBOUNDED, path=path)
     return CgroupIntegerSample(CgroupValueState.VALUE, value=value, path=path)
@@ -635,19 +635,12 @@ def read_effective_cgroup_usage_ratio(
     return None
 
 
-def read_cgroup_integer(name: str, *, controller: str | None = None) -> int | None:
-    """Compatibility value-only reader; UNKNOWN and UNBOUNDED both map to None."""
-    sample = read_cgroup_integer_state(name, controller=controller)
-    return sample.value if sample.state is CgroupValueState.VALUE else None
-
-
 __all__ = [
     "CgroupIntegerSample",
     "CgroupValueState",
     "CgroupView",
     "cgroup_file",
     "current_cgroup_view",
-    "read_cgroup_integer",
     "read_cgroup_integer_state",
     "read_cgroup_text",
     "read_effective_cgroup_headroom",

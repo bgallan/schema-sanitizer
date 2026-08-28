@@ -38,7 +38,7 @@ PARQUET_CONTRACT_RUNTIME_TEST_GROUPS: dict[str, tuple[str, ...]] = {
     "safe_pyarrow_fallback": (
         "tests/parquet/test_parquet_native_scalar_projection_and_encodings.py::test_native_parquet_stream_respects_small_batch_size_with_pyarrow_fallback",
         "tests/parquet/test_parquet_external_fallbacks.py::test_spark_flavored_nested_parquet_uses_pyarrow_fallback",
-        "tests/parquet/test_parquet_external_fallbacks.py::test_pyarrow_legacy_nested_list_map_encoding_uses_pyarrow_fallback",
+        "tests/parquet/test_parquet_external_fallbacks.py::test_pyarrow_deprecated_nested_list_map_encoding_uses_pyarrow_fallback",
     ),
     "nested_recursive_grammar": (
         "tests/parquet/test_parquet_native_recursive_grammar_runtime.py::test_native_parquet_stream_materializes_cartesian_recursive_grammar_corpus",
@@ -147,12 +147,11 @@ def _validate_runtime_suite_selection(
     groups: dict[str, tuple[str, ...]] | None = None,
     required_groups: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Validate that the runtime contract suite is complete and not stale.
+    """Validate that the runtime contract suite is complete and current.
 
     This does not replace pytest execution. It catches cheaper failure modes
     before launching pytest: duplicated nodeids, empty contract groups, selected
-    tests that no longer exist after a refactor, and required guarantee families
-    that are no longer represented by the manifest.
+    tests that are missing, and required guarantee families absent from the manifest.
     """
     root = Path(base_dir or Path(__file__).resolve().parents[3])
     suite_groups = dict(groups or PARQUET_CONTRACT_RUNTIME_TEST_GROUPS)
@@ -189,7 +188,7 @@ def _validate_runtime_suite_selection(
         if relative_path not in functions_by_file:
             functions_by_file[relative_path] = _test_function_names_from_file(path)
         if function not in functions_by_file[relative_path]:
-            issues.append(f"runtime contract test no longer exists: {nodeid}")
+            issues.append(f"runtime contract test is missing: {nodeid}")
 
     coverage = {group: bool(selected_by_group.get(group)) for group in required}
     return {

@@ -47,13 +47,11 @@ PyObject *py_context_registry_probe_from_arrow_sources(PyObject *,
     return nullptr;
   }
 
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, registry_json, &err,
-                                  "context_registry_probe_from_arrow_sources");
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
+  const auto valid = validate_registry_sink_mode(
+      schema_mode, registry_json, "context_registry_probe_from_arrow_sources");
+  if (!valid.ok()) {
     decref_arrow_sources(&sources);
-    raise_status_error(valid, err);
+    raise_status_error(valid);
     return nullptr;
   }
 
@@ -62,8 +60,7 @@ PyObject *py_context_registry_probe_from_arrow_sources(PyObject *,
       field_name_policy ? field_name_policy : "");
   decref_arrow_sources(&sources);
   if (!merged_r.ok()) {
-    raise_status_error(code_for_status(merged_r.status()),
-                       dup_cstr(merged_r.status().ToString()));
+    raise_status_error(merged_r.status());
     return nullptr;
   }
   auto merged = std::move(merged_r).ValueOrDie();
@@ -115,13 +112,12 @@ py_context_registry_probe_from_arrow_sources_registry_state(PyObject *,
     return nullptr;
   }
 
-  char *err = nullptr;
-  const int valid = validate_registry_sink_mode(
-      schema_mode, base_registry_plan->registry_json.c_str(), &err,
+  const auto valid = validate_registry_sink_mode(
+      schema_mode, base_registry_plan->registry_json,
       "context_registry_probe_from_arrow_sources_registry_state");
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
+  if (!valid.ok()) {
     decref_arrow_sources(&sources);
-    raise_status_error(valid, err);
+    raise_status_error(valid);
     return nullptr;
   }
 
@@ -130,8 +126,7 @@ py_context_registry_probe_from_arrow_sources_registry_state(PyObject *,
       field_name_policy ? field_name_policy : "", &base_registry_plan->schema);
   decref_arrow_sources(&sources);
   if (!merged_r.ok()) {
-    raise_status_error(code_for_status(merged_r.status()),
-                       dup_cstr(merged_r.status().ToString()));
+    raise_status_error(merged_r.status());
     return nullptr;
   }
   auto merged = std::move(merged_r).ValueOrDie();

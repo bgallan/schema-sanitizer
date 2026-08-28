@@ -17,7 +17,7 @@ runs:
     - name: Configure and build the fully instrumented extension
       shell: bash
       run: |
-        cmake -S . -B build/tsan -G Ninja \
+        cmake -S . -B .work/build/tsan -G Ninja \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DCMAKE_C_COMPILER=gcc-14 \
           -DCMAKE_CXX_COMPILER=g++-14 \
@@ -29,12 +29,12 @@ runs:
           -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
           -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
           -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-        cmake --build build/tsan --parallel 4
+        cmake --build .work/build/tsan --parallel 4
     - name: Run TSan fuzz regressions and mutation campaigns
       shell: bash
       run: >-
         python meta/ci/fuzz/run_fuzz_regressions.py
-        --build-root build/tsan/fuzz
+        --build-root .work/build/tsan/fuzz
         --campaign-runs 1000
         --seed 15172026
         --max-len 262144
@@ -42,22 +42,23 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        mkdir -p .work/bin
         read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
         read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
         g++-14 -std=c++17 -fsanitize=thread \
           -fno-omit-frame-pointer \
           "${python_embed_cflags[@]}" \
           meta/ci/sanitizers/tsan_python_launcher.cc \
-          -o python-tsan \
+          -o .work/bin/python-tsan \
           "${python_embed_ldflags[@]}"
     - name: Require capacity for complete TSan concurrency coverage
       shell: bash
       run: >-
-        build/tsan/schema_sanitizer_sanitized_ordered_executor
+        .work/build/tsan/schema_sanitizer_sanitized_ordered_executor
         --require-cpu-capacity 3
     - name: Run the executor and all full-extension TSan domains
       shell: bash
       run: >-
         meta/ci/sanitizers/run_tsan_extension_suite.sh
-        build/tsan ./python-tsan 2
+        .work/build/tsan .work/bin/python-tsan 2
         "$(python -c 'import site; print(site.getsitepackages()[0])')"

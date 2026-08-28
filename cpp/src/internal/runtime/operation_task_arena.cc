@@ -65,10 +65,9 @@ std::atomic<std::size_t> g_native_counter_underflows{0U};
 std::atomic<std::size_t> g_process_total_thread_permits{0U};
 std::atomic<std::size_t> g_process_physical_thread_permits{0U};
 std::atomic<std::size_t> g_process_external_runtime_thread_permits{0U};
-// Amount-based native release APIs are retained for ABI compatibility, but
-// any impossible debit poisons the whole permit domain.  This prevents a
-// duplicate/stale release from turning corrupted accounting into reusable
-// process headroom.  Exact Python/native RAII owners may still retire debt.
+// Any impossible debit poisons the whole permit domain. This prevents a
+// duplicate or stale release from turning corrupted accounting into reusable
+// process headroom while exact RAII owners retire their remaining debt.
 std::atomic<bool> g_process_thread_permit_corrupted{false};
 // Runtime-reported resident external workers are observational credits, not
 // active claims. They are kept distinct so a persistent pool is not mistaken
@@ -102,9 +101,8 @@ std::atomic<bool> g_process_file_descriptor_permit_corrupted{false};
 std::atomic<std::size_t> g_process_file_descriptor_uncertain_close_debts{0U};
 std::atomic<std::uint64_t> g_process_fd_epoch{0U};
 std::atomic<std::size_t> g_process_fd_waiters{0U};
-// Strict FIFO ticketing replaces Pass69's g_process_fd_fifo_mutex /
-// std::timed_mutex scheduler-dependent ordering. A fixed cancellation ring
-// keeps timeout retirement allocation-free and bounded.
+// Strict FIFO ticketing and a fixed cancellation ring keep timeout retirement
+// deterministic, allocation-free, and bounded.
 constexpr std::size_t kProcessFdTicketSlots = 65536U;
 std::atomic<std::uint64_t> g_process_fd_next_ticket{0U};
 std::atomic<std::uint64_t> g_process_fd_serving_ticket{0U};
@@ -392,8 +390,8 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
   return std::nullopt;
 }
 
-// Historical pass70 contract name: ProcessRlimitThreadCapacity. Pass71
-// refines Linux semantics to per-UID headroom rather than a process-local cap.
+// Linux RLIMIT_NPROC is represented as per-UID headroom, not a process-local
+// absolute capacity.
 [[nodiscard]] std::optional<std::size_t>
 ProcessRlimitThreadHeadroom() noexcept {
 #if defined(__linux__)
@@ -623,9 +621,7 @@ ProcessThreadStackReservationCount(std::size_t total_reserved) noexcept {
   const auto resident_stack_debt =
       g_process_external_runtime_stack_debt_threads.load(
           std::memory_order_acquire);
-  // Pass69 source-contract breadcrumb: std::max(external_active,
-  // resident_external). Pass70 intentionally substitutes resident_stack_debt so
-  // an unknown identity probe cannot forgive virtual stack memory that may
+  // An unknown identity probe cannot forgive virtual stack memory that may
   // still be resident.
   const auto external_stack_width =
       std::max(external_active, resident_stack_debt);
@@ -661,13 +657,11 @@ EffectiveProcessThreadCapacity(std::size_t total_reserved) noexcept {
   // Only runtime-reported resident workers may offset OS-observed unmanaged
   // threads. Active claims are reservations, not identity evidence, and are
   // therefore never subtracted from the observation independently.
-  // Historical source-contract breadcrumb: external_threads are represented by
-  // resident identity evidence, never by active reservation claims.
   const auto attributed_external =
       std::min(observed_unmanaged, resident_external);
   const auto unaccounted_external = observed_unmanaged - attributed_external;
-  // Historical pass53 name breadcrumb: process_managed_capacity. The effective
-  // process capacity is now shared by managed and external active reservations.
+  // Effective process capacity is shared by managed and external active
+  // reservations.
   const auto process_capacity =
       unaccounted_external >= configured_process_capacity
           ? 0U
@@ -712,10 +706,6 @@ TryAcquireProcessThreadPermitsUpTo(std::size_t desired, std::size_t minimum,
       g_process_thread_permit_corrupted.load(std::memory_order_acquire)) {
     return 0U;
   }
-  // Pass53 source-contract breadcrumb:
-  // g_process_physical_thread_permits.compare_exchange_weak was replaced by the
-  // pass68+ combined-total admission CAS; the managed counter is now only an
-  // ownership subledger.
   auto total = g_process_total_thread_permits.load(std::memory_order_acquire);
   for (;;) {
     const auto effective_capacity = EffectiveProcessThreadCapacity(total);
@@ -1801,9 +1791,8 @@ struct OperationTaskArena::State final {
   const std::size_t producer_waiter_capacity;
   std::vector<BackpressureWaitTicket> backpressure_tickets;
   ProcessCpuGovernor::Registration cpu_registration;
-  // The historical publication domain remains the sole 1-8-worker line and
-  // the first high-core shard. Three additional aligned shards cover workers
-  // 8-31.
+  // The primary publication domain covers workers 0-7 and the first high-core
+  // shard. Three additional aligned shards cover workers 8-31.
   QueueVisibilityShard primary_queue_visibility;
   std::array<QueueVisibilityShard, 3> queue_visibility;
   std::shared_ptr<PerformanceTelemetry> telemetry;
@@ -1849,8 +1838,8 @@ struct OperationTaskArena::State final {
   std::atomic<std::size_t> retained_bytes_total{0};
   // Versioned retained-byte availability plus a preallocated condition variable
   // provide deadline-bounded producer backpressure. Every release/shutdown
-  // advances the epoch before notifying both legacy atomic observers and timed
-  // waiters; no waiter holds a worker queue mutex while blocked.
+  // advances the epoch before notifying atomic observers and timed waiters; no
+  // waiter holds a worker queue mutex while blocked.
   std::atomic<std::uint64_t> retained_epoch{0};
   std::mutex retained_wait_mutex;
   std::condition_variable retained_ready;
@@ -1868,8 +1857,6 @@ struct OperationTaskArena::State final {
     // select a request that still does not fit while a smaller request remains
     // asleep despite available credit. Wake the bounded waiter set and let the
     // authoritative CAS choose requests that fit.
-    // Pass58 compatibility breadcrumb: retained_ready.notify_one() was used
-    // here.
     retained_epoch.notify_all();
     retained_ready.notify_all();
   }
@@ -2717,8 +2704,7 @@ private:
       if (!reinserted && !Terminalize(candidate)) {
         // Capacity is reserved at arena admission, so reaching this branch is
         // a hard invariant violation. Keep the process fail-closed rather than
-        // running arbitrary destructors on the reaper thread. This replaces
-        // the legacy hidden cycle: candidate->reaper_self = candidate.
+        // running arbitrary destructors on the reaper thread.
         std::terminate();
       }
     }
@@ -3536,9 +3522,6 @@ std::size_t OperationTaskArena::queue_byte_capacity() const noexcept {
   const auto state = state_.load(std::memory_order_acquire);
   return state ? state->queue_byte_capacity : 0U;
 }
-// Compatibility note: OperationTaskArena::RetainCompletionBytes was removed
-// because it could bypass queue_byte_capacity; all ownership transfer now uses
-// the single transactional method below.
 bool OperationTaskArena::TryTransferActiveToCompletion(
     std::size_t active_credit, std::size_t completion_bytes,
     CompletionMemoryLease *completion_lease) noexcept {
@@ -3921,8 +3904,8 @@ void OperationTaskArena::Shutdown() noexcept {
     ArenaCleanupReaper::Instance().ReleaseReservation(state);
   }
   if (abandoned > 0U) {
-    // The shared reaper performs the old abandoned_queues->clear() operation
-    // after shutdown returns, while retaining the arena allocator.
+    // The shared reaper clears abandoned queues after shutdown returns while
+    // retaining the arena allocator.
     if (!ArenaCleanupReaper::Instance().Enqueue(state)) {
       // Once teardown has begun, do not turn an exhausted deadline into an
       // unbounded synchronous run of arbitrary capture destructors.  A fixed

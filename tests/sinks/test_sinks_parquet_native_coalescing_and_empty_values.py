@@ -39,10 +39,7 @@ def test_parquet_sink_native_coalesces_flat_arrow_batches(tmp_path: Path) -> Non
     require_native()
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.adapters.parquet.sink import (
-        _write_coalesced_batches,
-        last_parquet_coalesce_route,
-    )
+    from schema_sanitizer.adapters.parquet.sink import _write_coalesced_batches
 
     batches = [
         pa.record_batch(
@@ -67,7 +64,6 @@ def test_parquet_sink_native_coalesces_flat_arrow_batches(tmp_path: Path) -> Non
         writer.close()
 
     parquet_file = pq.ParquetFile(out)
-    assert last_parquet_coalesce_route() == "native"
     assert parquet_file.metadata.num_rows == 8
     assert parquet_file.metadata.num_row_groups == 1
     assert pq.read_table(out).to_pylist() == [
@@ -80,10 +76,7 @@ def test_parquet_sink_native_coalesces_nested_arrow_batches(tmp_path: Path) -> N
     require_native()
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.adapters.parquet.sink import (
-        _write_coalesced_batches,
-        last_parquet_coalesce_route,
-    )
+    from schema_sanitizer.adapters.parquet.sink import _write_coalesced_batches
 
     payload_type = pa.struct(
         [
@@ -141,7 +134,6 @@ def test_parquet_sink_native_coalesces_nested_arrow_batches(tmp_path: Path) -> N
         writer.close()
 
     parquet_file = pq.ParquetFile(out)
-    assert last_parquet_coalesce_route() == "native"
     assert parquet_file.metadata.num_rows == 8
     assert parquet_file.metadata.num_row_groups == 1
     assert pq.read_table(out).to_pylist() == rows
@@ -154,10 +146,7 @@ def test_parquet_sink_native_coalesces_dictionary_arrow_batches(
     require_native()
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.adapters.parquet.sink import (
-        _write_coalesced_batches,
-        last_parquet_coalesce_route,
-    )
+    from schema_sanitizer.adapters.parquet.sink import _write_coalesced_batches
 
     schema = pa.schema([pa.field("coded", pa.dictionary(pa.int8(), pa.string()))])
     dictionary = pa.array(["value-0", "value-1"], type=pa.string())
@@ -182,7 +171,6 @@ def test_parquet_sink_native_coalesces_dictionary_arrow_batches(
         writer.close()
 
     parquet_file = pq.ParquetFile(out)
-    assert last_parquet_coalesce_route() == "native"
     assert parquet_file.metadata.num_rows == 8
     assert parquet_file.metadata.num_row_groups == 1
     assert pq.read_table(out).to_pylist() == [{"coded": f"value-{index % 2}"} for index in range(8)]

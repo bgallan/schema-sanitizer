@@ -30,9 +30,8 @@ extension or file contents.
 | `json` | `.json` | One complete document treated as one row. |
 | `json_array` | `.json` | Top-level array of row objects. |
 | `jsonl` | `.jsonl` | One JSON object per line. |
-| `ndjson` | `.ndjson` | One JSON object per line. |
 | `xml` | `.xml` | One document or streamed `xml_row_tag` elements. |
-| `parquet` | `.parquet`, `.pq` | Parquet rows. |
+| `parquet` | `.parquet` | Parquet rows. |
 | `python` | none | Iterable of dictionaries. |
 
 The explicit format must agree with a path's supported extension. JSON and JSON

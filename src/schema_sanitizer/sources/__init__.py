@@ -39,7 +39,7 @@ def list_objects(
         directory_metadata_budget_scope,
     )
     from ..remote_impl import routing, sync_backend
-    from ..remote_impl.transport import run_sync
+    from ..remote_impl.async_bridge import run_sync
 
     if resources is not None:
         if multi_threading is not None or memory_limit_bytes is not None:

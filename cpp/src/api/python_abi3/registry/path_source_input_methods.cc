@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <new>
 #include <string>
@@ -45,93 +46,96 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
   if (!ctx)
     return nullptr;
 
-  auto *prepared = unwrap_prepared_options(prepared_obj);
-  if (prepared_obj != Py_None && !prepared)
+  sanitize::PreparedOptionsPtr prepared;
+  if (!resolve_prepared_options(prepared_obj, &prepared)) {
     return nullptr;
-
-  switch (parse_python_source_kind(source_name)) {
-  case PythonSourceKind::kPath: {
-    PyObject *path_bytes = fsencode_path(payload_obj);
-    if (!path_bytes)
-      return nullptr;
-    const char *path = PyBytes_AsString(path_bytes);
-
-    PyRegistrySinkOutputs outputs;
-
-    int st = call_without_gil([&] {
-      return schema_sanitizer_context_to_registry_sink_path(
-          ctx, sink_name, frontend_name, path, prepared, registry_json,
-          field_name_policy, schema_mode, &outputs.main_stream,
-          &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
-          &outputs.conversion_timestamp, &outputs.err);
-    });
-    Py_DECREF(path_bytes);
-
-    return pack_registry_or_raise_with_metadata(
-        st, ctx_obj, &outputs, first_row_columns, all_row_columns,
-        row_span_columns, timestamp_columns,
-        prepared && prepared->prepared
-            ? prepared->prepared->spec.memory_limit_bytes
-            : -1);
   }
 
-  case PythonSourceKind::kStream: {
-    if (!python_reader_has_read_seek(payload_obj)) {
-      set_python_reader_type_error();
-      return nullptr;
+  try {
+    switch (parse_python_source_kind(source_name)) {
+    case PythonSourceKind::kPath: {
+      PyObject *path_bytes = fsencode_path(payload_obj);
+      if (!path_bytes) {
+        return nullptr;
+      }
+      const char *path = PyBytes_AsString(path_bytes);
+      if (!path) {
+        Py_DECREF(path_bytes);
+        return nullptr;
+      }
+      std::string path_copy(path);
+      Py_DECREF(path_bytes);
+      auto result = call_without_gil([&] {
+        auto source = sanitize::chunk_source_from_path_with_encoding(
+            std::move(path_copy), prepared->spec.input_text_encoding,
+            prepared->spec.memory_limit_bytes);
+        if (!source.ok()) {
+          return sanitize::Result<NativeRegistrySinkOutput>(source.status());
+        }
+        return native_registry_sink_from_source(
+            ctx, sink_name, frontend_name, std::move(source).ValueOrDie(),
+            prepared, registry_json, field_name_policy, schema_mode,
+            "context_to_registry_sink_from_source[path]");
+      });
+      return pack_registry_or_raise_with_metadata(
+          std::move(result), ctx_obj, first_row_columns, all_row_columns,
+          row_span_columns, timestamp_columns,
+          prepared->spec.memory_limit_bytes);
     }
 
-    sanitize::PreparedOptionsPtr prepared_shared;
-    if (!resolve_prepared_options(prepared_obj, &prepared_shared)) {
-      return nullptr;
+    case PythonSourceKind::kStream: {
+      if (!python_reader_has_read_seek(payload_obj)) {
+        set_python_reader_type_error();
+        return nullptr;
+      }
+      auto source = make_python_reader_chunk_source(payload_obj);
+      auto result = call_without_gil([&] {
+        return native_registry_sink_from_source(
+            ctx, sink_name, frontend_name, std::move(source), prepared,
+            registry_json, field_name_policy, schema_mode,
+            "context_to_registry_sink_from_source[stream]");
+      });
+      return pack_registry_or_raise_with_metadata(
+          std::move(result), payload_obj, first_row_columns, all_row_columns,
+          row_span_columns, timestamp_columns,
+          prepared->spec.memory_limit_bytes);
     }
 
-    PyRegistrySinkOutputs outputs;
+    case PythonSourceKind::kText: {
+      const char *data = nullptr;
+      Py_ssize_t data_len = 0;
+      if (!bytes_or_str_view(payload_obj, &data, &data_len)) {
+        return nullptr;
+      }
+      std::string bytes;
+      if (data_len != 0) {
+        bytes.assign(data, static_cast<std::size_t>(data_len));
+      }
+      auto result = call_without_gil([&] {
+        return native_registry_sink_from_source(
+            ctx, sink_name, frontend_name,
+            sanitize::chunk_source_from_bytes(std::move(bytes)), prepared,
+            registry_json, field_name_policy, schema_mode,
+            "context_to_registry_sink_from_source[text]");
+      });
+      return pack_registry_or_raise_with_metadata(
+          std::move(result), ctx_obj, first_row_columns, all_row_columns,
+          row_span_columns, timestamp_columns,
+          prepared->spec.memory_limit_bytes);
+    }
 
-    auto src = make_python_reader_chunk_source(payload_obj);
-    int st = call_without_gil([&] {
-      return schema_sanitizer_context_to_registry_sink_from_source(
-          ctx, sink_name, frontend_name, std::move(src), prepared_shared,
-          registry_json, field_name_policy, schema_mode, &outputs.main_stream,
-          &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
-          &outputs.conversion_timestamp, &outputs.err,
-          "schema_sanitizer_context_to_registry_sink_from_source");
-    });
-
-    return pack_registry_or_raise_with_metadata(
-        st, payload_obj, &outputs, first_row_columns, all_row_columns,
-        row_span_columns, timestamp_columns,
-        prepared_shared ? prepared_shared->spec.memory_limit_bytes : -1);
-  }
-
-  case PythonSourceKind::kText: {
-    const char *data = nullptr;
-    Py_ssize_t data_len = 0;
-    if (!bytes_or_str_view(payload_obj, &data, &data_len))
-      return nullptr;
-
-    PyRegistrySinkOutputs outputs;
-
-    int st = call_without_gil([&] {
-      return schema_sanitizer_context_to_registry_sink_text(
-          ctx, sink_name, frontend_name,
-          reinterpret_cast<const std::uint8_t *>(data),
-          static_cast<std::size_t>(data_len), prepared, registry_json,
-          field_name_policy, schema_mode, &outputs.main_stream,
-          &outputs.diagnostics, &outputs.registry_json, &outputs.drifts_json,
-          &outputs.conversion_timestamp, &outputs.err);
-    });
-
-    return pack_registry_or_raise_with_metadata(
-        st, ctx_obj, &outputs, first_row_columns, all_row_columns,
-        row_span_columns, timestamp_columns,
-        prepared && prepared->prepared
-            ? prepared->prepared->spec.memory_limit_bytes
-            : -1);
-  }
-
-  case PythonSourceKind::kUnknown:
-    break;
+    case PythonSourceKind::kUnknown:
+      break;
+    }
+  } catch (const std::bad_alloc &) {
+    PyErr_NoMemory();
+    return nullptr;
+  } catch (const std::exception &error) {
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+    return nullptr;
+  } catch (...) {
+    PyErr_SetString(PyExc_RuntimeError, "unknown registry sink error");
+    return nullptr;
   }
 
   PyErr_SetString(PyExc_ValueError,
@@ -187,9 +191,9 @@ PyObject *py_context_to_sink_from_path_sources(PyObject *, PyObject *args) {
   stream->release = &path_sources_release;
   stream->private_data = state.release();
 
-  auto *diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
+  auto *diagnostics = new (std::nothrow) NativeDiagnostics();
   if (!diagnostics) {
-    schema_sanitizer_stream_free(stream);
+    release_arrow_stream(stream);
     PyErr_NoMemory();
     return nullptr;
   }
@@ -250,9 +254,9 @@ PyObject *py_context_to_sink_from_path_source_chunk_provider(PyObject *,
   state->chunk_provider = provider_obj;
   stream->private_data = state.release();
 
-  auto *diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
+  auto *diagnostics = new (std::nothrow) NativeDiagnostics();
   if (!diagnostics) {
-    schema_sanitizer_stream_free(stream);
+    release_arrow_stream(stream);
     PyErr_NoMemory();
     return nullptr;
   }

@@ -438,7 +438,7 @@ def test_shared_physical_claim_dropped_before_handoff_releases_exact_envelope() 
     assert key not in module._EXTERNAL_RUNTIME_POOL_COORDINATOR
 
 
-def test_external_cleanup_uses_exact_owner_even_when_amount_mirror_is_zero() -> None:
+def test_external_cleanup_uses_exact_owner() -> None:
     from schema_sanitizer.core_impl import process_resources as module
 
     class Owner:
@@ -451,15 +451,11 @@ def test_external_cleanup_uses_exact_owner_even_when_amount_mirror_is_zero() -> 
             self.amount = int(target)
 
     owner = Owner()
-    state = module._ExternalRuntimeCleanupState(
-        native_lease=owner,
-        native=owner,
-        native_amount=0,  # deliberately stale mirror
-    )
+    state = module._ExternalRuntimeCleanupState(native=owner)
     module._cleanup_external_runtime_capsule(SimpleNamespace(arg0=state))
     assert owner.targets == [0]
     assert owner.amount == 0
-    assert state.native_lease is None
+    assert state.native is None
 
 
 def test_deferred_memory_close_tail_runs_without_second_close_call(
@@ -513,9 +509,7 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
                 raise ValueError("below opened")
             receipt.amount = int(target)
             receipt.generation += 1
-
-        def process_file_descriptor_permit_lease_amount(self, receipt):
-            return receipt.amount
+            return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_opened(self, receipt, amount, generation):
             assert generation == receipt.generation
@@ -523,6 +517,7 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
                 raise ValueError("open exceeds permits")
             receipt.opened += int(amount)
             receipt.generation += 1
+            return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_closed(self, receipt, amount, generation):
             assert generation == receipt.generation
@@ -530,12 +525,7 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
                 raise ValueError("over-close")
             receipt.opened -= int(amount)
             receipt.generation += 1
-
-        def process_file_descriptor_permits_acquire(self, *_args):
-            return 0
-
-        def process_file_descriptor_permits_release(self, _amount):
-            raise AssertionError("legacy release selected")
+            return receipt.generation, receipt.amount, receipt.opened
 
     native = Native()
     governor = module._Governor(
@@ -549,11 +539,10 @@ def test_fd_exact_receipt_owns_opened_state_and_blocks_release(
     capability = module.FileDescriptorCapability(
         lease, 1, label="exact-operation-thread-borrow-is-finalizer"
     )
-    capability._mark_opened()
-    assert native.receipt is not None and native.receipt.opened == 1
-    with pytest.raises(RuntimeError, match="open descriptors"):
-        capability.release()
-    capability._mark_closed()
+    with capability.open_descriptor(lambda: os.open(os.devnull, os.O_RDONLY)):
+        assert native.receipt is not None and native.receipt.opened == 1
+        with pytest.raises(RuntimeError, match="open descriptors"):
+            capability.release()
     assert native.receipt.opened == 0
     capability.release()
     assert native.receipt.amount == 0
@@ -588,9 +577,7 @@ def test_fd_interruption_after_exact_open_commit_is_repaired_after_physical_clos
             if target != receipt.amount:
                 receipt.amount = target
                 receipt.generation += 1
-
-        def process_file_descriptor_permit_lease_amount(self, receipt):
-            return receipt.amount
+            return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_opened(self, receipt, amount, generation):
             assert generation == receipt.generation
@@ -599,17 +586,13 @@ def test_fd_interruption_after_exact_open_commit_is_repaired_after_physical_clos
             if self.fail:
                 self.fail = False
                 raise KeyboardInterrupt("fault after exact opened commit")
+            return receipt.generation, receipt.amount, receipt.opened
 
         def process_file_descriptor_permit_lease_mark_closed(self, receipt, amount, generation):
             assert generation == receipt.generation
             receipt.opened -= amount
             receipt.generation += 1
-
-        def process_file_descriptor_permits_acquire(self, *_args):
-            return 0
-
-        def process_file_descriptor_permits_release(self, _amount):
-            raise AssertionError("legacy")
+            return receipt.generation, receipt.amount, receipt.opened
 
     native = Native()
     governor = module._Governor(
@@ -640,14 +623,17 @@ def test_external_generation_is_passed_as_optimistic_concurrency_token() -> None
     calls: list[tuple[int, int]] = []
     lease = object()
 
-    authority = module._ExternalNativeThreadAuthority(
-        lambda _desired, _minimum: 0,
-        lambda _amount: None,
-        lease_acquire=lambda _desired, _minimum: None,
-        lease_resize=lambda _lease, target, generation: calls.append((target, generation)),
-        lease_amount=lambda _lease: 3,
-        lease_metadata=lambda _lease: (9, 7, 3),
-    )
+    class Core:
+        @staticmethod
+        def process_external_runtime_thread_permit_lease_metadata(_lease):
+            return 9, 7, 3
+
+        @staticmethod
+        def process_external_runtime_thread_permit_lease_resize(_lease, target, generation):
+            calls.append((target, generation))
+            return generation + 1, target
+
+    authority = module._ExternalNativeThreadAuthority(Core())
     authority.resize_exact_permit_lease(lease, 2)
     assert calls == [(2, 7)]
 
@@ -667,14 +653,14 @@ def test_receipt_ids_and_generations_fail_closed_before_wrap() -> None:
     assert "stale file descriptor permit receipt generation" in probe
 
 
-def test_authoritative_mirrors_are_rebuilt_from_exact_owners() -> None:
+def test_exact_owners_drive_resource_cleanup() -> None:
     resources = (_root() / "src/schema_sanitizer/core_impl/process_resources.py").read_text()
     memory = (_root() / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
 
     assert "_sync_external_logical_lease_width_locked" in resources
     assert "_sync_external_native_lease_amount_locked" in resources
-    assert "Exact owner object is authoritative" in resources
-    assert "Exact borrow capability is authoritative" in resources
+    assert "native.resize_physical_thread_permits(0)" in resources
+    assert "borrow_lease.release()" in resources
     assert "self._maybe_finish_deferred_close()" in memory
     assert "process_file_descriptor_permit_lease_mark_opened" in resources
     assert "process_file_descriptor_permit_lease_mark_closed" in resources

@@ -14,7 +14,7 @@ RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 
 
 def test_wake_epoch_is_sampled_only_at_park_wake_boundaries() -> None:
-    """Completed packets no longer issue a wake-generation acquire load."""
+    """Completed packets avoid wake-generation acquire loads."""
     runtime = RUNTIME.read_text(encoding="utf-8")
     task_run = runtime.index(
         "queued.task(index - static_cast<std::size_t>(queued.lane_begin), stop);"

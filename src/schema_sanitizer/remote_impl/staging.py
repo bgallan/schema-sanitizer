@@ -25,10 +25,11 @@ from ..core_impl.uris import (
 )
 from ..sources.models import RemoteFile
 from . import routing, sync_backend
+from .async_bridge import run_sync
 from .directory_downloads import RemoteDirectoryDownloadSession, download_files_to_directory
 from .io_footprint import RemoteIoFootprint
 from .transfer_dispatch import download_single_file, upload_file
-from .transport import check_download_size, run_sync
+from .transport import check_download_size
 
 if TYPE_CHECKING:
     from ..api_impl.operation_context import OperationExecutionContext

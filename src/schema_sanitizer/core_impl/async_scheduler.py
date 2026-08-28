@@ -42,9 +42,6 @@ _ASYNC_DEBT_ACTIVE = 1
 _ASYNC_DEBT_CLAIMED = 2
 _ASYNC_DEBT_RETRY_PENDING = 3
 _ASYNC_DEBT_BUILDING = 4
-# Compatibility alias for pass57 tests/tooling: a failed reaping attempt remains
-# published and retryable, but it is no longer simultaneously claimable.
-_ASYNC_DEBT_REAPING = _ASYNC_DEBT_RETRY_PENDING
 _ASYNC_DEBT_MAX_GENERATION = (1 << 63) - 1
 _ASYNC_TERMINAL_REAP_CURSOR = 0
 _ASYNC_TERMINAL_REAP_FAILURES = 0
@@ -88,27 +85,17 @@ class AsyncResultMemoryContract:
     still bridges the result until the consumer adopts it.
     """
 
-    preflight_bytes: Callable[[int], int] | int | None
+    preflight_bytes: Callable[[Any], int] | int | None
     postflight_bytes: Callable[[Any], int] | None = None
     ownership_mode: AsyncResultOwnershipMode = AsyncResultOwnershipMode.SCHEDULER
     external_ownership_capability: Callable[[Any], GovernedResultOwnership | None] | None = None
-    # Pass59 API compatibility: callers may keep the old field name, but the
-    # callback must now return an authenticated GovernedResultOwnership rather
-    # than an arbitrary boolean.
-    external_ownership_proof: Callable[[Any], object] | None = None
 
 
-def _resolve_async_result_memory_contract(
-    retained_bytes: Callable[[Any], int] | None,
-    expected_retained_bytes: Callable[[int], int] | int | None,
+def _contract_estimators(
     memory_contract: AsyncResultMemoryContract | None,
-) -> tuple[Callable[[Any], int] | None, Callable[[int], int] | int | None]:
+) -> tuple[Callable[[Any], int] | None, Callable[[Any], int] | int | None]:
     if memory_contract is None:
-        return retained_bytes, expected_retained_bytes
-    if retained_bytes is not None or expected_retained_bytes is not None:
-        raise TypeError(
-            "async result memory_contract cannot be combined with legacy retained byte arguments"
-        )
+        return None, None
     if not isinstance(memory_contract.ownership_mode, AsyncResultOwnershipMode):
         raise TypeError("async result memory contract has an invalid ownership mode")
     return memory_contract.postflight_bytes, memory_contract.preflight_bytes
@@ -123,9 +110,7 @@ def _assert_async_result_ownership(
     mode = memory_contract.ownership_mode
     if mode is AsyncResultOwnershipMode.SCHEDULER:
         return
-    proof = (
-        memory_contract.external_ownership_capability or memory_contract.external_ownership_proof
-    )
+    proof = memory_contract.external_ownership_capability
     if proof is None:
         raise RuntimeError(
             "externally governed async results require an authenticated ownership capability"
@@ -753,7 +738,6 @@ def _park_async_terminal_debt(
         debt.result_slots = result_slots
         debt.pending_slots = pending_slots
         debt.building_tasks = tasks
-        # Pass54 compatibility breadcrumb: self.result_queue = result_queue.
         debt.state = _ASYNC_DEBT_BUILDING
         _ASYNC_TERMINAL_DEBT_COUNT = next_debt_count
 
@@ -1022,13 +1006,13 @@ def _known_async_result_upper_bound(value: object, *, _depth: int = 0) -> int | 
     return None
 
 
-def _expected_async_result_bytes(index: int, estimator: Callable[[int], int] | int | None) -> int:
+def _preflight_async_result_bytes(index: int, estimator: Callable[[int], int] | int | None) -> int:
     if estimator is None:
         return 0
     retained = estimator(index) if callable(estimator) else estimator
     if isinstance(retained, bool) or not isinstance(retained, int) or retained < 0:
         raise SchemaSanitizerResourceError(
-            "async expected_retained_bytes must return a non-negative integer"
+            "async result preflight_bytes must return a non-negative integer"
         )
     return retained
 
@@ -1041,13 +1025,15 @@ def _release_async_result_lease(lease: object | None) -> None:
         close()
 
 
-def _async_result_retained_bound(value: Any, estimator: Callable[[Any], int] | None) -> int | None:
+def _async_result_postflight_bound(
+    value: Any, estimator: Callable[[Any], int] | None
+) -> int | None:
     if estimator is None:
         return _known_async_result_upper_bound(value)
     retained = estimator(value)
     if isinstance(retained, bool) or not isinstance(retained, int) or retained < 0:
         raise SchemaSanitizerResourceError(
-            "async retained_bytes estimator must return a non-negative integer"
+            "async result postflight_bytes must return a non-negative integer"
         )
     return retained
 
@@ -1055,22 +1041,22 @@ def _async_result_retained_bound(value: Any, estimator: Callable[[Any], int] | N
 async def _fetch_with_result_admission(
     index: int,
     fetch: Callable[[int], Awaitable[Any]],
-    retained_bytes: Callable[[Any], int] | None,
-    expected_retained_bytes: Callable[[int], int] | int | None,
+    postflight_bytes: Callable[[Any], int] | None,
+    preflight_bytes: Callable[[int], int] | int | None,
 ) -> tuple[Any, object | None]:
     """Fetch one value; concurrent callers require a pre-materialization bound."""
     from .memory_budget import acquire_operation_memory
 
     result_lease: object | None = None
     value: Any = None
-    expected = _expected_async_result_bytes(index, expected_retained_bytes)
-    if expected_retained_bytes is not None and expected > 0:
+    expected = _preflight_async_result_bytes(index, preflight_bytes)
+    if preflight_bytes is not None and expected > 0:
         result_lease = acquire_operation_memory(expected, stage="async_result_preflight")
     try:
         value = await fetch(index)
-        retained_bound = _async_result_retained_bound(value, retained_bytes)
-        if expected_retained_bytes is not None:
-            # expected_retained_bytes is an explicit upper-bound contract. When
+        retained_bound = _async_result_postflight_bound(value, postflight_bytes)
+        if preflight_bytes is not None:
+            # preflight_bytes is an explicit upper-bound contract. When
             # the result is inspectable, reject/expand a violated declaration.
             if retained_bound is not None and retained_bound > expected:
                 if result_lease is None:
@@ -1081,8 +1067,6 @@ async def _fetch_with_result_admission(
                     resize = getattr(result_lease, "resize", None)
                     if callable(resize):
                         resize(retained_bound)
-            # Pass54 compatibility breadcrumb: resize(retained_size) was the
-            # former heuristic reconciliation; Pass57 uses proven bounds only.
             return value, result_lease
         # No preflight contract means the scheduler has already degraded to the
         # single caller coroutine. Charge only a proven post-materialization
@@ -1100,8 +1084,8 @@ async def _indexed_worker(
     indices: asyncio.Queue[int],
     result_slot: _AsyncWorkerResultSlot,
     fetch: Callable[[int], Awaitable[Any]],
-    retained_bytes: Callable[[Any], int] | None = None,
-    expected_retained_bytes: Callable[[int], int] | int | None = None,
+    postflight_bytes: Callable[[Any], int] | None = None,
+    preflight_bytes: Callable[[int], int] | int | None = None,
 ) -> None:
     """Fetch and publish into one preallocated terminal-safe result envelope."""
     while True:
@@ -1116,7 +1100,7 @@ async def _indexed_worker(
         try:
             try:
                 value, result_lease = await _fetch_with_result_admission(
-                    index, fetch, retained_bytes, expected_retained_bytes
+                    index, fetch, postflight_bytes, preflight_bytes
                 )
             except asyncio.CancelledError:
                 result_slot.available.set()
@@ -1140,8 +1124,8 @@ def _start_indexed_workers(
     indices: asyncio.Queue[int],
     result_slots: list[_AsyncWorkerResultSlot],
     fetch: Callable[[int], Awaitable[Any]],
-    retained_bytes: Callable[[Any], int] | None = None,
-    expected_retained_bytes: Callable[[int], int] | int | None = None,
+    postflight_bytes: Callable[[Any], int] | None = None,
+    preflight_bytes: Callable[[int], int] | int | None = None,
 ) -> list[asyncio.Task[None]]:
     """Start a fixed worker pool with one preallocated result slot per worker."""
     return [
@@ -1150,8 +1134,8 @@ def _start_indexed_workers(
                 indices,
                 result_slots[index],
                 fetch,
-                retained_bytes,
-                expected_retained_bytes,
+                postflight_bytes,
+                preflight_bytes,
             )
         )
         for index in range(worker_count)
@@ -1254,7 +1238,7 @@ def _release_or_park_async_terminal_ownership(
                 pending_slot.terminal_release()
         admission.close()
     except BaseException:
-        # No live Task is required: a cleanup-only debt remains REAPING-capable
+        # No live Task is required: a cleanup-only debt remains retryable
         # and roots the exact admission/lease fields that have not committed.
         _park_async_terminal_debt(
             _EMPTY_ASYNC_TASKS,
@@ -1271,22 +1255,16 @@ async def ordered_indexed_results(
     fetch: Callable[[int], Awaitable[Any]],
     *,
     window: int,
-    retained_bytes: Callable[[Any], int] | None = None,
-    expected_retained_bytes: Callable[[int], int] | int | None = None,
     memory_contract: AsyncResultMemoryContract | None = None,
 ) -> AsyncIterator[tuple[int, Any]]:
     """Yield in order under an explicit result-memory ownership contract."""
     if count <= 0:
         return
-    retained_bytes, expected_retained_bytes = _resolve_async_result_memory_contract(
-        retained_bytes, expected_retained_bytes, memory_contract
-    )
+    postflight_bytes, preflight_bytes = _contract_estimators(memory_contract)
     # Concurrent materialization is allowed only with an explicit preflight
     # upper-bound contract. Unknown-size results use the caller coroutine so N
     # workers can never materialize N uncharged payloads simultaneously.
-    requested_workers = (
-        min(count, max(1, int(window))) if expected_retained_bytes is not None else 0
-    )
+    requested_workers = min(count, max(1, int(window))) if preflight_bytes is not None else 0
     admission = (
         _acquire_async_scheduler_admission(requested_workers)
         if requested_workers > 0
@@ -1303,7 +1281,7 @@ async def ordered_indexed_results(
         for index in range(count):
             check_operation_cancelled(stage="ordered_async_results")
             value, result_lease = await _fetch_with_result_admission(
-                index, fetch, retained_bytes, expected_retained_bytes
+                index, fetch, postflight_bytes, preflight_bytes
             )
             try:
                 _assert_async_result_ownership(value, memory_contract)
@@ -1318,7 +1296,7 @@ async def ordered_indexed_results(
         indices.put_nowait(index)
     next_to_schedule = worker_count
     workers = _start_indexed_workers(
-        worker_count, indices, result_slots, fetch, retained_bytes, expected_retained_bytes
+        worker_count, indices, result_slots, fetch, postflight_bytes, preflight_bytes
     )
     if worker_count > _MAX_PROCESS_ASYNC_TASK_SLOTS:
         raise RuntimeError("async worker-count capacity invariant violated")
@@ -1358,22 +1336,16 @@ async def unordered_indexed_results(
     fetch: Callable[[int], Awaitable[Any]],
     *,
     window: int,
-    retained_bytes: Callable[[Any], int] | None = None,
-    expected_retained_bytes: Callable[[int], int] | int | None = None,
     memory_contract: AsyncResultMemoryContract | None = None,
 ) -> AsyncIterator[tuple[int, Any]]:
     """Yield completion-order results under an explicit memory contract."""
     if count <= 0:
         return
-    retained_bytes, expected_retained_bytes = _resolve_async_result_memory_contract(
-        retained_bytes, expected_retained_bytes, memory_contract
-    )
+    postflight_bytes, preflight_bytes = _contract_estimators(memory_contract)
     # Concurrent materialization is allowed only with an explicit preflight
     # upper-bound contract. Unknown-size results use the caller coroutine so N
     # workers can never materialize N uncharged payloads simultaneously.
-    requested_workers = (
-        min(count, max(1, int(window))) if expected_retained_bytes is not None else 0
-    )
+    requested_workers = min(count, max(1, int(window))) if preflight_bytes is not None else 0
     admission = (
         _acquire_async_scheduler_admission(requested_workers)
         if requested_workers > 0
@@ -1388,7 +1360,7 @@ async def unordered_indexed_results(
         for index in range(count):
             check_operation_cancelled(stage="unordered_async_results")
             value, result_lease = await _fetch_with_result_admission(
-                index, fetch, retained_bytes, expected_retained_bytes
+                index, fetch, postflight_bytes, preflight_bytes
             )
             try:
                 _assert_async_result_ownership(value, memory_contract)
@@ -1403,7 +1375,7 @@ async def unordered_indexed_results(
         indices.put_nowait(index)
     next_to_schedule = worker_count
     workers = _start_indexed_workers(
-        worker_count, indices, result_slots, fetch, retained_bytes, expected_retained_bytes
+        worker_count, indices, result_slots, fetch, postflight_bytes, preflight_bytes
     )
 
     try:
@@ -1431,8 +1403,6 @@ async def drain_ordered_indexed_results(
     fetch: Callable[[int], Awaitable[Any]],
     *,
     window: int,
-    retained_bytes: Callable[[Any], int] | None = None,
-    expected_retained_bytes: Callable[[int], int] | int | None = None,
     memory_contract: AsyncResultMemoryContract | None = None,
 ) -> None:
     """Run indexed async work with optional pre-materialization byte admission."""
@@ -1440,8 +1410,6 @@ async def drain_ordered_indexed_results(
         count,
         fetch,
         window=window,
-        retained_bytes=retained_bytes,
-        expected_retained_bytes=expected_retained_bytes,
         memory_contract=memory_contract,
     ):
         continue
@@ -1452,8 +1420,7 @@ async def drain_ordered_iterable_results(
     fetch: Callable[[T], Awaitable[Any]],
     *,
     window: int,
-    retained_bytes: Callable[[Any], int] | None = None,
-    expected_retained_bytes: Callable[[T], int] | int | None = None,
+    memory_contract: AsyncResultMemoryContract | None = None,
 ) -> None:
     """Drain an iterable with only O(window) auxiliary references.
 
@@ -1472,22 +1439,31 @@ async def drain_ordered_iterable_results(
         async def fetch_index(index: int) -> Any:
             return await fetch(batch[index])
 
-        expected_for_index: Callable[[int], int] | int | None
-        if callable(expected_retained_bytes):
-            estimator = expected_retained_bytes
+        preflight_for_index: Callable[[int], int] | int | None = None
+        if memory_contract is not None and callable(memory_contract.preflight_bytes):
+            estimator = memory_contract.preflight_bytes
 
-            def expected_for_batch_index(index: int) -> int:
+            def preflight_for_batch_index(index: int) -> int:
                 return estimator(batch[index])
 
-            expected_for_index = expected_for_batch_index
-        else:
-            expected_for_index = expected_retained_bytes
+            preflight_for_index = preflight_for_batch_index
+        elif memory_contract is not None:
+            preflight_for_index = memory_contract.preflight_bytes
+        batch_contract = (
+            None
+            if memory_contract is None
+            else AsyncResultMemoryContract(
+                preflight_bytes=preflight_for_index,
+                postflight_bytes=memory_contract.postflight_bytes,
+                ownership_mode=memory_contract.ownership_mode,
+                external_ownership_capability=memory_contract.external_ownership_capability,
+            )
+        )
         await drain_ordered_indexed_results(
             len(batch),
             fetch_index,
             window=min(batch_size, len(batch)),
-            retained_bytes=retained_bytes,
-            expected_retained_bytes=expected_for_index,
+            memory_contract=batch_contract,
         )
 
 

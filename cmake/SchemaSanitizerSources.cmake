@@ -1,249 +1,72 @@
-# Defines native source ownership for schema-sanitizer targets.
+# Derives native target ownership from the source-tree boundary.
 #
-# Keep this manifest explicit so packaging checks can verify every production
-# translation unit is owned by a CMake target.
+# Python extension translation units live below cpp/src/api and belong to the
+# ABI3 module. Every other production translation unit belongs to the core
+# library. CONFIGURE_DEPENDS makes adding or removing a source trigger a CMake
+# reconfigure instead of requiring a second, manually synchronized manifest.
 
-target_sources(
-  ${_schema_sanitizer_pymod_target}
-  PRIVATE
-    cpp/src/api/python_abi3/_core_abi3_module.cc
-    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct.cc
-    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_batch.cc
-    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_validate.cc
-    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_finalize.cc
-    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_formatters.cc
-    cpp/src/api/python_abi3/arrow_direct/schema/logical.cc
-    cpp/src/api/python_abi3/arrow_direct/schema/nested.cc
-    cpp/src/api/python_abi3/arrow_direct/schema/payload.cc
-    cpp/src/api/python_abi3/arrow_direct/schema/type.cc
-    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.cc
-    cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_wrappers.cc
-    cpp/src/api/python_abi3/context/_core_abi3_capsules.cc
-    cpp/src/api/python_abi3/streaming/coalesce_append.cc
-    cpp/src/api/python_abi3/streaming/coalesce_export.cc
-    cpp/src/api/python_abi3/streaming/coalesce_schema.cc
-    cpp/src/api/python_abi3/streaming/coalesce_stream.cc
-    cpp/src/api/python_abi3/csv/nested_stream/nested_stream.cc
-    cpp/src/api/python_abi3/csv/_core_abi3_csv_writer.cc
-    cpp/src/api/python_abi3/metadata/_core_abi3_file_metadata.cc
-    cpp/src/api/python_abi3/json/_core_abi3_json_compact.cc
-    cpp/src/api/python_abi3/json/_core_abi3_json_file_read.cc
-    cpp/src/api/python_abi3/json/_core_abi3_json_file_compact.cc
-    cpp/src/api/python_abi3/json/_core_abi3_json_document_tools.cc
-    cpp/src/api/python_abi3/json/_core_abi3_python_json_encoder.cc
-    cpp/src/api/python_abi3/json/output_adapters/output_adapters.cc
-    cpp/src/api/python_abi3/json/_core_abi3_jsonl_output_batch.cc
-    cpp/src/api/python_abi3/json/_core_abi3_jsonl_output.cc
-    cpp/src/api/python_abi3/json/_core_abi3_jsonl_writer.cc
-    cpp/src/api/python_abi3/parquet/_core_abi3_parquet_reader.cc
-    cpp/src/api/python_abi3/parquet/_core_abi3_parquet_writer.cc
-    cpp/src/api/python_abi3/path_sources/csv_source_projections.cc
-    cpp/src/api/python_abi3/path_sources/path_sources.cc
-    cpp/src/api/python_abi3/path_sources/path_source_plan.cc
-    cpp/src/api/python_abi3/path_sources/path_source_probe.cc
-    cpp/src/api/python_abi3/json/_core_abi3_python_rows.cc
-    cpp/src/api/python_abi3/xml/_core_abi3_xml_folder.cc
-    cpp/src/api/python_abi3/metadata/columns/columns.cc
-    cpp/src/api/python_abi3/metadata/stream/array_builder.cc
-    cpp/src/api/python_abi3/metadata/stream/stream.cc
-    cpp/src/api/python_abi3/sources/python_reader.cc
-    cpp/src/api/python_abi3/registry/plan/plan.cc
-    cpp/src/api/python_abi3/registry/registry_stream_metadata.cc
-    cpp/src/api/python_abi3/registry/native_multi_source_stream.cc
-    cpp/src/api/python_abi3/registry/arrow_stream_sink.cc
-    cpp/src/api/python_abi3/registry/arrow_source_support.cc
-    cpp/src/api/python_abi3/registry/arrow_source_provider.cc
-    cpp/src/api/python_abi3/registry/arrow_source_sinks.cc
-    cpp/src/api/python_abi3/registry/arrow_source_registry_methods.cc
-    cpp/src/api/python_abi3/registry/arrow_source_provider_methods.cc
-    cpp/src/api/python_abi3/registry/arrow_source_probe_methods.cc
-    cpp/src/api/python_abi3/registry/path_source_provider.cc
-    cpp/src/api/python_abi3/registry/path_source_sinks.cc
-    cpp/src/api/python_abi3/registry/path_source_input_methods.cc
-    cpp/src/api/python_abi3/registry/path_source_registry_methods.cc
-    cpp/src/api/python_abi3/registry/path_source_auto_methods.cc
-    cpp/src/api/python_abi3/logical_schema/payload.cc
-    cpp/src/api/python_abi3/registry/schema_registry_methods.cc
-    cpp/src/api/python_abi3/probes/schema_probe.cc
-    cpp/src/api/python_abi3/probes/schema_probe_methods.cc
-    cpp/src/api/python_abi3/sinks/_core_abi3_sink_result_packing.cc
-    cpp/src/api/python_abi3/sinks/_core_abi3_sinks.cc
-    cpp/src/api/python_abi3/sinks/_core_abi3_sinks_source.cc
-    cpp/src/api/python_abi3/sources/_core_abi3_source_protocols.cc
-    cpp/src/api/python_abi3/_core_abi3_python_adapters.cc
-    cpp/src/api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.cc
-    cpp/src/api/python_abi3/context/_core_abi3_context.cc
-    cpp/src/api/python_abi3/options/catalog.cc
-    cpp/src/api/python_abi3/options/prepare.cc
-    cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc
-    cpp/src/api/python_abi3/runtime/cpu_governor_probe.cc
-    cpp/src/api/python_abi3/runtime/ordered_executor_completion_probe.cc
-    cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc
-    cpp/src/api/python_abi3/runtime/arena_wake_probe.cc
-    cpp/src/api/python_abi3/runtime/output_admission_probe.cc
-    cpp/src/api/python_abi3/runtime/ordered_executor_cancellation_probe.cc
-    cpp/src/api/c/schema_sanitizer_c.cc
-    cpp/src/api/c/schema_sanitizer_c_context.cc
-    cpp/src/api/c/schema_sanitizer_c_context_stats.cc
-    cpp/src/api/c/schema_sanitizer_c_sink_common.cc
-    cpp/src/api/c/schema_sanitizer_c_sink_input.cc
-    cpp/src/api/c/schema_sanitizer_c_sink_diagnostics.cc
-    cpp/src/api/c/schema_sanitizer_c_sink_source.cc
-    cpp/src/api/c/schema_sanitizer_c_sink_registry.cc
-    cpp/src/api/c/schema_sanitizer_c_sink_registry_source.cc)
+set(_schema_sanitizer_source_root "${CMAKE_CURRENT_LIST_DIR}/../cpp/src")
+file(
+  GLOB_RECURSE _schema_sanitizer_native_sources CONFIGURE_DEPENDS
+  LIST_DIRECTORIES false
+  "${_schema_sanitizer_source_root}/*.c"
+  "${_schema_sanitizer_source_root}/*.cc"
+  "${_schema_sanitizer_source_root}/*.cpp"
+  "${_schema_sanitizer_source_root}/*.cxx")
 
+if(NOT _schema_sanitizer_native_sources)
+  message(FATAL_ERROR "No native production sources found below cpp/src")
+endif()
+
+set(_schema_sanitizer_module_sources)
+set(_schema_sanitizer_core_sources)
+foreach(_schema_sanitizer_source IN LISTS _schema_sanitizer_native_sources)
+  file(RELATIVE_PATH _schema_sanitizer_relative_source
+       "${_schema_sanitizer_source_root}" "${_schema_sanitizer_source}")
+  if(_schema_sanitizer_relative_source MATCHES "^api/")
+    list(APPEND _schema_sanitizer_module_sources "${_schema_sanitizer_source}")
+  else()
+    list(APPEND _schema_sanitizer_core_sources "${_schema_sanitizer_source}")
+  endif()
+endforeach()
+
+# Prove that the directory rule is an exact partition. This catches future
+# changes to the derivation before an unowned or multiply-owned source reaches a
+# platform build.
+set(_schema_sanitizer_owned_sources ${_schema_sanitizer_module_sources}
+                                    ${_schema_sanitizer_core_sources})
+list(LENGTH _schema_sanitizer_native_sources _schema_sanitizer_source_count)
+list(LENGTH _schema_sanitizer_owned_sources _schema_sanitizer_owned_count)
+list(REMOVE_DUPLICATES _schema_sanitizer_owned_sources)
+list(LENGTH _schema_sanitizer_owned_sources
+     _schema_sanitizer_unique_owned_count)
+if(NOT _schema_sanitizer_owned_count EQUAL _schema_sanitizer_source_count
+   OR NOT _schema_sanitizer_unique_owned_count EQUAL
+      _schema_sanitizer_source_count)
+  message(
+    FATAL_ERROR
+      "Native source ownership is not an exact cpp/src partition: discovered=${_schema_sanitizer_source_count}, owned=${_schema_sanitizer_owned_count}, unique=${_schema_sanitizer_unique_owned_count}"
+  )
+endif()
+
+list(SORT _schema_sanitizer_module_sources)
+list(SORT _schema_sanitizer_core_sources)
+target_sources(${_schema_sanitizer_pymod_target}
+               PRIVATE ${_schema_sanitizer_module_sources})
+target_sources(sanitize_core PRIVATE ${_schema_sanitizer_core_sources})
+
+# Keep the non-translation-unit projection contract visible in IDE targets.
 target_sources(
   sanitize_core
-  PRIVATE
-    cpp/src/core/logical_schema.cc
-    cpp/src/ingest/execute.cc
-    cpp/src/ingest/prepare/inference.cc
-    cpp/src/ingest/prepare/prepare.cc
-    cpp/src/ingest/prepare/schema.cc
-    cpp/src/internal/materialization/stream.cc
-    cpp/src/registry/registry.cpp
-    cpp/src/metadata/file_metadata.cc
-    cpp/src/schema_registry/schema_registry.cc
-    cpp/src/schema_registry/schema_registry_entry.cc
-    cpp/src/schema_registry/schema_registry_json.cc
-    cpp/src/schema_registry/schema_registry_numeric.cc
-    cpp/src/schema_registry/schema_registry_json_schema_write.cc
-    cpp/src/schema_registry/schema_registry_document_json.cc
-    cpp/src/schema_registry/schema_registry_drift_json.cc
-    cpp/src/schema_registry/schema_registry_types.cc
-    cpp/src/internal/memory/memory_budget.cc
-    cpp/src/internal/memory/memory_pool.cc
-    cpp/src/internal/arrow_c/cdata_stream_runtime.cc
-    cpp/src/internal/runtime/operation_task_arena.cc
-    cpp/src/internal/runtime/performance_telemetry.cc
-    cpp/src/internal/materialization/direct_rows.cc
-    cpp/src/internal/materialization/ingest_stream/source.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_diagnostics.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_packets.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_json_validation.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_preparer.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_preparer_columns.cc
-    cpp/src/internal/materialization/ingest_stream/column_partition.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_source.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_source_columns.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_source_dispatch.cc
-    cpp/src/internal/materialization/ingest_stream/parallel_source_json_validation.cc
-    cpp/src/internal/materialization/ingest_stream/batching.cc
-    cpp/src/internal/inference/depth.cc
-    cpp/src/internal/inference/evidence_reduce.cc
-    cpp/src/internal/inference/parallel_evidence.cc
-    cpp/src/internal/inference/parallel_evidence_keys.cc
-    cpp/src/internal/inference/parallel_flat_evidence.cc
-    cpp/src/internal/inference/value_observation.cc
-    cpp/src/internal/arrow_text/binary.cc
-    cpp/src/internal/arrow_text/decimal.cc
-    cpp/src/internal/arrow_text/temporal.cc
-    cpp/src/core/diagnostics.cc
-    cpp/src/planning/options.cpp
-    cpp/src/planning/options_temporal.cc
-    cpp/src/internal/planning/options_temporal_simple.cc
-    cpp/src/internal/planning/options_temporal_simple_parts.cc
-    cpp/src/planning/options_temporal_regex.cc
-    cpp/src/planning/temporal/calendar.cc
-    cpp/src/planning/temporal/regex_captures.cc
-    cpp/src/planning/options_deserialization.cc
-    cpp/src/planning/options_field_deserialization.cc
-    cpp/src/internal/planning/options_schema_serialization.cc
-    cpp/src/planning/field_name_sanitizer.cc
-    cpp/src/internal/planning/planned_name_matcher.cc
-    cpp/src/internal/planning/variant_field_names.cc
-    cpp/src/planning/plan.cpp
-    cpp/src/planning/struct_layout.cpp
-    cpp/src/planning/execution_context.cc
-    cpp/src/core/value_view.cpp
-    cpp/src/ingest/chunk_source_memory.cc
-    cpp/src/ingest/chunk_source_file.cc
-    cpp/src/ingest/transcoding/decoder.cc
-    cpp/src/ingest/transcoding/chunk_source.cc
-    cpp/src/ingest/text_encoding.cc
-    cpp/src/ingest/chunk_source_multi_path.cc
-    cpp/src/ingest/chunk_source_factories.cc
-    cpp/src/internal/parsing/json/ondemand/document.cc
-    cpp/src/internal/parsing/json/ondemand/scalar.cc
-    cpp/src/internal/parsing/json/ondemand/value.cc
-    cpp/src/internal/parsing/json/ondemand/array_iteration.cc
-    cpp/src/internal/parsing/json/ondemand/object_iteration.cc
-    cpp/src/internal/parsing/json/ondemand/flat_object_iteration.cc
-    cpp/src/internal/parsing/json/ondemand/value_iteration.cc
-    cpp/src/internal/parsing/json/ondemand/lex.cc
-    cpp/src/internal/parsing/json/ondemand/scan.cc
-    cpp/src/internal/parsing/json/string_decode.cc
-    cpp/src/core/numeric/integer.cpp
-    cpp/src/core/numeric/floating.cpp
-    cpp/src/core/temporal/date.cpp
-    cpp/src/core/temporal/time.cpp
-    cpp/src/core/temporal/timestamp.cpp
-    cpp/src/internal/csv/csv_stream_writer.cc
-    cpp/src/internal/parquet/footer_reader/footer_reader.cc
-    cpp/src/internal/parquet/stream_writer/stream_writer.cc
-    cpp/src/internal/json_encoding/token_writer.cc
-    cpp/src/internal/json_output/jsonl_stream_writer.cc
-    cpp/src/internal/json_output/schema/field.cc
-    cpp/src/internal/json_output/schema/array_validation.cc
-    cpp/src/internal/json_output/schema/format.cc
-    cpp/src/internal/json_output/jsonl_value_writer.cc
-    cpp/src/internal/json_output/jsonl_value_writer_nested.cc
-    cpp/src/internal/json_output/jsonl_value_writer_logical.cc
-    cpp/src/internal/json_output/jsonl_value_writer_integer.cc
-    cpp/src/internal/json_output/jsonl_value_writer_floating.cc
-    cpp/src/internal/json_output/jsonl_value_writer_string.cc
-    cpp/src/internal/json_output/jsonl_value_writer_temporal.cc
-    cpp/src/internal/arrow_c/cdata_export.cc
-    cpp/src/internal/arrow_c/cdata_schema_builder.cc
-    cpp/src/internal/arrow_c/cdata_schema_builder_nodes.cc
-    cpp/src/internal/arrow_c/cdata_stream_callbacks.cc
-    cpp/src/internal/memory/arena.cc
-    cpp/src/internal/memory/pool_resource.cc
-    cpp/src/frontends/csv/column_projection.cc
-    cpp/src/frontends/csv/source_projection.hh
-    cpp/src/frontends/json/root_field_filter.cc
-    cpp/src/internal/parsing/xml/document.cc
-    cpp/src/internal/parsing/xml/element.cc
-    cpp/src/internal/parsing/xml/tokens.cc
-    cpp/src/internal/parsing/xml_entities.cc
-    cpp/src/internal/parsing/xml_value_model.cc
-    cpp/src/internal/parsing/streaming/xml/row_scanner.cc
-    cpp/src/internal/parsing/streaming/xml/row_scanner_buffer.cc
-    cpp/src/internal/parsing/streaming/xml/row_scanner_markup.cc
-    cpp/src/frontends/json/text_frontend.cc
-    cpp/src/frontends/json/text_row_pipeline.cc
-    cpp/src/frontends/json/text_row_materializer.cc
-    cpp/src/frontends/json/path_group_frontend.cc
-    cpp/src/frontends/xml/frontend.cc
-    cpp/src/frontends/csv/frontend.cc
-    cpp/src/internal/parsing/streaming/csv/record_buffer.cc
-    cpp/src/internal/parsing/streaming/csv/record_span.cc
-    cpp/src/internal/parsing/streaming/csv/scanner.cc
-    cpp/src/internal/parsing/streaming/json/scanner_flow.cc
-    cpp/src/internal/parsing/streaming/json/scanner_line.cc
-    cpp/src/internal/parsing/streaming/json/scanner_state.cc
-    cpp/src/internal/parsing/streaming/json/scanner_value.cc
-    cpp/src/internal/parsing/streaming/json/value_span_scanner.cc
-    cpp/src/internal/parsing/streaming/json/value_span_buffer.cc
-    cpp/src/internal/inference/shape_scan.cc
-    cpp/src/internal/inference/statistics/scan_nested.cc
-    cpp/src/internal/inference/statistics/scan_row.cc
-    cpp/src/internal/inference/schema_inference.cc
-    cpp/src/internal/inference/statistics/state.cc
-    cpp/src/planning/schema_evolution.cc
-    cpp/src/internal/materialization/batch_appender.cc
-    cpp/src/internal/materialization/direct_scalar_rows.cc
-    cpp/src/internal/materialization/builders/factory.cc
-    cpp/src/internal/materialization/builders/nested.cc
-    cpp/src/internal/materialization/builders/scalar.cc
-    cpp/src/internal/materialization/conversion/scalar.cc
-    cpp/src/internal/materialization/conversion/value.cc
-    cpp/src/internal/materialization/conversion/object_fields.cc
-    cpp/src/internal/materialization/conversion/struct.cc
-    cpp/src/internal/materialization/conversion/object_struct/conversion.cc
-    cpp/src/internal/materialization/conversion/object_struct/fields.cc
-    cpp/src/internal/materialization/conversion/variants.cc
-    cpp/src/internal/materialization/field_lookup.cc
-    cpp/src/internal/materialization/conversion/scalar_text.cc
-    cpp/src/internal/materialization/row_appender.cc
-    cpp/src/internal/materialization/row_appender_json_tokens.cc)
+  PRIVATE "${_schema_sanitizer_source_root}/frontends/csv/source_projection.hh")
+
+unset(_schema_sanitizer_source_root)
+unset(_schema_sanitizer_native_sources)
+unset(_schema_sanitizer_module_sources)
+unset(_schema_sanitizer_core_sources)
+unset(_schema_sanitizer_owned_sources)
+unset(_schema_sanitizer_source)
+unset(_schema_sanitizer_relative_source)
+unset(_schema_sanitizer_source_count)
+unset(_schema_sanitizer_owned_count)
+unset(_schema_sanitizer_unique_owned_count)

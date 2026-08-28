@@ -18,9 +18,41 @@ from _support.parquet_contracts import (
 from schema_sanitizer.adapters.parquet import telemetry as recording
 
 
+def test_runtime_parquet_gate_snapshots_keep_inputs_defensive() -> None:
+    """Contract reports copy the mutable lists they expose to callers."""
+    from schema_sanitizer.adapters.parquet.status import (
+        _parquet_contract_certification_status_from_parts,
+        _parquet_preflight_contract_status_from_writer_status,
+    )
+
+    writer = {
+        "applicable": False,
+        "satisfied": False,
+        "issues": ["external writer"],
+        "nested_contract_issues": ["not applicable"],
+    }
+    preflight = _parquet_preflight_contract_status_from_writer_status(
+        writer,
+        pyarrow_available=True,
+    )
+    projection = {"stable": False, "mismatches": ["drift"]}
+    certificate = _parquet_contract_certification_status_from_parts(
+        preflight_status=preflight,
+        writer_status=writer,
+        projection_audit=projection,
+    )
+    certificate["preflight_status"]["issues"].append("caller mutation")
+    certificate["native_writer_status"]["issues"].append("caller mutation")
+    certificate["projection_audit"]["mismatches"].append("caller mutation")
+
+    assert preflight["issues"] == []
+    assert writer["issues"] == ["external writer"]
+    assert projection["mismatches"] == ["drift"]
+
+
 def test_native_nested_contract_status_certifies_stable_recursive_summary() -> None:
     """Verify the compact nested contract gate certifies stable recursive layouts."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_nested_contract_status_from_summary,
     )
 
@@ -39,7 +71,7 @@ def test_native_nested_contract_status_certifies_stable_recursive_summary() -> N
 
 def test_native_nested_contract_status_fails_closed_on_recursive_drift() -> None:
     """Verify the compact nested contract gate rejects partial/drifted layouts."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_nested_contract_status_from_summary,
     )
 
@@ -197,7 +229,7 @@ def test_last_parquet_pipeline_contract_status_fails_closed_on_inconsistent_stat
 
 def test_native_parquet_writer_contract_status_certifies_stable_native_nested_file() -> None:
     """Verify writer-native footer diagnostics produce a satisfied contract status."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
 
@@ -220,7 +252,7 @@ def test_native_parquet_writer_contract_status_certifies_stable_native_nested_fi
 
 def test_native_parquet_writer_contract_status_fails_closed_on_missing_native_stream() -> None:
     """Verify writer-native certification fails closed if native streaming is absent."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
 
@@ -236,7 +268,7 @@ def test_native_parquet_writer_contract_status_fails_closed_on_missing_native_st
 
 def test_native_parquet_writer_contract_status_fails_closed_on_external_writer() -> None:
     """Verify writer-native certification does not bless external writer layouts."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
 
@@ -277,7 +309,7 @@ def test_native_parquet_writer_contract_status_uses_public_footer_info(
 
 def test_parquet_preflight_contract_status_certifies_native_without_pyarrow() -> None:
     """Verify preflight accepts a schema-sanitizer-native file without PyArrow."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (
@@ -305,7 +337,7 @@ def test_parquet_preflight_contract_status_certifies_native_without_pyarrow() ->
 
 def test_parquet_preflight_contract_status_certifies_external_with_pyarrow() -> None:
     """Verify preflight accepts external/unsupported files only with PyArrow."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (
@@ -337,7 +369,7 @@ def test_parquet_preflight_contract_status_certifies_external_with_pyarrow() -> 
 
 def test_parquet_preflight_contract_status_fails_without_native_or_pyarrow() -> None:
     """Verify preflight fails closed when neither native nor PyArrow can cover input."""
-    from schema_sanitizer.adapters.parquet.contract_gates.native import (
+    from schema_sanitizer.adapters.parquet.contract_gates import (
         _native_parquet_writer_contract_status_from_footer_info,
     )
     from schema_sanitizer.adapters.parquet.status import (

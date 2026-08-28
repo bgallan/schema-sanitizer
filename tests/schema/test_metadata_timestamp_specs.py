@@ -28,8 +28,8 @@ def test_fixed_timestamp_columns_reject_values_outside_int64(value: int) -> None
         validate_timestamp_columns({"ingestion_timestamp": value})
 
 
-def test_dynamic_timestamp_columns_keep_legacy_sequence_contract() -> None:
-    """Internal callers may still request one clock read per emitted batch."""
+def test_dynamic_timestamp_columns_accept_the_sequence_contract() -> None:
+    """Internal callers may request one clock read per emitted batch."""
     assert validate_timestamp_columns(["ingestion_timestamp", "completed_at"]) == (
         "ingestion_timestamp",
         "completed_at",

@@ -1,6 +1,6 @@
 template <bool HighCore> sanitize::Result<Outcome> take_next_arena() {
-  // Preserve the historical single-consumer contract without putting worker
-  // publication behind the coordinator mutex.
+  // TakeNext has one consumer, so worker publication stays outside the
+  // coordinator mutex.
   std::unique_lock take_lock(take_mutex_);
   for (;;) {
     const auto expected_ordinal = next_take_ordinal_;

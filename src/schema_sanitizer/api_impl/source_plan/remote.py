@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from collections import deque
-from collections.abc import Iterator
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Condition, Lock, RLock
@@ -31,25 +30,15 @@ from ...core_impl.resource_lifecycle import (
     _cleanup_with_note,
     _close_suppressing_errors,
 )
-from ...remote_impl.io_coordinator import RemoteIoCoordinator, StagedResultOwnership
+from ...remote_impl.io_coordinator import RemoteIoCoordinator
 from ...remote_impl.session_lifecycle import (
     SharedDownloadSessionCloser,
     enter_shared_download_session,
 )
+from ...remote_impl.staged_ownership import StagedResultOwnership
 from ..input.directory_preparation import RemoteNativeDirectorySourceManifest
 from .remote_cleanup import take_prefetched_chunks
 from .remote_runtime import RemotePathSourceChunkProviderBase
-
-_PREFETCH_COMPAT_INIT_LOCK = Lock()
-
-
-def adaptive_concurrency_target(
-    desired: int, *, per_slot_bytes: int, reserve_bytes: int | None = None
-) -> int:
-    """Compatibility injection point with zero-slot helper semantics."""
-    return _adaptive_parallel_slots(
-        desired, per_slot_bytes=per_slot_bytes, reserve_bytes=reserve_bytes
-    )
 
 
 class _StorageLeaseRollbackOwner:
@@ -149,16 +138,16 @@ def _cleanup_remote_prefetch_capsule(capsule: PreparedFinalizerCleanup) -> None:
 class RemoteChunkPrefetchIterator:
     """Iterate staged remote chunks through one operation-owned I/O loop."""
 
-    def __init__(self, manifest: Any, *, start: int = 0) -> None:
+    def __init__(self, manifest: RemoteNativeDirectorySourceManifest, *, start: int = 0) -> None:
         """Create a staging iterator for a remote native manifest."""
         self._pid = os.getpid()
         self._manifest = manifest
         self._policy = execution_policy(
-            getattr(manifest, "threading_mode", "single"),
-            getattr(manifest, "memory_limit_bytes", None),
+            manifest.threading_mode,
+            manifest.memory_limit_bytes,
         )
         self._prefetch_chunks = self._policy.remote_chunk_prefetch
-        budget = memory_budget(getattr(manifest, "memory_limit_bytes", None))
+        budget = memory_budget(manifest.memory_limit_bytes)
         self._remote_timeout_seconds = budget.async_timeout_seconds
         self._io_chunk_bytes = max(1, budget.io_chunk_bytes)
         self._coordinator: RemoteIoCoordinator | None = None
@@ -187,7 +176,7 @@ class RemoteChunkPrefetchIterator:
 
     def _assert_owner_process(self) -> None:
         """Reject inherited iterator use before touching parent-owned state."""
-        if os.getpid() != getattr(self, "_pid", os.getpid()):
+        if os.getpid() != self._pid:
             raise RuntimeError("remote prefetch iterator cannot be reused after fork")
 
     def __enter__(self) -> RemoteChunkPrefetchIterator:
@@ -214,20 +203,20 @@ class RemoteChunkPrefetchIterator:
             self._ensure_started()
             while True:
                 with condition:
-                    if self._closed or getattr(self, "_close_started", False):
+                    if any((self._closed, self._close_started)):
                         raise StopIteration
                     has_future = bool(self._futures)
                 if not has_future:
                     self._fill_prefetch_window()
 
                 with condition:
-                    if self._closed or getattr(self, "_close_started", False):
+                    if any((self._closed, self._close_started)):
                         raise StopIteration
                     if not self._futures:
                         future = None
                     else:
                         future = self._futures.popleft()
-                        self._consumers_inflight = getattr(self, "_consumers_inflight", 0) + 1
+                        self._consumers_inflight += 1
 
                 if future is None:
                     self.close()
@@ -277,7 +266,7 @@ class RemoteChunkPrefetchIterator:
         self._assert_owner_process()
         condition = self._lifecycle_condition()
         deadline_ns = deadline_ns_from_timeout(
-            getattr(self, "_remote_timeout_seconds", 30.0),
+            self._remote_timeout_seconds,
             name="remote prefetch startup wait timeout",
             allow_zero=False,
         )
@@ -286,7 +275,7 @@ class RemoteChunkPrefetchIterator:
                 remaining = remaining_seconds(deadline_ns)
                 if remaining <= 0 or not condition.wait(timeout=remaining):
                     raise RuntimeError("remote prefetch startup exceeded its deadline")
-            if self._started or getattr(self, "_close_started", False):
+            if self._started or self._close_started:
                 return
             self._starting = True
             self._admissions_inflight += 1
@@ -297,12 +286,11 @@ class RemoteChunkPrefetchIterator:
         committed = False
         try:
             if not self._policy.is_single:
-                open_session = getattr(self._manifest, "open_staging_session", None)
-                stage_async = getattr(self._manifest, "stage_chunk_async", None)
-                if not callable(open_session) or not callable(stage_async):
-                    raise TypeError("multi remote chunk staging requires an async manifest session")
-                operation_context = getattr(self._manifest, "operation_context", None)
-                shared = getattr(operation_context, "remote_coordinator", None)
+                open_session = self._manifest.open_staging_session
+                operation_context = self._manifest.operation_context
+                shared = (
+                    operation_context.remote_coordinator if operation_context is not None else None
+                )
                 if shared is not None:
                     coordinator = shared
                     download_session = open_session()
@@ -319,7 +307,11 @@ class RemoteChunkPrefetchIterator:
                 else:
                     coordinator = RemoteIoCoordinator(
                         open_session,
-                        operation_memory_ledger=getattr(operation_context, "memory_ledger", None),
+                        operation_memory_ledger=(
+                            operation_context.memory_ledger
+                            if operation_context is not None
+                            else None
+                        ),
                         stage_bytes_per_permit=self._io_chunk_bytes,
                     )
                     owns_coordinator = True
@@ -362,39 +354,14 @@ class RemoteChunkPrefetchIterator:
                 raise
 
     def _lifecycle_condition(self) -> Condition:
-        """Return the lazily initialized close/callback condition."""
-        with _PREFETCH_COMPAT_INIT_LOCK:
-            close_lock = getattr(self, "_close_lock", None)
-            if close_lock is None:
-                close_lock = RLock()
-                self._close_lock = close_lock
-            condition = getattr(self, "_close_condition", None)
-            if condition is None:
-                condition = Condition(close_lock)
-                self._close_condition = condition
-            if not hasattr(self, "_close_in_progress"):
-                self._close_in_progress = False
-            if not hasattr(self, "_cleanup_callbacks_inflight"):
-                self._cleanup_callbacks_inflight = 0
-            if not hasattr(self, "_callbackless_storage_futures"):
-                self._callbackless_storage_futures = {}
-            if not hasattr(self, "_admissions_inflight"):
-                self._admissions_inflight = 0
-            if not hasattr(self, "_consumers_inflight"):
-                self._consumers_inflight = 0
-            if not hasattr(self, "_protocol_violations"):
-                self._protocol_violations = 0
-            if not hasattr(self, "_starting"):
-                self._starting = False
-            if not hasattr(self, "_fill_in_progress"):
-                self._fill_in_progress = False
-            return condition
+        """Return the close/callback condition created with the iterator."""
+        return self._close_condition
 
     def _finish_lifecycle_counter_locked(self, name: str) -> None:
         """Retire one quiescence latch without hiding protocol underflow."""
-        value = int(getattr(self, name, 0))
+        value = int(getattr(self, name))
         if value <= 0:
-            self._protocol_violations = int(getattr(self, "_protocol_violations", 0)) + 1
+            self._protocol_violations += 1
             return
         setattr(self, name, value - 1)
 
@@ -407,11 +374,7 @@ class RemoteChunkPrefetchIterator:
         except BaseException as cleanup_error:
             condition = self._lifecycle_condition()
             with condition:
-                failed = getattr(self, "_failed_storage_leases", None)
-                if failed is None:
-                    failed = deque()
-                    self._failed_storage_leases = failed
-                failed.append(storage_lease)
+                self._failed_storage_leases.append(storage_lease)
             if primary is not None:
                 add_bounded_note(
                     primary,
@@ -544,11 +507,8 @@ class RemoteChunkPrefetchIterator:
 
     def _stage_permit_weight(self, start: int) -> int:
         """Scale remote admission by the estimated chunk bytes."""
-        estimate = getattr(self._manifest, "estimated_chunk_bytes", None)
-        if not callable(estimate):
-            return 1
         try:
-            size_bytes = max(1, int(estimate(start)))
+            size_bytes = max(1, int(self._manifest.estimated_chunk_bytes(start)))
         except (TypeError, ValueError, OverflowError):
             return 1
         desired = 1 + (size_bytes - 1) // self._io_chunk_bytes
@@ -559,7 +519,7 @@ class RemoteChunkPrefetchIterator:
         self._assert_owner_process()
         condition = self._lifecycle_condition()
         deadline_ns = deadline_ns_from_timeout(
-            getattr(self, "_remote_timeout_seconds", 30.0),
+            self._remote_timeout_seconds,
             name="remote prefetch fill wait timeout",
             allow_zero=False,
         )
@@ -568,16 +528,16 @@ class RemoteChunkPrefetchIterator:
                 remaining = remaining_seconds(deadline_ns)
                 if remaining <= 0 or not condition.wait(timeout=remaining):
                     raise RuntimeError("remote prefetch fill exceeded its deadline")
-            if self._closed or getattr(self, "_close_started", False):
+            if self._closed or self._close_started:
                 return
             self._fill_in_progress = True
 
         try:
             while True:
                 with condition:
-                    if self._closed or getattr(self, "_close_started", False):
+                    if any((self._closed, self._close_started)):
                         return
-                    target = adaptive_concurrency_target(
+                    target = _adaptive_parallel_slots(
                         max(1, self._prefetch_chunks),
                         per_slot_bytes=self._io_chunk_bytes,
                     )
@@ -592,17 +552,17 @@ class RemoteChunkPrefetchIterator:
                 storage_lease: Any | None = None
                 future: Future[Any] | None = None
                 try:
-                    acquire = getattr(self._manifest, "try_acquire_storage_lease", None)
                     storage_lease = (
-                        acquire(start) if coordinator is not None and callable(acquire) else None
+                        self._manifest.try_acquire_storage_lease(start)
+                        if coordinator is not None
+                        else None
                     )
-                    if coordinator is not None and callable(acquire) and storage_lease is None:
+                    if coordinator is not None and storage_lease is None:
                         return
-                    next_chunk_start = getattr(self._manifest, "next_chunk_start", None)
-                    if callable(next_chunk_start):
-                        committed_next_start = max(start + 1, int(next_chunk_start(start)))
-                    else:
-                        committed_next_start = start + max(1, self._manifest.chunk_size)
+                    committed_next_start = max(
+                        start + 1,
+                        int(self._manifest.next_chunk_start(start)),
+                    )
                     future = self._submit_stage(start, storage_lease)
                     with condition:
                         # Close waits for this admission, so publishing here is
@@ -629,11 +589,11 @@ class RemoteChunkPrefetchIterator:
 
     def close(self) -> None:
         """Close staging transactionally after all cleanup publishers quiesce."""
-        if os.getpid() != getattr(self, "_pid", os.getpid()):
+        if os.getpid() != self._pid:
             return
         condition = self._lifecycle_condition()
         deadline_ns = deadline_ns_from_timeout(
-            getattr(self, "_remote_timeout_seconds", 30.0),
+            self._remote_timeout_seconds,
             name="remote prefetch close timeout",
             allow_zero=False,
         )
@@ -646,9 +606,7 @@ class RemoteChunkPrefetchIterator:
                 return
             self._close_in_progress = True
             self._close_started = True
-            while getattr(self, "_admissions_inflight", 0) or getattr(
-                self, "_consumers_inflight", 0
-            ):
+            while self._admissions_inflight or self._consumers_inflight:
                 remaining = remaining_seconds(deadline_ns)
                 if remaining <= 0 or not condition.wait(timeout=remaining):
                     self._close_in_progress = False
@@ -663,7 +621,7 @@ class RemoteChunkPrefetchIterator:
             shutdown_timeout = (
                 coordinator.shutdown_timeout_seconds
                 if coordinator is not None
-                else getattr(self, "_remote_timeout_seconds", 30.0)
+                else self._remote_timeout_seconds
             )
             shutdown_deadline_ns = deadline_ns_from_timeout(
                 shutdown_timeout,
@@ -683,7 +641,7 @@ class RemoteChunkPrefetchIterator:
 
             if coordinator is not None and download_session is not None:
                 with condition:
-                    closer = getattr(self, "_session_closer", None)
+                    closer = self._session_closer
                     if closer is None:
                         closer = SharedDownloadSessionCloser(
                             coordinator, download_session, all_futures
@@ -722,10 +680,7 @@ class RemoteChunkPrefetchIterator:
 
             failed_storage: deque[Any] = deque()
             with condition:
-                retained_storage = getattr(self, "_failed_storage_leases", None)
-                if retained_storage is None:
-                    retained_storage = deque()
-                    self._failed_storage_leases = retained_storage
+                retained_storage = self._failed_storage_leases
                 storage_snapshot = tuple(retained_storage)
                 retained_storage.clear()
             for lease in storage_snapshot:
@@ -763,19 +718,19 @@ class RemoteChunkPrefetchIterator:
                     raise RuntimeError(
                         "remote staging callbackless owner published during close commit"
                     )
-                if getattr(self, "_failed_storage_leases", ()):
+                if self._failed_storage_leases:
                     raise RuntimeError(
                         "remote staging storage release remains retryable after close failure"
                     )
-                if getattr(self, "_protocol_violations", 0):
+                if self._protocol_violations:
                     raise RuntimeError(
                         "remote staging lifecycle protocol violation prevents clean close"
                     )
                 self._futures = deque()
                 self._coordinator = None
                 self._closed = True
-                ticket = getattr(self, "_finalizer_ticket", None)
-                cleanup = getattr(self, "_finalizer_capsule", None)
+                ticket = self._finalizer_ticket
+                cleanup = self._finalizer_capsule
                 if ticket is not None and cleanup is not None:
                     cancel_prepared_finalizer_cleanup(cleanup)
                     self._finalizer_ticket = None
@@ -808,34 +763,22 @@ class RemoteChunkPrefetchIterator:
                 self._coordinator = None
                 self._download_session = None
                 self._session_closer = None
-                self._manifest = None
+                cast(Any, self)._manifest = None
                 self._finalizer_ticket = None
                 self._finalizer_capsule = None
         except BaseException:
             pass
 
 
-def iter_staged_remote_chunks(manifest: Any, *, start: int = 0) -> Iterator[Any]:
-    """Return a context-managed iterator over staged native remote chunks."""
+def open_staged_remote_chunks(
+    manifest: RemoteNativeDirectorySourceManifest, *, start: int = 0
+) -> RemoteChunkPrefetchIterator:
+    """Open the staged-chunk context for one remote manifest."""
     return RemoteChunkPrefetchIterator(manifest, start=start)
 
 
-def open_staged_remote_chunks(
-    manifest: RemoteNativeDirectorySourceManifest, *, start: int = 0
-) -> Any:
-    """Open the staged-chunk context for one remote manifest."""
-    return iter_staged_remote_chunks(manifest, start=start)
-
-
 class RemotePathSourceChunkProvider(RemotePathSourceChunkProviderBase):
-    """Compatibility owner for retryable staged remote path-source chunks."""
-
-
-def prefetched_remote_chunks(
-    manifest: RemoteNativeDirectorySourceManifest,
-) -> tuple[list[Any], int]:
-    """Take an optional partition-lookahead prefix from one remote manifest."""
-    return take_prefetched_chunks(manifest)
+    """Own retryable staged remote path-source chunks."""
 
 
 def probe_remote_registry(
@@ -849,7 +792,7 @@ def probe_remote_registry(
     native_registry_state: Any = None,
 ) -> Any:
     """Infer one registry through the native lazy chunk-provider route."""
-    retained_chunks, remaining_start = prefetched_remote_chunks(manifest)
+    retained_chunks, remaining_start = take_prefetched_chunks(manifest)
     provider = RemotePathSourceChunkProvider(
         retained_chunks=retained_chunks,
         remaining_manifest=manifest,

@@ -51,7 +51,6 @@ _INPUT_COVERAGE = {
         "materialization",
     ),
     "jsonl": ("source_prefetch", "row_validation", "inference", "materialization"),
-    "ndjson": ("source_prefetch", "row_validation", "inference", "materialization"),
     "xml": ("frontend_row_decode", "inference", "materialization"),
     "parquet": ("column_decode", "materialization"),
     "python": (
@@ -105,7 +104,6 @@ _INPUT_SERIAL_BOUNDARIES = {
     "json": ("top_level_value_framing",),
     "json_array": ("top_level_array_framing",),
     "jsonl": ("ordered_line_framing",),
-    "ndjson": ("ordered_line_framing",),
     "xml": ("ordered_tag_framing",),
     "parquet": ("footer_and_row_group_coordination",),
     "python": ("gil_bound_python_object_iteration", "ordered_replay_spool"),
@@ -129,7 +127,6 @@ _INPUT_BENEFIT_PROOFS = {
     "json": "worker_structural_framing_plus_direct_columnar_runtime",
     "json_array": "worker_structural_framing_plus_direct_columnar_runtime",
     "jsonl": "prefetch_validation_inference_materialization_runtime",
-    "ndjson": "prefetch_validation_inference_materialization_runtime",
     "xml": "ordered_tag_framing_plus_parallel_decode_runtime",
     "parquet": "native_column_decode_runtime",
     "python": "single_encode_progressive_replay_plus_parallel_pipeline_runtime",
@@ -279,7 +276,7 @@ def _pair_runtime_contract_evidence() -> tuple[RuntimeConcurrencyContract, ...]:
 
 
 def concurrency_pair_guarantees() -> dict[str, dict[str, dict[str, object]]]:
-    """Return implementation-backed end-to-end contracts for all 56 pairs."""
+    """Return implementation-backed end-to-end contracts for all 49 pairs."""
     evidence = _pair_runtime_contract_evidence()
     implemented = {
         item.name: bool(item.implementation_module and item.implementation_name)
@@ -373,7 +370,7 @@ def observed_concurrency_pair_guarantees() -> dict[str, dict[str, dict[str, int]
 
 
 def validate_observed_concurrency_pair_contracts() -> int:
-    """Require all 56 source/sink paths to have exercised every shared invariant.
+    """Require all 49 source/sink paths to have exercised every shared invariant.
 
     This validator intentionally fails on a fresh process.  CI/integration tests
     should run the format matrix first, then call this function to prove that the
@@ -416,11 +413,10 @@ def payload_observed_concurrency_pair_guarantees() -> dict[str, dict[str, dict[s
 
 
 def validate_payload_observed_concurrency_pair_contracts() -> int:
-    """Require all 56 real payload paths to exercise every shared invariant.
+    """Require all 49 real payload paths to exercise every shared invariant.
 
-    Unlike the pass50 compatibility validator, the structural one-byte pair
-    bootstrap cannot satisfy this contract.  Integration CI must execute the
-    actual conversion matrix before invoking this validator.
+    The structural one-byte pair bootstrap cannot satisfy this contract.
+    Integration CI must execute the actual conversion matrix first.
     """
     matrix = payload_observed_concurrency_pair_guarantees()
     missing: list[str] = []
@@ -439,7 +435,7 @@ def validate_payload_observed_concurrency_pair_contracts() -> int:
 
 
 def stage_observed_concurrency_pair_guarantees() -> dict[str, dict[str, dict[str, int]]]:
-    """Return format-specific primary-stage evidence for all 56 public pairs."""
+    """Return format-specific primary-stage evidence for all 49 public pairs."""
     observed = runtime_pair_stage_observations()
     return {
         input_name: {
@@ -515,7 +511,7 @@ def validate_route_profile_runtime_contracts() -> int:
 
 
 def validate_safety_critical_runtime_contracts() -> int:
-    """Require the cross-cutting governors/checkpoints introduced by Pass67."""
+    """Require every safety-critical runtime governor and checkpoint."""
     contracts = require_runtime_concurrency_contracts(*_SAFETY_CRITICAL_RUNTIME_CONTRACTS)
     missing = tuple(contract.name for contract in contracts if contract.observed_calls <= 0)
     if missing:
@@ -539,12 +535,17 @@ def validate_native_concurrency_protocol_health() -> None:
             "native concurrency protocol snapshot failed during release certification"
         )
     required = (
+        "snapshot_schema_fields",
         "completion_memory_protocol_violations",
         "counter_underflows",
         "native_physical_threads",
         "external_runtime_thread_permits",
         "total_physical_thread_permits",
         "native_physical_thread_capacity",
+        "thread_permit_snapshot_stable",
+        "external_runtime_resident_protocol_violations",
+        "external_runtime_resident_threads",
+        "external_runtime_stack_debt_threads",
     )
     missing = tuple(name for name in required if name not in snapshot)
     if missing:
@@ -560,35 +561,21 @@ def validate_native_concurrency_protocol_health() -> None:
     underflows = int(snapshot["counter_underflows"])
     if underflows != 0:
         raise RuntimeError(f"native concurrency counter underflows observed: {underflows}")
-    # Real diagnostic payloads identify their native tuple width. Release
-    # certification must not silently accept an older binary that cannot prove
-    # the pass69 transactional-ledger invariants. Focused historical test doubles
-    # omit this metadata and remain backward-compatible.
-    schema_fields = snapshot.get("snapshot_schema_fields")
-    if schema_fields is not None and int(schema_fields) < 30:
-        raise RuntimeError(
-            "native concurrency snapshot schema predates pass69/pass70 certification"
-        )
-    if "thread_permit_snapshot_stable" in snapshot and not bool(
-        int(snapshot["thread_permit_snapshot_stable"])
-    ):
+    if int(snapshot["snapshot_schema_fields"]) != 30:
+        raise RuntimeError("native concurrency snapshot does not match the current schema")
+    if not bool(int(snapshot["thread_permit_snapshot_stable"])):
         raise RuntimeError("native physical-thread permit snapshot was not transactionally stable")
-    if schema_fields is not None and int(schema_fields) >= 30:
-        if "external_runtime_stack_debt_threads" not in snapshot:
-            raise RuntimeError(
-                "native concurrency snapshot omits pass70 external stack-debt accounting"
-            )
-        resident_identity = int(snapshot.get("external_runtime_resident_threads", 0))
-        resident_stack_debt = int(snapshot["external_runtime_stack_debt_threads"])
-        if resident_identity < 0 or resident_stack_debt < 0:
-            raise RuntimeError("native external-runtime resident accounting became negative")
-        if resident_stack_debt < resident_identity:
-            raise RuntimeError(
-                "native external-runtime stack debt is below resident identity credit: "
-                f"identity={resident_identity}, debt={resident_stack_debt}"
-            )
+    resident_identity = int(snapshot["external_runtime_resident_threads"])
+    resident_stack_debt = int(snapshot["external_runtime_stack_debt_threads"])
+    if resident_identity < 0 or resident_stack_debt < 0:
+        raise RuntimeError("native external-runtime resident accounting became negative")
+    if resident_stack_debt < resident_identity:
+        raise RuntimeError(
+            "native external-runtime stack debt is below resident identity credit: "
+            f"identity={resident_identity}, debt={resident_stack_debt}"
+        )
 
-    resident_violations = int(snapshot.get("external_runtime_resident_protocol_violations", 0))
+    resident_violations = int(snapshot["external_runtime_resident_protocol_violations"])
     if resident_violations != 0:
         raise RuntimeError(
             f"external-runtime resident-thread protocol violations observed: {resident_violations}"

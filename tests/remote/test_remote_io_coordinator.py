@@ -136,14 +136,22 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
     class FakeStaged:
         """Track staged-resource cleanup."""
 
-        def __init__(self, start: int) -> None:
+        def __init__(self, start: int, lease: object | None = None) -> None:
             """Store the chunk ordinal."""
             self.start = start
             self.closed = False
+            self.lease = lease
 
         def close(self) -> None:
             """Mark this staging resource as released."""
             self.closed = True
+            if self.lease is not None:
+                self.lease.release()
+                self.lease = None
+
+    class Lease:
+        def release(self) -> None:
+            pass
 
     class Manifest:
         """Provide an async remote-manifest test double."""
@@ -152,6 +160,7 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
         chunk_size = 1
         memory_limit_bytes = 512 * 1024 * 1024
         threading_mode = "multi"
+        operation_context = None
 
         def __init__(self) -> None:
             """Initialize lifecycle tracking."""
@@ -172,7 +181,25 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
             finally:
                 self.exited += 1
 
-        async def stage_chunk_async(self, start: int, _session: object) -> FakeStaged:
+        @staticmethod
+        def next_chunk_start(start: int) -> int:
+            return start + 1
+
+        @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            return 1
+
+        @staticmethod
+        def try_acquire_storage_lease(_start: int) -> Lease:
+            return Lease()
+
+        async def stage_chunk_async(
+            self,
+            start: int,
+            _session: object,
+            *,
+            storage_lease: object | None = None,
+        ) -> FakeStaged:
             """Complete chunks out of order on the same I/O thread."""
             self.thread_ids.add(threading.get_ident())
             if start == 0:
@@ -182,7 +209,7 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
                 await asyncio.wait_for(self.zero_started.wait(), timeout=5)
                 self.later_completed.set()
             self.completion_order.append(start)
-            staged = FakeStaged(start)
+            staged = FakeStaged(start, storage_lease)
             self.staged[start] = staged
             return staged
 
@@ -388,8 +415,12 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
     class FakeStaged:
         """Minimal staged result."""
 
+        def __init__(self, lease: object) -> None:
+            self.lease = lease
+
         def close(self) -> None:
             """Release the fake result."""
+            self.lease.release()
 
     class Session:
         """Track one provider-session lifetime."""
@@ -429,14 +460,28 @@ def test_prefetch_borrows_operation_coordinator_without_closing_it() -> None:
             return start + 1
 
         @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            return 1
+
+        @staticmethod
+        def try_acquire_storage_lease(_start: int) -> object:
+            return operation.temporary_storage.acquire(1, label="test packet")
+
+        @staticmethod
         def open_staging_session() -> Session:
             """Return the shared fake provider session."""
             return session
 
         @staticmethod
-        async def stage_chunk_async(_start: int, _session: Session) -> FakeStaged:
+        async def stage_chunk_async(
+            _start: int,
+            _session: Session,
+            *,
+            storage_lease: object | None = None,
+        ) -> FakeStaged:
             """Return one staged fake packet."""
-            return FakeStaged()
+            assert storage_lease is not None
+            return FakeStaged(storage_lease)
 
     try:
         iterator = RemoteChunkPrefetchIterator(Manifest())

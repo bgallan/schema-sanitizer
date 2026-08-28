@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass, fields
-from functools import lru_cache
 from typing import Any
 
 from ..core_impl.dependencies import ensure_pyarrow
@@ -351,74 +350,7 @@ def _normalize_call_option_values(options: _CallOptions) -> None:
     )
 
 
-_MAX_CALL_OPTIONS_CACHE_KEY_BYTES = 64 * 1024
-_MAX_CALL_OPTIONS_CACHE_ITEMS = 4096
-
-
-def _bounded_utf8_size(value: str, remaining: int) -> int | None:
-    """Return the UTF-8 size when it fits without encoding an enormous string."""
-    if remaining < 0 or len(value) > remaining:
-        return None
-    encoded_size = len(value.encode("utf-8"))
-    return encoded_size if encoded_size <= remaining else None
-
-
-def _hashable_option_value(
-    value: Any, *, remaining_bytes: int, remaining_items: int
-) -> tuple[Any, int, int] | None:
-    """Return one bounded cache representation and its retained cost."""
-    if isinstance(value, (list, tuple)):
-        if len(value) > remaining_items:
-            return None
-        retained: list[str] = []
-        used_bytes = 0
-        for item in value:
-            if not isinstance(item, str):
-                return None
-            item_bytes = _bounded_utf8_size(item, remaining_bytes - used_bytes)
-            if item_bytes is None:
-                return None
-            retained.append(item)
-            used_bytes += item_bytes
-        kind = "list" if isinstance(value, list) else "tuple"
-        return (kind, tuple(retained)), used_bytes, len(retained)
-    if isinstance(value, str):
-        string_bytes = _bounded_utf8_size(value, remaining_bytes)
-        if string_bytes is None or remaining_items < 1:
-            return None
-        return ("str", value), string_bytes, 1
-    if isinstance(value, (int, bool, type(None))):
-        if remaining_items < 1:
-            return None
-        return (type(value).__name__, value), 0, 1
-    return None
-
-
-def _call_options_cache_key(
-    kwargs: dict[str, Any],
-) -> tuple[tuple[str, Any], ...] | None:
-    """Return a stable cache key only when its retained cost is safely bounded."""
-    items: list[tuple[str, Any]] = []
-    used_bytes = 0
-    used_items = 0
-    for name, value in sorted(kwargs.items()):
-        name_bytes = _bounded_utf8_size(name, _MAX_CALL_OPTIONS_CACHE_KEY_BYTES - used_bytes)
-        if name_bytes is None or used_items >= _MAX_CALL_OPTIONS_CACHE_ITEMS:
-            return None
-        used_bytes += name_bytes
-        used_items += 1
-        cached = _hashable_option_value(
-            value,
-            remaining_bytes=_MAX_CALL_OPTIONS_CACHE_KEY_BYTES - used_bytes,
-            remaining_items=_MAX_CALL_OPTIONS_CACHE_ITEMS - used_items,
-        )
-        if cached is None:
-            return None
-        tagged, value_bytes, value_items = cached
-        used_bytes += value_bytes
-        used_items += value_items
-        items.append((name, tagged))
-    return tuple(items)
+_DEFAULT_CALL_OPTIONS = _CallOptions()
 
 
 def _kwargs_are_default_call_options(kwargs: dict[str, Any]) -> bool:
@@ -447,23 +379,10 @@ def _kwargs_are_default_call_options(kwargs: dict[str, Any]) -> bool:
     return True
 
 
-@lru_cache(maxsize=128)
-def _cached_call_options(key: tuple[tuple[str, Any], ...]) -> _CallOptions:
-    """Return normalized immutable call options for a simple cache key."""
-    decoded: dict[str, Any] = {}
-    for name, tagged in key:
-        kind, value = tagged
-        decoded[name] = list(value) if kind == "list" else value
-    return _CallOptions.from_kwargs(decoded)
-
-
 def normalize_call_options(**kwargs: Any) -> Options:
     """Normalize public call option keywords into internal options."""
     if not kwargs:
-        return _cached_call_options(()).to_options()
-    key = _call_options_cache_key(kwargs)
-    if key is not None:
-        return _cached_call_options(key).to_options()
+        return _DEFAULT_CALL_OPTIONS.to_options()
     return _CallOptions.from_kwargs(kwargs).to_options()
 
 

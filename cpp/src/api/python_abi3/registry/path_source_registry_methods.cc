@@ -4,9 +4,7 @@
 #include "internal/abi/python_abi3/methods.hh"
 
 #include <cstdint>
-#include <cstring>
 #include <memory>
-#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -72,46 +70,7 @@ PyObject *py_context_to_registry_sink_from_path_sources(PyObject *,
   }
   state->registry_plan = std::move(plan_r).ValueOrDie();
 
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &path_sources_get_schema;
-  stream->get_next = &path_sources_get_next;
-  stream->get_last_error = &path_sources_last_error;
-  stream->release = &path_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(registry_json ? registry_json : "{}");
-  outputs.drifts_json = dup_cstr(drifts_json ? drifts_json : "[]");
-  outputs.conversion_timestamp =
-      dup_cstr(conversion_timestamp ? conversion_timestamp : "");
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  auto registry_plan = state->registry_plan;
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      ctx_obj, outputs.main_stream, outputs.diagnostics, outputs.registry_json,
-      outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_path_source_registry_stream(ctx_obj, std::move(state));
 }
 
 PyObject *
@@ -166,44 +125,7 @@ py_context_to_registry_sink_from_path_sources_registry_state(PyObject *,
     return nullptr;
   }
 
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &path_sources_get_schema;
-  stream->get_next = &path_sources_get_next;
-  stream->get_last_error = &path_sources_last_error;
-  stream->release = &path_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(registry_plan->registry_json);
-  outputs.drifts_json = dup_cstr(registry_plan->drifts_json);
-  outputs.conversion_timestamp = dup_cstr(registry_plan->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      ctx_obj, outputs.main_stream, outputs.diagnostics, outputs.registry_json,
-      outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_path_source_registry_stream(ctx_obj, std::move(state));
 }
 
 PyObject *
@@ -261,47 +183,8 @@ py_context_to_registry_sink_from_path_source_chunk_provider_registry_state(
     return nullptr;
   }
 
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &path_sources_get_schema;
-  stream->get_next = &path_sources_get_next;
-  stream->get_last_error = &path_sources_last_error;
-  stream->release = &path_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  if (!bind_path_source_diagnostics(state.get(), outputs.diagnostics)) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(registry_plan->registry_json);
-  outputs.drifts_json = dup_cstr(registry_plan->drifts_json);
-  outputs.conversion_timestamp = dup_cstr(registry_plan->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-
-  Py_INCREF(provider_obj);
-  state->chunk_provider = provider_obj;
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      ctx_obj, outputs.main_stream, outputs.diagnostics, outputs.registry_json,
-      outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_path_source_registry_stream(ctx_obj, std::move(state),
+                                          provider_obj);
 }
 
 } // namespace core_abi3_internal

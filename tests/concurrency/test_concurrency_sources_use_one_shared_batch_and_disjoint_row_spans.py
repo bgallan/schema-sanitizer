@@ -31,7 +31,7 @@ def _write_rows(path: Path, rows: int) -> None:
 
 
 def test_sources_use_one_shared_batch_and_disjoint_row_spans() -> None:
-    """Parallel packets no longer allocate and copy a RowRef vector each."""
+    """Parallel packets share one batch and use disjoint row spans."""
     root = Path(__file__).resolve().parents[2]
     header = (
         root / "cpp/src/internal/materialization/ingest_stream/parallel_packets.hh"

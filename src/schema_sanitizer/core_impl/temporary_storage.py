@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Lock
 from time import monotonic
-from typing import Protocol, cast
+from typing import cast
 
 from ..errors import SchemaSanitizerResourceError
 from .bounded_generation import next_reusable_token
@@ -19,7 +19,6 @@ from .memory_budget import memory_budget
 from .rooted_finalizer import FinalizerReplayCapability, RootedFinalizerAuthority
 from .safe_errors import add_bounded_note
 from .temporary_storage_governor import (
-    _MINIMUM_FREE_BYTES,
     _PROCESS_TEMPORARY_STORAGE,
     ProcessTemporaryStorageCapability,
     ProcessTemporaryStorageDiagnostics,
@@ -27,18 +26,6 @@ from .temporary_storage_governor import (
     process_temporary_storage_diagnostics,
     process_temporary_storage_snapshot,
 )
-
-
-class _TemporaryStorageReleasePool(Protocol):
-    """Structural pool surface retained by a rooted cleanup authority."""
-
-    def _release(
-        self,
-        size_bytes: int,
-        *,
-        filesystem_key: int,
-        inode_count: int = 0,
-    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +57,7 @@ class _StorageLeaseEntry:
     filesystem_key: int
     filesystem_path: Path
     inode_count: int
-    process_capability: ProcessTemporaryStorageCapability | None = None
+    process_capability: ProcessTemporaryStorageCapability
     control_ticket: ControlPlaneTicket | None = None
     resize_inflight: bool = False
     resize_reconcile: bool = False
@@ -101,19 +88,17 @@ class _StorageLeasePublication:
 
 
 class _StorageResizeResult:
-    __slots__ = ("requested", "filesystem_key", "filesystem_path", "process_capability")
+    __slots__ = ("requested", "filesystem_key", "filesystem_path")
 
     def __init__(
         self,
         requested: int,
         filesystem_key: int,
         filesystem_path: Path,
-        process_capability: ProcessTemporaryStorageCapability | None = None,
     ) -> None:
         self.requested = requested
         self.filesystem_key = filesystem_key
         self.filesystem_path = filesystem_path
-        self.process_capability = process_capability
 
     def __iter__(self):
         yield self.requested
@@ -122,9 +107,9 @@ class _StorageResizeResult:
 
 
 _MAX_TEMP_STORAGE_FINALIZER_OWNERS = 16384
-_TEMP_STORAGE_FINALIZER_ESCROW: ReservedFinalizerEscrow[
-    RootedFinalizerAuthority | TemporaryStorageLease
-] = ReservedFinalizerEscrow(_MAX_TEMP_STORAGE_FINALIZER_OWNERS, static_kind="temporary_storage")
+_TEMP_STORAGE_FINALIZER_ESCROW: ReservedFinalizerEscrow[RootedFinalizerAuthority] = (
+    ReservedFinalizerEscrow(_MAX_TEMP_STORAGE_FINALIZER_OWNERS, static_kind="temporary_storage")
+)
 _TEMP_STORAGE_FINALIZER_OVERFLOWS = 0
 _TEMP_STORAGE_FINALIZER_OVERFLOWED = False
 
@@ -146,15 +131,13 @@ def _run_temporary_storage_finalizer(authority: RootedFinalizerAuthority) -> Non
     pool = authority.arg0
     if pool is None:
         return
-    release_pool = cast(_TemporaryStorageReleasePool, pool)
     lease_id = int(cast(int, authority.arg1) or 0)
     capability = authority.arg2
     owner_id = int(cast(int, authority.arg3) or 0)
     if lease_id > 0 and capability is not None:
-        release_exact = getattr(pool, "_release_lease_authority", None)
-        if not callable(release_exact):
-            raise RuntimeError("temporary-storage pool lacks exact finalizer release")
-        release_exact(lease_id, owner_id, capability)
+        if not isinstance(pool, TemporaryStoragePermitPool):
+            raise RuntimeError("temporary-storage finalizer lost its permit pool")
+        pool._release_lease_authority(lease_id, owner_id, capability)
         authority.arg1 = 0
         authority.arg2 = None
         return
@@ -162,7 +145,7 @@ def _run_temporary_storage_finalizer(authority: RootedFinalizerAuthority) -> Non
     if process_capability is not None:
         exact_process_capability = cast(ProcessTemporaryStorageCapability, process_capability)
         if not _PROCESS_TEMPORARY_STORAGE.release_capability(exact_process_capability):
-            if getattr(process_capability, "active", False):
+            if exact_process_capability.active:
                 raise RuntimeError(
                     "orphan temporary-storage process capability is not authoritative"
                 )
@@ -172,14 +155,6 @@ def _run_temporary_storage_finalizer(authority: RootedFinalizerAuthority) -> Non
         if not release_control_plane(cast(ControlPlaneTicket, control_ticket)):
             raise RuntimeError("temporary-storage orphan control retirement did not commit")
         authority.arg5 = None
-    amount = int(cast(int, authority.arg6) or 0)
-    if amount > 0:
-        release_pool._release(
-            amount,
-            filesystem_key=int(cast(int, authority.arg7) or 0),
-            inode_count=int(cast(int, authority.arg8) or 0),
-        )
-        authority.arg6 = 0
 
 
 class TemporaryStorageLease:
@@ -194,7 +169,6 @@ class TemporaryStorageLease:
         filesystem_key: int,
         filesystem_path: Path,
         inode_count: int,
-        _active: bool = True,
     ) -> None:
         """Store the pool, reservation size, filesystem, and label."""
         self._pool = pool
@@ -211,35 +185,34 @@ class TemporaryStorageLease:
         self._finalizer_owner = RootedFinalizerAuthority(_run_temporary_storage_finalizer)
         self._finalizer_owner.arg0 = pool
         self._finalizer_owner.arg3 = id(self)
-        self._finalizer_owner.arg6 = reserved_bytes if _active else 0
-        self._finalizer_owner.arg7 = filesystem_key
-        self._finalizer_owner.arg8 = self._inode_count
         self._orphan_process_capability: ProcessTemporaryStorageCapability | None = None
         self._orphan_control_ticket: ControlPlaneTicket | None = None
-        self._released = not _active
+        self._released = True
 
     def _activate(
         self,
         filesystem_key: int,
         *,
-        lease_id: int = 0,
-        capability: object | None = None,
-        finalizer_ticket: int = -1,
+        lease_id: int,
+        capability: object,
+        finalizer_ticket: int,
     ) -> None:
         """Publish an already-admitted lease without any rollback side effect."""
         self._filesystem_key = filesystem_key
         self._lease_id = lease_id
         self._capability = capability
         self._finalizer_ticket = finalizer_ticket
-        owner = getattr(self, "_finalizer_owner", None)
-        if isinstance(owner, RootedFinalizerAuthority):
-            owner.ticket = finalizer_ticket
-            owner.arg1 = lease_id
-            owner.arg2 = capability
-            owner.arg3 = id(self)
-            owner.arg6 = 0 if lease_id else self._reserved_bytes
-            owner.arg7 = filesystem_key
-            owner.arg8 = self._inode_count
+        owner = self._finalizer_owner
+        owner.ticket = finalizer_ticket
+        owner.arg1 = lease_id
+        owner.arg2 = capability
+        owner.arg3 = id(self)
+        self._released = False
+
+    def _activate_cleanup_owner(self, *, finalizer_ticket: int) -> None:
+        """Arm cleanup for exact authorities retained after publication failure."""
+        self._finalizer_ticket = finalizer_ticket
+        self._finalizer_owner.ticket = finalizer_ticket
         self._released = False
 
     @property
@@ -250,10 +223,9 @@ class TemporaryStorageLease:
         with self._lock:
             if self._released:
                 return 0
-            getter = getattr(self._pool, "_lease_reserved_bytes", None)
-            if self._lease_id and callable(getter):
-                return getter(self)
-            return self._reserved_bytes
+            if not self._lease_id:
+                return self._reserved_bytes
+            return self._pool._lease_reserved_bytes(self)
 
     def resize(self, size_bytes: int, *, path: str | Path | None = None) -> None:
         """Resize this reservation atomically against concurrent release."""
@@ -262,19 +234,10 @@ class TemporaryStorageLease:
         with self._lock:
             if self._released:
                 raise RuntimeError("temporary-storage lease is already released")
+            if not self._lease_id:
+                raise RuntimeError("temporary-storage lease has no exact authority")
             effective_path = self._filesystem_path if path is None else Path(path)
-            resize_lease = getattr(self._pool, "_resize_lease", None)
-            if self._lease_id and callable(resize_lease):
-                resize_result = resize_lease(self, size_bytes, path=effective_path)
-            else:
-                resize_result = self._pool._resize(
-                    self._reserved_bytes,
-                    size_bytes,
-                    filesystem_key=self._filesystem_key,
-                    label=self.label,
-                    path=effective_path,
-                    inode_count=self._inode_count,
-                )
+            resize_result = self._pool._resize_lease(self, size_bytes, path=effective_path)
             self._reserved_bytes = resize_result.requested
             self._filesystem_key = resize_result.filesystem_key
             self._filesystem_path = resize_result.filesystem_path
@@ -288,22 +251,13 @@ class TemporaryStorageLease:
         with self._lock:
             if self._released:
                 raise RuntimeError("temporary-storage lease is already released")
+            if not self._lease_id:
+                raise RuntimeError("temporary-storage lease has no exact authority")
             requested_size = self._reserved_bytes + delta_bytes
             if requested_size < 0:
                 raise ValueError("temporary-storage adjustment exceeds the active lease")
             effective_path = self._filesystem_path if path is None else Path(path)
-            resize_lease = getattr(self._pool, "_resize_lease", None)
-            if self._lease_id and callable(resize_lease):
-                resize_result = resize_lease(self, requested_size, path=effective_path)
-            else:
-                resize_result = self._pool._resize(
-                    self._reserved_bytes,
-                    requested_size,
-                    filesystem_key=self._filesystem_key,
-                    label=self.label,
-                    path=effective_path,
-                    inode_count=self._inode_count,
-                )
+            resize_result = self._pool._resize_lease(self, requested_size, path=effective_path)
             self._reserved_bytes = resize_result.requested
             self._filesystem_key = resize_result.filesystem_key
             self._filesystem_path = resize_result.filesystem_path
@@ -314,86 +268,60 @@ class TemporaryStorageLease:
         if os.getpid() != self._pid:
             return
         with self._lock:
-            owner = getattr(self, "_finalizer_owner", None)
+            owner = self._finalizer_owner
             if self._released:
                 ticket = self._finalizer_ticket
-                if isinstance(owner, RootedFinalizerAuthority):
-                    owner.make_ack_only()
-                    if owner._escrow_armed:
-                        self._finalizer_ticket = -1
-                        return
+                owner.make_ack_only()
+                if owner.is_armed_for(ticket):
+                    self._finalizer_ticket = -1
+                    return
                 if ticket >= 0:
-                    # Keep this exact spelling for the pass72 source contract.
                     if _TEMP_STORAGE_FINALIZER_ESCROW.release_ticket(ticket):
                         self._finalizer_ticket = -1
-                        if isinstance(owner, RootedFinalizerAuthority):
-                            owner.clear()
-                    elif isinstance(owner, RootedFinalizerAuthority):
-                        if not _TEMP_STORAGE_FINALIZER_ESCROW.publish_rooted(ticket, owner):
-                            raise RuntimeError(
-                                "temporary-storage finalizer ACK publication did not commit"
-                            )
+                        owner.clear()
+                    elif not _TEMP_STORAGE_FINALIZER_ESCROW.publish_rooted(ticket, owner):
+                        raise RuntimeError(
+                            "temporary-storage finalizer ACK publication did not commit"
+                        )
                 return
 
-            orphan_process = getattr(self, "_orphan_process_capability", None)
-            if orphan_process is not None:
-                if not _PROCESS_TEMPORARY_STORAGE.release_capability(orphan_process):
-                    if getattr(orphan_process, "active", False):
-                        raise RuntimeError(
-                            "orphan temporary-storage process capability is not authoritative"
-                        )
-                self._orphan_process_capability = None
-                if isinstance(owner, RootedFinalizerAuthority):
-                    owner.arg4 = None
-            elif self._lease_id:
-                release_lease = getattr(self._pool, "_release_lease", None)
-                if callable(release_lease):
-                    release_lease(self)
-                    if isinstance(owner, RootedFinalizerAuthority):
-                        owner.arg1 = 0
-                        owner.arg2 = None
-                else:
-                    self._pool._release(
-                        self._reserved_bytes,
-                        filesystem_key=self._filesystem_key,
-                        inode_count=self._inode_count,
-                    )
-                    if isinstance(owner, RootedFinalizerAuthority):
-                        owner.arg6 = 0
+            if self._lease_id:
+                self._pool._release_lease(self)
+                owner.arg1 = 0
+                owner.arg2 = None
             else:
-                self._pool._release(
-                    self._reserved_bytes,
-                    filesystem_key=self._filesystem_key,
-                    inode_count=self._inode_count,
-                )
-                if isinstance(owner, RootedFinalizerAuthority):
-                    owner.arg6 = 0
-
-            orphan_control = getattr(self, "_orphan_control_ticket", None)
-            if orphan_control is not None:
-                if not release_control_plane(orphan_control):
-                    raise RuntimeError("temporary-storage orphan control retirement did not commit")
-                self._orphan_control_ticket = None
-                if isinstance(owner, RootedFinalizerAuthority):
+                orphan_process = self._orphan_process_capability
+                if orphan_process is not None:
+                    if not _PROCESS_TEMPORARY_STORAGE.release_capability(orphan_process):
+                        if orphan_process.active:
+                            raise RuntimeError(
+                                "orphan temporary-storage process capability is not authoritative"
+                            )
+                    self._orphan_process_capability = None
+                    owner.arg4 = None
+                orphan_control = self._orphan_control_ticket
+                if orphan_control is not None:
+                    if not release_control_plane(orphan_control):
+                        raise RuntimeError(
+                            "temporary-storage orphan control retirement did not commit"
+                        )
+                    self._orphan_control_ticket = None
                     owner.arg5 = None
 
             self._released = True
             self._reserved_bytes = 0
             self._inode_count = 0
-            if isinstance(owner, RootedFinalizerAuthority):
-                owner.make_ack_only()
+            owner.make_ack_only()
             ticket = self._finalizer_ticket
             if ticket >= 0:
                 if _TEMP_STORAGE_FINALIZER_ESCROW.release_ticket(ticket):
                     self._finalizer_ticket = -1
-                    if isinstance(owner, RootedFinalizerAuthority):
-                        owner.clear()
+                    owner.clear()
                 else:
-                    if isinstance(owner, RootedFinalizerAuthority):
-                        if not _TEMP_STORAGE_FINALIZER_ESCROW.publish_rooted(ticket, owner):
-                            raise RuntimeError(
-                                "temporary-storage finalizer ACK publication did not commit"
-                            )
+                    if not _TEMP_STORAGE_FINALIZER_ESCROW.publish_rooted(ticket, owner):
+                        raise RuntimeError(
+                            "temporary-storage finalizer ACK publication did not commit"
+                        )
                     raise RuntimeError("temporary-storage finalizer slot retirement did not commit")
 
     def __enter__(self) -> TemporaryStorageLease:
@@ -434,18 +362,12 @@ def drain_temporary_storage_finalizers() -> int:
     """Run deferred lease releases without unrooting before commit."""
     drained = 0
 
-    def process(ticket: int, value: RootedFinalizerAuthority | TemporaryStorageLease) -> None:
+    def process(ticket: int, value: RootedFinalizerAuthority) -> None:
         nonlocal drained
         if isinstance(value, RootedFinalizerAuthority):
             value.ticket = ticket
             value.run()
             value.clear()
-            drained += 1
-            return
-        # Compatibility for escrows populated by an older in-process object.
-        if isinstance(value, TemporaryStorageLease):
-            value._finalizer_ticket = ticket
-            value.release()
             drained += 1
             return
         raise RuntimeError("unknown temporary-storage finalizer owner")
@@ -493,9 +415,8 @@ class StreamingStorageReservation:
         self._written = 0
         self._path = Path(path)
         configured_quantum = max(64 * 1024, int(quantum_bytes))
-        pool = getattr(lease, "_pool", None) if lease is not None else None
-        pool_limit = getattr(pool, "limit_bytes", None)
-        if type(pool_limit) is int and pool_limit > 0:
+        pool_limit = lease._pool.limit_bytes if lease is not None else None
+        if pool_limit is not None and pool_limit > 0:
             # Amortization must never request a block larger than the complete
             # artifact window.  Tiny operation budgets otherwise reject the
             # first short write merely because the default quantum is 4 MiB.
@@ -569,21 +490,6 @@ class TemporaryStoragePermitPool:
         self._unknown_lease_releases = 0
         self._protocol_violations = 0
 
-    def _ensure_capability_state_locked(self) -> None:
-        """Lazily initialize pass45 accounting for focused legacy test doubles."""
-        if not hasattr(self, "_lease_sequence"):
-            self._lease_sequence = 0
-        if not hasattr(self, "_leases"):
-            self._leases = {}
-        if not hasattr(self, "_unknown_lease_releases"):
-            self._unknown_lease_releases = 0
-        if not hasattr(self, "_resize_inflight"):
-            self._resize_inflight = 0
-        if not hasattr(self, "_pending_resize_growth"):
-            self._pending_resize_growth = 0
-        if not hasattr(self, "_protocol_violations"):
-            self._protocol_violations = 0
-
     def _finish_resize_inflight_locked(self) -> None:
         """Decrement a quiescence latch without hiding protocol underflow."""
         if self._resize_inflight <= 0:
@@ -638,10 +544,9 @@ class TemporaryStoragePermitPool:
         filesystem_key: int,
         filesystem_path: Path,
         inode_count: int,
-        process_capability: ProcessTemporaryStorageCapability | None = None,
-        control_ticket: ControlPlaneTicket | None = None,
+        process_capability: ProcessTemporaryStorageCapability,
+        control_ticket: ControlPlaneTicket,
     ) -> _StorageLeasePublication:
-        self._ensure_capability_state_locked()
         lease_id = next_reusable_token(self._lease_sequence, self._leases)
         if lease_id is None:
             raise RuntimeError("temporary-storage lease namespace exhausted")
@@ -664,7 +569,6 @@ class TemporaryStoragePermitPool:
     def _lease_entry_authority_locked(
         self, lease_id: int, owner_id: int, capability: object
     ) -> _StorageLeaseEntry:
-        self._ensure_capability_state_locked()
         entry = self._leases.get(lease_id)
         if entry is None or entry.owner_id != owner_id or capability is not entry.capability:
             self._unknown_lease_releases += 1
@@ -701,7 +605,6 @@ class TemporaryStoragePermitPool:
             filesystem_key=filesystem_key,
             filesystem_path=filesystem_path,
             inode_count=inode_count,
-            _active=False,
         )
         try:
             finalizer_ticket = _TEMP_STORAGE_FINALIZER_ESCROW.reserve_rooted(lease._finalizer_owner)
@@ -830,10 +733,7 @@ class TemporaryStoragePermitPool:
                         primary, "temporary-storage control-ticket rollback failed", cleanup_error
                     )
             if orphaned:
-                lease._activate(
-                    actual_filesystem_key,
-                    finalizer_ticket=finalizer_ticket,
-                )
+                lease._activate_cleanup_owner(finalizer_ticket=finalizer_ticket)
             else:
                 lease._finalizer_owner.make_ack_only()
                 if _TEMP_STORAGE_FINALIZER_ESCROW.release_ticket(finalizer_ticket):
@@ -901,7 +801,7 @@ class TemporaryStoragePermitPool:
         with self._condition:
             self._closed = True
             deadline = monotonic() + 30.0
-            while self._pending_active_leases or getattr(self, "_resize_inflight", 0):
+            while self._pending_active_leases or self._resize_inflight:
                 remaining = deadline - monotonic()
                 if remaining <= 0 or not self._condition.wait(timeout=remaining):
                     raise RuntimeError("temporary-storage admissions exceeded their close deadline")
@@ -913,147 +813,6 @@ class TemporaryStoragePermitPool:
             self._close_active_leases = self._active_leases
             self._close_complete = True
             self._condition.notify_all()
-
-    def _resize(
-        self,
-        current_bytes: int,
-        size_bytes: int,
-        *,
-        filesystem_key: int,
-        label: str,
-        path: str | Path,
-        inode_count: int,
-        process_capability: ProcessTemporaryStorageCapability | None = None,
-    ) -> _StorageResizeResult:
-        """Resize one lease without allocating a multi-value return after commit."""
-        check_operation_cancelled(stage="temporary_storage_resize")
-        requested = self._normalize_size(size_bytes)
-        self._validate_one_artifact(requested, label=label)
-        target_key, target_path, _free = _PROCESS_TEMPORARY_STORAGE.filesystem(path)
-        result = _StorageResizeResult(requested, target_key, target_path)
-        growth = requested - current_bytes
-        moved = target_key != filesystem_key
-        growth_charge = max(0, growth)
-
-        if process_capability is not None:
-            # Capability-based production path: keep this pool's aggregate
-            # snapshot stable while the exact process capability commits. All
-            # local integers are prepared before the lower-level resize.
-            with self._condition:
-                if self._closed:
-                    raise RuntimeError("temporary-storage permit pool is closed")
-                next_committed = self._reserved_bytes + growth
-                if next_committed < 0 or next_committed > self.limit_bytes:
-                    raise SchemaSanitizerResourceError(
-                        "temporary storage limit exceeded after staging: "
-                        f"{next_committed} bytes > {self.limit_bytes} bytes",
-                        detail={
-                            "stage": "temporary_storage",
-                            "limit_name": "temporary_storage_bytes",
-                            "limit_bytes": self.limit_bytes,
-                            "actual_bytes": next_committed,
-                            "artifact": label,
-                        },
-                    )
-                next_peak = max(self._peak_reserved_bytes, next_committed)
-                replacement = _PROCESS_TEMPORARY_STORAGE.resize_capability(
-                    process_capability,
-                    requested,
-                    path=path,
-                    label=label,
-                    inode_count=inode_count,
-                )
-                # Commit tail contains only assignments to pre-existing owners.
-                self._reserved_bytes = next_committed
-                self._peak_reserved_bytes = next_peak
-                self._condition.notify_all()
-                result.filesystem_key = replacement.device
-                result.filesystem_path = target_path
-                result.process_capability = replacement
-                return result
-
-        with self._condition:
-            if self._closed:
-                raise RuntimeError("temporary-storage permit pool is closed")
-            next_committed = self._reserved_bytes + growth
-            admission_total = (
-                self._reserved_bytes
-                + self._pending_reserved_bytes
-                + self._pending_resize_growth
-                + growth_charge
-            )
-            if next_committed < 0 or admission_total > self.limit_bytes:
-                raise SchemaSanitizerResourceError(
-                    "temporary storage limit exceeded after staging: "
-                    f"{max(next_committed, admission_total)} bytes > "
-                    f"{self.limit_bytes} bytes",
-                    detail={
-                        "stage": "temporary_storage",
-                        "limit_name": "temporary_storage_bytes",
-                        "limit_bytes": self.limit_bytes,
-                        "actual_bytes": max(next_committed, admission_total),
-                        "artifact": label,
-                    },
-                )
-            self._resize_inflight += 1
-            self._pending_resize_growth += growth_charge
-
-        new_reserved_bytes = 0
-        new_reserved_inodes = 0
-        try:
-            if moved:
-                target_key = _PROCESS_TEMPORARY_STORAGE.reserve(
-                    requested,
-                    path=path,
-                    label=label,
-                    inode_count=inode_count,
-                )
-                new_reserved_bytes = requested
-                new_reserved_inodes = inode_count
-            elif growth > 0:
-                _PROCESS_TEMPORARY_STORAGE.reserve(growth, path=target_path, label=label)
-                new_reserved_bytes = growth
-
-            try:
-                if moved:
-                    _PROCESS_TEMPORARY_STORAGE.release(
-                        filesystem_key,
-                        current_bytes,
-                        inode_count=inode_count,
-                    )
-                elif growth < 0:
-                    _PROCESS_TEMPORARY_STORAGE.release(filesystem_key, -growth)
-            except BaseException as primary:
-                if new_reserved_bytes or new_reserved_inodes:
-                    try:
-                        _PROCESS_TEMPORARY_STORAGE.release(
-                            target_key,
-                            new_reserved_bytes,
-                            inode_count=new_reserved_inodes,
-                        )
-                    except BaseException as cleanup_error:
-                        add_bounded_note(
-                            primary,
-                            "temporary-storage speculative reservation rollback also failed",
-                            cleanup_error,
-                        )
-                raise
-        except BaseException:
-            with self._condition:
-                self._consume_pending_resize_growth_locked(growth_charge)
-                self._finish_resize_inflight_locked()
-                self._condition.notify_all()
-            raise
-
-        with self._condition:
-            self._consume_pending_resize_growth_locked(growth_charge)
-            self._finish_resize_inflight_locked()
-            self._reserved_bytes += growth
-            self._peak_reserved_bytes = max(self._peak_reserved_bytes, self._reserved_bytes)
-            self._condition.notify_all()
-        result.filesystem_key = target_key
-        result.filesystem_path = target_path
-        return result
 
     def _finish_pending_resize_locked(self, entry: _StorageLeaseEntry) -> None:
         """Reconcile one already-committed process resize into local accounting.
@@ -1142,17 +901,6 @@ class TemporaryStoragePermitPool:
                     },
                 )
             process_capability = entry.process_capability
-            if process_capability is None:
-                # Compatibility-only entries retain the historical path. This
-                # path is not used by production capabilities.
-                return self._resize(
-                    current,
-                    requested,
-                    filesystem_key=entry.filesystem_key,
-                    label=lease.label,
-                    path=path,
-                    inode_count=entry.inode_count,
-                )
             next_resize_inflight = self._resize_inflight + 1
             next_pending_growth = self._pending_resize_growth + growth_charge
             # Publish all retry metadata before external filesystem/journal work.
@@ -1234,7 +982,6 @@ class TemporaryStoragePermitPool:
                     self._condition.notify_all()
                 result.filesystem_key = entry.filesystem_key
                 result.filesystem_path = entry.filesystem_path
-                result.process_capability = replacement
         if ownership_error is not None:
             if cleanup_replacement is not None:
                 try:
@@ -1252,7 +999,6 @@ class TemporaryStoragePermitPool:
         """Release exact process/local/control authorities without a wrapper."""
         replay_committed = False
         with self._condition:
-            self._ensure_capability_state_locked()
             entry = self._leases.get(lease_id)
             if entry is None:
                 if isinstance(capability, FinalizerReplayCapability) and capability.released:
@@ -1275,26 +1021,16 @@ class TemporaryStoragePermitPool:
             if not entry.process_released:
                 entry.release_inflight = True
                 process_capability = entry.process_capability
-                filesystem_key = entry.filesystem_key
-                amount = entry.reserved_bytes
-                inode_count = entry.inode_count
             else:
                 process_capability = None
-                filesystem_key = entry.filesystem_key
-                amount = entry.reserved_bytes
-                inode_count = entry.inode_count
 
         if not entry.process_released:
             try:
-                if process_capability is not None:
-                    released = _PROCESS_TEMPORARY_STORAGE.release_capability(process_capability)
-                    if not released and process_capability.active:
-                        raise RuntimeError(
-                            "temporary-storage process capability release did not commit"
-                        )
-                else:
-                    _PROCESS_TEMPORARY_STORAGE.release(
-                        filesystem_key, amount, inode_count=inode_count
+                assert process_capability is not None
+                released = _PROCESS_TEMPORARY_STORAGE.release_capability(process_capability)
+                if not released and process_capability.active:
+                    raise RuntimeError(
+                        "temporary-storage process capability release did not commit"
                     )
             except BaseException:
                 with self._condition:
@@ -1350,27 +1086,6 @@ class TemporaryStoragePermitPool:
         """Release one wrapper-owned exact capability."""
         self._release_lease_authority(lease._lease_id, id(lease), lease._capability)
 
-    def _release(
-        self,
-        size_bytes: int,
-        *,
-        filesystem_key: int,
-        inode_count: int = 0,
-    ) -> None:
-        """Release one reservation while retaining cleanup anomaly diagnostics."""
-        amount = max(0, int(size_bytes))
-        # Keep local ownership visible while the device journal is pending, but
-        # do not serialize unrelated filesystem releases behind this pool lock.
-        _PROCESS_TEMPORARY_STORAGE.release(filesystem_key, amount, inode_count=inode_count)
-        with self._condition:
-            excess = max(0, amount - self._reserved_bytes)
-            missing_lease = self._active_leases <= 0
-            if excess or missing_lease:
-                self._over_release_count += 1
-                self._over_release_bytes += excess
-            self._finish_active_lease_locked(amount)
-            self._condition.notify_all()
-
     def _validate_one_artifact(self, size_bytes: int, *, label: str) -> None:
         """Reject an artifact that cannot fit even in an otherwise empty pool."""
         if size_bytes <= self.limit_bytes:
@@ -1404,31 +1119,6 @@ class TemporaryStoragePermitPool:
         if artifact_count < 0:
             raise ValueError("temporary-storage artifact_count must be >= 0")
         return artifact_count
-
-    @staticmethod
-    def _ensure_filesystem_capacity(
-        growth_bytes: int,
-        *,
-        path: str | Path | None,
-        label: str,
-    ) -> None:
-        """Compatibility check retained for callers and test doubles."""
-        if growth_bytes <= 0:
-            return
-        _device, _target, free_bytes = _PROCESS_TEMPORARY_STORAGE.filesystem(path)
-        required = int(growth_bytes) + _MINIMUM_FREE_BYTES
-        if free_bytes < required:
-            raise SchemaSanitizerResourceError(
-                "temporary filesystem has insufficient free space: "
-                f"{free_bytes} bytes available, {required} bytes required",
-                detail={
-                    "stage": "temporary_storage",
-                    "limit_name": "filesystem_free_bytes",
-                    "limit_bytes": free_bytes,
-                    "actual_bytes": required,
-                    "artifact": label,
-                },
-            )
 
 
 def _reset_temporary_storage_finalizers_after_fork() -> None:

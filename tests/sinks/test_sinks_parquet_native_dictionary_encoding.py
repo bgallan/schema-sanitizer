@@ -55,7 +55,6 @@ def test_parquet_native_file_output_dictionary_encodes_repeated_byte_arrays(
     assert "RLE_DICTIONARY" not in unique_meta.encodings
     assert "DELTA_LENGTH_BYTE_ARRAY" in unique_meta.encodings
     assert unique_meta.dictionary_page_offset is None
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_preserves_null_dictionary_values(
@@ -89,7 +88,6 @@ def test_parquet_native_file_output_preserves_null_dictionary_values(
         feature="test_parquet_native_file_output_preserves_null_dictionary_values",
     )
 
-    assert native_file_output.last_parquet_stream_route() == "native"
     assert pq.read_table(out).to_pylist() == [
         {"name": None, "score": None},
         {"name": "x", "score": 7},
@@ -148,7 +146,6 @@ def test_parquet_native_file_output_accepts_coalesced_empty_byte_arrays(
         feature="test_parquet_native_file_output_accepts_coalesced_empty_byte_arrays",
     )
 
-    assert native_file_output.last_parquet_stream_route() == "native"
     assert pq.read_table(out).to_pylist() == [
         {"text": "", "payload": b""},
         {"text": "", "payload": b""},
@@ -193,7 +190,6 @@ def test_parquet_native_file_output_skips_dictionary_when_payload_is_larger(
     assert small_int_meta.dictionary_page_offset is None
     assert "RLE_DICTIONARY" in long_text_meta.encodings
     assert long_text_meta.dictionary_page_offset is not None
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_dictionary_encodes_repeated_fixed_values(
@@ -248,7 +244,6 @@ def test_parquet_native_file_output_dictionary_encodes_repeated_fixed_values(
         metadata = parquet_file.metadata.row_group(0).column(column_index)
         assert "RLE_DICTIONARY" not in metadata.encodings
         assert metadata.dictionary_page_offset is None
-    assert native_file_output.last_parquet_stream_route() == "native"
 
 
 def test_parquet_native_file_output_writes_dictionary_stream(
@@ -288,4 +283,3 @@ def test_parquet_native_file_output_writes_dictionary_stream(
         {"name": "one", "flag": True},
         {"name": None, "flag": None},
     ]
-    assert native_file_output.last_parquet_stream_route() == "native"

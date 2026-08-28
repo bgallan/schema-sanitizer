@@ -227,8 +227,8 @@ class StagedPath:
             | int(getattr(os, "O_NOFOLLOW", 0))
             | int(getattr(os, "O_CLOEXEC", 0))
         )
-        # Pass62: never retain an ancestor FD while acquiring a descendant.
-        # Each directory consumes exactly two credits atomically: the opened
+        # Never retain an ancestor FD while acquiring a descendant. Each
+        # directory consumes exactly two credits atomically: the opened
         # directory and the descriptor duplicated by os.scandir(fd).
         pending: list[tuple[Path, PathIdentity, int]] = [(root, expected, 0)]
         while pending:
@@ -452,10 +452,7 @@ class StagedPath:
                     lease=lease,
                     expected_identity=retry_identity,
                 )
-                # Legacy internal callbacks returned ``None`` after accepting
-                # ownership. Only an explicit ``False`` means shutdown rejected
-                # the handoff and the caller must retain its retry handle.
-                if accepted is not False:
+                if accepted:
                     completed = True
                 else:
                     raise RuntimeError(

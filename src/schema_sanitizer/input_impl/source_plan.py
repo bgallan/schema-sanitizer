@@ -25,14 +25,11 @@ from ..core_impl.resource_lifecycle import (
     _close_sequence_retryably,
     _close_suppressing_errors,
 )
-from .selection import native_input_format
 
 PATH_SOURCES = "path_sources"
 REMOTE_CHUNKS = "remote_chunks"
 PARQUET_ARROW_SOURCES = "parquet_arrow_sources"
 SEQUENCE = "sequence"
-
-_LAST_NATIVE_MULTISOURCE_ROUTE = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,11 +75,9 @@ def _cleanup_native_source_plan_capsule(capsule: PreparedFinalizerCleanup) -> No
 
     close_items = capsule.arg2
     if close_items is not None:
-        if not isinstance(close_items, list):
-            close_items = list(cast(Iterable[Any], close_items))
-            capsule.arg2 = close_items
-        _close_sequence_retryably(close_items)
-        if close_items:
+        owned_close_items = cast(list[Any], close_items)
+        _close_sequence_retryably(owned_close_items)
+        if owned_close_items:
             raise RuntimeError("deferred source-plan close items remain retryable")
         capsule.arg2 = None
     # native_payload is deliberately only rooted until all closeable owners are
@@ -125,7 +120,7 @@ class NativeSourcePlan:
 
     def close(self) -> None:
         """Close plan resources while retaining failures for a later retry."""
-        if os.getpid() != getattr(self, "_pid", os.getpid()):
+        if os.getpid() != self._pid:
             return
         if self.kind == SEQUENCE:
             sequence = list(self.payload)
@@ -165,10 +160,6 @@ class NativeSourcePlan:
                     self._finalizer_ticket = 0
                     self._finalizer_capsule = None
                 return
-            # Synthetic object.__new__ doubles have never acquired production
-            # ownership and therefore have nothing safe to publish. The legacy
-            # unreserved FinalizerEscrow is intentionally not used in production.
-            return
         except BaseException:
             pass
 
@@ -183,9 +174,8 @@ class SourcePlanRegistryProbeResult:
 
 def source_kind_for_format(input_format: str) -> str | None:
     """Return the native path-source kind for one public input format."""
-    native_format = native_input_format(input_format)
-    if native_format in {"json", "jsonl", "csv", "json_array", "xml"}:
-        return native_format
+    if input_format in {"json", "jsonl", "csv", "json_array", "xml"}:
+        return input_format
     return None
 
 
@@ -201,20 +191,9 @@ def path_source_tuples(
     return [(source.kind, source.path, source.source_file) for source in sources]
 
 
-def last_native_multisource_route() -> str:
-    """Return the route used by the most recent native multi-source conversion."""
-    return _LAST_NATIVE_MULTISOURCE_ROUTE
-
-
-def _mark_native_path_sources_route() -> None:
-    """Preserve the native multi-source diagnostic route marker."""
-    global _LAST_NATIVE_MULTISOURCE_ROUTE
-    _LAST_NATIVE_MULTISOURCE_ROUTE = "cxx_path_sources"
-
-
 def _memory_limit_stage(input_format: str) -> str:
     """Return the document-size stage label for native path-source files."""
-    if input_format in {"json", "json_array", "jsonl", "ndjson"}:
+    if input_format in {"json", "json_array", "jsonl"}:
         return "json_parse"
     if input_format == "xml":
         return "xml_parse"
@@ -334,5 +313,4 @@ def _open_path_sources_auto_registry_stream(
             registry_json=registry_json,
             **common,
         )
-    _mark_native_path_sources_route()
     return raw

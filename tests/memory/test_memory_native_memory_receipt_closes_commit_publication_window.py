@@ -11,15 +11,15 @@ def _root() -> Path:
 
 def test_native_memory_receipt_closes_commit_publication_window() -> None:
     source = (_root() / "cpp/src/api/python_abi3/options/prepare.cc").read_text()
-    module = (_root() / "cpp/src/api/python_abi3/_core_abi3_module.cc").read_text()
+    catalog = (_root() / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
     memory = (_root() / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
 
     assert "kOperationMemoryReservationCapsuleName" in source
     assert "reservation->bytes = bytes;" in source
     assert "reservation->bytes = requested;" in source
     assert "reservation->release();" in source
-    assert '"operation_memory_reservation_create"' in module
-    assert '"operation_memory_reservation_resize"' in module
+    assert "operation_memory_reservation_create," in catalog
+    assert "operation_memory_reservation_resize," in catalog
     assert "_prepare_python_lease" in memory
     assert "_commit_python_lease_reservation" in memory
     assert "entry.native_receipt = receipt" in memory
@@ -30,7 +30,7 @@ def test_memory_release_uses_receipt_not_mirrored_amount() -> None:
     start = memory.index("    def _release_python_lease_authority(")
     end = memory.index("    def _release_python_lease(", start)
     block = memory[start:end]
-    assert "operation_memory_reservation_release(receipt)" in block
+    assert "self._native_reservation_release(receipt)" in block
     assert "current.native_receipt = None" in block
     assert "if amount == 0:" in block
 

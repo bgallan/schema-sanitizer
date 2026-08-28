@@ -25,7 +25,7 @@ def test_native_thread_domains_commit_through_one_atomic_total() -> None:
     assert "g_process_external_runtime_thread_permits.fetch_add" in arena
     assert "const auto total_reserved = current + external_reserved" not in arena
     assert "total_physical_thread_permits" in header
-    assert "PyTuple_New(27)" in probe
+    assert "PyTuple_New(30)" in probe
 
 
 def test_external_runtime_claims_are_not_os_thread_identity_evidence() -> None:
@@ -71,39 +71,58 @@ def test_runtime_reported_resident_width_survives_active_claim_generation(
 
     class Native:
         supports_resident_attribution = True
+        supports_stack_debt = True
+        supports_atomic_residency_update = True
 
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+        def __init__(self) -> None:
+            self.leases: dict[object, int] = {}
+
+        def acquire_exact_permit_lease(
+            self, desired: int, minimum: int
+        ) -> tuple[object, int] | None:
             assert minimum <= desired
             events.append(("claim-acquire", desired))
-            return desired
+            receipt = object()
+            self.leases[receipt] = desired
+            return receipt, desired
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            events.append(("claim-release", amount))
+        def exact_permit_lease_amount(self, receipt: object) -> int:
+            return self.leases[receipt]
 
-        def external_runtime_resident_threads_add(self, amount: int) -> None:
-            events.append(("resident-add", amount))
+        def resize_exact_permit_lease(self, receipt: object, target: int) -> int:
+            current = self.leases[receipt]
+            if current > target:
+                events.append(("claim-release", current - target))
+            self.leases[receipt] = target
+            return target
 
-        def external_runtime_resident_threads_release(self, amount: int) -> None:
-            events.append(("resident-release", amount))
+        def external_runtime_residency_update(
+            self, identity_delta: int, _stack_debt_delta: int
+        ) -> None:
+            if identity_delta > 0:
+                events.append(("resident-add", identity_delta))
+            elif identity_delta < 0:
+                events.append(("resident-release", -identity_delta))
 
     native = Native()
     monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
 
-    permit, granted = module._acquire_shared_external_native_thread_permits(Runtime, 4, minimum=2)
-    assert permit is not None
-    assert granted == 4
+    acquisition = module._acquire_shared_external_native_thread_permits(Runtime, 4, minimum=2)
+    assert acquisition.owner is not None
+    assert acquisition.amount == 4
     assert ("resident-add", 3) in events
     assert module.external_runtime_pool_snapshot()["resident_width"] == 3
     assert module.external_runtime_pool_snapshot()["physical_permits"] == 4
 
-    permit.process_physical_thread_permits_release(4)
+    acquisition.owner.release()
     snapshot = module.external_runtime_pool_snapshot()
     assert snapshot["physical_permits"] == 0
     assert snapshot["resident_width"] == 3
     assert snapshot["coordinator_entries"] == 1
 
     with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
-        runtime_id, entry = module._external_runtime_entry_locked(Runtime, create=False)
+        runtime_id = module._external_runtime_pool_identity_key(Runtime)
+        entry = module._external_runtime_entry_locked(Runtime, create=False, runtime_key=runtime_id)
         assert entry is not None
         module._set_external_runtime_resident_width_locked(entry, native, 0)
         module._retire_external_runtime_entry_locked(runtime_id, entry)
@@ -116,7 +135,7 @@ def test_stage_domain_rollback_keeps_failed_release_retryable(
 ) -> None:
     from schema_sanitizer.core_impl import memory_budget as module
 
-    base = module.CompositeParallelAdmission(slots=2, per_slot_bytes=64)
+    base = module.StageConcurrencyAdmission(slots=2, per_slot_bytes=64)
     monkeypatch.setattr(module, "acquire_parallel_admission", lambda *a, **k: base)
 
     class RetryLease:
@@ -171,12 +190,17 @@ def test_release_native_protocol_validation_is_fail_closed(
 
     good = {
         "available": True,
+        "snapshot_schema_fields": 30,
         "completion_memory_protocol_violations": 0,
         "counter_underflows": 0,
         "native_physical_threads": 3,
         "external_runtime_thread_permits": 2,
         "total_physical_thread_permits": 5,
         "native_physical_thread_capacity": 8,
+        "thread_permit_snapshot_stable": 1,
+        "external_runtime_resident_protocol_violations": 0,
+        "external_runtime_resident_threads": 2,
+        "external_runtime_stack_debt_threads": 2,
     }
     monkeypatch.setattr(runtime_diagnostics, "_native_arena_snapshot", lambda: dict(good))
     coverage.validate_native_concurrency_protocol_health()

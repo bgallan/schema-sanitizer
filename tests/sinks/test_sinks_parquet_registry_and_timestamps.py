@@ -161,10 +161,7 @@ def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
     """Verify native metadata injection covers single-file generated columns."""
     require_native()
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import (
-        last_metadata_route,
-        prepare_file_output_metadata_stream,
-    )
+    from schema_sanitizer.adapters.pyarrow.file_metadata import prepare_file_output_metadata_stream
 
     first = pa.record_batch({"a": pa.array(["1", "2"])})
     second = pa.record_batch({"a": pa.array(["3"])})
@@ -180,7 +177,6 @@ def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
     )
 
     try:
-        assert last_metadata_route() == "native"
         assert metadata.schema.field("source_file").type == pa.string()
         assert metadata.schema.field("ingestion_timestamp").type == pa.timestamp("us")
         batches = list(metadata.reader)
@@ -198,10 +194,7 @@ def test_metadata_native_stream_handles_row_span_columns_across_batches() -> Non
     """Verify native metadata injection can track directory source-file spans."""
     require_native()
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import (
-        last_metadata_route,
-        prepare_file_output_metadata_stream,
-    )
+    from schema_sanitizer.adapters.pyarrow.file_metadata import prepare_file_output_metadata_stream
 
     first = pa.record_batch({"a": pa.array(["1", "2"])})
     second = pa.record_batch({"a": pa.array(["3", "4"])})
@@ -215,7 +208,6 @@ def test_metadata_native_stream_handles_row_span_columns_across_batches() -> Non
     )
 
     try:
-        assert last_metadata_route() == "native"
         assert metadata.schema.field("source_file").type == pa.string()
         rows = metadata.reader.read_all().to_pylist()
     finally:

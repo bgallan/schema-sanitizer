@@ -13,7 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
 #include "api/python_abi3/arrow_direct/schema/logical.hh"
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
@@ -22,7 +21,7 @@
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/options_schema_serialization.hh"
@@ -275,7 +274,7 @@ bool parse_next_arrow_provider_sources(PyObject *provider_obj,
 }
 // Arrow provider chunk schema, metadata, passthrough, and ingest flow.
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
-merge_arrow_source_schemas(schema_sanitizer_context *ctx,
+merge_arrow_source_schemas(NativeContext *ctx,
                            const std::vector<ArrowSourceSpec> &sources,
                            const sanitize::PreparedOptionsPtr &prepared,
                            const char *registry_json,
@@ -314,7 +313,7 @@ merge_arrow_source_schemas(schema_sanitizer_context *ctx,
 
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_arrow_source_provider_schemas(
-    schema_sanitizer_context *ctx, PyObject *provider_obj,
+    NativeContext *ctx, PyObject *provider_obj,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy,
     const sanitize::LogicalSchema *previous_schema) {

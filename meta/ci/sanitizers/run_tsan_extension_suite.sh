@@ -2,8 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-build_dir="${1:-${repo_root}/build/tsan}"
-python_launcher="${2:-${repo_root}/python-tsan}"
+build_dir="${1:-${repo_root}/.work/build/tsan}"
+python_launcher="${2:-${repo_root}/.work/bin/python-tsan}"
 rounds="${3:-1}"
 site_packages="${4:-}"
 test_target="${5:-}"

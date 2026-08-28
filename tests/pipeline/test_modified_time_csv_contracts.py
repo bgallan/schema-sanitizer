@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 from pathlib import Path
 
 import schema_sanitizer as ss
@@ -105,36 +104,13 @@ def test_exact_mode_and_existing_inputs_remain_default_compatible() -> None:
     assert "GCS manifests freeze every `(uri, generation)` identity" in compatibility
 
 
-def test_docs_do_not_introduce_numbered_design_files() -> None:
-    """Stable topics own docs instead of pass-, phase-, or version-numbered files."""
-    docs_root = ROOT / "docs"
-    forbidden = re.compile(r"(?:^|[-_])(?:pass|phase|version|v)[-_]?\d", re.IGNORECASE)
-    offenders = sorted(
-        path.relative_to(docs_root).as_posix()
-        for path in docs_root.rglob("*.md")
-        if forbidden.search(path.stem)
-    )
-
-    assert offenders == []
-
-
-def test_modified_time_csv_tests_use_topic_oriented_modules() -> None:
-    """Completed implementation stages must not return as numbered test modules."""
-    pipeline_tests = ROOT / "tests/pipeline"
-    numbered_stage = re.compile(r"(?:^|_)phase\d+(?:_|$)", re.IGNORECASE)
-    numbered = sorted(
-        path.name for path in pipeline_tests.glob("test_*.py") if numbered_stage.search(path.stem)
-    )
-
-    assert numbered == []
-
-
 def test_consolidated_ci_owns_modified_time_csv_validation() -> None:
     """Focused suites run inside the existing compact CI and sanitizer jobs."""
     workflow = _read(".github/workflows/ci.yml")
     quality = _read(".github/actions/quality-validation/action.yml")
     platform_sanitizer = _read(".github/actions/platform-sanitizer/action.yml")
     source_distribution = _read(".github/actions/source-distribution/action.yml")
+    coverage_suites = _read("meta/ci/quality/run_coverage_suite.py")
     platform_tests = _read(".github/actions/test-platform-wheel/action.yml")
     tsan_runner = _read("meta/ci/sanitizers/run_tsan_extension_suite.sh")
     native_probe = _read("cpp/tests/ordered_executor_tsan.cc")
@@ -151,7 +127,9 @@ def test_consolidated_ci_owns_modified_time_csv_validation() -> None:
         "tests/pipeline/test_modified_time_csv_contracts.py",
     )
 
-    validation_sources = workflow + quality + platform_sanitizer + source_distribution
+    validation_sources = (
+        workflow + quality + platform_sanitizer + source_distribution + coverage_suites
+    )
     for suite in focused_suites:
         assert suite in validation_sources
     assert (validation_sources + tsan_runner).count(

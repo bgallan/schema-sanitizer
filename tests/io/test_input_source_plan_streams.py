@@ -323,7 +323,7 @@ def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
         raise AssertionError("remote directories should not stage during preparation")
 
     def fake_list_remote_directory(*_args, **_kwargs):
-        """Return one remote child without using the removed sync facade."""
+        """Return one remote child through the synchronous backend."""
         return (RemoteFile("s3://bucket/partition/row.json", "row.json"),)
 
     monkeypatch.setattr(

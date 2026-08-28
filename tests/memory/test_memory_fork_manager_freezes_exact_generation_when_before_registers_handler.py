@@ -207,7 +207,7 @@ def test_retry_ready_map_is_authoritative_not_deque_rotation() -> None:
 
 def test_release_guardian_dead_letter_owner_remains_authoritative_for_dedup() -> None:
     source = _source("core_impl/retry_scheduler.py")
-    assert "self._owner_index = self._items" in source
+    assert "self._items" in source
     assert "DEAD_LETTER" in source
     # Dead-letter transition keeps the same owner rooted in _items.
     marker = "item.state = _GuardedReleaseState.DEAD_LETTER"
@@ -356,11 +356,10 @@ def test_static_escrow_footprint_is_runtime_layout_derived_not_single_magic_mult
     source = _source("core_impl/finalizer_escrow.py")
     assert "sys.getsizeof" in source
     assert "_reserved_escrow_static_bytes" in source
-    assert "_legacy_escrow_static_bytes" in source
 
 
 def test_native_abi_surface_declares_direct_atomic_activity_writer() -> None:
-    methods = (ROOT / "cpp/src/internal/abi/python_abi3/methods.hh").read_text()
+    catalog = (ROOT / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
     module = (ROOT / "cpp/src/api/python_abi3/_core_abi3_module.cc").read_text()
-    assert "atomic_epoch_write_activity" in methods
-    assert "atomic_epoch_write_activity" in module
+    assert "atomic_epoch_write_activity" in catalog
+    assert 'include "internal/abi/python_abi3/method_catalog.inc"' in module

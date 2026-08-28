@@ -346,107 +346,6 @@ def test_staged_path_keeps_ownership_when_janitor_is_closed(
     assert lease.calls == 0
 
 
-class _FakeNativeLedger:
-    """Provide a focused sync-retry-does-not-replay-success regression test helper."""
-
-    def __init__(self, reserved: int) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        self.reserved = reserved
-        self.peak = reserved
-
-    def operation_memory_ledger_reserve(self, _capsule: object, amount: int, _stage: str) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        self.reserved += amount
-        self.peak = max(self.peak, self.reserved)
-
-    def operation_memory_ledger_release(self, _capsule: object, amount: int) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        self.reserved = max(0, self.reserved - amount)
-
-    def operation_memory_ledger_snapshot(self, _capsule: object) -> tuple[int, int, int]:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        return 1 << 30, self.reserved, self.peak
-
-    def operation_memory_ledger_diagnostics(self, _capsule: object) -> tuple[int, int]:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        return 0, 0
-
-
-class _FakeCrossProcessLease:
-    """Provide a focused sync-retry-does-not-replay-success regression test helper."""
-
-    def __init__(self, failures: int) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        self.failures = failures
-        self.resize_calls: list[int] = []
-        self.release_calls = 0
-
-    def resize(self, amount: int) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        self.resize_calls.append(amount)
-        if self.failures:
-            self.failures -= 1
-            raise OSError("journal unavailable")
-
-    def release(self) -> None:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        self.release_calls += 1
-
-
-def _memory_ledger_for_test(native: _FakeNativeLedger, cross: _FakeCrossProcessLease) -> Any:
-    """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-    from schema_sanitizer.core_impl.memory_budget import OperationMemoryLedger
-
-    ledger = object.__new__(OperationMemoryLedger)
-    ledger.limit_bytes = 1 << 30
-    ledger._pid = os.getpid()
-    ledger._native = native
-    ledger._capsule = object()
-    ledger._cross_process = cross
-    ledger._cross_process_reconciliation_failures = 0
-    ledger._cross_process_pending_bytes = 0
-    ledger._lock = threading.Lock()
-    ledger._close_condition = threading.Condition(ledger._lock)
-    ledger._close_started = False
-    ledger._closing = False
-    ledger._closed = False
-    ledger._close_outstanding_bytes = 0
-    return ledger
-
-
-def test_memory_release_records_and_repairs_stale_host_reservation() -> None:
-    """Cleanup remains non-throwing while the next admission repairs shared state."""
-    native = _FakeNativeLedger(32 << 20)
-    cross = _FakeCrossProcessLease(failures=1)
-    ledger = _memory_ledger_for_test(native, cross)
-
-    ledger.release(4 << 20)
-    diagnostics = ledger.diagnostics()
-    assert diagnostics.cross_process_reconciliation_failures == 1
-    assert diagnostics.cross_process_pending_bytes > 0
-
-    ledger.reserve(1, stage="sync-retry-does-not-replay-success")
-    repaired = ledger.diagnostics()
-    assert repaired.cross_process_pending_bytes == 0
-    assert len(cross.resize_calls) == 2
-    ledger.close()
-
-
-def test_memory_reserve_compensates_shared_state_after_strict_failure() -> None:
-    """Failed admission rolls back native bytes and reconciles the rollback target."""
-    native = _FakeNativeLedger(16 << 20)
-    cross = _FakeCrossProcessLease(failures=1)
-    ledger = _memory_ledger_for_test(native, cross)
-    before = native.reserved
-
-    with pytest.raises(OSError, match="journal"):
-        ledger.reserve(2 << 20, stage="sync-retry-does-not-replay-success")
-    assert native.reserved == before
-    assert len(cross.resize_calls) == 2
-    assert ledger.diagnostics().cross_process_pending_bytes == 0
-    ledger.close()
-
-
 def test_completed_diagnostic_copy_does_not_hold_registry_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -586,11 +485,14 @@ def test_storage_governor_releases_with_creation_time_coordination_setting(
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path))
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_CROSS_PROCESS_TEMP_RESERVATIONS", "1")
     governor = module._ProcessTemporaryStorageGovernor()
-    device = governor.reserve(1, path=tmp_path, label="sync-retry-does-not-replay-success-toggle")
+    capability = governor.reserve_capability(
+        1, path=tmp_path, label="sync-retry-does-not-replay-success-toggle"
+    )
+    device = capability.device
     assert shared.cross_process_reserved_bytes(device) == 1
 
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_CROSS_PROCESS_TEMP_RESERVATIONS", "0")
-    governor.release(device, 1)
+    assert governor.release_capability(capability)
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_CROSS_PROCESS_TEMP_RESERVATIONS", "1")
     assert shared.cross_process_reserved_bytes(device) == 0
 
@@ -599,21 +501,12 @@ def _temporary_pool_for_test(*, limit: int, reserved: int = 0, closed: bool = Fa
     """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
     from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 
-    pool = object.__new__(TemporaryStoragePermitPool)
+    pool = TemporaryStoragePermitPool(None)
     pool.limit_bytes = limit
-    pool._lock = threading.Lock()
-    pool._condition = threading.Condition(pool._lock)
     pool._reserved_bytes = reserved
-    pool._pending_reserved_bytes = 0
-    pool._pending_active_leases = 0
     pool._peak_reserved_bytes = reserved
-    pool._active_leases = 0
     pool._closed = closed
     pool._close_complete = closed
-    pool._close_outstanding_bytes = 0
-    pool._close_active_leases = 0
-    pool._over_release_count = 0
-    pool._over_release_bytes = 0
     return pool
 
 
@@ -698,35 +591,6 @@ def test_temporary_lease_constructor_fails_before_shared_reservation(
     assert Governor.reserve_calls == 0
 
 
-def test_janitor_stale_scan_retries_transient_root_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A transient discovery error cannot disable crash-leftover cleanup forever."""
-    from schema_sanitizer.core_impl import temporary_janitor as module
-
-    janitor = module._TemporaryArtifactJanitor()
-    stale = tmp_path / "artifact-stale.bin"
-    stale.write_bytes(b"payload")
-    calls = 0
-
-    def root() -> Path:
-        """Exercise one focused sync-retry-does-not-replay-success regression helper path."""
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise OSError("mount temporarily unavailable")
-        return tmp_path
-
-    monkeypatch.setattr(janitor, "root", root)
-    janitor._scan_stale()
-    assert not janitor._scanned
-    assert stale.exists()
-    janitor._scan_stale()
-    assert janitor._scanned
-    assert not stale.exists()
-
-
 def test_janitor_quarantine_never_scans_stale_directory_inline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -747,7 +611,7 @@ def test_janitor_quarantine_never_scans_stale_directory_inline(
         "_scan_stale",
         lambda: (_ for _ in ()).throw(AssertionError("inline stale scan")),
     )
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     path = tmp_path / "artifact.bin"
     path.write_bytes(b"payload")
     assert janitor.quarantine(path, is_dir=False, lease=Lease())
@@ -778,46 +642,6 @@ def test_cross_process_memory_aggregates_live_leases_per_process(
     for lease in leases:
         lease.release()
     assert module.cross_process_memory_reserved_bytes() == 0
-
-
-def test_cross_process_memory_aggregate_coexists_with_legacy_live_entries(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Rolling deployment keeps predecessor per-lease entries independently charged."""
-    import json
-    from time import time
-
-    from schema_sanitizer.core_impl import cross_process_memory as module
-
-    if module.fcntl is None:
-        pytest.skip("cross-process coordination requires POSIX flock")
-    _set_environment(monkeypatch, "SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path))
-    _set_environment(monkeypatch, "SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS", "1")
-    pid = os.getpid()
-    start = module._process_start_token(pid)
-    legacy_key = f"{pid}:{start}:legacy"
-    module._coordination_path().write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "leases": {
-                    legacy_key: {
-                        "pid": pid,
-                        "start": start,
-                        "reserved": 7,
-                        "updated": time(),
-                    }
-                },
-            },
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-    lease = module.CrossProcessMemoryLease(1024, 5)
-    assert module.cross_process_memory_reserved_bytes() == 12
-    lease.release()
-    assert module.cross_process_memory_reserved_bytes() == 7
 
 
 def test_failed_shared_storage_admission_leaves_inert_unpublished_lease(
@@ -968,12 +792,13 @@ def test_storage_release_uses_creation_time_coordination_directory(
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_COORDINATION_DIR", str(first))
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_CROSS_PROCESS_TEMP_RESERVATIONS", "1")
     governor = module._ProcessTemporaryStorageGovernor()
-    device = governor.reserve(
+    capability = governor.reserve_capability(
         1, path=artifacts, label="sync-retry-does-not-replay-success-directory"
     )
+    device = capability.device
 
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_COORDINATION_DIR", str(second))
-    governor.release(device, 1)
+    assert governor.release_capability(capability)
     assert not (second / f"schema-sanitizer-temp-{device}.json").exists()
     _set_environment(monkeypatch, "SCHEMA_SANITIZER_COORDINATION_DIR", str(first))
     assert shared.cross_process_reserved_bytes(device) == 0

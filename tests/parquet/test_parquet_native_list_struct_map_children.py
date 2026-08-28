@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _support.parquet_runtime import pa
+from _support.parquet_runtime import pa, write_read_native_parquet
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
 from conftest import require_native
 
@@ -14,16 +14,6 @@ def test_native_parquet_stream_materializes_list_struct_with_map_child(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes list structs with map children."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-list-struct-map-child.parquet"
@@ -46,14 +36,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_child(
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -65,30 +48,12 @@ def test_native_parquet_stream_materializes_list_struct_with_map_child(
         ["items", "list", "item", "name"],
     ]
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-    out = reader.read_all()
-
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_map_list_child(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes list structs with list-valued map children."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-list-struct-map-list-child.parquet"
@@ -117,14 +82,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_list_child(
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -136,30 +94,12 @@ def test_native_parquet_stream_materializes_list_struct_with_map_list_child(
         ["items", "list", "item", "name"],
     ]
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-    out = reader.read_all()
-
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_map_list_chain_child(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes list structs with nested-list-valued maps."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-list-struct-map-list-chain-child.parquet"
@@ -191,14 +131,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_list_chain_chil
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -228,30 +161,12 @@ def test_native_parquet_stream_materializes_list_struct_with_map_list_chain_chil
         ["items", "list", "item", "name"],
     ]
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-    out = reader.read_all()
-
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_map_struct_child(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes list structs with struct-valued maps."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-list-struct-map-struct-child.parquet"
@@ -283,14 +198,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_struct_child(
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -303,30 +211,12 @@ def test_native_parquet_stream_materializes_list_struct_with_map_struct_child(
         ["items", "list", "item", "name"],
     ]
 
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-    out = reader.read_all()
-
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"
-
 
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_list_struct_with_map_struct_list_child(
     tmp_path: Path,
 ) -> None:
     """Verify native reader materializes list structs with map struct list fields."""
-    from schema_sanitizer.adapters.parquet.record_batch_factory import (
-        open_parquet_record_batch_stream_factory,
-    )
-    from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
-    from schema_sanitizer.adapters.parquet.telemetry import (
-        last_parquet_stream_factory_route,
-    )
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        write_parquet_native_first_stream,
-    )
 
     require_native()
     path = tmp_path / "native-list-struct-map-struct-list-child.parquet"
@@ -364,14 +254,7 @@ def test_native_parquet_stream_materializes_list_struct_with_map_struct_list_chi
             )
         }
     )
-    write_parquet_native_first_stream(
-        pa.RecordBatchReader.from_batches(table.schema, table.to_batches()),
-        path,
-        feature="test",
-        parquet_compression="uncompressed",
-    )
-
-    info = native_parquet_footer_info(path)
+    info = write_read_native_parquet(table, path)
 
     assert info is not None
     assert info["native_reader_ready"] == 1
@@ -393,11 +276,3 @@ def test_native_parquet_stream_materializes_list_struct_with_map_struct_list_chi
         ["items", "list", "item", "attrs", "key_value", "value", "label"],
         ["items", "list", "item", "name"],
     ]
-
-    factory = open_parquet_record_batch_stream_factory(path, source="path", feature="test")
-    reader = pa.RecordBatchReader.from_stream(factory)
-    out = reader.read_all()
-
-    assert out.schema.equals(table.schema)
-    assert out.to_pylist() == table.to_pylist()
-    assert last_parquet_stream_factory_route() == "native_parquet_stream"

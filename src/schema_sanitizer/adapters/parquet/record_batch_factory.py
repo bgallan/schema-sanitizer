@@ -674,26 +674,14 @@ class _DatasetLifetimeLease:
 
 def close_factory(factory: Any) -> None:
     """Close factory-owned resources without stealing live stream ownership."""
-    if os.getpid() != getattr(factory, "_pid", os.getpid()):
+    if os.getpid() != factory._pid:
         return
     _close_and_clear_attrs(factory, "_pending_parquet_file", "_pending_opened_file")
-
-    # Stream registrations are weak references only.  Historical focused tests
-    # may still place concrete cleanup resources in this field; retain their
-    # retry semantics while never closing a live stream-scoped owner.
-    original_keepalive = getattr(factory, "_keepalive", ())
-    remaining: list[Any] = []
-    for resource in list(original_keepalive):
-        if isinstance(resource, weakref.ReferenceType):
-            continue
-        if not _close_suppressing_errors(resource):
-            remaining.append(resource)
-    factory._keepalive = remaining if isinstance(original_keepalive, list) else tuple(remaining)
+    factory._keepalive.clear()
 
     # Drop the factory's dataset reference before returning its external FD
     # admission or staged-storage credits. Active streams hold independent refs.
-    if hasattr(factory, "_dataset"):
-        factory._dataset = None
+    factory._dataset = None
     _close_and_clear_attrs(factory, "_dataset_owner")
     _close_and_clear_attrs(factory, "_dataset_fd_capability")
     _close_and_clear_attrs(factory, "_staged_artifact")
@@ -786,7 +774,7 @@ def _external_runtime_threads(factory: Any) -> Any:
         except BaseException:
             desired = max(2, min(32, os.cpu_count() or 2))
     return acquire_external_runtime_threads(
-        desired, allow_parallel=factory._use_threads, runtime=getattr(factory, "_pa", None)
+        desired, allow_parallel=factory._use_threads, runtime=factory._pa
     )
 
 
@@ -809,26 +797,17 @@ def _compact_factory_stream_keepalive(keepalive: list[Any]) -> None:
 
 
 def _factory_stream_keepalive(factory: Any) -> list[Any]:
-    """Return/create the per-stream owner list, compacting abandoned tombstones."""
-    keepalive = getattr(factory, "_keepalive", None)
-    if isinstance(keepalive, list):
-        _compact_factory_stream_keepalive(keepalive)
-        return keepalive
-    converted = list(keepalive or ())
-    _compact_factory_stream_keepalive(converted)
-    factory._keepalive = converted
-    return converted
+    """Return the per-stream owner list after compacting abandoned tombstones."""
+    keepalive = factory._keepalive
+    _compact_factory_stream_keepalive(keepalive)
+    return keepalive
 
 
 def _constrain_factory_pyarrow_pool(factory: Any, runtime_lease: Any) -> None:
-    """Cap real PyArrow pools while remaining compatible with focused doubles."""
-    pa = getattr(factory, "_pa", None)
-    workers = getattr(runtime_lease, "workers", None)
-    if pa is not None and isinstance(workers, int) and workers > 1:
-        configured = constrain_external_runtime_worker_pool(pa, workers)
-        shrink = getattr(runtime_lease, "shrink_to", None)
-        if callable(shrink):
-            shrink(configured)
+    """Cap the PyArrow pool to the admitted external-runtime workers."""
+    if runtime_lease.workers > 1:
+        configured = constrain_external_runtime_worker_pool(factory._pa, runtime_lease.workers)
+        runtime_lease.shrink_to(configured)
 
 
 def pyarrow_fallback_arrow_stream(
@@ -862,13 +841,12 @@ def pyarrow_fallback_arrow_stream(
         try:
             if runtime_lease.parallel:
                 _constrain_factory_pyarrow_pool(factory, runtime_lease)
-            dataset_owner = getattr(factory, "_dataset_owner", None)
-            if dataset_owner is not None:
-                dataset_lifetime = dataset_owner.acquire()
-                owner.add(dataset_lifetime)
-                dataset = dataset_owner.dataset
-            else:
-                dataset = factory._dataset
+            dataset_owner = factory._dataset_owner
+            if dataset_owner is None:
+                raise RuntimeError("PyArrow dataset source has no lifetime owner")
+            dataset_lifetime = dataset_owner.acquire()
+            owner.add(dataset_lifetime)
+            dataset = dataset_owner.dataset
             scanner = dataset.scanner(
                 columns=None if factory._columns is None else list(factory._columns),
                 filter=factory._filters,
@@ -878,21 +856,11 @@ def pyarrow_fallback_arrow_stream(
             owner.add(scanner)
             reader = scanner.to_reader()
             owner.add(reader)
-            if not hasattr(reader, "__iter__"):  # focused legacy test double only
-                registry[-1] = owner
-                stream = reader.__arrow_c_stream__()
-            else:
-                owned_batches = _OwnedParquetBatchIterator(
-                    iter(reader), owner, registry, registration
-                )
-                exported_reader = record_batch_reader_from_iterable(
-                    factory._pa, factory.schema, owned_batches
-                )
-                if exported_reader is None:  # focused legacy test double only
-                    registry[-1] = owner
-                    stream = reader.__arrow_c_stream__()
-                else:
-                    stream = exported_reader.__arrow_c_stream__()
+            owned_batches = _OwnedParquetBatchIterator(iter(reader), owner, registry, registration)
+            exported_reader = record_batch_reader_from_iterable(
+                factory._pa, factory.schema, owned_batches
+            )
+            stream = exported_reader.__arrow_c_stream__()
         except BaseException as exc:
             try:
                 owner.close()
@@ -913,7 +881,7 @@ def pyarrow_fallback_arrow_stream(
             record_parquet_fallback_success(fallback_route)
             return stream
 
-    dataset_error = getattr(factory, "_dataset_error", None)
+    dataset_error = factory._dataset_error
     if dataset_error is not None:
         dataset_route = "pyarrow_dataset_scanner"
         record_parquet_fallback_attempt(dataset_route)
@@ -949,11 +917,7 @@ def pyarrow_fallback_arrow_stream(
         )
         owned_batches = _OwnedParquetBatchIterator(iter(batches), owner, registry, registration)
         reader = record_batch_reader_from_iterable(factory._pa, factory.schema, owned_batches)
-        if reader is None:  # focused legacy test double only
-            registry[-1] = owner
-            stream = object()
-        else:
-            stream = reader.__arrow_c_stream__()
+        stream = reader.__arrow_c_stream__()
     except BaseException as exc:
         try:
             owner.close()

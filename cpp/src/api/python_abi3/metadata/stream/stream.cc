@@ -125,7 +125,7 @@ void close_metadata_stream(MetadataStreamState *state) noexcept {
     return;
   }
   if (state->inner && !state->stream_obj && !state->stream_capsule) {
-    schema_sanitizer_stream_free(state->inner);
+    release_arrow_stream(state->inner);
     state->inner = nullptr;
     state->closed = true;
     return;

@@ -7,7 +7,6 @@
 #include <utility>
 
 #include "internal/abi/python_abi3/capsules.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/planning/plan_compile.hh"
 #include "internal/planning/schema_evolution.hh"
 #include "internal/runtime/process_identity.hh"

@@ -9,7 +9,11 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-TARGETS = ("json", "csv", "xml", "parquet")
+try:
+    from meta.ci.fuzz.corpus_io import ARCHIVE_SUFFIX, TARGETS, target_inputs
+except ModuleNotFoundError:
+    from corpus_io import ARCHIVE_SUFFIX, TARGETS, target_inputs
+
 ROLES = ("corpus", "regressions")
 SHA1_NAME = re.compile(r"[0-9a-f]{40}")
 HEX40_NAME = re.compile(r"[0-9A-Fa-f]{40}")
@@ -23,7 +27,7 @@ EXPECTED_INPUT_COUNTS = {
     ("regressions", "xml"): 84,
     ("regressions", "parquet"): 5,
 }
-EXPECTED_TREE_SHA256 = "7c6167755bf670e838b2ef95491a3c54df4fd07064520999e0c5e72efeae5f36"
+EXPECTED_TREE_SHA256 = "6f0edba72c6823df471cd0ab3392d5f095449938d1ace52f38b21cbc3eb40831"
 DESCRIPTIVE_REGRESSION_SHA256 = {
     "csv/unterminated.csv": "17a373d8a99cbc0238d1b1b87088915e04040adec99d3605d930099ee4f42df0",
     "json/truncated.json": "ee3bb016ee1b1e395152b5db18af8d7e785aa19a2ab541c9bd9d13dfa8a2a0f0",
@@ -83,12 +87,20 @@ def _validate_role_entries(fuzz_root: Path, role: str, errors: list[str]) -> Pat
         return role_root
 
     expected = set(TARGETS)
+    allowed = set(expected)
     if role == "regressions":
         expected.add("README.md")
+        allowed.add("README.md")
+        archives = {f"{target}{ARCHIVE_SUFFIX}" for target in TARGETS}
+        present_archives = {path.name for path in role_root.iterdir()} & archives
+        if present_archives and present_archives != archives:
+            missing = sorted(archives - present_archives)
+            errors.append(f"regression archives must be all-or-none; missing: {missing}")
+        allowed.update(archives)
     actual = {path.name for path in role_root.iterdir()}
     for name in sorted(expected - actual):
         errors.append(f"missing {role} entry: {name}")
-    for name in sorted(actual - expected):
+    for name in sorted(actual - allowed):
         errors.append(f"unexpected {role} entry: {name}")
     return role_root
 
@@ -113,28 +125,34 @@ def check_fuzz_tree(fuzz_root: Path) -> FuzzInventory:
                 errors.append(f"missing regular directory: {role}/{target}")
                 continue
             target_count = 0
-            for path in sorted(target_root.iterdir()):
-                relative = path.relative_to(fuzz_root)
-                if path.is_symlink() or not path.is_file():
-                    errors.append(f"fuzz target directories must stay flat: {relative}")
-                    continue
-                if path.name.startswith("."):
-                    errors.append(f"hidden fuzz input is not allowed: {relative}")
-                    continue
-
-                data = path.read_bytes()
+            cases = target_inputs(role_root, target, errors=errors)
+            archive_present = (role_root / f"{target}{ARCHIVE_SUFFIX}").is_file()
+            if archive_present:
+                loose_hashes = [
+                    case.name
+                    for case in cases
+                    if not case.archived and HEX40_NAME.fullmatch(case.name)
+                ]
+                if loose_hashes:
+                    errors.append(
+                        f"content-addressed regressions must be packed under {role}/{target}: "
+                        f"{loose_hashes[:5]}"
+                    )
+            for case in cases:
+                relative = Path(role, target, case.name)
+                data = case.data
                 counts[role] += 1
                 target_count += 1
                 content_digest = hashlib.sha256(data).digest()
                 campaign_inputs[target].add(content_digest)
                 tree_entries.append((relative.as_posix(), len(data), content_digest))
-                if HEX40_NAME.fullmatch(path.name) is not None:
+                if HEX40_NAME.fullmatch(case.name) is not None:
                     content_addressed += 1
                     actual = _sha1(data)
-                    if SHA1_NAME.fullmatch(path.name) is None or actual != path.name:
+                    if SHA1_NAME.fullmatch(case.name) is None or actual != case.name:
                         errors.append(f"content hash mismatch: {relative} (actual SHA-1: {actual})")
                 elif role == "regressions":
-                    manifest_name = f"{target}/{path.name}"
+                    manifest_name = f"{target}/{case.name}"
                     expected = DESCRIPTIVE_REGRESSION_SHA256.get(manifest_name)
                     actual = _sha256(data)
                     if expected is not None and actual != expected:

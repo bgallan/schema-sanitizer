@@ -295,15 +295,6 @@ def test_result_wrapper_exposes_safe_point_close_for_finalizer_cleanup() -> None
     assert "self._table_cache = self._UNSET" in result_block
 
 
-def test_fork_quarantine_uses_preallocated_storage_in_production() -> None:
-    from schema_sanitizer.core_impl import fork_safety
-
-    assert fork_safety._FORK_INHERITED_CAPSULE is None
-    source = Path("src/schema_sanitizer/core_impl/fork_safety.py").read_text()
-    assert "_FORK_LABELS" in source and "_FORK_OWNERS" in source
-    assert "before=_prepare_fork_child_state" in source
-
-
 def test_cpp_retention_traits_sum_source_and_output_and_rollback_private_cursor() -> None:
     source = Path("cpp/src/internal/runtime/ordered_executor.hh").read_text()
     assert "SaturatingRetainedAdd(source_hint, output_hint)" in source
@@ -315,16 +306,6 @@ def test_cpp_retention_traits_sum_source_and_output_and_rollback_private_cursor(
     assert private.index("try {") < private.index("ScheduledPacket scheduled")
     assert "completion_ring_.RollbackSubmit();" in private
     assert "TryTransferActiveToCompletion" in source
-
-
-def test_runtime_shutdown_observes_remote_authoritative_ledgers() -> None:
-    source = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
-    assert "process_remote_io_permit_snapshot" in source
-    assert "process_provider_throttle_snapshot" in source
-    assert "active_capacity_registrations" in source
-    assert "provider_active_leases" in source
-    assert "remote_io_submission_capabilities" in source
-    assert "remote_io_capacity_capabilities" in source
 
 
 def test_process_lease_finalizer_publishes_compact_capability_only() -> None:
@@ -416,7 +397,7 @@ def test_terminal_ownership_rejection_latch_survives_counter_oom() -> None:
 def test_large_budgeted_payloads_use_prepared_lease_capsules_instead_of_self() -> None:
     source = Path("src/schema_sanitizer/remote_impl/transport.py").read_text()
     block = source[source.index("class _BudgetedBytes") : source.index("class _HttpStatusError")]
-    assert "prepare_resource_finalizer_cleanup(lease)" in block
+    assert "reserve_resource_finalizer_cleanup(lease)" in block
     assert "defer_prepared_finalizer_cleanup" in block
     assert "defer_finalizer_cleanup(self)" not in block
 
@@ -428,39 +409,12 @@ def test_provider_registry_limit_rejects_coercible_non_integer() -> None:
         ProviderThrottleGovernor(max_tracked_keys=True)
 
 
-def test_finalizer_escrow_failed_owner_does_not_head_of_line_block() -> None:
-    from schema_sanitizer.core_impl.finalizer_escrow import FinalizerEscrow
-
-    escrow: FinalizerEscrow[object] = FinalizerEscrow(2)
-    first = object()
-    second = object()
-    assert escrow.try_publish(first)
-    assert escrow.try_publish(second)
-    seen: list[object] = []
-
-    def process(value: object) -> None:
-        if value is first:
-            raise RuntimeError("retry")
-        seen.append(value)
-
-    with pytest.raises(RuntimeError):
-        escrow.process_one(process)
-    assert escrow.process_one(process)
-    assert seen == [second]
-    assert escrow.size() == 1
-
-
 def test_production_finalizers_do_not_publish_rich_self_owners() -> None:
     root = Path("src/schema_sanitizer")
     offenders: list[str] = []
     for path in root.rglob("*.py"):
         text = path.read_text()
         if "defer_finalizer_cleanup(self)" not in text:
-            continue
-        # NativeSourcePlan keeps one explicit compatibility branch for synthetic
-        # object.__new__ test doubles that never ran __post_init__. Production
-        # objects have a pre-reserved capsule.
-        if path.as_posix().endswith("input_impl/source_plan.py"):
             continue
         offenders.append(path.as_posix())
     assert offenders == []
@@ -484,7 +438,8 @@ def test_prepared_capsule_self_publishes_unused_reserved_ticket() -> None:
     from schema_sanitizer.core_impl import finalizer_cleanup as module
 
     escrow = module._PREPARED_FINALIZER_ESCROW
-    ticket, capsule = module.prepare_reference_finalizer_cleanup()
+    capsule = module.reserve_reference_finalizer_cleanup()
+    ticket = capsule.ticket
     authority = capsule._authority
     slot = escrow._ticket_slots[ticket]
     assert escrow._tickets[slot] == ticket

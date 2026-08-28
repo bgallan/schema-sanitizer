@@ -34,30 +34,138 @@ from ..input_impl.source_plan import (
     SEQUENCE,
     NativeSourcePlan,
     _flatten_path_source_sequence_or_none,
-    _mark_native_path_sources_route,
     _path_sources_for_native,
 )
 from ..options_impl.call_options import attach_operation_detected_at, unwrap_options
 from ..options_impl.options import Options, memory_limit_bytes_or_none
 from ..remote_impl.staging import stage_remote_single_file
+from .duckdb_relation import _OwnedDuckDBRelation
 from .ingest import normalize_options, reject_unsupported_binary_direct_input
-from .input.memory_limits import enforce_materialized_input_limit
-from .input_lifetime import (
-    operation_context_for_source_plan,
-    operation_input_keepalive,
-    reserve_materialized_input,
+from .input.memory_limits import (
+    enforce_materialized_input_limit,
+    materialized_input_size_bytes,
 )
+from .operation_context import OperationExecutionContext
 from .output_diagnostics import patch_table_diagnostics
-from .parquet.direct_routes import parquet_direct_sink_raw_or_none
+from .parquet.direct_routes import parquet_direct_sink
 from .results import (
     TABLE_ADAPTER_FORMATS,
     Result,
     SinkResult,
+    convert_arrow_stream_output,
 )
 from .source_plan.attached import source_plan_from_data
-from .source_plan.remote import RemotePathSourceChunkProvider, prefetched_remote_chunks
+from .source_plan.remote import RemotePathSourceChunkProvider
+from .source_plan.remote_cleanup import take_prefetched_chunks
 from .streams import ArrowCStream
-from .table_adapter_sink import materialize_table_adapter_sink
+
+
+def operation_context_for_source_plan(
+    source_plan: Any,
+    *,
+    threading_mode: str,
+    memory_limit_bytes: int | None,
+) -> tuple[OperationExecutionContext, bool]:
+    """Return a borrowed plan context or create one owned by this call."""
+    if source_plan is not None:
+        for item in getattr(source_plan, "close_items", ()):
+            if isinstance(item, OperationExecutionContext):
+                return item, False
+    return (
+        OperationExecutionContext(
+            threading_mode=threading_mode,
+            memory_limit_bytes=memory_limit_bytes,
+        ),
+        True,
+    )
+
+
+def reserve_materialized_input(
+    operation_context: OperationExecutionContext,
+    data: Any,
+    format_name: str,
+    *,
+    source_name: str,
+) -> Any | None:
+    """Charge retained materialized input bytes to the operation ledger."""
+    materialized_bytes = materialized_input_size_bytes(
+        data,
+        format_name,
+        source=source_name,
+    )
+    if not materialized_bytes:
+        return None
+    return operation_context.memory_ledger.acquire(
+        materialized_bytes,
+        stage="materialized_input",
+    )
+
+
+def operation_input_keepalive(
+    operation_context: OperationExecutionContext,
+    *,
+    owns_operation_context: bool,
+    input_reservation: Any | None,
+) -> Any | None:
+    """Build the keepalive that closes only resources owned by this call."""
+    if owns_operation_context:
+        if input_reservation is not None:
+            return ChainedKeepalive(operation_context, input_reservation)
+        return operation_context
+    return input_reservation
+
+
+def materialize_table_adapter_sink(
+    context: Any,
+    data: Any,
+    *,
+    sink: str,
+    options: Any,
+    format: Any,
+    source: Any,
+) -> Any:
+    """Consume the native Arrow stream directly in an analytical adapter."""
+    threading_mode = (
+        options.performance.threading_mode if isinstance(options, Options) else "single"
+    )
+    output = context.to_sink(
+        data,
+        sink="stream",
+        options=options,
+        format=format,
+        source=source,
+    )
+    try:
+        conversion = convert_arrow_stream_output(
+            output.raw,
+            sink,
+            feature=f"sink={sink!r}",
+            threading_mode=threading_mode,
+        )
+        if conversion.resource_owner is None:
+            result = conversion.clean_data
+        else:
+            try:
+                result = _OwnedDuckDBRelation(
+                    conversion.clean_data,
+                    conversion.resource_owner,
+                )
+            except BaseException as primary:
+                _cleanup_with_note(
+                    primary,
+                    conversion.resource_owner,
+                    label="DuckDB adapter-owner rollback also failed",
+                )
+                raise
+    except BaseException as primary:
+        _cleanup_with_note(
+            primary,
+            output,
+            label="adapter stream cleanup also failed",
+        )
+        raise
+    output.close()
+    return result
 
 
 def _open_source_plan_sink_stream_or_none(
@@ -78,11 +186,10 @@ def _open_source_plan_sink_stream_or_none(
             first_row_columns={},
             timestamp_columns=(),
         )
-        _mark_native_path_sources_route()
         return raw
 
     if plan.kind == REMOTE_CHUNKS:
-        retained_chunks, remaining_start = prefetched_remote_chunks(plan.payload)
+        retained_chunks, remaining_start = take_prefetched_chunks(plan.payload)
         provider = RemotePathSourceChunkProvider(
             retained_chunks=retained_chunks,
             remaining_manifest=plan.payload,
@@ -97,7 +204,6 @@ def _open_source_plan_sink_stream_or_none(
                 first_row_columns={},
                 timestamp_columns=(),
             )
-            _mark_native_path_sources_route()
             return raw
         except BaseException as exc:
             _cleanup_with_note(
@@ -260,7 +366,7 @@ def execution_context_to_sink(
 
     if format_name == "parquet" and sink == "stream":
         try:
-            raw = parquet_direct_sink_raw_or_none(
+            direct_outcome = parquet_direct_sink(
                 context._raw,
                 data,
                 sink=sink,
@@ -269,6 +375,7 @@ def execution_context_to_sink(
                 call_options=options,
                 prepared=prepared,
             )
+            raw = direct_outcome.raw
         except BaseException as exc:
             if keepalive is not None:
                 _cleanup_with_note(

@@ -20,7 +20,7 @@ from ..core_impl.durations import normalize_duration
 from ..core_impl.governed_thread import (
     defer_governed_thread_retirement,
     reap_governed_thread_retirements,
-    start_governed_runtime_thread,
+    start_governed_thread,
 )
 from ..core_impl.memory_budget import (
     OperationMemoryLedger,
@@ -57,7 +57,6 @@ from .io_permits import (
 )
 from .io_shutdown import RemoteIoCleanupOwner, shutdown_remote_io
 from .provider_session_pool import activate_provider_session_pool
-from .staged_ownership import StagedResultOwnership as StagedResultOwnership
 
 T = TypeVar("T")
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 30.0
@@ -278,7 +277,7 @@ class _RemotePermitStageDomain:
     coordinator: "RemoteIoCoordinator"
     permit: Any | None
     descriptor_lease: Any | None
-    footprint_owner: ActiveRemoteIoFootprint | None
+    footprint_owner: ActiveRemoteIoFootprint
 
     def release(self) -> None:
         """Retire both domains without publishing a false cleanup commit.
@@ -311,12 +310,7 @@ class _RemotePermitStageDomain:
         descriptor_lease = self.descriptor_lease
         if descriptor_lease is not None:
             try:
-                if self.footprint_owner is not None:
-                    self.footprint_owner.release_descriptor_lease()
-                else:
-                    # Defensive compatibility path for synthetic domains that
-                    # predate ActiveRemoteIoFootprint ownership.
-                    descriptor_lease.release()
+                self.footprint_owner.release_descriptor_lease()
             except BaseException as descriptor_error:
                 if first_error is None:
                     first_error = descriptor_error
@@ -442,7 +436,7 @@ class RemoteIoCoordinator:
                 daemon=True,
             )
             registration = self._runtime_registration
-            start_governed_runtime_thread(registration, self._thread)
+            start_governed_thread(self._thread, registration=registration)
             started = True
         except BaseException as exc:
             self._closed = True
@@ -584,7 +578,6 @@ class RemoteIoCoordinator:
                         memory_ledger=self._operation_memory_ledger,
                         physical_threads=False,
                     )
-                    # Pass59 compatibility breadcrumb: _acquire_active_descriptor_lease(permit_weight)
                     descriptor_lease = await self._acquire_active_descriptor_lease(
                         footprint.total_file_descriptors
                     )
@@ -686,11 +679,7 @@ class RemoteIoCoordinator:
                 raise
             submission_owner.future = future
             self._futures.add(future)
-            submissions = getattr(self, "_submissions", None)
-            if submissions is None:
-                submissions = {}
-                self._submissions = submissions
-            submissions[future] = submission_owner
+            self._submissions[future] = submission_owner
             self._submission_callbacks_inflight += 1
             try:
                 setattr(future, "_schema_sanitizer_remote_submission", submission_owner)
@@ -736,32 +725,8 @@ class RemoteIoCoordinator:
         if threading.current_thread() is self._thread:
             raise RuntimeError("remote I/O coordinator cannot close from its owned thread")
 
-        condition = getattr(self, "_close_condition", None)
-        if condition is None:
-            with self._lock:
-                condition = getattr(self, "_close_condition", None)
-                if condition is None:
-                    condition = threading.Condition(self._lock)
-                    self._close_condition = condition
+        condition = self._close_condition
         with condition:
-            if not hasattr(self, "_terminal_callback_owners"):
-                self._terminal_callback_owners = set()
-            if not hasattr(self, "_deferred_terminal_callbacks"):
-                self._deferred_terminal_callbacks = deque()
-            if not hasattr(self, "_shutdown_future"):
-                self._shutdown_future = None
-            if not hasattr(self, "_failed_terminal_callbacks"):
-                self._failed_terminal_callbacks = deque()
-            if not hasattr(self, "_failed_permits"):
-                self._failed_permits = deque()
-            if not hasattr(self, "_terminal_retry_scheduled"):
-                self._terminal_retry_scheduled = False
-                self._terminal_retry_attempt = 0
-            if not hasattr(self, "_close_generation"):
-                self._close_generation = 0
-                self._completed_close_generation = 0
-                self._close_results = {}
-                self._close_waiters = {}
             if self._closing:
                 generation = self._close_generation
                 self._close_waiters[generation] = self._close_waiters.get(generation, 0) + 1
@@ -784,7 +749,7 @@ class RemoteIoCoordinator:
                 self._close_complete.clear()
                 loop = self._loop if self._thread.is_alive() else None
                 futures = tuple(self._futures)
-                submissions = tuple(getattr(self, "_submissions", {}).values())
+                submissions = tuple(self._submissions.values())
             else:
                 if self._close_generation >= (1 << 63) - 1:
                     raise RuntimeError("remote I/O close generation exhausted")
@@ -796,7 +761,7 @@ class RemoteIoCoordinator:
                 self._close_complete.clear()
                 loop = self._loop
                 futures = tuple(self._futures)
-                submissions = tuple(getattr(self, "_submissions", {}).values())
+                submissions = tuple(self._submissions.values())
 
         if wait_for_owner:
             deadline = monotonic() + self._shutdown_timeout_seconds
@@ -879,8 +844,8 @@ class RemoteIoCoordinator:
             if (
                 not host_must_remain_live
                 and loop is not None
-                and not bool(getattr(loop, "is_closed", lambda: False)())
-                and (bool(getattr(loop, "is_running", lambda: False)()) or self._thread.is_alive())
+                and not loop.is_closed()
+                and (loop.is_running() or self._thread.is_alive())
             ):
                 try:
                     remaining = deadline - monotonic()
@@ -950,7 +915,7 @@ class RemoteIoCoordinator:
             # The close generation cannot commit until every publisher that can
             # retain a failed reservation has left its callback.
             with condition:
-                while getattr(self, "_submission_callbacks_inflight", 0):
+                while self._submission_callbacks_inflight:
                     remaining = deadline - monotonic()
                     if remaining <= 0 or not condition.wait(timeout=remaining):
                         close_error = close_error or RuntimeError(
@@ -1069,7 +1034,7 @@ class RemoteIoCoordinator:
 
     def _ensure_owner_process(self) -> None:
         """Reject inherited event-loop, thread, and lock state before touching it."""
-        if os.getpid() != getattr(self, "_pid", os.getpid()):
+        if os.getpid() != self._pid:
             raise RuntimeError(
                 "remote I/O coordinator cannot be reused after fork; create it in the child"
             )
@@ -1079,22 +1044,22 @@ class RemoteIoCoordinator:
         return bool(
             self._permit_registration is not None
             or self._thread_lease is not None
-            or getattr(self, "_failed_submissions", ())
-            or getattr(self, "_failed_permits", ())
-            or getattr(self, "_submission_callbacks_inflight", 0)
-            or getattr(self, "_callbackless_submissions", {})
-            or getattr(self, "_submissions", {})
-            or getattr(self, "_shutdown_future", None) is not None
-            or getattr(self, "_terminal_callback_owners", set())
-            or getattr(self, "_deferred_terminal_callbacks", ())
-            or getattr(self, "_failed_terminal_callbacks", ())
-            or getattr(self, "_protocol_violations", 0)
+            or self._failed_submissions
+            or self._failed_permits
+            or self._submission_callbacks_inflight
+            or self._callbackless_submissions
+            or self._submissions
+            or self._shutdown_future is not None
+            or self._terminal_callback_owners
+            or self._deferred_terminal_callbacks
+            or self._failed_terminal_callbacks
+            or self._protocol_violations
             or self._thread.is_alive()
         )
 
     def _finish_submission_callback_locked(self) -> None:
         """Retire one submission callback barrier without masking underflow."""
-        current = int(getattr(self, "_submission_callbacks_inflight", 0))
+        current = self._submission_callbacks_inflight
         if current <= 0:
             self._protocol_violations += 1
             return
@@ -1103,16 +1068,11 @@ class RemoteIoCoordinator:
     def _release_permit_registration(self, *, transfer_on_failure: bool = False) -> bool:
         """Return shared capacity, optionally transferring a failed owner.
 
-        The default preserves the historical commit-after-release contract used
-        by explicit ``close()`` generations: the first release error propagates
+        Explicit ``close()`` generations propagate the first release error
         and the coordinator remains the retry owner. Terminal worker paths can
         request a bounded guardian handoff because no caller remains to retry.
         """
-        release_lock = getattr(self, "_release_lock", None)
-        if release_lock is None:
-            release_lock = threading.Lock()
-            self._release_lock = release_lock
-        with release_lock:
+        with self._release_lock:
             with self._lock:
                 registration = self._permit_registration
             if registration is None:
@@ -1139,11 +1099,7 @@ class RemoteIoCoordinator:
 
     def _release_thread_lease(self, *, transfer_on_failure: bool = False) -> bool:
         """Return the host-thread slot, optionally transferring failed cleanup."""
-        release_lock = getattr(self, "_release_lock", None)
-        if release_lock is None:
-            release_lock = threading.Lock()
-            self._release_lock = release_lock
-        with release_lock:
+        with self._release_lock:
             with self._lock:
                 lease = self._thread_lease
             if lease is None:
@@ -1171,11 +1127,7 @@ class RemoteIoCoordinator:
     def _detach_host_resource_capsule(self) -> int | None:
         """Move terminal resource ownership out of the coordinator graph."""
         global _HOST_RESOURCE_CAPSULE_SEQUENCE
-        release_lock = getattr(self, "_release_lock", None)
-        if release_lock is None:
-            release_lock = threading.Lock()
-            self._release_lock = release_lock
-        with release_lock:
+        with self._release_lock:
             with self._lock:
                 permit_registration = self._permit_registration
                 thread_lease = self._thread_lease
@@ -1320,23 +1272,15 @@ class RemoteIoCoordinator:
             owner.reservation.release()
         except BaseException:
             with self._lock:
-                failed = getattr(self, "_failed_submissions", None)
-                if failed is None:
-                    failed = deque()
-                    self._failed_submissions = failed
-                failed.append(owner.reservation)
-        condition = getattr(self, "_close_condition", None)
-        if condition is None:
-            condition = threading.Condition(self._lock)
-            self._close_condition = condition
+                self._failed_submissions.append(owner.reservation)
+        condition = self._close_condition
         callbacks: tuple[Callable[[Future[Any]], None], ...] = ()
         with condition:
             future = owner.future
             if future is not None:
                 self._futures.discard(future)
-                getattr(self, "_submissions", {}).pop(future, None)
-                callbackless = getattr(self, "_callbackless_submissions", {})
-                was_callbackless = callbackless.pop(future, None) is not None
+                self._submissions.pop(future, None)
+                was_callbackless = self._callbackless_submissions.pop(future, None) is not None
             else:
                 was_callbackless = False
             owner.terminal.set()
@@ -1469,9 +1413,7 @@ class RemoteIoCoordinator:
                 not future.cancelled() or not owner.started.is_set()
             ):
                 # A non-cancelled run_coroutine_threadsafe Future becomes done
-                # only after the task has produced its terminal outcome. This is
-                # also the safe fallback for non-standard test Futures whose
-                # coroutine body was never driven.
+                # only after the task has produced its terminal outcome.
                 try:
                     future.result(timeout=0)
                 except BaseException as exc:
@@ -1486,40 +1428,16 @@ class RemoteIoCoordinator:
         if not owner.registration_complete.is_set() or not owner.callback_seen.is_set():
             return
         if owner.claim_callback():
-            condition = getattr(self, "_close_condition", None)
-            if condition is None:
-                with self._lock:
-                    self._finish_submission_callback_locked()
-            else:
-                with condition:
-                    self._finish_submission_callback_locked()
-                    condition.notify_all()
-
-    def _complete_submission(
-        self,
-        future: Future[Any],
-        cleanup: _RemoteIoSubmission | RemoteIoSubmissionReservation,
-    ) -> None:
-        """Compatibility callback for older tests and internal doubles."""
-        owner = (
-            cleanup
-            if isinstance(cleanup, _RemoteIoSubmission)
-            else _RemoteIoSubmission(cleanup, future=future)
-        )
-        if not isinstance(cleanup, _RemoteIoSubmission):
-            owner.registration_complete.set()
-            owner.callback_seen.set()
-            self._finish_submission_real(owner)
-            self._complete_submission_callback_barrier(owner)
-            return
-        self._bridge_submission_done(future, owner)
+            with self._close_condition:
+                self._finish_submission_callback_locked()
+                self._close_condition.notify_all()
 
     def _complete_callbackless_submissions(self) -> None:
         """Finalize callbackless owners only after a safe terminal proof."""
         with self._lock:
             pending = tuple(
                 (future, owner)
-                for future, owner in getattr(self, "_callbackless_submissions", {}).items()
+                for future, owner in self._callbackless_submissions.items()
                 if owner.terminal.is_set()
                 or (future.done() and (not future.cancelled() or not owner.started.is_set()))
             )
@@ -1533,7 +1451,7 @@ class RemoteIoCoordinator:
                 self._finish_submission_real(owner)
             else:
                 with self._close_condition:
-                    getattr(self, "_callbackless_submissions", {}).pop(future, None)
+                    self._callbackless_submissions.pop(future, None)
                     if owner.claim_callback():
                         self._finish_submission_callback_locked()
                     self._close_condition.notify_all()
@@ -1543,7 +1461,7 @@ class RemoteIoCoordinator:
         while True:
             self._complete_callbackless_submissions()
             with self._lock:
-                pending = tuple(getattr(self, "_callbackless_submissions", {}).items())
+                pending = tuple(self._callbackless_submissions.items())
             if not pending:
                 return
             for future, owner in pending:
@@ -1592,9 +1510,7 @@ class RemoteIoCoordinator:
     def _retry_failed_submissions(self) -> None:
         """Retry every submission owner retained by failed done callbacks."""
         with self._lock:
-            pending: deque[RemoteIoSubmissionReservation] = getattr(
-                self, "_failed_submissions", deque()
-            )
+            pending = self._failed_submissions
             self._failed_submissions = deque()
         failed: deque[RemoteIoSubmissionReservation] = deque()
         primary: BaseException | None = None

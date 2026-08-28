@@ -10,6 +10,7 @@ import pytest
 from conftest import require_native
 
 import schema_sanitizer as ss
+from benchmarks.concurrency.assets import load_evidence
 from schema_sanitizer.api_impl.execution_context import default_pool
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -18,7 +19,6 @@ HEADER = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 TELEMETRY = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
 TELEMETRY_JSON = ROOT / "cpp/src/internal/runtime/performance_telemetry_json.cc.inc"
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/telemetry/submission-shards.json"
 
 
 def test_submission_shards_are_separate_and_cache_aligned() -> None:
@@ -115,7 +115,7 @@ def test_public_multiworker_stats_remain_exact(tmp_path: Path) -> None:
 
 def test_documentation_and_evidence_record_scope() -> None:
     """Release evidence records coverage, cache isolation, and both producer cases."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("submission-shards")
 
     for key in ("single_producer", "four_producers"):
         result = evidence[key]

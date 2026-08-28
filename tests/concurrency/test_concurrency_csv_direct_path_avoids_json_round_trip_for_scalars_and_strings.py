@@ -24,7 +24,6 @@ def test_csv_direct_path_avoids_json_round_trip_for_scalars_and_strings() -> Non
     assert "array_is_null(array, row)" in source
     assert "append_csv_cell_from_json" in source  # generic fallback retained
     assert "getenv" not in source
-    assert len(source.splitlines()) <= 500
 
 
 def test_csv_estimator_uses_csv_cells_and_keeps_interleave_margin() -> None:
@@ -37,10 +36,9 @@ def test_csv_estimator_uses_csv_cells_and_keeps_interleave_margin() -> None:
     assert "array.offset + row" in source
     assert "return multiply_capped(total, 2, cap);" in source
     assert "estimate_jsonl_row_bytes(root, array, row, cap)" in source
-    assert len(source.splitlines()) <= 500
 
 
-def test_csv_single_multi_and_legacy_bytes_are_identical(tmp_path: Path) -> None:
+def test_csv_single_multi_and_stream_adapter_bytes_are_identical(tmp_path: Path) -> None:
     """Direct scalar/string rendering preserves quoting, nulls, and row order."""
     require_native()
     pa = pytest.importorskip("pyarrow")

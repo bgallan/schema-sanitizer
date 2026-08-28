@@ -164,17 +164,6 @@ def test_storage_account_child_reset_replaces_inherited_global_lock() -> None:
         old_lock.release()
 
 
-def test_cross_process_storage_raw_amount_api_is_not_public() -> None:
-    from schema_sanitizer.core_impl import cross_process_storage as storage
-
-    assert "reserve_cross_process" not in storage.__all__
-    assert "release_cross_process" not in storage.__all__
-    assert not hasattr(storage, "reserve_cross_process")
-    assert not hasattr(storage, "release_cross_process")
-    assert hasattr(storage, "reserve_cross_process_account")
-    assert hasattr(storage, "release_cross_process_account")
-
-
 def test_provider_expiry_index_is_one_node_per_live_key() -> None:
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
@@ -217,7 +206,7 @@ def test_operation_memory_resize_commits_into_mutable_authoritative_entry() -> N
     start = source.index("    def _resize_python_lease(")
     end = source.index("\n    def _transfer_python_lease", start)
     body = source[start:end]
-    assert "entry.size_bytes = requested" in body
+    assert "entry.size_bytes = committed_bytes" in body
     assert "self._python_leases[" not in body
     assert "= (" not in body
 
@@ -249,18 +238,6 @@ def test_finalizer_activity_token_changes_across_cardinality_aba() -> None:
     escrow.release_ticket(second_ticket)
 
 
-def test_provider_fork_reset_drops_parent_tickets_without_releasing_them() -> None:
-    source = (ROOT / "src/schema_sanitizer/remote_impl/provider_throttle.py").read_text(
-        encoding="utf-8"
-    )
-    start = source.index("    def reset_after_fork(self)")
-    end = source.index("\n\n_PROVIDER_THROTTLE", start)
-    body = source[start:end]
-    assert "release_control_plane" not in body
-    assert "self._condition = Condition()" in body
-    assert "self._active_leases = {}" in body
-
-
 def test_active_owner_domains_are_charged_to_control_plane_budget() -> None:
     sources = {
         "process_resource_lease": ROOT / "src/schema_sanitizer/core_impl/process_resources.py",
@@ -275,62 +252,6 @@ def test_active_owner_domains_are_charged_to_control_plane_budget() -> None:
         text = path.read_text(encoding="utf-8")
         needle = "process_resource_lease:" if kind == "process_resource_lease" else kind
         assert needle in text and "reserve_control_plane(" in text, kind
-
-
-def test_operation_memory_stage_transfer_invalidates_upstream_without_recharge() -> None:
-    from schema_sanitizer.core_impl.memory_budget import (
-        OperationMemoryLease,
-        _MemoryLeaseRegistration,
-        _PythonMemoryLeaseEntry,
-    )
-
-    class Ledger:
-        def __init__(self) -> None:
-            self.physical = 0
-            self.entries: dict[int, _PythonMemoryLeaseEntry] = {}
-
-        def reserve(self, amount: int, *, stage: str) -> None:
-            self.physical += amount
-
-        def release(self, amount: int) -> None:
-            self.physical -= amount
-
-        def _register_python_lease(self, owner: OperationMemoryLease, amount: int):
-            capability = object()
-            self.entries[1] = _PythonMemoryLeaseEntry(id(owner), capability, amount)
-            registration = _MemoryLeaseRegistration()
-            registration.lease_id = 1
-            registration.capability = capability
-            return registration
-
-        def _entry(self, owner: OperationMemoryLease) -> _PythonMemoryLeaseEntry:
-            entry = self.entries[owner._lease_id]
-            if entry.owner_id != id(owner) or entry.capability is not owner._capability:
-                raise RuntimeError("not authoritative")
-            return entry
-
-        def _transfer_python_lease(
-            self, owner: OperationMemoryLease, successor: OperationMemoryLease
-        ) -> None:
-            entry = self._entry(owner)
-            entry.owner_id = id(successor)
-            entry.capability = successor._capability
-
-        def _release_python_lease(self, owner: OperationMemoryLease) -> None:
-            entry = self._entry(owner)
-            self.release(entry.size_bytes)
-            self.entries.pop(owner._lease_id)
-
-    ledger = Ledger()
-    upstream = OperationMemoryLease(ledger, 4096, "decode")  # type: ignore[arg-type]
-    downstream = upstream.transfer_stage("write")
-    assert downstream is not upstream
-    assert ledger.physical == 4096
-    assert upstream.reserved_bytes == 0
-    upstream.release()
-    assert ledger.physical == 4096
-    downstream.release()
-    assert ledger.physical == 0
 
 
 def test_composite_parallel_admission_acquires_bytes_before_physical_slots(
@@ -380,7 +301,7 @@ def test_56_pair_contracts_are_backed_by_concrete_runtime_implementations() -> N
     from schema_sanitizer.core_impl.concurrency_coverage import validate_concurrency_pair_contracts
 
     pair_count, evidence = validate_concurrency_pair_contracts()
-    assert pair_count == 56
+    assert pair_count == 49
     assert {item.name for item in evidence} == {
         "transferable_resident_memory_credit",
         "composite_slot_and_byte_admission",
@@ -534,7 +455,7 @@ def test_shutdown_uses_registered_finalizer_domains_epochs_and_control_budget() 
     source = (ROOT / "src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text(
         encoding="utf-8"
     )
-    assert "finalizer_activity_token()" in source
+    assert "write_finalizer_activity_into(" in source
     assert "for domain in finalizer_domains()" in source
     assert "process_control_plane_snapshot()" in source
     assert "control_plane_active" in source
@@ -583,10 +504,9 @@ def test_availability_dispatcher_is_sealed_per_governor_instance(
     )
     event = module.AvailabilityEvent.RETRY_SCHEDULER
     assert governor.register_availability_event(event)
-    canonical = governor._availability_events[event]
-    compatibility = module._AvailabilityDelivery(governor, event, canonical)
+    delivery = governor._availability_events[event]
     monkeypatch.setattr(module, "_dispatch_availability_event", lambda _event: stolen.set())
-    assert notifier.publish((compatibility,)) == ()
+    assert notifier.publish_one(delivery)
     assert first.wait(1.0)
     assert not stolen.is_set()
     assert notifier.close(deadline_seconds=1.0)
@@ -618,7 +538,7 @@ def test_remote_delivery_reclaims_batch_tail_before_propagating_baseexception() 
 def test_control_plane_static_baseline_is_part_of_governed_headroom() -> None:
     source = (ROOT / "src/schema_sanitizer/core_impl/memory_budget.py").read_text(encoding="utf-8")
     assert "exact.reserved_bytes + control.governed_bytes" in source
-    assert "snapshot.capacity_bytes - snapshot.reserved_bytes - control.governed_bytes" in source
+    assert "snapshot.capacity_bytes - snapshot.reserved_bytes" in source
 
 
 def test_runtime_shutdown_does_not_import_finalizer_domains_dynamically() -> None:

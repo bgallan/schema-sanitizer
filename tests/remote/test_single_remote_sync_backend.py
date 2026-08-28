@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from schema_sanitizer.remote_impl import sync_backend
-from schema_sanitizer.remote_impl.providers import azure_sync, gcs_sync, s3_sync
+from schema_sanitizer.remote_impl.providers import azure_sync, gcs, gcs_sync, s3_sync
 from schema_sanitizer.remote_impl.sync_http import SyncHttpResult
 from schema_sanitizer.sources import RemoteFile
 
@@ -262,7 +262,7 @@ def test_gcs_blocking_credentials_and_metadata_stay_inline(monkeypatch) -> None:
         calls.append(("request", threading.get_ident()))
         return SyncHttpResult(200, {}, b'{"name":"object.jsonl","size":"17"}')
 
-    monkeypatch.setattr(gcs_sync, "access_token", fake_access_token)
+    monkeypatch.setattr(gcs, "access_token", fake_access_token)
     monkeypatch.setattr(gcs_sync, "request_bytes", fake_request_bytes)
 
     metadata = gcs_sync.file_metadata("gs://bucket/object.jsonl")

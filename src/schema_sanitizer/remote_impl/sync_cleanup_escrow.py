@@ -1,6 +1,6 @@
 """Bounded terminal ownership for synchronous provider resources.
 
-Pass61 reserves an escrow slot and its network-FD capability *before* an SDK
+Cleanup reserves an escrow slot and its network-FD capability *before* an SDK
 resource is created.  A constructor, context-body, physical close, or logical
 release failure therefore always leaves one authoritative retry owner.
 """
@@ -278,15 +278,9 @@ def reserve_sync_cleanup(*, label: str, network_fds: int = 1) -> SyncCleanupRese
     return _SYNC_CLEANUP_ESCROW.reserve(label=label, network_fds=network_fds)
 
 
-def sync_cleanup_escrow_snapshot() -> SyncCleanupEscrowSnapshot:
-    """Return the synchronous provider cleanup escrow snapshot."""
-    return _SYNC_CLEANUP_ESCROW.snapshot()
-
-
 __all__ = [
     "SyncCleanupEscrowSnapshot",
     "SyncCleanupReservation",
     "process_sync_cleanup_escrow_snapshot",
     "reserve_sync_cleanup",
-    "sync_cleanup_escrow_snapshot",
 ]

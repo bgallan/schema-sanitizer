@@ -73,7 +73,6 @@ def test_coverage_matrix_matches_every_public_format() -> None:
         "json",
         "json_array",
         "jsonl",
-        "ndjson",
         "xml",
         "parquet",
         "python",
@@ -87,7 +86,7 @@ def test_coverage_matrix_matches_every_public_format() -> None:
         "polars",
         "duckdb",
     }
-    assert set(INPUT_CONCURRENCY_COVERAGE) - {"ndjson", "python"} == set(_FILE_FORMATS)
+    assert set(INPUT_CONCURRENCY_COVERAGE) - {"python"} == set(_FILE_FORMATS)
     assert all(stages for stages in INPUT_CONCURRENCY_COVERAGE.values())
     assert all(stages for stages in OUTPUT_CONCURRENCY_COVERAGE.values())
     for output_name in OUTPUT_CONCURRENCY_COVERAGE:

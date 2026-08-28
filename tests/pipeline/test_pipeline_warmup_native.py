@@ -49,10 +49,6 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
             calls.append((sources, kwargs))
             return FakeRaw()
 
-        def registry_probe_path_sources_best_effort(self, *_args, **_kwargs):
-            """Fail if warm-up falls back to the older probe path."""
-            raise AssertionError("warm-up should use native auto-registry stream")
-
     class FakePool:
         """Fake context pool."""
 
@@ -99,10 +95,9 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
 
 
 def test_pipeline_warm_up_uses_source_plan_probe_helper() -> None:
-    """Verify warm-up does not own low-level source-plan probing."""
+    """Verify warm-up delegates source-plan probing to the focused helper."""
     from schema_sanitizer.pipeline import registry_warmup
 
-    assert not hasattr(registry_warmup, "probe_source_plan_registry")
     assert hasattr(registry_warmup, "probe_prepared_source_plan_registry")
 
 
@@ -235,8 +230,6 @@ def test_pipeline_parquet_warm_up_uses_native_arrow_sources(tmp_path: Path) -> N
     first = _write_warm_up_source(tmp_path, "parquet", "single_file", "first", "alpha")
     second = _write_warm_up_source(tmp_path, "parquet", "single_file", "second", "beta")
 
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
-
     state = infer_warm_up_schema_registry_state(
         [
             PartitionRunPlan(date(2026, 1, 1), str(first), str(tmp_path / "first.parquet")),
@@ -252,7 +245,6 @@ def test_pipeline_parquet_warm_up_uses_native_arrow_sources(tmp_path: Path) -> N
     fields = state.schema_registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
     assert state.native_registry_state is not None
-    assert last_warm_up_route() == "native_parquet_arrow_sources"
 
 
 def test_pipeline_parquet_directory_warm_up_bypasses_jsonl_bridge(tmp_path: Path) -> None:
@@ -263,8 +255,6 @@ def test_pipeline_parquet_directory_warm_up_bypasses_jsonl_bridge(tmp_path: Path
     folder.mkdir()
     pq.write_table(pa.table({"alpha": [1]}), folder / "a.parquet")
     pq.write_table(pa.table({"beta": [2]}), folder / "b.parquet")
-
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
 
     state = infer_warm_up_schema_registry_state(
         [PartitionRunPlan(date(2026, 1, 1), str(folder), str(tmp_path / "out.parquet"))],
@@ -278,7 +268,6 @@ def test_pipeline_parquet_directory_warm_up_bypasses_jsonl_bridge(tmp_path: Path
     fields = state.schema_registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
     assert state.native_registry_state is not None
-    assert last_warm_up_route() == "native_parquet_arrow_sources"
 
 
 def test_pipeline_xml_directory_warm_up_bypasses_wrapper(
@@ -292,8 +281,6 @@ def test_pipeline_xml_directory_warm_up_bypasses_wrapper(
     )
     (folder / "b.xml").write_text("<row><beta>2</beta></row>", encoding="utf-8")
 
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
-
     registry = infer_warm_up_schema_registry(
         [PartitionRunPlan(date(2026, 1, 1), str(folder), str(tmp_path / "out.parquet"))],
         input_format="xml",
@@ -305,15 +292,12 @@ def test_pipeline_xml_directory_warm_up_bypasses_wrapper(
 
     fields = registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
-    assert last_warm_up_route() == "native_manifest_paths"
 
 
 def test_pipeline_xml_warm_up_infers_row_tag_natively(tmp_path: Path) -> None:
-    """Verify XML warm-up no longer needs the temp wrapper to infer row tags."""
+    """Verify XML warm-up infers row tags through the native path."""
     first = _write_warm_up_source(tmp_path, "xml", "single_file", "first", "alpha")
     second = _write_warm_up_source(tmp_path, "xml", "single_file", "second", "beta")
-
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
 
     registry = infer_warm_up_schema_registry(
         [
@@ -329,7 +313,6 @@ def test_pipeline_xml_warm_up_infers_row_tag_natively(tmp_path: Path) -> None:
 
     fields = registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
-    assert last_warm_up_route() == "native_manifest_paths"
 
 
 @pytest.mark.parametrize("input_format", ["csv", "xml"])
@@ -342,7 +325,6 @@ def test_pipeline_warm_up_native_manifest_replaces_fallback_routing(
 
     from schema_sanitizer.pipeline import registry_warmup as warm_up_input
 
-    assert not hasattr(warm_up_input, "_route_prepared_inputs_for_warm_up")
     progress = []
 
     prepared = warm_up_input.prepare_schema_warm_up_input(
@@ -371,7 +353,7 @@ def test_pipeline_warm_up_native_manifest_replaces_fallback_routing(
 
 @pytest.mark.parametrize(
     "input_format",
-    ["jsonl", "ndjson", "json", "json_array", "csv", "xml"],
+    ["jsonl", "json", "json_array", "csv", "xml"],
 )
 def test_pipeline_warm_up_and_normal_directory_share_source_descriptors(
     tmp_path: Path,
@@ -412,7 +394,7 @@ def test_pipeline_warm_up_and_normal_directory_share_source_descriptors(
 
 @pytest.mark.parametrize(
     "input_format",
-    ["jsonl", "ndjson", "json", "json_array", "csv", "xml", "parquet"],
+    ["jsonl", "json", "json_array", "csv", "xml", "parquet"],
 )
 @pytest.mark.parametrize("input_mode", ["single_file", "directory"])
 def test_pipeline_warm_up_supports_all_public_file_formats_and_modes(

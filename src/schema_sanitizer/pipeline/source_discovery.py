@@ -69,8 +69,8 @@ def _discovery_result_external_ownership_capability(
     live_lease = getattr(owner, "live_lease", None)
     if not callable(live_lease):
         return None
-    # Pass61: every independently escapable file record carries the same stable
-    # owner.  The scheduler therefore does not accept a container-level proof
+    # Every independently escapable file record carries the same stable owner.
+    # The scheduler therefore does not accept a container-level proof
     # if any payload element could outlive that ownership graph on its own.
     for local_file in discovered.local_files:
         if getattr(local_file, "_metadata_owner", None) is not owner:
@@ -86,9 +86,6 @@ _DISCOVERY_RESULT_MEMORY_CONTRACT = AsyncResultMemoryContract(
     ownership_mode=AsyncResultOwnershipMode.EXTERNALLY_GOVERNED,
     external_ownership_capability=_discovery_result_external_ownership_capability,
 )
-# Pass54 compatibility breadcrumb: expected_retained_bytes=512. The long-lived
-# directory metadata is charged by DirectoryMetadataBudget; this contract only
-# governs the scheduler bridge shell until the consumer adopts the result.
 
 
 class _DirectoryDiscoveryModule(Protocol):
@@ -168,7 +165,6 @@ def _local_directories_containing_files(
     groups: dict[Path, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for uri, kind in locations.items():
         path = _local_path(uri, kind)
-        # pass63 proof anchor: metadata_budget.charge_group_associations()
         discovery.publish_group_association(lambda: groups[path.parent][path.name].append(uri))
 
     for parent, children in groups.items():

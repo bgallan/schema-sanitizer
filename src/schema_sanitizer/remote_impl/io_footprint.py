@@ -107,7 +107,7 @@ class ActiveRemoteIoFootprint:
                     self._local_in_use = max(0, self._local_in_use - 1)
             return
 
-        # Pass61: footprint under-declaration is a contract violation. Acquiring
+        # Footprint under-declaration is a contract violation. Acquiring
         # another FD while this operation already owns part of the same composite
         # resource can create a circular wait under low capacity. Fail before the
         # physical open instead of recursively acquiring from the same governor.

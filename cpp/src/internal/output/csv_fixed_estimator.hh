@@ -117,15 +117,4 @@ make_csv_fixed_estimate_plan(const jsonl::JsonlField &root,
   return multiply_capped(total, 2, cap);
 }
 
-// Compatibility helper for source-level contracts and all-fixed users.
-[[nodiscard]] inline std::int64_t
-estimate_wide_fixed_csv_row_upper_bound(const jsonl::JsonlField &root) {
-  const auto plan = make_csv_fixed_estimate_plan(root);
-  if (!plan.eligible || !plan.dynamic_fields.empty()) {
-    return 0;
-  }
-  return multiply_capped(plan.fixed_base_bytes, 2,
-                         std::numeric_limits<std::int64_t>::max());
-}
-
 } // namespace sanitize::internal::text_output_estimator

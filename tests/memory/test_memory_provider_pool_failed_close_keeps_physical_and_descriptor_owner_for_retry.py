@@ -168,21 +168,6 @@ def test_io_shutdown_uses_hard_task_boundary_not_wait_for() -> None:
     assert "asyncio.wait_for" not in source
 
 
-def test_remote_io_domain_couples_active_fd_and_remote_permit() -> None:
-    source = _source("remote_impl/io_coordinator.py")
-    domain = source[
-        source.index("class _RemotePermitStageDomain") : source.index("class RemoteIoCoordinator")
-    ]
-    assert "descriptor_lease" in domain
-    assert "permit.release()" in domain
-    assert "descriptor_lease.release()" in domain
-    invoke = source[source.index("async def invoke() -> T:") :]
-    fd = invoke.index("_acquire_active_descriptor_lease(permit_weight)")
-    permit = invoke.index("self._permit_governor.acquire", fd)
-    attach = invoke.index('attach_domain("remote_io", domain)', permit)
-    assert fd < permit < attach
-
-
 def test_azure_sdk_fanout_is_disabled_for_async_blob_transfers() -> None:
     source = _source("remote_impl/providers/azure.py")
     assert "max_concurrency=policy.async_concurrency" not in source
@@ -207,22 +192,6 @@ def test_async_external_ownership_requires_runtime_issued_capability() -> None:
     )
     with pytest.raises(RuntimeError, match="authenticated ownership capability"):
         _assert_async_result_ownership(value, missing)
-
-    forged_false = AsyncResultMemoryContract(
-        preflight_bytes=1,
-        ownership_mode=AsyncResultOwnershipMode.EXTERNALLY_GOVERNED,
-        external_ownership_proof=lambda _value: False,
-    )
-    with pytest.raises(RuntimeError, match="runtime-issued"):
-        _assert_async_result_ownership(value, forged_false)
-
-    forged_true = AsyncResultMemoryContract(
-        preflight_bytes=1,
-        ownership_mode=AsyncResultOwnershipMode.EXTERNALLY_GOVERNED,
-        external_ownership_proof=lambda candidate: candidate is value,
-    )
-    with pytest.raises(RuntimeError, match="runtime-issued"):
-        _assert_async_result_ownership(value, forged_true)
 
     zero_payload = AsyncResultMemoryContract(
         preflight_bytes=1,

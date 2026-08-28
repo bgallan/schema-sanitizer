@@ -10,12 +10,12 @@ import pytest
 from conftest import require_native
 
 import schema_sanitizer as ss
+from benchmarks.concurrency.assets import load_evidence
 from schema_sanitizer.api_impl.execution_context import default_pool
 
 ROOT = Path(__file__).resolve().parents[2]
 HEADER = ROOT / "cpp/src/internal/runtime/performance_telemetry.hh"
 SOURCE = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/telemetry/worker-single-store-publication.json"
 
 
 def test_worker_shards_keep_private_single_writer_totals() -> None:
@@ -108,7 +108,7 @@ def test_public_four_worker_stats_remain_exact(tmp_path: Path) -> None:
 
 def test_documentation_and_evidence_record_scope() -> None:
     """Release evidence states coverage, measurement, and conservative gates."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("worker-single-store-publication")
 
     assert evidence["candidate_wins"] == evidence["pair_count"] == 15
     assert evidence["paired_median_reduction_percent"] > 70.0

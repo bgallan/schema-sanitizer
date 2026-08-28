@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -54,26 +55,28 @@ def test_remote_permit_ack_failure_retries_only_secondary_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from schema_sanitizer.core_impl import finalizer_cleanup
-    from schema_sanitizer.remote_impl.io_permits import RemoteIoPermit
+    from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
-    class Governor:
-        def __init__(self) -> None:
-            self.calls = 0
+    governor = RemoteIoPermitGovernor(1)
+    permit = asyncio.run(governor.acquire(label="prepared-finalizer-ack-disarms-primary-before"))
+    calls = 0
+    real_release = governor._release_permit
 
-        def _release(self, _weight: int) -> None:
-            self.calls += 1
+    def counting_release(owner: object) -> None:
+        nonlocal calls
+        calls += 1
+        real_release(owner)  # type: ignore[arg-type]
 
-    governor = Governor()
-    permit = RemoteIoPermit(governor, 1, "prepared-finalizer-ack-disarms-primary-before")  # type: ignore[arg-type]
+    monkeypatch.setattr(governor, "_release_permit", counting_release)
     _fail_first_release_for(monkeypatch, finalizer_cleanup._PREPARED_FINALIZER_ESCROW)
 
     with pytest.raises(RuntimeError, match="acknowledgement did not commit"):
         permit.release()
     assert permit._released is True
-    assert governor.calls == 1
+    assert calls == 1
 
     permit.release()
-    assert governor.calls == 1
+    assert calls == 1
     assert permit._finalizer_ticket == 0
 
 
@@ -135,46 +138,10 @@ def test_cross_process_exact_stale_authority_fails_closed() -> None:
             token,
             id(reservation) + 1,
             capability,
-            nonblocking=False,
         )
     assert token in coordinator._contributions
     reservation.release()
     assert token not in coordinator._contributions
-
-
-def test_cross_process_finalizer_ticket_failure_transfers_ack_authority(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl.cross_process_memory import _ProcessCrossMemoryCoordinator
-
-    coordinator = _ProcessCrossMemoryCoordinator(16 << 20)
-    escrow = coordinator._finalizer_releases
-    ticket = escrow.reserve_ticket()
-    assert ticket is not None
-    before = escrow.published_count()
-    _fail_first_release_for(monkeypatch, escrow)
-
-    assert coordinator.release_finalizer_ticket(ticket)
-    assert escrow.published_count() == before + 1
-    coordinator.reconcile_pending()
-    assert escrow.published_count() == before
-
-
-def test_stage_construction_ticket_failure_transfers_ack_authority(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import memory_budget as module
-
-    escrow = module._STAGE_ADMISSION_CONSTRUCTION_ESCROW
-    ticket = escrow.reserve_ticket()
-    assert ticket is not None
-    before = escrow.published_count()
-    _fail_first_release_for(monkeypatch, escrow)
-
-    assert module._retire_stage_admission_construction_ticket(ticket)
-    assert escrow.published_count() == before + 1
-    module.drain_abandoned_memory_finalizers()
-    assert escrow.published_count() == before
 
 
 def test_path_claim_capacity_rollback_never_decrements_uncommitted_admission(

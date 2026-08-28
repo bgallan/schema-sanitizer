@@ -152,7 +152,7 @@ def test_remote_parquet_directory_stages_children_synchronously(monkeypatch, tmp
 
     staged = remote_staging.stage_remote_parquet_directory(
         "s3://bucket/partition/",
-        suffixes=(".parquet", ".pq"),
+        suffixes=(".parquet",),
         memory_limit_bytes=None,
     )
     try:
@@ -180,7 +180,7 @@ def test_remote_parquet_directory_public_reader_uses_staged_arrow_path(
     ):
         """Return a local staged Parquet directory for a remote URI."""
         assert uri == "s3://bucket/partition/"
-        assert suffixes == (".parquet", ".pq")
+        assert suffixes == (".parquet",)
         assert isinstance(memory_limit_bytes, int) and memory_limit_bytes > 0
         staged_dir = tmp_path / "staged-parquet"
         staged_dir.mkdir()

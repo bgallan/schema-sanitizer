@@ -225,8 +225,8 @@ async def cancellable_async_sleep(seconds: float, *, stage: str) -> None:
         sleep_seconds = 0.1 if slice_seconds is None else slice_seconds
         started = monotonic()
         await asyncio.sleep(sleep_seconds)
-        # Subtract at least the requested slice. Test doubles and unusual event
-        # loops may return immediately; they must not turn cancellation polling
+        # Subtract at least the requested slice. Spurious event loops may return
+        # immediately; they must not turn cancellation polling
         # into an unbounded busy loop. Real scheduling delays are also honoured.
         remaining = max(0.0, remaining - max(sleep_seconds, monotonic() - started))
     check_operation_cancelled(stage=stage)

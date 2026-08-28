@@ -17,11 +17,6 @@ pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
 )
 
-_NATIVE_STUB_MODULES = (
-    "schema_sanitizer.core_impl.native_options",
-    "schema_sanitizer.core_impl.execution_policy",
-)
-
 
 def _move_all_pending_to_ready(scheduler: Any) -> None:
     """Deterministically perform the timer-worker state transition."""
@@ -194,7 +189,7 @@ def test_release_guardian_uses_bounded_shared_workers(
     assert guardian.snapshot().retained_bytes == 0
 
 
-def test_default_coordination_roots_isolate_foreign_legacy_owner(
+def test_default_coordination_roots_are_scoped_to_the_effective_uid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import schema_sanitizer.core_impl.path_identity as module
@@ -204,36 +199,19 @@ def test_default_coordination_roots_isolate_foreign_legacy_owner(
     if getuid is None:
         pytest.skip("effective-UID isolation is POSIX-specific")
     uid = getuid()
-    legacy = tmp_path / module._CLAIM_DIRECTORY
-    quarantine_legacy = tmp_path / "schema-sanitizer-quarantine"
-    legacy.mkdir(mode=0o700)
-    quarantine_legacy.mkdir(mode=0o700)
-    foreign_roots = {legacy, quarantine_legacy}
     real_lstat = os.lstat
 
-    def foreign_legacy_lstat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
-        metadata = real_lstat(path, *args, **kwargs)
-        try:
-            is_legacy = Path(path) in foreign_roots
-        except TypeError:
-            is_legacy = False
-        if not is_legacy:
-            return metadata
-        fields = list(metadata)
-        fields[4] = uid + 1
-        return os.stat_result(fields)
-
     monkeypatch.delenv(module._COORDINATION_ENV, raising=False)
+    monkeypatch.delenv(janitor_module._ENV_DIRECTORY, raising=False)
     monkeypatch.setattr(module.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(module.os, "lstat", foreign_legacy_lstat)
     root = module._private_claim_root()
     assert root == tmp_path / f"{module._CLAIM_DIRECTORY}-{uid}"
     assert root.is_dir()
     assert real_lstat(root).st_uid == uid
-    quarantine_root = janitor_module._TemporaryArtifactJanitor.root()
+    base, directory_name, quarantine_root = janitor_module._configured_root_location()
+    assert base == tmp_path
+    assert directory_name == f"schema-sanitizer-quarantine-{uid}"
     assert quarantine_root == tmp_path / f"schema-sanitizer-quarantine-{uid}"
-    assert quarantine_root.is_dir()
-    assert real_lstat(quarantine_root).st_uid == uid
 
 
 def test_claim_sweep_budget_counts_unrelated_entries(
@@ -420,7 +398,6 @@ def test_cleanup_worker_start_is_published_before_start_commit(
 
 def test_async_bridge_transfers_failed_lease_to_guardian(
     monkeypatch: pytest.MonkeyPatch,
-    native_stub: None,
 ) -> None:
     from contextvars import copy_context
 

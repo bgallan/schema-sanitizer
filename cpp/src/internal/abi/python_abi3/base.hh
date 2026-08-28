@@ -1,4 +1,4 @@
-// Declares shared Python ABI3 bridge helpers.
+// Declares shared Python ABI3 extension helpers.
 
 #pragma once
 
@@ -17,8 +17,6 @@
 #endif
 #endif
 
-#include "internal/abi/schema_sanitizer_c_bridge.hh"
-
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -26,11 +24,29 @@
 
 namespace sanitize {
 class ChunkSource;
-}
+class Status;
+} // namespace sanitize
+
+struct ArrowArrayStream;
 
 namespace core_abi3_internal {
 
+struct NativeContext;
+
 enum class PythonSourceKind { kPath, kText, kStream, kUnknown };
+void release_arrow_stream(ArrowArrayStream *stream) noexcept;
+
+struct ArrowStreamDeleter {
+  void operator()(ArrowArrayStream *stream) const noexcept {
+    release_arrow_stream(stream);
+  }
+};
+
+using OwnedArrowStream = std::unique_ptr<ArrowArrayStream, ArrowStreamDeleter>;
+
+inline OwnedArrowStream own_arrow_stream(ArrowArrayStream *stream) noexcept {
+  return OwnedArrowStream(stream);
+}
 
 // Releases the GIL for one native blocking region and restores it on every
 // exit path. Python callbacks reached by the native region acquire it locally.
@@ -62,14 +78,34 @@ template <class Callable> decltype(auto) call_without_gil(Callable &&callable) {
   return std::forward<Callable>(callable)();
 }
 
-void raise_status_error(int status, char *err);
+void raise_status_error(const sanitize::Status &status);
 PyObject *fsencode_path(PyObject *obj);
 int bytes_or_str_view(PyObject *obj, const char **out_ptr, Py_ssize_t *out_len);
 int tuple_set_item_steal(PyObject *tup, Py_ssize_t index, PyObject *item);
+inline PyObject *materialization_stats_dict(long long rows_value,
+                                            long long batches_value) {
+  PyObject *dict = PyDict_New();
+  if (!dict) {
+    return nullptr;
+  }
+  PyObject *rows = PyLong_FromLongLong(rows_value);
+  PyObject *batches = PyLong_FromLongLong(batches_value);
+  if (!rows || !batches ||
+      PyDict_SetItemString(dict, "materialized_rows", rows) < 0 ||
+      PyDict_SetItemString(dict, "batches", batches) < 0) {
+    Py_XDECREF(rows);
+    Py_XDECREF(batches);
+    Py_DECREF(dict);
+    return nullptr;
+  }
+  Py_DECREF(rows);
+  Py_DECREF(batches);
+  return dict;
+}
 int readonly_buffer_view(PyObject *obj, const std::uint8_t **out_ptr,
                          Py_ssize_t *out_len, PyObject **out_owner);
 bool check_python_signals();
-void install_python_interrupt_check(schema_sanitizer_context *ctx);
+void install_python_interrupt_check(NativeContext *ctx);
 std::shared_ptr<sanitize::ChunkSource>
 make_python_reader_chunk_source(PyObject *reader);
 PythonSourceKind parse_python_source_kind(const char *source_name) noexcept;

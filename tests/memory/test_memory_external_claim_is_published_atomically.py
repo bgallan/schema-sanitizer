@@ -151,11 +151,11 @@ def test_retry_worker_start_rollback_has_autonomous_guardian(
     guardian = module._RELEASE_GUARDIAN
     while time.monotonic() < deadline:
         with guardian._condition:
-            if id(lease) not in guardian._owner_index:
+            if id(lease) not in guardian._items:
                 break
         time.sleep(0.01)
     with guardian._condition:
-        assert id(lease) not in guardian._owner_index
+        assert id(lease) not in guardian._items
     assert scheduler.snapshot().failed_worker_leases == 0
 
 
@@ -227,7 +227,11 @@ def test_failed_stale_delete_retains_claim_owner(
     leftover.write_text("x")
     janitor = _TemporaryArtifactJanitor()
     janitor.root = lambda: root  # type: ignore[method-assign]
-    monkeypatch.setattr(janitor, "_delete", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        janitor,
+        "_delete_owned",
+        lambda path, _is_dir, identity=None: (False, path, identity, False),
+    )
     janitor._scan_stale()
     assert janitor.snapshot().pending_artifacts == 1
     artifact = next(iter(janitor._pending.values()))
@@ -293,27 +297,3 @@ def test_path_claim_owner_finalizer_eventually_removes_external_claim(
     while claim.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not claim.exists()
-
-
-def test_source_contracts() -> None:
-    root = Path(__file__).resolve().parents[2]
-    retry = (root / "src/schema_sanitizer/core_impl/retry_scheduler.py").read_text()
-    path_identity = (root / "src/schema_sanitizer/core_impl/path_identity.py").read_text()
-    assert "_next_token_locked" in retry
-    assert "discard_payload" in retry
-    assert "_compact_heap_locked" in retry
-    assert "schema-sanitizer-retry-timer" in retry
-    assert "schema-sanitizer-retry-executor" in retry
-    assert "schema-sanitizer-retry-lease-guardian" in retry
-    assert "_MAX_EMERGENCY_BYTES" in retry
-    assert "os.link(" in path_identity
-    assert ".claim-write-" in path_identity
-    assert "authority_released" in path_identity
-    assert "_CLAIM_SWEEP_ITERATOR" in path_identity
-    header = (root / "cpp/src/internal/runtime/operation_task_arena.hh").read_text()
-    source = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
-    assert "class TaskMemoryLease" in header
-    assert "SubmitLeased" in header and "SubmitLeased" in source
-    assert "kLaneCount = 2U" in source
-    assert "reaper_queued_bytes" in header
-    assert "post_shutdown_retained_bytes" in header

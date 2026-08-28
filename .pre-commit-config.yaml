@@ -1,7 +1,7 @@
 ---
 minimum_pre_commit_version: 3.7.0
 default_stages: [pre-commit, pre-push]
-exclude: ^(build/|dist/|wheelhouse/|\.venv.*/|__pycache__/)
+exclude: ^(\.work/|dist/|wheelhouse/|\.venv.*/|__pycache__/)
 repos:
   # Generic repo hygiene + config file formatting
   - repo: https://github.com/pre-commit/pre-commit-hooks

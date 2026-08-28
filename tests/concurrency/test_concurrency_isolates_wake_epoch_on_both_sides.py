@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/layout/wake-epoch-cacheline.json"
-PROBE = ROOT / "benchmarks/probes/concurrency/layout/wake-epoch-cacheline-tsan.cc"
 
 
 def test_isolates_wake_epoch_on_both_sides() -> None:
@@ -40,7 +39,7 @@ def test_preserves_wake_protocol_operations() -> None:
 
 def test_probe_repeats_real_park_wake_and_exact_drain() -> None:
     """The native/TSan probe stresses wake and queue ownership repeatedly."""
-    source = PROBE.read_text(encoding="utf-8")
+    source = load_probe("layout/wake-epoch-cacheline-tsan.cc")
     compact = source.replace(" ", "").replace("\n", "")
 
     assert "kWaves=96U" in compact
@@ -53,7 +52,7 @@ def test_probe_repeats_real_park_wake_and_exact_drain() -> None:
 
 def test_evidence_is_positive_and_narrowly_scoped() -> None:
     """The benchmark shows cache ownership gains without throughput claims."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("wake-epoch-cacheline")
 
     assert evidence["pair_count"] == 15
     assert evidence["iterations_per_thread"] == 5_000_000

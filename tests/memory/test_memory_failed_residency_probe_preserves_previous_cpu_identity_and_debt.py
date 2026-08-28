@@ -158,8 +158,10 @@ def test_armed_physical_tombstone_retains_finalizer_until_actual_cleanup() -> No
             receipt.amount = int(target)
             return receipt.amount
 
-    claim_id = module._EXTERNAL_RUNTIME_CLAIM_SLOTS.acquire()
+    permit = module._SharedExternalRuntimeNativePermit(key, 0)
+    claim_id = module._EXTERNAL_RUNTIME_CLAIM_SLOTS.acquire_for(permit)
     assert claim_id is not None
+    permit._bind_claim_id(claim_id)
     receipt = Receipt()
     entry = module._ExternalRuntimePoolCoordinatorEntry(
         runtime=None,
@@ -172,7 +174,6 @@ def test_armed_physical_tombstone_retains_finalizer_until_actual_cleanup() -> No
         config_owner_thread_id=123456,
     )
     module._EXTERNAL_RUNTIME_POOL_COORDINATOR[key] = entry
-    permit = module._SharedExternalRuntimeNativePermit(key, claim_id)
     capsule = permit._finalizer_capsule
     assert capsule is not None
     ticket = capsule.ticket
@@ -196,7 +197,7 @@ def test_armed_physical_tombstone_retains_finalizer_until_actual_cleanup() -> No
     module.drain_finalizer_cleanup()
     assert receipt.amount == 0
     assert claim_id not in entry.physical_claims
-    assert not module._EXTERNAL_RUNTIME_CLAIM_SLOTS.owns(claim_id)
+    assert module._EXTERNAL_RUNTIME_CLAIM_SLOTS.owner_for(claim_id) is None
     assert not authority.is_armed_for(ticket)
     assert authority._escrow_armed_ticket == 0
 
@@ -220,8 +221,10 @@ def test_manual_target_zero_hands_off_retry_instead_of_waiting() -> None:
             receipt.amount = int(target)
             return receipt.amount
 
-    claim_id = module._EXTERNAL_RUNTIME_CLAIM_SLOTS.acquire()
+    permit = module._SharedExternalRuntimeNativePermit(key, 0)
+    claim_id = module._EXTERNAL_RUNTIME_CLAIM_SLOTS.acquire_for(permit)
     assert claim_id is not None
+    permit._bind_claim_id(claim_id)
     receipt = Receipt()
     entry = module._ExternalRuntimePoolCoordinatorEntry(
         runtime=None,
@@ -234,8 +237,6 @@ def test_manual_target_zero_hands_off_retry_instead_of_waiting() -> None:
         config_owner_thread_id=999999,
     )
     module._EXTERNAL_RUNTIME_POOL_COORDINATOR[key] = entry
-    permit = module._SharedExternalRuntimeNativePermit(key, claim_id)
-
     # Must not wait for the third-party configuration owner. The wrapper hands
     # exact retry authority to escrow and returns after publishing target zero.
     permit.release()
@@ -250,7 +251,7 @@ def test_manual_target_zero_hands_off_retry_instead_of_waiting() -> None:
         module._EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION.notify_all()
     module.drain_finalizer_cleanup()
     assert receipt.amount == 0
-    assert not module._EXTERNAL_RUNTIME_CLAIM_SLOTS.owns(claim_id)
+    assert module._EXTERNAL_RUNTIME_CLAIM_SLOTS.owner_for(claim_id) is None
 
 
 def test_control_plane_wrapper_loss_requests_exact_capability_retirement() -> None:

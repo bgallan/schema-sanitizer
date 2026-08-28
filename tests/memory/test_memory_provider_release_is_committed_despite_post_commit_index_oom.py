@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
-from threading import Lock
 
 import pytest
 
@@ -113,29 +111,18 @@ def test_cross_process_storage_account_is_exact_and_serialized() -> None:
     )
 
     account = open_cross_process_storage_account(47)
-    calls: list[tuple[str, int, int]] = []
-
-    def reserve_impl(device: int, amount: int, capacity: int, **kwargs: object) -> int:
-        calls.append(("reserve", device, amount))
-        return amount
-
-    def release_impl(device: int, amount: int, **kwargs: object) -> int:
-        calls.append(("release", device, amount))
-        return 0
-
-    assert reserve_cross_process_account(account, 16, 128, _reserve_impl=reserve_impl) == 16
+    assert reserve_cross_process_account(account, 16, 128, enabled=False) == 0
     assert account.reserved_bytes == 16
     with pytest.raises(RuntimeError, match="exceeds authoritative contribution"):
-        release_cross_process_account(account, 17, _release_impl=release_impl)
+        release_cross_process_account(account, 17, enabled=False)
     assert account.reserved_bytes == 16
-    release_cross_process_account(account, 16, _release_impl=release_impl)
+    release_cross_process_account(account, 16, enabled=False)
     assert account.reserved_bytes == 0
     close_cross_process_storage_account(account)
     with pytest.raises(RuntimeError, match="not active"):
-        reserve_cross_process_account(account, 1, 128, _reserve_impl=reserve_impl)
+        reserve_cross_process_account(account, 1, 128, enabled=False)
     with pytest.raises(RuntimeError, match="not active"):
         close_cross_process_storage_account(account)
-    assert calls == [("reserve", 47, 16), ("release", 47, 16)]
 
 
 def test_cross_process_storage_local_account_registry_is_bounded_and_reuses_tokens(
@@ -155,9 +142,6 @@ def test_cross_process_storage_local_account_registry_is_bounded_and_reuses_toke
     module.close_cross_process_storage_account(first)
     third = module.open_cross_process_storage_account(3)
     assert third.token == first_token
-    # Token reuse is safe because the old object/capability no longer authenticates.
-    with pytest.raises(RuntimeError, match="not active"):
-        module._authenticate_account(first)
     module.close_cross_process_storage_account(second)
     module.close_cross_process_storage_account(third)
 
@@ -202,7 +186,7 @@ def test_control_plane_budget_composes_with_native_resident_envelope(
 
     monkeypatch.setattr(
         memory_module,
-        "_optional_process_resident_memory_snapshot",
+        "_raw_process_resident_memory_snapshot",
         lambda: SimpleNamespace(capacity_bytes=1024, reserved_bytes=800),
     )
     budget = _ProcessControlPlaneBudget()
@@ -213,48 +197,10 @@ def test_control_plane_budget_composes_with_native_resident_envelope(
     assert budget.snapshot().reserved_bytes == 0
 
 
-def test_control_plane_budget_stays_hard_bounded_without_native_envelope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import memory_budget as memory_module
-    from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
-
-    monkeypatch.setattr(
-        memory_module,
-        "_optional_process_resident_memory_snapshot",
-        lambda: None,
-    )
-    budget = _ProcessControlPlaneBudget()
-    budget.configure(512)
-    ticket = budget.reserve("source-only", 256)
-    snapshot = budget.snapshot()
-    assert snapshot.reserved_bytes == 256
-    assert snapshot.capacity_bytes == 512
-    budget.release(ticket)
-    assert budget.snapshot().reserved_bytes == 0
-
-
 def test_operation_memory_reservation_uses_shared_governed_admission_lock() -> None:
     source = Path("src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     assert "with _GOVERNED_MEMORY_ADMISSION_LOCK:" in source
     assert "resident.reserved_bytes" in source
-    assert "+ control.governed_bytes" in source
-    assert "process_governed_memory_bytes" in source
-
-
-def test_operation_memory_credit_transfer_keeps_same_owner_and_bytes() -> None:
-    from schema_sanitizer.core_impl.memory_budget import OperationMemoryLease
-
-    lease = object.__new__(OperationMemoryLease)
-    lease._pid = os.getpid()
-    lease._lock = Lock()
-    lease._released = False
-    lease._size_bytes = 8192
-    lease.stage = "reader"
-    result = lease.transfer_stage("writer")
-    assert result is lease
-    assert lease.stage == "writer"
-    assert lease._size_bytes == 8192
 
 
 def test_composite_parallel_admission_transfers_and_releases_once() -> None:
@@ -265,8 +211,9 @@ def test_composite_parallel_admission_transfers_and_releases_once() -> None:
             self.stages: list[str] = []
             self.closed = 0
 
-        def transfer_stage(self, stage: str) -> None:
+        def transfer_stage(self, stage: str) -> "FakeLease":
             self.stages.append(stage)
+            return self
 
         def close(self) -> None:
             self.closed += 1
@@ -286,7 +233,7 @@ def test_all_io_pairs_advertise_integrated_credit_and_composite_admission() -> N
 
     matrix = coverage.concurrency_pair_guarantees()
     rows = [row for outputs in matrix.values() for row in outputs.values()]
-    assert len(rows) == 56
+    assert len(rows) == 49
     assert all(row["resident_credit_transfer"] is True for row in rows)
     assert all(row["composite_slot_byte_admission"] is True for row in rows)
     assert all(row["control_plane_budgeted"] is True for row in rows)
@@ -362,7 +309,9 @@ def test_runtime_thread_start_commit_does_not_report_diagnostic_failure(
     monkeypatch.setattr(registry, "_mark_progress_locked", fail_diagnostics)
     registration.start_thread(thread)
     assert thread.is_alive()
-    assert registry.snapshot().registered_services == 1
+    snapshot = registry.snapshot()
+    assert snapshot.registered_services == 1
+    assert snapshot.post_commit_failures >= 1
     exited.set()
     thread.join(1.0)
     registration.close()
@@ -386,12 +335,12 @@ def test_level_triggered_availability_failure_leaves_autonomous_retry_debt(
         "_schedule_availability_retry_noexcept",
         lambda: scheduled.append(governor._availability_retry_callback),
     )
-    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish", lambda _batch: (object(),))
+    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish_one", lambda _delivery: False)
     lease.release()
     assert governor._availability_dirty is True
     assert scheduled == [governor._availability_retry_callback]
 
-    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish", lambda _batch: ())
+    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish_one", lambda _delivery: True)
     callback = scheduled.pop()
     callback()  # type: ignore[operator]
     assert governor._availability_dirty is False

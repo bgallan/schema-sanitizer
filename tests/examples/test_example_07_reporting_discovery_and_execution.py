@@ -546,7 +546,7 @@ def test_example_07_hourly_directory_prefix_plan() -> None:
             "--partition-granularity",
             "hourly",
             "--input-format",
-            "ndjson",
+            "jsonl",
             "--input-mode",
             "directory",
             "--target-table",
@@ -651,7 +651,7 @@ def test_example_07_directory_discovery_skips_empty_partitions(tmp_path: Path) -
     source_directories = [tmp_path / f"hour={hour:02d}" for hour in (8, 9)]
     for directory in source_directories:
         directory.mkdir()
-    (source_directories[0] / "part.pq").write_bytes(b"parquet-placeholder")
+    (source_directories[0] / "part.parquet").write_bytes(b"parquet-placeholder")
     (source_directories[1] / "ignored.csv").write_text("value\n1\n", encoding="utf-8")
     plans = [
         PartitionRunPlan(

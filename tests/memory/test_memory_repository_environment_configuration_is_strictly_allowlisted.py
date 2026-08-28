@@ -30,6 +30,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     )
     ignored = {
         ".git",
+        ".work",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
@@ -80,7 +81,6 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
         "tests/quality/test_ci_workflow_topology.py",
         "tests/quality/test_distribution_archive_cleanliness.py",
-        "tests/quality/test_layout_build_source_limits.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }
     assert set(offenders) <= allowed_environment_files

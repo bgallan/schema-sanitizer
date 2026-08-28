@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Iterable
-from contextlib import suppress
 from threading import Condition, Lock
 from time import monotonic
 from typing import Any, cast
@@ -269,11 +268,7 @@ class _ReplayReader:
 
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
         """Export the replay reader through the Arrow C Stream protocol."""
-        export = self._reader.__arrow_c_stream__
-        if requested_schema is not None:
-            with suppress(TypeError):
-                return export(requested_schema)
-        return export()
+        return self._reader.__arrow_c_stream__(requested_schema)
 
     def close(self) -> None:
         """Close reader resources while retaining any cleanup failures."""
@@ -340,8 +335,6 @@ class ReplayableArrowStream:
         if isinstance(stream, pa.Table):
             self.schema = stream.schema
             return stream.to_batches()
-        if hasattr(stream, "schema"):
-            self.schema = stream.schema
         if isinstance(stream, pa.RecordBatchReader):
             self.schema = stream.schema
             return stream
@@ -349,8 +342,6 @@ class ReplayableArrowStream:
             reader = pa.RecordBatchReader.from_stream(stream)
             self.schema = reader.schema
             return reader
-        if hasattr(stream, "__iter__") and hasattr(stream, "schema"):
-            return stream
         raise TypeError("Parquet output requires a replayable Arrow stream for safe fallback.")
 
     def _spool(self, stream: Any) -> None:
@@ -396,7 +387,7 @@ class ReplayableArrowStream:
                 budgeted = _BudgetedReplayFile(handle, reservation)
                 with self._pa.output_stream(budgeted) as sink:
                     with self._pa.ipc.new_stream(sink, self.schema) as writer:
-                        if hasattr(source, "read_next_batch"):
+                        if isinstance(source, self._pa.RecordBatchReader):
                             self._copy_reader(source, writer)
                         else:
                             for batch in source:
@@ -418,85 +409,51 @@ class ReplayableArrowStream:
 
     def reader(self) -> _ReplayReader:
         """Return a fresh governed reader retaining artifact bytes until close."""
-        artifact = getattr(self, "_artifact", None)
+        artifact = self._artifact
         if artifact is None:
-            if self._path is None:
-                raise RuntimeError("Replayable Parquet stream has been closed.")
-            reader_lease = None
-            # Historical proof anchor and legacy path: this read is governed.
-            handle = open_governed_file(self._path, "rb")
-            path = None
-        else:
-            reader_lease = artifact.acquire_reader()
-            path = artifact.path
-            if path is None:
-                reader_lease.close()
-                raise RuntimeError("Replayable Parquet stream has been closed.")
+            raise RuntimeError("Replayable Parquet stream has been closed.")
+        reader_lease = artifact.acquire_reader()
+        path = artifact.path
+        if path is None:
+            reader_lease.close()
+            raise RuntimeError("Replayable Parquet stream has been closed.")
         try:
-            if path is not None:
-                handle = open_governed_file(path, "rb")
+            handle = open_governed_file(path, "rb")
         except BaseException:
-            if reader_lease is not None:
-                reader_lease.close()
+            reader_lease.close()
             raise
         try:
             source = self._pa.input_stream(handle)
             reader = self._pa.ipc.open_stream(source)
         except BaseException:
             handle.close()
-            if reader_lease is not None:
-                reader_lease.close()
+            reader_lease.close()
             raise
         # LIFO close order is reader -> source -> handle -> reader lease, so
         # storage bytes cannot be returned before the physical FD is gone.
-        keepalive = (reader_lease, handle, source) if reader_lease is not None else (handle, source)
+        keepalive = (reader_lease, handle, source)
         return _ReplayReader(reader, keepalive=keepalive)
 
     def close(self) -> None:
         """Unlink now but return storage only after every reader FD is closed."""
-        if os.getpid() != getattr(self, "_pid", os.getpid()):
+        if os.getpid() != self._pid:
             return
-        artifact = getattr(self, "_artifact", None)
-        if artifact is not None:
-            try:
-                artifact.close()
-            except BaseException:
-                self._path = artifact.path
-                return
+        artifact = self._artifact
+        if artifact is None:
+            return
+        try:
+            artifact.close()
+        except BaseException:
             self._path = artifact.path
-            if artifact.released:
-                self._storage_lease = None
-                self._storage_pool = None
-                self._artifact = None
-        else:
-            # Compatibility for focused legacy tests constructing via __new__.
-            path = getattr(self, "_path", None)
-            if path is not None:
-                try:
-                    os.unlink(path)
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    return
-                self._path = None
-            lease = getattr(self, "_storage_lease", None)
-            if lease is not None:
-                try:
-                    lease.release()
-                except BaseException:
-                    return
-                self._storage_lease = None
-            pool = getattr(self, "_storage_pool", None)
-            if pool is not None:
-                try:
-                    pool.close()
-                except BaseException:
-                    return
-                self._storage_pool = None
-
-        ticket = getattr(self, "_finalizer_ticket", None)
-        cleanup = getattr(self, "_finalizer_capsule", None)
-        if getattr(self, "_artifact", None) is None and ticket is not None and cleanup is not None:
+            return
+        self._path = artifact.path
+        if artifact.released:
+            self._storage_lease = None
+            self._storage_pool = None
+            self._artifact = None
+        ticket = self._finalizer_ticket
+        cleanup = self._finalizer_capsule
+        if self._artifact is None and ticket is not None and cleanup is not None:
             cancel_prepared_finalizer_cleanup(cleanup)
             self._finalizer_ticket = None
             self._finalizer_capsule = None

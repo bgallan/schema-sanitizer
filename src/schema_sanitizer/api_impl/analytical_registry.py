@@ -13,7 +13,7 @@ from ..input_impl.selection import _Source
 from ..options_impl.call_options import unwrap_options
 from ..options_impl.options import memory_limit_bytes_or_none
 from .input.directory_preparation import prepare_single_parquet_file
-from .parquet.direct_routes import parquet_direct_registry_sink_raw_or_none
+from .parquet.direct_routes import parquet_direct_registry_sink
 from .parquet.errors import unsupported_direct_parquet_ingestion
 from .source_plan.attached import source_plan_from_data
 from .source_plan.registry import (
@@ -34,7 +34,7 @@ def open_single_source_registry_stream(
 ) -> OpenedSourcePlanRegistryStream:
     """Open a native registry stream with generated metadata already injected."""
     if prepared_input.format == "parquet":
-        raw = parquet_direct_registry_sink_raw_or_none(
+        direct_outcome = parquet_direct_registry_sink(
             raw_ctx,
             prepared_input.data,
             source=cast(_Source, prepared_input.source),
@@ -44,6 +44,7 @@ def open_single_source_registry_stream(
             field_name_policy=field_name_policy,
             schema_mode=schema_mode,
         )
+        raw = direct_outcome.raw
         if raw is not None:
             observe_successful_input_runtime_stage("parquet")
             return OpenedSourcePlanRegistryStream(
