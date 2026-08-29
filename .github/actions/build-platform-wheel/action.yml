@@ -58,6 +58,60 @@ runs:
         python -c
         "import importlib.util,sys;
         sys.exit(0 if importlib.util.find_spec('pyarrow') is None else 1)"
+    - name: Preseed the pinned Windows NuGet client
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+        import hashlib
+        import os
+        import ssl
+        import tempfile
+        import time
+        import urllib.request
+        from pathlib import Path
+        import certifi
+        from cibuildwheel.util.file import CIBW_CACHE_PATH
+        url = 'https://dist.nuget.org/win-x86-commandline/v7.9.0/nuget.exe'
+        expected = '992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800'
+        CIBW_CACHE_PATH.mkdir(parents=True, exist_ok=True)
+        target = CIBW_CACHE_PATH / 'nuget.exe'
+        installed = None
+        if not target.is_symlink() and target.is_file():
+            installed = hashlib.sha256(target.read_bytes()).hexdigest()
+        if installed != expected:
+            context = ssl.create_default_context(cafile=certifi.where())
+            payload = None
+            for attempt in range(5):
+                try:
+                    with urllib.request.urlopen(url, context=context, timeout=60) as response:
+                        payload = response.read()
+                    break
+                except OSError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(2 ** attempt)
+            if payload is None:
+                raise SystemExit('Pinned NuGet download returned no payload')
+            actual = hashlib.sha256(payload).hexdigest()
+            if actual != expected:
+                raise SystemExit(
+                    f'NuGet SHA-256 mismatch: expected {expected}, got {actual}'
+                )
+            with tempfile.NamedTemporaryFile(dir=CIBW_CACHE_PATH, delete=False) as stream:
+                stream.write(payload)
+                temporary = Path(stream.name)
+            try:
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        if target.is_symlink() or not target.is_file():
+            raise SystemExit(f'Pinned NuGet client was not installed safely: {target}')
+        installed = hashlib.sha256(target.read_bytes()).hexdigest()
+        if installed != expected:
+            raise SystemExit(f'Pinned NuGet client was not installed safely: {target}')
+        PY
     - name: Prevent Arrow C++ headers
       if: runner.os == 'Linux'
       shell: bash
@@ -122,30 +176,51 @@ runs:
       shell: bash
       run: |-
         set -euo pipefail
-        rm -rf -- wheelhouse .work/build
+        rm -rf -- wheelhouse .work/build .work/delvewheel-extract
+        mkdir -p .work
         SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
         [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
         export SOURCE_DATE_EPOCH
-        python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}"
+        python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}" \
+          2>&1 | tee .work/cibuildwheel.log
+        if grep -Fq -- 'Exception ignored in:' .work/cibuildwheel.log; then
+          echo 'cibuildwheel reported an unraisable exception' >&2
+          exit 2
+        fi
+        if grep -Fq -- 'win-x86-commandline/latest/nuget.exe' \
+          .work/cibuildwheel.log; then
+          echo 'cibuildwheel attempted a mutable NuGet download' >&2
+          exit 2
+        fi
     - name: Certify the Windows release toolchain
       if: runner.os == 'Windows'
       shell: bash
       run: |
         set -euo pipefail
-        mapfile -t caches < <(find .work/build -type f -name CMakeCache.txt -print)
+        shopt -s nullglob
+        caches=(.work/build/*/CMakeCache.txt)
         if [[ "${#caches[@]}" -ne 1 ]]; then
-          echo "Expected exactly one Windows CMake cache, found ${#caches[@]}" >&2
+          echo "Expected exactly one root Windows CMake cache, found ${#caches[@]}" >&2
+          for candidate in "${caches[@]}"; do
+            printf '  %s\n' "${candidate}" >&2
+          done
+          exit 2
+        fi
+        cache="${caches[0]}"
+        if [[ ! -f "${cache}" || -L "${cache}" ]]; then
+          echo "Authoritative Windows CMake cache is missing or unsafe: ${cache}" >&2
           exit 2
         fi
         expected=(
+          'CMAKE_PROJECT_NAME:STATIC=schema_sanitizer'
           'CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022'
           'CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise'
           'CMAKE_GENERATOR_PLATFORM:INTERNAL=x64'
           'CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64'
         )
         for entry in "${expected[@]}"; do
-          grep -Fx -- "${entry}" "${caches[0]}" >/dev/null || {
-            echo "Windows release toolchain mismatch: missing '${entry}' in ${caches[0]}" >&2
+          grep -Fx -- "${entry}" "${cache}" >/dev/null || {
+            echo "Windows release toolchain mismatch: missing '${entry}' in ${cache}" >&2
             exit 2
           }
         done

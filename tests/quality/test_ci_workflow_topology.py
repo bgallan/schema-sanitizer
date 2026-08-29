@@ -14,6 +14,7 @@ import signal
 import stat
 import subprocess
 import sys
+import textwrap
 import tomllib
 from pathlib import Path
 
@@ -900,15 +901,11 @@ def test_wheel_build_runs_the_stable_abi_audit_explicitly() -> None:
     )
 
 
-def test_build_backend_uses_one_exact_native_toolchain() -> None:
-    """Isolated builds cannot select a newer CMake, Ninja, or Make fallback."""
+def test_build_backend_injects_one_exact_native_toolchain() -> None:
+    """Backend-managed builds pin CMake and Ninja without duplicate requirements."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert pyproject["build-system"]["requires"] == [
-        "cmake==4.3.4",
-        "ninja==1.13.0",
-        "scikit-build-core==0.11.6",
-    ]
+    assert pyproject["build-system"]["requires"] == ["scikit-build-core==0.11.6"]
     scikit_build = pyproject["tool"]["scikit-build"]
     assert scikit_build["cmake"]["version"] == "==4.3.4"
     assert scikit_build["ninja"] == {"version": "==1.13.0", "make-fallback": False}
@@ -1074,19 +1071,41 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
         "CMAKE_GENERATOR_TOOLSET": "v143,host=x64",
     }
     assert windows["repair-wheel-command"] == (
-        "python -W error -m delvewheel repair --add-path "
+        "python -W error -m delvewheel repair --extract-dir "
+        "{project}/.work/delvewheel-extract --add-path "
         "{project}/.work/msvc-redist -w {dest_dir} -v {wheel}"
     )
     assert "Microsoft.VCRedistVersion.default.txt" in build
     assert "Microsoft.VC143.CRT" in build
+    assert "name: Preseed the pinned Windows NuGet client" in build
+    assert "https://dist.nuget.org/win-x86-commandline/v7.9.0/nuget.exe" in build
+    assert "992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800" in build
+    assert "from cibuildwheel.util.file import CIBW_CACHE_PATH" in build
+    assert "target.is_symlink() or not target.is_file()" in build
+    assert "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" not in build
+    assert "grep -Fq -- 'win-x86-commandline/latest/nuget.exe'" in build
+    nuget_script = build.split("python - <<'PY'\n", 1)[1].split("\n        PY", 1)[0]
+    compile(textwrap.dedent(nuget_script), "pinned-nuget-bootstrap", "exec")
+    assert build.index("name: Preseed the pinned Windows NuGet client") < build.index(
+        "python -m cibuildwheel"
+    )
     assert "rm -rf -- .work/msvc-redist" in build
     assert 'cp -- "${redist_directory}"/*.dll .work/msvc-redist/' in build
+    assert "rm -rf -- wheelhouse .work/build .work/delvewheel-extract" in build
+    assert "2>&1 | tee .work/cibuildwheel.log" in build
+    assert "grep -Fq -- 'Exception ignored in:' .work/cibuildwheel.log" in build
     assert (
         build.index("python -m cibuildwheel")
         < build.index("name: Certify the Windows release toolchain")
         < build.index("python -m abi3audit")
     )
+    assert "shopt -s nullglob" in build
+    assert "caches=(.work/build/*/CMakeCache.txt)" in build
+    assert 'cache="${caches[0]}"' in build
+    assert '[[ ! -f "${cache}" || -L "${cache}" ]]' in build
+    assert "find .work/build -type f -name CMakeCache.txt" not in build
     for cache_entry in (
+        "CMAKE_PROJECT_NAME:STATIC=schema_sanitizer",
         "CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022",
         "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
         "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64",
