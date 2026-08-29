@@ -30,7 +30,7 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
 
     first_source = tmp_path / "first.jsonl"
     first_source.write_text(
-        json.dumps({"variables": {"email": "a@example.com", "phone": "1"}}) + "\n",
+        json.dumps({"variables": {"middle": "initial", "tail": "value"}}) + "\n",
         encoding="utf-8",
     )
     first_out = tmp_path / "first.parquet"
@@ -47,10 +47,10 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
         json.dumps(
             {
                 "variables": {
-                    "birthday": "2026-01-01",
-                    "company": "acme",
-                    "country": "ES",
-                    "email": "b@example.com",
+                    "alpha": "first",
+                    "beta": "second",
+                    "gamma": "third",
+                    "middle": "updated",
                 }
             }
         )
@@ -69,14 +69,14 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
 
     physical_schema = pq.read_schema(second_out)
     variable_names = [field.name for field in physical_schema.field("variables").type]
-    assert variable_names == ["birthday", "company", "country", "email", "phone"]
+    assert variable_names == ["alpha", "beta", "gamma", "middle", "tail"]
     assert pq.read_table(second_out, columns=["variables"])["variables"].to_pylist() == [
         {
-            "birthday": "2026-01-01",
-            "company": "acme",
-            "country": "ES",
-            "email": "b@example.com",
-            "phone": None,
+            "alpha": "first",
+            "beta": "second",
+            "gamma": "third",
+            "middle": "updated",
+            "tail": None,
         }
     ]
 

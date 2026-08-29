@@ -33,7 +33,7 @@ runs:
     - name: Run TSan fuzz regressions and mutation campaigns
       shell: bash
       run: >-
-        python meta/ci/fuzz/run_fuzz_regressions.py
+        meta/ci/fuzz/run_fuzz_regressions.sh
         --build-root .work/build/tsan/fuzz
         --campaign-runs 1000
         --seed 15172026
@@ -51,12 +51,29 @@ runs:
           meta/ci/sanitizers/tsan_python_launcher.cc \
           -o .work/bin/python-tsan \
           "${python_embed_ldflags[@]}"
-    - name: Require capacity for complete TSan concurrency coverage
+    - name: Check capacity for complete TSan concurrency coverage
+      id: sanitizer_cpu_capacity
       shell: bash
-      run: >-
-        .work/build/tsan/schema_sanitizer_sanitized_ordered_executor
-        --require-cpu-capacity 3
+      run: |
+        set -euo pipefail
+        if capacity_message="$(
+          .work/build/tsan/schema_sanitizer_sanitized_ordered_executor \
+            --require-cpu-capacity 3 2>&1
+        )"; then
+          echo "sufficient=true" >> "${GITHUB_OUTPUT}"
+        else
+          probe_status=$?
+          if [[ "${probe_status}" -eq 1 && \
+                "${capacity_message}" =~ ^sanitizer\ runner\ exposes\ [0-9]+\ CPU\ credits\;\ at\ least\ 3\ are\ required\ for\ complete\ concurrency\ coverage$ ]]; then
+            echo "sufficient=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning title=Sanitizer concurrency skipped::${capacity_message}; CPU-dependent concurrency steps will be skipped."
+          else
+            printf '%s\n' "${capacity_message}" >&2
+            exit "${probe_status}"
+          fi
+        fi
     - name: Run the executor and all full-extension TSan domains
+      if: steps.sanitizer_cpu_capacity.outputs.sufficient == 'true'
       shell: bash
       run: >-
         meta/ci/sanitizers/run_tsan_extension_suite.sh

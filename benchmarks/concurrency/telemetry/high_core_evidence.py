@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ from benchmarks.concurrency.telemetry.high_core_suite import (  # noqa: E402
     recommend_suite_frontier,
     suite_markdown,
 )
+from benchmarks.support.command import CAPTURE, CommandError, run_command  # noqa: E402
 
 _DEFAULT_PERF_EVENTS = (
     "task-clock,cycles,instructions,cache-references,cache-misses,"
@@ -213,12 +213,12 @@ def _base_command(args: argparse.Namespace) -> list[str]:
 
 
 def _run_json(command: list[str], *, output: Path | None = None) -> dict[str, Any]:
-    """Run a subprocess and decode its JSON standard output."""
-    completed = subprocess.run(
+    """Run an isolated command and decode its JSON standard output."""
+    completed = run_command(
         command,
         check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=CAPTURE,
+        stderr=CAPTURE,
         text=True,
     )
     if completed.returncode != 0:
@@ -364,7 +364,7 @@ def main() -> None:
     _validate(parser, args)
     try:
         report = _execute(args)
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, RuntimeError, ValueError, CommandError) as error:
         parser.error(str(error))
     print(json.dumps(report, indent=2, sort_keys=True))
 

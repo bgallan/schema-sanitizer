@@ -64,10 +64,10 @@ def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> 
                     "variables",
                     pa.struct(
                         [
-                            pa.field("email", pa.string()),
-                            pa.field("phone", pa.string()),
-                            pa.field("birthday", pa.string()),
-                            pa.field("company", pa.string()),
+                            pa.field("middle", pa.string()),
+                            pa.field("tail", pa.string()),
+                            pa.field("alpha", pa.string()),
+                            pa.field("beta", pa.string()),
                         ]
                     ),
                 ),
@@ -84,7 +84,7 @@ def test_bigquery_external_table_ddl_can_sort_nested_fields_alphabetically() -> 
 
     assert ddl.index("`a` STRING") < ddl.index("`variables` STRUCT") < ddl.index("`z` INT64")
     assert (
-        "`variables` STRUCT<`birthday` STRING, `company` STRING, `email` STRING, `phone` STRING>"
+        "`variables` STRUCT<`alpha` STRING, `beta` STRING, `middle` STRING, `tail` STRING>"
     ) in ddl
 
 

@@ -1,13 +1,15 @@
-"""Tests for deterministic execution of promoted fuzz crashes.
+"""Tests for deterministic planning of promoted fuzz crashes.
 
-It validates stable crash discovery, bounded campaign commands, symlink rejection,
-temporary staging, and machine-readable evidence.
+They cover packed-input staging, bounded engine flags, symlink rejection, stable
+campaign seeds, shell quoting, cleanup ownership, and delayed evidence publication.
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -15,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "meta" / "ci" / "fuzz" / "run_fuzz_regressions.py"
 
 
-def _module():
+def _module() -> ModuleType:
     """Load the CI script as a testable module."""
     spec = importlib.util.spec_from_file_location("run_fuzz_regressions", SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -24,84 +26,87 @@ def _module():
     return module
 
 
-def test_regression_runner_discovers_stable_cases_and_commands(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Every parser directory is executed against its matching fuzzer binary."""
-    module = _module()
-    build_root = tmp_path / "build"
-    regression_root = tmp_path / "regressions"
-    calls: list[list[str]] = []
-    staged_inputs: list[tuple[Path, bytes]] = []
-
+def _runner_tree(module: ModuleType, root: Path) -> tuple[Path, Path]:
+    """Create regular fuzzer binaries and one loose regression per target."""
+    build_root = root / "build"
+    regression_root = root / "regressions"
+    build_root.mkdir()
     for target in module.TARGETS:
-        build_root.mkdir(exist_ok=True)
         module.fuzzer_binary(build_root, target).write_bytes(b"binary")
         target_root = regression_root / target
         target_root.mkdir(parents=True)
         (target_root / "case.bin").write_bytes(target.encode())
+    return build_root, regression_root
 
-    def fake_run(command: list[str], *, check: bool) -> None:
-        """Capture one deterministic fuzzer invocation."""
-        assert check is True
-        path = Path(command[-1])
-        staged_inputs.append((path, path.read_bytes()))
-        calls.append(command)
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    assert module.run_regressions(build_root, regression_root) == len(module.TARGETS)
-    assert len(calls) == len(module.TARGETS)
-    for target, command in zip(module.TARGETS, calls, strict=True):
+def test_regression_planner_stages_stable_cases_and_commands(tmp_path: Path) -> None:
+    """Every logical input is staged and assigned to its matching fuzzer."""
+    module = _module()
+    build_root, regression_root = _runner_tree(module, tmp_path)
+    staging_root = tmp_path / "staged"
+
+    commands = module.regression_commands(build_root, regression_root, staging_root)
+
+    assert len(commands) == len(module.TARGETS)
+    for target, command in zip(module.TARGETS, commands, strict=True):
         assert Path(command[0]) == module.fuzzer_binary(build_root, target)
-        assert command[1] == "-runs=1"
-        assert command[2:4] == [
+        assert command[1:4] == (
+            "-runs=1",
             f"-max_input_ms={module.DEFAULT_MAX_INPUT_MS}",
             f"-max_rss_mb={module.DEFAULT_MAX_RSS_MB}",
-        ]
-        assert Path(command[4]).name == "case.bin"
-        assert Path(command[4]).parent != regression_root / target
-    assert [data for _path, data in staged_inputs] == [target.encode() for target in module.TARGETS]
-    assert all(not path.exists() for path, _data in staged_inputs)
+        )
+        staged = Path(command[4])
+        assert staged == staging_root / target / "case.bin"
+        assert staged.read_bytes() == target.encode()
+        assert staged.parent != regression_root / target
 
 
-def test_regression_runner_rejects_empty_regression_set(tmp_path: Path) -> None:
-    """CI fails rather than silently claiming regression coverage with no inputs."""
+def test_regression_planner_materializes_repository_archives(tmp_path: Path) -> None:
+    """Packed regressions become ordinary staged files before shell execution."""
     module = _module()
     build_root = tmp_path / "build"
-    regression_root = tmp_path / "regressions"
     build_root.mkdir()
     for target in module.TARGETS:
         module.fuzzer_binary(build_root, target).write_bytes(b"binary")
-        (regression_root / target).mkdir(parents=True)
+
+    commands = module.regression_commands(
+        build_root,
+        ROOT / "fuzz" / "regressions",
+        tmp_path / "staged",
+    )
+
+    assert len(commands) == 275
+    assert all(Path(command[-1]).is_file() for command in commands)
+    assert all(Path(command[-1]).is_relative_to(tmp_path / "staged") for command in commands)
+
+
+def test_regression_planner_rejects_empty_regression_set(tmp_path: Path) -> None:
+    """CI fails rather than claiming regression coverage with no inputs."""
+    module = _module()
+    build_root, regression_root = _runner_tree(module, tmp_path)
+    first_target = module.TARGETS[0]
+    (regression_root / first_target / "case.bin").unlink()
 
     with pytest.raises(RuntimeError, match="no fuzz regression inputs"):
-        module.run_regressions(build_root, regression_root)
+        module.regression_commands(build_root, regression_root, tmp_path / "staged")
 
 
-def test_regression_runner_rejects_a_missing_target_directory(tmp_path: Path) -> None:
-    """A populated sibling target cannot hide a missing parser regression set."""
+def test_regression_planner_rejects_a_missing_target_directory(tmp_path: Path) -> None:
+    """A populated sibling cannot hide a missing parser regression set."""
     module = _module()
-    build_root = tmp_path / "build"
-    regression_root = tmp_path / "regressions"
-    build_root.mkdir()
+    build_root, regression_root = _runner_tree(module, tmp_path)
     missing = module.TARGETS[0]
-    for target in module.TARGETS:
-        module.fuzzer_binary(build_root, target).write_bytes(b"binary")
-        if target == missing:
-            continue
-        target_root = regression_root / target
-        target_root.mkdir(parents=True)
-        (target_root / "case.bin").write_bytes(target.encode())
+    (regression_root / missing / "case.bin").unlink()
+    (regression_root / missing).rmdir()
 
     with pytest.raises(
         FileNotFoundError,
         match=rf"missing regular fuzz target directory: .*{missing}",
     ):
-        module.run_regressions(build_root, regression_root)
+        module.regression_commands(build_root, regression_root, tmp_path / "staged")
 
 
-def test_regression_cases_reject_a_symlinked_target(tmp_path: Path) -> None:
+def test_target_cases_reject_a_symlinked_target(tmp_path: Path) -> None:
     """Custom roots cannot redirect one parser target outside its declared tree."""
     module = _module()
     regression_root = tmp_path / "regressions"
@@ -115,134 +120,151 @@ def test_regression_cases_reject_a_symlinked_target(tmp_path: Path) -> None:
         pytest.skip(f"directory symlinks are unavailable: {error}")
 
     with pytest.raises(FileNotFoundError, match="missing regular fuzz target directory"):
-        module.regression_cases(regression_root, target)
+        module.target_cases(regression_root, target)
 
 
-def test_campaign_runner_uses_stable_target_seeds_and_limits(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Mutation campaigns must be bounded and reproducible per parser."""
+def test_target_cases_reject_a_symlinked_input(tmp_path: Path) -> None:
+    """A corpus entry cannot redirect reads outside its regular target directory."""
     module = _module()
-    build_root = tmp_path / "build"
-    regression_root = tmp_path / "regressions"
-    calls: list[list[str]] = []
-    staged_corpora: list[Path] = []
+    target = module.TARGETS[0]
+    target_root = tmp_path / "regressions" / target
+    target_root.mkdir(parents=True)
+    external = tmp_path / "external"
+    external.write_bytes(b"outside")
+    try:
+        (target_root / "case").symlink_to(external)
+    except OSError as error:
+        pytest.skip(f"file symlinks are unavailable: {error}")
 
-    build_root.mkdir()
-    for target in module.TARGETS:
-        module.fuzzer_binary(build_root, target).write_bytes(b"binary")
-        target_root = regression_root / target
-        target_root.mkdir(parents=True)
-        (target_root / "case.bin").write_bytes(target.encode())
+    with pytest.raises(ValueError, match="fuzz target directories must stay flat"):
+        module.target_cases(tmp_path / "regressions", target)
 
-    def fake_run(command: list[str], *, check: bool) -> None:
-        """Capture one bounded mutation campaign."""
-        assert check is True
-        staged_corpora.append(Path(command[-1]))
-        calls.append(command)
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    assert module.run_campaigns(
+def test_regression_planner_rejects_a_symlinked_binary(tmp_path: Path) -> None:
+    """The execution plan accepts only regular build outputs as fuzzers."""
+    module = _module()
+    build_root, regression_root = _runner_tree(module, tmp_path)
+    target = module.TARGETS[0]
+    binary = module.fuzzer_binary(build_root, target)
+    replacement = build_root / "replacement"
+    replacement.write_bytes(b"binary")
+    binary.unlink()
+    try:
+        binary.symlink_to(replacement)
+    except OSError as error:
+        pytest.skip(f"file symlinks are unavailable: {error}")
+
+    with pytest.raises(FileNotFoundError, match="missing regular fuzzer binary"):
+        module.regression_commands(build_root, regression_root, tmp_path / "staged")
+
+
+def test_campaign_planner_uses_stable_target_seeds_and_limits(tmp_path: Path) -> None:
+    """Mutation campaigns remain bounded and reproducible per parser."""
+    module = _module()
+    build_root, regression_root = _runner_tree(module, tmp_path)
+    campaign_root = tmp_path / "campaign"
+
+    commands = module.campaign_commands(
         build_root,
         regression_root,
+        campaign_root,
         runs=17,
         seed=41,
         max_length=4096,
-    ) == 17 * len(module.TARGETS)
-    assert len(calls) == len(module.TARGETS)
-    for ordinal, (target, command) in enumerate(zip(module.TARGETS, calls, strict=True)):
+    )
+
+    assert len(commands) == len(module.TARGETS)
+    for ordinal, (target, command) in enumerate(zip(module.TARGETS, commands, strict=True)):
         assert Path(command[0]) == module.fuzzer_binary(build_root, target)
-        assert command[1:6] == [
+        assert command[1:6] == (
             "-runs=17",
             f"-seed={41 + ordinal}",
             "-max_len=4096",
             f"-max_input_ms={module.DEFAULT_MAX_INPUT_MS}",
             f"-max_rss_mb={module.DEFAULT_MAX_RSS_MB}",
-        ]
-        assert Path(command[6]).name == target
-        assert Path(command[6]) != regression_root / target
-    assert all(not corpus.exists() for corpus in staged_corpora)
+        )
+        assert Path(command[6]) == campaign_root / target
+        assert Path(command[6]).is_dir()
 
 
-def test_libfuzzer_runner_uses_native_timeout_and_rss_flags(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """ASan/UBSan libFuzzer jobs must not receive standalone-only options."""
+def test_libfuzzer_planner_uses_native_timeout_and_rss_flags(tmp_path: Path) -> None:
+    """ASan and UBSan libFuzzer jobs avoid standalone-only options."""
     module = _module()
-    build_root = tmp_path / "build"
-    regression_root = tmp_path / "regressions"
-    calls: list[list[str]] = []
+    build_root, regression_root = _runner_tree(module, tmp_path)
 
-    build_root.mkdir()
-    for target in module.TARGETS:
-        module.fuzzer_binary(build_root, target).write_bytes(b"binary")
-        target_root = regression_root / target
-        target_root.mkdir(parents=True)
-        (target_root / "case.bin").write_bytes(target.encode())
-
-    def fake_run(command: list[str], *, check: bool) -> None:
-        """Record one deterministic fuzz-runner subprocess invocation."""
-        assert check is True
-        calls.append(command)
-
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    assert module.run_regressions(
+    commands = module.regression_commands(
         build_root,
         regression_root,
+        tmp_path / "staged",
         max_input_ms=5_001,
         max_rss_mb=768,
         engine="libfuzzer",
-    ) == len(module.TARGETS)
+    )
 
-    for command in calls:
-        assert command[1:4] == ["-runs=1", "-timeout=6", "-rss_limit_mb=768"]
+    for command in commands:
+        assert command[1:4] == ("-runs=1", "-timeout=6", "-rss_limit_mb=768")
         assert all("max_input_ms" not in argument for argument in command)
         assert all("max_rss_mb" not in argument for argument in command)
 
 
 def test_guard_arguments_reject_unknown_engine() -> None:
-    """Configuration mistakes must fail before starting a fuzz subprocess."""
+    """Configuration mistakes fail before any fuzz command is emitted."""
     module = _module()
 
     with pytest.raises(ValueError, match="unsupported fuzz engine"):
         module.guard_arguments("unknown", max_input_ms=1_000, max_rss_mb=128)
 
 
-def test_main_can_publish_machine_readable_fuzz_evidence(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Scheduled campaigns emit canonical evidence for limit review automation."""
+def test_build_plan_owns_all_staging_until_shell_execution(tmp_path: Path) -> None:
+    """The generated shell, rather than the short-lived planner, owns cleanup."""
     module = _module()
-    output = tmp_path / "evidence.json"
-    monkeypatch.setattr(module, "run_regressions", lambda *args, **kwargs: 10)
-    monkeypatch.setattr(module, "run_campaigns", lambda *args, **kwargs: 4000)
-    monkeypatch.setattr(
-        module,
-        "parse_args",
-        lambda: type(
-            "Args",
-            (),
-            {
-                "build_root": tmp_path,
-                "regression_root": tmp_path,
-                "campaign_runs": 1000,
-                "seed": 41,
-                "max_len": 4096,
-                "max_input_ms": 5000,
-                "max_rss_mb": 768,
-                "engine": "libfuzzer",
-                "evidence_output": output,
-            },
-        )(),
+    build_root, regression_root = _runner_tree(module, tmp_path)
+    args = argparse.Namespace(
+        build_root=build_root,
+        regression_root=regression_root,
+        corpus_root=regression_root,
+        work_root=tmp_path / "work",
+        campaign_runs=0,
+        seed=41,
+        max_len=4096,
+        max_input_ms=5000,
+        max_rss_mb=768,
+        engine="standalone",
     )
 
-    module.main()
-    import json
+    plan = module.build_plan(args)
 
-    evidence = json.loads(output.read_text(encoding="utf-8"))
-    assert evidence["status"] == "passed"
-    assert evidence["regression_inputs"] == 10
-    assert evidence["mutation_runs"] == 4000
-    assert evidence["sanitizer_findings"] == 0
+    assert plan.staging_root.is_dir()
+    assert all(Path(command[-1]).is_relative_to(plan.staging_root) for command in plan.commands)
+    assert plan.regression_inputs == len(module.TARGETS)
+    assert plan.mutation_runs == 0
+
+
+def test_shell_plan_quotes_commands_and_publishes_evidence_last(tmp_path: Path) -> None:
+    """Passing evidence appears only after quoted commands and owned cleanup setup."""
+    module = _module()
+    output = tmp_path / "evidence.json"
+    script = tmp_path / "plan.sh"
+    staging_root = tmp_path / "staging root"
+    staging_root.mkdir()
+    plan = module.FuzzPlan(
+        commands=(("/usr/bin/true", "value; touch injected"),),
+        regression_inputs=10,
+        mutation_runs=4000,
+        staging_root=staging_root,
+    )
+    evidence = {
+        "status": "passed",
+        "regression_inputs": 10,
+        "mutation_runs": 4000,
+        "sanitizer_findings": 0,
+    }
+
+    module.write_shell_plan(plan, script, evidence_output=output, evidence=evidence)
+
+    content = script.read_text(encoding="utf-8")
+    assert "trap cleanup_staging EXIT" in content
+    assert "'value; touch injected'" in content
+    assert content.index("/usr/bin/true") < content.index(output.as_posix())
+    assert '"status": "passed"' in content
+    assert not output.exists()

@@ -812,6 +812,7 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
     activity.Start();
     const auto task_started_ns =
         telemetry ? PerformanceTelemetry::NowNs() : std::int64_t{0};
+    const auto telemetry_publication_admitted = telemetry_batch.Begin();
     try {
       queued.task(index - static_cast<std::size_t>(queued.lane_begin), stop);
     } catch (...) {
@@ -819,8 +820,8 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
     if (telemetry) {
       const auto task_run_ns = PerformanceTelemetry::NowNs() - task_started_ns;
       telemetry_batch.Record(queued.telemetry_kind,
-                             task_started_ns - queued.queued_at_ns,
-                             task_run_ns);
+                             task_started_ns - queued.queued_at_ns, task_run_ns,
+                             telemetry_publication_admitted);
     }
   }
 }

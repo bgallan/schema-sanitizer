@@ -419,9 +419,13 @@ def test_native_fd_abi_and_raii_cover_user_data_file_handles() -> None:
     assert "process_file_descriptor_permit_lease_acquire_wait" in catalog
     assert 'include "internal/abi/python_abi3/method_catalog.inc"' in module
 
+    secure_file = (CPP / "ingest/secure_read_only_file.hh").read_text(encoding="utf-8")
+    assert "ProcessFdPermitLease" in secure_file
+    for relative in ("ingest/chunk_source_file.cc", "ingest/transcoding/chunk_source.cc"):
+        source = (CPP / relative).read_text(encoding="utf-8")
+        assert "SecureReadOnlyFile" in source, relative
+
     for relative in (
-        "ingest/chunk_source_file.cc",
-        "ingest/transcoding/chunk_source.cc",
         "internal/parquet/footer_reader/footer_reader.cc",
         "api/python_abi3/json/output_adapters/output_adapters.cc",
         "api/python_abi3/csv/_core_abi3_csv_writer.cc",
@@ -473,14 +477,14 @@ def test_cgroup_resolver_prefers_complete_root_mount_over_subtree(
     from schema_sanitizer.core_impl import cgroup_view
 
     lines = [
-        "25 1 0:20 /tenant /sys/fs/cgroup/sub rw - cgroup2 cgroup rw",
+        "25 1 0:20 /slice /sys/fs/cgroup/sub rw - cgroup2 cgroup rw",
         "26 1 0:21 / /sys/fs/cgroup rw - cgroup2 cgroup rw",
     ]
     monkeypatch.setattr(cgroup_view, "_iter_bounded_proc_lines", lambda *_a, **_k: iter(lines))
-    view = cgroup_view._resolve_linux_cgroup_view_once(("/tenant", {}))
+    view = cgroup_view._resolve_linux_cgroup_view_once(("/slice", {}))
     assert view.version == 2
     assert view.hierarchy_complete
-    assert view.root == Path("/sys/fs/cgroup/tenant")
+    assert view.root == Path("/sys/fs/cgroup/slice")
 
 
 def test_cgroup_small_value_reader_rejects_truncation(tmp_path: Path) -> None:

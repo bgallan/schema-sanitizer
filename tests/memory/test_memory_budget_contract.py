@@ -179,7 +179,7 @@ def test_invalid_memory_limits_fail_before_native_execution() -> None:
 def test_repository_environment_access_is_limited_to_resource_hardening() -> None:
     """Only documented resource owners and the release preflight inspect the environment."""
     root = Path(__file__).resolve().parents[2]
-    ignored = {".git", ".work", "__pycache__", ".pytest_cache"}
+    ignored = {".git", ".work", ".venv", "__pycache__", ".pytest_cache"}
     offenders: list[str] = []
     for path in root.rglob("*"):
         if path == Path(__file__).resolve():

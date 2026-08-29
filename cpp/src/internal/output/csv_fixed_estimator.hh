@@ -90,10 +90,10 @@ make_csv_fixed_estimate_plan(const jsonl::JsonlField &root,
 }
 
 /// Estimates a row by reusing the schema-only contribution of fixed columns and
-/// inspecting only the bounded variable tail. Nulls can only reduce fixed
-/// output bytes, so the plan remains conservative for every batch. A fully
-/// fixed schema is O(1) per row; public outputs with four metadata fields are
-/// O(4), not O(N).
+/// inspecting only the bounded variable tail.
+/// Nulls can only reduce fixed output bytes, so the plan remains conservative
+/// for every batch. A fully fixed schema is O(1) per row.
+/// The public outputs with four metadata fields are O(4), not O(N).
 [[nodiscard]] inline std::int64_t estimate_csv_row_bytes_from_plan(
     const CsvFixedEstimatePlan &plan, const jsonl::JsonlField &root,
     const ArrowArray &array, std::int64_t row, std::int64_t cap) noexcept {

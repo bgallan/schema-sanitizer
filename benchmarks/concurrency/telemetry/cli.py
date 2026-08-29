@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -39,6 +38,7 @@ from benchmarks.concurrency.telemetry.support import (  # noqa: E402
     host_snapshot,
     load_cpu_sets,
 )
+from benchmarks.support.command import CommandError  # noqa: E402
 
 _DEFAULT_PERF_EVENTS = (
     "task-clock,cycles,instructions,cache-references,cache-misses,"
@@ -304,7 +304,7 @@ def main() -> None:
                 _write_fixture(fixture, rows=args.rows, columns=args.columns)
                 args.fixture = fixture
                 report = _parent_report(args)
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, RuntimeError, ValueError, CommandError) as error:
         parser.error(str(error))
     _emit_report(args, report)
 

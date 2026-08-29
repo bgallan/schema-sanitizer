@@ -54,14 +54,18 @@ def test_shallow_remote_output_steal_preserves_thread_budget(
     workers: int,
 ) -> None:
     """Idle low-core helpers can recover front output without deep scanning."""
-    promoted, outputs, broad, stolen, started, queued, submitted = (
+    promoted, outputs, broad, stolen, started, queued, submitted, cpu_capacity = (
         native_core.operation_task_arena_output_steal_probe(workers)
     )
     expected_outputs = workers // 2 - 1
     assert 0 <= promoted <= expected_outputs
     assert outputs == expected_outputs
     assert broad == workers - 1
-    assert stolen > 0
+    # With one CPU credit per worker, every owner remains blocked and the
+    # released helper must steal. Under a narrower CPU quota an unblocked owner
+    # may drain its own queue first, so requiring a steal would depend on OS
+    # scheduling rather than arena correctness.
+    assert stolen > 0 or cpu_capacity < workers
     assert queued == 0
     # Only currently runnable CPU credits need blockers. The output and broad
     # packet counts remain exact regardless of the host CPU quota.

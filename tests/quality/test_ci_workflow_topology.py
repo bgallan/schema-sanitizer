@@ -842,17 +842,12 @@ def test_validation_gate_retries_artifact_downloads_from_clean_exact_destination
     assert "cp download/source/*.tar.gz download/wheels/*.whl dist/" in gate
 
 
-def test_platform_evidence_records_comparable_cpu_limits() -> None:
-    """Runner timing evidence includes portable CPU and Linux cgroup context."""
+def test_platform_evidence_records_comparable_cpu_limits_without_job_summary() -> None:
+    """Runner evidence keeps portable CPU context without rendering job summaries."""
     test_action = _action("test-platform-wheel")
     helper = (ROOT / "meta/ci/quality/record_runner_environment.py").read_text(encoding="utf-8")
     evidence = next(
         step for step in _step_bodies(test_action) if "name: Record runner CPU environment" in step
-    )
-    upload = next(
-        step
-        for step in _step_bodies(test_action)
-        if "name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}" in step
     )
 
     assert "if:" not in evidence
@@ -877,7 +872,9 @@ def test_platform_evidence_records_comparable_cpu_limits() -> None:
     assert test_action.index("name: Record runner CPU environment") < test_action.index(
         "name: Cross-platform reader linear-scaling smoke"
     )
-    assert "path: artifacts/" in upload
+    assert "name: Summarize platform-shard evidence" not in test_action
+    assert "GITHUB_STEP_SUMMARY" not in test_action
+    assert "actions/upload-artifact@" not in test_action
 
 
 def test_runner_environment_helper_writes_only_the_owned_schema(
@@ -910,16 +907,11 @@ def test_runner_environment_helper_writes_only_the_owned_schema(
     assert "environment" not in output.read_text(encoding="utf-8").lower()
 
 
-def test_platform_suite_persists_test_timings_on_failure() -> None:
-    """Every wheel runner retains complete and ranked pytest timing evidence."""
+def test_platform_suite_reports_test_timings_without_job_summary() -> None:
+    """Every wheel runner logs ranked pytest timings without rendering a summary."""
     test_action = _action("test-platform-wheel")
     full_suite = next(
         step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
-    )
-    upload = next(
-        step
-        for step in _step_bodies(test_action)
-        if "name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}" in step
     )
 
     assert "shell: bash" in full_suite
@@ -928,14 +920,37 @@ def test_platform_suite_persists_test_timings_on_failure() -> None:
     assert "--durations-min=0.05" in full_suite
     assert '--junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml"' in full_suite
     assert 'tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"' in full_suite
-    assert test_action.index("name: Run functional test shard") < test_action.index(
-        "name: Upload platform-shard evidence"
+    assert "name: Summarize platform-shard evidence" not in test_action
+    assert "GITHUB_STEP_SUMMARY" not in test_action
+
+
+def test_ci_reserves_job_summaries_for_cibuildwheel() -> None:
+    """Only cibuildwheel may inherit GitHub's summary destination."""
+    summary_references = {
+        path.relative_to(ROOT).as_posix(): [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if "GITHUB_STEP_SUMMARY" in line
+        ]
+        for pattern in ("*.yml", "*.yaml")
+        for path in sorted((ROOT / ".github").rglob(pattern))
+        if "GITHUB_STEP_SUMMARY" in path.read_text(encoding="utf-8")
+    }
+
+    assert summary_references == {}
+
+    build_action = _action("build-platform-wheel")
+    wheel_build = next(
+        step
+        for step in _step_bodies(build_action)
+        if "name: Build and test the CPython 3.11 ABI3 wheel" in step
     )
-    assert "failure() && hashFiles('artifacts/**') != ''" in upload
+    assert wheel_build.count("python -m cibuildwheel") == 1
+    assert "env -u GITHUB_STEP_SUMMARY" not in wheel_build
 
 
 def test_validation_owns_full_extension_tsan_gate() -> None:
-    """Linux CI must build and repeatedly exercise the complete TSan extension."""
+    """Linux CI exercises TSan when the runner exposes enough CPU capacity."""
     ci = _workflow("ci.yml")
     tsan = _action("thread-sanitizer")
 
@@ -946,6 +961,21 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert tsan.count("meta/ci/sanitizers/run_tsan_extension_suite.sh") == 1
     assert ".work/build/tsan .work/bin/python-tsan 2" in tsan
     assert "site.getsitepackages()[0]" in tsan
+
+    capacity_step = tsan.split("- name: Check capacity for complete TSan concurrency coverage", 1)[
+        1
+    ].split("- name:", 1)[0]
+    suite_step = tsan.split("- name: Run the executor and all full-extension TSan domains", 1)[1]
+    assert "id: sanitizer_cpu_capacity" in capacity_step
+    assert 'echo "sufficient=true" >> "${GITHUB_OUTPUT}"' in capacity_step
+    assert 'echo "sufficient=false" >> "${GITHUB_OUTPUT}"' in capacity_step
+    assert "::warning title=Sanitizer concurrency skipped::" in capacity_step
+    assert "continue-on-error" not in capacity_step
+    assert "probe_status" in capacity_step
+    assert 'exit "${probe_status}"' in capacity_step
+    assert "exit 1" not in capacity_step
+    assert "Reject unexpected sanitizer capacity probe failures" not in tsan
+    assert "steps.sanitizer_cpu_capacity.outputs.sufficient == 'true'" in suite_step
 
     runner = (ROOT / "meta/ci/sanitizers/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
     for domain in (
@@ -976,7 +1006,7 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "macos-arm64-asan-ubsan" in ci
     assert sanitizer.count("SCHEMA_SANITIZER_BUILD_FUZZERS=ON") >= 3
     assert sanitizer.count("SCHEMA_SANITIZER_FUZZ_ENGINE=standalone") >= 2
-    assert sanitizer.count("meta/ci/fuzz/run_fuzz_regressions.py") == 2
+    assert sanitizer.count("meta/ci/fuzz/run_fuzz_regressions.sh") == 2
     assert sanitizer.count("--engine libfuzzer") >= 1
     assert "--campaign-runs 1000" in sanitizer
     assert "--campaign-runs 500" in sanitizer
@@ -985,12 +1015,33 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     concurrency_step = sanitizer.split("- name: Run repeated sanitized concurrency probe", 1)[
         1
     ].split("- name:", 1)[0]
+    capacity_step = sanitizer.split(
+        "- name: Check capacity for complete native concurrency coverage", 1
+    )[1].split("- name:", 1)[0]
     fuzz_step = sanitizer.split("- name: Run platform fuzz regressions and mutation campaigns", 1)[
         1
     ].split("- name:", 1)[0]
+    linux_fuzz_step = sanitizer.split(
+        "- name: Run Linux ASan/UBSan fuzz regressions and mutation campaigns", 1
+    )[1]
+    assert "id: sanitizer_cpu_capacity" in capacity_step
+    assert 'echo "sufficient=true" >> "${GITHUB_OUTPUT}"' in capacity_step
+    assert 'echo "sufficient=false" >> "${GITHUB_OUTPUT}"' in capacity_step
+    assert "::warning title=Sanitizer concurrency skipped::" in capacity_step
+    assert "continue-on-error" not in capacity_step
+    assert "probe_status" in capacity_step
+    assert 'exit "${probe_status}"' in capacity_step
+    assert "exit 1" not in capacity_step
+    normalized_concurrency_step = " ".join(concurrency_step.split())
+    assert "Reject unexpected sanitizer capacity probe failures" not in sanitizer
     assert "inputs.mode == 'native'" in concurrency_step
     assert "runner.os != 'Windows'" in concurrency_step
+    assert (
+        "steps.sanitizer_cpu_capacity.outputs.sufficient == 'true'" in normalized_concurrency_step
+    )
     assert "if: inputs.mode == 'native'" in fuzz_step
+    assert "sanitizer_cpu_capacity" not in fuzz_step
+    assert "sanitizer_cpu_capacity" not in linux_fuzz_step
 
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "SCHEMA_SANITIZER_FUZZ_ENGINE" in cmake
@@ -1030,6 +1081,64 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
     assert "at least " in probe
     assert _action("platform-sanitizer").count("--require-cpu-capacity 3") == 1
     assert _action("thread-sanitizer").count("--require-cpu-capacity 3") == 1
+
+
+def test_native_concurrency_probes_wait_for_every_asserted_async_metric() -> None:
+    """A completion flag cannot stand in for independently published arena state."""
+    probe = (ROOT / "cpp/tests/ordered_executor_tsan.cc").read_text(encoding="utf-8")
+    shared = probe.split("bool run_shared_operation_arena_round()", 1)[1].split(
+        '#include "ordered_executor_tsan_completion.cc.inc"', 1
+    )[0]
+    backlog = probe.split("bool run_backlog_driven_admission_round()", 1)[1].split(
+        "bool run_lane_work_stealing_round()", 1
+    )[0]
+    stealing = probe.split("bool run_lane_work_stealing_round()", 1)[1].split(
+        "bool run_arena_stage_cancellation_round()", 1
+    )[0]
+    cancellation = probe.split("bool run_arena_stage_cancellation_round()", 1)[1].split(
+        "bool run_arena_queue_capacity_round()", 1
+    )[0]
+
+    shared_startup_wait = shared.split("const auto startup_deadline", 1)[1].split(
+        "release_gate(&release)", 1
+    )[0]
+    assert "started.load(std::memory_order_acquire) < worker_count" in shared_startup_wait
+    assert "arena->peak_active_tasks() < worker_count" in shared_startup_wait
+
+    admission_wait = backlog.split("const auto deadline", 1)[1].split(
+        "const bool fully_admitted", 1
+    )[0]
+    assert "arena->started_workers() < worker_count" in admission_wait
+    assert "entered.load(std::memory_order_acquire) < worker_count" in admission_wait
+    assert "arena->peak_active_tasks() < worker_count" in admission_wait
+
+    backlog_drain_wait = backlog.split("const auto drain_deadline", 1)[1].split(
+        "const bool valid", 1
+    )[0]
+    assert "completed.load(std::memory_order_acquire) <" in backlog_drain_wait
+    assert "arena->active_tasks() != 0U" in backlog_drain_wait
+    assert "arena->queued_tasks() != 0U" in backlog_drain_wait
+
+    stealing_drain_wait = stealing.split("const auto drain_deadline", 1)[1].split(
+        "const bool valid", 1
+    )[0]
+    assert "completed.load(std::memory_order_acquire) != worker_count + 1U" in stealing_drain_wait
+    assert "arena->stolen_tasks() == 0U" in stealing_drain_wait
+    assert "arena->active_tasks() != 0U" in stealing_drain_wait
+    assert "arena->queued_tasks() != 0U" in stealing_drain_wait
+
+    reuse_wait = cancellation.split("const auto reuse_deadline", 1)[1].split("const bool valid", 1)[
+        0
+    ]
+    assert "!arena_reused.load(std::memory_order_acquire)" in reuse_wait
+    assert "arena->active_tasks() != 0U" in reuse_wait
+    assert "arena->queued_tasks() != 0U" in reuse_wait
+    assert "arena->retained_bytes() != 0U" in reuse_wait
+
+    exact_peak_assertions = probe.count("arena->peak_active_tasks() == worker_count")
+    peak_publication_waits = probe.count("arena->peak_active_tasks() < worker_count")
+    assert exact_peak_assertions == 2
+    assert peak_publication_waits >= exact_peak_assertions
 
 
 def test_native_launcher_arguments_preserve_shell_word_boundaries() -> None:
@@ -1105,10 +1214,11 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
     ci = _workflow("ci.yml")
     test_action = _action("test-platform-wheel")
 
-    assert "python -m benchmarks.concurrency.threading.matrix" in test_action
+    assert "benchmarks/concurrency/threading/run_matrix.sh" in test_action
     assert "--profile ci" in test_action
     assert "python -I benchmarks/readers/linear_scaling.py" in test_action
     assert "--maximum-normalized-growth 8" in test_action
+    assert "--failure-confirmations 2" in test_action
     assert "--latency-budget benchmarks/readers/linear_scaling_budget.json" in test_action
     assert "--wheel wheelhouse/*.whl" in test_action
     reader_step = next(
@@ -1141,7 +1251,7 @@ def test_python_coverage_has_an_explicit_regression_floor() -> None:
 
 
 def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
-    """Missing evidence fails and each artifact has a deliberate lifetime."""
+    """Only release transport and publication artifacts are uploaded."""
     sources = (
         _workflow("ci.yml"),
         _action("build-platform-wheel"),
@@ -1160,29 +1270,24 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
     for step in upload_steps:
         uploads.setdefault(_with_value(step, "name"), []).append(step)
     retention = {
-        "python-branch-coverage": "14",
         "dist-wheels-${{ inputs.platform-name }}": "7",
-        "platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}": "14",
         "source-distribution": "7",
-        "release-distributions": "30",
-        "native-llvm-coverage": "14",
+        "release-distributions": "7",
     }
 
     assert set(uploads) == set(retention)
     for name, days in retention.items():
         assert all(_with_value(step, "retention-days") == days for step in uploads[name])
         assert all(_with_value(step, "if-no-files-found") == "error" for step in uploads[name])
-    platform_evidence = uploads["platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}"][0]
-    assert "success() || (failure() && hashFiles('artifacts/**') != '')" in platform_evidence
     assert all(_with_value(step, "path") == "release/" for step in uploads["release-distributions"])
+    assert "actions/upload-artifact@" not in _action("test-platform-wheel")
+    assert "actions/upload-artifact@" not in _action("quality-validation")
+    assert "actions/upload-artifact@" not in _action("native-llvm-coverage")
 
     retried = {
         "dist-wheels-${{ inputs.platform-name }}",
-        "platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}",
         "source-distribution",
         "release-distributions",
-        "python-branch-coverage",
-        "native-llvm-coverage",
     }
     assert {name for name, steps in uploads.items() if len(steps) == 2} == retried
     for name in retried:
@@ -1207,11 +1312,12 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     assert build_action.count("python -I meta/ci/release/downstream_smoke.py") == 3
     assert "needs: [platform-wheel-builds, platform-tests, validation-matrix]" in distribution
     assert "python -m build --sdist --outdir dist" in source_distribution
-    assert "check_downstream_install.py" in source_distribution
+    assert "check_downstream_install.sh" in source_distribution
     assert "name: source-distribution" in source_distribution
     assert "name: source-distribution" in distribution
     assert "pattern: dist-wheels-*" in distribution
     assert "check_distribution_contents.py --release-set" in distribution
+    assert "check_downstream_install.sh" not in distribution
     assert "release/packages/" in distribution
     assert "release/release-manifest.json" in distribution
     assert "name: release-distributions" in distribution

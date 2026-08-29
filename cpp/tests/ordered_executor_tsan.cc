@@ -322,13 +322,16 @@ bool run_shared_operation_arena_round() {
   }
   const auto startup_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (started.load(std::memory_order_acquire) < worker_count &&
+  while ((started.load(std::memory_order_acquire) < worker_count ||
+          arena->peak_active_tasks() < worker_count) &&
          std::chrono::steady_clock::now() < startup_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
-  if (started.load(std::memory_order_acquire) < worker_count) {
+  if (started.load(std::memory_order_acquire) < worker_count ||
+      arena->peak_active_tasks() < worker_count) {
     std::cerr << "shared arena startup timed out: started="
-              << started.load(std::memory_order_acquire) << '\n';
+              << started.load(std::memory_order_acquire)
+              << " peak=" << arena->peak_active_tasks() << '\n';
     release_gate(&release);
     upstream->Cancel();
     output->Cancel();
@@ -444,7 +447,8 @@ bool run_backlog_driven_admission_round() {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while ((arena->started_workers() < worker_count ||
-          entered.load(std::memory_order_acquire) < worker_count) &&
+          entered.load(std::memory_order_acquire) < worker_count ||
+          arena->peak_active_tasks() < worker_count) &&
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
@@ -455,20 +459,23 @@ bool run_backlog_driven_admission_round() {
   release_gate(&release);
   const auto drain_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (completed.load(std::memory_order_acquire) <
-             sequential_tasks + worker_count &&
+  while ((completed.load(std::memory_order_acquire) <
+              sequential_tasks + worker_count ||
+          arena->active_tasks() != 0U || arena->queued_tasks() != 0U) &&
          std::chrono::steady_clock::now() < drain_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
   const bool valid = fully_admitted &&
                      completed.load(std::memory_order_acquire) ==
                          sequential_tasks + worker_count &&
+                     arena->active_tasks() == 0U &&
                      arena->queued_tasks() == 0U;
   if (!valid) {
     std::cerr << "parallel admission: started=" << arena->started_workers()
               << " entered=" << entered.load(std::memory_order_acquire)
               << " completed=" << completed.load(std::memory_order_acquire)
               << " peak=" << arena->peak_active_tasks()
+              << " active=" << arena->active_tasks()
               << " queued=" << arena->queued_tasks() << '\n';
   }
   arena->Shutdown();
@@ -562,7 +569,9 @@ bool run_lane_work_stealing_round() {
   release_gate(&release[0]);
   const auto drain_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (completed.load(std::memory_order_acquire) != worker_count + 1U &&
+  while ((completed.load(std::memory_order_acquire) != worker_count + 1U ||
+          arena->active_tasks() != 0U || arena->queued_tasks() != 0U ||
+          arena->stolen_tasks() == 0U) &&
          std::chrono::steady_clock::now() < drain_deadline) {
     std::this_thread::sleep_for(std::chrono::microseconds(25));
   }
@@ -571,13 +580,15 @@ bool run_lane_work_stealing_round() {
       displaced_finished.load(std::memory_order_acquire) &&
       displaced_worker.load(std::memory_order_acquire) != 0U &&
       completed.load(std::memory_order_acquire) == worker_count + 1U &&
-      arena->stolen_tasks() > 0U && arena->queued_tasks() == 0U;
+      arena->stolen_tasks() > 0U && arena->active_tasks() == 0U &&
+      arena->queued_tasks() == 0U;
   if (!valid) {
     std::cerr << "lane steal: displaced="
               << displaced_finished.load(std::memory_order_acquire)
               << " worker=" << displaced_worker.load(std::memory_order_acquire)
               << " completed=" << completed.load(std::memory_order_acquire)
               << " stolen=" << arena->stolen_tasks()
+              << " active=" << arena->active_tasks()
               << " queued=" << arena->queued_tasks() << '\n';
   }
   arena->Shutdown();
@@ -645,7 +656,8 @@ bool run_arena_stage_cancellation_round() {
     const auto reuse_deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while ((!arena_reused.load(std::memory_order_acquire) ||
-            arena->active_tasks() != 0U || arena->queued_tasks() != 0U) &&
+            arena->active_tasks() != 0U || arena->queued_tasks() != 0U ||
+            arena->retained_bytes() != 0U) &&
            std::chrono::steady_clock::now() < reuse_deadline) {
       std::this_thread::sleep_for(std::chrono::microseconds(25));
     }

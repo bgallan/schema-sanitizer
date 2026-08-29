@@ -1,30 +1,28 @@
 """Release-version, PyPI, and GitHub preflight contracts.
 
-It covers version agreement, trusted PyPI and GitHub endpoints, bounded retries,
-workflow inputs, release state, and command failure modes.
+The tests cover workflow identity, literal-host HTTPS transports, strict endpoint
+validation, bounded retries, fail-closed response handling, and release state.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import io
 import json
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
-from urllib.error import HTTPError, URLError
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-RELEASE = ROOT / "meta/ci/release"
-GITHUB_URL = "https://api.github.com/repos/bgallan/project/git/ref/heads/main"
+RELEASE = ROOT / "meta" / "ci" / "release"
+GITHUB_URL = "https://api.github.com/repos/example/project/git/ref/heads/main"
 
 
 def _module(name: str) -> ModuleType:
-    """Load the CI helper module under test from its repository path."""
+    """Load one standalone release helper from its repository path."""
     path = RELEASE / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -37,34 +35,8 @@ def _module(name: str) -> ModuleType:
     return module
 
 
-class _Response(io.BytesIO):
-    def __enter__(self) -> _Response:
-        """Return the managed response value from context entry."""
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        """Finalize the response context without suppressing exceptions."""
-        self.close()
-
-
-class _Responses:
-    def __init__(self, *values: object) -> None:
-        """Initialize responses state for values and calls."""
-        self.values = list(values)
-        self.calls = 0
-
-    def __call__(self, _request: object, *, timeout: int) -> _Response:
-        """Return successive HTTP responses while enforcing the release-check timeout."""
-        assert timeout == 20
-        self.calls += 1
-        value = self.values.pop(0)
-        if isinstance(value, Exception):
-            raise value
-        return _Response(json.dumps(value).encode())
-
-
 def test_validate_release_version_accepts_matching_optional_version(tmp_path: Path) -> None:
-    """Verify validate release version accepts matching optional version."""
+    """The canonical version file may be checked against a workflow value."""
     version_file = tmp_path / "VERSION"
     version_file.write_text("0.3.8\n", encoding="utf-8")
     validator = _module("validate_release_version")
@@ -73,7 +45,7 @@ def test_validate_release_version_accepts_matching_optional_version(tmp_path: Pa
 
 
 def test_validate_release_version_rejects_invalid_or_mismatched_version(tmp_path: Path) -> None:
-    """Verify validate release version rejects invalid or mismatched version."""
+    """Malformed and stale workflow versions fail before release work starts."""
     version_file = tmp_path / "VERSION"
     validator = _module("validate_release_version")
     version_file.write_text("release-0.3.8\n", encoding="utf-8")
@@ -85,14 +57,14 @@ def test_validate_release_version_rejects_invalid_or_mismatched_version(tmp_path
 
 
 def test_release_version_is_read_from_manual_workflow_event(tmp_path: Path) -> None:
-    """Verify release version is read from manual workflow event."""
+    """Manual dispatch input remains the release version authority."""
     event = tmp_path / "event.json"
     event.write_text('{"inputs":{"release_version":"0.3.8"}}', encoding="utf-8")
     assert _module("validate_release_version").release_version_from_event(event) == "0.3.8"
 
 
 def test_required_release_version_fails_closed_in_cli(tmp_path: Path) -> None:
-    """Verify required release version fails closed in CLI."""
+    """The command-line gate rejects a dispatch that omits release identity."""
     version = tmp_path / "VERSION"
     version.write_text("0.3.8\n", encoding="utf-8")
     event = tmp_path / "event.json"
@@ -116,7 +88,7 @@ def test_required_release_version_fails_closed_in_cli(tmp_path: Path) -> None:
 
 
 def test_publish_confirmation_is_read_from_manual_workflow_event(tmp_path: Path) -> None:
-    """Verify publish confirmation is read from manual workflow event."""
+    """Publication requires the exact explicit manual confirmation phrase."""
     validator = _module("validate_release_version")
     event = tmp_path / "event.json"
     event.write_text('{"inputs":{"confirm_publish":"publish schema-sanitizer"}}', encoding="utf-8")
@@ -127,149 +99,365 @@ def test_publish_confirmation_is_read_from_manual_workflow_event(tmp_path: Path)
 
 
 def test_tag_shaped_release_version_is_rejected(tmp_path: Path) -> None:
-    """Verify tag shaped release version is rejected."""
+    """Tag syntax cannot substitute for the canonical package version."""
     version = tmp_path / "VERSION"
     version.write_text("0.3.8\n", encoding="utf-8")
     with pytest.raises(ValueError, match="does not match"):
         _module("validate_release_version").validate_release_version(version, "v0.3.8")
 
 
+@pytest.mark.parametrize("hostname", ("pypi.org", "test.pypi.org"))
+def test_pypi_transport_connects_only_to_literal_https_origins(
+    monkeypatch: pytest.MonkeyPatch,
+    hostname: str,
+) -> None:
+    """The low-level transport fixes the remote origin before making a request."""
+    checker = _module("check_pypi_version")
+    observed: list[object] = []
+
+    class Response:
+        """Provide one successful PyPI JSON response."""
+
+        status = 200
+
+        @staticmethod
+        def read() -> bytes:
+            """Return the exact simulated response body."""
+            return b'{"info":{"version":"0.4.2"}}'
+
+    class Connection:
+        """Record the literal connection and origin-form request target."""
+
+        def __init__(self, host: str, *, timeout: int) -> None:
+            """Capture the selected TLS host and timeout."""
+            observed.append(("connect", host, timeout))
+
+        def request(self, method: str, target: str, *, headers: dict[str, str]) -> None:
+            """Capture the method, target, and request headers."""
+            observed.append(("request", method, target, headers))
+
+        @staticmethod
+        def getresponse() -> Response:
+            """Return the simulated successful response."""
+            return Response()
+
+        def close(self) -> None:
+            """Record deterministic connection cleanup."""
+            observed.append(("close",))
+
+    monkeypatch.setattr(checker, "HTTPSConnection", Connection)
+    status, payload = checker._pypi_https_json(
+        hostname,
+        "/pypi/schema-sanitizer/0.4.2/json",
+        {"Accept": "application/json"},
+    )
+
+    assert status == 200
+    assert payload == {"info": {"version": "0.4.2"}}
+    assert observed == [
+        ("connect", hostname, 20),
+        (
+            "request",
+            "GET",
+            "/pypi/schema-sanitizer/0.4.2/json",
+            {"Accept": "application/json"},
+        ),
+        ("close",),
+    ]
+
+
+def test_pypi_transport_rejects_an_unlisted_host_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Internal misuse cannot turn the release preflight into an HTTPS proxy."""
+    checker = _module("check_pypi_version")
+    monkeypatch.setattr(
+        checker,
+        "HTTPSConnection",
+        lambda *_args, **_kwargs: pytest.fail("unexpected connection"),
+    )
+
+    with pytest.raises(RuntimeError, match="non-PyPI HTTPS host"):
+        checker._pypi_https_json("example.invalid", "/", {})
+
+
 def test_pypi_lookup_distinguishes_existing_and_available_versions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify PyPI lookup distinguishes existing and available versions."""
+    """An exact JSON resource blocks release while a 404 proves availability."""
     checker = _module("check_pypi_version")
-    existing = _Responses({"info": {"version": "0.4.2"}})
-    monkeypatch.setattr(checker, "urlopen", existing)
+    captured: list[str] = []
+
+    def existing(hostname: str, target: str, _headers: object) -> tuple[int, object]:
+        """Return a matching release and capture its fixed-origin resource."""
+        captured.append(f"https://{hostname}{target}")
+        return 200, {"info": {"version": "0.4.2"}}
+
+    monkeypatch.setattr(checker, "_pypi_https_json", existing)
     assert checker.pypi_release_exists("schema-sanitizer", "0.4.2") is True
+    assert captured == ["https://pypi.org/pypi/schema-sanitizer/0.4.2/json"]
 
-    def missing(request: object, *, timeout: int) -> _Response:
-        """Return the simulated GitHub response for a missing release resource."""
-        raise HTTPError(request.full_url, 404, "not found", {}, None)
+    def missing(_hostname: str, _target: str, _headers: object) -> tuple[int, object]:
+        """Return the only response that authorizes a new version."""
+        return 404, None
 
-    monkeypatch.setattr(checker, "urlopen", missing)
+    monkeypatch.setattr(checker, "_pypi_https_json", missing)
     assert checker.pypi_release_exists("schema-sanitizer", "0.4.3") is False
 
 
 def test_pypi_lookup_fails_closed_on_service_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify PyPI lookup fails closed on service errors."""
+    """An inconclusive index response cannot authorize publication."""
     checker = _module("check_pypi_version")
-    unavailable = _Responses(*(HTTPError("url", 503, "unavailable", {}, None) for _ in range(3)))
-    monkeypatch.setattr(checker, "urlopen", unavailable)
+    calls = 0
+
+    def unavailable(_hostname: str, _target: str, _headers: object) -> tuple[int, object]:
+        """Count and return one transient service failure."""
+        nonlocal calls
+        calls += 1
+        return 503, None
+
+    monkeypatch.setattr(checker, "_pypi_https_json", unavailable)
     with pytest.raises(RuntimeError, match="HTTP 503"):
-        checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=lambda _: None)
-    assert unavailable.calls == 3
+        checker.pypi_release_exists(
+            "schema-sanitizer",
+            "0.4.3",
+            sleeper=lambda _delay: None,
+        )
+    assert calls == 3
 
 
 def test_pypi_lookup_retries_transport_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify PyPI lookup retries transport then succeeds."""
+    """A bounded retry absorbs one transient transport failure."""
     checker = _module("check_pypi_version")
-    responses = _Responses(URLError("reset"), {"info": {"version": "0.4.3"}})
+    responses: list[object] = [OSError("reset"), {"info": {"version": "0.4.3"}}]
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", responses)
-    assert checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=delays.append)
+
+    def flaky(_hostname: str, _target: str, _headers: object) -> tuple[int, object]:
+        """Raise the first response and return the second."""
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return 200, response
+
+    monkeypatch.setattr(checker, "_pypi_https_json", flaky)
+    assert checker.pypi_release_exists(
+        "schema-sanitizer",
+        "0.4.3",
+        sleeper=delays.append,
+    )
     assert delays == [1.0]
 
 
 def test_pypi_lookup_does_not_retry_semantic_client_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify PyPI lookup does not retry semantic client errors."""
+    """Authentication and policy failures terminate immediately."""
     checker = _module("check_pypi_version")
-    forbidden = _Responses(HTTPError("url", 403, "forbidden", {}, None))
+    calls = 0
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", forbidden)
+
+    def forbidden(_hostname: str, _target: str, _headers: object) -> tuple[int, object]:
+        """Count and return one non-retryable client failure."""
+        nonlocal calls
+        calls += 1
+        return 403, None
+
+    monkeypatch.setattr(checker, "_pypi_https_json", forbidden)
     with pytest.raises(RuntimeError, match="HTTP 403"):
         checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=delays.append)
-    assert forbidden.calls == 1
+    assert calls == 1
     assert delays == []
 
 
 def test_pypi_lookup_retries_rate_limit_before_exact_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify PyPI lookup retries rate limit before exact 404."""
+    """A rate-limited lookup may retry before an exact missing result."""
     checker = _module("check_pypi_version")
-    responses = _Responses(
-        HTTPError("url", 429, "rate", {}, None), HTTPError("url", 404, "missing", {}, None)
-    )
+    statuses = iter((429, 404))
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", responses)
+
+    def response(_hostname: str, _target: str, _headers: object) -> tuple[int, object]:
+        """Return successive retryable and authoritative statuses."""
+        return next(statuses), None
+
+    monkeypatch.setattr(checker, "_pypi_https_json", response)
     assert checker.pypi_release_exists("schema-sanitizer", "0.4.3", sleeper=delays.append) is False
     assert delays == [1.0]
 
 
 @pytest.mark.parametrize(
-    "index_url", ("http://pypi.org/pypi", "file:///tmp/pypi", "https://example.invalid/pypi")
+    "index_url",
+    (
+        "http://pypi.org/pypi",
+        "file:///tmp/pypi",
+        "https://example.invalid/pypi",
+        "https://user@pypi.org/pypi",
+        "https://pypi.org:444/pypi",
+        "https://pypi.org/simple",
+        "https://pypi.org/pypi?mirror=other",
+        "https://pypi.org/pypi#fragment",
+    ),
 )
 def test_pypi_lookup_rejects_untrusted_index_urls(index_url: str) -> None:
-    """Verify PyPI lookup rejects untrusted index urls."""
+    """Preflight accepts only the exact credential-free PyPI JSON base URL."""
     with pytest.raises(RuntimeError, match="non-PyPI HTTPS"):
         _module("check_pypi_version").pypi_release_exists(
-            "schema-sanitizer", "0.4.3", index_url=index_url
+            "schema-sanitizer",
+            "0.4.3",
+            index_url=index_url,
         )
 
 
 @pytest.mark.parametrize("payload", ([], {}, {"info": []}, {"info": {"version": "0.4.2"}}))
 def test_pypi_lookup_never_treats_an_unexpected_200_as_available(
-    monkeypatch: pytest.MonkeyPatch, payload: object
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
 ) -> None:
-    """Verify PyPI lookup never treats an unexpected 200 as available."""
+    """Malformed or inconsistent successful responses fail closed."""
     checker = _module("check_pypi_version")
-    monkeypatch.setattr(checker, "urlopen", _Responses(payload))
+
+    def unexpected(_hostname: str, _target: str, _headers: object) -> tuple[int, object]:
+        """Return the parametrized unexpected successful payload."""
+        return 200, payload
+
+    monkeypatch.setattr(checker, "_pypi_https_json", unexpected)
     with pytest.raises(RuntimeError, match="malformed JSON|exact resource"):
         checker.pypi_release_exists("schema-sanitizer", "0.4.3")
 
 
+def test_github_transport_connects_to_the_literal_api_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The low-level transport fixes GitHub's origin independently of its target."""
+    checker = _module("check_github_release_state")
+    observed: list[object] = []
+
+    class Response:
+        """Provide one successful GitHub JSON response."""
+
+        status = 200
+
+        @staticmethod
+        def getheaders() -> list[tuple[str, str]]:
+            """Return one response header for normalization."""
+            return [("X-RateLimit-Remaining", "42")]
+
+        @staticmethod
+        def read() -> bytes:
+            """Return the exact simulated response body."""
+            return b'{"object":{"sha":"abc"}}'
+
+    class Connection:
+        """Record the literal connection and origin-form request target."""
+
+        def __init__(self, host: str, *, timeout: int) -> None:
+            """Capture the selected TLS host and timeout."""
+            observed.append(("connect", host, timeout))
+
+        def request(self, method: str, target: str, *, headers: dict[str, str]) -> None:
+            """Capture the method, target, and request headers."""
+            observed.append(("request", method, target, headers))
+
+        @staticmethod
+        def getresponse() -> Response:
+            """Return the simulated successful response."""
+            return Response()
+
+        def close(self) -> None:
+            """Record deterministic connection cleanup."""
+            observed.append(("close",))
+
+    monkeypatch.setattr(checker, "HTTPSConnection", Connection)
+    status, headers, payload = checker._github_https_json(
+        "/repos/example/project/git/ref/heads/main",
+        {"Accept": "application/json"},
+    )
+
+    assert (status, headers, payload) == (
+        200,
+        {"x-ratelimit-remaining": "42"},
+        {"object": {"sha": "abc"}},
+    )
+    assert observed == [
+        ("connect", "api.github.com", 20),
+        (
+            "request",
+            "GET",
+            "/repos/example/project/git/ref/heads/main",
+            {"Accept": "application/json"},
+        ),
+        ("close",),
+    ]
+
+
 def test_main_sha_uses_the_retrying_api_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify main sha uses the retrying API lookup."""
+    """Release identity is checked against the authenticated remote main ref."""
     checker = _module("check_github_release_state")
     expected = "a" * 40
     captured: list[str] = []
 
     def reference(url: str, _token: str) -> dict[str, object]:
-        """Return the simulated GitHub response for the target reference."""
+        """Return and capture the simulated main reference."""
         captured.append(url)
         return {"object": {"sha": expected}}
 
     monkeypatch.setattr(checker, "_github_json", reference)
-    checker.validate_main_sha("bgallan/project", expected, token="token")
+    checker.validate_main_sha("example/project", expected, token="token")
     assert captured == [GITHUB_URL]
 
 
 def test_main_sha_fails_closed_if_the_branch_moved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify main sha fails closed if the branch moved."""
+    """A release cannot proceed from a stale dispatch commit."""
     checker = _module("check_github_release_state")
     monkeypatch.setattr(
-        checker, "_github_json", lambda *_args, **_kwargs: {"object": {"sha": "b" * 40}}
+        checker,
+        "_github_json",
+        lambda *_args, **_kwargs: {"object": {"sha": "b" * 40}},
     )
     with pytest.raises(RuntimeError, match="main moved"):
-        checker.validate_main_sha("bgallan/project", "a" * 40)
+        checker.validate_main_sha("example/project", "a" * 40)
 
 
 def test_github_lookup_retries_transport_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify GitHub lookup retries transport then succeeds."""
+    """A temporary API transport failure consumes one bounded retry."""
     checker = _module("check_github_release_state")
     payload = {"object": {"sha": "a" * 40}}
-    responses = _Responses(URLError("reset"), payload)
+    responses: list[object] = [OSError("reset"), payload]
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", responses)
+
+    def flaky(_target: str, _headers: object) -> tuple[int, dict[str, str], object]:
+        """Raise the first response and return the second."""
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return 200, {}, response
+
+    monkeypatch.setattr(checker, "_github_https_json", flaky)
     assert checker._github_json(GITHUB_URL, sleeper=delays.append) == payload
     assert delays == [1.0]
 
 
 @pytest.mark.parametrize("status", (429, 500, 503))
 def test_github_lookup_retries_transient_http_statuses(
-    monkeypatch: pytest.MonkeyPatch, status: int
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
 ) -> None:
-    """Verify GitHub lookup retries transient HTTP statuses."""
+    """Rate limits and server failures retry without weakening the result."""
     checker = _module("check_github_release_state")
-    payload = {"object": {"sha": "a" * 40}}
-    responses = _Responses(HTTPError("url", status, "transient", {}, None), payload)
+    calls = 0
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", responses)
+    payload = {"object": {"sha": "a" * 40}}
+
+    def transient(_target: str, _headers: object) -> tuple[int, dict[str, str], object]:
+        """Return one transient status before a successful payload."""
+        nonlocal calls
+        calls += 1
+        return (status, {}, None) if calls == 1 else (200, {}, payload)
+
+    monkeypatch.setattr(checker, "_github_https_json", transient)
     assert checker._github_json(GITHUB_URL, sleeper=delays.append) == payload
-    assert responses.calls == 2
+    assert calls == 2
     assert delays == [1.0]
 
 
@@ -292,39 +480,60 @@ def test_github_lookup_retries_documented_rate_limited_403(
     now: float,
     expected_delay: float,
 ) -> None:
-    """Verify GitHub lookup retries documented rate limited 403."""
+    """A 403 retries only with GitHub's documented rate-limit signal."""
     checker = _module("check_github_release_state")
-    payload = {"object": {"sha": "a" * 40}}
-    responses = _Responses(HTTPError("url", 403, "rate limited", headers, None), payload)
+    calls = 0
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", responses)
+    payload = {"object": {"sha": "a" * 40}}
+
+    def rate_limited(_target: str, _headers: object) -> tuple[int, dict[str, str], object]:
+        """Return one qualified 403 before the successful payload."""
+        nonlocal calls
+        calls += 1
+        return (403, headers, None) if calls == 1 else (200, {}, payload)
+
+    monkeypatch.setattr(checker, "_github_https_json", rate_limited)
     assert checker._github_json(GITHUB_URL, sleeper=delays.append, clock=lambda: now) == payload
-    assert responses.calls == 2
+    assert calls == 2
     assert delays == [expected_delay]
 
 
 @pytest.mark.parametrize("headers", ({}, {"Retry-After": "invalid"}))
 def test_github_lookup_rejects_unqualified_403_without_retry(
-    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
 ) -> None:
-    """Verify GitHub lookup rejects unqualified 403 without retry."""
+    """Permission failures cannot be disguised as transient rate limits."""
     checker = _module("check_github_release_state")
-    responses = _Responses(HTTPError("url", 403, "forbidden", headers, None))
+    calls = 0
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", responses)
+
+    def forbidden(_target: str, _headers: object) -> tuple[int, dict[str, str], object]:
+        """Count and return one unqualified permission failure."""
+        nonlocal calls
+        calls += 1
+        return 403, headers, None
+
+    monkeypatch.setattr(checker, "_github_https_json", forbidden)
     with pytest.raises(RuntimeError, match="HTTP 403"):
         checker._github_json(GITHUB_URL, sleeper=delays.append)
-    assert responses.calls == 1
+    assert calls == 1
     assert delays == []
 
 
 @pytest.mark.parametrize("payload", ([], "main", None))
 def test_github_lookup_rejects_non_object_json(
-    monkeypatch: pytest.MonkeyPatch, payload: object
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
 ) -> None:
-    """Verify GitHub lookup rejects non object JSON."""
+    """A structurally invalid successful response fails closed."""
     checker = _module("check_github_release_state")
-    monkeypatch.setattr(checker, "urlopen", _Responses(payload))
+
+    def invalid(_target: str, _headers: object) -> tuple[int, dict[str, str], object]:
+        """Return the parametrized invalid payload."""
+        return 200, {}, payload
+
+    monkeypatch.setattr(checker, "_github_https_json", invalid)
     with pytest.raises(RuntimeError, match="non-object"):
         checker._github_json(GITHUB_URL)
 
@@ -332,36 +541,49 @@ def test_github_lookup_rejects_non_object_json(
 def test_github_lookup_rejects_malformed_json_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify GitHub lookup rejects malformed JSON without retry."""
+    """Malformed data is semantic corruption rather than transport failure."""
     checker = _module("check_github_release_state")
-    responses = _Responses(b"{")
-
-    def malformed(_request: object, *, timeout: int) -> _Response:
-        """Return the malformed workflow input used by the validation case."""
-        responses.calls += 1
-        return _Response(b"{")
-
+    calls = 0
     delays: list[float] = []
-    monkeypatch.setattr(checker, "urlopen", malformed)
+
+    def malformed(_target: str, _headers: object) -> tuple[int, dict[str, str], object]:
+        """Raise one JSON parse failure and count transport calls."""
+        nonlocal calls
+        calls += 1
+        raise json.JSONDecodeError("invalid payload", "{", 1)
+
+    monkeypatch.setattr(checker, "_github_https_json", malformed)
     with pytest.raises(RuntimeError, match="verify GitHub release state"):
         checker._github_json(GITHUB_URL, sleeper=delays.append)
-    assert responses.calls == 1
+    assert calls == 1
     assert delays == []
 
 
 @pytest.mark.parametrize("repository", ("", "owner", "../owner/repository", "owner/../repo"))
 def test_main_sha_rejects_invalid_repository_identifiers(repository: str) -> None:
-    """Verify main sha rejects invalid repository identifiers."""
+    """Repository input cannot alter the intended GitHub API path."""
     with pytest.raises(RuntimeError, match="invalid GitHub repository identifier"):
         _module("check_github_release_state").validate_main_sha(repository, "a" * 40)
 
 
 @pytest.mark.parametrize(
-    "api_url", ("http://api.github.com", "file:///tmp/github", "https://example.invalid")
+    "api_url",
+    (
+        "http://api.github.com",
+        "file:///tmp/github",
+        "https://example.invalid",
+        "https://user@api.github.com",
+        "https://api.github.com:444",
+        "https://api.github.com/base",
+        "https://api.github.com?redirect=other",
+        "https://api.github.com#fragment",
+    ),
 )
 def test_main_sha_rejects_untrusted_api_urls(api_url: str) -> None:
-    """Verify main sha rejects untrusted API urls."""
+    """Release preflight accepts only GitHub's credential-free API root."""
     with pytest.raises(RuntimeError, match="non-GitHub HTTPS"):
         _module("check_github_release_state").validate_main_sha(
-            "bgallan/project", "a" * 40, api_url=api_url
+            "example/project",
+            "a" * 40,
+            api_url=api_url,
         )

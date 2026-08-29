@@ -90,8 +90,8 @@ def test_column_order_alphabetically_reorders_additive_contract_nested_fields() 
                 "variables",
                 pa.struct(
                     [
-                        ("email", pa.string()),
-                        ("phone", pa.string()),
+                        ("middle", pa.string()),
+                        ("tail", pa.string()),
                     ]
                 ),
             )
@@ -100,9 +100,9 @@ def test_column_order_alphabetically_reorders_additive_contract_nested_fields() 
     rows = [
         {
             "variables": {
-                "birthday": "2026-01-01",
-                "company": "acme",
-                "email": "a@example.com",
+                "alpha": "first",
+                "beta": "second",
+                "middle": "third",
             }
         }
     ]
@@ -118,10 +118,10 @@ def test_column_order_alphabetically_reorders_additive_contract_nested_fields() 
 
     assert res.clean_data is not None
     assert _field_names(res.clean_data.schema.field("variables").type) == [
-        "birthday",
-        "company",
-        "email",
-        "phone",
+        "alpha",
+        "beta",
+        "middle",
+        "tail",
     ]
 
 
@@ -131,7 +131,7 @@ def test_column_order_alphabetically_reorders_incremental_registry_struct_fields
     """Verify column order alphabetically reorders incremental registry struct fields."""
     first_path = tmp_path / "first.jsonl"
     first_path.write_text(
-        json.dumps({"variables": {"email": "a@example.com", "phone": "1"}}) + "\n",
+        json.dumps({"variables": {"middle": "initial", "tail": "value"}}) + "\n",
         encoding="utf-8",
     )
     second_path = tmp_path / "second.jsonl"
@@ -139,10 +139,10 @@ def test_column_order_alphabetically_reorders_incremental_registry_struct_fields
         json.dumps(
             {
                 "variables": {
-                    "birthday": "2026-01-01",
-                    "company": "acme",
-                    "country": "ES",
-                    "email": "b@example.com",
+                    "alpha": "first",
+                    "beta": "second",
+                    "gamma": "third",
+                    "middle": "updated",
                 }
             }
         )
@@ -166,7 +166,7 @@ def test_column_order_alphabetically_reorders_incremental_registry_struct_fields
 
     assert second.clean_data is not None
     variable_names = _field_names(second.clean_data.schema.field("variables").type)
-    assert variable_names == ["birthday", "company", "country", "email", "phone"]
+    assert variable_names == ["alpha", "beta", "gamma", "middle", "tail"]
 
     registry_fields = second.schema_registry["canonical_schema"]["fields"]
     variables = next(field for field in registry_fields if field["name"] == "variables")

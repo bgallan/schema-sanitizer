@@ -748,7 +748,7 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
     return nullptr;
   }
 
-  PyObject *result = PyTuple_New(7);
+  PyObject *result = PyTuple_New(8);
   if (!result) {
     return nullptr;
   }
@@ -768,7 +768,8 @@ PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
       !tuple_set_item_steal(result, 5,
                             PyLong_FromSize_t(arena->queued_tasks())) ||
       !tuple_set_item_steal(result, 6,
-                            PyLong_FromSize_t(arena->submitted_tasks()))) {
+                            PyLong_FromSize_t(arena->submitted_tasks())) ||
+      !tuple_set_item_steal(result, 7, PyLong_FromSize_t(cpu_window))) {
     Py_DECREF(result);
     return nullptr;
   }

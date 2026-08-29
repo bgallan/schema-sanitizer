@@ -3,12 +3,10 @@
 // incremental source reads.
 
 #include "ingest/chunk_source_detail.hh"
+#include "ingest/secure_read_only_file.hh"
 #include "ingest/transcoding/decoder.hh"
 #include "internal/memory/memory_budget.hh"
-#include "internal/runtime/process_fd_governor.hh"
 
-#include <fstream>
-#include <ios>
 #include <limits>
 #include <memory>
 #include <string>
@@ -54,22 +52,16 @@ public:
             internal::memory_budget_from_limit(memory_limit_bytes)
                 .materialized_input_bytes)) {}
 
-  /// Releases resources retained by `TranscodingFileChunkSource` without
-  /// propagating cleanup failures.
-  ~TranscodingFileChunkSource() override {
-    internal::close_stream_and_commit(input_, fd_lease_);
-  }
+  /// Releases the securely opened input through its non-throwing RAII owner.
+  ~TranscodingFileChunkSource() override = default;
 
   /// Rewinds the text transcoding source to its initial input position and
   /// clears per-pass state.
   sanitize::Status Reset() override {
-    internal::close_stream_and_commit(input_, fd_lease_);
-    if (input_.is_open()) {
+    if (!input_.Close()) {
       return sanitize::Status::IOError(
           "TranscodingFileChunkSource: failed closing input");
     }
-    fd_lease_.reset();
-    input_.clear();
     utf8_pos_ = 0;
     eof_ = false;
     pending_utf8_.reset();
@@ -95,16 +87,17 @@ public:
     for (;;) {
       std::string raw(requested, '\0');
       SensitiveStringGuard raw_guard(&raw);
-      input_.read(raw.data(), static_cast<std::streamsize>(requested));
-      const auto read = input_.gcount();
-      raw.resize(read > 0 ? static_cast<std::size_t>(read) : 0);
+      SAN_ASSIGN_OR_RAISE(const auto read, input_.Read(raw.data(), requested));
+      raw.resize(read);
 
-      const bool final = read <= 0;
+      const bool final = read == 0U;
       SAN_ASSIGN_OR_RAISE(auto transcoded, decoder_.Decode(raw, final));
       if (final) {
         eof_ = true;
-        internal::close_stream_and_commit(input_, fd_lease_);
-        fd_lease_.reset();
+        if (!input_.Close()) {
+          return sanitize::Status::IOError(
+              "TranscodingFileChunkSource: failed closing input");
+        }
       }
       if (!transcoded.empty()) {
         pending_utf8_ = std::make_shared<std::string>(std::move(transcoded));
@@ -186,27 +179,15 @@ private:
     if (input_.is_open()) {
       return {};
     }
-    fd_lease_ = internal::ProcessFdPermitLease(1U);
-    if (!fd_lease_) {
-      return sanitize::Status::IOError("TranscodingFileChunkSource: file "
-                                       "descriptor capacity exhausted for '",
-                                       path_, "'");
-    }
-    input_.open(path_, std::ios::binary);
-    if (!input_.good()) {
-      fd_lease_.reset();
-      return sanitize::Status::Invalid(
-          "TranscodingFileChunkSource: failed to open '", path_, "'");
-    }
-    fd_lease_.mark_opened();
+    SAN_ASSIGN_OR_RAISE(input_, internal::SecureReadOnlyFile::Open(
+                                    path_, "TranscodingFileChunkSource"));
     return {};
   }
 
   std::string path_;
   internal::TranscodingDecoder decoder_;
   std::uint64_t materialized_limit_ = 0;
-  internal::ProcessFdPermitLease fd_lease_;
-  std::ifstream input_;
+  internal::SecureReadOnlyFile input_;
   std::size_t utf8_pos_ = 0;
   bool eof_ = false;
   std::shared_ptr<std::string> pending_utf8_;

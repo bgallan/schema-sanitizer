@@ -240,6 +240,94 @@ def test_static_latency_gate_scales_reference_and_tolerates_runner_variance() ->
         assert all(sample["within_budget"] for sample in case["samples"])
 
 
+def test_failure_confirmation_accepts_one_transient_runner_slowdown() -> None:
+    """One noisy hosted-runner sample cannot become a product regression."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+    measurements = iter(
+        (
+            _synthetic_report(budget, ratios={"csv_multi": 30.0}),
+            _synthetic_report(budget, ratios={}),
+        )
+    )
+
+    report = linear_scaling.evaluate_with_failure_confirmations(
+        lambda: next(measurements),
+        maximum_normalized_growth=8.0,
+        latency_budget=budget,
+        failure_confirmations=2,
+    )
+
+    confirmation = report["failure_confirmation"]
+    assert report["within_budget"] is True
+    assert report["failures"] == {}
+    assert confirmation["attempts_executed"] == 2
+    assert confirmation["required_consecutive_failures"] == 3
+    assert [attempt["within_budget"] for attempt in confirmation["attempts"]] == [False, True]
+    assert set(confirmation["attempts"][0]["failures"]["absolute_latency"]) == {"csv_multi"}
+
+
+def test_failure_confirmation_rejects_a_persistent_regression() -> None:
+    """A repeatable slowdown remains blocking after every fresh measurement."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+    calls = 0
+
+    def measure() -> dict[str, object]:
+        """Return another synthetic report containing the persistent slowdown."""
+        nonlocal calls
+        calls += 1
+        return _synthetic_report(budget, ratios={"csv_multi": 30.0})
+
+    report = linear_scaling.evaluate_with_failure_confirmations(
+        measure,
+        maximum_normalized_growth=8.0,
+        latency_budget=budget,
+        failure_confirmations=2,
+    )
+
+    confirmation = report["failure_confirmation"]
+    assert calls == 3
+    assert report["within_budget"] is False
+    assert set(report["failures"]["absolute_latency"]) == {"csv_multi"}
+    assert confirmation["attempts_executed"] == 3
+    assert all(not attempt["within_budget"] for attempt in confirmation["attempts"])
+
+
+def test_failure_confirmation_does_not_repeat_a_healthy_measurement() -> None:
+    """The normal CI path still executes the benchmark exactly once."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+    calls = 0
+
+    def measure() -> dict[str, object]:
+        """Return another healthy synthetic report for the fast-path assertion."""
+        nonlocal calls
+        calls += 1
+        return _synthetic_report(budget, ratios={})
+
+    report = linear_scaling.evaluate_with_failure_confirmations(
+        measure,
+        maximum_normalized_growth=8.0,
+        latency_budget=budget,
+        failure_confirmations=2,
+    )
+
+    assert calls == 1
+    assert report["within_budget"] is True
+    assert report["failure_confirmation"]["attempts_executed"] == 1
+
+
+def test_failure_confirmation_rejects_a_negative_retry_count() -> None:
+    """Invalid confirmation policy cannot silently disable the performance gate."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        linear_scaling.evaluate_with_failure_confirmations(
+            lambda: _synthetic_report(budget, ratios={}),
+            maximum_normalized_growth=8.0,
+            latency_budget=budget,
+            failure_confirmations=-1,
+        )
+
+
 def test_static_latency_budget_is_versioned_and_covers_every_case() -> None:
     """The independent policy identifies the known-good release and exact cases."""
     budget = linear_scaling.load_latency_budget(BUDGET)
@@ -286,6 +374,15 @@ def test_provenance_hashes_the_measured_native_extension(require_native: None) -
     assert native["filename"]
     assert native["size_bytes"] > 0
     assert len(native["sha256"]) == 64
+
+
+def test_actions_commit_sha_is_validated_without_launching_git(tmp_path: Path) -> None:
+    """Actions can inject its immutable SHA while local runs still inspect .git."""
+    supplied = "AB" * 20
+
+    assert linear_scaling._git_commit(tmp_path, supplied) == supplied.lower()
+    with pytest.raises(ValueError, match="40 hexadecimal"):
+        linear_scaling._git_commit(tmp_path, "not-a-commit")
 
 
 def test_wheel_provenance_proves_the_loaded_native_bytes(tmp_path: Path) -> None:

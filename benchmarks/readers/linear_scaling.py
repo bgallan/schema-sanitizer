@@ -13,15 +13,21 @@ import json
 import math
 import platform
 import statistics
-import subprocess
+import sys
 import tempfile
 import time
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+
 DEFAULT_LATENCY_BUDGET = Path(__file__).with_name("linear_scaling_budget.json")
 DEFAULT_WARMUP_EPOCHS = 2
+DEFAULT_FAILURE_CONFIRMATIONS = 2
 
 _CaseKey = TypeVar("_CaseKey")
 
@@ -334,24 +340,109 @@ def evaluate_report(
     return evaluated
 
 
-def _git_commit(root: Path) -> str | None:
-    """Return the current source revision when Git metadata is available."""
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
+def evaluate_with_failure_confirmations(
+    measure: Callable[[], dict[str, Any]],
+    *,
+    maximum_normalized_growth: float,
+    latency_budget: dict[str, Any],
+    failure_confirmations: int,
+) -> dict[str, Any]:
+    """Require repeated independent failures before rejecting performance.
+
+    Hosted runners can occasionally pause one complete measurement epoch.  A
+    healthy first attempt remains the fast path, while a failure is measured
+    again from fresh fixtures.  Persistent product regressions therefore fail
+    every attempt; transient host contention is retained as evidence without
+    becoming a correctness result.
+    """
+    if failure_confirmations < 0:
+        raise ValueError("failure confirmations must be non-negative")
+
+    attempts: list[dict[str, Any]] = []
+    for _ in range(failure_confirmations + 1):
+        evaluated = evaluate_report(
+            measure(),
+            maximum_normalized_growth=maximum_normalized_growth,
+            latency_budget=latency_budget,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    commit = completed.stdout.strip().lower()
-    if len(commit) == 40 and all(character in "0123456789abcdef" for character in commit):
+        attempts.append(evaluated)
+        if evaluated["within_budget"]:
+            break
+
+    report = dict(attempts[-1])
+    report["failure_confirmation"] = {
+        "additional_attempts": failure_confirmations,
+        "required_consecutive_failures": failure_confirmations + 1,
+        "attempts_executed": len(attempts),
+        "attempts": [
+            {
+                "attempt": index,
+                "within_budget": bool(attempt["within_budget"]),
+                "failures": attempt["failures"],
+            }
+            for index, attempt in enumerate(attempts, start=1)
+        ],
+    }
+    return report
+
+
+def _git_commit(root: Path, supplied: str | None = None) -> str | None:
+    """Validate a supplied revision or resolve HEAD from repository metadata."""
+    if supplied is not None:
+        commit = supplied.strip().lower()
+        if not _is_commit(commit):
+            raise ValueError("supplied commit SHA must contain 40 hexadecimal characters")
         return commit
+
+    marker = root.resolve() / ".git"
+    if marker.is_dir():
+        git_dir = marker
+    elif marker.is_file():
+        value = marker.read_text(encoding="utf-8").strip()
+        if not value.startswith("gitdir: "):
+            return None
+        candidate = Path(value.removeprefix("gitdir: "))
+        git_dir = (
+            (marker.parent / candidate).resolve() if not candidate.is_absolute() else candidate
+        )
+    else:
+        return None
+
+    common_dir = git_dir
+    common_marker = git_dir / "commondir"
+    if common_marker.is_file():
+        candidate = Path(common_marker.read_text(encoding="utf-8").strip())
+        common_dir = (
+            (git_dir / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        )
+    head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    if not head.startswith("ref: "):
+        commit = head.lower()
+        return commit if _is_commit(commit) else None
+
+    reference = head.removeprefix("ref: ")
+    for directory in (git_dir, common_dir):
+        loose = directory / reference
+        if loose.is_file():
+            commit = loose.read_text(encoding="utf-8").strip().lower()
+            return commit if _is_commit(commit) else None
+    packed = common_dir / "packed-refs"
+    if packed.is_file():
+        for line in packed.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith(("#", "^")):
+                continue
+            commit, name = line.split(" ", 1)
+            if name == reference:
+                commit = commit.lower()
+                return commit if _is_commit(commit) else None
     return None
+
+
+def _is_commit(commit: str) -> bool:
+    """Return whether a value is a full hexadecimal Git object identifier."""
+    if len(commit) == 40 and all(character in "0123456789abcdef" for character in commit):
+        return True
+    return False
 
 
 def _file_identity(path: Path) -> dict[str, Any]:
@@ -413,7 +504,9 @@ def _measured_wheel_identity(package_path: Path, native_path: Path, wheel: Path)
     return {**_file_identity(wheel.resolve()), "native_extension": wheel_native}
 
 
-def collect_provenance(root: Path, wheel: Path | None = None) -> dict[str, Any]:
+def collect_provenance(
+    root: Path, wheel: Path | None = None, *, commit_sha: str | None = None
+) -> dict[str, Any]:
     """Identify the measured checkout, installed distribution, and optional wheel."""
     import schema_sanitizer as ss
 
@@ -424,7 +517,7 @@ def collect_provenance(root: Path, wheel: Path | None = None) -> dict[str, Any]:
     if wheel is not None and native_path is None:
         raise ValueError("the measured package did not load an ABI3 extension")
     return {
-        "commit_sha": _git_commit(root),
+        "commit_sha": _git_commit(root, commit_sha),
         "distribution_version": ss.__version__,
         "package_file": str(package_path),
         "native_extension": (
@@ -450,13 +543,22 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUP_EPOCHS)
     parser.add_argument("--maximum-normalized-growth", type=float, default=1.75)
+    parser.add_argument(
+        "--failure-confirmations",
+        type=int,
+        default=DEFAULT_FAILURE_CONFIRMATIONS,
+        help="additional fresh measurements required after a budget failure",
+    )
     parser.add_argument("--latency-budget", type=Path, default=DEFAULT_LATENCY_BUDGET)
     parser.add_argument("--wheel", type=Path)
+    parser.add_argument("--commit-sha")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     sizes = sorted({max(1, int(value)) for value in args.sizes.split(",")})
     if len(sizes) < 2:
         parser.error("--sizes must contain at least two distinct values")
+    if args.failure_confirmations < 0:
+        parser.error("--failure-confirmations must be non-negative")
     try:
         latency_budget = load_latency_budget(args.latency_budget)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -465,13 +567,14 @@ def main() -> None:
         parser.error(f"--wheel is not a file: {args.wheel}")
     root = args.root.resolve()
     try:
-        provenance = collect_provenance(root, args.wheel)
+        provenance = collect_provenance(root, args.wheel, commit_sha=args.commit_sha)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         parser.error(str(exc))
-    report = evaluate_report(
-        run(root, sizes, max(1, args.repeats), warmups=max(0, args.warmups)),
+    report = evaluate_with_failure_confirmations(
+        lambda: run(root, sizes, max(1, args.repeats), warmups=max(0, args.warmups)),
         maximum_normalized_growth=args.maximum_normalized_growth,
         latency_budget=latency_budget,
+        failure_confirmations=args.failure_confirmations,
     )
     report["policy"] = {
         "latency_budget": {
@@ -482,6 +585,11 @@ def main() -> None:
     report["provenance"] = provenance
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    confirmation = report["failure_confirmation"]
+    required = confirmation["required_consecutive_failures"]
+    for attempt in confirmation["attempts"]:
+        outcome = "within budget" if attempt["within_budget"] else "exceeded budget"
+        print(f"performance attempt {attempt['attempt']}/{required}: {outcome}")
     latency_by_name = {item["name"]: item for item in report["absolute_latency"]["cases"]}
     for item in report["comparisons"]:
         latency = latency_by_name[item["name"]]

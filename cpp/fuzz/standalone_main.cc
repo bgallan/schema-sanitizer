@@ -212,7 +212,8 @@ void mutate(std::vector<std::uint8_t> &bytes,
   case 0U:
     if (!bytes.empty()) {
       const auto offset = random_index(random, bytes.size());
-      bytes[offset] ^= static_cast<std::uint8_t>(1U << (random() % 8U));
+      const auto bit = std::uniform_int_distribution<unsigned>(0U, 7U)(random);
+      bytes[offset] ^= static_cast<std::uint8_t>(1U << bit);
     }
     break;
   case 1U:

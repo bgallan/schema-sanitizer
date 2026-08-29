@@ -73,6 +73,33 @@ def _capture_error(
     return type(caught.value), str(caught.value)
 
 
+@pytest.mark.parametrize("input_text_encoding", ["utf-8", "iso8859-1"])
+def test_local_reader_rejects_symbolic_link_input(
+    tmp_path: Path,
+    input_text_encoding: str,
+    require_native: None,
+) -> None:
+    """Native and transcoding readers reject the same symlink input."""
+    target = tmp_path / "target.csv"
+    target.write_text("value\n1\n", encoding="ascii")
+    source = tmp_path / "input.csv"
+    try:
+        source.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symbolic links are unavailable on this runner: {exc}")
+
+    with pytest.raises(
+        ss.SchemaSanitizerInvalidArgumentError,
+        match="symbolic links.*not accepted",
+    ):
+        ss.to_jsonl(
+            source,
+            tmp_path / "output.jsonl",
+            input_format="csv",
+            input_text_encoding=input_text_encoding,
+        )
+
+
 @pytest.mark.parametrize(
     ("xml_row_tag", "accepted", "rejected"),
     [
@@ -1221,7 +1248,7 @@ def test_reader_errors_do_not_echo_sensitive_input_contents(
 ) -> None:
     """Malformed payload values and XML names stay out of public exceptions."""
 
-    secret = "private_customer_token_7f45c0"  # pragma: allowlist secret
+    secret = "private_payload_token_7f45c0"  # pragma: allowlist secret
     cases = (
         (
             f"<{secret}><child></{secret}_other>".encode(),

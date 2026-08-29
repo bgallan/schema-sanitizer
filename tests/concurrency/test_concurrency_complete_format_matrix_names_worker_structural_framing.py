@@ -43,12 +43,14 @@ def _user_rows(path: Path) -> list[dict[str, str]]:
         ]
 
 
-def _materialization_stats() -> tuple[int, int]:
-    """Return submitted materialization tasks and peak active tasks."""
+def _materialization_stats() -> tuple[int, int, int]:
+    """Return submitted, started, and finished materialization tasks."""
     stats = default_pool().get().performance_stats()
+    tasks = stats["tasks"]["materialization"]
     return (
-        int(stats["tasks"]["materialization"]["submitted"]),
-        int(stats["counters"]["peak_active_tasks"]),
+        int(tasks["submitted"]),
+        int(tasks["started"]),
+        int(tasks["finished"]),
     )
 
 
@@ -133,9 +135,9 @@ def test_object_arrays_keep_exact_single_multi_data_and_real_work(
         telemetry[mode] = _materialization_stats()
 
     assert _user_rows(outputs["multi"]) == _user_rows(outputs["single"])
-    assert telemetry["single"][0] == 0
+    assert telemetry["single"] == (0, 0, 0)
     assert telemetry["multi"][0] >= 2
-    assert telemetry["multi"][1] >= 2
+    assert telemetry["multi"][0] == telemetry["multi"][1] == telemetry["multi"][2]
 
 
 def test_deep_values_fall_back_without_changing_results(

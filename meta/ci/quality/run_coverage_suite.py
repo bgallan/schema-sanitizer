@@ -8,7 +8,7 @@ native coverage workflow.
 from __future__ import annotations
 
 import argparse
-import subprocess
+import os
 import sys
 from pathlib import Path
 
@@ -79,11 +79,11 @@ def selected_tests(profile: str, suite: str, *, root: Path = Path(".")) -> tuple
     return paths
 
 
-def run(profile: str, suite: str) -> None:
-    """Execute one suite with the instrumentation appropriate to its profile."""
+def coverage_command(profile: str, suite: str) -> tuple[str, ...]:
+    """Return one validated coverage command as an immutable argument vector."""
     tests = selected_tests(profile, suite)
     if profile == "python":
-        command = [
+        command = (
             sys.executable,
             "-m",
             "coverage",
@@ -95,10 +95,16 @@ def run(profile: str, suite: str) -> None:
             "-m",
             "pytest",
             "-q",
-        ]
+        )
     else:
-        command = [sys.executable, "-m", "pytest", "-q"]
-    subprocess.run([*command, *tests], check=True)
+        command = (sys.executable, "-m", "pytest", "-q")
+    return (*command, *tests)
+
+
+def run(profile: str, suite: str) -> None:
+    """Replace this helper with the selected argv-only coverage command."""
+    command = coverage_command(profile, suite)
+    os.execv(command[0], command)
 
 
 def main() -> None:

@@ -126,19 +126,21 @@ def test_native_fd_lease_has_explicit_physical_close_commit_and_debt() -> None:
     """Verify native FD lease has explicit physical close commit and debt."""
     header = (CPP / "internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     mapped = (CPP / "ingest/chunk_source_file.cc").read_text(encoding="utf-8")
+    secure_file = (CPP / "ingest/secure_read_only_file.cc").read_text(encoding="utf-8")
     assert "retain_uncertain_close()" in header
     assert "commit_physical_close(bool proven_closed" in header
     assert "close_stream_and_commit" in header
     assert "ProcessFdStreamCloseGuard" in header
-    assert "fd_lease.commit_physical_close(closed)" in mapped
+    assert "SecureReadOnlyFile" in mapped
+    assert "fd_lease_.commit_physical_close(closed)" in secure_file
 
 
 def test_windows_read_only_mapping_allows_staged_path_rename_without_write_sharing() -> None:
     """Mapped staged inputs permit cleanup rename without granting write sharing."""
-    mapped = (CPP / "ingest/chunk_source_file.cc").read_text(encoding="utf-8")
-    create_file = mapped[
-        mapped.index("CreateFileW(native_path.c_str()") : mapped.index(
-            "if (mapped->file == INVALID_HANDLE_VALUE)"
+    secure_file = (CPP / "ingest/secure_read_only_file.cc").read_text(encoding="utf-8")
+    create_file = secure_file[
+        secure_file.index("CreateFileW(native_path.c_str()") : secure_file.index(
+            "if (handle == INVALID_HANDLE_VALUE)"
         )
     ]
     compact_create_file = " ".join(create_file.split())

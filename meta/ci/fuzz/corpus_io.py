@@ -64,9 +64,12 @@ def _archive_inputs(
     errors: list[str] | None,
 ) -> list[FuzzInput]:
     """Read and validate every regular member from a fuzz corpus archive."""
+    if path.is_symlink():
+        _record_error(errors, f"fuzz archive must be a regular file: {path}")
+        return []
     if not path.exists():
         return []
-    if path.is_symlink() or not path.is_file():
+    if not path.is_file():
         _record_error(errors, f"fuzz archive must be a regular file: {path}")
         return []
 

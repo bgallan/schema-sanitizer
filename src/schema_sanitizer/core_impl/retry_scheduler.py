@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import math
 import os
-import random
 import sys
 import threading
 import weakref
@@ -16,6 +15,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from secrets import SystemRandom
 from time import monotonic_ns
 from typing import Any, Hashable, cast
 
@@ -38,6 +38,8 @@ from .process_resources import (
 )
 from .safe_errors import clear_exception_traceback, safe_exception_summary
 from .terminal_ownership import publish_terminal_owner, retire_terminal_category
+
+_JITTER_RANDOM = SystemRandom()
 
 _MAX_PENDING_RETRIES = 8192
 _MAX_PENDING_BYTES = 32 * 1024 * 1024
@@ -1729,7 +1731,7 @@ class _RetryScheduler:
         if jitter > 1:
             raise ValueError("retry jitter_fraction must be between 0 and 1")
         if jitter:
-            delay *= 1.0 + random.uniform(-jitter, jitter)
+            delay *= 1.0 + _JITTER_RANDOM.uniform(-jitter, jitter)
         deadline_ns = self._deadline_from_delay(delay)
         subsystem = _subsystem_for(key)
         detached: list[Callable[[], None]] = []

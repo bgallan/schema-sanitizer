@@ -101,13 +101,14 @@ def _cgroup_events() -> tuple[int | None, int | None]:
 def _cgroup_usage_ratio() -> float | None:
     """Return the highest memory usage ratio across constraining ancestors."""
     view = current_cgroup_view()
+    version = view.controller_version("memory")
     ratios: tuple[float | None, ...]
-    if view.version == 2:
+    if version == 2:
         ratios = (
             read_effective_cgroup_usage_ratio("memory.high", "memory.current", controller="memory"),
             read_effective_cgroup_usage_ratio("memory.max", "memory.current", controller="memory"),
         )
-    elif view.version == 1:
+    elif version == 1:
         ratios = (
             read_effective_cgroup_usage_ratio(
                 "memory.limit_in_bytes",

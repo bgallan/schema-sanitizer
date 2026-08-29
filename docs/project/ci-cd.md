@@ -72,9 +72,8 @@ Cartesian product because its workloads need different runners, Python
 versions, timeouts, and sanitizer settings. Five repository-owned composite
 actions contain the workload implementations; conditions select exactly one
 of them for each task label. `fail-fast: false` on all three matrices preserves
-independent failure evidence. Artifact names include their platform, shard, or
-validation domain where necessary, so concurrently running entries cannot
-overwrite one another.
+independent failure evidence. The four intermediate wheel artifact names include
+their platform, so concurrently running entries cannot overwrite one another.
 
 There is no independent manual mode in `ci.yml`, no schedule, no TestPyPI
 branch, and no check-only publication mode. A safe dry run is a pull request or
@@ -166,8 +165,8 @@ tools are pinned, while pip and apt receive bounded transport retries and
 timeouts. Linux additionally executes the installed public conversion smoke on
 exact 3.12, 3.13, and 3.14 patches, and every platform loads it on the exact
 3.14 patch. `platform-wheel-builds` defines the runner,
-release platform, cibuildwheel architecture, and wheel and evidence artifact
-identifiers once for each of the four targets. `platform-tests` lists the exact
+release platform, cibuildwheel architecture, and wheel artifact identifier once
+for each of the four targets. `platform-tests` lists the exact
 12-entry product of those four platforms and the `concurrency`,
 `memory-parquet`, and `io-pipeline` shards. Every matrix uses
 `fail-fast: false`, preserving evidence from companion entries when one fails.
@@ -215,10 +214,10 @@ marker expression is supplied.
 
 Every functional-shard invocation emits a JUnit XML report with the duration of
 each test and a terminal log ranking the 50 slowest phases above 50 ms. Both
-files identify their platform and shard and are retained in that shard's
-evidence artifact. The log is piped through `tee` with `pipefail`, so pytest's
-exit status remains authoritative; when pytest fails, the evidence upload still
-runs and preserves the partial diagnostics produced before the failure.
+files identify their platform and shard. The log is piped through `tee` with
+`pipefail`, so pytest's exit status remains authoritative. Successful and
+partial failure diagnostics remain in the run logs without creating twelve
+separate retained artifacts or repository-owned Job Summaries.
 
 Functional correctness tests do not treat wall-clock speed as a pass/fail
 signal. Deadline behavior is exercised with controlled clocks, exact timeout
@@ -247,7 +246,10 @@ case as the cross-platform reference. The report records the commit, platform,
 package version, and SHA-256 of the native extension. CI runs the
 benchmark in isolated Python mode and verifies that the loaded extension's
 bytes match the extension inside the declared wheel, preventing a checkout or
-stale build from satisfying the gate. The reader and threading smokes run
+stale build from satisfying the gate. A first timing-policy breach triggers two
+fresh complete measurements and becomes blocking only if all three consecutive
+attempts fail. This preserves detection of persistent slope or latency
+regressions while filtering a one-off hosted-runner pause. The reader and threading smokes run
 before pytest in `io-pipeline` and `concurrency`, respectively, while
 `memory-parquet` performs the Parquet certificate. A regression therefore
 fails early in its owning shard without serializing unrelated functional
@@ -289,20 +291,29 @@ release gate.
 
 ## [Release evidence](#index)
 
-All artifact uploads fail if their expected files are absent and have explicit
-retention periods. Every upload retries once after a transport failure; an
-exhausted retry is still blocking. Platform tests, the terminal validation gate,
-and the manual publisher also retry their exact downloads after removing only
-the corresponding possibly partial destination.
+Only files needed to transport or publish a release are uploaded. Every upload
+fails if its expected files are absent, has an explicit retention period, and
+retries once after a transport failure; an exhausted retry is still blocking.
+Platform tests, the terminal validation gate, and the manual publisher also
+retry their exact downloads after removing only the corresponding possibly
+partial destination.
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
-| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 7 days | The three matching shard entries in `platform-tests` and `validation-gate`. |
-| `source-distribution` | One validated intermediate sdist. | 7 days | `validation-gate`. |
-| `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 30 days | Manual publication and external audit. |
-| `python-branch-coverage` | Contextual HTML, XML, JSON, and high-risk gap report. | 14 days | Maintainers and auditors. |
-| `native-llvm-coverage` | LLVM profiles, summaries, and contextual HTML. | 14 days | Maintainers and auditors. |
-| `platform-evidence-PLATFORM-SHARD` | Functional JUnit timings, slowest-phase log, and runner/dependency manifest; the three owning shards also retain native-stress/threading, Parquet-certificate, or reader-benchmark evidence. | 14 days | Maintainers and auditors. |
+| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 7 days | The three matching shard entries in `platform-tests`, `validation-gate`, and delayed reruns. |
+| `source-distribution` | One validated intermediate sdist. | 7 days | `validation-gate` and delayed reruns. |
+| `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 7 days | Manual publication and external audit. |
+
+Python and native coverage still execute their complete commands and gates.
+Their summaries are written to the logs rather than uploaded as archives.
+Platform JUnit, benchmark, certificate, and runner files likewise remain local
+to their owning job while their test output and inventory remain visible in the
+run. The four wheel-build jobs deliberately retain cibuildwheel's native GitHub
+Job Summary; repository actions do not write any other Job Summary.
+
+Every completed run therefore retains exactly six artifacts: four platform
+wheels, one sdist, and the final auditable release set. No workflow receives
+artifact-deletion permission, and no completed run is modified after it ends.
 
 The `source-distribution` validation entry builds and exercises the sdist while
 platform work is in flight. After every matrix succeeds, `validation-gate`
@@ -579,7 +590,8 @@ configuration because the toolchains and runners are platform-specific.
   artifacts, retention, manifest fields, or publication controls change.
 
 For a compact external audit, verify that there are two workflow files, only
-`publish.yml` has `workflow_dispatch`, `ci.yml` owns the three safe triggers,
-every external `uses` reference is a full commit SHA, only the final publish job
-has OIDC authority, `validation-gate` depends directly on all three matrices,
-and publication consumes only the named 30-day release artifact.
+`publish.yml` has `workflow_dispatch`, and `ci.yml` owns the three safe
+validation triggers. Every external `uses` reference must be a full commit SHA,
+only the final publish job has OIDC authority, `validation-gate` must depend
+directly on all three matrices, and publication must consume only the named
+seven-day release artifact.

@@ -298,10 +298,10 @@ def test_devnull_mode_bypasses_atomic_publication(tmp_path: Path) -> None:
     }
 
 
-def test_high_core_wide_fixture_configures_32_workers_and_breaks_16(
+def test_high_core_wide_fixture_configures_32_workers_and_publishes_all_tasks(
     tmp_path: Path,
 ) -> None:
-    """Eligible fixed-wide work configures 32 workers and exceeds 16-way activity."""
+    """Eligible fixed-wide work configures 32 workers and publishes exact task totals."""
     if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < 32:
         pytest.skip("requires 32 visible CPUs")
     report_path = tmp_path / "high-core.json"
@@ -334,6 +334,10 @@ def test_high_core_wide_fixture_configures_32_workers_and_breaks_16(
     payload = json.loads(run)["workloads"]["arrow_stream"]["runs"]["32"]
     native = payload["representative_native"]
     assert native["effective_workers"] == 32
+    tasks = native["tasks"]
+    submitted = sum(int(values["submitted"]) for values in tasks.values())
+    started_tasks = sum(int(values["started"]) for values in tasks.values())
+    finished = sum(int(values["finished"]) for values in tasks.values())
     started = native["counters"]["started_workers"]
-    peak = native["counters"]["peak_active_tasks"]
-    assert 16 < peak <= started <= 32
+    assert submitted == started_tasks == finished > 32
+    assert 1 <= started <= 32

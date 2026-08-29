@@ -34,7 +34,7 @@ def test_retry_delay_bounds_exponent_work(monkeypatch: pytest.MonkeyPatch) -> No
     """Verify retry delay bounds exponent work."""
     from schema_sanitizer.core_impl import async_scheduler
 
-    monkeypatch.setattr(async_scheduler.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(async_scheduler._JITTER_RANDOM, "uniform", lambda _a, _b: 0.0)
     assert async_scheduler.retry_delay(10**9) == 8.0
     assert async_scheduler.retry_delay(-(10**9)) == 0.25
 

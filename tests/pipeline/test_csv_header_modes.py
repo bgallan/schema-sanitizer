@@ -77,7 +77,7 @@ def test_union_mode_reaches_the_normal_input_lifecycle(tmp_path: Path) -> None:
         )
 
 
-def _business_rows(path: Path) -> list[dict[str, object]]:
+def _stable_rows(path: Path) -> list[dict[str, object]]:
     """Return stable user/provenance fields from generated JSON Lines."""
     return [
         {
@@ -107,7 +107,7 @@ def test_exact_default_and_explicit_mode_materialize_the_same_rows(tmp_path: Pat
         csv_header_mode="exact",
     )
 
-    assert _business_rows(default_output) == _business_rows(exact_output)
+    assert _stable_rows(default_output) == _stable_rows(exact_output)
 
 
 def test_exact_default_and_explicit_mode_reject_the_same_mismatch(tmp_path: Path) -> None:

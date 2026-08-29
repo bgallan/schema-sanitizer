@@ -89,7 +89,8 @@ def _logical_digest(path: Path) -> str:
     elif path.suffix == ".parquet":
         import pyarrow.parquet as pq
 
-        rows = pq.read_table(path).to_pylist()
+        with pq.ParquetFile(path) as parquet_file:
+            rows = parquet_file.read().to_pylist()
     else:
         raise ValueError(f"unsupported logical benchmark output: {path.suffix}")
 

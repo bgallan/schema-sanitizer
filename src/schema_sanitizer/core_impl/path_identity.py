@@ -721,7 +721,7 @@ def _private_claim_root() -> Path:
     root = base / root_name
 
     try:
-        os.mkdir(root, 0o700)
+        os.mkdir(root, stat.S_IRWXU)
     except FileExistsError:
         pass
     metadata = os.lstat(root)
@@ -730,9 +730,9 @@ def _private_claim_root() -> Path:
     if uid is not None and metadata.st_uid != uid:
         raise OSError("temporary path claim root must be owned by the current user")
     try:
-        os.chmod(root, 0o700, follow_symlinks=False)
+        os.chmod(root, stat.S_IRWXU, follow_symlinks=False)
     except (NotImplementedError, TypeError):
-        os.chmod(root, 0o700)
+        os.chmod(root, stat.S_IRWXU)
     return root
 
 

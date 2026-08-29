@@ -43,7 +43,7 @@ runs:
         done
     - name: Render LLVM reports
       shell: bash
-      run: |
+      run: |-
         EXTENSION=$(python - <<'PY'
         import schema_sanitizer._core_abi3 as core
         print(core.__file__)
@@ -67,21 +67,3 @@ runs:
           -instr-profile=coverage-native/combined.profdata \
           > coverage-native/combined-summary.txt
         cat coverage-native/combined-summary.txt
-    - name: Upload native LLVM coverage
-      id: upload-native-llvm-coverage
-      continue-on-error: true
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      with:
-        name: native-llvm-coverage
-        path: coverage-native/
-        if-no-files-found: error
-        retention-days: 14
-    - name: Retry native LLVM coverage upload after a transport failure
-      if: ${{ always() && steps.upload-native-llvm-coverage.outcome == 'failure' }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      with:
-        name: native-llvm-coverage
-        path: coverage-native/
-        if-no-files-found: error
-        retention-days: 14
-        overwrite: true

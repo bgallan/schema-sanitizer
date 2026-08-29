@@ -10,11 +10,16 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from benchmarks.support.command import DISCARD, run_command  # noqa: E402
 
 PIPELINE_CASES = (
     "pipeline_scalar_jsonl_to_csv",
@@ -74,7 +79,7 @@ def _run_worker_case(
         "--output",
         str(output),
     ]
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+    run_command(command, check=True, stdout=DISCARD)
     report = json.loads(output.read_text(encoding="utf-8"))
     selected = {name: report["cases"][name] for name in selected_cases}
     if not all(bool(result["equivalent"]) for result in selected.values()):

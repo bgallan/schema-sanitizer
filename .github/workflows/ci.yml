@@ -346,7 +346,7 @@ jobs:
           name: release-distributions
           path: release/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
           compression-level: 0
       - name: Retry the publishable release-set upload after a transport failure
         if: ${{ always() && steps.upload-release-distributions.outcome == 'failure' }}
@@ -355,6 +355,6 @@ jobs:
           name: release-distributions
           path: release/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
           compression-level: 0
           overwrite: true

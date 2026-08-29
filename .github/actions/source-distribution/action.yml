@@ -24,8 +24,7 @@ runs:
         python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
         python meta/ci/release/check_distribution_contents.py downstream-wheel/*.whl
         WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
-        python meta/ci/release/check_downstream_install.py "${WHEEL}" \
-          --work-root "${{ runner.temp }}/downstream-checks"
+        meta/ci/release/check_downstream_install.sh "${WHEEL}"
     - name: Upload the validated source distribution
       id: upload-source-distribution
       continue-on-error: true

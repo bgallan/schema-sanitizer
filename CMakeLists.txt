@@ -163,7 +163,8 @@ add_custom_target(
   COMMAND
     ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_LIST_DIR}/meta/ci/native/check_cpp_documentation.py
-    --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
+    --build-root ${CMAKE_BINARY_DIR} --compile-commands
+    ${CMAKE_BINARY_DIR}/compile_commands.json
   WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
   COMMENT "Checking C/C++ file and callable documentation with Clang ASTs"
   VERBATIM)

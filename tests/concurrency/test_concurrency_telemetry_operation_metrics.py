@@ -7,6 +7,9 @@ and memory metrics, and each subsequent operation replaces the report with a hig
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -20,6 +23,24 @@ pytestmark = pytest.mark.usefixtures("require_native")
 
 _MEMORY_LIMIT = 128 * 1024 * 1024
 _COLUMNS = tuple(f"column_{index:03d}" for index in range(128))
+
+
+@contextmanager
+def _two_cpu_affinity_when_supported() -> Iterator[None]:
+    """Exercise the private-runner topology without changing other tests."""
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        yield
+        return
+    original = os.sched_getaffinity(0)
+    if len(original) <= 2:
+        yield
+        return
+    selected = set(sorted(original)[:2])
+    os.sched_setaffinity(0, selected)
+    try:
+        yield
+    finally:
+        os.sched_setaffinity(0, original)
 
 
 def _write_wide_jsonl(path: Path, rows: int) -> None:
@@ -69,7 +90,8 @@ def test_completed_operation_reports_phases_tasks_and_bounded_memory(
     output = tmp_path / "wide-output.jsonl"
     _write_wide_jsonl(source, 2_000)
 
-    report = _run_native_jsonl(ExecutionContext(), source, output)
+    with _two_cpu_affinity_when_supported():
+        report = _run_native_jsonl(ExecutionContext(), source, output)
 
     assert report["schema_version"] == 1
     assert report["operation_id"] == 1

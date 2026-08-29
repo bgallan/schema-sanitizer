@@ -12,7 +12,7 @@ workflow or configuration file.
 | [`quality/`](quality/) | Source, secret, cleanup, coverage, and runner-evidence policy | `check_detect_secrets_report.py`, `check_primary_cleanup.py`, `record_runner_environment.py`, `report_risk_coverage.py`, `run_coverage_suite.py` |
 | [`native/`](native/) | Native source and binary linkage policy | `check_no_arrow_cpp.sh`, `check_no_libarrow_linkage.sh`, the manual CMake documentation target |
 | [`parquet/`](parquet/) | Installed-wheel and runtime Parquet certification | compression and fail-closed contract suites |
-| [`fuzz/`](fuzz/) | Corpus integrity and bounded regression campaigns | `check_fuzz_corpus.py`, `run_fuzz_regressions.py` |
+| [`fuzz/`](fuzz/) | Corpus integrity and bounded regression campaigns | `check_fuzz_corpus.py`, `run_fuzz_regressions.sh`, `run_fuzz_regressions.py` |
 | [`sanitizers/`](sanitizers/) | ASan/UBSan/TSan process launch and orchestration | CPython launchers and the TSan extension suite |
 | [`release/`](release/) | Distribution identity, downstream installation, provenance, and PyPI preflight | archive checker, release manifest, isolated consumer checks, version and remote-main checks |
 | [`requirements/`](requirements/) | Reproducible CI-only dependency sets and their cache identity | pinned platform-test adapters, quality tools, and isolated downstream extras |
@@ -51,8 +51,10 @@ retries transport failures, HTTP 429, server errors, and HTTP 403 only with an
 official GitHub rate-limit header; its server-requested delay is capped at 30
 seconds per attempt, while semantic client errors fail immediately. Platform
 and release-set consumers retry artifact downloads only after clearing their
-exact partial destination. Intermediate wheels and the sdist are retained
-for seven days so delayed failed-job reruns can still consume their producers.
+exact partial destination. Intermediate wheels, the sdist, and the audited
+`release-distributions` set are retained for seven days. This keeps delayed
+failed-job reruns possible without granting artifact-deletion permissions or
+modifying a completed run.
 The canonical sdist encodes the checked-out commit time through
 `SOURCE_DATE_EPOCH`, which its archive validator checks explicitly.
 

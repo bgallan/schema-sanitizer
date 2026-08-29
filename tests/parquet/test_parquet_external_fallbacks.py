@@ -303,21 +303,21 @@ def test_pyarrow_deprecated_nested_list_map_encoding_uses_pyarrow_fallback(
     path = tmp_path / "pyarrow-deprecated-nested-list-map.parquet"
     item_type = pa.struct(
         [
-            pa.field("sku", pa.string()),
+            pa.field("label", pa.string()),
             pa.field("attrs", pa.map_(pa.string(), pa.list_(pa.int64()))),
         ]
     )
     table = pa.table(
         {
-            "orders": pa.array(
+            "collections": pa.array(
                 [
                     [
-                        {"sku": "a", "attrs": [("color", [1, 2]), ("size", [])]},
-                        {"sku": "b", "attrs": None},
+                        {"label": "a", "attrs": [("color", [1, 2]), ("size", [])]},
+                        {"label": "b", "attrs": None},
                     ],
                     None,
                     [],
-                    [{"sku": None, "attrs": [("missing", None)]}],
+                    [{"label": None, "attrs": [("missing", None)]}],
                 ],
                 type=pa.list_(item_type),
             )
@@ -343,24 +343,24 @@ def test_pyarrow_deprecated_nested_list_map_encoding_uses_pyarrow_fallback(
 
     assert result.clean_data.to_pylist() == [
         {
-            "orders": [
+            "collections": [
                 {
                     "attrs": [
                         {"key": "color", "value": [1, 2]},
                         {"key": "size", "value": None},
                     ],
-                    "sku": "a",
+                    "label": "a",
                 },
-                {"attrs": None, "sku": "b"},
+                {"attrs": None, "label": "b"},
             ]
         },
-        {"orders": None},
-        {"orders": None},
+        {"collections": None},
+        {"collections": None},
         {
-            "orders": [
+            "collections": [
                 {
                     "attrs": [{"key": "missing", "value": None}],
-                    "sku": None,
+                    "label": None,
                 }
             ]
         },

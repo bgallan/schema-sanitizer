@@ -7,12 +7,12 @@ diagnostics, and orderly shutdown for shared asynchronous execution.
 from __future__ import annotations
 
 import asyncio
-import random
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from itertools import islice
+from secrets import SystemRandom
 from threading import Condition, Lock
 from time import monotonic
 from typing import AbstractSet, Any, TypeVar, cast
@@ -23,6 +23,7 @@ from .memory_budget import GovernedResultOwnership
 
 T = TypeVar("T")
 
+_JITTER_RANDOM = SystemRandom()
 _MAX_ASYNC_RETRIES = 32
 _MAX_PROCESS_ASYNC_TASK_SLOTS = 256
 _ASYNC_SLOT_CONTROL_BYTES = 4096
@@ -870,7 +871,7 @@ def async_scheduler_snapshot() -> AsyncSchedulerSnapshot:
 def retry_delay(attempt: int) -> float:
     """Return jittered exponential backoff delay for remote I/O retries."""
     bounded_attempt = min(max(attempt, 0), 16)
-    return min(8.0, 0.25 * (2**bounded_attempt)) + random.uniform(0.0, 0.25)
+    return min(8.0, 0.25 * (2**bounded_attempt)) + _JITTER_RANDOM.uniform(0.0, 0.25)
 
 
 async def retry_async(

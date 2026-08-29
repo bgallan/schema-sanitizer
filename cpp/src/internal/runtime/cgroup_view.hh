@@ -21,9 +21,8 @@ enum class ValueState : std::uint8_t { kValue, kUnbounded, kUnknown };
 struct UnsignedSample final {
   ValueState state = ValueState::kUnknown;
   std::uint64_t value = 0U;
-  // ENOENT is meaningful only for a controller file at the cgroup2 mount
-  // root: that root is exempt from resource control and normally omits those
-  // files. Keep it distinct from permission, I/O and parse failures so every
+  // Keep open-time ENOENT distinct from permission, I/O and parse failures.
+  // A narrowly documented controller-root omission can be unbounded; every
   // other failure remains UNKNOWN.
   bool missing = false;
 };
@@ -425,6 +424,22 @@ inline bool parent_directory_in_place(char *current,
   return std::strlen(current) >= mount_length;
 }
 
+/// Recognizes only controller-root omissions whose documented meaning is
+/// unbounded capacity.
+[[nodiscard]] inline bool missing_controller_file_is_unbounded_root(
+    std::string_view controller, std::string_view filename, bool unified,
+    bool at_mount_root, bool missing) noexcept {
+  if (!at_mount_root || !missing) {
+    return false;
+  }
+  // A cgroup2 root is exempt from resource control and normally omits
+  // controller interface files. The legacy cgroup-v1 pids controller has the
+  // same root-only contract specifically for pids.max. Keep the exception
+  // exact so missing files below the root, usage files, and all other errors
+  // continue to fail closed.
+  return unified || (controller == "pids" && filename == "pids.max");
+}
+
 /// Returns the tightest finite value found while walking the effective
 /// cgroup ancestry.
 [[nodiscard]] inline UnsignedSample
@@ -459,10 +474,8 @@ effective_unsigned(std::string_view controller,
       const auto sample = read_unsigned_file(path);
       if (sample.state == ValueState::kUnknown) {
         const bool at_mount_root = std::strcmp(current, mountpoint) == 0;
-        if (unified && at_mount_root && sample.missing) {
-          // The cgroup2 root is exempt from resource control and normally has
-          // no controller interface files. Only its exact ENOENT is a known
-          // unbounded level; all non-root and non-ENOENT failures stay closed.
+        if (missing_controller_file_is_unbounded_root(
+                controller, filename, unified, at_mount_root, sample.missing)) {
           break;
         }
         read_failed = true;
@@ -539,9 +552,9 @@ effective_headroom(std::string_view controller, std::string_view limit_filename,
       const auto limit = read_unsigned_file(limit_path);
       if (limit.state == ValueState::kUnknown) {
         const bool at_mount_root = std::strcmp(current, mountpoint) == 0;
-        if (unified && at_mount_root && limit.missing) {
-          // See effective_unsigned(): a missing controller file is expected
-          // only at the exempt cgroup2 root.
+        if (missing_controller_file_is_unbounded_root(
+                controller, limit_filename, unified, at_mount_root,
+                limit.missing)) {
           break;
         }
         read_failed = true;

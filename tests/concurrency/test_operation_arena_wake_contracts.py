@@ -139,7 +139,11 @@ def test_native_wake_coalescing_preserves_every_park_wave(
     assert submitted == runnable_blockers + rounds + wave_tasks
     assert finished == rounds + wave_tasks
     assert queued == 0
-    assert wake_before_preload == wake_after_preload == runnable_blockers
+    # A worker can dequeue its blocker before it reaches the park boundary, so
+    # that submission legitimately needs no wake publication. The busy preload
+    # must not publish any additional wake generations.
+    assert 0 <= wake_before_preload <= runnable_blockers
+    assert wake_after_preload == wake_before_preload
     assert runnable_blockers < wake_final < submitted
     assert runnable_blockers <= started <= workers
     assert runnable_blockers <= peak <= workers

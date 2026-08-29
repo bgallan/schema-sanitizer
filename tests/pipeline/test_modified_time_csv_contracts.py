@@ -141,6 +141,6 @@ def test_consolidated_ci_owns_modified_time_csv_validation() -> None:
     ) >= 3
     assert "tests/pipeline" in platform_tests
     assert "pytest -q -o pythonpath=." in platform_tests
-    assert "check_downstream_install.py" in source_distribution
+    assert "check_downstream_install.sh" in source_distribution
     assert "tests/pipeline/test_csv_union_projection.py" in tsan_runner
     assert '#include "ordered_executor_tsan_csv_projection.cc.inc"' in native_probe

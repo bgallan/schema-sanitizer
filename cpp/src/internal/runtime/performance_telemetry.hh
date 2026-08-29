@@ -121,6 +121,10 @@ public:
                              std::int64_t queue_wait_ns, std::int64_t run_ns,
                              std::int64_t max_queue_wait_ns,
                              std::int64_t max_run_ns) noexcept;
+  /// Admits one worker task whose batched measurements must precede finality.
+  [[nodiscard]] bool BeginWorkerTaskPublication() noexcept;
+  /// Releases worker-task publication ownership after its shard is visible.
+  void CompleteWorkerTaskPublications(std::size_t task_count) noexcept;
   /// Increments the aggregate count of work-stealing executions.
   void RecordTaskStolen() noexcept;
   /// Increments one worker shard's stolen-task count.
@@ -148,6 +152,10 @@ public:
   }
 
 private:
+  /// Publishes the final timestamp and releases the operation memory lease
+  /// once.
+  void Finalize() noexcept;
+
   static constexpr std::size_t kPhaseCount =
       static_cast<std::size_t>(PerformancePhase::kCount);
   static constexpr std::size_t kTaskKindCount =
@@ -162,6 +170,14 @@ private:
   bool multi_mode_ = false;
   std::int64_t started_ns_ = 0;
   std::atomic<std::int64_t> finished_ns_{0};
+  static constexpr std::uint64_t kFinishRequested = std::uint64_t{1} << 63U;
+  static constexpr std::uint64_t kTaskPublicationCountMask =
+      kFinishRequested - 1U;
+  // The high bit closes admission when Finish() is requested; the remaining
+  // bits count worker tasks whose completion batch is not yet public. Keeping
+  // both states in one atomic prevents Finish() from racing a worker between
+  // its admission and publication.
+  std::atomic<std::uint64_t> task_publication_state_{0};
 
   std::array<std::atomic<std::int64_t>, kPhaseCount> phase_ns_{};
   std::array<std::atomic<std::int64_t>, kPhaseCount> phase_calls_{};

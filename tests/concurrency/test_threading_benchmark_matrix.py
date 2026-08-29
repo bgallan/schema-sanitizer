@@ -45,7 +45,7 @@ def test_matrix_rejects_child_cross_mode_mismatch(monkeypatch, tmp_path: Path) -
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(matrix.subprocess, "run", fake_run)
+    monkeypatch.setattr(matrix, "run_command", fake_run)
     try:
         matrix._run_case(
             case,

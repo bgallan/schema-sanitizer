@@ -49,6 +49,14 @@ _WORKER_CAPACITY_NAMES = frozenset(
         "workers",
     }
 )
+_OVERLAP_TELEMETRY_NAMES = frozenset({"peak_active_tasks"})
+_PROMOTION_TELEMETRY_NAMES = frozenset(
+    {
+        "output_preference_bypasses",
+        "outputs_before_broad",
+        "promoted",
+    }
+)
 _PROBE_STARTED_RESULT_INDEX = {
     "operation_task_arena_mixed_lane_probe": 2,
     "operation_task_arena_output_preference_probe": 3,
@@ -74,10 +82,19 @@ class PythonFindings:
     async_sleeps: tuple[tuple[int, str], ...] = ()
     lazy_workers: tuple[tuple[str, int, str], ...] = ()
     prewarmed_lazy_workers: tuple[tuple[str, int, str], ...] = ()
+    incidental_overlap: tuple[tuple[int, str], ...] = ()
+    incidental_promotions: tuple[tuple[int, str], ...] = ()
 
     def empty(self) -> bool:
         """Return whether the module has no determinism violations."""
-        return not (self.wall_clock or self.thread_sleeps or self.async_sleeps or self.lazy_workers)
+        return not (
+            self.wall_clock
+            or self.thread_sleeps
+            or self.async_sleeps
+            or self.lazy_workers
+            or self.incidental_overlap
+            or self.incidental_promotions
+        )
 
 
 def _assigned_names(node: ast.AST) -> set[str]:
@@ -634,6 +651,117 @@ def _lazy_worker_findings(
     return tuple(dict.fromkeys(findings)), tuple(dict.fromkeys(prewarmed_findings))
 
 
+def _telemetry_expression(
+    node: ast.AST,
+    aliases: set[str],
+    field_names: frozenset[str],
+) -> bool:
+    """Return whether an expression reads selected scheduler telemetry."""
+    if isinstance(node, ast.Name):
+        return node.id in aliases or node.id in field_names
+    if _field_name(node) in field_names:
+        return True
+    if not isinstance(node, ast.Call):
+        return False
+    function_name = (
+        node.func.id
+        if isinstance(node.func, ast.Name)
+        else node.func.attr
+        if isinstance(node.func, ast.Attribute)
+        else ""
+    )
+    if function_name in {"int", "operator.index"} and len(node.args) == 1:
+        return _telemetry_expression(node.args[0], aliases, field_names)
+    return bool(
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value in field_names
+    )
+
+
+def _requires_scheduler_observation(
+    left: ast.AST,
+    operator: ast.cmpop,
+    right: ast.AST,
+    aliases: set[str],
+    field_names: frozenset[str],
+    incidental_threshold: float,
+) -> bool:
+    """Return whether a comparison requires scheduler evidence above a safe bound."""
+    left_value = _numeric_literal(left)
+    right_value = _numeric_literal(right)
+    if _telemetry_expression(left, aliases, field_names) and right_value is not None:
+        return bool(
+            isinstance(operator, ast.Gt)
+            and right_value >= incidental_threshold
+            or isinstance(operator, ast.GtE)
+            and right_value > incidental_threshold
+            or isinstance(operator, ast.NotEq)
+            and incidental_threshold == 0
+            and right_value == 0
+        )
+    if _telemetry_expression(right, aliases, field_names) and left_value is not None:
+        return bool(
+            isinstance(operator, ast.Lt)
+            and left_value >= incidental_threshold
+            or isinstance(operator, ast.LtE)
+            and left_value > incidental_threshold
+            or isinstance(operator, ast.NotEq)
+            and incidental_threshold == 0
+            and left_value == 0
+        )
+    return False
+
+
+def _incidental_scheduler_findings(
+    tree: ast.Module,
+    field_names: frozenset[str],
+    incidental_threshold: float,
+) -> tuple[tuple[int, str], ...]:
+    """Find assertions that require nondeterministic scheduler observations."""
+    findings: list[tuple[int, str]] = []
+    for scope in _scopes(tree):
+        aliases: set[str] = set()
+        for node in _local_guard_nodes(scope):
+            if isinstance(node, ast.Assign):
+                assigned = set().union(*(_assigned_names(target) for target in node.targets))
+                derived = _telemetry_expression(node.value, aliases, field_names)
+                aliases.difference_update(assigned)
+                if derived:
+                    aliases.update(assigned)
+                continue
+            if isinstance(node, ast.AnnAssign):
+                assigned = _assigned_names(node.target)
+                derived = node.value is not None and _telemetry_expression(
+                    node.value, aliases, field_names
+                )
+                aliases.difference_update(assigned)
+                if derived:
+                    aliases.update(assigned)
+                continue
+            for comparison in (
+                child for child in ast.walk(node.test) if isinstance(child, ast.Compare)
+            ):
+                operands = (comparison.left, *comparison.comparators)
+                if any(
+                    _requires_scheduler_observation(
+                        left,
+                        operator,
+                        right,
+                        aliases,
+                        field_names,
+                        incidental_threshold,
+                    )
+                    for left, operator, right in zip(
+                        operands[:-1], comparison.ops, operands[1:], strict=True
+                    )
+                ):
+                    findings.append((node.lineno, ast.unparse(comparison)))
+    return tuple(dict.fromkeys(findings))
+
+
 @lru_cache(maxsize=None)
 def analyze_python(path: Path) -> PythonFindings:
     """Parse and apply every Python determinism rule to one test module."""
@@ -650,6 +778,8 @@ def analyze_python(path: Path) -> PythonFindings:
         async_sleeps=async_sleeps,
         lazy_workers=lazy_workers,
         prewarmed_lazy_workers=prewarmed_lazy_workers,
+        incidental_overlap=_incidental_scheduler_findings(tree, _OVERLAP_TELEMETRY_NAMES, 1),
+        incidental_promotions=_incidental_scheduler_findings(tree, _PROMOTION_TELEMETRY_NAMES, 0),
     )
 
 
@@ -658,6 +788,16 @@ def unapproved_lazy_workers(path: Path) -> tuple[tuple[str, int, str], ...]:
     findings = analyze_python(path)
     allowed = set(findings.prewarmed_lazy_workers)
     return tuple(finding for finding in findings.lazy_workers if finding not in allowed)
+
+
+def incidental_overlap_assertions(path: Path) -> tuple[tuple[int, str], ...]:
+    """Return assertions that require live tasks to overlap incidentally."""
+    return analyze_python(path).incidental_overlap
+
+
+def incidental_promotion_assertions(path: Path) -> tuple[tuple[int, str], ...]:
+    """Return assertions that require a scheduler-dependent promotion."""
+    return analyze_python(path).incidental_promotions
 
 
 def _cpp_words(expression: str) -> set[str]:
@@ -836,6 +976,12 @@ def repository_findings(root: Path = ROOT) -> tuple[str, ...]:
         findings.extend(
             f"{relative}:{line}: {expression}"
             for _function, line, expression in unapproved_lazy_workers(path)
+        )
+        findings.extend(
+            f"{relative}:{line}: {expression}" for line, expression in result.incidental_overlap
+        )
+        findings.extend(
+            f"{relative}:{line}: {expression}" for line, expression in result.incidental_promotions
         )
     cpp_root = root / "cpp" / "tests"
     paths = sorted(cpp_root.rglob("*.cc")) + sorted(cpp_root.rglob("*.cc.inc"))

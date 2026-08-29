@@ -8,14 +8,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 
 def test_output_steal_preference_is_dormant_through_eight_workers(require_native: None) -> None:
     """The eight-worker stealing path uses the low-worker reverse scan."""
-    promoted, outputs, broad, stolen, started, queued, submitted = (
+    promoted, outputs, broad, stolen, started, queued, submitted, cpu_capacity = (
         native_core.operation_task_arena_output_steal_probe(8)
     )
+
+    if cpu_capacity < 3:
+        pytest.skip("output-steal topology requires at least three runnable CPUs")
 
     assert 0 <= promoted <= outputs
     assert outputs == 3
@@ -29,9 +34,12 @@ def test_output_steal_preference_is_dormant_through_eight_workers(require_native
 
 def test_idle_high_worker_steals_front_output_before_later_broad_work(require_native: None) -> None:
     """An idle high worker no longer hides front output behind back broad work."""
-    promoted, outputs, broad, stolen, started, queued, submitted = (
+    promoted, outputs, broad, stolen, started, queued, submitted, cpu_capacity = (
         native_core.operation_task_arena_output_steal_probe(16)
     )
+
+    if cpu_capacity < 3:
+        pytest.skip("output-steal topology requires at least three runnable CPUs")
 
     assert 0 <= promoted <= outputs
     assert outputs == 7

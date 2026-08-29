@@ -8,10 +8,14 @@ particular file layout.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
+
+import pytest
 
 from schema_sanitizer import pipeline
 from schema_sanitizer.integrations import bigquery
@@ -231,6 +235,44 @@ def test_cpp_source_has_file_summaries() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def _cpp_documentation_helper() -> ModuleType:
+    """Load the native documentation checker for trust-boundary tests."""
+    path = ROOT / "meta/ci/native/check_cpp_documentation.py"
+    spec = importlib.util.spec_from_file_location("check_cpp_documentation", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_compile_database_is_confined_to_the_approved_build_root(tmp_path: Path) -> None:
+    """Reject a compile database outside the caller-approved build tree."""
+    helper = _cpp_documentation_helper()
+    build_root = tmp_path / "build"
+    trusted = build_root / "native" / "compile_commands.json"
+    trusted.parent.mkdir(parents=True)
+    trusted.write_text("[]", encoding="utf-8")
+
+    assert helper._validated_compile_database(trusted, build_root) == trusted.resolve()
+
+    outside = tmp_path / "compile_commands.json"
+    outside.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="below"):
+        helper._validated_compile_database(outside, build_root)
+
+
+def test_compile_database_requires_the_expected_regular_filename(tmp_path: Path) -> None:
+    """Reject directories and alternate compile-database filenames."""
+    helper = _cpp_documentation_helper()
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    unexpected = build_root / "commands.json"
+    unexpected.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="regular expected file"):
+        helper._validated_compile_database(unexpected, build_root)
 
 
 def test_msvc_translation_units_compile_in_four_bounded_processes() -> None:

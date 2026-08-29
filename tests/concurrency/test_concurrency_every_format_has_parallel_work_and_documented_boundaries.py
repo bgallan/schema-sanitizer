@@ -48,12 +48,15 @@ def _user_csv_rows(path: Path) -> list[dict[str, str]]:
         ]
 
 
-def _materialization_stats() -> tuple[int, int]:
-    """Return submitted materialization tasks and peak active task count."""
+def _materialization_stats() -> tuple[int, int, int]:
+    """Return submitted, started, and finished materialization task counts."""
     stats = default_pool().get().performance_stats()
-    submitted = int(stats.get("tasks", {}).get("materialization", {}).get("submitted", 0))
-    peak = int(stats.get("counters", {}).get("peak_active_tasks", 0))
-    return submitted, peak
+    tasks = stats.get("tasks", {}).get("materialization", {})
+    return (
+        int(tasks.get("submitted", 0)),
+        int(tasks.get("started", 0)),
+        int(tasks.get("finished", 0)),
+    )
 
 
 def _write_flat_array(path: Path, *, rows: int = 4_096, columns: int = 24) -> None:
@@ -145,9 +148,9 @@ def test_large_flat_arrays_parallelize_with_exact_user_data(
         telemetry[mode] = _materialization_stats()
 
     assert _user_csv_rows(outputs["multi"]) == _user_csv_rows(outputs["single"])
-    assert telemetry["single"][0] == 0
+    assert telemetry["single"] == (0, 0, 0)
     assert telemetry["multi"][0] >= 2
-    assert telemetry["multi"][1] >= 2
+    assert telemetry["multi"][0] == telemetry["multi"][1] == telemetry["multi"][2]
 
 
 def test_small_json_document_avoids_artificial_column_parallelism(
@@ -169,9 +172,9 @@ def test_small_json_document_avoids_artificial_column_parallelism(
         memory_limit_bytes=128 * 1024 * 1024,
         parse_integers=True,
     )
-    submitted, peak = _materialization_stats()
+    submitted, started, finished = _materialization_stats()
     assert submitted == 1
-    assert peak == 1
+    assert submitted == started == finished
 
 
 def test_json_array_object_contract_has_exact_single_multi_error(

@@ -239,7 +239,7 @@ def test_list_of_structs_allows_nested_list_fields(input_case, tmp_path) -> None
             "author": [
                 {
                     "id": 1,
-                    "signature": "El Pais",
+                    "signature": "Example Publisher",
                     "tagauthor": {
                         "image": {
                             "auth": ["abc", "def"],
@@ -290,7 +290,7 @@ def test_list_struct_scalar_conflict_resolves_at_nested_field(input_case, tmp_pa
 def test_list_struct_numeric_looking_string_conflict_stays_typed(input_case, tmp_path) -> None:
     """Verify list struct numeric looking string conflict stays typed."""
     rows = [
-        {"author": [{"tagauthor": {"externalid": "el_pais_a"}}]},
+        {"author": [{"tagauthor": {"externalid": "example_publisher_a"}}]},
         {"author": [{"tagauthor": {"externalid": "-1"}}]},
     ]
 

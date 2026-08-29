@@ -26,7 +26,7 @@ def _write_csv(folder: Path, name: str, text: str) -> Path:
     return path
 
 
-def _business_rows(path: Path) -> list[dict[str, object]]:
+def _stable_rows(path: Path) -> list[dict[str, object]]:
     """Return rows without volatile registry and timestamp metadata."""
     rows: list[dict[str, object]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -64,7 +64,7 @@ def test_union_accepts_equal_reordered_missing_and_additive_headers(tmp_path: Pa
 
     _convert_union(folder, output)
 
-    assert _business_rows(output) == [
+    assert _stable_rows(output) == [
         {"extra": None, "id": "1", "name": "Ana", "source_file": "a.csv"},
         {"extra": None, "id": "2", "name": "Luis", "source_file": "b.csv"},
         {"extra": None, "id": "3", "name": None, "source_file": "c.csv"},
@@ -89,7 +89,7 @@ def test_union_single_and_multi_thread_results_are_identical(tmp_path: Path) -> 
     _convert_union(folder, single, multi_threading=False)
     _convert_union(folder, multi, multi_threading=True)
 
-    assert _business_rows(single) == _business_rows(multi)
+    assert _stable_rows(single) == _stable_rows(multi)
 
 
 def test_union_rejects_duplicate_fields_before_materialization(tmp_path: Path) -> None:
@@ -128,7 +128,7 @@ def test_union_pads_short_rows_with_nulls(tmp_path: Path) -> None:
 
     _convert_union(folder, output)
 
-    assert _business_rows(output) == [
+    assert _stable_rows(output) == [
         {"extra": None, "id": "1", "name": "Ana", "source_file": "a.csv"}
     ]
 
@@ -210,7 +210,7 @@ def test_union_preserves_projection_and_provenance_across_quoted_newlines(
 
     _convert_union(folder, output, multi_threading=True)
 
-    assert _business_rows(output) == [
+    assert _stable_rows(output) == [
         {
             "extra": None,
             "id": "1",
@@ -280,7 +280,7 @@ def test_union_additive_registry_accepts_unexpected_columns(tmp_path: Path) -> N
         schema_mode="additive",
     )
 
-    assert _business_rows(output) == [
+    assert _stable_rows(output) == [
         {"extra": "x", "id": "2", "name": "Luis", "source_file": "b.csv"}
     ]
 

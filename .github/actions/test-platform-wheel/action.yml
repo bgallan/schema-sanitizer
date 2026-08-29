@@ -93,8 +93,10 @@ runs:
         --sizes 1024,2048
         --repeats 3
         --maximum-normalized-growth 8
+        --failure-confirmations 2
         --latency-budget benchmarks/readers/linear_scaling_budget.json
         --wheel wheelhouse/*.whl
+        --commit-sha "${GITHUB_SHA}"
         --output "artifacts/reader-linear-scaling-${PLATFORM_ARTIFACT}.json"
     - name: Cross-platform threading benchmark smoke
       if: inputs.shard == 'concurrency'
@@ -102,7 +104,7 @@ runs:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash
       run: >-
-        python -m benchmarks.concurrency.threading.matrix
+        benchmarks/concurrency/threading/run_matrix.sh
         --profile ci
         --rows 256
         --warmups 0
@@ -128,7 +130,7 @@ runs:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         TEST_SHARD: ${{ inputs.shard }}
       shell: bash
-      run: |
+      run: |-
         set -euo pipefail
         case "${TEST_SHARD}" in
           concurrency)
@@ -163,22 +165,3 @@ runs:
           --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" \
           "${test_paths[@]}" \
           2>&1 | tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"
-    - name: Upload platform-shard evidence
-      id: upload-platform-shard-evidence
-      if: ${{ success() || (failure() && hashFiles('artifacts/**') != '') }}
-      continue-on-error: true
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      with:
-        name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}
-        path: artifacts/
-        if-no-files-found: error
-        retention-days: 14
-    - name: Retry platform-shard evidence upload
-      if: ${{ always() && steps.upload-platform-shard-evidence.outcome == 'failure' }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      with:
-        name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}
-        path: artifacts/
-        if-no-files-found: error
-        retention-days: 14
-        overwrite: true

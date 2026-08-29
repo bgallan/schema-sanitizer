@@ -1954,9 +1954,10 @@ def _read_bounded_system_integer(paths: tuple[str, ...]) -> int | None:
 def _effective_memory_limit_sample():
     """Return the effective memory limit for the active cgroup generation."""
     view = current_cgroup_view()
-    if view.version == 2:
+    version = view.controller_version("memory")
+    if version == 2:
         return read_effective_cgroup_integer("memory.max", controller="memory")
-    if view.version == 1:
+    if version == 1:
         return read_effective_cgroup_integer("memory.limit_in_bytes", controller="memory")
     # A known host without a cgroup controller is genuinely unbounded.  An
     # unresolved Linux hierarchy remains UNKNOWN and is handled fail-closed.
@@ -1990,11 +1991,12 @@ def _effective_memory_ceiling_bytes() -> int | None:
 def _effective_memory_headroom_bytes() -> int | None:
     """Return live memory headroom for new thread-stack admission."""
     view = current_cgroup_view()
-    if view.version == 2:
+    version = view.controller_version("memory")
+    if version == 2:
         cgroup_headroom = read_effective_cgroup_headroom(
             "memory.max", "memory.current", controller="memory"
         )
-    elif view.version == 1:
+    elif version == 1:
         cgroup_headroom = read_effective_cgroup_headroom(
             "memory.limit_in_bytes",
             "memory.usage_in_bytes",
@@ -2066,7 +2068,7 @@ def _thread_requested_capacity() -> int:
 def _cgroup_pid_headroom() -> int | None:
     """Return the cgroup process-count headroom, when known."""
     view = current_cgroup_view()
-    if view.version not in (1, 2):
+    if view.controller_version("pids") not in (1, 2):
         return None if view.resolution_known else 0
     maximum = read_effective_cgroup_integer("pids.max", controller="pids")
     if maximum.state is CgroupValueState.UNKNOWN:

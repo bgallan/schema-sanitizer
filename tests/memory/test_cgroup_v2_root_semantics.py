@@ -1,7 +1,8 @@
-"""Define cgroup-v2 hierarchy and controller-value parsing contracts.
+"""Define cgroup-v1, cgroup-v2, and hybrid hierarchy parsing contracts.
 
 The Python and native cases distinguish absent, unbounded, truncated, unknown, and valid root
-controller data without treating read failures as unlimited capacity.
+controller data without treating read failures as unlimited capacity. They also verify
+controller-specific routing and narrowly documented root-file omissions.
 """
 
 from __future__ import annotations
@@ -18,6 +19,29 @@ def _stable_view(monkeypatch: pytest.MonkeyPatch, root: Path, mountpoint: Path) 
     view = cgroup_view.CgroupView(2, root, mountpoint, resolution_known=True)
     monkeypatch.setattr(cgroup_view, "current_cgroup_view", lambda **_kwargs: view)
     monkeypatch.setattr(cgroup_view, "_sample_membership_before", lambda: ("/scope", {}))
+    monkeypatch.setattr(cgroup_view, "_membership_sample_stable", lambda _before: True)
+
+
+def _stable_v1_view(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    mountpoint: Path,
+    *,
+    controller: str,
+) -> None:
+    """Install a stable cgroup-v1 view for one named controller hierarchy."""
+    from schema_sanitizer.core_impl import cgroup_view
+
+    view = cgroup_view.CgroupView(
+        1,
+        None,
+        controller_roots=((controller, root),),
+        controller_mountpoints=((controller, mountpoint),),
+        resolution_known=True,
+        controller_hierarchy_complete=((controller, True),),
+    )
+    monkeypatch.setattr(cgroup_view, "current_cgroup_view", lambda **_kwargs: view)
+    monkeypatch.setattr(cgroup_view, "_sample_membership_before", lambda: (None, {}))
     monkeypatch.setattr(cgroup_view, "_membership_sample_stable", lambda _before: True)
 
 
@@ -83,6 +107,92 @@ def test_cgroup2_root_existing_value_counts_and_other_failures_stay_unknown(
     assert missing_non_root.state is cgroup_view.CgroupValueState.UNKNOWN
 
 
+def test_cgroup_v1_pids_root_missing_limit_is_known_unbounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Treat only an absent root ``pids.max`` as an unbounded ancestor."""
+    from schema_sanitizer.core_impl import cgroup_view
+
+    mountpoint = tmp_path / "pids"
+    leaf = mountpoint / "init.scope"
+    leaf.mkdir(parents=True)
+    (leaf / "pids.max").write_text("9331\n", encoding="ascii")
+    (leaf / "pids.current").write_text("225\n", encoding="ascii")
+    _stable_v1_view(monkeypatch, leaf, mountpoint, controller="pids")
+
+    limit = cgroup_view.read_effective_cgroup_integer("pids.max", controller="pids")
+    headroom = cgroup_view.read_effective_cgroup_headroom(
+        "pids.max", "pids.current", controller="pids"
+    )
+    hierarchy = cgroup_view.read_cgroup_hierarchy_texts("pids.max", controller="pids")
+    ratio = cgroup_view.read_effective_cgroup_usage_ratio(
+        "pids.max", "pids.current", controller="pids"
+    )
+
+    assert (limit.state, limit.value) == (cgroup_view.CgroupValueState.VALUE, 9331)
+    assert (headroom.state, headroom.value) == (cgroup_view.CgroupValueState.VALUE, 9106)
+    assert hierarchy == ("9331",)
+    assert ratio == pytest.approx(225 / 9331)
+
+
+def test_cgroup_v1_root_missing_exception_stays_pids_max_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep leaf omissions and non-pids cgroup-v1 omissions fail-closed."""
+    from schema_sanitizer.core_impl import cgroup_view
+
+    pids_mount = tmp_path / "pids"
+    pids_leaf = pids_mount / "init.scope"
+    pids_leaf.mkdir(parents=True)
+    (pids_leaf / "pids.current").write_text("225\n", encoding="ascii")
+    _stable_v1_view(monkeypatch, pids_leaf, pids_mount, controller="pids")
+
+    missing_leaf = cgroup_view.read_effective_cgroup_integer("pids.max", controller="pids")
+    missing_usage = cgroup_view.read_cgroup_hierarchy_texts("pids.current", controller="pids")
+    assert missing_leaf.state is cgroup_view.CgroupValueState.UNKNOWN
+    assert missing_usage is None
+
+    memory_mount = tmp_path / "memory"
+    memory_leaf = memory_mount / "init.scope"
+    memory_leaf.mkdir(parents=True)
+    (memory_leaf / "memory.max").write_text("1024\n", encoding="ascii")
+    _stable_v1_view(monkeypatch, memory_leaf, memory_mount, controller="memory")
+
+    missing_other_controller = cgroup_view.read_effective_cgroup_integer(
+        "memory.max", controller="memory"
+    )
+    assert missing_other_controller.state is cgroup_view.CgroupValueState.UNKNOWN
+
+
+def test_hybrid_cgroup_view_routes_named_v1_controllers_to_v1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route named legacy controllers through v1 within a hybrid hierarchy."""
+    from schema_sanitizer.core_impl import cgroup_view
+
+    lines = [
+        "25 1 0:20 / /sys/fs/cgroup/unified rw - cgroup2 cgroup2 rw",
+        "26 1 0:21 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory",
+        "27 1 0:22 / /sys/fs/cgroup/pids rw - cgroup cgroup rw,pids",
+    ]
+    monkeypatch.setattr(cgroup_view, "_iter_bounded_proc_lines", lambda *_a, **_k: iter(lines))
+
+    view = cgroup_view._resolve_linux_cgroup_view_once(
+        ("/init.scope", {"memory": "/init.scope", "pids": "/init.scope"})
+    )
+
+    assert view.version == 2
+    assert view.controller_version("memory") == 1
+    assert view.controller_version("pids") == 1
+    assert view.controller_version("io") == 2
+    assert view.file("pids.max", controller="pids") == Path(
+        "/sys/fs/cgroup/pids/init.scope/pids.max"
+    )
+    assert view.file("memory.limit_in_bytes", controller="memory") == Path(
+        "/sys/fs/cgroup/memory/init.scope/memory.limit_in_bytes"
+    )
+
+
 def test_cgroup_text_reader_distinguishes_absence_from_truncation(tmp_path: Path) -> None:
     """Verify cgroup text reader distinguishes absence from truncation."""
     from schema_sanitizer.core_impl.cgroup_view import _read_text_path_sample
@@ -95,14 +205,16 @@ def test_cgroup_text_reader_distinguishes_absence_from_truncation(tmp_path: Path
     assert _read_text_path_sample(truncated, limit=4) == (None, False)
 
 
-def test_native_cgroup2_root_missing_contract_is_narrow() -> None:
-    """Verify native cgroup v2 root missing contract is narrow."""
+def test_native_cgroup_root_missing_contract_is_narrow() -> None:
+    """Keep the native root-missing exception narrow for both cgroup generations."""
     root = Path(__file__).resolve().parents[2]
     cgroup = (root / "cpp/src/internal/runtime/cgroup_view.hh").read_text(encoding="utf-8")
     cpu = (root / "cpp/src/internal/runtime/cpu_capacity.hh").read_text(encoding="utf-8")
 
     assert "errno == ENOENT" in cgroup
-    assert "unified && at_mount_root && sample.missing" in cgroup
-    assert "unified && at_mount_root && limit.missing" in cgroup
+    assert 'controller == "pids" && filename == "pids.max"' in cgroup
+    assert cgroup.count("missing_controller_file_is_unbounded_root(") == 3
+    assert "controller, filename, unified, at_mount_root" in cgroup
+    assert "controller, limit_filename, unified, at_mount_root" in cgroup
     assert "std::strcmp(current, mountpoint) == 0 && missing" in cpu
     assert "read && complete && !input_error && close_status == 0" in cpu

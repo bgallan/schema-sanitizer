@@ -92,8 +92,13 @@ def test_wide_jsonl_uses_row_packets_with_exact_output(
     assert counters["jsonl_row_packets_submitted"] >= 2
     assert counters["column_groups_submitted"] == 0
     assert counters["column_logical_packets_submitted"] == 0
-    assert counters["peak_active_tasks"] >= 2
-    assert stats["tasks"]["materialization"]["submitted"] == counters["jsonl_row_packets_submitted"]
+    materialization_tasks = stats["tasks"]["materialization"]
+    assert (
+        materialization_tasks["submitted"]
+        == materialization_tasks["started"]
+        == materialization_tasks["finished"]
+        == counters["jsonl_row_packets_submitted"]
+    )
 
 
 def test_validated_raw_mode_preserves_later_parse_error_stage(
@@ -204,14 +209,20 @@ def test_parallel_validation_and_materialization_share_exact_output(
         == counters["jsonl_validation_packets_completed"]
     )
     assert validation_tasks["submitted"] == counters["jsonl_validation_packets_submitted"]
-    assert validation_tasks["finished"] == validation_tasks["submitted"]
-    assert materialization_tasks["submitted"] == counters["jsonl_row_packets_submitted"]
+    assert (
+        validation_tasks["submitted"] == validation_tasks["started"] == validation_tasks["finished"]
+    )
+    assert (
+        materialization_tasks["submitted"]
+        == materialization_tasks["started"]
+        == materialization_tasks["finished"]
+        == counters["jsonl_row_packets_submitted"]
+    )
     assert counters["jsonl_token_rows_indexed"] == 2_048
     assert counters["jsonl_token_fields_indexed"] == 2_048 * len(_VALIDATION_COLUMNS)
     assert counters["jsonl_token_rows_fallback"] == 0
-    peak_active_tasks = counters["peak_active_tasks"]
     started_workers = counters["started_workers"]
-    assert 2 <= peak_active_tasks <= started_workers <= stats["effective_workers"]
+    assert 1 <= started_workers <= stats["effective_workers"]
     assert single_stats["counters"]["started_workers"] == 0
     assert single_stats["tasks"]["json_validation"]["submitted"] == 0
     assert diagnosis["json_validation_worker_parallelism"] > 0

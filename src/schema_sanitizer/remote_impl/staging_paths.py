@@ -354,7 +354,7 @@ class StagedPath:
             return source
         root = source.parent / ".schema-sanitizer-delete"
         try:
-            os.mkdir(root, 0o700)
+            os.mkdir(root, stat.S_IRWXU)
         except FileExistsError:
             pass
         metadata = os.lstat(root)
@@ -364,9 +364,9 @@ class StagedPath:
         if getuid is not None and metadata.st_uid != getuid():
             raise OSError("temporary delete root must be owned by the current user")
         try:
-            os.chmod(root, 0o700, follow_symlinks=False)
+            os.chmod(root, stat.S_IRWXU, follow_symlinks=False)
         except (NotImplementedError, TypeError):
-            os.chmod(root, 0o700)
+            os.chmod(root, stat.S_IRWXU)
         return root / f"artifact-{os.getpid()}-{uuid.uuid4().hex}"
 
     @staticmethod

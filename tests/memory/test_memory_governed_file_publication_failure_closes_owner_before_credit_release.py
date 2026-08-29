@@ -175,6 +175,7 @@ def test_native_fd_reset_is_fail_closed_and_transcoding_eof_commits_close() -> N
     """Verify native FD reset is fail closed and transcoding eof commits close."""
     header = (CPP / "internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     transcoding = (CPP / "ingest/transcoding/chunk_source.cc").read_text(encoding="utf-8")
+    secure_file = (CPP / "ingest/secure_read_only_file.cc").read_text(encoding="utf-8")
     reset = header[
         header.index("void reset() noexcept") : header.index(
             "private:", header.index("void reset() noexcept")
@@ -185,8 +186,9 @@ def test_native_fd_reset_is_fail_closed_and_transcoding_eof_commits_close() -> N
     assert reset.index("retain_uncertain_close();") < reset.index(
         "release_process_file_descriptor_permits"
     )
-    assert "close_stream_and_commit(input_, fd_lease_)" in transcoding
-    assert "input_.close();\n      fd_lease_.reset();" not in transcoding
+    assert "input_.Close()" in transcoding
+    assert "fd_lease_.commit_physical_close(closed)" in secure_file
+    assert "fd_lease_.reset()" in secure_file
 
 
 def test_remote_and_local_grouping_graphs_share_directory_metadata_budget() -> None:

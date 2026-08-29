@@ -155,6 +155,67 @@ def test_lazy_worker_guard_preserves_bounds_inline_and_unrelated_counts(
 
 
 @pytest.mark.parametrize(
+    "source",
+    (
+        "assert stats['counters']['peak_active_tasks'] >= 2\n",
+        "assert int(stats['counters']['peak_active_tasks']) > 1\n",
+        "peak_active_tasks = counters['peak_active_tasks']\nassert 2 <= peak_active_tasks\n",
+        "peak = counters.get('peak_active_tasks', 0)\nobserved = peak\nassert observed >= 2\n",
+    ),
+)
+def test_overlap_guard_detects_scheduler_dependent_lower_bounds(
+    tmp_path: Path, source: str
+) -> None:
+    """Detect lower bounds whose truth depends on incidental live-task overlap."""
+    assert _analyze(tmp_path, "test_fragile_overlap.py", source).incidental_overlap
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "assert counters['peak_active_tasks'] >= 0\n",
+        "peak = counters['peak_active_tasks']\nassert peak <= started_workers\n",
+        "peak = counters['peak_active_tasks']\npeak = 3\nassert peak >= 2\n",
+        "assert 'arena->peak_active_tasks() > 1U' in source\n",
+        "workers, peak, total = operation_task_arena_probe()\nassert peak >= 2\n",
+    ),
+)
+def test_overlap_guard_preserves_invariants_and_barrier_probes(tmp_path: Path, source: str) -> None:
+    """Preserve bounds, source contracts, and explicitly synchronized probes."""
+    assert not _analyze(tmp_path, "test_safe_overlap.py", source).incidental_overlap
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "promoted = probe()[0]\nassert promoted > 0\n",
+        "assert stats['outputs_before_broad'] >= 1\n",
+        "observed = counters.get('output_preference_bypasses', 0)\nassert 1 <= observed\n",
+        "promoted = result.promoted\nforwarded = promoted\nassert forwarded != 0\n",
+    ),
+)
+def test_promotion_guard_detects_scheduler_dependent_lower_bounds(
+    tmp_path: Path, source: str
+) -> None:
+    """Detect positive promotion requirements that depend on scheduling order."""
+    assert _analyze(tmp_path, "test_fragile_promotion.py", source).incidental_promotions
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "assert 0 <= promoted <= outputs\n",
+        "assert promoted == 0\n",
+        "assert stats['outputs_before_broad'] >= 0\n",
+        "assert 'outputs_before_broad.fetch_add(1' in source\n",
+    ),
+)
+def test_promotion_guard_preserves_bounds_and_source_contracts(tmp_path: Path, source: str) -> None:
+    """Preserve bounded counters, zero observations, and source assertions."""
+    assert not _analyze(tmp_path, "test_safe_promotion.py", source).incidental_promotions
+
+
+@pytest.mark.parametrize(
     "body",
     (
         "const auto elapsed=std::chrono::steady_clock::now()-before;\nif (elapsed < std::chrono::milliseconds(250)) return true;",
@@ -227,6 +288,16 @@ def test_tests_do_not_require_every_lazy_worker_to_start() -> None:
         for _function, line, expression in checker.unapproved_lazy_workers(path)
     ]
     assert not findings
+
+
+def test_live_pipeline_tests_do_not_require_incidental_task_overlap() -> None:
+    """Require explicit barriers before correctness depends on parallel overlap."""
+    assert not _repository_python_findings("incidental_overlap")
+
+
+def test_live_scheduler_tests_do_not_require_incidental_promotions() -> None:
+    """Treat promotion telemetry as bounded evidence unless synchronization forces it."""
+    assert not _repository_python_findings("incidental_promotions")
 
 
 def test_output_preference_probe_guarantees_exact_prewarm_counts() -> None:

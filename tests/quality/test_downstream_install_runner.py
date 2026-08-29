@@ -7,11 +7,10 @@ constraints for every published dependency group.
 from __future__ import annotations
 
 import importlib.util
-import os
+import shlex
 import tomllib
 from pathlib import Path
 
-import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -29,7 +28,6 @@ def _module():
 
 
 def test_every_extra_is_installed_and_imported_in_isolation(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """The compact job gives every extra its own isolated environment."""
@@ -37,39 +35,34 @@ def test_every_extra_is_installed_and_imported_in_isolation(
     wheel = tmp_path / "schema_sanitizer-0.4.0-cp311-abi3-linux.whl"
     wheel.write_bytes(b"wheel")
     constraints = ROOT / "meta/ci/requirements/downstream.txt"
-    calls: list[tuple[list[str], Path | None]] = []
+    plan = module.shell_plan(wheel, tmp_path, SCRIPT.parent, constraints)
 
-    def fake_environment(root: Path, name: str) -> Path:
-        """Return a distinct fake interpreter without creating a venv."""
-        assert root == tmp_path
-        return Path("/isolated") / name / "python"
+    assert plan.count(" -m venv ") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("pip==26.1.2") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("[downstream-extra]") == len(module.EXTRA_IMPORTS)
+    for extra, imports in module.EXTRA_IMPORTS.items():
+        assert f"[downstream-extra] {extra}" in plan
+        requirement = wheel.as_posix() if extra == "core" else f"{wheel.as_posix()}[{extra}]"
+        assert requirement in plan
+        for imported in imports:
+            assert f"import {imported}" in plan
+    assert plan.index("downstream_typecheck.py") < plan.index("[downstream-extra] core")
 
-    def fake_run(
-        command: list[str],
-        *,
-        check: bool,
-        cwd: Path | None = None,
-    ) -> None:
-        """Capture a checked subprocess call."""
-        assert check is True
-        calls.append((command, cwd))
 
-    monkeypatch.setattr(module, "create_environment", fake_environment)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+def test_downstream_plan_quotes_paths_and_owns_cleanup(tmp_path: Path) -> None:
+    """Hostile path characters stay inside argv boundaries and owned cleanup."""
+    module = _module()
+    wheel_root = tmp_path / "wheel dir; touch injected"
+    wheel_root.mkdir()
+    wheel = wheel_root / "schema sanitizer.whl"
+    wheel.write_bytes(b"wheel")
+    constraints = ROOT / "meta/ci/requirements/downstream.txt"
 
-    module.validate_extras(wheel, tmp_path, constraints)
+    plan = module.shell_plan(wheel, tmp_path / "work root", SCRIPT.parent, constraints)
 
-    installs = [command for command, _cwd in calls if command[1:4] == ["-m", "pip", "install"]]
-    imports = [command for command, _cwd in calls if command[1:3] == ["-I", "-c"]]
-    assert len(installs) == len(module.EXTRA_IMPORTS)
-    assert len(imports) == len(module.EXTRA_IMPORTS)
-    for extra, command in zip(module.EXTRA_IMPORTS, installs, strict=True):
-        assert command[4:6] == ["-c", os.fspath(constraints)]
-        requirement = command[-1]
-        if extra == "core":
-            assert requirement == os.fspath(wheel)
-        else:
-            assert requirement == f"{wheel}[{extra}]"
+    assert shlex.quote(wheel.as_posix()) in plan
+    assert "trap cleanup_downstream EXIT" in plan
+    assert 'rm -rf -- "${isolated_root}"' in plan
 
 
 def test_downstream_profiles_cover_every_published_runtime_extra() -> None:

@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <locale>
 #include <sstream>
@@ -390,7 +391,39 @@ void PerformanceTelemetry::ObserveActiveTasks(std::size_t active) noexcept {
   update_maximum(&peak_active_tasks_, static_cast<std::int64_t>(active));
 }
 
-void PerformanceTelemetry::Finish() noexcept {
+bool PerformanceTelemetry::BeginWorkerTaskPublication() noexcept {
+  auto state = task_publication_state_.load(std::memory_order_acquire);
+  while ((state & kFinishRequested) == 0U) {
+    if ((state & kTaskPublicationCountMask) == kTaskPublicationCountMask) {
+      return false;
+    }
+    if (task_publication_state_.compare_exchange_weak(
+            state, state + 1U, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void PerformanceTelemetry::CompleteWorkerTaskPublications(
+    std::size_t task_count) noexcept {
+  if (task_count == 0U) {
+    return;
+  }
+  const auto count = static_cast<std::uint64_t>(task_count);
+  const auto previous =
+      task_publication_state_.fetch_sub(count, std::memory_order_acq_rel);
+  if ((previous & kTaskPublicationCountMask) < count) {
+    std::terminate();
+  }
+  if (previous - count == kFinishRequested) {
+    Finalize();
+    task_publication_state_.notify_all();
+  }
+}
+
+void PerformanceTelemetry::Finalize() noexcept {
   auto expected = std::int64_t{0};
   const auto now = NowNs();
   if (finished_ns_.compare_exchange_strong(expected, now,
@@ -399,6 +432,17 @@ void PerformanceTelemetry::Finish() noexcept {
       operation_pool_) {
     operation_pool_->ReleaseOperationLease();
   }
+}
+
+void PerformanceTelemetry::Finish() noexcept {
+  auto state = task_publication_state_.fetch_or(kFinishRequested,
+                                                std::memory_order_acq_rel);
+  state |= kFinishRequested;
+  while ((state & kTaskPublicationCountMask) != 0U) {
+    task_publication_state_.wait(state, std::memory_order_acquire);
+    state = task_publication_state_.load(std::memory_order_acquire);
+  }
+  Finalize();
 }
 
 bool PerformanceTelemetry::finished() const noexcept {

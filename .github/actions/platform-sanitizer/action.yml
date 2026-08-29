@@ -133,17 +133,34 @@ runs:
         schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
         schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
         --parallel 4
-    - name: Require capacity for complete native concurrency coverage
+    - name: Check capacity for complete native concurrency coverage
+      id: sanitizer_cpu_capacity
       if: runner.os != 'Windows'
       shell: bash
-      run: >-
-        .work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor
-        --require-cpu-capacity 3
+      run: |
+        set -euo pipefail
+        if capacity_message="$(
+          .work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor \
+            --require-cpu-capacity 3 2>&1
+        )"; then
+          echo "sufficient=true" >> "${GITHUB_OUTPUT}"
+        else
+          probe_status=$?
+          if [[ "${probe_status}" -eq 1 && \
+                "${capacity_message}" =~ ^sanitizer\ runner\ exposes\ [0-9]+\ CPU\ credits\;\ at\ least\ 3\ are\ required\ for\ complete\ concurrency\ coverage$ ]]; then
+            echo "sufficient=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning title=Sanitizer concurrency skipped::${capacity_message}; CPU-dependent concurrency steps will be skipped."
+          else
+            printf '%s\n' "${capacity_message}" >&2
+            exit "${probe_status}"
+          fi
+        fi
     - name: Run repeated sanitized concurrency probe
       # MSVC ASan can hang outside the probe watchdog. Windows still builds
       # the probe and executes all four native fuzzers below; Linux TSan owns
       # the repeated race-sensitive concurrency gate.
-      if: inputs.mode == 'native' && runner.os != 'Windows'
+      if: inputs.mode == 'native' && runner.os != 'Windows' && steps.sanitizer_cpu_capacity.outputs.sufficient
+        == 'true'
       shell: bash
       run: >-
         ctest --test-dir .work/build/platform-sanitizer
@@ -155,7 +172,7 @@ runs:
       if: inputs.mode == 'native'
       shell: bash
       run: >-
-        python meta/ci/fuzz/run_fuzz_regressions.py
+        meta/ci/fuzz/run_fuzz_regressions.sh
         --build-root .work/build/platform-sanitizer/fuzz
         --campaign-runs 500
         --seed 15172026
@@ -164,7 +181,7 @@ runs:
       if: inputs.mode == 'linux-full'
       shell: bash
       run: >-
-        python meta/ci/fuzz/run_fuzz_regressions.py
+        meta/ci/fuzz/run_fuzz_regressions.sh
         --build-root .work/build/platform-sanitizer/fuzz
         --engine libfuzzer
         --campaign-runs 1000

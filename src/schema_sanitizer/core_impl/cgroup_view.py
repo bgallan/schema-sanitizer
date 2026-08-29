@@ -1,8 +1,8 @@
 """Resolve and read the cgroup hierarchy that constrains the current process.
 
-The runtime must not assume that ``/sys/fs/cgroup`` itself is the process
-cgroup: systemd slices, Kubernetes pods and nested containers commonly place a
-process below that mount root. It also distinguishes three states for
+The runtime resolves v1, v2, and hybrid controller ownership because systemd,
+Kubernetes, and nested containers commonly place processes below distinct mount
+roots. It also distinguishes three states for
 limit reads -- VALUE, UNBOUNDED and UNKNOWN -- so an unreadable limit can never
 be mistaken for an unlimited one.
 """
@@ -54,38 +54,45 @@ class CgroupView:
     hierarchy_complete: bool = True
     controller_hierarchy_complete: tuple[tuple[str, bool], ...] = ()
 
+    def controller_version(self, controller: str | None = None) -> int:
+        """Return the cgroup generation that owns one named controller."""
+        if controller is not None:
+            for candidate, _root in self.controller_roots:
+                if candidate == controller:
+                    return 1
+        return self.version
+
     def _root_and_mountpoint(self, *, controller: str | None = None) -> tuple[Path, Path] | None:
         """Return the hierarchy root and mountpoint represented by this cgroup view."""
+        root: Path | None = None
+        mountpoint: Path | None = None
+        if controller is not None:
+            for candidate, value in self.controller_roots:
+                if candidate == controller:
+                    root = value
+                    break
+            for candidate, value in self.controller_mountpoints:
+                if candidate == controller:
+                    mountpoint = value
+                    break
+            if root is not None or mountpoint is not None:
+                return (root, mountpoint) if root is not None and mountpoint is not None else None
         if self.version == 2:
             if self.root is None or self.mountpoint is None:
                 return None
             return self.root, self.mountpoint
-        if self.version != 1 or controller is None:
-            return None
-        root: Path | None = None
-        mountpoint: Path | None = None
-        for candidate, value in self.controller_roots:
-            if candidate == controller:
-                root = value
-                break
-        for candidate, value in self.controller_mountpoints:
-            if candidate == controller:
-                mountpoint = value
-                break
-        if root is None or mountpoint is None:
-            return None
-        return root, mountpoint
+        return None
 
     def hierarchy_is_complete(self, *, controller: str | None = None) -> bool:
         """Return whether all potentially constraining ancestors are visible."""
+        if self.controller_version(controller) == 1 and controller is not None:
+            for candidate, complete in self.controller_hierarchy_complete:
+                if candidate == controller:
+                    return complete
+            return False
         if self.version == 2:
             return self.hierarchy_complete
-        if self.version != 1 or controller is None:
-            return self.version == 0 and self.resolution_known
-        for candidate, complete in self.controller_hierarchy_complete:
-            if candidate == controller:
-                return complete
-        return False
+        return self.version == 0 and self.resolution_known
 
     def file(self, name: str, *, controller: str | None = None) -> Path | None:
         """Return one file inside the current process cgroup when available."""
@@ -263,10 +270,7 @@ def _resolve_linux_cgroup_view_once(membership: tuple[str | None, dict[str, str]
                     )
                     # Prefer a complete root mount over an earlier subtree/bind
                     # mount. Only retain an incomplete candidate as fallback.
-                    if complete:
-                        unified_candidate = candidate
-                        break
-                    if unified_candidate is None:
+                    if complete or unified_candidate is None:
                         unified_candidate = candidate
                 continue
             if fs_type != "cgroup":
@@ -296,7 +300,19 @@ def _resolve_linux_cgroup_view_once(membership: tuple[str | None, dict[str, str]
         return CgroupView(0, None, resolution_known=False)
 
     if unified_candidate is not None:
-        return unified_candidate
+        # Hybrid hierarchies (notably WSL2) can expose an empty cgroup2 mount
+        # while resource controllers remain on cgroup v1. Preserve both views
+        # so each named controller resolves to the hierarchy that owns it.
+        return CgroupView(
+            2,
+            unified_candidate.root,
+            unified_candidate.mountpoint,
+            tuple(sorted(v1_roots.items())),
+            tuple(sorted(v1_mountpoints.items())),
+            True,
+            unified_candidate.hierarchy_complete,
+            tuple(sorted(v1_complete.items())),
+        )
     if v1_roots:
         return CgroupView(
             1,
@@ -376,8 +392,8 @@ def _read_text_path_sample(path: Path, *, limit: int) -> tuple[str | None, bool]
     try:
         stream = path.open("rt", encoding="ascii")
     except OSError as exc:
-        # Only an open-time ENOENT can denote the intentionally absent
-        # controller file at a cgroup2 mount root.
+        # Only an open-time ENOENT can denote an intentionally absent
+        # controller file at an exempt mount root.
         return None, exc.errno == errno.ENOENT
     except ValueError:
         return None, False
@@ -425,6 +441,21 @@ def _unknown_or_unbounded_for_view(view: CgroupView) -> CgroupIntegerSample:
     return CgroupIntegerSample(state)
 
 
+def _missing_controller_file_is_unbounded_root(
+    *,
+    view: CgroupView,
+    controller: str | None,
+    name: str,
+    missing: bool,
+    at_mount_root: bool,
+) -> bool:
+    """Recognize only documented controller files omitted at an exempt root."""
+    if not missing or not at_mount_root:
+        return False
+    version = view.controller_version(controller)
+    return version == 2 or (version == 1 and controller == "pids" and name == "pids.max")
+
+
 def read_cgroup_text(name: str, *, controller: str | None = None, limit: int = 256) -> str | None:
     """Read a bounded text value from the current cgroup, if resolvable."""
     path = cgroup_file(name, controller=controller)
@@ -451,9 +482,13 @@ def read_cgroup_hierarchy_texts(
             for index, path in enumerate(paths):
                 raw, missing = _read_text_path_sample(path, limit=limit)
                 if raw is None:
-                    if view.version == 2 and missing and index == len(paths) - 1:
-                        # The cgroup2 mount root is exempt from resource
-                        # control and normally omits controller interface files.
+                    if _missing_controller_file_is_unbounded_root(
+                        view=view,
+                        controller=controller,
+                        name=name,
+                        missing=missing,
+                        at_mount_root=index == len(paths) - 1,
+                    ):
                         continue
                     values = []
                     break
@@ -496,7 +531,15 @@ def read_cgroup_integer_state(name: str, *, controller: str | None = None) -> Cg
             sample = _unknown_or_unbounded_for_view(view)
         else:
             raw, missing = _read_text_path_sample(path, limit=64)
-            if view.version == 2 and view.root == view.mountpoint and missing:
+            resolved = view._root_and_mountpoint(controller=controller)
+            at_mount_root = resolved is not None and resolved[0] == resolved[1]
+            if _missing_controller_file_is_unbounded_root(
+                view=view,
+                controller=controller,
+                name=name,
+                missing=missing,
+                at_mount_root=at_mount_root,
+            ):
                 sample = CgroupIntegerSample(CgroupValueState.UNBOUNDED, path=path)
             else:
                 sample = _parse_cgroup_integer(raw, path=path)
@@ -523,7 +566,13 @@ def read_effective_cgroup_integer(
             sample = CgroupIntegerSample(CgroupValueState.UNBOUNDED)
             for index, path in enumerate(paths):
                 raw, missing = _read_text_path_sample(path, limit=64)
-                if view.version == 2 and missing and index == len(paths) - 1:
+                if _missing_controller_file_is_unbounded_root(
+                    view=view,
+                    controller=controller,
+                    name=name,
+                    missing=missing,
+                    at_mount_root=index == len(paths) - 1,
+                ):
                     continue
                 current = _parse_cgroup_integer(raw, path=path)
                 if current.state is CgroupValueState.UNKNOWN:
@@ -566,7 +615,13 @@ def read_effective_cgroup_headroom(
             pairs = zip(limit_paths, usage_paths, strict=True)
             for index, (limit_path, usage_path) in enumerate(pairs):
                 limit_raw, limit_missing = _read_text_path_sample(limit_path, limit=64)
-                if view.version == 2 and limit_missing and index == len(limit_paths) - 1:
+                if _missing_controller_file_is_unbounded_root(
+                    view=view,
+                    controller=controller,
+                    name=limit_name,
+                    missing=limit_missing,
+                    at_mount_root=index == len(limit_paths) - 1,
+                ):
                     continue
                 limit_sample = _parse_cgroup_integer(limit_raw, path=limit_path)
                 if limit_sample.state is CgroupValueState.UNKNOWN:
@@ -620,7 +675,13 @@ def read_effective_cgroup_usage_ratio(
             pairs = zip(limit_paths, usage_paths, strict=True)
             for index, (limit_path, usage_path) in enumerate(pairs):
                 limit_raw, limit_missing = _read_text_path_sample(limit_path, limit=64)
-                if view.version == 2 and limit_missing and index == len(limit_paths) - 1:
+                if _missing_controller_file_is_unbounded_root(
+                    view=view,
+                    controller=controller,
+                    name=limit_name,
+                    missing=limit_missing,
+                    at_mount_root=index == len(limit_paths) - 1,
+                ):
                     continue
                 limit_sample = _parse_cgroup_integer(limit_raw, path=limit_path)
                 if limit_sample.state is CgroupValueState.UNKNOWN:

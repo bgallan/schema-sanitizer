@@ -246,7 +246,7 @@ def _root_handle() -> _QuarantineRootHandle:
             base_fd = os.open(base, flags)
             record_physical_file_descriptors_opened(1)
             try:
-                os.mkdir(directory_name, 0o700, dir_fd=base_fd)
+                os.mkdir(directory_name, stat.S_IRWXU, dir_fd=base_fd)
             except FileExistsError:
                 pass
             try:
@@ -265,7 +265,7 @@ def _root_handle() -> _QuarantineRootHandle:
                 raise OSError("temporary quarantine must be a real directory")
             if uid is not None and metadata.st_uid != uid:
                 raise OSError("temporary quarantine must be owned by the current user")
-            os.fchmod(root_fd, 0o700)
+            os.fchmod(root_fd, stat.S_IRWXU)
 
             # The parent authority is no longer needed.  Prove its physical close
             # before shrinking the exact two-credit lease to the one persistent
@@ -557,7 +557,7 @@ class _TemporaryArtifactJanitor:
         if handle is None:
             raise OSError("temporary artifact is outside the pinned quarantine root")
         try:
-            os.mkdir(".delete", 0o700, dir_fd=handle.descriptor)
+            os.mkdir(".delete", stat.S_IRWXU, dir_fd=handle.descriptor)
         except FileExistsError:
             pass
         metadata = os.stat(".delete", dir_fd=handle.descriptor, follow_symlinks=False)

@@ -1,6 +1,6 @@
-"""Operation and subprocess runners for concurrency telemetry benchmarks.
+"""Operation and isolated-command runners for concurrency telemetry benchmarks.
 
-It controls operation and subprocess execution, captures robust timings, and assembles
+It controls operation and child-process execution, captures robust timings, and assembles
 the repeated matrix statistics used by reports.
 """
 
@@ -11,7 +11,6 @@ import json
 import os
 import shutil
 import statistics
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,6 +26,7 @@ from benchmarks.concurrency.telemetry.support import (
     numactl_prefix,
     parse_cpu_list,
 )
+from benchmarks.support.command import CAPTURE, run_command
 
 
 def run_operation(
@@ -253,7 +253,7 @@ def run_child(
         warmups=args.warmups if warmups is None else warmups,
         repeats=args.repeats if repeats is None else repeats,
     )
-    subprocess.run(command, check=True)
+    run_command(command, check=True)
     report = json.loads(output.read_text(encoding="utf-8"))
     report["numa_binding_status"] = binding_status
     return report
@@ -395,7 +395,7 @@ def run_perf_child(
         "--",
         *direct,
     ]
-    completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    completed = run_command(command, stdout=CAPTURE, stderr=CAPTURE)
     parsed = parse_perf_stat(perf_output)
     parsed["returncode"] = completed.returncode
     parsed["numa_binding_status"] = binding_status

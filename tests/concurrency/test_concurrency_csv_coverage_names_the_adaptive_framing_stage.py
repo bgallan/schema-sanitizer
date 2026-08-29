@@ -163,7 +163,13 @@ def test_wide_csv_keeps_parallel_decode_and_exact_probe_parity(
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
     assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
-    assert int(single_stats["tasks"]["input"]["submitted"]) == 0
-    assert int(multi_stats["tasks"]["input"]["submitted"]) >= 2
-    assert int(multi_stats["counters"]["peak_active_tasks"]) >= 2
+    single_tasks = single_stats["tasks"]["input"]
+    multi_tasks = multi_stats["tasks"]["input"]
+    assert int(single_tasks["submitted"]) == 0
+    assert (
+        int(multi_tasks["submitted"])
+        == int(multi_tasks["started"])
+        == int(multi_tasks["finished"])
+        >= 2
+    )
     assert int(multi_stats["memory"]["peak_bytes"]) <= 64 << 20

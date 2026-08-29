@@ -1,23 +1,122 @@
 """Regression tests for the benchmark reporting harness.
 
-It validates benchmark package ownership, timing records, machine-readable reports,
-comparisons, route details, and privacy-safe limit reviews.
+It validates shell-free command isolation, package ownership, timing records,
+machine-readable reports, route details, and privacy-safe limit reviews.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from benchmarks.concurrency import assets as concurrency_assets
 from benchmarks.concurrency.assets import load_catalog, stage_probes
+from benchmarks.concurrency.threading import modes
 from benchmarks.ingestion.reporting import write_report
 from benchmarks.ingestion.timing import records, reset_records, set_default_warmups, time_call
+from benchmarks.support.command import CAPTURE, DISCARD, MERGE_WITH_STDOUT, run_command
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_run_command_uses_argv_and_captures_text() -> None:
+    """A validated interpreter runs without a shell and returns captured streams."""
+    completed = run_command(
+        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
+        check=True,
+        stdout=CAPTURE,
+        stderr=CAPTURE,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.stdout.splitlines() == ["out"]
+    assert completed.stderr.splitlines() == ["err"]
+
+
+def test_run_command_supports_discard_and_stderr_merge() -> None:
+    """Only the explicitly supported stream combinations are accepted."""
+    completed = run_command(
+        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
+        check=True,
+        stdout=DISCARD,
+        stderr=MERGE_WITH_STDOUT,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.stdout is None
+    assert completed.stderr is None
+
+
+def test_run_command_preserves_python_environment_prefix() -> None:
+    """Executable validation must not resolve a virtualenv launcher out of its env."""
+    completed = run_command(
+        [sys.executable, "-c", "import sys; print(sys.prefix)"],
+        check=True,
+        stdout=CAPTURE,
+        text=True,
+    )
+
+    assert isinstance(completed.stdout, str)
+    assert Path(completed.stdout.strip()).resolve() == Path(sys.prefix).resolve()
+
+
+@pytest.mark.parametrize("command", [[], "echo value", [""], ["python\0evil"]])
+def test_run_command_rejects_non_argv_commands(command: object) -> None:
+    """Shell strings, empty commands, and NUL-bearing arguments fail before execution."""
+    with pytest.raises((TypeError, ValueError)):
+        run_command(command)  # type: ignore[arg-type]
+
+
+def test_run_command_rejects_stdout_merge() -> None:
+    """The stderr-only merge sentinel cannot be misapplied to stdout."""
+    with pytest.raises(ValueError, match="valid only for stderr"):
+        run_command([sys.executable, "-c", "pass"], stdout=MERGE_WITH_STDOUT)
+
+
+def test_threading_parquet_digest_closes_reader_before_cleanup(tmp_path: Path, monkeypatch) -> None:
+    """The Windows benchmark must release its Parquet handle before unlinking."""
+    output = tmp_path / "output.parquet"
+    output.write_bytes(b"placeholder")
+    lifecycle: list[str] = []
+
+    class FakeTable:
+        def to_pylist(self) -> list[dict[str, int]]:
+            """Return one deterministic row after recording materialization."""
+            lifecycle.append("materialize")
+            return [{"value": 1}]
+
+    class FakeParquetFile:
+        def __init__(self, path: Path) -> None:
+            """Record construction for the expected output path."""
+            assert path == output
+            lifecycle.append("construct")
+
+        def __enter__(self) -> "FakeParquetFile":
+            """Open the fake reader and return its context value."""
+            lifecycle.append("open")
+            return self
+
+        def read(self) -> FakeTable:
+            """Record the read and return a materializable table."""
+            lifecycle.append("read")
+            return FakeTable()
+
+        def __exit__(self, *_exc: object) -> None:
+            """Record that the reader closed before fixture cleanup."""
+            lifecycle.append("close")
+
+    monkeypatch.setattr(pq, "ParquetFile", FakeParquetFile)
+
+    assert len(modes._logical_digest(output)) == 64
+    assert lifecycle == ["construct", "open", "read", "materialize", "close"]
+    output.unlink()
 
 
 def test_benchmark_python_modules_are_grouped_by_domain() -> None:

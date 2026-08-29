@@ -10,12 +10,18 @@ from __future__ import annotations
 import argparse
 import json
 import platform
-import subprocess
+import shlex
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from benchmarks.support.command import DISCARD, run_command  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +72,7 @@ def _cases(profile: str) -> list[MatrixCase]:
     raise ValueError(f"unsupported benchmark profile: {profile}")
 
 
-def _run_case(
+def _case_command(
     case: MatrixCase,
     *,
     rows: int,
@@ -74,8 +80,8 @@ def _run_case(
     repeats: int,
     selection: str,
     directory: Path,
-) -> dict[str, Any]:
-    """Run one child benchmark and return its verified JSON report."""
+) -> tuple[list[str], Path]:
+    """Return one isolated benchmark argv and its report path."""
     output = directory / f"{case.label}.json"
     command = [
         sys.executable,
@@ -104,32 +110,49 @@ def _run_case(
     ]
     if case.cpu_quota is not None:
         command.extend(("--cpu-quota", str(case.cpu_quota)))
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+    return command, output
+
+
+def _load_case(case: MatrixCase, output: Path) -> dict[str, Any]:
+    """Load one completed child report and verify logical equivalence."""
     report = json.loads(output.read_text(encoding="utf-8"))
     if not all(bool(result.get("equivalent")) for result in report["cases"].values()):
         raise RuntimeError(f"{case.label}: benchmark reported a cross-mode mismatch")
     return report
 
 
-def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
-    """Execute every selected dimension in a fresh child process."""
+def _run_case(
+    case: MatrixCase,
+    *,
+    rows: int,
+    warmups: int,
+    repeats: int,
+    selection: str,
+    directory: Path,
+) -> dict[str, Any]:
+    """Run one child benchmark and return its verified JSON report."""
+    command, output = _case_command(
+        case,
+        rows=rows,
+        warmups=warmups,
+        repeats=repeats,
+        selection=selection,
+        directory=directory,
+    )
+    run_command(command, check=True, stdout=DISCARD)
+    return _load_case(case, output)
+
+
+def _report(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
+    """Aggregate already completed case reports."""
     cases = _cases(args.profile)
-    with tempfile.TemporaryDirectory(prefix="schema-sanitizer-threading-matrix-") as raw:
-        directory = Path(raw)
-        results = {
-            case.label: {
-                "dimensions": asdict(case),
-                "report": _run_case(
-                    case,
-                    rows=args.rows,
-                    warmups=args.warmups,
-                    repeats=args.repeats,
-                    selection=args.only,
-                    directory=directory,
-                ),
-            }
-            for case in cases
+    results = {
+        case.label: {
+            "dimensions": asdict(case),
+            "report": _load_case(case, directory / f"{case.label}.json"),
         }
+        for case in cases
+    }
     return {
         "schema_version": 1,
         "profile": args.profile,
@@ -148,6 +171,69 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
+    """Execute every selected dimension in a fresh child process."""
+    cases = _cases(args.profile)
+    with tempfile.TemporaryDirectory(prefix="schema-sanitizer-threading-matrix-") as raw:
+        directory = Path(raw)
+        for case in cases:
+            _run_case(
+                case,
+                rows=args.rows,
+                warmups=args.warmups,
+                repeats=args.repeats,
+                selection=args.only,
+                directory=directory,
+            )
+        return _report(args, directory)
+
+
+def _shell_plan(args: argparse.Namespace, work_root: Path) -> str:
+    """Return a same-job shell plan for GitHub Actions."""
+    work_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(
+        tempfile.mkdtemp(prefix="schema-sanitizer-threading-matrix-", dir=work_root)
+    ).resolve()
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f"matrix_root={shlex.quote(directory.as_posix())}",
+        'cleanup_matrix() { rm -rf -- "${matrix_root}"; }',
+        "trap cleanup_matrix EXIT",
+    ]
+    for case in _cases(args.profile):
+        command, _output = _case_command(
+            case,
+            rows=args.rows,
+            warmups=args.warmups,
+            repeats=args.repeats,
+            selection=args.only,
+            directory=directory,
+        )
+        lines.append(shlex.join(command) + " > /dev/null")
+    aggregate = [
+        sys.executable,
+        "-m",
+        "benchmarks.concurrency.threading.matrix",
+        "--profile",
+        args.profile,
+        "--rows",
+        str(args.rows),
+        "--warmups",
+        str(args.warmups),
+        "--repeats",
+        str(args.repeats),
+        "--only",
+        args.only,
+        "--assemble-root",
+        directory.as_posix(),
+    ]
+    if args.output is not None:
+        aggregate.extend(("--output", args.output.as_posix()))
+    lines.append(shlex.join(aggregate))
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     """Parse matrix controls, execute children, and write one report."""
     parser = argparse.ArgumentParser()
@@ -157,11 +243,25 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--only", choices=("all", "parquet"), default="all")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--work-root", type=Path)
+    parser.add_argument("--command-output", type=Path)
+    parser.add_argument("--assemble-root", type=Path)
     args = parser.parse_args()
     if args.rows <= 0 or args.warmups < 0 or args.repeats <= 0:
         parser.error("rows and repeats must be positive; warmups must be non-negative")
 
-    report = run_matrix(args)
+    if (args.work_root is None) != (args.command_output is None):
+        parser.error("work-root and command-output must be provided together")
+    if args.command_output is not None:
+        args.command_output.parent.mkdir(parents=True, exist_ok=True)
+        args.command_output.write_text(
+            _shell_plan(args, args.work_root), encoding="utf-8", newline="\n"
+        )
+        return
+
+    report = (
+        _report(args, args.assemble_root) if args.assemble_root is not None else run_matrix(args)
+    )
     encoded = json.dumps(report, indent=2, sort_keys=True)
     print(encoded)
     if args.output is not None:

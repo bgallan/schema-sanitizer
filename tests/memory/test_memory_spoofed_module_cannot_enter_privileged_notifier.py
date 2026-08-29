@@ -237,7 +237,7 @@ def test_cleanup_subsystem_is_explicit_not_callback_metadata(
         """Return no value without exposing callback metadata."""
         return None
 
-    callback.__module__ = "schema_sanitizer.fake_many_tenants"
+    callback.__module__ = "schema_sanitizer.fake_many_callbacks"
     callback.__qualname__ = "forged"
     assert dispatcher.submit(callback)
     with dispatcher._condition:

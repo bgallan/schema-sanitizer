@@ -7,16 +7,19 @@ to cover private callables while excluding generated or vendored source files.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import re
 import shlex
 import shutil
-import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_BUILD_ROOT = (_REPO_ROOT / ".work" / "build").resolve()
 _MAINTAINED_CPP_ROOTS = (
     _REPO_ROOT / "cpp" / "src",
     _REPO_ROOT / "cpp" / "tests",
@@ -279,9 +282,43 @@ int main(int argc, char **argv) {
 """
 
 
+async def _invoke_command(
+    arguments: Sequence[str | Path],
+    *,
+    cwd: Path | None = None,
+    stdout: Any = None,
+) -> tuple[int, bytes, bytes]:
+    """Run one argv-only command and return its status and captured streams."""
+    process = await asyncio.create_subprocess_exec(
+        *(str(argument) for argument in arguments),
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=asyncio.subprocess.PIPE if stdout is None else stdout,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    captured_stdout, captured_stderr = await process.communicate()
+    return process.returncode, captured_stdout or b"", captured_stderr or b""
+
+
+def _command_output(arguments: Sequence[str | Path]) -> str:
+    """Return UTF-8 output from one successful argv-only command."""
+    returncode, stdout, stderr = asyncio.run(_invoke_command(arguments))
+    if returncode:
+        diagnostics = stderr.decode(errors="replace")[-12_000:]
+        raise RuntimeError(f"command failed with status {returncode}:\n{diagnostics}")
+    return stdout.decode()
+
+
+def _run_checked_command(arguments: Sequence[str | Path], *, cwd: Path) -> None:
+    """Run one trusted argv and raise with bounded diagnostics on failure."""
+    returncode, _stdout, stderr = asyncio.run(_invoke_command(arguments, cwd=cwd))
+    if returncode:
+        diagnostics = stderr.decode(errors="replace")[-12_000:]
+        raise RuntimeError(f"command failed with status {returncode}:\n{diagnostics}")
+
+
 def _llvm_config_version(executable: str | Path) -> tuple[int, ...]:
     """Return the numeric LLVM version reported by one llvm-config candidate."""
-    output = subprocess.check_output([str(executable), "--version"], text=True).strip()
+    output = _command_output((executable, "--version")).strip()
     match = re.match(r"(\d+(?:\.\d+)*)", output)
     return tuple(int(part) for part in match.group(1).split(".")) if match else ()
 
@@ -290,7 +327,7 @@ def _find_llvm_config(explicit: Path | None = None) -> str:
     """Return the requested or newest available llvm-config executable."""
     if explicit is not None:
         executable = explicit.expanduser().resolve()
-        if not executable.is_file():
+        if not executable.is_file() or not os.access(executable, os.X_OK):
             raise FileNotFoundError(f"llvm-config was not found at {executable}")
         return str(executable)
     candidates = {
@@ -304,12 +341,28 @@ def _find_llvm_config(explicit: Path | None = None) -> str:
     raise FileNotFoundError("llvm-config was not found")
 
 
-def _find_compile_database() -> Path:
-    """Return the most recently modified compile database."""
-    candidates = sorted((_REPO_ROOT / ".work" / "build").glob("*/compile_commands.json"))
+def _find_compile_database(build_root: Path = _BUILD_ROOT) -> Path:
+    """Return the newest compile database below one trusted build root."""
+    root = build_root.expanduser().resolve(strict=True)
+    candidates = [root / "compile_commands.json"]
+    candidates.extend(sorted(root.glob("*/compile_commands.json")))
+    candidates = [path for path in candidates if path.is_file()]
     if not candidates:
-        raise FileNotFoundError("no .work/build/*/compile_commands.json file was found")
+        raise FileNotFoundError(f"no compile_commands.json was found below {root}")
     return max(candidates, key=lambda path: path.stat().st_mtime_ns)
+
+
+def _validated_compile_database(candidate: Path, build_root: Path = _BUILD_ROOT) -> Path:
+    """Resolve a regular compile database confined to an approved build root."""
+    root = build_root.expanduser().resolve(strict=True)
+    database = candidate.expanduser().resolve(strict=True)
+    try:
+        database.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"compile database must be located below {root}: {database}") from exc
+    if database.name != "compile_commands.json" or not database.is_file():
+        raise FileNotFoundError(f"compile database is not a regular expected file: {database}")
+    return database
 
 
 def _maintained_cpp_files() -> tuple[Path, ...]:
@@ -453,13 +506,13 @@ def _augmented_compile_database(compile_commands: Path, output_dir: Path) -> Pat
 
 def _llvm_config_arguments(executable: str, *options: str) -> list[str]:
     """Return shell-split compiler or linker flags reported by llvm-config."""
-    output = subprocess.check_output([executable, *options], text=True)
+    output = _command_output((executable, *options))
     return shlex.split(output)
 
 
 def _find_clang_cpp_library(llvm_config: str) -> Path:
     """Return the monolithic Clang library associated with llvm-config."""
-    library_dir = Path(subprocess.check_output([llvm_config, "--libdir"], text=True).strip())
+    library_dir = Path(_command_output((llvm_config, "--libdir")).strip())
     candidates = tuple(
         path
         for pattern in ("libclang-cpp.so*", "libclang-cpp*.dylib", "clang-cpp.lib")
@@ -474,7 +527,7 @@ def _find_clang_cpp_library(llvm_config: str) -> Path:
 def _compile_callable_auditor(output_dir: Path, llvm_config_path: Path | None) -> Path:
     """Compile the small LibTooling program used for exact callable discovery."""
     llvm_config = _find_llvm_config(llvm_config_path)
-    binary_dir = Path(subprocess.check_output([llvm_config, "--bindir"], text=True).strip())
+    binary_dir = Path(_command_output((llvm_config, "--bindir")).strip())
     compiler = binary_dir / "clang++"
     if not compiler.is_file():
         compiler = binary_dir / "clang++.exe"
@@ -485,8 +538,8 @@ def _compile_callable_auditor(output_dir: Path, llvm_config_path: Path | None) -
     executable_name = "callable-auditor.exe" if compiler.suffix == ".exe" else "callable-auditor"
     executable = output_dir / executable_name
     source.write_text(_CALLABLE_AUDITOR_SOURCE, encoding="utf-8")
-    subprocess.run(
-        [
+    _run_checked_command(
+        (
             str(compiler),
             *_llvm_config_arguments(llvm_config, "--cxxflags"),
             "-std=c++20",
@@ -496,9 +549,8 @@ def _compile_callable_auditor(output_dir: Path, llvm_config_path: Path | None) -
             *_llvm_config_arguments(llvm_config, "--ldflags", "--system-libs", "--libs"),
             "-o",
             str(executable),
-        ],
+        ),
         cwd=_REPO_ROOT,
-        check=True,
     )
     return executable
 
@@ -514,16 +566,15 @@ def _ast_documentation_gaps(
     """Return callable gaps, unreached files, and the unique callable count."""
     audit_output = compile_commands.parent / "callables.tsv"
     with audit_output.open("w", encoding="utf-8") as output_stream:
-        completed = subprocess.run(
-            [str(executable), str(compile_commands.parent), str(_REPO_ROOT)],
-            cwd=_REPO_ROOT,
-            check=False,
-            stdout=output_stream,
-            stderr=subprocess.PIPE,
-            text=True,
+        returncode, _stdout, stderr = asyncio.run(
+            _invoke_command(
+                (executable, compile_commands.parent, _REPO_ROOT),
+                cwd=_REPO_ROOT,
+                stdout=output_stream,
+            )
         )
-    if completed.returncode:
-        diagnostics = completed.stderr[-12_000:]
+    if returncode:
+        diagnostics = stderr.decode(errors="replace")[-12_000:]
         raise RuntimeError(f"Clang AST documentation audit failed:\n{diagnostics}")
 
     reached_files: set[str] = set()
@@ -574,6 +625,12 @@ def main() -> int:
         help="Path to compile_commands.json; defaults to the latest build directory.",
     )
     parser.add_argument(
+        "--build-root",
+        type=Path,
+        default=_BUILD_ROOT,
+        help="Trusted build root containing the compile database.",
+    )
+    parser.add_argument(
         "--source-only",
         action="store_true",
         help="Validate maintained native file summaries without invoking Clang.",
@@ -596,7 +653,9 @@ def main() -> int:
         print("All maintained C/C++ file summaries are present.")
         return 0
 
-    compile_commands = (args.compile_commands or _find_compile_database()).resolve()
+    compile_commands = _validated_compile_database(
+        args.compile_commands or _find_compile_database(args.build_root), args.build_root
+    )
     with tempfile.TemporaryDirectory(prefix="schema-sanitizer-cpp-docs-") as tmp:
         temporary_root = Path(tmp)
         augmented_commands = _augmented_compile_database(compile_commands, temporary_root)

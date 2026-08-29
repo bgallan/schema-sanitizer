@@ -538,7 +538,7 @@ def test_read_xml_folder_rejects_mismatched_root_tags(tmp_path) -> None:
     folder = tmp_path / "mixed"
     folder.mkdir()
     (folder / "a.xml").write_text("<event><id>1</id></event>", encoding="utf-8")
-    (folder / "b.xml").write_text("<order><id>2</id></order>", encoding="utf-8")
+    (folder / "b.xml").write_text("<record><id>2</id></record>", encoding="utf-8")
 
     with pytest.raises(ValueError, match="expected root tag"):
         read_test_xml_folder(folder)

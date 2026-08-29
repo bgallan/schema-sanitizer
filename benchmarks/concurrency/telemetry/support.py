@@ -12,9 +12,10 @@ import os
 import platform
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any, Iterable
+
+from benchmarks.support.command import CAPTURE, MERGE_WITH_STDOUT, CommandError, run_command
 
 
 def parse_cpu_list(raw: str) -> tuple[int, ...]:
@@ -204,16 +205,16 @@ def binding_snapshot() -> dict[str, Any]:
     executable = shutil.which("numactl")
     if executable is not None:
         try:
-            completed = subprocess.run(
+            completed = run_command(
                 [executable, "--show"],
                 check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=CAPTURE,
+                stderr=MERGE_WITH_STDOUT,
                 text=True,
                 timeout=5,
             )
             numactl_policy = completed.stdout.strip() or None
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, CommandError):
             numactl_policy = None
     return {
         "cpu_affinity": list(current_affinity()),

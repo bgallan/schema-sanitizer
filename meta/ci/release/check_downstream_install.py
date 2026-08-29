@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Validate a built wheel from isolated downstream environments.
+"""Prepare isolated downstream checks for a composite-action shell step.
 
-It creates isolated environments and validates base, typed, and optional-extra consumer
-profiles against the built wheel.
+The planner validates its wheel and support files, creates one environment per
+published extra, and emits a safely quoted, fail-fast Bash execution plan.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import shutil
-import subprocess
-import venv
+import shlex
+import sys
+import tempfile
 from pathlib import Path
 
 EXTRA_IMPORTS = {
@@ -49,93 +49,99 @@ EXTRA_IMPORTS = {
 
 
 def environment_python(environment: Path) -> Path:
-    """Return the interpreter created in a virtual environment."""
+    """Return the interpreter path created by ``python -m venv``."""
     directory = "Scripts" if os.name == "nt" else "bin"
     executable = "python.exe" if os.name == "nt" else "python"
     return environment / directory / executable
 
 
-def create_environment(root: Path, name: str) -> Path:
-    """Create a clean downstream virtual environment and return its Python."""
-    environment = root / name
-    if environment.exists():
-        shutil.rmtree(environment)
-    venv.EnvBuilder(with_pip=True).create(environment)
-    python = environment_python(environment)
-    subprocess.run(
-        [os.fspath(python), "-m", "pip", "install", "pip==26.1.2"],
-        check=True,
-    )
-    return python
+def _shell_path(path: Path) -> str:
+    """Return a path spelling accepted by Bash on every supported runner."""
+    return path.as_posix()
 
 
-def validate_consumer(wheel: Path, root: Path, scripts: Path, constraints: Path) -> None:
-    """Exercise runtime and typing behavior outside the repository."""
-    python = create_environment(root, "consumer")
-    subprocess.run(
-        [
-            os.fspath(python),
-            "-m",
-            "pip",
-            "install",
-            "-c",
-            os.fspath(constraints),
-            "mypy",
-            "pyarrow",
-            os.fspath(wheel),
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [os.fspath(python), "-I", os.fspath(scripts / "downstream_smoke.py")],
-        check=True,
-        cwd=root,
-    )
-    subprocess.run(
-        [
-            os.fspath(python),
-            "-I",
-            "-m",
-            "mypy",
-            "--strict",
-            os.fspath(scripts / "downstream_typecheck.py"),
-        ],
-        check=True,
-        cwd=root,
+def _command(arguments: list[str | Path]) -> str:
+    """Render one argument vector with POSIX shell quoting for every value."""
+    return shlex.join(
+        _shell_path(argument) if isinstance(argument, Path) else argument for argument in arguments
     )
 
 
-def validate_extras(wheel: Path, root: Path, constraints: Path) -> None:
-    """Install every optional extra alone and verify its advertised imports."""
+def shell_plan(
+    wheel: Path,
+    work_root: Path,
+    scripts: Path,
+    constraints: Path,
+) -> str:
+    """Return one fail-fast Bash plan preserving per-extra isolation."""
+    work_root.mkdir(parents=True, exist_ok=True)
+    isolated_root = Path(
+        tempfile.mkdtemp(prefix="schema-sanitizer-downstream-", dir=work_root)
+    ).resolve()
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f"isolated_root={shlex.quote(_shell_path(isolated_root))}",
+        'cleanup_downstream() { rm -rf -- "${isolated_root}"; }',
+        "trap cleanup_downstream EXIT",
+        'cd "${isolated_root}"',
+    ]
+
+    def create_environment(name: str) -> Path:
+        """Append commands that create and bootstrap one isolated environment."""
+        environment = isolated_root / name
+        python = environment_python(environment)
+        lines.append(_command([Path(sys.executable), "-m", "venv", environment]))
+        lines.append(_command([python, "-m", "pip", "install", "pip==26.1.2"]))
+        return python
+
+    consumer = create_environment("consumer")
+    lines.extend(
+        (
+            _command(
+                [
+                    consumer,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-c",
+                    constraints,
+                    "mypy",
+                    "pyarrow",
+                    wheel,
+                ]
+            ),
+            _command([consumer, "-I", scripts / "downstream_smoke.py"]),
+            _command(
+                [
+                    consumer,
+                    "-I",
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    scripts / "downstream_typecheck.py",
+                ]
+            ),
+        )
+    )
+
     for extra, imports in EXTRA_IMPORTS.items():
-        print(f"[downstream-extra] {extra}", flush=True)
-        python = create_environment(root, f"extra-{extra}")
-        requirement = os.fspath(wheel) if extra == "core" else f"{wheel}[{extra}]"
-        subprocess.run(
-            [
-                os.fspath(python),
-                "-m",
-                "pip",
-                "install",
-                "-c",
-                os.fspath(constraints),
-                requirement,
-            ],
-            check=True,
-        )
+        lines.append("printf '%s\\n' " + shlex.quote(f"[downstream-extra] {extra}"))
+        python = create_environment(f"extra-{extra}")
+        requirement = _shell_path(wheel) if extra == "core" else f"{_shell_path(wheel)}[{extra}]"
+        lines.append(_command([python, "-m", "pip", "install", "-c", constraints, requirement]))
         statements = ["import schema_sanitizer", *(f"import {name}" for name in imports)]
-        subprocess.run(
-            [os.fspath(python), "-I", "-c", "; ".join(statements)],
-            check=True,
-            cwd=root,
-        )
+        lines.append(_command([python, "-I", "-c", "; ".join(statements)]))
+    lines.append("printf '%s\\n' 'downstream wheel and isolated extras passed'")
+    return "\n".join(lines) + "\n"
 
 
 def main() -> None:
-    """Parse paths and run all downstream installation checks."""
+    """Validate paths and write the downstream command plan."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wheel", type=Path)
     parser.add_argument("--work-root", type=Path, required=True)
+    parser.add_argument("--command-output", type=Path, required=True)
     parser.add_argument("--scripts", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument(
         "--constraints",
@@ -147,14 +153,20 @@ def main() -> None:
     wheel = args.wheel.resolve()
     scripts = args.scripts.resolve()
     constraints = args.constraints.resolve()
-    args.work_root.mkdir(parents=True, exist_ok=True)
     if not wheel.is_file():
-        raise SystemExit(f"wheel does not exist: {wheel}")
+        parser.error(f"wheel does not exist: {wheel}")
     if not constraints.is_file():
-        raise SystemExit(f"constraints do not exist: {constraints}")
-    validate_consumer(wheel, args.work_root, scripts, constraints)
-    validate_extras(wheel, args.work_root, constraints)
-    print("downstream wheel and isolated extras passed")
+        parser.error(f"constraints do not exist: {constraints}")
+    for script in (scripts / "downstream_smoke.py", scripts / "downstream_typecheck.py"):
+        if not script.is_file():
+            parser.error(f"downstream script does not exist: {script}")
+
+    args.command_output.parent.mkdir(parents=True, exist_ok=True)
+    args.command_output.write_text(
+        shell_plan(wheel, args.work_root.resolve(), scripts, constraints),
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 if __name__ == "__main__":

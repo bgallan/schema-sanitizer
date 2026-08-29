@@ -133,9 +133,20 @@ def test_parquet_output_parallelizes_and_remains_logically_exact(
             "every-format-declares-an-eligible-multi-benefit row-group overlap requires at least four effective workers"
         )
 
-    assert int(stats["single"]["tasks"]["output"]["submitted"]) == 0
-    assert int(stats["multi"]["tasks"]["output"]["submitted"]) >= 2
-    assert int(stats["multi"]["counters"]["peak_active_tasks"]) >= 2
+    single_tasks = stats["single"]["tasks"]["output"]
+    multi_tasks = stats["multi"]["tasks"]["output"]
+    assert (
+        int(single_tasks["submitted"])
+        == int(single_tasks["started"])
+        == int(single_tasks["finished"])
+        == 0
+    )
+    assert (
+        int(multi_tasks["submitted"])
+        == int(multi_tasks["started"])
+        == int(multi_tasks["finished"])
+        >= 2
+    )
     for mode in ("single", "multi"):
         assert int(stats[mode]["memory"]["peak_bytes"]) <= 128 << 20
         assert footers[mode]["native_reader_ready"] == 1

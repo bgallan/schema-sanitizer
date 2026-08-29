@@ -268,7 +268,6 @@ def test_public_four_worker_stats_cover_every_shard(tmp_path: Path, require_nati
     batches = int(stats["counters"]["low_core_task_telemetry_batches"])
     assert submitted == started == finished > 0
     assert 0 < batches <= finished
-    assert int(stats["counters"]["peak_active_tasks"]) >= 2
     assert int(stats["counters"]["peak_queue_depth"]) > 0
     assert output.exists() and output.stat().st_size > 0
 

@@ -3,16 +3,12 @@
 // lifetimes.
 
 #include "ingest/chunk_source_detail.hh"
+#include "ingest/secure_read_only_file.hh"
 #include "internal/memory/memory_budget.hh"
-#include "internal/runtime/process_fd_governor.hh"
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <ios>
 #include <limits>
 #include <memory>
 #include <string>
@@ -25,10 +21,7 @@
 #endif
 #include <windows.h>
 #else
-#include <fcntl.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #endif
 
 namespace sanitize {
@@ -58,33 +51,19 @@ DetectedCompression sniff_compression(const std::uint8_t *data,
 /// Inspects file compression without consuming bytes from the chunk source.
 sanitize::Result<DetectedCompression>
 sniff_file_compression(const std::string &path) {
-  internal::ProcessFdPermitLease fd_lease(1U);
-  if (!fd_lease) {
-    return sanitize::Status::IOError(
-        "file descriptor capacity exhausted while sniffing input file '", path,
-        "'");
-  }
-  std::ifstream input(path, std::ios::binary);
-  if (!input.good()) {
-    return sanitize::Status::Invalid("failed to open input file '", path, "'");
-  }
-  fd_lease.mark_opened();
-  internal::ProcessFdStreamCloseGuard<std::ifstream> close_guard(input,
-                                                                 fd_lease);
+  SAN_ASSIGN_OR_RAISE(auto input, internal::SecureReadOnlyFile::Open(
+                                      path, "compression detection"));
   std::array<std::uint8_t, 2> magic{};
-  input.read(reinterpret_cast<char *>(magic.data()),
-             static_cast<std::streamsize>(magic.size()));
-  return sniff_compression(magic.data(),
-                           static_cast<std::size_t>(input.gcount()));
+  SAN_ASSIGN_OR_RAISE(
+      const auto read,
+      input.Read(reinterpret_cast<char *>(magic.data()), magic.size()));
+  return sniff_compression(magic.data(), read);
 }
 
 struct MappedFile {
-  internal::ProcessFdPermitLease fd_lease;
+  internal::SecureReadOnlyFile file;
 #if defined(_WIN32)
-  HANDLE file = INVALID_HANDLE_VALUE;
   HANDLE mapping = nullptr;
-#else
-  int file = -1;
 #endif
   const char *data = nullptr;
   std::size_t size = 0;
@@ -99,23 +78,9 @@ struct MappedFile {
     if (mapping) {
       CloseHandle(mapping);
     }
-    if (file != INVALID_HANDLE_VALUE) {
-      const bool closed = CloseHandle(file) != 0;
-      fd_lease.commit_physical_close(closed);
-      if (closed) {
-        file = INVALID_HANDLE_VALUE;
-      }
-    }
 #else
     if (data && size > 0) {
       munmap(const_cast<char *>(data), size);
-    }
-    if (file >= 0) {
-      const bool closed = close(file) == 0;
-      fd_lease.commit_physical_close(closed);
-      if (closed) {
-        file = -1;
-      }
     }
 #endif
   }
@@ -125,46 +90,23 @@ struct MappedFile {
 sanitize::Result<std::shared_ptr<MappedFile>>
 map_file_read_only(const std::string &path, std::uint64_t limit) {
   auto mapped = std::make_shared<MappedFile>();
-  mapped->fd_lease = internal::ProcessFdPermitLease(1U);
-  if (!mapped->fd_lease) {
-    return sanitize::Status::IOError(
-        "file descriptor capacity exhausted while mapping input file '", path,
-        "'");
-  }
-#if defined(_WIN32)
-  const auto utf8_path = std::u8string(path.begin(), path.end());
-  const auto native_path = std::filesystem::path(utf8_path).wstring();
-  // Staged inputs are renamed into a private cleanup directory while Arrow may
-  // still retain this read-only mapping. Do not grant write sharing.
-  mapped->file =
-      CreateFileW(native_path.c_str(), GENERIC_READ,
-                  FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-  if (mapped->file == INVALID_HANDLE_VALUE) {
-    return sanitize::Status::IOError(
-        "FileChunkSource: CreateFileW failed for '", path, "'");
-  }
-  mapped->fd_lease.mark_opened();
-  if (GetFileType(mapped->file) != FILE_TYPE_DISK) {
-    return sanitize::Status::Invalid(
-        "FileChunkSource: memory mapping requires a regular disk file: '", path,
-        "'");
-  }
-  LARGE_INTEGER file_size{};
-  if (!GetFileSizeEx(mapped->file, &file_size) || file_size.QuadPart < 0 ||
-      static_cast<std::uint64_t>(file_size.QuadPart) >
-          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+  SAN_ASSIGN_OR_RAISE(mapped->file, internal::SecureReadOnlyFile::Open(
+                                        path, "FileChunkSource"));
+  const auto file_size = mapped->file.size();
+  if (file_size >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return sanitize::Status::OutOfMemory(
         "FileChunkSource: mapped file size is out of range: '", path, "'");
   }
-  mapped->size = static_cast<std::size_t>(file_size.QuadPart);
-  SAN_RETURN_NOT_OK(validate_mapped_file_size(
-      path, static_cast<std::uint64_t>(mapped->size), limit));
+  mapped->size = static_cast<std::size_t>(file_size);
+  SAN_RETURN_NOT_OK(validate_mapped_file_size(path, file_size, limit));
   if (mapped->size == 0) {
     return mapped;
   }
+#if defined(_WIN32)
   mapped->mapping =
-      CreateFileMappingW(mapped->file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+      CreateFileMappingW(static_cast<HANDLE>(mapped->file.native_handle()),
+                         nullptr, PAGE_READONLY, 0, 0, nullptr);
   if (!mapped->mapping) {
     return sanitize::Status::IOError(
         "FileChunkSource: CreateFileMappingW failed for '", path, "'");
@@ -176,32 +118,8 @@ map_file_read_only(const std::string &path, std::uint64_t limit) {
         "FileChunkSource: MapViewOfFile failed for '", path, "'");
   }
 #else
-  int open_flags = O_RDONLY;
-#ifdef O_CLOEXEC
-  open_flags |= O_CLOEXEC;
-#endif
-  mapped->file = open(path.c_str(), open_flags);
-  if (mapped->file < 0) {
-    return sanitize::Status::IOError("FileChunkSource: open failed for '", path,
-                                     "'");
-  }
-  mapped->fd_lease.mark_opened();
-  struct stat metadata{};
-  if (fstat(mapped->file, &metadata) != 0 || metadata.st_size < 0 ||
-      !S_ISREG(metadata.st_mode) ||
-      static_cast<std::uint64_t>(metadata.st_size) >
-          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-    return sanitize::Status::OutOfMemory(
-        "FileChunkSource: mapped file size is out of range: '", path, "'");
-  }
-  mapped->size = static_cast<std::size_t>(metadata.st_size);
-  SAN_RETURN_NOT_OK(validate_mapped_file_size(
-      path, static_cast<std::uint64_t>(mapped->size), limit));
-  if (mapped->size == 0) {
-    return mapped;
-  }
-  void *view =
-      mmap(nullptr, mapped->size, PROT_READ, MAP_PRIVATE, mapped->file, 0);
+  void *view = mmap(nullptr, mapped->size, PROT_READ, MAP_PRIVATE,
+                    mapped->file.native_handle(), 0);
   if (view == MAP_FAILED) {
     return sanitize::Status::IOError("FileChunkSource: mmap failed for '", path,
                                      "'");
@@ -230,20 +148,14 @@ public:
             internal::memory_budget_from_limit(memory_limit_bytes)
                 .materialized_input_bytes)) {}
 
-  /// Releases resources retained by `FileChunkSource` without propagating
-  /// cleanup failures.
-  ~FileChunkSource() override {
-    internal::close_stream_and_commit(input_, fd_lease_);
-  }
+  /// Releases the securely opened input through its non-throwing RAII owner.
+  ~FileChunkSource() override = default;
 
   /// Rewinds the file source and clears its per-pass cursor state.
   sanitize::Status Reset() override {
-    internal::close_stream_and_commit(input_, fd_lease_);
-    if (input_.is_open()) {
+    if (!input_.Close()) {
       return sanitize::Status::IOError("FileChunkSource: failed closing input");
     }
-    fd_lease_.reset();
-    input_.clear();
     pos_ = 0;
     eof_ = false;
     full_owner_.reset();
@@ -262,30 +174,22 @@ public:
     }
     SAN_RETURN_NOT_OK(open_if_needed());
 
-    const auto max_stream =
-        static_cast<std::int64_t>(std::numeric_limits<std::streamsize>::max());
-    const auto requested = static_cast<std::streamsize>(
-        std::min<std::int64_t>(max_bytes, max_stream));
-    auto bytes = std::make_shared<std::string>(
-        static_cast<std::size_t>(requested), '\0');
-    input_.read(bytes->data(), requested);
-    const auto read = input_.gcount();
-    if (read <= 0) {
+    const auto requested = static_cast<std::size_t>(max_bytes);
+    auto bytes = std::make_shared<std::string>(requested, '\0');
+    SAN_ASSIGN_OR_RAISE(const auto read, input_.Read(bytes->data(), requested));
+    if (read == 0U) {
       eof_ = true;
       Chunk chunk;
       chunk.base_offset = pos_;
       return chunk;
     }
 
-    bytes->resize(static_cast<std::size_t>(read));
+    bytes->resize(read);
     Chunk chunk;
     chunk.owner = bytes;
     chunk.data = std::string_view(*bytes);
     chunk.base_offset = pos_;
-    pos_ += static_cast<std::size_t>(read);
-    if (read < requested || input_.eof()) {
-      eof_ = true;
-    }
+    pos_ += read;
     return chunk;
   }
 
@@ -312,26 +216,14 @@ private:
     if (input_.is_open()) {
       return {};
     }
-    fd_lease_ = internal::ProcessFdPermitLease(1U);
-    if (!fd_lease_) {
-      return sanitize::Status::IOError(
-          "FileChunkSource: file descriptor capacity exhausted for '", path_,
-          "'");
-    }
-    input_.open(path_, std::ios::binary);
-    if (!input_.good()) {
-      fd_lease_.reset();
-      return sanitize::Status::Invalid("FileChunkSource: failed to open '",
-                                       path_, "'");
-    }
-    fd_lease_.mark_opened();
+    SAN_ASSIGN_OR_RAISE(
+        input_, internal::SecureReadOnlyFile::Open(path_, "FileChunkSource"));
     return {};
   }
 
   std::string path_;
   std::uint64_t materialized_limit_ = 0;
-  internal::ProcessFdPermitLease fd_lease_;
-  std::ifstream input_;
+  internal::SecureReadOnlyFile input_;
   std::size_t pos_ = 0;
   bool eof_ = false;
   std::shared_ptr<const void> full_owner_;

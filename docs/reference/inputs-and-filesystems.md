@@ -65,6 +65,11 @@ native inference, materialization, and output can still use the operation arena.
 `input_mode="directory"` processes matching direct children in deterministic
 filename order and never recurses into subdirectories.
 
+Local input files must be regular files. Symbolic-link inputs (and Windows
+reparse points) are rejected rather than followed, including files selected
+from a directory input. This keeps validation and opening bound to the same
+filesystem object.
+
 ```python
 result = ss.to_pandas(
     "raw/2026-08/",
