@@ -13,17 +13,19 @@ runs:
   steps:
     - name: Require a supported sanitizer tuple
       env:
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
         RUNNER_SYSTEM: ${{ runner.os }}
         SANITIZER_MODE: ${{ inputs.mode }}
         SANITIZER_NAME: ${{ inputs.sanitizer }}
       shell: bash
       run: |-
         set -euo pipefail
-        sanitizer_tuple="${RUNNER_SYSTEM}:${SANITIZER_MODE}:${SANITIZER_NAME}"
+        sanitizer_tuple="${RUNNER_SYSTEM}:${RUNNER_ARCHITECTURE}:${SANITIZER_MODE}:${SANITIZER_NAME}"
         case "${sanitizer_tuple}" in
-          Linux:linux-full:asan-ubsan | \
-          Windows:native:asan | \
-          macOS:native:asan-ubsan) ;;
+          Linux:X64:linux-full:asan-ubsan | \
+          Windows:X64:native:asan | \
+          macOS:X64:native:asan-ubsan | \
+          macOS:ARM64:native:asan-ubsan) ;;
           *)
             echo "Unsupported sanitizer tuple: ${sanitizer_tuple}" >&2
             exit 2
@@ -38,9 +40,23 @@ runs:
           -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
         sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
           -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-          install -y clang-18
-        clang-18 -dumpversion | grep -Eq '^18([.]|$)'
-        clang++-18 -dumpversion | grep -Eq '^18([.]|$)'
+          install -y clang-18=1:18.1.3-1ubuntu1
+        [[ "$(dpkg-query -W -f='${Version}' clang-18)" == '1:18.1.3-1ubuntu1' ]]
+        [[ "$(clang-18 -dumpfullversion -dumpversion)" == '18.1.3' ]]
+        [[ "$(clang++-18 -dumpfullversion -dumpversion)" == '18.1.3' ]]
+    - name: Select the macOS sanitizer toolchain
+      if: runner.os == 'macOS'
+      env:
+        DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      shell: bash
+      run: |
+        set -euo pipefail
+        xcode_version=$(xcodebuild -version)
+        [[ "${xcode_version}" == $'Xcode 16.4\nBuild version 16F6' ]]
+        [[ "$(xcrun --sdk macosx15.5 --show-sdk-version)" == '15.5' ]]
+        clang_version=$(xcrun --sdk macosx15.5 clang --version)
+        [[ "${clang_version%%$'\n'*}" == \
+          'Apple clang version 17.0.0 (clang-1700.0.13.5)' ]]
     - name: Install build dependencies
       env:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
@@ -131,7 +147,7 @@ runs:
       shell: bash
       run: >-
         cmake -S . -B .work/build/platform-sanitizer
-        -A x64
+        -G "Visual Studio 17 2022" -A x64 -T v143,host=x64
         -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
         -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
         -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
@@ -142,11 +158,13 @@ runs:
     - name: Configure macOS ASan/UBSan
       if: runner.os == 'macOS'
       env:
+        DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
         SANITIZER: ${{ inputs.sanitizer }}
       shell: bash
       run: >-
         cmake -S . -B .work/build/platform-sanitizer -G Ninja
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        -DCMAKE_OSX_SYSROOT=macosx15.5
         -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
         -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
         -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON

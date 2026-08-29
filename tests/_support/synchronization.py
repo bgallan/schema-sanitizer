@@ -15,6 +15,7 @@ from typing import Any, Protocol
 # Deadlock fuse for scheduling another test thread on a contended CI host.
 # Correctness must still be established by an Event/Condition/Barrier handshake.
 SCHEDULER_TIMEOUT_SECONDS = 10.0
+_WAIT_NOHANG = getattr(os, "WNOHANG", None)
 
 
 class _WaitableSignal(Protocol):
@@ -95,9 +96,11 @@ def join_process_or_fail(
 
 def wait_for_process_exit(pid: int) -> int:
     """Reap one test child or terminate it after the shared deadlock fuse."""
+    if _WAIT_NOHANG is None:
+        raise RuntimeError("nonblocking process reaping requires POSIX waitpid support")
     deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while True:
-        waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        waited_pid, status = os.waitpid(pid, _WAIT_NOHANG)
         if waited_pid == pid:
             return status
         remaining = deadline - monotonic()
@@ -108,7 +111,7 @@ def wait_for_process_exit(pid: int) -> int:
                 pass
             reap_deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
             while True:
-                waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+                waited_pid, _status = os.waitpid(pid, _WAIT_NOHANG)
                 if waited_pid == pid:
                     break
                 reap_remaining = reap_deadline - monotonic()

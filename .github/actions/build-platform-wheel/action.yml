@@ -19,16 +19,17 @@ runs:
         BUILD_ARCH: ${{ inputs.arch }}
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         PLATFORM_NAME: ${{ inputs.platform-name }}
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
         RUNNER_SYSTEM: ${{ runner.os }}
       shell: bash
       run: |-
         set -euo pipefail
-        platform_tuple="${RUNNER_SYSTEM}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}:${BUILD_ARCH}"
+        platform_tuple="${RUNNER_SYSTEM}:${RUNNER_ARCHITECTURE}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}:${BUILD_ARCH}"
         case "${platform_tuple}" in
-          Linux:linux-x86_64:linux:x86_64 | \
-          Windows:windows-amd64:windows:AMD64 | \
-          macOS:macos-x86_64:macos-x86_64:x86_64 | \
-          macOS:macos-arm64:macos-arm64:arm64) ;;
+          Linux:X64:linux-x86_64:linux:x86_64 | \
+          Windows:X64:windows-amd64:windows:AMD64 | \
+          macOS:X64:macos-x86_64:macos-x86_64:x86_64 | \
+          macOS:ARM64:macos-arm64:macos-arm64:arm64) ;;
           *)
             echo "Unsupported build-platform tuple: ${platform_tuple}" >&2
             exit 2
@@ -61,6 +62,47 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: meta/ci/native/check_no_arrow_cpp.sh
+    - name: Select the macOS release toolchain
+      if: runner.os == 'macOS'
+      env:
+        DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      shell: bash
+      run: |
+        set -euo pipefail
+        xcode_version=$(xcodebuild -version)
+        [[ "${xcode_version}" == $'Xcode 16.4\nBuild version 16F6' ]]
+        [[ "$(xcrun --sdk macosx15.5 --show-sdk-version)" == '15.5' ]]
+        clang_version=$(xcrun --sdk macosx15.5 clang --version)
+        [[ "${clang_version%%$'\n'*}" == \
+          'Apple clang version 17.0.0 (clang-1700.0.13.5)' ]]
+    - name: Select the Windows v143 redistributable
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        vs_root='C:/Program Files/Microsoft Visual Studio/2022/Enterprise'
+        version_file="${vs_root}/VC/Auxiliary/Build/Microsoft.VCRedistVersion.default.txt"
+        [[ -f "${version_file}" ]] || {
+          echo "VS 2022 v143 redistributable version file is missing: ${version_file}" >&2
+          exit 2
+        }
+        redist_version=$(tr -d '\r\n' < "${version_file}")
+        [[ "${redist_version}" =~ ^14[.]4[0-9][.][0-9]+$ ]] || {
+          echo "Expected a VS 2022 v143 redistributable, got ${redist_version}" >&2
+          exit 2
+        }
+        redist_directory="${vs_root}/VC/Redist/MSVC/${redist_version}/x64/Microsoft.VC143.CRT"
+        for dll in \
+          msvcp140.dll msvcp140_1.dll msvcp140_atomic_wait.dll \
+          vcruntime140.dll vcruntime140_1.dll; do
+          [[ -f "${redist_directory}/${dll}" ]] || {
+            echo "Required v143 redistributable DLL is missing: ${redist_directory}/${dll}" >&2
+            exit 2
+          }
+        done
+        rm -rf -- .work/msvc-redist
+        mkdir -p .work/msvc-redist
+        cp -- "${redist_directory}"/*.dll .work/msvc-redist/
     - name: Build and test the CPython 3.11 ABI3 wheel
       env:
         CIBW_ARCH: ${{ inputs.arch }}
@@ -85,6 +127,28 @@ runs:
         [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
         export SOURCE_DATE_EPOCH
         python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}"
+    - name: Certify the Windows release toolchain
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mapfile -t caches < <(find .work/build -type f -name CMakeCache.txt -print)
+        if [[ "${#caches[@]}" -ne 1 ]]; then
+          echo "Expected exactly one Windows CMake cache, found ${#caches[@]}" >&2
+          exit 2
+        fi
+        expected=(
+          'CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022'
+          'CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise'
+          'CMAKE_GENERATOR_PLATFORM:INTERNAL=x64'
+          'CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64'
+        )
+        for entry in "${expected[@]}"; do
+          grep -Fx -- "${entry}" "${caches[0]}" >/dev/null || {
+            echo "Windows release toolchain mismatch: missing '${entry}' in ${caches[0]}" >&2
+            exit 2
+          }
+        done
     - name: Audit the CPython stable ABI
       shell: bash
       run: python -m abi3audit --strict --report wheelhouse/*.whl
@@ -123,11 +187,6 @@ runs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
         python-version: 3.12.11
-        cache: pip
-        cache-dependency-path: |-
-          pyproject.toml
-          meta/ci/requirements/build-tools.txt
-          .github/actions/build-platform-wheel/action.yml
     - name: Exercise the ABI3 wheel on CPython 3.12
       if: inputs.artifact == 'linux'
       env:
@@ -143,11 +202,6 @@ runs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
         python-version: 3.13.15
-        cache: pip
-        cache-dependency-path: |-
-          pyproject.toml
-          meta/ci/requirements/build-tools.txt
-          .github/actions/build-platform-wheel/action.yml
     - name: Exercise the ABI3 wheel on CPython 3.13
       if: inputs.artifact == 'linux'
       env:
@@ -161,12 +215,7 @@ runs:
     - name: Set up the newest supported Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
-        python-version: 3.14.3
-        cache: pip
-        cache-dependency-path: |-
-          pyproject.toml
-          meta/ci/requirements/build-tools.txt
-          .github/actions/build-platform-wheel/action.yml
+        python-version: 3.14.7
     - name: Verify the ABI3 wheel on Python 3.14
       env:
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt

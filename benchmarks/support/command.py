@@ -26,6 +26,8 @@ PathArgument: TypeAlias = str | os.PathLike[str]
 Output = TypeVar("Output", str, bytes)
 _POST_KILL_REAP_TIMEOUT_SECONDS = 5.0
 _WINDOWS_SYSTEM_DIRECTORY_BUFFER_CHARS = 32_768
+_PLATFORM_FAMILY = os.name
+_PROCESS_DOMAIN_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 class CommandError(Exception):
@@ -147,12 +149,12 @@ async def _kill_process_domain_and_reap(
     """Kill one isolated process domain and bound direct-child reaping."""
     cleanup_failed = False
     direct_child_only_kill = False
-    if os.name == "posix":
+    if _PLATFORM_FAMILY == "posix":
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, _PROCESS_DOMAIN_KILL_SIGNAL)
         except ProcessLookupError:
             pass
-    elif os.name == "nt":
+    elif _PLATFORM_FAMILY == "nt":
         taskkill = _windows_taskkill_path()
         if taskkill is None or not taskkill.is_file():
             cleanup_failed = True
@@ -250,7 +252,7 @@ async def _execute(
                         cwd=os.fspath(cwd) if cwd is not None else None,
                         stdout=stdout_target,
                         stderr=stderr_target,
-                        start_new_session=os.name == "posix",
+                        start_new_session=_PLATFORM_FAMILY == "posix",
                     )
                     try:
                         await asyncio.wait_for(process.wait(), timeout=timeout)

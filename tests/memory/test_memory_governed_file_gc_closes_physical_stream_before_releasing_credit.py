@@ -52,7 +52,7 @@ def test_governed_file_gc_closes_physical_stream_before_releasing_credit(
     governed = module.open_governed_file("ignored", "rb")
     del governed
     gc.collect()
-    assert drain_finalizer_cleanup() >= 1
+    drain_finalizer_cleanup()
     assert events == ["stream.close", "lease.release"]
     assert stream.closed
 

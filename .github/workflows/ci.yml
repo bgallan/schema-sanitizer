@@ -41,7 +41,7 @@ jobs:
             artifact: linux
             arch: x86_64
           - display-name: Windows AMD64
-            runner: windows-2025
+            runner: windows-2022
             platform-name: windows-amd64
             artifact: windows
             arch: AMD64
@@ -90,7 +90,7 @@ jobs:
   platform-tests-windows-amd64:
     if: ${{ !cancelled() }}
     needs: [platform-wheel-builds]
-    runs-on: windows-2025
+    runs-on: windows-2022
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -184,7 +184,7 @@ jobs:
             mode: linux-full
           - name: sanitizer / windows-amd64-asan
             task: platform-sanitizer
-            runner: windows-2025
+            runner: windows-2022
             python: 3.11.9
             timeout: 70
             sanitizer: asan

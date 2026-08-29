@@ -102,7 +102,7 @@ def test_source_loader_registers_repaired_windows_wheel_directories(
         registered.append(path)
         return object()
 
-    monkeypatch.setattr(native_runtime.os, "name", "nt")
+    monkeypatch.setattr(native_runtime, "_IS_WINDOWS", True)
     monkeypatch.setattr(
         native_runtime.os,
         "add_dll_directory",

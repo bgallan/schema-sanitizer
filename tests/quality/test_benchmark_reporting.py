@@ -116,7 +116,7 @@ def test_run_command_timeout_kills_domain_and_bounds_post_kill_reap(
 
     monkeypatch.setattr(benchmark_command.asyncio, "create_subprocess_exec", fake_create)
     monkeypatch.setattr(benchmark_command.asyncio, "wait_for", fake_wait_for)
-    monkeypatch.setattr(benchmark_command.os, "name", "posix")
+    monkeypatch.setattr(benchmark_command, "_PLATFORM_FAMILY", "posix")
     monkeypatch.setattr(
         benchmark_command.os,
         "killpg",
@@ -136,7 +136,7 @@ def test_run_command_timeout_kills_domain_and_bounds_post_kill_reap(
         )
 
     assert spawned["start_new_session"] is True
-    assert killed == [(FakeProcess.pid, benchmark_command.signal.SIGKILL)]
+    assert killed == [(FakeProcess.pid, benchmark_command._PROCESS_DOMAIN_KILL_SIGNAL)]
     assert timeouts == [7, benchmark_command._POST_KILL_REAP_TIMEOUT_SECONDS]
 
 
@@ -199,7 +199,7 @@ def test_windows_tree_kill_race_distinguishes_terminal_from_direct_fallback(
         return FakeTreeKiller()
 
     with monkeypatch.context() as patch:
-        patch.setattr(benchmark_command.os, "name", "nt")
+        patch.setattr(benchmark_command, "_PLATFORM_FAMILY", "nt")
         patch.setattr(benchmark_command, "_windows_taskkill_path", lambda: FakePath())
         patch.setattr(benchmark_command.asyncio, "create_subprocess_exec", fake_create)
         process = FakeProcess()

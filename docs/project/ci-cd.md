@@ -160,7 +160,7 @@ artifact, rather than an import from `src/`, on:
 | Runner | Release platform | Native safety coverage |
 |---|---|---|
 | Ubuntu 24.04 / Linux x86-64 | `manylinux_2_27_x86_64.manylinux_2_28_x86_64` | Full wheel suite, focused extension ASan/UBSan, libFuzzer, LLVM coverage, and GCC TSan. |
-| Windows Server 2025 / AMD64 | `win_amd64` | Full wheel suite and MSVC ASan parser fuzzing. |
+| Windows Server 2022 / AMD64 | `win_amd64` | Full wheel suite and MSVC ASan parser fuzzing. |
 | macOS 15 / x86-64 | `macosx_11_0_x86_64` | Full wheel suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
 | macOS 15 / ARM64 | `macosx_11_0_arm64` | Full wheel suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
 
@@ -344,10 +344,12 @@ distribution, and manifest destinations. Native linkage certification also
 fails when neither `otool` nor `ldd` is available; the absence of an inspection
 tool can never print a successful no-Arrow result.
 
-Linux sanitizer setup also checks the selected Clang/LLVM 18 and GCC/G++ 14
-major families after apt installation. Hosted-image and apt patch revisions
-remain mutable infrastructure inputs, but an unexpected compiler major fails
-before instrumented code is built.
+Linux sanitizer setup installs exact Clang/LLVM 18.1.3 and GCC/G++ 14.2.0 apt
+revisions, then verifies both package and compiler identities. macOS builds
+select Xcode 16.4, SDK 15.5, and its exact AppleClang release; Windows release
+builds select VS 2022/v143 and verify the generated CMake cache. Missing or
+changed toolchains therefore fail before their output can become release
+evidence.
 
 ## [Release evidence](#index)
 

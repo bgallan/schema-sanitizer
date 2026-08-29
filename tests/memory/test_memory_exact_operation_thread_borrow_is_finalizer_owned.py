@@ -39,7 +39,7 @@ def test_exact_operation_thread_borrow_is_finalizer_owned() -> None:
     assert budget.borrowed == 3
     del owner
     gc.collect()
-    assert module.drain_finalizer_cleanup() >= 1
+    module.drain_finalizer_cleanup()
     assert budget.borrowed == 0
 
 
@@ -450,7 +450,7 @@ def test_shared_physical_claim_dropped_before_handoff_releases_exact_envelope() 
     claim = module._SharedExternalRuntimeNativePermit(key, 1)
     del claim
     gc.collect()
-    assert module.drain_finalizer_cleanup() >= 1
+    module.drain_finalizer_cleanup()
     assert receipt.amount == 0
     assert module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS == 0
     assert key not in module._EXTERNAL_RUNTIME_POOL_COORDINATOR

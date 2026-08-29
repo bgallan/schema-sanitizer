@@ -339,7 +339,7 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
     started = threading.Event()
     release = threading.Event()
     staged_closed = threading.Event()
-    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=0.05)
+    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
 
     class Staged:
         """Record cleanup of one staging result completed after abandonment."""
@@ -396,31 +396,34 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
                     continue
             return Staged()
 
-    iterator = RemoteChunkPrefetchIterator(
-        Manifest(
-            files=[RemoteFile("gs://bucket/part.jsonl", "part.jsonl", size=1)],
-            input_format="jsonl",
-            memory_limit_bytes=64 << 20,
-            threading_mode="multi",
-            chunk_size=1,
-            operation_context=SimpleNamespace(remote_coordinator=coordinator),
+    try:
+        iterator = RemoteChunkPrefetchIterator(
+            Manifest(
+                files=[RemoteFile("gs://bucket/part.jsonl", "part.jsonl", size=1)],
+                input_format="jsonl",
+                memory_limit_bytes=64 << 20,
+                threading_mode="multi",
+                chunk_size=1,
+                operation_context=SimpleNamespace(remote_coordinator=coordinator),
+            )
         )
-    )
-    iterator.__enter__()
-    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    close_timeouts: list[float] = []
+        iterator.__enter__()
+        assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+        close_timeouts: list[float] = []
 
-    def bounded_close(_closer: object, *, timeout_seconds: float) -> bool:
-        """Model an exhausted session deadline without waiting on wall time."""
-        close_timeouts.append(timeout_seconds)
-        return False
+        def bounded_close(_closer: object, *, timeout_seconds: float) -> bool:
+            """Model an exhausted session deadline without waiting on wall time."""
+            close_timeouts.append(timeout_seconds)
+            return False
 
-    monkeypatch.setattr(remote_source, "remaining_seconds", lambda _deadline: 0.05)
-    monkeypatch.setattr(remote_source.SharedDownloadSessionCloser, "close", bounded_close)
-    iterator.close()
-    assert close_timeouts == [0.05]
-    assert not staged_closed.is_set()
-    assert not release.is_set()
-    release.set()
-    assert staged_closed.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    coordinator.close()
+        monkeypatch.setattr(remote_source, "remaining_seconds", lambda _deadline: 0.05)
+        monkeypatch.setattr(remote_source.SharedDownloadSessionCloser, "close", bounded_close)
+        iterator.close()
+        assert close_timeouts == [0.05]
+        assert not staged_closed.is_set()
+        assert not release.is_set()
+        release.set()
+        assert staged_closed.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    finally:
+        release.set()
+        coordinator.close()

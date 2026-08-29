@@ -78,7 +78,12 @@ runs:
           python meta/ci/quality/run_coverage_suite.py python "${suite}"
         done
         python meta/ci/quality/run_coverage_suite.py python --validate-inputs
-        coverage combine --strict
+        python - <<'PY'
+        from coverage import Coverage
+        coverage_data = Coverage()
+        coverage_data.combine(strict=True)
+        coverage_data.save()
+        PY
         coverage report --fail-under=44 | tee coverage-python-summary.txt
         coverage html --show-contexts -d coverage-python-html
         coverage xml -o coverage-python.xml

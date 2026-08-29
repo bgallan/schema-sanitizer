@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import gc
-import os
 import signal
 import threading
 from pathlib import Path
@@ -48,6 +47,7 @@ def test_process_exit_fuse_never_falls_back_to_an_unbounded_reap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A child resisting SIGKILL leaves the test bounded and diagnostically failed."""
+    wait_nohang = 1
     wait_options: list[int] = []
     signals: list[tuple[int, int]] = []
     times = iter((0.0, 11.0, 11.0, 22.0))
@@ -58,6 +58,7 @@ def test_process_exit_fuse_never_falls_back_to_an_unbounded_reap(
         return 0, 0
 
     monkeypatch.setattr(synchronization.os, "waitpid", never_reaped)
+    monkeypatch.setattr(synchronization, "_WAIT_NOHANG", wait_nohang)
     monkeypatch.setattr(
         synchronization.os,
         "kill",
@@ -69,7 +70,7 @@ def test_process_exit_fuse_never_falls_back_to_an_unbounded_reap(
         synchronization.wait_for_process_exit(12345)
 
     assert signals == [(12345, getattr(signal, "SIGKILL", signal.SIGTERM))]
-    assert wait_options == [os.WNOHANG, os.WNOHANG]
+    assert wait_options == [wait_nohang, wait_nohang]
 
 
 def test_synchronization_helpers_reject_missed_events_and_live_workers() -> None:

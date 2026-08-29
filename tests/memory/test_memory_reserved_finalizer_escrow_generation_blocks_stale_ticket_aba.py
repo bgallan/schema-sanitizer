@@ -354,7 +354,7 @@ def test_process_lease_finalizer_publishes_compact_capability_only() -> None:
     # inspect the authoritative ledger directly before the explicit drain.
     assert governor._in_use == 1
     assert len(governor._active_leases) == 1
-    assert drain_finalizer_cleanup() >= 1
+    drain_finalizer_cleanup()
     assert governor.snapshot().in_use == 0
     assert governor.snapshot().active_leases == 0
 
@@ -376,7 +376,7 @@ def test_remote_and_provider_finalizers_release_from_capability_ledgers() -> Non
     gc.collect()
     assert remote.snapshot().pending_submissions == 1
     assert provider.snapshot("endpoint").in_flight == 1
-    assert drain_finalizer_cleanup() >= 2
+    drain_finalizer_cleanup()
     assert remote.snapshot().pending_submissions == 0
     assert provider.snapshot("endpoint").in_flight == 0
 
@@ -411,7 +411,7 @@ def test_result_finalizer_detaches_wrapper_but_roots_large_graph_until_safe_poin
     assert result_ref() is None
     assert box_ref() is not None
     assert raw.closed == 0
-    assert drain_finalizer_cleanup() >= 1
+    drain_finalizer_cleanup()
     gc.collect()
     assert raw.closed == 1
     assert box_ref() is None

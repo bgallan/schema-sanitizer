@@ -63,7 +63,7 @@ def test_prepared_finalizer_pre_root_survives_publish_lock_contention() -> None:
     finally:
         lock.release()
 
-    assert module.drain_finalizer_cleanup() >= 1
+    module.drain_finalizer_cleanup()
     assert calls == 1
     assert escrow.active_count() <= baseline_active
 

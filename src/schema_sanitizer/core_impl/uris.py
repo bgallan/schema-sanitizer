@@ -21,6 +21,7 @@ _GCS_SCHEMES = frozenset({"gcs", "gs"})
 _S3_SCHEMES = frozenset({"s3"})
 _AZURE_SCHEMES = frozenset({"abfs", "abfss", "adl", "az", "azure", "wasb", "wasbs"})
 _HTTP_SCHEMES = frozenset({"http", "https"})
+_IS_WINDOWS = os.name == "nt"
 
 
 def looks_like_windows_drive_path(value: str) -> bool:
@@ -83,7 +84,7 @@ def local_path_from_file_uri(uri: str) -> str:
     if parsed.scheme.lower() != "file":
         raise ValueError(f"not a file URI: {uri!r}")
     if (
-        os.name == "nt"
+        _IS_WINDOWS
         and parsed.path.startswith("/")
         and looks_like_windows_drive_path(parsed.path[1:3])
     ):

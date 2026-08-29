@@ -198,8 +198,9 @@ def test_quality_action_combines_coverage_only_after_exact_input_validation() ->
     ).read_text(encoding="utf-8")
 
     validate = "run_coverage_suite.py python --validate-inputs"
-    combine = "coverage combine --strict"
+    combine = "coverage_data.combine(strict=True)"
     assert validate in action
     assert combine in action
     assert action.index(validate) < action.index(combine)
-    assert "\n        coverage combine\n" not in action
+    assert "from coverage import Coverage" in action
+    assert "coverage combine" not in action

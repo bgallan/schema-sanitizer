@@ -22,17 +22,18 @@ runs:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         PLATFORM_NAME: ${{ inputs.platform-name }}
         MINIMUM_CPU_CAPACITY: ${{ inputs.minimum-cpu-capacity }}
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
         RUNNER_SYSTEM: ${{ runner.os }}
         TEST_SHARD: ${{ inputs.shard }}
       shell: bash
       run: |-
         set -euo pipefail
-        platform_tuple="${RUNNER_SYSTEM}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}:${MINIMUM_CPU_CAPACITY}"
+        platform_tuple="${RUNNER_SYSTEM}:${RUNNER_ARCHITECTURE}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}:${MINIMUM_CPU_CAPACITY}"
         case "${platform_tuple}" in
-          Linux:linux-x86_64:linux:4 | \
-          Windows:windows-amd64:windows:4 | \
-          macOS:macos-x86_64:macos-x86_64:4 | \
-          macOS:macos-arm64:macos-arm64:3) ;;
+          Linux:X64:linux-x86_64:linux:4 | \
+          Windows:X64:windows-amd64:windows:4 | \
+          macOS:X64:macos-x86_64:macos-x86_64:4 | \
+          macOS:ARM64:macos-arm64:macos-arm64:3) ;;
           *)
             echo "Unsupported platform-test tuple: ${platform_tuple}" >&2
             exit 2

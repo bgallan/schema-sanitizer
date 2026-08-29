@@ -72,7 +72,7 @@ def test_local_path_from_file_uri_normalizes_windows_drive_uri(
     """Verify local path from file URI normalizes windows drive URI."""
     from schema_sanitizer.core_impl import uris
 
-    monkeypatch.setattr(uris.os, "name", "nt")
+    monkeypatch.setattr(uris, "_IS_WINDOWS", True)
 
     assert (
         uris.local_path_from_file_uri("file:///C:/Users/runner/AppData/out%20file.parquet")

@@ -1,11 +1,14 @@
 actionlint-py==1.7.12.24
 annotated-doc==0.0.5
 annotated-types==0.8.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
 clang-format==22.1.8
 click==8.5.0
 cmakelang==0.6.13
 colorama==0.4.6; platform_system == "Windows"
 distro==1.9.0
+idna==3.19
 librt==0.15.0
 loguru==0.7.3
 maison==2.0.2
@@ -22,10 +25,12 @@ pre-commit-hooks==6.0.0
 pydantic==2.13.5
 pydantic-core==2.46.5
 pygments==2.21.0
+requests==2.34.2
 rich==15.0.0
 ruamel.yaml==0.19.1
 ruff==0.16.2
 ruyaml==0.91.0
+semver==3.0.4
 setuptools==84.0.0
 shellcheck-py==0.11.0.1
 shellingham==1.5.4
@@ -36,6 +41,7 @@ tomlkit==0.15.1
 typer==0.27.2
 typing-extensions==4.16.0
 typing-inspection==0.4.4
+urllib3==2.7.0
 wheel==0.48.0
 yamlfix==1.18.0
 zizmor==1.29.0

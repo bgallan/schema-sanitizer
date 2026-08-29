@@ -147,6 +147,30 @@ def test_test_modules_are_domain_partitioned_and_import_safe() -> None:
     assert len(names) == len(set(names))
 
 
+def test_tests_do_not_mutate_process_global_platform_identity() -> None:
+    """Platform branch tests patch module-owned seams rather than stdlib ``os.name``."""
+    violations: dict[str, list[int]] = {}
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "setattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "name"
+            ):
+                continue
+            target = node.args[0]
+            if (isinstance(target, ast.Name) and target.id == "os") or (
+                isinstance(target, ast.Attribute) and target.attr == "os"
+            ):
+                violations.setdefault(path.relative_to(ROOT).as_posix(), []).append(node.lineno)
+
+    assert violations == {}
+
+
 def test_examples_do_not_import_implementation_packages() -> None:
     """Third-party examples must never require private implementation modules."""
     forbidden = {"api_impl", "core_impl", "input_impl", "options_impl", "remote_impl"}

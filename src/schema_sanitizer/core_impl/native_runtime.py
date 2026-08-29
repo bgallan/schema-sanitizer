@@ -17,6 +17,7 @@ from contextlib import suppress
 from typing import Any
 
 _NATIVE_MODULE_NAME = "schema_sanitizer._core_abi3"
+_IS_WINDOWS = os.name == "nt"
 _WINDOWS_DLL_DIRECTORY_HANDLES: list[Any] = []
 _WINDOWS_DLL_DIRECTORIES: set[pathlib.Path] = set()
 
@@ -124,7 +125,7 @@ def _native_candidate_dirs() -> list[pathlib.Path]:
 def _register_windows_dll_directories(package_dir: pathlib.Path) -> None:
     """Retain approved wheel DLL directories when loading from a source tree."""
     add_dll_directory = getattr(os, "add_dll_directory", None)
-    if os.name != "nt" or add_dll_directory is None:
+    if not _IS_WINDOWS or add_dll_directory is None:
         return
     dependency_dirs = (
         package_dir,

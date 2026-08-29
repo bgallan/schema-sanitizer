@@ -53,7 +53,7 @@ _VALIDATION_ROWS = _table(
     ("name", "task", "runner", "python", "timeout", "sanitizer", "mode"),
     """
     sanitizer / linux-x86_64-asan-ubsan | platform-sanitizer | ubuntu-24.04 | 3.11.9 | 70 | asan-ubsan | linux-full
-    sanitizer / windows-amd64-asan | platform-sanitizer | windows-2025 | 3.11.9 | 70 | asan | native
+    sanitizer / windows-amd64-asan | platform-sanitizer | windows-2022 | 3.11.9 | 70 | asan | native
     sanitizer / macos-x86_64-asan-ubsan | platform-sanitizer | macos-15-intel | 3.11.9 | 70 | asan-ubsan | native
     sanitizer / macos-arm64-asan-ubsan | platform-sanitizer | macos-15 | 3.11.9 | 70 | asan-ubsan | native
     """,
@@ -62,7 +62,7 @@ _BUILD_PLATFORMS = _table(
     ("display-name", "runner", "platform-name", "artifact", "arch"),
     """
     Linux x86-64 | ubuntu-24.04 | linux-x86_64 | linux | x86_64
-    Windows AMD64 | windows-2025 | windows-amd64 | windows | AMD64
+    Windows AMD64 | windows-2022 | windows-amd64 | windows | AMD64
     macOS x86-64 | macos-15-intel | macos-x86_64 | macos-x86_64 | x86_64
     macOS ARM64 | macos-15 | macos-arm64 | macos-arm64 | arm64
     """,
@@ -100,11 +100,12 @@ _BUILD_TOOL_LOCK_NAMES = frozenset(
 )
 _PRE_COMMIT_HOOK_LOCK_NAMES = frozenset(
     """
-    actionlint-py annotated-doc annotated-types clang-format click cmakelang colorama distro librt
-    loguru maison markdown-it-py mdformat mdurl mypy mypy-extensions packaging pathspec pip
-    platformdirs pre-commit-hooks pydantic pydantic-core pygments rich ruamel-yaml ruff ruyaml
-    setuptools shellcheck-py shellingham shfmt-py six toml-sort tomlkit typer typing-extensions
-    typing-inspection wheel yamlfix zizmor
+    actionlint-py annotated-doc annotated-types certifi charset-normalizer clang-format click
+    cmakelang colorama distro idna librt loguru maison markdown-it-py mdformat mdurl mypy
+    mypy-extensions packaging pathspec pip platformdirs pre-commit-hooks pydantic pydantic-core
+    pygments requests rich ruamel-yaml ruff ruyaml semver setuptools shellcheck-py shellingham
+    shfmt-py six toml-sort tomlkit typer typing-extensions typing-inspection urllib3 wheel yamlfix
+    zizmor
     """.split()
 )
 _QUALITY_LOCK_NAMES = frozenset(
@@ -999,6 +1000,8 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert build_action.count("python-version: 3.11.9") == 1
     assert test_action.count("python-version: 3.11.9") == 1
     assert build_action.count("python -m cibuildwheel") == 1
+    assert build_action.count("cache: pip") == 1
+    assert build_action.count("cache-dependency-path: |-") == 1
     assert build_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 2
     assert test_action.count("actions/download-artifact@") == 2
     assert test_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 2
@@ -1016,6 +1019,7 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert "meta/ci/requirements/platform-tests.txt" in test_action
     assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
     assert cibuildwheel["dependency-versions"] == "meta/ci/requirements/build-tools.txt"
+    assert cibuildwheel["build-verbosity"] == 0
     assert _exact_lock_names(test_requirements_path) == _PLATFORM_LOCK_NAMES
     assert len(test_requirements) == len(_PLATFORM_LOCK_NAMES)
     assert all(
@@ -1052,6 +1056,44 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert ci.count("uses: ./.github/actions/test-platform-wheel") == 4
 
 
+def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
+    """Windows release builds reject compiler or redistributable path drift."""
+    cibuildwheel = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "cibuildwheel"
+    ]
+    windows = cibuildwheel["windows"]
+    build = _action("build-platform-wheel")
+    sanitizer = _action("platform-sanitizer")
+
+    assert windows["environment"] == {
+        "CMAKE_GENERATOR": "Visual Studio 17 2022",
+        "CMAKE_GENERATOR_INSTANCE": ("C:/Program Files/Microsoft Visual Studio/2022/Enterprise"),
+        "CMAKE_GENERATOR_PLATFORM": "x64",
+        "CMAKE_GENERATOR_TOOLSET": "v143,host=x64",
+    }
+    assert windows["repair-wheel-command"] == (
+        "python -W error -m delvewheel repair --add-path "
+        "{project}/.work/msvc-redist -w {dest_dir} -v {wheel}"
+    )
+    assert "Microsoft.VCRedistVersion.default.txt" in build
+    assert "Microsoft.VC143.CRT" in build
+    assert "rm -rf -- .work/msvc-redist" in build
+    assert 'cp -- "${redist_directory}"/*.dll .work/msvc-redist/' in build
+    assert (
+        build.index("python -m cibuildwheel")
+        < build.index("name: Certify the Windows release toolchain")
+        < build.index("python -m abi3audit")
+    )
+    for cache_entry in (
+        "CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022",
+        "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
+        "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64",
+        "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64",
+    ):
+        assert cache_entry in build
+    assert '-G "Visual Studio 17 2022" -A x64 -T v143,host=x64' in sanitizer
+
+
 def test_composite_actions_reject_unknown_platform_and_sanitizer_tuples() -> None:
     """Misspelled matrix inputs cannot silently skip platform-specific validation."""
     build = _action("build-platform-wheel")
@@ -1063,34 +1105,36 @@ def test_composite_actions_reject_unknown_platform_and_sanitizer_tuples() -> Non
             build,
             "Require a supported build-platform tuple",
             (
-                "Linux:linux-x86_64:linux:x86_64",
-                "Windows:windows-amd64:windows:AMD64",
-                "macOS:macos-x86_64:macos-x86_64:x86_64",
-                "macOS:macos-arm64:macos-arm64:arm64",
+                "Linux:X64:linux-x86_64:linux:x86_64",
+                "Windows:X64:windows-amd64:windows:AMD64",
+                "macOS:X64:macos-x86_64:macos-x86_64:x86_64",
+                "macOS:ARM64:macos-arm64:macos-arm64:arm64",
             ),
         ),
         (
             test,
             "Require a supported platform-test tuple",
             (
-                "Linux:linux-x86_64:linux:4",
-                "Windows:windows-amd64:windows:4",
-                "macOS:macos-x86_64:macos-x86_64:4",
-                "macOS:macos-arm64:macos-arm64:3",
+                "Linux:X64:linux-x86_64:linux:4",
+                "Windows:X64:windows-amd64:windows:4",
+                "macOS:X64:macos-x86_64:macos-x86_64:4",
+                "macOS:ARM64:macos-arm64:macos-arm64:3",
             ),
         ),
         (
             sanitizer,
             "Require a supported sanitizer tuple",
             (
-                "Linux:linux-full:asan-ubsan",
-                "Windows:native:asan",
-                "macOS:native:asan-ubsan",
+                "Linux:X64:linux-full:asan-ubsan",
+                "Windows:X64:native:asan",
+                "macOS:X64:native:asan-ubsan",
+                "macOS:ARM64:native:asan-ubsan",
             ),
         ),
     ):
         guard_step = next(step for step in _step_bodies(source) if f"name: {guard}" in step)
         assert "exit 2" in guard_step
+        assert "RUNNER_ARCHITECTURE: ${{ runner.arch }}" in guard_step
         assert all(value in guard_step for value in tuples)
         assert guard in _step_bodies(source)[0]
 
@@ -1334,16 +1378,39 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
     for action in (native, sanitizer, tsan):
         assert "ninja==1.13.0" in action
         assert "cmake==4.3.4" in action
+    for action in (sanitizer, tsan):
         assert "pytest==9.1.1" in action
         assert "pyarrow==25.0.1" in action
+    assert "-r meta/ci/requirements/platform-tests.txt" in native
     assert "clang++-18" in sanitizer
     assert "CMAKE_C_COMPILER=clang-18" in sanitizer
-    assert "clang-18 -dumpversion | grep -Eq '^18([.]|$)'" in native
-    assert "llvm-profdata-18 --version | grep -Eq 'LLVM version 18([.]|$)'" in native
-    assert "llvm-cov-18 --version | grep -Eq 'LLVM version 18([.]|$)'" in native
-    assert "clang++-18 -dumpversion | grep -Eq '^18([.]|$)'" in sanitizer
-    assert "gcc-14 -dumpfullversion -dumpversion | grep -Eq '^14([.]|$)'" in tsan
-    assert "g++-14 -dumpfullversion -dumpversion | grep -Eq '^14([.]|$)'" in tsan
+    for action in (native, sanitizer):
+        assert "clang-18=1:18.1.3-1ubuntu1" in action
+        assert "dpkg-query -W -f='${Version}' clang-18" in action
+        assert "clang-18 -dumpfullversion -dumpversion" in action
+        assert "== '18.1.3'" in action
+    assert "llvm-18=1:18.1.3-1ubuntu1" in native
+    assert "dpkg-query -W -f='${Version}' llvm-18" in native
+    assert "llvm-profdata-18 --version | grep -F 'LLVM version 18.1.3'" in native
+    assert "llvm-cov-18 --version | grep -F 'LLVM version 18.1.3'" in native
+    assert "clang++-18 -dumpfullversion -dumpversion" in sanitizer
+    for package in ("gcc-14", "g++-14"):
+        assert f"{package}=14.2.0-4ubuntu2~24.04.1" in tsan
+        assert f"dpkg-query -W -f='${{Version}}' {package}" in tsan
+        assert f"{package} -dumpfullversion -dumpversion" in tsan
+    macos = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "cibuildwheel"
+    ]["macos"]
+    assert macos["environment"] == {
+        "DEVELOPER_DIR": "/Applications/Xcode_16.4.app/Contents/Developer",
+        "MACOSX_DEPLOYMENT_TARGET": "11.0",
+    }
+    for action in (build, sanitizer):
+        assert "/Applications/Xcode_16.4.app/Contents/Developer" in action
+        assert "$'Xcode 16.4\\nBuild version 16F6'" in action
+        assert "xcrun --sdk macosx15.5 --show-sdk-version" in action
+        assert "Apple clang version 17.0.0 (clang-1700.0.13.5)" in action
+    assert "-DCMAKE_OSX_SYSROOT=macosx15.5" in sanitizer
     assert "pre-commit install-hooks" in quality
     assert "for attempt in 1 2 3" in quality
     assert "timeout --signal=TERM --kill-after=15s 120s pre-commit install-hooks" in quality
@@ -2169,7 +2236,7 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
 
     build_action = _action("build-platform-wheel")
     assert "python-version: 3.11.9" in build_action
-    for version in ("3.12.11", "3.13.15", "3.14.3"):
+    for version in ("3.12.11", "3.13.15", "3.14.7"):
         assert f"python-version: {version}" in build_action
     assert build_action.count("python -I meta/ci/release/downstream_smoke.py") == 3
     assert _job_needs(ci, "validation-gate") == (
