@@ -43,15 +43,22 @@ flowchart LR
 
     GATE --> CHECK[CI / validation gate]
     GATE --> ARTIFACT[release-distributions]
-    GATE --> PUBLISH[Manual wrapper continues]
-    ARTIFACT --> PUBLISH
+    ARTIFACT --> RECONCILE[PyPI reconciliation<br/>no OIDC]
+    RECONCILE --> STAGED[manifest-matched<br/>missing packages]
+    STAGED --> PUBLISH[code-free publisher]
     PUBLISH --> PYPI[PyPI through OIDC<br/>+ PEP 740 attestations]
+    PYPI --> VERIFY[exact files + verified provenance<br/>no OIDC]
+    PUBLISH -. success, failure, or skip .-> VERIFY
+    RECONCILE --> VERIFY
+    RECONCILE --> RELEASEGATE[release-gate<br/>unconditional terminal status]
+    PUBLISH --> RELEASEGATE
+    VERIFY --> RELEASEGATE
 ```
 
 | Workflow | Entry points | Role | External side effects |
 |---|---|---|---|
 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) | `pull_request`, `push` to `main`, and `workflow_call` | Defines all build, test, security, coverage, packaging, and evidence jobs. | Uploads GitHub run artifacts only. |
-| [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) | `workflow_dispatch` only | Rejects an invalid release request, calls `ci.yml` once, and publishes its final artifact. | Always targets production PyPI after canonical validation. |
+| [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) | `workflow_dispatch` only | Rejects an invalid request, calls `ci.yml` once, reconciles the validated manifest with PyPI, publishes only missing files, verifies the complete remote digest and provenance set, and emits one terminal release status. | Always targets production PyPI after canonical validation. |
 
 The canonical graph has three matrices and one terminal job:
 
@@ -60,7 +67,7 @@ The canonical graph has three matrices and one terminal job:
 | `platform-wheel-builds` | 4 platforms | None | Build, audit, smoke, and upload one wheel for each release target. |
 | `platform-tests` | 12 platform-by-shard entries | Complete wheel matrix | Run the three exhaustive functional shards against all four installed wheels. |
 | `validation-matrix` | 8 thematic workloads | None | Run quality, source packaging, native coverage, TSan, and four platform-sanitizer entries in parallel. |
-| `validation-gate` | 1 terminal job | All three matrices | Require exact success, assemble and validate the release set, create its manifest, and upload the only publication artifact. |
+| `validation-gate` | 1 terminal job | All three matrices | Require exact success, assemble and validate the release set, create its manifest, and upload the canonical reconciliation artifact. |
 
 The source-distribution workload is an independent entry in
 `validation-matrix`. It builds and validates the sdist while wheel and test work
@@ -91,8 +98,9 @@ The canonical workflow has these exact triggers:
 
 Draft pull requests are not excluded: `opened`, `synchronize`, and `reopened`
 events can validate a draft, and `ready_for_review` starts validation when its
-state changes. Superseded pull-request runs are cancelled by their concurrency
-group. `main` and publication validation runs are not cancelled automatically.
+state changes. Superseded pull-request runs share a concurrency group and are
+cancelled. Every `main` and publication-validation run instead includes its
+unique run ID in the group, so GitHub cannot replace an older pending commit.
 All manual publication runs share the constant `pypi-production` concurrency
 group, regardless of their `release_version`. PyPI production publication is
 therefore globally serialized, and a newer dispatch never cancels an active
@@ -124,7 +132,9 @@ The `quality` entry in `validation-matrix` collects branch coverage with three
 explicit contexts: `regular`, `adversarial`, and `integration`. The selected suites concentrate on public
 I/O, source manifests, cleanup and finalization, cancellation and retry,
 remote staging, cloud integration, streaming writers, and recursive Parquet
-behavior. The combined report enforces `--fail-under=44`.
+behavior. The combined report invokes `--fail-under=44`, then independently
+checks the exact covered line-and-branch count fraction so display rounding can
+never turn a result below 44% into a passing gate.
 
 The 44 percent value is a regression floor for the current deliberately
 focused suite, not a coverage target or a claim that every module is 44 percent
@@ -151,8 +161,8 @@ artifact, rather than an import from `src/`, on:
 |---|---|---|
 | Ubuntu 24.04 / Linux x86-64 | `manylinux_2_27_x86_64.manylinux_2_28_x86_64` | Full wheel suite, focused extension ASan/UBSan, libFuzzer, LLVM coverage, and GCC TSan. |
 | Windows Server 2025 / AMD64 | `win_amd64` | Full wheel suite and MSVC ASan parser fuzzing. |
-| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Full wheel suite, ASan/UBSan parser fuzzing, and repeated concurrency probes. |
-| macOS 15 / ARM64 | `macosx_11_0_arm64` | Full wheel suite, ASan/UBSan parser fuzzing, and repeated concurrency probes. |
+| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Full wheel suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
+| macOS 15 / ARM64 | `macosx_11_0_arm64` | Full wheel suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
 
 Each wheel is built for CPython 3.11 with the stable ABI (`cp311-abi3`). The
 complete suite runs on the same CPython 3.11 patch and the same fully locked
@@ -160,9 +170,15 @@ adapter versions on all four platforms, so timing and behavior comparisons do
 not silently mix direct, transitive, or interpreter upgrades. Those test locks
 live in `meta/ci/requirements/platform-tests.txt`, which is also the setup-Python
 cache key, so changing the environment invalidates the cache deterministically.
-Validation cells use exact interpreter patches as well. Python and native build
-tools are pinned, while pip and apt receive bounded transport retries and
-timeouts. Linux additionally executes the installed public conversion smoke on
+Build, release, sanitizer, and cibuildwheel build/test isolation share the exact
+`build-tools.txt` owner lock; Linux containers receive its `/project` path while
+host builds receive an absolute workspace path. Pre-commit's independently
+created hook environments use the separate exact `pre-commit-hooks.txt` lock.
+The dependency audit scans each executable lock independently and statically
+requires every declared project, build, and CI-tool dependency to have a
+compatible owner pin. Validation cells use exact interpreter patches as well.
+Pip and apt receive bounded transport retries and timeouts. Linux additionally
+executes the installed public conversion smoke on
 exact 3.12, 3.13, and 3.14 patches, and every platform loads it on the exact
 3.14 patch. `platform-wheel-builds` defines the runner,
 release platform, cibuildwheel architecture, and wheel artifact identifier once
@@ -170,6 +186,10 @@ for each of the four targets. `platform-tests` lists the exact
 12-entry product of those four platforms and the `concurrency`,
 `memory-parquet`, and `io-pipeline` shards. Every matrix uses
 `fail-fast: false`, preserving evidence from companion entries when one fails.
+Both workflows fix `PYTHONHASHSEED=0`, enable Python UTF-8 mode, and use UTC;
+the Linux wheel build passes all three controls into its cibuildwheel container.
+They deliberately avoid a global `LC_ALL` value because no single UTF-8 locale
+name is portable across all Windows and macOS runners.
 
 GitHub Actions resolves `needs` at job granularity, not separately for each
 matrix entry. Consequently, the 12-entry test matrix starts only after all
@@ -190,7 +210,7 @@ four platforms:
 |---|---|---|
 | `concurrency` | `tests/concurrency` | Threading smoke and the single `native_stress` invocation. |
 | `memory-parquet` | `tests/memory`, `tests/parquet`, `tests/quality`, and `tests/sinks` | Compiled-wheel Parquet certification. |
-| `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | Reader linear-scaling benchmark. |
+| `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | Non-gating reader scaling measurement. |
 
 The topology contract derives the repository's test directories and fails if a
 new one is not assigned exactly once. Separate hosted runners provide real parallelism without
@@ -223,10 +243,13 @@ Functional correctness tests do not treat wall-clock speed as a pass/fail
 signal. Deadline behavior is exercised with controlled clocks, exact timeout
 arguments and lifecycle state, while concurrency ordering uses events,
 barriers and bounded-work counters. A repository contract scans both Python
-and native test sources to reject new elapsed-time ceilings. Timeouts on
-waits, joins and subprocesses remain as anti-hang fuses, and benchmark timing
-remains valid evidence; only the calibrated reader policy below turns that
-evidence into a performance gate.
+and native test sources to reject new elapsed-time ceilings, entropy-backed or
+unseeded randomness, and vacuous empty-collection assertions. Pytest also
+rejects unknown configuration, unknown markers, non-strict xfails, unhandled
+thread exceptions, and unraisable exceptions. Other warnings, including known
+Python fork deprecations, retain their normal warning behavior.
+Timeouts on waits, joins, and external commands remain anti-hang fuses, while
+benchmark timing is retained only as diagnostic evidence.
 
 Each test shard also records a runner manifest with the exact Python and
 installed package versions, operating-system and architecture identifiers,
@@ -236,41 +259,50 @@ identical across architectures, so this manifest distinguishes an environment
 difference from a product regression while the software and test workload stay
 fixed.
 
-In parallel with the other two shards, `io-pipeline` runs the reader
-performance gate once for each installed wheel before its functional tests.
-It enforces both normalized growth and the versioned absolute-latency policy in
-`benchmarks/readers/linear_scaling_budget.json`; a reader that remains linear
-but becomes uniformly slower therefore fails. The static policy identifies its
-healthy run and all four platform artifacts, using the slowest median for each
-case as the cross-platform reference. The report records the commit, platform,
-package version, and SHA-256 of the native extension. CI runs the
-benchmark in isolated Python mode and verifies that the loaded extension's
-bytes match the extension inside the declared wheel, preventing a checkout or
-stale build from satisfying the gate. A first timing-policy breach triggers two
-fresh complete measurements and becomes blocking only if all three consecutive
-attempts fail. This preserves detection of persistent slope or latency
-regressions while filtering a one-off hosted-runner pause. The reader and threading smokes run
-before pytest in `io-pipeline` and `concurrency`, respectively, while
-`memory-parquet` performs the Parquet certificate. A regression therefore
-fails early in its owning shard without serializing unrelated functional
-suites; successful runs retain the same checks and coverage.
+The concurrency shard fails before its workload when detected native CPU
+capacity is below the matrix contract: four credits on Linux, Windows, and
+macOS Intel, and three on the standard macOS ARM64 runner. Thus four-core
+contracts execute on three platforms and ARM64's lower capacity is an explicit
+topology decision rather than a runner-dependent green skip. The macOS native
+sanitizer and Linux TSan cells similarly require three credits and fail closed.
+Only Windows ASan's deeply threaded native probe remains disabled because its
+runtime can hang outside the probe watchdog; all Windows fuzz targets execute.
+The native probe itself runs 100 semantic rounds with deterministic barriers;
+CI selects its exact CTest name and does not use `until-fail` schedule sampling.
 
-The shared build action pins cibuildwheel and abi3audit. After cibuildwheel emits each
-repaired wheel, CI runs `abi3audit --strict` explicitly as a blocking gate. This
-preserves the upstream stable-ABI check while avoiding its hidden cold-runner
-download of `virtualenv.pyz` from release hosting.
+In parallel with the other two shards, `io-pipeline` records one reader scaling
+measurement for each installed wheel before its functional tests. The versioned
+policy in `benchmarks/readers/linear_scaling_budget.json` is evaluated once,
+without pass-on-one-lucky-retry behavior; an exceeded slope or absolute latency
+budget emits a warning and remains visible in the JSON report rather than
+turning variable hosted-runner timing into a correctness result. Fixture
+generation, public conversions, report structure, source provenance, and wheel
+identity remain blocking. The report records the commit, platform, package
+version, and SHA-256 of the native extension, and isolated Python verifies that
+the loaded extension matches the declared wheel. The reader measurement and
+threading smoke run before pytest in `io-pipeline` and `concurrency`, respectively, while
+`memory-parquet` performs the Parquet certificate. A regression therefore
+fails in its owning shard without serializing unrelated functional suites;
+timing changes remain comparable evidence instead of a flaky release gate.
+
+The shared build action pins cibuildwheel and abi3audit. The PEP 517 build
+requirements and scikit-build configuration also require exactly CMake 4.3.4,
+Ninja 1.13.0, and scikit-build-core 0.11.6, with Make fallback disabled. After
+cibuildwheel emits each repaired wheel, CI runs `abi3audit --strict` explicitly
+as a blocking gate. This preserves the upstream stable-ABI check while avoiding
+its hidden cold-runner download of `virtualenv.pyz` from release hosting.
 
 ### Packaging, dependencies, and security
 
 The distribution gate requires exactly one sdist and four ABI3 wheels with one
 version, the expected project name, and the four exact platform tags.
 The `source-distribution` task in `validation-matrix` starts independently of
-the wheel builds: it checks the source archive, rebuilds a wheel from it, and
-validates an isolated downstream consumer. The terminal `validation-gate`
-waits for that task together with every other matrix entry, verifies that all
-three matrices succeeded, and only then validates the five-file release set
-and creates the publication manifest. A failed source or unrelated validation
-entry therefore prevents assembly.
+the wheel builds: it checks the source archive, rebuilds exactly one wheel from
+it, and validates that wheel as an isolated downstream consumer. The terminal
+`validation-gate` waits for that task together with every other matrix entry,
+verifies that all three matrices succeeded, and only then validates the
+five-file release set and creates the publication manifest. A failed source or
+unrelated validation entry therefore prevents assembly.
 
 Downstream installation exercises `core` and every published runtime extra:
 `pyarrow`, `pandas`, `polars`, `duckdb`, `gcs`, `s3`, `azure`, `bigquery`,
@@ -278,10 +310,13 @@ Downstream installation exercises `core` and every published runtime extra:
 `meta/ci/requirements/downstream.txt`; the ranges published to users are still
 checked, but the canonical CI result cannot change when the package index gains
 a new release. The dependency audit resolves runtime, build-system, CI-tool,
-the CI constraint sets, and every optional requirement. Bandit covers Python sources. `detect-secrets`
-scans tracked repository files without credential-verification network calls;
-only byte-exact fuzz payloads are excluded because their full tree is enforced
-separately by `check_fuzz_corpus.py` and its SHA-256 manifest.
+and every optional requirement together, then audits each CI lock as its own
+environment. Mutually exclusive exact pins are never flattened into an
+installation that CI does not actually create. Bandit covers Python
+sources. `detect-secrets` scans tracked repository files without
+credential-verification network calls; only byte-exact fuzz payloads are
+excluded because their full tree is enforced separately by
+`check_fuzz_corpus.py` and its SHA-256 manifest.
 
 The native coverage reports do not currently impose a numerical percentage
 floor. Their value is line/branch visibility across three contexts, alongside
@@ -289,20 +324,39 @@ hard pass/fail results from the native tests, fuzz campaigns, ASan, UBSan, and
 TSan. This distinction prevents a report-only metric from being mistaken for a
 release gate.
 
+Python coverage is combined only after the regular, adversarial, and integration
+data files all exist as the exact expected regular-file set. Strict combination
+therefore cannot silently turn one surviving context into a complete report.
+
+Composite actions validate exact runner/platform/toolchain tuples before any
+platform-specific condition can turn a typo into a green no-op. They remove
+only their owned output roots before the first write, every multi-command Bash
+block uses `set -euo pipefail`, and release assembly resets its exact download,
+distribution, and manifest destinations. Native linkage certification also
+fails when neither `otool` nor `ldd` is available; the absence of an inspection
+tool can never print a successful no-Arrow result.
+
+Linux sanitizer setup also checks the selected Clang/LLVM 18 and GCC/G++ 14
+major families after apt installation. Hosted-image and apt patch revisions
+remain mutable infrastructure inputs, but an unexpected compiler major fails
+before instrumented code is built.
+
 ## [Release evidence](#index)
 
 Only files needed to transport or publish a release are uploaded. Every upload
 fails if its expected files are absent, has an explicit retention period, and
-retries once after a transport failure; an exhausted retry is still blocking.
-Platform tests, the terminal validation gate, and the manual publisher also
-retry their exact downloads after removing only the corresponding possibly
-partial destination.
+replaces the same owned artifact name on rerun, then retries once after a
+transport failure; an exhausted retry is still blocking.
+Platform tests, the terminal validation gate, PyPI reconciliation, and the
+manual publisher also retry exact downloads after removing only the
+corresponding possibly partial destination.
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
 | `dist-wheels-PLATFORM` | One intermediate platform wheel. | 7 days | The three matching shard entries in `platform-tests`, `validation-gate`, and delayed reruns. |
 | `source-distribution` | One validated intermediate sdist. | 7 days | `validation-gate` and delayed reruns. |
-| `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 7 days | Manual publication and external audit. |
+| `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 7 days | PyPI reconciliation and external audit. |
+| `pypi-publish-distributions` | Only manifest-matched files absent from PyPI. | 7 days | The code-free OIDC publisher; omitted when PyPI already has the complete matching set. |
 
 Python and native coverage still execute their complete commands and gates.
 Their summaries are written to the logs rather than uploaded as archives.
@@ -311,9 +365,11 @@ to their owning job while their test output and inventory remain visible in the
 run. The four wheel-build jobs deliberately retain cibuildwheel's native GitHub
 Job Summary; repository actions do not write any other Job Summary.
 
-Every completed run therefore retains exactly six artifacts: four platform
-wheels, one sdist, and the final auditable release set. No workflow receives
-artifact-deletion permission, and no completed run is modified after it ends.
+A canonical CI run retains exactly six artifacts: four platform wheels, one
+sdist, and the final auditable release set. A manual publication run adds one
+staged missing-package artifact only when publication is required. No workflow
+receives artifact-deletion permission, and no completed run is modified after
+it ends.
 
 The `source-distribution` validation entry builds and exercises the sdist while
 platform work is in flight. After every matrix succeeds, `validation-gate`
@@ -321,7 +377,9 @@ downloads that immutable source artifact and the four intermediate wheels,
 then validates the five files as one set. Wheel and sdist builders derive
 `SOURCE_DATE_EPOCH` from the checked-out commit,
 rather than the runner wall clock. The archive validator requires the canonical
-sdist gzip header and every tar member to encode that epoch. Repaired wheel ZIP
+sdist gzip header and every tar member to encode that epoch. The source workload
+also builds twice from clean owned directories and byte-compares the sole output
+before downstream rebuilding. Repaired wheel ZIP
 timestamps are not used as a gate because the independent platform repair tools
 do not share one cross-platform timestamp-preservation contract; wheel bytes are
 instead bound by the release manifest digests below.
@@ -333,10 +391,14 @@ The gate creates a canonical `release-manifest.json` containing:
 - the filename, byte size, and SHA-256 digest of every distribution.
 
 The helper validates the packages before creating the manifest and rebuilds the
-expected data to verify the serialized manifest. `release-distributions` is
-therefore the only publication input; publication neither rebuilds nor selects
-files with a wildcard. The manifest is outside `packages/`, so it is retained as
-evidence but is not uploaded as a Python distribution.
+expected data to verify the serialized manifest. `release-distributions` is the
+only reconciliation input; publication neither rebuilds nor wildcard-selects
+packages. Reconciliation revalidates the remote `main` SHA immediately before
+staging, requests cache revalidation from PyPI, validates every existing
+filename and SHA-256 against the manifest, rejects unknown, mismatched,
+malformed, or yanked files, and atomically stages only missing distributions.
+The manifest is outside `packages/`, so it remains audit evidence and is never
+sent to PyPI.
 
 GitHub also calculates a digest for the uploaded artifact archive and checks it
 on download. That transport digest and the per-file manifest digests have
@@ -351,9 +413,12 @@ authority:
 
 | Phase | Repository code | Effective authority |
 |---|---|---|
-| `preflight` | Checks out the selected commit and validates the `main` ref and remote SHA, the requested version against `meta/VERSION`, the unused PyPI version, and the explicit confirmation. | Read-only Actions metadata and contents; no OIDC token. |
+| `preflight` | Checks out the selected commit and validates the `main` ref and remote SHA, the requested version against `meta/VERSION`, the PyPI version state, and the explicit confirmation. An existing version is allowed to continue only to post-validation reconciliation. | Read-only Actions metadata and contents; no OIDC token. |
 | reusable `validation` | Executes the same `ci.yml` used by PRs and `main`. | Read-only contents and GitHub artifact writes; no OIDC token. |
-| `publish` | Has no checkout, Python setup, or repository-code execution. It downloads `release-distributions` by exact name, and its sole fixed shell step removes only `release/` before a transport retry. It then invokes the PyPI action. | `id-token: write` only. No GitHub Environment is currently attached. |
+| `reconcile` | Checks out repository code, downloads `release-distributions`, revalidates the remote `main` SHA, verifies PyPI state against every manifest digest, and stages only missing files. If the matching release is already complete, it emits `publish_required=false` and no staging artifact. | Read-only contents and GitHub artifact writes; no OIDC token. |
+| `publish` | Has no checkout, Python setup, or repository-code execution. It runs only for `publish_required=true`, downloads `pypi-publish-distributions` by exact name, and its sole fixed shell step removes only `pypi-publish/` before a transport retry. Exact duplicates from an interrupted attempt are tolerated. | `id-token: write` only. No GitHub Environment is currently attached. |
+| `verify` | Runs after publisher success, failure, or skip whenever reconciliation succeeded. It downloads the original `release-distributions`, requires all five unyanked filenames and SHA-256 digests, and cryptographically verifies at least one matching PyPI Publish attestation per file. | Read-only contents; no OIDC token. |
+| `release-gate` | Runs unconditionally and accepts only successful reconciliation and verification. It requires `publish=success` when `publish_required=true`, or `publish=skipped` when it is false. | No repository or package-index authority. |
 
 Every external action used by workflows or repository-owned composite actions,
 and every remote pre-commit hook, including GitHub-maintained actions, is pinned
@@ -382,6 +447,27 @@ validated five-file set to this repository commit and GitHub run. The manifest
 is internal audit evidence, is not a PEP 740 attestation, and is not itself
 uploaded to PyPI.
 
+The post-publish verifier installs `pypi-attestations==0.0.30` and its complete
+exact, vulnerability-audited compatible dependency lock outside the OIDC job.
+The verifier version matches the pinned publisher action, while its transitive
+pins are independently kept current. For every local manifest file it consumes
+the [PyPI Integrity API](https://docs.pypi.org/api/integrity/), performs
+Sigstore/PEP 740 cryptographic verification
+against the file bytes, and then requires the PyPI Publish v1 predicate, GitHub
+publisher `bgallan/schema-sanitizer`, workflow `publish.yml`, source ref
+`refs/heads/main`, and source repository digest equal to the manifest
+`git_sha`. Merely decoding or displaying an attestation never satisfies the
+gate.
+
+For external callers, publisher action 1.14.2 resolves its exact action ref to
+the prebuilt `ghcr.io/pypa/gh-action-pypi-publish` registry tag; it does not
+build the action's Dockerfile or install its Python dependencies during the
+calling workflow. The action source is commit-pinned, but that registry tag is
+not an immutable image digest. Hosted-runner images, registry delivery, PyPI,
+Sigstore trust data, and network availability therefore remain external inputs.
+Job and request timeouts bound those inputs and all repository checks fail
+closed, but the workflow must not be described as bit-for-bit hermetic.
+
 ## [External controls](#index)
 
 Workflow files cannot create or verify repository and PyPI administration
@@ -400,13 +486,25 @@ security model:
    changes to `.github/`, `meta/ci/`, packaging metadata, and this document in
    ownership review.
 
-PyPI and GitHub API reads make at most three attempts. GitHub API transport
-errors, HTTP 429, and 5xx responses use short bounded backoff. HTTP 403 retries
-only when GitHub supplies `Retry-After` or reports
-`X-RateLimit-Remaining: 0`; official retry/reset timing is honored up to 30
-seconds per attempt, with a short fallback when no reset is supplied. Other 4xx
-responses and malformed data fail immediately. The exact remote `main` SHA is
-read through that authenticated, retrying API path as well.
+Initial PyPI/reconciliation reads and GitHub API reads make at most three
+short attempts. GitHub API transport errors, HTTP 429, and 5xx responses use bounded
+backoff. HTTP 403 retries only when GitHub supplies `Retry-After` or reports
+`X-RateLimit-Remaining: 0`; official retry/reset timing is honored up to 30 seconds per
+attempt, with a short fallback when no reset is supplied. Other 4xx responses and
+malformed data fail immediately. The exact remote `main` SHA is read through that
+authenticated, retrying API path as well.
+
+Post-publication verification has a different fixed budget because PyPI serves
+release JSON with a 900-second CDN max-age and Integrity responses with a
+600-second max-age. It requests `no-cache, max-age=0`, records and validates
+available `Cache-Control`, `Age`, `Date`, `ETag`, `X-Cache`, and serial
+metadata, and observes the remote state at the start and after three fixed
+five-minute waits. Only absent files, missing provenance, temporary Integrity
+disablement, rate limits, transport failures, and 5xx responses consume that
+visibility budget. A digest, filename, yank state, provenance schema,
+predicate, publisher, signature, commit, or ref conflict fails immediately.
+The verifier job has a 75-minute terminal timeout around those bounded reads
+and offline cryptographic verification against the pinned trust data.
 
 A protected GitHub Environment with required reviewers would add a useful
 human approval boundary. Introduce it only as one atomic administration and
@@ -451,14 +549,22 @@ gh workflow run publish.yml \
 
 Both inputs are required. Preflight fails unless the selected ref is `main`,
 `release_version` exactly matches the valid `meta/VERSION`, that version is
-absent from PyPI, `main` has not moved, and the confirmation phrase is exact.
-The input is a package version, not a Git tag. Preflight has no publication
-credentials and runs before the expensive reusable validation.
+either absent from PyPI or present for later manifest reconciliation, `main`
+has not moved, and the confirmation phrase is exact. The input is a package
+version, not a Git tag. Preflight has no publication credentials and runs
+before the expensive reusable validation; it never trusts an existing release
+until the newly built manifest can be compared after validation.
 
 After preflight, the workflow invokes the complete reusable `ci.yml`: the same
 three matrices and terminal `validation-gate` used by pull requests and pushes
-to `main`. When that gate succeeds, the final job publishes immediately; there
-is currently no GitHub Environment approval pause. Before dispatching, the
+to `main`. When that gate succeeds, the non-OIDC reconciliation job compares
+PyPI with the validated manifest. A complete matching release ends without a
+publisher job; otherwise the privileged job publishes only the staged missing
+files. In either case, the final verifier requires the complete remote digest
+set and one valid matching publish attestation per file. The unconditional
+`release-gate` then checks that publication succeeded exactly when
+reconciliation required it; this is the sole terminal release status. There is
+currently no GitHub Environment approval pause. Before dispatching, the
 operator should retain and audit after the run:
 
 - the dispatch actor, commit, requested version, run ID, and attempt;
@@ -467,29 +573,46 @@ operator should retain and audit after the run:
 - that the manifest project, version, commit, run provenance, filenames, sizes,
   and SHA-256 digests match the candidate.
 
-The final job always sends `release/packages/` to production PyPI. There is no
-target selector and `skip-existing` is intentionally disabled. Retain the
-workflow run URL, downloaded manifest, PyPI release URL, and PyPI attestation
-records as the release audit record.
+The publisher sends only `pypi-publish/` to production PyPI. There is no target
+selector. `skip-existing` is enabled narrowly so a failed upload can resume the
+same immutable staged bytes; it cannot establish workflow success by itself.
+Reconciliation checks existing digests before OIDC authority is granted, and
+the no-OIDC verifier checks the complete remote set and cryptographic
+provenance afterward. Retain the workflow run URL, downloaded manifest,
+reconciliation, verification and `release-gate` status, PyPI release URL, and
+PyPI Integrity provenance objects as the release audit record.
 
 ## [Failures and recovery](#index)
 
 - For a PR or `main` run, a rerun can diagnose a transient runner failure; the
-  GitHub attempt number remains part of the record.
+  GitHub attempt number remains part of the record. Every owned artifact upload
+  replaces a same-named artifact from an earlier attempt, so reruns do not rely
+  on an expected name-conflict failure before retrying.
 - For a manual release that has not entered `publish`, cancel the run. If
   `main` still points at the candidate, start a new complete manual run; if
   `main` moved, validate the version on its current head. Prefer a complete new
   run over “re-run failed jobs” so all artifacts, their manifest, run ID, and
   attempt form one obvious evidence chain.
-- Once `publish` starts, do not rerun it blindly. PyPI uploads are not an atomic
-  five-file transaction and published filenames cannot be overwritten.
-- If no file reached PyPI, investigate the OIDC or service failure. Start a new
-  complete run of the same candidate only while it is still the head of `main`;
-  otherwise use a new version on the current head.
-- If only part of the set reached PyPI, compare every PyPI filename and digest
-  with `release-manifest.json`. Do not enable `skip-existing` or overwrite files.
-  Yank the incomplete release, increment `meta/VERSION`,
-  and pass the complete pipeline again from the corrected `main` commit.
+- Once `publish` starts, preserve that workflow run and its original
+  `release-distributions` bytes. From that point onward the only supported
+  recovery is **Re-run failed jobs** on that exact run. The verifier runs even
+  when the publisher fails, the publisher tolerates only same-name duplicates,
+  and the verifier still requires every remote digest and publish attestation
+  to match the original manifest identity.
+- Do not use **Re-run all jobs** or start a new dispatch to recover a partial
+  upload. Those choices rebuild platform wheels; cross-run wheel byte identity
+  is not certified across mutable hosted images and toolchain patch revisions.
+  A different rebuild digest correctly fails reconciliation against the
+  already-published immutable file.
+- If only `verify` fails because PyPI visibility lag exceeded its fixed
+  15-minute cache budget, choose **Re-run failed jobs**. It reuses the original
+  manifest, performs no upload, and lets the terminal gate re-evaluate the
+  certified state.
+- Reconciliation rejects an unknown filename, a digest mismatch, or an existing
+  PyPI file absent from the candidate manifest; verification also rejects
+  yanked files and any missing, invalid, or wrong-identity provenance. Do not
+  attempt an overwrite. Treat that state as a release incident; if the
+  published set cannot match the manifest, use a corrected new version.
 
 Yanking does not erase the historical release. Record the failed run, manifest,
 observed PyPI state, decision, and replacement version so the recovery remains
@@ -569,9 +692,10 @@ configuration because the toolchains and runners are platform-specific.
   grant `id-token: write` outside the final publication job.
 - Keep Actionlint and Zizmor as blocking pre-commit checks for workflow schema,
   expressions, permissions, and security regressions.
-- Build every release file once. Publication must download
-  `release-distributions` by exact name and must not rebuild, mutate, or
-  wildcard-select packages.
+- Build every release file once. Reconciliation must download
+  `release-distributions` by exact name, compare it with PyPI, and stage only
+  digest-matched missing files. The OIDC publisher must consume only that named
+  staged artifact and must not rebuild, mutate, or wildcard-select packages.
 - Keep the three shards in the 12-entry test matrix disjoint and exhaustive,
   and preserve the same four platform definitions as the wheel matrix. Its
   job-level dependency on the complete wheel matrix is an intentional
@@ -593,5 +717,6 @@ For a compact external audit, verify that there are two workflow files, only
 `publish.yml` has `workflow_dispatch`, and `ci.yml` owns the three safe
 validation triggers. Every external `uses` reference must be a full commit SHA,
 only the final publish job has OIDC authority, `validation-gate` must depend
-directly on all three matrices, and publication must consume only the named
-seven-day release artifact.
+directly on all three matrices, reconciliation must consume the named validated
+release artifact, and publication must consume only the conditional named
+seven-day missing-package artifact.

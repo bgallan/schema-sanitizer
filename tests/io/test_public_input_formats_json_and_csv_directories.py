@@ -28,12 +28,12 @@ def test_none_input_format_is_rejected(tmp_path: Path) -> None:
     ("input_format", "failure"),
     [("jsonl", MemoryError), (" parquet ", KeyboardInterrupt)],
 )
-def test_format_normalization_fault_cannot_abandon_prepared_ownership(
+def test_format_normalization_fault_precedes_prepared_ownership(
     monkeypatch: pytest.MonkeyPatch,
     input_format: str,
     failure: type[BaseException],
 ) -> None:
-    """Verify format normalization fault cannot abandon prepared ownership."""
+    """Format validation fails before an input owner can be acquired."""
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.input_impl.prepared import PreparedPublicInput
 
@@ -75,7 +75,7 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
             memory_limit_bytes=None,
         )
 
-    assert not acquired or all(getattr(owner, "closed") for owner in acquired)
+    assert acquired == []
 
 
 @pytest.mark.parametrize(

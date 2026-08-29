@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Reject test contracts that depend on wall-clock speed or scheduler timing.
+"""Reject test contracts that depend on chance, wall-clock speed, or scheduler timing.
 
-It analyzes Python and C++ tests for speed ceilings, scheduler sleeps, and
-worker-capacity assumptions while allowing bounded safety waits.
+It analyzes Python and C++ tests for nondeterministic randomness, vacuous assertions,
+speed ceilings, scheduler sleeps, and worker-capacity assumptions while allowing
+bounded safety waits.
 """
 
 from __future__ import annotations
@@ -57,6 +58,38 @@ _PROMOTION_TELEMETRY_NAMES = frozenset(
         "promoted",
     }
 )
+_NONDETERMINISTIC_FUNCTIONS = {
+    "os": frozenset({"getrandom", "urandom"}),
+    "random": frozenset(
+        {
+            "betavariate",
+            "binomialvariate",
+            "choice",
+            "choices",
+            "expovariate",
+            "gammavariate",
+            "gauss",
+            "getrandbits",
+            "lognormvariate",
+            "normalvariate",
+            "paretovariate",
+            "randbytes",
+            "randint",
+            "random",
+            "randrange",
+            "sample",
+            "shuffle",
+            "triangular",
+            "uniform",
+            "vonmisesvariate",
+            "weibullvariate",
+        }
+    ),
+    "secrets": frozenset(
+        {"choice", "randbelow", "randbits", "token_bytes", "token_hex", "token_urlsafe"}
+    ),
+    "uuid": frozenset({"uuid1", "uuid4", "uuid6", "uuid7", "uuid8"}),
+}
 _PROBE_STARTED_RESULT_INDEX = {
     "operation_task_arena_mixed_lane_probe": 2,
     "operation_task_arena_output_preference_probe": 3,
@@ -77,6 +110,8 @@ _CPP_LITERAL_DURATION = re.compile(r"(?<![\w.])\d+(?:ns|us|ms|s|min|h)(?!\w)")
 class PythonFindings:
     """Determinism violations found in one Python test module."""
 
+    nondeterministic_randomness: tuple[tuple[int, str], ...] = ()
+    vacuous_assertions: tuple[tuple[int, str], ...] = ()
     wall_clock: tuple[tuple[int, str], ...] = ()
     thread_sleeps: tuple[tuple[int, str], ...] = ()
     async_sleeps: tuple[tuple[int, str], ...] = ()
@@ -88,7 +123,9 @@ class PythonFindings:
     def empty(self) -> bool:
         """Return whether the module has no determinism violations."""
         return not (
-            self.wall_clock
+            self.nondeterministic_randomness
+            or self.vacuous_assertions
+            or self.wall_clock
             or self.thread_sleeps
             or self.async_sleeps
             or self.lazy_workers
@@ -133,6 +170,84 @@ def _numeric_literal(node: ast.AST) -> int | float | None:
         if value is not None:
             return -value if isinstance(node.op, ast.USub) else value
     return None
+
+
+def _nondeterministic_random_findings(tree: ast.Module) -> tuple[tuple[int, str], ...]:
+    """Find entropy-backed or implicitly seeded randomness in Python tests."""
+    module_aliases: dict[str, str] = {}
+    callable_aliases: dict[str, tuple[str, str]] = {}
+    findings: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _NONDETERMINISTIC_FUNCTIONS or alias.name == "random":
+                    module_aliases[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module in {
+            *_NONDETERMINISTIC_FUNCTIONS,
+            "random",
+        }:
+            for alias in node.names:
+                if alias.name == "*":
+                    findings.append((node.lineno, ast.unparse(node)))
+                    continue
+                callable_aliases[alias.asname or alias.name] = (node.module, alias.name)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        resolved: tuple[str, str] | None = None
+        if isinstance(node.func, ast.Name):
+            resolved = callable_aliases.get(node.func.id)
+        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            module = module_aliases.get(node.func.value.id)
+            if module is not None:
+                resolved = (module, node.func.attr)
+        if resolved is None:
+            continue
+        module, member = resolved
+        nondeterministic = member in _NONDETERMINISTIC_FUNCTIONS.get(module, ())
+        if module == "random" and member == "SystemRandom":
+            nondeterministic = True
+        elif module == "random" and member == "Random":
+            nondeterministic = not node.args or (
+                isinstance(node.args[0], ast.Constant) and node.args[0].value is None
+            )
+        elif module == "random" and member == "seed":
+            nondeterministic = not node.args or (
+                isinstance(node.args[0], ast.Constant) and node.args[0].value is None
+            )
+        if nondeterministic:
+            findings.append((node.lineno, ast.unparse(node)))
+    return tuple(dict.fromkeys(findings))
+
+
+def _vacuous_assertion_findings(tree: ast.Module) -> tuple[tuple[int, str], ...]:
+    """Find OR assertions whose empty-input branch can skip the claimed evidence."""
+    findings: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert) or not isinstance(node.test, ast.BoolOp):
+            continue
+        if not isinstance(node.test.op, ast.Or):
+            continue
+        empty_guards = {
+            ast.dump(value.operand, include_attributes=False)
+            for value in node.test.values
+            if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not)
+        }
+        guarded_iterations = {
+            ast.dump(generator.iter, include_attributes=False)
+            for value in node.test.values
+            for call in ast.walk(value)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id in {"all", "any"}
+            for argument in call.args
+            if isinstance(argument, (ast.GeneratorExp, ast.ListComp, ast.SetComp))
+            for generator in argument.generators
+        }
+        if empty_guards & guarded_iterations:
+            findings.append((node.lineno, ast.unparse(node.test)))
+    return tuple(dict.fromkeys(findings))
 
 
 def _scope_nodes(
@@ -773,6 +888,8 @@ def analyze_python(path: Path) -> PythonFindings:
     thread_sleeps, async_sleeps = _sleep_findings(tree)
     lazy_workers, prewarmed_lazy_workers = _lazy_worker_findings(tree)
     return PythonFindings(
+        nondeterministic_randomness=_nondeterministic_random_findings(tree),
+        vacuous_assertions=_vacuous_assertion_findings(tree),
         wall_clock=_wall_clock_findings(tree),
         thread_sleeps=thread_sleeps,
         async_sleeps=async_sleeps,
@@ -961,9 +1078,16 @@ def fragile_cpp_assertions(path: Path) -> tuple[tuple[int, str], ...]:
 def repository_findings(root: Path = ROOT) -> tuple[str, ...]:
     """Return every determinism violation in the repository test trees."""
     findings: list[str] = []
-    for path in sorted((root / "tests").rglob("test_*.py")):
+    for path in sorted((root / "tests").rglob("*.py")):
         result = analyze_python(path)
         relative = path.relative_to(root)
+        findings.extend(
+            f"{relative}:{line}: {expression}"
+            for line, expression in result.nondeterministic_randomness
+        )
+        findings.extend(
+            f"{relative}:{line}: {expression}" for line, expression in result.vacuous_assertions
+        )
         findings.extend(
             f"{relative}:{line}: {expression}" for line, expression in result.wall_clock
         )

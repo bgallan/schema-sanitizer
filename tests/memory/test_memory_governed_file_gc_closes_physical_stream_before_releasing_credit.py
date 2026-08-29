@@ -11,6 +11,7 @@ import gc
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
@@ -191,7 +192,7 @@ def test_remote_permit_post_commit_failure_is_level_trigger_repaired(
 
         monkeypatch.setattr(governor, "_grant_ready_locked", fail_once)
         holder.release()
-        permit = await asyncio.wait_for(waiter_task, timeout=0.5)
+        permit = await asyncio.wait_for(waiter_task, timeout=SCHEDULER_TIMEOUT_SECONDS)
         assert permit is not None
         permit.release()
         assert governor.snapshot().in_use == 0

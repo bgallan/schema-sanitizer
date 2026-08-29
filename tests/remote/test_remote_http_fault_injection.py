@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 from schema_sanitizer.core_impl.memory_budget import memory_budget
@@ -89,7 +90,7 @@ def test_truncated_get_retries_and_replaces_partial_attempt(
             target = tmp_path / "download.bin"
             await asyncio.wait_for(
                 download_http_file(f"{base_url}/object", str(target)),
-                timeout=5,
+                timeout=SCHEDULER_TIMEOUT_SECONDS,
             )
             assert target.read_bytes() == payload
 
@@ -123,7 +124,7 @@ def test_put_disconnect_retries_with_complete_body_from_byte_zero(
         async with _http_server([("PUT", "/object", upload)]) as base_url:
             await asyncio.wait_for(
                 upload_http_file(str(source), f"{base_url}/object"),
-                timeout=5,
+                timeout=SCHEDULER_TIMEOUT_SECONDS,
             )
 
     asyncio.run(scenario())
@@ -154,7 +155,7 @@ def test_retryable_status_exhaustion_is_bounded(
             with pytest.raises(RuntimeError, match="503"):
                 await asyncio.wait_for(
                     upload_http_file(str(source), f"{base_url}/object"),
-                    timeout=5,
+                    timeout=SCHEDULER_TIMEOUT_SECONDS,
                 )
 
     asyncio.run(scenario())
@@ -211,7 +212,7 @@ def test_head_transient_failure_retries_before_returning_metadata(
         async with _http_server([("HEAD", "/source.parquet", metadata)]) as base_url:
             result = await asyncio.wait_for(
                 http_file_metadata(f"{base_url}/source.parquet"),
-                timeout=5,
+                timeout=SCHEDULER_TIMEOUT_SECONDS,
             )
             assert result == RemoteFile(
                 f"{base_url}/source.parquet",
@@ -246,7 +247,7 @@ def test_cancelled_get_is_not_retried(tmp_path: Path, monkeypatch: pytest.Monkey
         async with _http_server([("GET", "/object", delayed)]) as base_url:
             target = tmp_path / "cancelled.bin"
             task = asyncio.create_task(download_http_file(f"{base_url}/object", str(target)))
-            await asyncio.wait_for(started.wait(), timeout=2)
+            await asyncio.wait_for(started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task

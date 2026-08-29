@@ -18,9 +18,12 @@ env:
   PIP_NO_INPUT: '1'
   PIP_RETRIES: '10'
   PIP_TIMEOUT: '60'
+  PYTHONHASHSEED: '0'
+  PYTHONUTF8: '1'
+  TZ: UTC
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
-    }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number
+    || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # Build the four release wheels as one homogeneous platform matrix.
@@ -77,61 +80,73 @@ jobs:
             runner: ubuntu-24.04
             platform-name: linux-x86_64
             artifact: linux
+            minimum-cpu-capacity: 4
             shard: concurrency
           - display-name: Windows AMD64
             runner: windows-2025
             platform-name: windows-amd64
             artifact: windows
+            minimum-cpu-capacity: 4
             shard: concurrency
           - display-name: macOS x86-64
             runner: macos-15-intel
             platform-name: macos-x86_64
             artifact: macos-x86_64
+            minimum-cpu-capacity: 4
             shard: concurrency
           - display-name: macOS ARM64
             runner: macos-15
             platform-name: macos-arm64
             artifact: macos-arm64
+            minimum-cpu-capacity: 3
             shard: concurrency
           - display-name: Linux x86-64
             runner: ubuntu-24.04
             platform-name: linux-x86_64
             artifact: linux
+            minimum-cpu-capacity: 4
             shard: memory-parquet
           - display-name: Windows AMD64
             runner: windows-2025
             platform-name: windows-amd64
             artifact: windows
+            minimum-cpu-capacity: 4
             shard: memory-parquet
           - display-name: macOS x86-64
             runner: macos-15-intel
             platform-name: macos-x86_64
             artifact: macos-x86_64
+            minimum-cpu-capacity: 4
             shard: memory-parquet
           - display-name: macOS ARM64
             runner: macos-15
             platform-name: macos-arm64
             artifact: macos-arm64
+            minimum-cpu-capacity: 3
             shard: memory-parquet
           - display-name: Linux x86-64
             runner: ubuntu-24.04
             platform-name: linux-x86_64
             artifact: linux
+            minimum-cpu-capacity: 4
             shard: io-pipeline
           - display-name: Windows AMD64
             runner: windows-2025
             platform-name: windows-amd64
             artifact: windows
+            minimum-cpu-capacity: 4
             shard: io-pipeline
           - display-name: macOS x86-64
             runner: macos-15-intel
             platform-name: macos-x86_64
             artifact: macos-x86_64
+            minimum-cpu-capacity: 4
             shard: io-pipeline
           - display-name: macOS ARM64
             runner: macos-15
             platform-name: macos-arm64
             artifact: macos-arm64
+            minimum-cpu-capacity: 3
             shard: io-pipeline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -141,6 +156,7 @@ jobs:
         with:
           platform-name: ${{ matrix['platform-name'] }}
           artifact: ${{ matrix.artifact }}
+          minimum-cpu-capacity: ${{ matrix['minimum-cpu-capacity'] }}
           shard: ${{ matrix.shard }}
 
   # Source, quality, coverage, and sanitizer workloads are one heterogeneous
@@ -218,6 +234,7 @@ jobs:
           VALIDATION_TASK: ${{ matrix.task }}
         shell: bash
         run: |-
+          set -euo pipefail
           case "${VALIDATION_TASK}" in
             quality|source-distribution|native-llvm-coverage|thread-sanitizer|platform-sanitizer) ;;
             *)
@@ -276,6 +293,11 @@ jobs:
             pyproject.toml
             meta/ci/requirements/*.txt
             .github/actions/*/action.yml
+      - name: Reset release-assembly destinations
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- download dist release
       - id: download-source-distribution
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -283,13 +305,14 @@ jobs:
           name: source-distribution
           path: download/source
       - name: Remove a partial source-distribution download before retrying
+        id: reset-source-distribution-download
         if: ${{ always() && steps.download-source-distribution.outcome == 'failure' }}
         shell: bash
         run: |-
           set -euo pipefail
           rm -rf -- download/source
       - name: Retry the source-distribution download
-        if: ${{ always() && steps.download-source-distribution.outcome == 'failure' }}
+        if: ${{ always() && steps.download-source-distribution.outcome == 'failure' && steps.reset-source-distribution-download.outcome == 'success' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: source-distribution
@@ -302,19 +325,23 @@ jobs:
           pattern: dist-wheels-*
           merge-multiple: true
       - name: Remove partial platform-wheel downloads before retrying
+        id: reset-platform-wheel-downloads
         if: ${{ always() && steps.download-platform-wheels.outcome == 'failure' }}
         shell: bash
         run: |-
           set -euo pipefail
           rm -rf -- download/wheels
       - name: Retry the platform-wheel downloads
-        if: ${{ always() && steps.download-platform-wheels.outcome == 'failure' }}
+        if: ${{ always() && steps.download-platform-wheels.outcome == 'failure' && steps.reset-platform-wheel-downloads.outcome == 'success' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           path: download/wheels
           pattern: dist-wheels-*
           merge-multiple: true
       - name: Validate the complete release artifact set
+        env:
+          PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+          PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         shell: bash
         run: |
           set -euo pipefail
@@ -323,7 +350,7 @@ jobs:
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
           export SOURCE_DATE_EPOCH
-          python -m pip install pip==26.1.2 twine==7.0.0 packaging==26.3
+          python -m pip install pip==26.2.1 twine==7.0.0 packaging==26.3
           python -m twine check dist/*
           python meta/ci/release/check_distribution_contents.py --release-set dist/*
       - name: Assemble the auditable release artifact
@@ -348,6 +375,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+          overwrite: true
       - name: Retry the publishable release-set upload after a transport failure
         if: ${{ always() && steps.upload-release-distributions.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

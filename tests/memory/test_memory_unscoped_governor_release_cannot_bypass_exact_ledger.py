@@ -81,7 +81,7 @@ def test_hostile_exception_cannot_kill_cleanup_dispatcher_worker(
         raise _HostileError()
 
     assert dispatcher.submit(cleanup, retained_bytes=128)
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         snapshot = dispatcher.snapshot()
         if snapshot.dead_letter_calls == 1:
@@ -126,7 +126,7 @@ def test_guardian_is_governed_and_deduplicates_terminal_owner(
         def release(self) -> None:
             """Release the resource held by the owner test double."""
             entered.set()
-            assert resume.wait(2)
+            assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
             raise _HostileError()
 
         def close(self) -> None:
@@ -139,7 +139,7 @@ def test_guardian_is_governed_and_deduplicates_terminal_owner(
     with permit_lock:
         assert 1 <= active_permits <= module._MAX_RELEASE_GUARDIAN_WORKERS
     resume.set()
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         snapshot = guardian.snapshot()
         if snapshot.dead_letter_owners == 1:
@@ -280,7 +280,7 @@ def test_availability_callbacks_are_one_shot_and_off_releaser_thread(
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
     releasing_thread = threading.get_ident()
     lease.release()
-    assert called.wait(2)
+    assert called.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert callback_thread[0] != releasing_thread
     assert governor.snapshot().availability_callbacks == 0
 

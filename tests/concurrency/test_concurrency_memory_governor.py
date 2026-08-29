@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _support.synchronization import join_thread_or_fail
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -232,8 +233,7 @@ def test_process_governor_allows_suboperations_without_double_reserving_budget(
     thread = threading.Thread(target=open_second, daemon=True)
     thread.start()
     try:
-        thread.join(timeout=10.0)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
         _, active_leases, queued = _governor_stats()
         assert 0 < active_leases <= 8 * 1024 * 1024
         assert queued == 0

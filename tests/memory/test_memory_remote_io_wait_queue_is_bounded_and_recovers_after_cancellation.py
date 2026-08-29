@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.synchronization import join_thread_or_fail
 
 from schema_sanitizer.errors import SchemaSanitizerResourceError
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
@@ -134,9 +135,8 @@ def test_provider_request_lease_terminal_outcome_is_thread_safe() -> None:
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=2)
+        join_thread_or_fail(thread)
 
-    assert all(not thread.is_alive() for thread in threads)
     snapshot = governor.snapshot("raced")
     assert snapshot.in_flight == 0
     assert snapshot.successes == 1

@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -100,9 +101,11 @@ def test_finalizer_snapshot_never_waits_for_reserved_publisher_lock() -> None:
 
     worker = Thread(target=snapshot)
     worker.start()
-    assert done.wait(0.5), "observability contended with the finalizer publisher lock"
+    assert done.wait(SCHEDULER_TIMEOUT_SECONDS), (
+        "observability contended with the finalizer publisher lock"
+    )
     lock.release()
-    worker.join(timeout=1)
+    join_thread_or_fail(worker)
     assert box and box[0].active == 1
     escrow.release_ticket(ticket)
 
@@ -126,9 +129,9 @@ def test_reserved_consumer_does_not_contend_with_unpublished_reserved_slot() -> 
 
     worker = Thread(target=consume)
     worker.start()
-    assert done.wait(0.5)
+    assert done.wait(SCHEDULER_TIMEOUT_SECONDS)
     lock.release()
-    worker.join(timeout=1)
+    join_thread_or_fail(worker)
     assert result == [False]
     assert escrow.publish_reserved(ticket, object())
     assert escrow.process_one(lambda _ticket, _value: None)
@@ -513,7 +516,7 @@ def test_availability_emergency_debt_starts_worker_without_normal_queue(
             completed.set()
 
     notifier.arm_emergency_republish(Debt())  # type: ignore[arg-type]
-    assert completed.wait(1.0)
+    assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert notifier.close(deadline_seconds=1.0)
 
 
@@ -540,7 +543,7 @@ def test_availability_dispatcher_is_sealed_per_governor_instance(
     delivery = governor._availability_events[event]
     monkeypatch.setattr(module, "_dispatch_availability_event", lambda _event: stolen.set())
     assert notifier.publish_one(delivery)
-    assert first.wait(1.0)
+    assert first.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert not stolen.is_set()
     assert notifier.close(deadline_seconds=1.0)
 

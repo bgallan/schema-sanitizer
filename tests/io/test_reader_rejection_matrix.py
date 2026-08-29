@@ -13,6 +13,7 @@ from threading import Thread
 from typing import Iterator
 
 import pytest
+from _support.synchronization import join_thread_or_fail
 
 import schema_sanitizer as ss
 
@@ -50,7 +51,7 @@ def _payload_server(payload: bytes, suffix: str) -> Iterator[str]:
         yield f"http://127.0.0.1:{server.server_port}/hostile.{suffix}"
     finally:
         server.shutdown()
-        thread.join(timeout=5)
+        join_thread_or_fail(thread)
         server.server_close()
 
 

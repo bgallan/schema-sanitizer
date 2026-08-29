@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import Barrier, Event, Lock
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, wait_event_or_fail
 
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 from schema_sanitizer.core_impl.execution import ExecutionContext as NativeExecutionContext
@@ -53,18 +54,18 @@ def test_python_ledger_reservations_are_atomic_and_preserve_peak_after_close() -
                 all_attempted.set()
         if lease is None:
             return False
-        release.wait(timeout=10)
+        wait_event_or_fail(release)
         lease.close()
         return True
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         futures = [pool.submit(reserve_one) for _ in range(16)]
-        assert all_attempted.wait(timeout=10)
+        assert all_attempted.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         snapshot = ledger.snapshot()
         assert snapshot.reserved_bytes == limit
         assert snapshot.peak_reserved_bytes == limit
         release.set()
-        results = [future.result(timeout=10) for future in futures]
+        results = [future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) for future in futures]
 
     assert sum(results) == limit // unit
     assert ledger.snapshot().reserved_bytes == 0

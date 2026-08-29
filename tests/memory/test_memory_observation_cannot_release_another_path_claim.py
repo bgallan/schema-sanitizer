@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -120,10 +121,10 @@ def test_remote_startup_timeout_preserves_real_finally() -> None:
             context_factory=Context,
             shutdown_timeout_seconds=0.05,
         )
-    assert started.wait(2)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     release.set()
-    assert finalized.wait(2)
-    assert exited.wait(2)
+    assert finalized.wait(SCHEDULER_TIMEOUT_SECONDS)
+    assert exited.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_private_crash_leftovers_are_scanned(tmp_path: Path) -> None:
@@ -178,16 +179,16 @@ def test_cleanup_dispatcher_counts_active_retained_bytes() -> None:
     def blocking_cleanup() -> None:
         """Pause at the blocking cleanup synchronization point."""
         started.set()
-        assert release.wait(3)
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     before = cleanup_dispatcher_snapshot()
     assert dispatch_cleanup(blocking_cleanup, retained_bytes=charge)
-    assert started.wait(2)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     active = cleanup_dispatcher_snapshot()
     assert active.active_bytes >= before.active_bytes + charge
     assert active.pending_bytes <= before.pending_bytes
     release.set()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if cleanup_dispatcher_snapshot().active_bytes <= before.active_bytes:
             break
@@ -296,7 +297,7 @@ def test_memory_cross_process_io_does_not_hold_local_ledger_lock() -> None:
         def resize(self, _amount: int) -> None:
             """Resize the resource represented by the cross test double."""
             entered.set()
-            assert release.wait(3)
+            assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
         def release(self) -> None:
             """Release the resource held by the cross test double."""
@@ -324,11 +325,10 @@ def test_memory_cross_process_io_does_not_hold_local_ledger_lock() -> None:
     ledger._close_outstanding_bytes = 0
     thread = threading.Thread(target=lambda: ledger.reserve(1, stage="test"))
     thread.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert ledger.snapshot().reserved_bytes == 1
     release.set()
-    thread.join(2)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
 
 
 def test_storage_resize_journal_runs_outside_pool_lock(
@@ -347,17 +347,16 @@ def test_storage_resize_journal_runs_outside_pool_lock(
     def blocking_resize(*args: object, **kwargs: object) -> object:
         """Pause at the blocking resize synchronization point."""
         entered.set()
-        assert release.wait(3)
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
         return original_resize(*args, **kwargs)
 
     monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "resize_capability", blocking_resize)
     thread = threading.Thread(target=lambda: lease.resize(5))
     thread.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert pool.snapshot().reserved_bytes == 10
     release.set()
-    thread.join(2)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert pool.snapshot().reserved_bytes == 5
     lease.release()
 

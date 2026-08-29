@@ -13,7 +13,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    ContentionObservedLock,
+    join_thread_or_fail,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -61,8 +65,8 @@ def test_external_thread_borrow_linearizes_with_parent_release(
     assert operation._lock.contention_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert release_thread.is_alive(), "parent release must block behind atomic child publication"
     continue_borrow.set()
-    acquire_thread.join(SCHEDULER_TIMEOUT_SECONDS)
-    release_thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(acquire_thread)
+    join_thread_or_fail(release_thread)
     assert len(result) == 1
     runtime = result[0]
     assert getattr(runtime, "workers") == 3
@@ -133,7 +137,7 @@ def test_fd_opening_state_prevents_credit_release_before_opener_returns(tmp_path
         """Open the resource after the parent borrow is established."""
         fd = os.open(path, os.O_RDONLY)
         entered.set()
-        assert continue_open.wait(2)
+        assert continue_open.wait(SCHEDULER_TIMEOUT_SECONDS)
         return fd
 
     errors: list[BaseException] = []
@@ -148,12 +152,12 @@ def test_fd_opening_state_prevents_credit_release_before_opener_returns(tmp_path
 
     thread = threading.Thread(target=use)
     thread.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert capability.opening == 1
     with pytest.raises(RuntimeError, match="descriptors are opening"):
         capability.release()
     continue_open.set()
-    thread.join(2)
+    join_thread_or_fail(thread)
     assert not errors
     assert capability.opening == 0
     assert capability.opened == 0
@@ -298,7 +302,7 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
         def close(self) -> None:
             """Close the resources owned by the stream test double."""
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
             self.closed = True
 
     class Lease:
@@ -312,7 +316,7 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
     owner.bind(Stream(), Lease())
     first = threading.Thread(target=owner.close)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     clock_values = iter((100.0, 101.0))
     clock_reads = 0
 
@@ -327,7 +331,7 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
         owner.close()
     assert clock_reads == 2
     continue_close.set()
-    first.join(2)
+    join_thread_or_fail(first)
 
     path_src = (SRC / "core_impl/path_identity.py").read_text(encoding="utf-8")
     replay_src = (SRC / "api_impl/parquet/replay_stream.py").read_text(encoding="utf-8")
@@ -466,7 +470,7 @@ def test_dataset_lifetime_retirement_is_single_closer_under_concurrent_close() -
             """Close the resources owned by the capability test double."""
             events.append("capability")
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     class Stage:
         def close(self) -> None:
@@ -477,14 +481,14 @@ def test_dataset_lifetime_retirement_is_single_closer_under_concurrent_close() -
     errors: list[BaseException] = []
     first = threading.Thread(target=lambda: _capture_error(owner.close, errors))
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     # A duplicate closer must not race the already-published retirement or
     # release any component a second time.
     owner.close()
     assert events == ["dataset", "capability"]
     continue_close.set()
-    first.join(2)
+    join_thread_or_fail(first)
     assert not errors
     assert events == ["dataset", "capability", "stage"]
     assert owner._closed

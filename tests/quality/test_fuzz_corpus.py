@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import shutil
+import stat
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -161,13 +162,96 @@ def test_fuzz_packer_is_deterministic_and_removes_only_hashed_files(tmp_path: Pa
     assert packer.pack_target(regression_root, target, remove_loose=True) == 2
     archive = regression_root / f"{target}.sha1.zip"
     first_bytes = archive.read_bytes()
+    first_mtime = archive.stat().st_mtime_ns
     assert packer.pack_target(regression_root, target, remove_loose=True) == 2
     assert archive.read_bytes() == first_bytes
+    assert archive.stat().st_mtime_ns == first_mtime
+    assert stat.S_IMODE(archive.stat().st_mode) == 0o644
     assert descriptive.read_bytes() == b"descriptive"
     assert sorted(path.name for path in target_root.iterdir()) == [descriptive.name]
     with zipfile.ZipFile(archive) as packed:
         assert packed.namelist() == sorted(expected)
         assert {name: packed.read(name) for name in packed.namelist()} == expected
+
+
+def test_fuzz_packer_recovers_after_interrupted_loose_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup failure leaves a complete archive that remove-loose can resume."""
+    packer = _module(PACKER, "pack_fuzz_regressions_cleanup_retry")
+    regression_root = tmp_path / "regressions"
+    target = packer.TARGETS[0]
+    target_root = regression_root / target
+    target_root.mkdir(parents=True)
+    expected: dict[str, bytes] = {}
+    for data in (b"first retry case", b"second retry case"):
+        name = hashlib.sha1(data, usedforsecurity=False).hexdigest()
+        expected[name] = data
+        (target_root / name).write_bytes(data)
+
+    failing_path = target_root / sorted(expected)[1]
+    original_unlink = Path.unlink
+    failure_injected = False
+
+    def unlink_with_one_failure(path: Path, *, missing_ok: bool = False) -> None:
+        """Fail exactly once while removing the second archived loose input."""
+        nonlocal failure_injected
+        if path == failing_path and not failure_injected:
+            failure_injected = True
+            raise OSError("injected loose cleanup failure")
+        original_unlink(path, missing_ok=missing_ok)
+
+    with monkeypatch.context() as cleanup_patch:
+        cleanup_patch.setattr(Path, "unlink", unlink_with_one_failure)
+        with pytest.raises(OSError, match="injected loose cleanup failure"):
+            packer.pack_target(regression_root, target, remove_loose=True)
+
+    archive = regression_root / f"{target}.sha1.zip"
+    committed_bytes = archive.read_bytes()
+    with zipfile.ZipFile(archive) as packed:
+        assert {name: packed.read(name) for name in packed.namelist()} == expected
+    assert sorted(path.name for path in target_root.iterdir()) == [failing_path.name]
+    with pytest.raises(ValueError, match="duplicate loose and archived fuzz input"):
+        packer.pack_target(regression_root, target, remove_loose=False)
+
+    assert packer.pack_target(regression_root, target, remove_loose=True) == 2
+    assert archive.read_bytes() == committed_bytes
+    assert not any(target_root.iterdir())
+
+
+def test_fuzz_packer_keeps_loose_inputs_when_archive_commit_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed atomic archive replacement cannot start destructive cleanup."""
+    packer = _module(PACKER, "pack_fuzz_regressions_commit_failure")
+    regression_root = tmp_path / "regressions"
+    target = packer.TARGETS[0]
+    target_root = regression_root / target
+    target_root.mkdir(parents=True)
+    data = b"preserved until archive commit"
+    name = hashlib.sha1(data, usedforsecurity=False).hexdigest()
+    loose = target_root / name
+    loose.write_bytes(data)
+
+    def fail_replace(source: Path, destination: Path) -> None:
+        """Inject one archive commit failure before loose cleanup begins."""
+        raise OSError(f"injected archive commit failure: {source} -> {destination}")
+
+    with monkeypatch.context() as commit_patch:
+        commit_patch.setattr(packer.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="injected archive commit failure"):
+            packer.pack_target(regression_root, target, remove_loose=True)
+
+    archive = regression_root / f"{target}.sha1.zip"
+    assert loose.read_bytes() == data
+    assert not archive.exists()
+    assert not any(path.name.endswith(".tmp") for path in regression_root.iterdir())
+
+    assert packer.pack_target(regression_root, target, remove_loose=True) == 1
+    assert archive.is_file()
+    assert not loose.exists()
 
 
 @pytest.mark.parametrize(

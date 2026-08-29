@@ -1,11 +1,12 @@
 """Test and apply the reusable test-determinism checker.
 
-It exercises Python and C++ guards for speed ceilings, sleeps, polling, lazy-worker
-assumptions, safety timeouts, and repository-wide reporting.
+It exercises Python and C++ guards for randomness, vacuous assertions, speed ceilings,
+sleeps, polling, lazy-worker assumptions, safety timeouts, and repository-wide reporting.
 """
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,64 @@ def _analyze(tmp_path: Path, name: str, source: str) -> checker.PythonFindings:
     path = tmp_path / name
     path.write_text(source, encoding="utf-8")
     return checker.analyze_python(path)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "import random\nvalue=random.randint(1, 3)\n",
+        "import random as rng\nvalue=rng.random()\n",
+        "from random import Random as Generator\nrng=Generator()\n",
+        "from random import SystemRandom\nrng=SystemRandom()\n",
+        "from uuid import uuid4 as fresh\nvalue=fresh()\n",
+        "import uuid\nvalue=uuid.uuid7()\n",
+        "import secrets\nvalue=secrets.token_hex()\n",
+        "from os import urandom\nvalue=urandom(8)\n",
+        "from os import getrandom\nvalue=getrandom(8)\n",
+        "from random import binomialvariate\nvalue=binomialvariate(4, 0.5)\n",
+        "from random import *\nvalue=random()\n",  # noqa: F403
+    ),
+)
+def test_randomness_guard_detects_implicit_or_entropy_backed_sources(
+    tmp_path: Path, source: str
+) -> None:
+    """Reject test inputs whose values can change between identical runs."""
+    assert _analyze(tmp_path, "test_random.py", source).nondeterministic_randomness
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "import random\nrng=random.Random(7)\nvalue=rng.randint(1, 3)\n",
+        "from random import Random\nseed=11\nrng=Random(seed)\n",
+        "import uuid\nvalue=uuid.uuid5(uuid.NAMESPACE_DNS, 'example.invalid')\n",
+    ),
+)
+def test_randomness_guard_preserves_explicit_deterministic_generators(
+    tmp_path: Path, source: str
+) -> None:
+    """Allow local seeded generators and name-derived UUIDs."""
+    assert not _analyze(tmp_path, "test_seeded.py", source).nondeterministic_randomness
+
+
+def test_vacuous_assertion_guard_detects_empty_evidence_bypass(tmp_path: Path) -> None:
+    """Reject cleanup assertions that pass when no owner was acquired."""
+    finding = _analyze(
+        tmp_path,
+        "test_vacuous.py",
+        "assert not acquired or all(owner.closed for owner in acquired)\n",
+    )
+    assert finding.vacuous_assertions
+
+
+def test_vacuous_assertion_guard_preserves_required_evidence(tmp_path: Path) -> None:
+    """Allow assertions that require evidence before checking every item."""
+    finding = _analyze(
+        tmp_path,
+        "test_exact.py",
+        "assert acquired\nassert all(owner.closed for owner in acquired)\n",
+    )
+    assert not finding.vacuous_assertions
 
 
 @pytest.mark.parametrize(
@@ -259,7 +318,7 @@ def _repository_python_findings(field: str) -> list[str]:
     """Run the determinism checker over an isolated test repository."""
     return [
         f"{path.relative_to(ROOT)}:{line}: {expression}"
-        for path in sorted((ROOT / "tests").rglob("test_*.py"))
+        for path in sorted((ROOT / "tests").rglob("*.py"))
         for finding in (checker.analyze_python(path),)
         for line, expression in getattr(finding, field)
     ]
@@ -268,6 +327,16 @@ def _repository_python_findings(field: str) -> list[str]:
 def test_tests_do_not_assert_wall_clock_speed() -> None:
     """Verify tests do not assert wall clock speed."""
     assert not _repository_python_findings("wall_clock")
+
+
+def test_tests_do_not_use_nondeterministic_randomness() -> None:
+    """Require explicitly seeded, locally owned generators in tests."""
+    assert not _repository_python_findings("nondeterministic_randomness")
+
+
+def test_tests_do_not_allow_empty_evidence_to_bypass_assertions() -> None:
+    """Require tests to prove their target path ran before checking its result."""
+    assert not _repository_python_findings("vacuous_assertions")
 
 
 def test_tests_do_not_use_fixed_thread_sleeps_as_synchronization() -> None:
@@ -280,11 +349,49 @@ def test_tests_do_not_use_fixed_async_sleeps_as_synchronization() -> None:
     assert not _repository_python_findings("async_sleeps")
 
 
+def test_termination_joins_use_fail_closed_helpers() -> None:
+    """Reject raw joins unless the next assertion intentionally requires liveness."""
+    violations: list[str] = []
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        if path == ROOT / "tests/_support/synchronization.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        next_statement: dict[ast.stmt, ast.stmt] = {}
+        for parent in ast.walk(tree):
+            for _field, value in ast.iter_fields(parent):
+                if not isinstance(value, list):
+                    continue
+                for current, following in zip(value, value[1:], strict=False):
+                    if isinstance(current, ast.stmt) and isinstance(following, ast.stmt):
+                        next_statement[current] = following
+        for statement in ast.walk(tree):
+            if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+                continue
+            call = statement.value
+            if not isinstance(call.func, ast.Attribute) or call.func.attr != "join":
+                continue
+            following = next_statement.get(statement)
+            receiver = ast.dump(call.func.value, include_attributes=False)
+            liveness_check = following.test if isinstance(following, ast.Assert) else None
+            intentionally_alive = (
+                isinstance(liveness_check, ast.Call)
+                and isinstance(liveness_check.func, ast.Attribute)
+                and liveness_check.func.attr == "is_alive"
+                and ast.dump(liveness_check.func.value, include_attributes=False) == receiver
+            )
+            if not intentionally_alive:
+                violations.append(
+                    f"{path.relative_to(ROOT)}:{statement.lineno}: {ast.unparse(call)}"
+                )
+    assert not violations
+
+
 def test_tests_do_not_require_every_lazy_worker_to_start() -> None:
     """Verify tests do not require every lazy worker to start."""
     findings = [
         f"{path.relative_to(ROOT)}:{line}: {expression}"
-        for path in sorted((ROOT / "tests").rglob("test_*.py"))
+        for path in sorted((ROOT / "tests").rglob("*.py"))
         for _function, line, expression in checker.unapproved_lazy_workers(path)
     ]
     assert not findings

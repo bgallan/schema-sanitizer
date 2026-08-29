@@ -20,6 +20,11 @@ def _compact_noop(_value: str) -> None:
 
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 
 def test_reserved_finalizer_escrow_generation_blocks_stale_ticket_aba() -> None:
@@ -113,7 +118,7 @@ def test_runtime_close_all_keeps_logically_closed_live_thread_registered() -> No
         service, kind="reserved-finalizer-escrow-generation-blocks-stale", close_name="close"
     )
     exit_event = Event()
-    thread = Thread(target=lambda: exit_event.wait(1.0))
+    thread = Thread(target=lambda: wait_event_or_fail(exit_event))
     registration.start_thread(thread)
     closed, remaining = registry.close_all(
         deadline_ns=deadline_ns_from_timeout(
@@ -125,7 +130,7 @@ def test_runtime_close_all_keeps_logically_closed_live_thread_registered() -> No
     # 50-ms bounded re-probes, not an unbounded hot loop.
     assert service.calls < 10
     exit_event.set()
-    thread.join(1.0)
+    join_thread_or_fail(thread)
     registration.close()
     assert registry.snapshot().registered_services == 0
 
@@ -495,7 +500,7 @@ def test_prepared_capsule_self_publishes_unused_reserved_ticket() -> None:
         assert escrow._tickets[slot] == ticket
         assert escrow._slots[slot] is authority
 
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while (
         ticket in escrow._ticket_slots
         or authority.is_armed_for(ticket)

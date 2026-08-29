@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -69,8 +70,8 @@ def test_notifier_retries_failed_event_and_acks_only_after_success(
     assert governor.register_availability_event(module.AvailabilityEvent.RETRY_SCHEDULER)
     delivery = _delivery(module, governor, module.AvailabilityEvent.RETRY_SCHEDULER)
     assert notifier.publish_one(delivery)
-    assert completed.wait(2)
-    deadline = time.monotonic() + 2
+    assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while governor.snapshot().availability_callbacks and time.monotonic() < deadline:
         time.sleep(0.01)
     assert attempts == 2

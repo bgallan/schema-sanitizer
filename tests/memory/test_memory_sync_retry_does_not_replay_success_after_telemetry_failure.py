@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 
 def _set_environment(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
@@ -364,13 +365,13 @@ def test_completed_diagnostic_copy_does_not_hold_registry_lock(
     def slow_deepcopy(value: Any) -> Any:
         """Pause at the slow deepcopy synchronization point."""
         entered.set()
-        assert unblock.wait(timeout=2.0)
+        assert unblock.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         return copy.deepcopy(value)
 
     monkeypatch.setattr(module, "deepcopy", slow_deepcopy)
     reader = threading.Thread(target=module.process_operation_diagnostics)
     reader.start()
-    assert entered.wait(timeout=1.0)
+    assert entered.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     completed = threading.Event()
 
@@ -381,12 +382,10 @@ def test_completed_diagnostic_copy_does_not_hold_registry_lock(
 
     writer = threading.Thread(target=complete_second)
     writer.start()
-    assert completed.wait(timeout=0.5)
+    assert completed.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     unblock.set()
-    reader.join(timeout=2.0)
-    writer.join(timeout=2.0)
-    assert not reader.is_alive()
-    assert not writer.is_alive()
+    join_thread_or_fail(reader)
+    join_thread_or_fail(writer)
     module._reset_after_fork()
 
 
@@ -708,7 +707,7 @@ def test_operation_resource_final_close_is_serialized_once(
             """Close the resources owned by the blocking close test double."""
             self.calls += 1
             entered.set()
-            assert unblock.wait(timeout=2.0)
+            assert unblock.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     memory = BlockingClose()
     resources = _resource_domain_for_test(memory)
@@ -724,13 +723,12 @@ def test_operation_resource_final_close_is_serialized_once(
     first = threading.Thread(target=close)
     second = threading.Thread(target=close)
     first.start()
-    assert entered.wait(timeout=1.0)
+    assert entered.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     second.start()
     unblock.set()
-    first.join(timeout=2.0)
-    second.join(timeout=2.0)
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert not errors
-    assert not first.is_alive() and not second.is_alive()
     assert memory.calls == 1
     assert resources.directory_metadata.calls == 1
     assert resources.temporary_storage.calls == 1

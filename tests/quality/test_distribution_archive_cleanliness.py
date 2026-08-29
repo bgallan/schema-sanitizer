@@ -186,6 +186,42 @@ def test_archive_timestamp_check_rejects_runner_clock_drift(
         validator._validate_archive_timestamps(sdist)
 
 
+@pytest.mark.parametrize(
+    "member_name",
+    ("../escape.py", "/absolute.py", "C:/windows.py", "package\\windows.py"),
+)
+def test_distribution_validator_rejects_unsafe_member_names(
+    member_name: str,
+    tmp_path: Path,
+) -> None:
+    """Release archives cannot encode traversal or platform-dependent paths."""
+    wheel = tmp_path / "unsafe.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(member_name, b"unsafe")
+
+    with pytest.raises(AssertionError, match="unsafe archive member names"):
+        _load_validator().validate(wheel)
+
+
+def test_distribution_validator_rejects_duplicate_members_and_symlinks(tmp_path: Path) -> None:
+    """Ambiguous member lookup and symlinked artifact aliases fail closed."""
+    wheel = tmp_path / "duplicates.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("duplicate", b"first")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            archive.writestr("duplicate", b"second")
+    with pytest.raises(AssertionError, match="must be unique"):
+        _load_validator().validate(wheel)
+
+    linked = tmp_path / "linked.whl"
+    try:
+        linked.symlink_to(wheel)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    with pytest.raises(AssertionError, match="regular file"):
+        _load_validator().validate(linked)
+
+
 def _add_tar_file(archive: tarfile.TarFile, name: str, content: bytes = b"fixture\n") -> None:
     """Add a deterministic regular file member to the test archive."""
     member = tarfile.TarInfo(name)
@@ -272,6 +308,9 @@ def test_release_manifest_is_canonical_complete_and_verifiable(tmp_path: Path) -
         assert entry["sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
     assert manifest.read_text(encoding="utf-8") == helper.canonical_json(payload)
     helper.verify_release_manifest(manifest, reversed(artifacts), **options)
+    first_mtime = manifest.stat().st_mtime_ns
+    helper.write_release_manifest(manifest, reversed(artifacts), **options)
+    assert manifest.stat().st_mtime_ns == first_mtime
 
 
 def test_release_manifest_verification_rejects_tampering(tmp_path: Path) -> None:
@@ -300,6 +339,41 @@ def test_release_manifest_verification_rejects_tampering(tmp_path: Path) -> None
     manifest.write_text("\n" + manifest.read_text(encoding="utf-8"), encoding="utf-8")
     with pytest.raises(AssertionError, match="not canonical"):
         helper.verify_release_manifest(manifest, artifacts, **options)
+
+
+def test_release_manifest_rejects_symlinked_inputs_and_outputs(tmp_path: Path) -> None:
+    """Release provenance cannot be read or written through mutable symlink aliases."""
+    helper = _load_validator("release_manifest")
+    artifacts = _release_artifacts(tmp_path / "artifacts")
+    version = tmp_path / "VERSION"
+    version.write_text("0.4.0\n", encoding="utf-8")
+    options = {
+        "version_file": version,
+        "github_sha": _GITHUB_SHA,
+        "github_run_id": 42,
+        "github_run_attempt": 1,
+    }
+    manifest = tmp_path / "release-manifest.json"
+    target = tmp_path / "manifest-target.json"
+    target.write_text("preserve\n", encoding="utf-8")
+    try:
+        manifest.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(AssertionError, match="must not be a symlink"):
+        helper.write_release_manifest(manifest, artifacts, **options)
+    assert target.read_text(encoding="utf-8") == "preserve\n"
+
+    manifest.unlink()
+    linked_version = tmp_path / "VERSION.link"
+    linked_version.symlink_to(version)
+    with pytest.raises(AssertionError, match="version source must be a regular file"):
+        helper.write_release_manifest(
+            manifest,
+            artifacts,
+            **{**options, "version_file": linked_version},
+        )
 
 
 def test_release_validation_rejects_filename_metadata_drift(tmp_path: Path) -> None:

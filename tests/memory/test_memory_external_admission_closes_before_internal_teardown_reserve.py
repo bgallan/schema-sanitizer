@@ -13,7 +13,11 @@ import weakref
 from pathlib import Path
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    WaitObservedCondition,
+    join_thread_or_fail,
+)
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -102,7 +106,7 @@ def test_notifier_schedules_autonomous_restart_after_start_failure(
     monkeypatch.setattr(module, "_NOTIFIER_THREAD_GOVERNOR", Exhausted())
     monkeypatch.setattr(retry_scheduler, "schedule_retry", schedule)
     assert notifier.publish_one(delivery)
-    assert scheduled.wait(1)
+    assert scheduled.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert notifier.snapshot().pending_callbacks == 1
     assert notifier.snapshot().worker_start_failures == 1
 
@@ -200,11 +204,10 @@ def test_shutdown_single_flight_propagates_same_failure_to_waiters(
     second.start()
     assert module._SHUTDOWN_CONDITION.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     resume.set()
-    first.join(SCHEDULER_TIMEOUT_SECONDS)
-    second.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     try:
-        assert not first.is_alive() and not second.is_alive()
-        assert observed == [failure, failure] or observed == [failure] * 2
+        assert observed == [failure, failure]
     finally:
         module._reset_runtime_shutdown_for_tests()
 

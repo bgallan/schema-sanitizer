@@ -12,7 +12,12 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    ContentionObservedLock,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 
 def test_remote_io_cancel_after_grant_delivers_successor() -> None:
@@ -43,7 +48,7 @@ def test_remote_io_cancel_after_grant_delivers_successor() -> None:
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
-        permit = await asyncio.wait_for(second, timeout=1.0)
+        permit = await asyncio.wait_for(second, timeout=SCHEDULER_TIMEOUT_SECONDS)
         assert governor.snapshot().waiting == 0
         assert governor.snapshot().in_use == 1
         permit.release()
@@ -74,7 +79,7 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
     thread = Thread(
         target=lambda: (
             target_started.set(),
-            target_exit.wait(SCHEDULER_TIMEOUT_SECONDS),
+            wait_event_or_fail(target_exit),
         )
     )
     physical_start = thread.start
@@ -102,15 +107,15 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
     assert registration._lock.contention_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert not close_done.is_set()
     allow_start.set()
-    starter.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(starter)
     assert target_started.wait(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(closer)
     assert close_done.is_set()
     assert registry.snapshot().registered_services == 1
     assert any(entry.state.name == "RETIRING" for entry in registry._entries.values())
 
     target_exit.set()
-    thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(thread)
     registration.close()
     assert registry.snapshot().registered_services == 0
 
@@ -387,7 +392,7 @@ def test_governed_thread_permit_lives_until_physical_thread_exit() -> None:
         """Run the target side of the synchronization scenario."""
         assert defer_governed_thread_retirement(holder["thread"], lambda: releases.append(1))
         ready.set()
-        exit_event.wait(SCHEDULER_TIMEOUT_SECONDS)
+        wait_event_or_fail(exit_event)
 
     thread = Thread(target=target)
     holder["thread"] = thread
@@ -397,7 +402,7 @@ def test_governed_thread_permit_lives_until_physical_thread_exit() -> None:
     assert releases == []
     assert governed_thread_retirement_snapshot()[0] >= 1
     exit_event.set()
-    thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(thread)
     reap_governed_thread_retirements()
     assert releases == [1]
 
@@ -428,7 +433,7 @@ def test_retirement_reaper_claims_debt_before_reentrant_release() -> None:
     holder["thread"] = thread
     thread.start()
     assert done.wait(SCHEDULER_TIMEOUT_SECONDS)
-    thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(thread)
     reap_governed_thread_retirements()
     assert calls == [1]
 

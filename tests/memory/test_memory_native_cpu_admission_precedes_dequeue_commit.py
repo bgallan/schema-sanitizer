@@ -10,6 +10,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from _support.synchronization import join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
@@ -494,8 +495,7 @@ def test_python_and_cpp_share_one_physical_thread_permit_domain(
     monkeypatch.setattr(governed_thread, "_native_physical_thread_api", lambda: native)
     thread = Thread(target=lambda: events.append("target"))
     governed_thread.start_governed_thread(thread)
-    thread.join(timeout=2.0)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert events == ["acquire", "running", "target", "stopped", "release"]
 
     cpp = (CPP / "internal/runtime/operation_task_arena.cc").read_text()

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 from schema_sanitizer.core_impl.memory_budget import (
@@ -43,8 +43,7 @@ def test_operation_memory_lease_release_is_thread_safe() -> None:
         thread.start()
     barrier.wait()
     for thread in threads:
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
 
     assert lease.reserved_bytes == 0
     assert ledger.snapshot().reserved_bytes == 0
@@ -68,8 +67,7 @@ def test_temporary_storage_lease_release_is_thread_safe() -> None:
         thread.start()
     barrier.wait()
     for thread in threads:
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
 
     snapshot = pool.snapshot()
     assert snapshot.reserved_bytes == 0
@@ -104,10 +102,8 @@ def test_temporary_storage_resize_and_release_are_serialized() -> None:
         resize_thread.start()
         release_thread.start()
         barrier.wait()
-        resize_thread.join(timeout=2)
-        release_thread.join(timeout=2)
-        assert not resize_thread.is_alive()
-        assert not release_thread.is_alive()
+        join_thread_or_fail(resize_thread)
+        join_thread_or_fail(release_thread)
         assert len(resize_errors) <= 1
         snapshot = pool.snapshot()
         assert snapshot.reserved_bytes == 0
@@ -184,8 +180,7 @@ def test_remote_close_deadline_includes_cancelled_future_drain(
     assert not release.is_set()
     release.set()
     coordinator.close()
-    coordinator._thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)  # noqa: SLF001
-    assert not coordinator._thread.is_alive()  # noqa: SLF001
+    join_thread_or_fail(coordinator._thread)  # noqa: SLF001
 
 
 def test_remote_close_from_owned_thread_fails_without_deadlock() -> None:
@@ -240,8 +235,7 @@ def test_concurrent_remote_close_waits_for_the_owner() -> None:
     assert completions == []
     coordinator._loop.call_soon_threadsafe(release_exit.set)  # noqa: SLF001
     for thread in threads:
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
 
     assert errors == []
     assert completions == [True, True]

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -192,7 +193,7 @@ def test_release_guardian_uses_bounded_shared_workers(
 
     owners = [Lease() for _ in range(32)]
     assert all(guardian.adopt(owner, retained_bytes=64) for owner in owners)
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     peak_workers = 0
     while time.monotonic() < deadline:
         snapshot = guardian.snapshot()

@@ -16,6 +16,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_for_process_exit,
+)
 
 
 def _set_environment(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
@@ -133,7 +138,7 @@ def test_opportunistic_process_acquisition_does_not_bypass_fifo_waiter() -> None
 
     thread = threading.Thread(target=wait_for_all)
     thread.start()
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while governor.snapshot().waiting != 1 and time.monotonic() < deadline:
         time.sleep(0.005)
     assert governor.snapshot().waiting == 1
@@ -143,8 +148,7 @@ def test_opportunistic_process_acquisition_does_not_bypass_fifo_waiter() -> None
     assert governor.snapshot().opportunistic_rejections == 1
 
     first.release()
-    thread.join(timeout=2.0)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert len(acquired) == 1
     acquired[0].release()
 
@@ -224,10 +228,10 @@ def test_fork_child_drops_inherited_resource_contextvars() -> None:
             os._exit(0)
 
         os.close(write_fd)
-        ready, _, _ = select.select([read_fd], [], [], 3.0)
+        ready, _, _ = select.select([read_fd], [], [], SCHEDULER_TIMEOUT_SECONDS)
         payload = os.read(read_fd, 1) if ready else b""
         os.close(read_fd)
-        _child, status = os.waitpid(pid, 0)
+        status = wait_for_process_exit(pid)
         assert os.waitstatus_to_exitcode(status) == 0
         assert payload == b"1"
     finally:

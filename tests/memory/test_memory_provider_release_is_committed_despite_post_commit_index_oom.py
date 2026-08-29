@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from _support.synchronization import join_thread_or_fail, wait_event_or_fail
 
 
 class _FailingSetOrderedDict(dict):
@@ -323,7 +324,7 @@ def test_runtime_thread_start_commit_does_not_report_diagnostic_failure(
         Service(), kind="provider-release-is-committed-despite-post", close_name="close"
     )
     exited = Event()
-    thread = Thread(target=lambda: exited.wait(1.0))
+    thread = Thread(target=lambda: wait_event_or_fail(exited))
 
     # All lifecycle progress publication around the physical start/retirement is
     # diagnostic-only. Once the registration exists, diagnostic OOM must not
@@ -340,7 +341,7 @@ def test_runtime_thread_start_commit_does_not_report_diagnostic_failure(
     assert snapshot.registered_services == 1
     assert snapshot.post_commit_failures >= 1
     exited.set()
-    thread.join(1.0)
+    join_thread_or_fail(thread)
     registration.close()
     assert registry.snapshot().registered_services == 0
 

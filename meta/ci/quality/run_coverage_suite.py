@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Sequence
 
 SHARED = {
     "adversarial": (
@@ -68,6 +69,7 @@ SUITES = {
         ),
     },
 }
+_COVERAGE_DIRECTORY = Path(".work/coverage")
 
 
 def selected_tests(profile: str, suite: str, *, root: Path = Path(".")) -> tuple[str, ...]:
@@ -77,6 +79,31 @@ def selected_tests(profile: str, suite: str, *, root: Path = Path(".")) -> tuple
     if missing:
         raise FileNotFoundError(f"missing {profile}/{suite} coverage tests: {missing}")
     return paths
+
+
+def coverage_data_file(profile: str, suite: str) -> Path:
+    """Return the deterministic input file consumed by coverage combine."""
+    return _COVERAGE_DIRECTORY / f".coverage.{profile}.{suite}"
+
+
+def validate_coverage_inputs(profile: str) -> tuple[Path, ...]:
+    """Require the exact regular files produced by every declared profile suite."""
+    expected = tuple(coverage_data_file(profile, suite) for suite in SUITES[profile])
+    actual = (
+        tuple(sorted(_COVERAGE_DIRECTORY.glob(".coverage.*")))
+        if _COVERAGE_DIRECTORY.is_dir()
+        else ()
+    )
+    if actual != tuple(sorted(expected)):
+        missing = sorted(set(expected) - set(actual))
+        unexpected = sorted(set(actual) - set(expected))
+        raise RuntimeError(
+            f"coverage inputs for {profile} differ: missing={missing}, unexpected={unexpected}"
+        )
+    invalid = [path for path in expected if path.is_symlink() or not path.is_file()]
+    if invalid:
+        raise RuntimeError(f"coverage inputs must be regular files: {invalid}")
+    return expected
 
 
 def coverage_command(profile: str, suite: str) -> tuple[str, ...]:
@@ -90,7 +117,7 @@ def coverage_command(profile: str, suite: str) -> tuple[str, ...]:
             "run",
             "--source=src/schema_sanitizer",
             "--branch",
-            "--parallel-mode",
+            f"--data-file={coverage_data_file(profile, suite).as_posix()}",
             f"--context={suite}",
             "-m",
             "pytest",
@@ -103,16 +130,33 @@ def coverage_command(profile: str, suite: str) -> tuple[str, ...]:
 
 def run(profile: str, suite: str) -> None:
     """Replace this helper with the selected argv-only coverage command."""
+    if profile == "python":
+        data_file = coverage_data_file(profile, suite)
+        if data_file.is_symlink() or (data_file.exists() and not data_file.is_file()):
+            raise ValueError(f"coverage data output must be a regular file: {data_file}")
+        if data_file.parent.is_symlink():
+            raise ValueError(
+                f"coverage output root must be a regular directory: {data_file.parent}"
+            )
+        data_file.parent.mkdir(parents=True, exist_ok=True)
     command = coverage_command(profile, suite)
     os.execv(command[0], command)
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """Parse and execute a declared suite."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", choices=tuple(SUITES))
-    parser.add_argument("suite", choices=("regular", "adversarial", "integration"))
-    args = parser.parse_args()
+    parser.add_argument("suite", nargs="?", choices=("regular", "adversarial", "integration"))
+    parser.add_argument("--validate-inputs", action="store_true")
+    args = parser.parse_args(argv)
+    if args.validate_inputs:
+        if args.suite is not None:
+            parser.error("suite cannot be combined with --validate-inputs")
+        validate_coverage_inputs(args.profile)
+        return
+    if args.suite is None:
+        parser.error("suite is required unless --validate-inputs is used")
     run(args.profile, args.suite)
 
 

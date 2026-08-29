@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from _support.source_contracts import SourceContract, assert_source_contract
+from _support.synchronization import join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,7 +42,7 @@ def test_atomic_epoch_is_exact_under_concurrent_publishers() -> None:
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        join_thread_or_fail(thread)
     assert counter.value() == workers * per_worker
 
 

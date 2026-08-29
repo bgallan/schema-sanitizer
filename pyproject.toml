@@ -1,5 +1,7 @@
 [build-system]
 requires = [
+  "cmake==4.3.4",
+  "ninja==1.13.0",
   "scikit-build-core==0.11.6"
 ]
 build-backend = "scikit_build_core.build"
@@ -109,6 +111,7 @@ Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 audit-command = ""
 build = "cp311-*"
 build-verbosity = 1
+dependency-versions = "meta/ci/requirements/build-tools.txt"
 test-requires = ["pyarrow==25.0.1"]
 test-command = "python {project}/meta/ci/parquet/check_parquet_compression_matrix.py"
 
@@ -147,6 +150,12 @@ show_error_codes = true
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "tests"]
 cache_dir = ".work/pytest"
+addopts = ["--strict-config", "--strict-markers"]
+xfail_strict = true
+filterwarnings = [
+  "error::pytest.PytestUnhandledThreadExceptionWarning",
+  "error::pytest.PytestUnraisableExceptionWarning"
+]
 markers = [
   "native_stress: high-volume native concurrency coverage run explicitly in CI"
 ]
@@ -171,7 +180,7 @@ build-dir = ".work/build/{wheel_tag}"
 verbose = true
 
 [tool.scikit-build.cmake]
-version = ">=4.3,<4.4"
+version = "==4.3.4"
 
 [tool.scikit-build.cmake.define]
 SCHEMA_SANITIZER_REQUIRE_ZLIB = "ON"
@@ -182,6 +191,10 @@ provider = "scikit_build_core.metadata.regex"
 input = "meta/VERSION"
 regex = '^(?P<value>\d+\.\d+(?:\.\d+)?(?:\.post\d+)?)$'
 
+[tool.scikit-build.ninja]
+version = "==1.13.0"
+make-fallback = false
+
 [tool.scikit-build.sdist]
 # Let scikit-build-core collect the source tree through .gitignore semantics.
 # Broad force-includes override exclusions in 0.11.x and can accidentally pull
@@ -191,9 +204,12 @@ include = [
   "/cmake/SchemaSanitizerCompression.cmake",
   "/docs/**",
   "/meta/ci/parquet/check_parquet_compression_matrix.py",
+  "/meta/ci/requirements/build-tools.txt",
   "/meta/ci/requirements/downstream.txt",
   "/meta/ci/requirements/platform-tests.txt",
+  "/meta/ci/requirements/pre-commit-hooks.txt",
   "/meta/ci/requirements/quality.txt",
+  "/meta/ci/requirements/release-verification.txt",
   "/LICENSE",
   "/README.md",
   "/meta/VERSION",

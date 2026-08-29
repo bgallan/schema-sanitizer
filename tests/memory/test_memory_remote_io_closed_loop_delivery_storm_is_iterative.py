@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, wait_for_process_exit
 
 _NATIVE_STUB_MODULES = (
     "schema_sanitizer.core_impl.native_options",
@@ -444,13 +445,12 @@ def test_native_options_actual_fork_replaces_inherited_locked_cache(
     os.close(write_fd)
     module._PREPARED_OPTIONS_CACHE_LOCK.release()
     try:
-        readable, _, _ = select.select([read_fd], [], [], 2.0)
+        readable, _, _ = select.select([read_fd], [], [], SCHEDULER_TIMEOUT_SECONDS)
         assert readable, "fork child did not report cache state"
         payload = os.read(read_fd, 128).decode("ascii")
     finally:
         os.close(read_fd)
-        waited_pid, status = os.waitpid(pid, 0)
-    assert waited_pid == pid
+        status = wait_for_process_exit(pid)
     assert os.waitstatus_to_exitcode(status) == 0
     assert payload == "0:0:1"
 
@@ -564,12 +564,12 @@ def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
     os.close(write_fd)
     module._lock.release()
     try:
-        readable, _, _ = select.select([read_fd], [], [], 2.0)
+        readable, _, _ = select.select([read_fd], [], [], SCHEDULER_TIMEOUT_SECONDS)
         assert readable, "fork child did not report pressure state"
         payload = os.read(read_fd, 256).decode("ascii")
     finally:
         os.close(read_fd)
-        waited_pid, status = os.waitpid(pid, 0)
+        status = wait_for_process_exit(pid)
         with module._lock:
             (
                 module._cached_at,
@@ -578,6 +578,5 @@ def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
                 module._last_oom,
                 module._last_scale_change,
             ) = previous
-    assert waited_pid == pid
     assert os.waitstatus_to_exitcode(status) == 0
     assert payload == "1.0:0.0:0:0:0.0:1"

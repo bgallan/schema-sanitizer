@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -107,7 +107,7 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
     assert lease.releases == 0
     assert not finalized.is_set()
     release.set()
-    runner._thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(runner._thread)
     assert finalized.is_set()
     assert lease.releases == 1
 
@@ -142,7 +142,7 @@ def test_coordinator_timeout_keeps_live_host_retryable() -> None:
     assert coordinator._submissions
 
     release.set()
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while coordinator._submissions and time.monotonic() < deadline:
         time.sleep(0.005)
     assert future.done()
@@ -264,8 +264,7 @@ def test_janitor_filesystem_claim_does_not_hold_global_lock(
     assert janitor._lock.acquire(timeout=0.1)
     janitor._lock.release()
     allow.set()
-    worker.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not worker.is_alive()
+    join_thread_or_fail(worker)
 
 
 def test_permit_operation_queues_have_bounded_removal_work(

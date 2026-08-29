@@ -164,6 +164,7 @@ def _write_fixtures(root: Path, rows: int, width: int, candidate_root: Path) -> 
         check=True,
         cwd=root,
         stdout=DISCARD,
+        timeout=600,
     )
 
 
@@ -175,6 +176,7 @@ def _run_tree(root: Path, fixtures: Path, repeats: int, label: str) -> dict[str,
         cwd=fixtures,
         text=True,
         stdout=CAPTURE,
+        timeout=3_600,
     )
     return json.loads(completed.stdout)
 

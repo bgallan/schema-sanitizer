@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 import tempfile
 import zipfile
 from pathlib import Path
@@ -38,7 +39,11 @@ def pack_target(regression_root: Path, target: str, *, remove_loose: bool) -> in
         raise ValueError(f"missing regular fuzz target directory: {target_root}")
     cases = [
         case
-        for case in target_inputs(regression_root, target)
+        for case in target_inputs(
+            regression_root,
+            target,
+            allow_identical_archive_duplicates=remove_loose,
+        )
         if is_content_addressed_name(case.name)
     ]
     if not cases:
@@ -72,14 +77,22 @@ def pack_target(regression_root: Path, target: str, *, remove_loose: bool) -> in
                     compress_type=zipfile.ZIP_DEFLATED,
                     compresslevel=9,
                 )
-        os.replace(temporary, destination)
+        archive_mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+        temporary.chmod(archive_mode)
+        if destination.is_symlink():
+            raise ValueError(f"refusing symlinked fuzz archive: {destination}")
+        if not destination.is_file() or destination.read_bytes() != temporary.read_bytes():
+            os.replace(temporary, destination)
+        else:
+            destination.chmod(archive_mode)
     finally:
         temporary.unlink(missing_ok=True)
 
     if remove_loose:
+        # Archive replacement commits every byte before retryable loose cleanup.
         for case in cases:
             if not case.archived:
-                case.origin.unlink()
+                case.origin.unlink(missing_ok=True)
     return len(cases)
 
 

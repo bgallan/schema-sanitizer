@@ -10,8 +10,15 @@ import stat
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+    wait_for_process_exit,
+)
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -178,12 +185,12 @@ def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Pat
         """Hold the synchronization point until the competing path arrives."""
         owner.lock.acquire()
         locked.set()
-        release.wait(5)
+        wait_event_or_fail(release)
         owner.lock.release()
 
     thread = threading.Thread(target=hold)
     thread.start()
-    assert locked.wait(2)
+    assert locked.wait(SCHEDULER_TIMEOUT_SECONDS)
     module._ABANDONED_CLAIM_OWNERS = {id(owner): owner}
     read_fd, write_fd = os.pipe()
     pid = os.fork()
@@ -195,7 +202,7 @@ def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Pat
         finally:
             os._exit(0)
     os.close(write_fd)
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     data = b""
     while time.monotonic() < deadline and not data:
         import select
@@ -203,9 +210,9 @@ def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Pat
         if select.select([read_fd], [], [], 0.05)[0]:
             data = os.read(read_fd, 2)
     release.set()
-    thread.join(2)
+    join_thread_or_fail(thread)
     os.close(read_fd)
-    os.waitpid(pid, 0)
+    wait_for_process_exit(pid)
     assert data == b"ok"
 
 
@@ -234,7 +241,7 @@ def test_guardian_parks_overflow_without_destroying_owner_under_lock(
 
     owner = Broken()
     assert guardian.adopt(owner, retained_bytes=32)
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline and guardian.snapshot().parked_owners == 0:
         time.sleep(0.002)
     snap = guardian.snapshot()
@@ -347,11 +354,11 @@ def test_structured_runtime_shutdown_orders_producers_before_guardian(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify structured runtime shutdown orders producers before guardian."""
-    import schema_sanitizer.core_impl.cleanup_dispatcher as cleanup
-    import schema_sanitizer.core_impl.process_resources as resources
-    import schema_sanitizer.core_impl.retry_scheduler as retry
     import schema_sanitizer.core_impl.runtime_shutdown as shutdown
-    import schema_sanitizer.core_impl.temporary_janitor as janitor
+    from schema_sanitizer.core_impl import runtime_registry
+    from schema_sanitizer.remote_impl import (
+        sync_cleanup_escrow as _sync_cleanup_escrow,  # noqa: F401
+    )
 
     order: list[str] = []
 
@@ -366,29 +373,63 @@ def test_structured_runtime_shutdown_orders_producers_before_guardian(
             order.append(self.name)
             return True
 
-    monkeypatch.setattr(retry, "_SCHEDULER", Service("retry"))
-    monkeypatch.setattr(janitor, "_JANITOR", Service("janitor"))
-    monkeypatch.setattr(cleanup, "_DISPATCHER", Service("cleanup"))
-    monkeypatch.setattr(retry, "_RELEASE_GUARDIAN", Service("guardian"))
-    # This is an ordering unit test with fake services. Keep the corresponding
-    # process-global admissions and real notifier/reaper untouched; otherwise
-    # their live leases cannot be drained by the substituted services.
-    monkeypatch.setattr(resources, "close_process_resource_external_admission", lambda: None)
-    monkeypatch.setattr(resources, "close_process_resource_admission", lambda: None)
-    monkeypatch.setattr(resources, "close_release_guardian_thread_admission", lambda: None)
-    monkeypatch.setattr(resources, "shutdown_availability_notifier", lambda **_kwargs: True)
-    monkeypatch.setattr(shutdown, "_shutdown_native_cleanup_reaper", lambda _deadline: True)
+    real_registry = shutdown._registry_module._RUNTIME_SERVICES
+    registry_before = real_registry.snapshot()
+    assert dict(registry_before.service_kinds).get("sync_provider_cleanup_escrow") == 1
     try:
+        resources = shutdown._resources_module
+        monkeypatch.setattr(
+            shutdown,
+            "_registry_module",
+            SimpleNamespace(_RUNTIME_SERVICES=runtime_registry._RuntimeServiceRegistry()),
+        )
+        monkeypatch.setattr(
+            shutdown,
+            "_retry_module",
+            SimpleNamespace(_SCHEDULER=Service("retry"), _RELEASE_GUARDIAN=Service("guardian")),
+        )
+        monkeypatch.setattr(
+            shutdown,
+            "_janitor_module",
+            SimpleNamespace(_JANITOR=Service("janitor")),
+        )
+        monkeypatch.setattr(
+            shutdown,
+            "_cleanup_module",
+            SimpleNamespace(_DISPATCHER=Service("cleanup")),
+        )
+        # Substitute only shutdown's module view. Live workers keep the real process-global
+        # services and therefore cannot observe these ordering doubles during test teardown.
+        monkeypatch.setattr(
+            shutdown,
+            "_resources_module",
+            SimpleNamespace(
+                close_process_resource_external_admission=lambda: None,
+                close_process_resource_admission=lambda: None,
+                close_release_guardian_thread_admission=lambda: None,
+                shutdown_availability_notifier=lambda **_kwargs: True,
+                availability_notifier_snapshot=resources.availability_notifier_snapshot,
+                availability_notifier_thread_snapshot=(
+                    resources.availability_notifier_thread_snapshot
+                ),
+                process_file_descriptor_snapshot=resources.process_file_descriptor_snapshot,
+                process_thread_snapshot=resources.process_thread_snapshot,
+                release_guardian_thread_snapshot=resources.release_guardian_thread_snapshot,
+                uncertain_fd_close_snapshot=resources.uncertain_fd_close_snapshot,
+            ),
+        )
+        monkeypatch.setattr(shutdown, "_shutdown_native_cleanup_reaper", lambda _deadline: True)
         result = shutdown.shutdown_concurrency_runtime(deadline_seconds=1.0)
         assert result.retry_scheduler_stopped
         assert result.janitor_stopped
         assert result.cleanup_dispatcher_stopped
         assert result.release_guardian_stopped
-        # terminal_success is intentionally stricter and may be false when an
-        # unrelated real singleton worker from a previous test remains alive.
         assert order == ["janitor", "cleanup", "retry", "guardian"]
     finally:
         shutdown._reset_runtime_shutdown_for_tests()
+        registry_after = real_registry.snapshot()
+        assert dict(registry_after.service_kinds).get("sync_provider_cleanup_escrow") == 1
+        assert not registry_after.admission_closed
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1])

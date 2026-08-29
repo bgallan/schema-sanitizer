@@ -9,6 +9,7 @@ import os
 import time
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -93,7 +94,7 @@ def test_release_guardian_dead_letters_permanent_failure(monkeypatch: pytest.Mon
             raise OSError("permanent")
 
     assert guardian.adopt(Broken(), retained_bytes=32)
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         snap = guardian.snapshot()
         if snap.dead_letter_owners:

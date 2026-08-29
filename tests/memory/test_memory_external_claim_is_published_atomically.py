@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -50,7 +51,7 @@ def test_external_claim_is_published_atomically(
             first = calls == 1
         if first:
             entered.set()
-            assert release.wait(3)
+            assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
         original(descriptor, payload)
 
     monkeypatch.setattr(module, "_write_claim_payload", blocked_write)
@@ -66,12 +67,11 @@ def test_external_claim_is_published_atomically(
     first = threading.Thread(target=claim)
     second = threading.Thread(target=claim)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    second.join(2)
+    join_thread_or_fail(second)
     release.set()
-    first.join(2)
-    assert not first.is_alive() and not second.is_alive()
+    join_thread_or_fail(first)
     owners = [value for value in outcomes if isinstance(value, module.PathIdentity)]
     errors = [value for value in outcomes if isinstance(value, BaseException)]
     assert len(owners) == 1
@@ -157,8 +157,8 @@ def test_retry_worker_start_rollback_has_autonomous_guardian(
 
     monkeypatch.setattr(module.threading, "Thread", thread_factory)
     scheduler._start_timer_worker()
-    assert released.wait(2)
-    deadline = time.monotonic() + 2
+    assert released.wait(SCHEDULER_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     guardian = module._RELEASE_GUARDIAN
     while time.monotonic() < deadline:
         with guardian._condition:
@@ -181,7 +181,7 @@ def test_retry_timer_is_not_blocked_by_one_callback() -> None:
     def first_callback() -> None:
         """Run the first callback while replacement publication is blocked."""
         blocked.set()
-        assert release.wait(3)
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     assert schedule_retry(
         ("external-claim-is-published-atomically-exec", 1), first_callback, delay_seconds=0
@@ -189,8 +189,8 @@ def test_retry_timer_is_not_blocked_by_one_callback() -> None:
     assert schedule_retry(
         ("external-claim-is-published-atomically-exec", 2), second.set, delay_seconds=0.02
     )
-    assert blocked.wait(2)
-    assert second.wait(2)
+    assert blocked.wait(SCHEDULER_TIMEOUT_SECONDS)
+    assert second.wait(SCHEDULER_TIMEOUT_SECONDS)
     release.set()
 
 
@@ -291,10 +291,9 @@ def test_bridge_drain_reaches_tasks_spawned_from_finally(
 
     runner = _BridgeRunner(operation(), copy_context(), Lease())
     runner.start()
-    assert started.wait(2)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     runner.cancel()
-    runner._thread.join(2)
-    assert not runner._thread.is_alive()
+    join_thread_or_fail(runner._thread)
     assert child_started.is_set()
     assert child_finally.is_set()
 
@@ -314,7 +313,7 @@ def test_path_claim_owner_finalizer_eventually_removes_external_claim(
     claim = Path(identity.external_claim_path)
     del identity
     gc.collect()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while claim.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not claim.exists()

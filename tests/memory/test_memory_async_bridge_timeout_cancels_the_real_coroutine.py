@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
 def test_async_bridge_timeout_cancels_the_real_coroutine(
@@ -39,7 +40,7 @@ def test_async_bridge_timeout_cancels_the_real_coroutine(
             async_bridge.run_sync(slow(), threading_mode="multi")
 
     asyncio.run(exercise())
-    assert finalized.wait(1.0)
+    assert finalized.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_async_bridge_thread_start_failure_closes_coroutine_and_releases_lease(

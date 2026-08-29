@@ -8,15 +8,19 @@ They verify that interruption preserves progress and that ownership ends only af
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import multiprocessing
 import os
 import threading
-import uuid
 from pathlib import Path
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_process_or_fail,
+    join_thread_or_fail,
+)
 
 from schema_sanitizer.core_impl.cancellation import (
     OperationCancellationToken,
@@ -33,6 +37,8 @@ from schema_sanitizer.core_impl.operation_diagnostics import (
     register_operation,
 )
 from schema_sanitizer.core_impl.process_resources import _Governor
+
+_DIAGNOSTIC_OPERATION_IDS = itertools.count()
 from schema_sanitizer.errors import (
     SchemaSanitizerCancelledError,
     SchemaSanitizerResourceError,
@@ -224,8 +230,8 @@ def test_cancelled_governor_ticket_does_not_block_followers(
     assert timed_out.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     holder.release()
     assert follower_acquired.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    first.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    second.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert governor.snapshot().in_use == 0
 
 
@@ -245,7 +251,9 @@ def test_cross_process_memory_rejects_combined_overcommit(
     child.start()
     child_connection.close()
     try:
-        assert parent_connection.poll(30), "child reservation handshake timed out"
+        assert parent_connection.poll(SCHEDULER_TIMEOUT_SECONDS), (
+            "child reservation handshake timed out"
+        )
         assert parent_connection.recv() == ("reserved", 70)
         with pytest.raises(SchemaSanitizerResourceError, match="cross-process"):
             CrossProcessMemoryLease(100, 40)
@@ -256,10 +264,7 @@ def test_cross_process_memory_rejects_combined_overcommit(
         except (BrokenPipeError, EOFError, OSError):
             pass
         parent_connection.close()
-        child.join(timeout=30)
-        if child.is_alive():  # pragma: no cover - emergency anti-hang cleanup
-            child.terminate()
-            child.join(timeout=30)
+        join_process_or_fail(child)
     assert child.exitcode == 0
     assert cross_process_memory_reserved_bytes() == 0
 
@@ -328,7 +333,7 @@ def test_provider_throttle_reduces_window_and_opens_bounded_circuit(
 
 def test_operation_diagnostics_separate_live_and_completed_operations() -> None:
     """Concurrent callers can query a bounded operation-specific diagnostic record."""
-    operation_id = f"test-{uuid.uuid4().hex}"
+    operation_id = f"test-operation-diagnostics-{next(_DIAGNOSTIC_OPERATION_IDS)}"
 
     class Owner:
         """Expose a bound-method snapshot without global retention."""
@@ -360,7 +365,7 @@ def test_initialized_runtime_fails_fast_after_fork() -> None:
     child = context.Process(target=_fork_safety_child, args=(result,))
     child.start()
     message = result.get(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    child.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    join_process_or_fail(child)
     assert child.exitcode == 0
     assert "spawn" in message
     assert "forkserver" in message

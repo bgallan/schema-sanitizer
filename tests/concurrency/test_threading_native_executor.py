@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -107,12 +108,12 @@ assert result[2] == 1
         text=True,
     )
     child_proc = proc_root / str(process.pid)
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
         time.sleep(0.001)
     if not ready.exists():
         process.terminate()
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=SCHEDULER_TIMEOUT_SECONDS)
         pytest.fail(f"child did not initialize: stdout={stdout!r} stderr={stderr!r}")
 
     baseline_threads = len(tuple((child_proc / "task").iterdir()))

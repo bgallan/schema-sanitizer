@@ -13,15 +13,25 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <random>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <stdexcept>
 #include <system_error>
 #include <vector>
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <psapi.h>
+#elif defined(__APPLE__)
 #include <sys/resource.h>
 #elif defined(__linux__)
 #include <unistd.h>
@@ -32,6 +42,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size);
 
 namespace {
+
+constexpr std::uint64_t kBytesPerMiB = 1024U * 1024U;
 
 struct Options {
   std::size_t runs{1};
@@ -90,6 +102,9 @@ struct Options {
       options.max_input_ms = parsed;
     } else if (parse_option("-max_rss_mb=", parsed) ||
                parse_option("--max-rss-mb=", parsed)) {
+      if (parsed > std::numeric_limits<std::uint64_t>::max() / kBytesPerMiB) {
+        throw std::invalid_argument("fuzzer RSS limit is too large");
+      }
       options.max_rss_mb = parsed;
     } else if (argument == "--help" || argument == "-help=1") {
       std::cout
@@ -106,30 +121,37 @@ struct Options {
   return options;
 }
 
-/// Returns current resident bytes when the host exposes a supported probe.
-[[nodiscard]] std::uint64_t resident_bytes() noexcept {
-#if defined(__linux__)
+/// Returns current resident bytes, or no value when the probe cannot be trusted.
+[[nodiscard]] std::optional<std::uint64_t> resident_bytes() noexcept {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS counters{};
+  if (GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                           static_cast<DWORD>(sizeof(counters))) == 0) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(counters.WorkingSetSize);
+#elif defined(__linux__)
   std::ifstream statm("/proc/self/statm");
   std::uint64_t total_pages = 0;
   std::uint64_t resident_pages = 0;
   if (!(statm >> total_pages >> resident_pages)) {
-    return 0;
+    return std::nullopt;
   }
   const auto page_size = sysconf(_SC_PAGESIZE);
   if (page_size <= 0 ||
       resident_pages > std::numeric_limits<std::uint64_t>::max() /
                            static_cast<std::uint64_t>(page_size)) {
-    return 0;
+    return std::nullopt;
   }
   return resident_pages * static_cast<std::uint64_t>(page_size);
 #elif defined(__APPLE__)
   rusage usage{};
   if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss < 0) {
-    return 0;
+    return std::nullopt;
   }
   return static_cast<std::uint64_t>(usage.ru_maxrss);
 #else
-  return 0;
+  return std::nullopt;
 #endif
 }
 
@@ -189,30 +211,46 @@ load_corpus(const Options &options) {
   return corpus;
 }
 
+/// Maps engine output uniformly below a bound with a library-independent rule.
+[[nodiscard]] std::uint64_t random_below(std::mt19937_64 &random,
+                                         std::uint64_t upper_exclusive) {
+  if (upper_exclusive == 0U) {
+    throw std::invalid_argument("random bound must be positive");
+  }
+  const auto rejection_floor =
+      (std::uint64_t{0} - upper_exclusive) % upper_exclusive;
+  std::uint64_t value = 0;
+  do {
+    value = random();
+  } while (value < rejection_floor);
+  return value % upper_exclusive;
+}
+
 /// Selects a uniform valid index, returning zero for an empty range.
 [[nodiscard]] std::size_t random_index(std::mt19937_64 &random,
                                        std::size_t size) {
+  static_assert(sizeof(std::size_t) <= sizeof(std::uint64_t));
   if (size == 0U) {
     return 0U;
   }
-  return std::uniform_int_distribution<std::size_t>(0U, size - 1U)(random);
+  return static_cast<std::size_t>(
+      random_below(random, static_cast<std::uint64_t>(size)));
 }
 
 /// Applies one bounded deterministic mutation selected from the operation set.
 void mutate(std::vector<std::uint8_t> &bytes,
             std::span<const std::vector<std::uint8_t>> corpus,
             std::size_t max_length, std::mt19937_64 &random) {
-  const auto operation = std::uniform_int_distribution<unsigned>(0U, 7U)(random);
+  const auto operation = static_cast<unsigned>(random_below(random, 8U));
   const auto random_byte = [&]() {
-    return static_cast<std::uint8_t>(
-        std::uniform_int_distribution<unsigned>(0U, 255U)(random));
+    return static_cast<std::uint8_t>(random_below(random, 256U));
   };
 
   switch (operation) {
   case 0U:
     if (!bytes.empty()) {
       const auto offset = random_index(random, bytes.size());
-      const auto bit = std::uniform_int_distribution<unsigned>(0U, 7U)(random);
+      const auto bit = static_cast<unsigned>(random_below(random, 8U));
       bytes[offset] ^= static_cast<std::uint8_t>(1U << bit);
     }
     break;
@@ -311,12 +349,18 @@ int main(int argc, char **argv) {
         return 3;
       }
       if (options.max_rss_mb > 0U) {
-        constexpr std::uint64_t kMiB = 1024U * 1024U;
         const auto rss = resident_bytes();
-        if (rss > options.max_rss_mb * kMiB) {
+        if (!rss.has_value()) {
+          std::cerr << "standalone fuzzer RSS probe failed while the guard was "
+                       "enabled: run="
+                    << run << " size=" << input.size() << '\n';
+          return 5;
+        }
+        const auto limit_bytes = options.max_rss_mb * kBytesPerMiB;
+        if (*rss > limit_bytes) {
           std::cerr << "standalone fuzzer RSS guard exceeded: run=" << run
-                    << " size=" << input.size() << " rss_bytes=" << rss
-                    << " limit_bytes=" << options.max_rss_mb * kMiB << '\n';
+                    << " size=" << input.size() << " rss_bytes=" << *rss
+                    << " limit_bytes=" << limit_bytes << '\n';
           return 4;
         }
       }

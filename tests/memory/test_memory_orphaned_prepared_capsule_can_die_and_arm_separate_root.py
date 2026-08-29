@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -44,7 +45,7 @@ def test_orphaned_prepared_capsule_can_die_and_arm_separate_root() -> None:
         assert escrow._tickets[slot] == ticket
         assert escrow._slots[slot] is authority
 
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while (
         ticket in escrow._ticket_slots
         or authority.is_armed_for(ticket)
@@ -189,7 +190,7 @@ def test_path_claim_escrow_roots_authority_not_destructed_owner() -> None:
         assert module._PATH_CLAIM_FINALIZER_ESCROW._tickets[slot] == ticket
         assert module._PATH_CLAIM_FINALIZER_ESCROW._slots[slot] is authority
 
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while (
         ticket in module._PATH_CLAIM_FINALIZER_ESCROW._ticket_slots
         or authority.is_armed_for(ticket)

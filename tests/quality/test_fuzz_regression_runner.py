@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import ModuleType
 
@@ -15,6 +19,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "meta" / "ci" / "fuzz" / "run_fuzz_regressions.py"
+STANDALONE_RUNNER = ROOT / "cpp" / "fuzz" / "standalone_main.cc"
 
 
 def _module() -> ModuleType:
@@ -37,6 +42,81 @@ def _runner_tree(module: ModuleType, root: Path) -> tuple[Path, Path]:
         target_root.mkdir(parents=True)
         (target_root / "case.bin").write_bytes(target.encode())
     return build_root, regression_root
+
+
+def _compile_recording_standalone_runner(tmp_path: Path) -> Path:
+    """Build the standalone driver with a target that records every input."""
+    compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+    if compiler is None:
+        pytest.skip("a C++ compiler is required for the standalone mutation golden test")
+    target_source = tmp_path / "record_fuzz_inputs.cc"
+    target_source.write_text(
+        """\
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <iomanip>
+#include <iostream>
+
+#define main schema_sanitizer_standalone_main
+#include "cpp/fuzz/standalone_main.cc"
+#undef main
+
+extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
+                                      std::size_t size) {
+  std::cout << std::hex << std::setfill('0');
+  for (std::size_t index = 0; index < size; ++index) {
+    std::cout << std::setw(2) << static_cast<unsigned>(data[index]);
+  }
+  std::cout << std::dec << '\\n';
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--bounded-random-golden") {
+    std::mt19937_64 random(41U);
+    constexpr std::array<std::uint64_t, 5> bounds{
+        3U,
+        10U,
+        17U,
+        (std::uint64_t{1} << 63U) + 1U,
+        std::numeric_limits<std::uint64_t>::max(),
+    };
+    for (const auto bound : bounds) {
+      for (unsigned sample = 0; sample < 4U; ++sample) {
+        std::cout << random_below(random, bound) << '\\n';
+      }
+    }
+    return 0;
+  }
+  return schema_sanitizer_standalone_main(argc, argv);
+}
+""",
+        encoding="utf-8",
+    )
+    executable = tmp_path / ("record_fuzz_inputs.exe" if os.name == "nt" else "record_fuzz_inputs")
+    command = [
+        compiler,
+        "-std=c++23",
+        "-O0",
+        "-I",
+        str(ROOT),
+        str(target_source),
+        "-o",
+        str(executable),
+    ]
+    if os.name == "nt":
+        command.append("-lpsapi")
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return executable
 
 
 def test_regression_planner_stages_stable_cases_and_commands(tmp_path: Path) -> None:
@@ -215,6 +295,117 @@ def test_guard_arguments_reject_unknown_engine() -> None:
         module.guard_arguments("unknown", max_input_ms=1_000, max_rss_mb=128)
 
 
+def test_standalone_mutation_stream_matches_its_cross_library_golden(
+    tmp_path: Path,
+) -> None:
+    """Fixed seed mutation bytes stay independent of standard-library distributions."""
+    executable = _compile_recording_standalone_runner(tmp_path)
+    seed = tmp_path / "seed"
+    seed.write_bytes(b"abcd")
+    command = [
+        str(executable),
+        "-runs=16",
+        "-seed=41",
+        "-max_len=16",
+        "-max_input_ms=5000",
+        "-max_rss_mb=0",
+        str(seed),
+    ]
+    outputs: list[list[str]] = []
+    for _ in range(2):
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stderr
+        outputs.append(completed.stdout.splitlines())
+
+    assert outputs[0] == outputs[1]
+    runner_source = STANDALONE_RUNNER.read_text(encoding="utf-8")
+    assert "uniform_int_distribution" not in runner_source
+    assert "GetProcessMemoryInfo" in runner_source
+
+    guarded_command = command.copy()
+    guarded_command[1] = "-runs=1"
+    guarded_command[5] = "-max_rss_mb=1000000"
+    guarded = subprocess.run(
+        guarded_command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert guarded.returncode == 0, guarded.stderr
+
+    overflow = subprocess.run(
+        [
+            str(executable),
+            "-runs=1",
+            "-max_rss_mb=17592186044416",
+            str(seed),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert overflow.returncode == 2
+    assert "RSS limit is too large" in overflow.stderr
+
+    bounded = subprocess.run(
+        [str(executable), "--bounded-random-golden"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert bounded.returncode == 0, bounded.stderr
+    assert bounded.stdout.splitlines() == [
+        "1",
+        "2",
+        "2",
+        "1",
+        "5",
+        "7",
+        "5",
+        "0",
+        "4",
+        "1",
+        "5",
+        "10",
+        "3776483655231910937",
+        "4614963366957433368",
+        "3795442861040559494",
+        "4082647064111992146",
+        "6628579074409753543",
+        "13884036159728665350",
+        "12874508976105387110",
+        "6827436633806237924",
+    ]
+    assert outputs[0] == [
+        "61626364",
+        "61636364",
+        "196173628e64",
+        "6161426462636464",
+        "6161626343646243646263646162",
+        "",
+        "",
+        "82da207ee5a99c896263641b",
+        "616263",
+        "0197422d497f8d4301",
+        "6162636446",
+        "71524c63",
+        "907507bee6df9861",
+        "",
+        "85148a5c85c5c6d6",
+        "b34ebaaaf8",
+        "standalone fuzz runs completed: 16",
+    ]
+
+
 def test_build_plan_owns_all_staging_until_shell_execution(tmp_path: Path) -> None:
     """The generated shell, rather than the short-lived planner, owns cleanup."""
     module = _module()
@@ -238,6 +429,12 @@ def test_build_plan_owns_all_staging_until_shell_execution(tmp_path: Path) -> No
     assert all(Path(command[-1]).is_relative_to(plan.staging_root) for command in plan.commands)
     assert plan.regression_inputs == len(module.TARGETS)
     assert plan.mutation_runs == 0
+
+    stale = plan.staging_root / "stale"
+    stale.write_text("old run", encoding="utf-8")
+    replacement = module.build_plan(args)
+    assert replacement.staging_root == plan.staging_root
+    assert not stale.exists()
 
 
 def test_shell_plan_quotes_commands_and_publishes_evidence_last(tmp_path: Path) -> None:
@@ -265,6 +462,175 @@ def test_shell_plan_quotes_commands_and_publishes_evidence_last(tmp_path: Path) 
     content = script.read_text(encoding="utf-8")
     assert "trap cleanup_staging EXIT" in content
     assert "'value; touch injected'" in content
-    assert content.index("/usr/bin/true") < content.index(output.as_posix())
+    assert content.index("/usr/bin/true") < content.index("mv -f --")
     assert '"status": "passed"' in content
     assert not output.exists()
+
+    completed = subprocess.run(["bash", str(script)], check=False, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(output.read_text(encoding="utf-8")) == evidence
+    assert not staging_root.exists()
+
+
+def test_failed_fuzz_plan_removes_stale_passing_evidence(tmp_path: Path) -> None:
+    """A rerun clears old success evidence before executing a failing command."""
+    module = _module()
+    output = tmp_path / "evidence.json"
+    output.write_text('{"status":"passed"}\n', encoding="utf-8")
+    script = tmp_path / "plan.sh"
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir()
+    plan = module.FuzzPlan(
+        commands=(("/usr/bin/false",),),
+        regression_inputs=1,
+        mutation_runs=0,
+        staging_root=staging_root,
+    )
+
+    module.write_shell_plan(
+        plan,
+        script,
+        evidence_output=output,
+        evidence={"status": "passed"},
+    )
+    completed = subprocess.run(["bash", str(script)], check=False)
+
+    assert completed.returncode != 0
+    assert not output.exists()
+    assert not staging_root.exists()
+
+
+def test_fuzz_outputs_cannot_overlap_staging_executables_or_inputs(tmp_path: Path) -> None:
+    """Plan and evidence publication cannot overwrite any cleanup or command owner."""
+    module = _module()
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir()
+    binary = tmp_path / "fuzzer"
+    binary.write_bytes(b"binary")
+    command_input = tmp_path / "external-input"
+    command_input.write_bytes(b"input")
+    regression_root = tmp_path / "regression-source"
+    regression_root.mkdir()
+    source_input = regression_root / "source.bin"
+    source_input.write_bytes(b"source")
+    plan = module.FuzzPlan(
+        commands=((binary.as_posix(), command_input.as_posix()),),
+        regression_inputs=1,
+        mutation_runs=0,
+        staging_root=staging_root,
+        source_roots=(("regression root", regression_root),),
+    )
+    valid_output = tmp_path / "commands.sh"
+    invalid = (
+        (staging_root / "commands.sh", None, "outside owned staging"),
+        (binary, None, "command 0 executable"),
+        (valid_output, command_input, "command 0 input"),
+        (source_input, None, "stay outside regression root"),
+        (valid_output, valid_output / "evidence.json", "outputs must be disjoint"),
+    )
+
+    for command_output, evidence_output, message in invalid:
+        with pytest.raises(ValueError, match=message):
+            module.write_shell_plan(
+                plan,
+                command_output,
+                evidence_output=evidence_output,
+                evidence={"status": "passed"},
+            )
+    assert binary.read_bytes() == b"binary"
+    assert command_input.read_bytes() == b"input"
+    assert source_input.read_bytes() == b"source"
+
+
+def test_fuzz_source_overlap_fails_before_staging_cleanup(tmp_path: Path) -> None:
+    """A cleanup-owned build root is rejected without deleting its fuzzer."""
+    module = _module()
+    work_root = tmp_path / "work"
+    staging_root = work_root / "staging"
+    build_root = staging_root / "build"
+    regression_root = tmp_path / "regressions"
+    build_root.mkdir(parents=True)
+    regression_root.mkdir()
+    sentinel = build_root / "preserve"
+    sentinel.write_bytes(b"binary")
+    args = argparse.Namespace(
+        build_root=build_root,
+        regression_root=regression_root,
+        corpus_root=regression_root,
+        work_root=work_root,
+        campaign_runs=0,
+        seed=41,
+        max_len=4096,
+        max_input_ms=5000,
+        max_rss_mb=768,
+        engine="standalone",
+    )
+
+    with pytest.raises(ValueError, match="build root must stay outside owned staging"):
+        module.build_plan(args)
+    assert sentinel.read_bytes() == b"binary"
+
+
+@pytest.mark.parametrize(("primary_status", "expected_status"), ((0, 23), (7, 7)))
+def test_fuzz_cleanup_traps_report_cleanup_only_failures(
+    tmp_path: Path,
+    primary_status: int,
+    expected_status: int,
+) -> None:
+    """Generated and outer traps fail success but preserve an existing failure."""
+    module = _module()
+    staging_root = tmp_path / f"staging-{primary_status}"
+    staging_root.mkdir()
+    generated = tmp_path / f"generated-{primary_status}.sh"
+    module.write_shell_plan(
+        module.FuzzPlan((), 0, 0, staging_root),
+        generated,
+        evidence_output=None,
+        evidence={},
+    )
+    wrapper = SCRIPT.with_suffix(".sh")
+    scripts = (
+        (generated.read_text(encoding="utf-8"), "trap cleanup_staging EXIT"),
+        (wrapper.read_text(encoding="utf-8"), "trap cleanup_plan EXIT"),
+    )
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    fake_rm = fake_bin / "rm"
+    required_commands = {
+        command: shutil.which(command) for command in ("bash", "dirname", "mktemp")
+    }
+    assert all(required_commands.values())
+    bash = required_commands["bash"]
+    assert bash is not None
+    fake_rm.write_text("#!/usr/bin/env bash\nexit 23\n", encoding="utf-8")
+    fake_rm.chmod(0o755)
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir(exist_ok=True)
+    tool_directories = sorted(
+        {str(Path(command).parent) for command in required_commands.values() if command is not None}
+    )
+    environment = {
+        "LC_ALL": "C",
+        "PATH": os.pathsep.join((str(fake_bin), *tool_directories)),
+        "TMPDIR": str(temporary_root),
+        "TZ": "UTC",
+    }
+
+    for content, marker in scripts:
+        end = content.index(marker) + len(marker)
+        preamble = content[:end] + f"\nexit {primary_status}\n"
+        completed = subprocess.run(
+            [bash, "-c", preamble],
+            check=False,
+            cwd=ROOT,
+            env=environment,
+        )
+        assert completed.returncode == expected_status
+
+
+def test_fuzz_wrapper_keeps_owned_plan_locations_authoritative() -> None:
+    """Caller options cannot override the wrapper's process-owned output paths."""
+    wrapper = SCRIPT.with_suffix(".sh").read_text(encoding="utf-8")
+
+    assert wrapper.index('"$@"') < wrapper.index("--work-root")
+    assert wrapper.index('"$@"') < wrapper.index("--command-output")

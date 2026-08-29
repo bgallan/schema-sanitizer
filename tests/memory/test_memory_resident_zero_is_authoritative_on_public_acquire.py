@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
@@ -336,16 +338,14 @@ def test_capacity_shrink_ejects_impossible_fifo_head() -> None:
 
     thread = threading.Thread(target=wait_big)
     thread.start()
-    assert entered.wait(1.0)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     # Ensure the waiter has reached the queue before shrinking.
-    for _ in range(1000):
-        if governor.snapshot().waiting:
-            break
+    deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
+    while not governor.snapshot().waiting and monotonic() < deadline:
         threading.Event().wait(0.001)
     assert governor.snapshot().waiting == 1
     governor.refresh_capacity(1)
-    thread.join(1.0)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert result and "no longer fits refreshed capacity" in result[0]
     assert governor.snapshot().waiting == 0
     held.release()

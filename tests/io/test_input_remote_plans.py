@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from _support.remote_harness import BoundedResponse as FakeResponse
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 from conftest import read_test_jsonl
 
 import schema_sanitizer as ss
@@ -1297,7 +1298,7 @@ def test_remote_chunk_prefetch_iterator_stages_next_chunk_and_cleans_up() -> Non
     with open_staged_remote_chunks(manifest) as chunks:
         first = next(chunks)
         assert first.start == 0
-        assert manifest.second_started.wait(timeout=2.0)
+        assert manifest.second_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         assert manifest.calls == [0, 1]
         assert manifest.staged[1].closed is False
 
@@ -1914,7 +1915,7 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         if active_downloads == 2:
             full_window.set()
         try:
-            await asyncio.wait_for(full_window.wait(), timeout=5)
+            await asyncio.wait_for(full_window.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
             Path(local_path).write_text(f'{{"file":"{file.name}"}}\n', encoding="utf-8")
         finally:
             active_downloads -= 1

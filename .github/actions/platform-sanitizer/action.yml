@@ -11,6 +11,24 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Require a supported sanitizer tuple
+      env:
+        RUNNER_SYSTEM: ${{ runner.os }}
+        SANITIZER_MODE: ${{ inputs.mode }}
+        SANITIZER_NAME: ${{ inputs.sanitizer }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        sanitizer_tuple="${RUNNER_SYSTEM}:${SANITIZER_MODE}:${SANITIZER_NAME}"
+        case "${sanitizer_tuple}" in
+          Linux:linux-full:asan-ubsan | \
+          Windows:native:asan | \
+          macOS:native:asan-ubsan) ;;
+          *)
+            echo "Unsupported sanitizer tuple: ${sanitizer_tuple}" >&2
+            exit 2
+            ;;
+        esac
     - name: Install the Linux Clang 18 toolchain
       if: inputs.mode == 'linux-full'
       shell: bash
@@ -21,13 +39,25 @@ runs:
         sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
           -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
           install -y clang-18
+        clang-18 -dumpversion | grep -Eq '^18([.]|$)'
+        clang++-18 -dumpversion | grep -Eq '^18([.]|$)'
     - name: Install build dependencies
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: >-
-        python -m pip install pip==26.1.2 ninja==1.13.0 cmake==4.3.4
+        python -m pip install pip==26.2.1 ninja==1.13.0 cmake==4.3.4
         scikit-build-core==0.11.6 pytest==9.1.1 pyarrow==25.0.1
+    - name: Reset generated sanitizer paths
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- .work/build .work/bin/python-asan
     - name: Build and install the Linux instrumented extension
       if: inputs.mode == 'linux-full'
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: >-
         python -m pip install -v --no-build-isolation
@@ -133,40 +163,23 @@ runs:
         schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
         schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
         --parallel 4
-    - name: Check capacity for complete native concurrency coverage
-      id: sanitizer_cpu_capacity
-      if: runner.os != 'Windows'
+    - name: Require capacity for complete native concurrency coverage
+      if: inputs.mode == 'native' && runner.os != 'Windows'
       shell: bash
-      run: |
+      run: |-
         set -euo pipefail
-        if capacity_message="$(
-          .work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor \
-            --require-cpu-capacity 3 2>&1
-        )"; then
-          echo "sufficient=true" >> "${GITHUB_OUTPUT}"
-        else
-          probe_status=$?
-          if [[ "${probe_status}" -eq 1 && \
-                "${capacity_message}" =~ ^sanitizer\ runner\ exposes\ [0-9]+\ CPU\ credits\;\ at\ least\ 3\ are\ required\ for\ complete\ concurrency\ coverage$ ]]; then
-            echo "sufficient=false" >> "${GITHUB_OUTPUT}"
-            echo "::warning title=Sanitizer concurrency skipped::${capacity_message}; CPU-dependent concurrency steps will be skipped."
-          else
-            printf '%s\n' "${capacity_message}" >&2
-            exit "${probe_status}"
-          fi
-        fi
-    - name: Run repeated sanitized concurrency probe
+        .work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor \
+          --require-cpu-capacity 3
+    - name: Run fixed-round sanitized concurrency probe
       # MSVC ASan can hang outside the probe watchdog. Windows still builds
       # the probe and executes all four native fuzzers below; Linux TSan owns
       # the repeated race-sensitive concurrency gate.
-      if: inputs.mode == 'native' && runner.os != 'Windows' && steps.sanitizer_cpu_capacity.outputs.sufficient
-        == 'true'
+      if: inputs.mode == 'native' && runner.os != 'Windows'
       shell: bash
       run: >-
         ctest --test-dir .work/build/platform-sanitizer
         -C RelWithDebInfo
-        -R schema_sanitizer_sanitized_ordered_executor
-        --repeat until-fail:2
+        -R '^schema_sanitizer_sanitized_ordered_executor$'
         --output-on-failure
     - name: Run platform fuzz regressions and mutation campaigns
       if: inputs.mode == 'native'

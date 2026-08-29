@@ -275,8 +275,9 @@ def test_to_file_embeds_native_schema_registry(tmp_path: Path, suffix: str) -> N
         assert isinstance(second_row["ingestion_timestamp"], str)
         assert row["ingestion_timestamp"]
         assert second_row["ingestion_timestamp"]
-    assert second_row["schema_registry"] in (None, "")
-    assert second_row["schema_drifts"] in (None, "")
+    expected_absent = "" if suffix == ".csv" else None
+    assert second_row["schema_registry"] == expected_absent
+    assert second_row["schema_drifts"] == expected_absent
     assert result.schema_registry == registry
     assert result.schema_drifts == drifts
     assert result.schema_registry_json == row["schema_registry"]

@@ -20,6 +20,7 @@ from _support.remote_harness import (
 from _support.remote_harness import (
     sparse_file as _sparse_file,
 )
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.usefixtures("require_native")
 
@@ -84,9 +85,13 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
             try:
                 if part == 1:
                     self.part_one_started.set()
-                    await asyncio.wait_for(self.part_two_completed.wait(), timeout=5)
+                    await asyncio.wait_for(
+                        self.part_two_completed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                    )
                 elif part == 2:
-                    await asyncio.wait_for(self.part_one_started.wait(), timeout=5)
+                    await asyncio.wait_for(
+                        self.part_one_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                    )
                 self.completion_order.append(part)
                 if part == 2:
                     self.part_two_completed.set()
@@ -466,10 +471,14 @@ def test_s3_multipart_reports_earliest_failing_part(
             part = int(kwargs["PartNumber"])
             if part == 2:
                 self.part_two_started.set()
-                await asyncio.wait_for(self.part_three_failed.wait(), timeout=5)
+                await asyncio.wait_for(
+                    self.part_three_failed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                )
                 raise ValueError("canonical part 2 failure")
             if part == 3:
-                await asyncio.wait_for(self.part_two_started.wait(), timeout=5)
+                await asyncio.wait_for(
+                    self.part_two_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                )
                 self.part_three_failed.set()
                 raise ValueError("later part 3 failure")
             await asyncio.sleep(0)

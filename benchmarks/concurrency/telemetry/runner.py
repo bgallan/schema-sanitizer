@@ -253,7 +253,7 @@ def run_child(
         warmups=args.warmups if warmups is None else warmups,
         repeats=args.repeats if repeats is None else repeats,
     )
-    run_command(command, check=True)
+    run_command(command, check=True, timeout=14_400)
     report = json.loads(output.read_text(encoding="utf-8"))
     report["numa_binding_status"] = binding_status
     return report
@@ -395,7 +395,7 @@ def run_perf_child(
         "--",
         *direct,
     ]
-    completed = run_command(command, stdout=CAPTURE, stderr=CAPTURE)
+    completed = run_command(command, stdout=CAPTURE, stderr=CAPTURE, timeout=14_400)
     parsed = parse_perf_stat(perf_output)
     parsed["returncode"] = completed.returncode
     parsed["numa_binding_status"] = binding_status

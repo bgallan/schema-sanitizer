@@ -12,6 +12,7 @@ import tracemalloc
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 from schema_sanitizer.core_impl.process_resources import _Governor
 from schema_sanitizer.errors import SchemaSanitizerResourceError
@@ -148,7 +149,7 @@ def test_provider_throttle_registry_stays_bounded_under_threaded_churn() -> None
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=5)
+        join_thread_or_fail(thread)
 
     assert all(not thread.is_alive() for thread in threads)
     assert errors == []
@@ -296,7 +297,7 @@ def test_resource_waiter_timeouts_are_removed_without_ticket_tombstones() -> Non
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=1)
+        join_thread_or_fail(thread)
 
     assert timed_out == 16
     assert governor.snapshot().waiting == 0
@@ -314,7 +315,7 @@ def test_resource_wait_queue_fails_fast_at_its_memory_bound() -> None:
     def wait_for_slot() -> None:
         """Acquire after the holder releases and return capacity immediately."""
         nonlocal acquired
-        lease = governor.acquire(timeout_seconds=1)
+        lease = governor.acquire(timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
         with acquired_lock:
             acquired += 1
         lease.release()
@@ -322,13 +323,13 @@ def test_resource_wait_queue_fails_fast_at_its_memory_bound() -> None:
     threads = [threading.Thread(target=wait_for_slot) for _ in range(2)]
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while governor.snapshot().waiting < 2 and time.monotonic() < deadline:
         time.sleep(0.005)
     assert governor.snapshot().waiting == 2
 
     with pytest.raises(SchemaSanitizerResourceError, match="wait queue exhausted"):
-        governor.acquire(timeout_seconds=1)
+        governor.acquire(timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
     saturated = governor.snapshot()
     assert saturated.waiting == 2
     assert saturated.queue_capacity == 2
@@ -336,6 +337,6 @@ def test_resource_wait_queue_fails_fast_at_its_memory_bound() -> None:
 
     holder.release()
     for thread in threads:
-        thread.join(timeout=1)
+        join_thread_or_fail(thread)
     assert acquired == 2
     assert governor.snapshot().waiting == 0

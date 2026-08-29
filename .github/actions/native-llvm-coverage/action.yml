@@ -7,6 +7,7 @@ runs:
     - name: Install LLVM 18 coverage toolchain
       shell: bash
       run: |
+        set -euo pipefail
         sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
           -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
         sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
@@ -15,12 +16,20 @@ runs:
         clang-18 --version
         llvm-profdata-18 --version
         llvm-cov-18 --version
+        clang-18 -dumpversion | grep -Eq '^18([.]|$)'
+        llvm-profdata-18 --version | grep -Eq 'LLVM version 18([.]|$)'
+        llvm-cov-18 --version | grep -Eq 'LLVM version 18([.]|$)'
     - name: Install instrumented package
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
-        python -m pip install pip==26.1.2 ninja==1.13.0 cmake==4.3.4 \
+        set -euo pipefail
+        python -m pip install pip==26.2.1 ninja==1.13.0 cmake==4.3.4 \
           scikit-build-core==0.11.6
         python -m pip install pytest==9.1.1 pyarrow==25.0.1 polars==1.43.2
+        rm -rf -- coverage-native .work/build
         mkdir -p coverage-native/raw
         python -m pip install --no-build-isolation -v \
           --config-settings=install.strip=false \
@@ -35,6 +44,7 @@ runs:
     - name: Run native coverage suites
       shell: bash
       run: |
+        set -euo pipefail
         for suite in regular adversarial integration; do
           mkdir -p "coverage-native/raw/${suite}"
           python meta/ci/quality/run_coverage_suite.py native "${suite}"
@@ -44,6 +54,7 @@ runs:
     - name: Render LLVM reports
       shell: bash
       run: |-
+        set -euo pipefail
         EXTENSION=$(python - <<'PY'
         import schema_sanitizer._core_abi3 as core
         print(core.__file__)

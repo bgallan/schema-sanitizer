@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 from schema_sanitizer.api_impl.source_plan import remote as remote_source_plan
@@ -91,7 +92,7 @@ def test_multi_pipeline_prepares_next_partition_before_current_callback(
         preparation_threads.append(threading.current_thread().name)
         if path == plans[1].source_uri:
             second_started.set()
-            assert release_second.wait(timeout=5)
+            assert release_second.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         return original_prepare(path, **kwargs)
 
     monkeypatch.setattr(lookahead_module, "prepare_public_input", delayed_prepare)
@@ -100,7 +101,7 @@ def test_multi_pipeline_prepares_next_partition_before_current_callback(
     def after_partition(index: int, *_args: Any) -> None:
         """Confirm the next source started before partition one was reported."""
         if index == 1:
-            assert second_started.wait(timeout=5)
+            assert second_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             release_second.set()
         callbacks.append(index)
 
@@ -144,7 +145,7 @@ def test_lookahead_error_is_retained_until_its_partition_ordinal(
     def after_partition(index: int, *_args: Any) -> None:
         """Record the current commit before the next failure is published."""
         if index == 1:
-            assert failure_ready.wait(timeout=5)
+            assert failure_ready.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             assert not Path(plans[1].output_uri).exists()
         callbacks.append(index)
 
@@ -314,7 +315,7 @@ def test_one_slot_window_never_prepares_partition_n_plus_two_early(
         """Hold N+1 and prove N+2 is not submitted into the one-slot window."""
         if path == plans[1].source_uri:
             second_started.set()
-            assert release_second.wait(timeout=5)
+            assert release_second.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         elif path == plans[2].source_uri:
             third_started.set()
         return original_prepare(path, **kwargs)
@@ -324,11 +325,11 @@ def test_one_slot_window_never_prepares_partition_n_plus_two_early(
     def after_partition(index: int, *_args: Any) -> None:
         """Release each next source only after proving the one-slot bound."""
         if index == 1:
-            assert second_started.wait(timeout=5)
+            assert second_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             assert not third_started.is_set()
             release_second.set()
         elif index == 2:
-            assert third_started.wait(timeout=5)
+            assert third_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     result = run_partitioned_to_parquet(
         plans,

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -38,7 +39,7 @@ def test_physical_file_owner_close_commits_once_under_two_closers(
         def close(self) -> None:
             """Close the resources owned by the stream test double."""
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
             self.closed = True
 
     class Lease:
@@ -59,11 +60,11 @@ def test_physical_file_owner_close_commits_once_under_two_closers(
     first = threading.Thread(target=owner.close)
     second = threading.Thread(target=owner.close)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
     continue_close.set()
-    first.join(2)
-    second.join(2)
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert closed_commits == 1
     assert lease_releases == 1
 
@@ -86,7 +87,7 @@ def test_path_identity_does_not_release_credit_before_close_finishes(
     def blocked_close(_fd: int) -> None:
         """Pause at the blocked close synchronization point."""
         entered.set()
-        assert continue_close.wait(2)
+        assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(module.os, "close", blocked_close)
     monkeypatch.setattr(module, "record_physical_file_descriptors_closed", lambda _n=1: None)
@@ -103,18 +104,16 @@ def test_path_identity_does_not_release_credit_before_close_finishes(
     first = threading.Thread(target=owner.release)
     second = threading.Thread(target=owner.release)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    assert waiter_entered.wait(2)
+    assert waiter_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     with owner._condition:
         assert owner._state == owner._CLOSING
         assert owner.fd_lease is not None
     assert not lease_released.is_set()
     continue_close.set()
-    first.join(2)
-    second.join(2)
-    assert not first.is_alive()
-    assert not second.is_alive()
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert lease_released.is_set()
 
 
@@ -280,7 +279,7 @@ def test_scandir_owner_does_not_release_credit_before_iterator_close(
         def close(self) -> None:
             """Close the resources owned by the iterator test double."""
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     class Lease:
         def release(self) -> None:
@@ -301,18 +300,16 @@ def test_scandir_owner_does_not_release_credit_before_iterator_close(
     first = threading.Thread(target=owner.release)
     second = threading.Thread(target=owner.release)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    assert waiter_entered.wait(2)
+    assert waiter_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     with owner._condition:
         assert owner._state == owner._CLOSING
         assert owner.lease is not None
     assert not lease_released.is_set()
     continue_close.set()
-    first.join(2)
-    second.join(2)
-    assert not first.is_alive()
-    assert not second.is_alive()
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert lease_released.is_set()
 
 

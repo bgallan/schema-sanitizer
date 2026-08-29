@@ -11,7 +11,11 @@ import threading
 from pathlib import Path
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
@@ -251,7 +255,7 @@ def test_sync_and_async_remote_waiters_share_one_process_authority(
             try:
                 permit = governor.acquire_sync(1, operation_id="sync-waiter")
                 acquired.set()
-                release.wait(timeout=1.0)
+                wait_event_or_fail(release)
                 permit.release()
             except BaseException as exc:
                 errors.append(exc)
@@ -266,8 +270,7 @@ def test_sync_and_async_remote_waiters_share_one_process_authority(
         first.release()
         assert await asyncio.to_thread(acquired.wait, SCHEDULER_TIMEOUT_SECONDS)
         release.set()
-        thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
         assert not errors
 
     asyncio.run(run())

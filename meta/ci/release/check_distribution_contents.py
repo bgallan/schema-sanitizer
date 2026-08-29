@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import os
+import stat
 import tarfile
 import zipfile
 from email.message import Message
@@ -92,9 +93,12 @@ _SDIST_REQUIRED = {
     "meta/ci/quality/check_detect_secrets_report.py",
     "meta/ci/quality/check_primary_cleanup.py",
     "meta/ci/quality/report_risk_coverage.py",
+    "meta/ci/requirements/build-tools.txt",
     "meta/ci/requirements/platform-tests.txt",
     "meta/ci/requirements/downstream.txt",
+    "meta/ci/requirements/pre-commit-hooks.txt",
     "meta/ci/requirements/quality.txt",
+    "meta/ci/requirements/release-verification.txt",
     "meta/ci/release/check_distribution_contents.py",
     "meta/ci/release/check_downstream_install.py",
     "meta/ci/release/check_downstream_install.sh",
@@ -152,14 +156,58 @@ def _validate_archive_timestamps(path: Path) -> None:
 
 
 def _members(path: Path) -> list[str]:
-    """Return file members from a supported distribution archive."""
+    """Return stable regular members after rejecting unsafe archive entries."""
+    if path.is_symlink() or not path.is_file():
+        raise AssertionError(f"release artifact must be a regular file: {path}")
     if path.name.endswith((".tar.gz", ".tgz")):
         with tarfile.open(path, "r:gz") as archive:
-            return [member.name for member in archive.getmembers() if member.isfile()]
+            members = archive.getmembers()
+            _validate_member_names(path, [member.name for member in members])
+            unsafe = sorted(
+                member.name for member in members if not member.isfile() and not member.isdir()
+            )
+            if unsafe:
+                raise AssertionError(
+                    f"{path.name}: contains non-regular archive entries: {unsafe[:20]}"
+                )
+            return sorted(member.name for member in members if member.isfile())
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
-            return [item.filename for item in archive.infolist() if not item.is_dir()]
+            members = archive.infolist()
+            _validate_member_names(path, [member.filename for member in members])
+            unsafe = sorted(
+                member.filename
+                for member in members
+                if stat.S_ISLNK(member.external_attr >> 16) or member.flag_bits & 0x1
+            )
+            if unsafe:
+                raise AssertionError(f"{path.name}: contains unsafe ZIP entries: {unsafe[:20]}")
+            return sorted(member.filename for member in members if not member.is_dir())
     raise ValueError(f"unsupported distribution type: {path}")
+
+
+def _validate_member_names(path: Path, names: list[str]) -> None:
+    """Reject duplicate, absolute, traversing, or non-canonical member names."""
+    if len(names) != len(set(names)):
+        raise AssertionError(f"{path.name}: archive member names must be unique")
+    unsafe: list[str] = []
+    for name in names:
+        candidate = name[:-1] if name.endswith("/") else name
+        member = PurePosixPath(candidate)
+        if (
+            not candidate
+            or "\\" in candidate
+            or "\0" in candidate
+            or member.is_absolute()
+            or member.as_posix() != candidate
+            or any(part in {".", ".."} for part in member.parts)
+            or ":" in member.parts[0]
+        ):
+            unsafe.append(name)
+    if unsafe:
+        raise AssertionError(
+            f"{path.name}: contains unsafe archive member names: {sorted(unsafe)[:20]}"
+        )
 
 
 def _strip_sdist_root(names: Iterable[str]) -> set[str]:
@@ -413,7 +461,7 @@ def validate_release_set(
     expected_version: str | None = None,
 ) -> str:
     """Validate every archive and return the release-set version."""
-    artifacts = sorted(paths)
+    artifacts = sorted(paths, key=lambda path: (path.name, path.as_posix()))
     for artifact in artifacts:
         validate(artifact)
     return validate_release_filenames(
@@ -435,7 +483,7 @@ def main() -> None:
     if args.release_set:
         validate_release_set(args.artifacts)
     else:
-        for artifact in args.artifacts:
+        for artifact in sorted(args.artifacts, key=lambda path: path.as_posix()):
             validate(artifact)
 
 

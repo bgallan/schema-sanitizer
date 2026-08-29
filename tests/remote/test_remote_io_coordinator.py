@@ -123,7 +123,7 @@ def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:
             thread_name=thread_name,
             shutdown_timeout_seconds=0.01,
         )
-    deadline = monotonic() + 1.0
+    deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while monotonic() < deadline and any(
         thread.name == thread_name and thread.is_alive() for thread in threading.enumerate()
     ):
@@ -212,9 +212,11 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
             self.thread_ids.add(threading.get_ident())
             if start == 0:
                 self.zero_started.set()
-                await asyncio.wait_for(self.later_completed.wait(), timeout=5)
+                await asyncio.wait_for(
+                    self.later_completed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                )
             else:
-                await asyncio.wait_for(self.zero_started.wait(), timeout=5)
+                await asyncio.wait_for(self.zero_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
                 self.later_completed.set()
             self.completion_order.append(start)
             staged = FakeStaged(start, storage_lease)
@@ -271,7 +273,7 @@ def test_directory_session_applies_one_global_transfer_limit(
         if active == policy.async_concurrency:
             full_window.set()
         try:
-            await asyncio.wait_for(full_window.wait(), timeout=5)
+            await asyncio.wait_for(full_window.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
             with open(local_path, "wb") as handle:
                 handle.write(file.name.encode())
         finally:
@@ -345,7 +347,7 @@ def test_coordinator_cancellation_removes_partial_staging(monkeypatch, tmp_path)
         )
 
     coordinator.submit(stage)
-    assert started.wait(timeout=2.0)
+    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     coordinator.close()
     assert not target.exists()
 

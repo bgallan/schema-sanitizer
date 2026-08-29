@@ -17,7 +17,11 @@ from typing import Any
 
 import pytest
 from _support.resource_fakes import DeadThread
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    WaitObservedCondition,
+    join_thread_or_fail,
+)
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -107,8 +111,8 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     assert coordinator._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert waiter.is_alive(), "waiter observed the previous generation's event"
     owner.allow_recovery.set()
-    recovery.join(SCHEDULER_TIMEOUT_SECONDS)
-    waiter.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(recovery)
+    join_thread_or_fail(waiter)
     assert not errors
     assert coordinator._permit_registration is None
 
@@ -195,8 +199,8 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
     assert closer.is_alive()
     assert not iterator._closed
     lease.allow_first.set()
-    setter.join(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(setter)
+    join_thread_or_fail(closer)
     assert not close_errors
     assert lease.released
     assert iterator._closed
@@ -377,7 +381,7 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
         nonlocal parse_calls
         parse_calls += 1
         entered.set()
-        assert release.wait(2)
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
         return None, None
 
     monkeypatch.setattr(module, "_parse_psi", blocked_psi)
@@ -388,13 +392,12 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
     monkeypatch.setattr(module, "_cgroup_usage_ratio", lambda: None)
     refresher = Thread(target=lambda: module.system_pressure_snapshot(refresh=True))
     refresher.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     snapshot = module.system_pressure_snapshot(refresh=True)
     assert parse_calls == 1
     assert snapshot.scale == 1.0
     release.set()
-    refresher.join(1)
-    assert not refresher.is_alive()
+    join_thread_or_fail(refresher)
 
 
 def test_pressure_refresh_releases_claim_for_control_flow_exception(

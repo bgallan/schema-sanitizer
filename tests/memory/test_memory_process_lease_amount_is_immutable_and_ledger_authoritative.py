@@ -11,6 +11,11 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_for_process_exit,
+)
 
 
 def test_process_lease_amount_is_immutable_and_ledger_authoritative() -> None:
@@ -89,7 +94,7 @@ def test_guardian_reads_owner_metadata_outside_its_lock(
         def reserved_bytes(self) -> int:
             """Fail the first cleanup attempt, then signal a successful retry."""
             entered.set()
-            assert resume.wait(2)
+            assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
             return 1024
 
         def release(self) -> None:
@@ -116,13 +121,12 @@ def test_guardian_reads_owner_metadata_outside_its_lock(
         target=lambda: guardian.adopt(Owner(), retained_bytes=128), daemon=True
     )
     thread.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     try:
         guardian.snapshot()
     finally:
         resume.set()
-    thread.join(1)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
 
 
 def test_cleanup_dispatcher_retries_instead_of_dropping_failed_owner() -> None:
@@ -142,7 +146,7 @@ def test_cleanup_dispatcher_retries_instead_of_dropping_failed_owner() -> None:
         completed.set()
 
     assert dispatcher.submit(cleanup, retained_bytes=256)
-    assert completed.wait(3)
+    assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert attempts == 2
     assert dispatcher.close(deadline_seconds=2.0)
 
@@ -226,8 +230,7 @@ def test_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
         except RuntimeError:
             os._exit(0)
         os._exit(3)
-    waited, status = os.waitpid(pid, 0)
-    assert waited == pid
+    status = wait_for_process_exit(pid)
     assert os.waitstatus_to_exitcode(status) == 0
     assert scheduler.close(deadline_seconds=1.0)
 

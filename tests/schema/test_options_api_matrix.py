@@ -139,7 +139,8 @@ def test_token_option_matrix_converters(
     if suffix == ".parquet":
         assert pq.read_table(out).num_rows == EXPECTED_ROWS
     else:
-        assert len([line for line in out.read_text(encoding="utf-8").splitlines() if line]) >= 2
+        lines = [line for line in out.read_text(encoding="utf-8").splitlines() if line]
+        assert len(lines) == EXPECTED_ROWS + int(suffix == ".csv")
 
 
 API_CSV_TEXT = "a,b,c\n1,true,3.5\n2,false,4.5\n"

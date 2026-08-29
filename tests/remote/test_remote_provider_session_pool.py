@@ -255,10 +255,10 @@ def test_operation_close_cancels_active_use_before_closing_provider(monkeypatch)
                 raise
 
     future = operation.submit_remote(block)
-    assert started.wait(timeout=2)
+    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     operation.close()
 
-    assert future.cancelled() or future.done()
+    assert future.done()
     assert cancelled == [True]
     assert client.close_calls == 1
 

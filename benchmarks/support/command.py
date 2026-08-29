@@ -1,26 +1,31 @@
-"""Validated command execution for local benchmark isolation.
+"""Validate command execution for local benchmark isolation.
 
-Local benchmarks need fresh processes on the same host so native modules, CPU affinity,
-and performance counters remain isolated. This module provides a validated argv-only
-boundary without importing Python's :mod:`subprocess` module.
+Local benchmarks need fresh processes on the same host, so this module provides an
+argv-only boundary that isolates native modules, CPU affinity, and performance counters.
+Every invocation has a deadline; timeout cleanup kills the POSIX process domain or
+Windows process tree and reaps the direct child under a second fixed deadline.
 """
 
 from __future__ import annotations
 
 import asyncio
-import locale
+import ctypes
+import math
 import os
 import shutil
+import signal
 import tempfile
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Generic, TypeAlias, TypeVar
+from typing import IO, Any, Generic, TypeAlias, TypeVar, cast
 
 PathArgument: TypeAlias = str | os.PathLike[str]
 Output = TypeVar("Output", str, bytes)
+_POST_KILL_REAP_TIMEOUT_SECONDS = 5.0
+_WINDOWS_SYSTEM_DIRECTORY_BUFFER_CHARS = 32_768
 
 
 class CommandError(Exception):
@@ -35,6 +40,15 @@ class CommandFailed(CommandError):
         self.returncode = returncode
         self.argv = argv
         super().__init__(f"command {argv[0]!r} returned non-zero exit status {returncode}")
+
+
+class CommandCleanupFailed(CommandError):
+    """A timed-out command's process tree could not be killed and reaped."""
+
+    def __init__(self, argv: tuple[str, ...]) -> None:
+        """Record the command whose bounded post-kill cleanup failed."""
+        self.argv = argv
+        super().__init__(f"timed-out command {argv[0]!r} could not be reaped after kill")
 
 
 class StreamMode(Enum):
@@ -103,7 +117,106 @@ def _decode(data: bytes | None, *, text: bool) -> bytes | str | None:
     """Decode captured bytes when the caller requested text output."""
     if data is None or not text:
         return data
-    return data.decode(locale.getpreferredencoding(False))
+    return data.decode("utf-8")
+
+
+def _windows_taskkill_path() -> Path | None:
+    """Resolve the system-owned Windows tree-kill executable without consulting PATH."""
+    try:
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_system_directory = kernel32.GetSystemDirectoryW
+        get_system_directory.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        get_system_directory.restype = wintypes.UINT
+        buffer = ctypes.create_unicode_buffer(_WINDOWS_SYSTEM_DIRECTORY_BUFFER_CHARS)
+        length = int(get_system_directory(buffer, len(buffer)))
+    except (AttributeError, OSError, ValueError):
+        return None
+    if length == 0 or length >= len(buffer):
+        return None
+    candidate = Path(buffer.value) / "taskkill.exe"
+    return candidate if candidate.is_file() else None
+
+
+async def _kill_process_domain_and_reap(
+    process: asyncio.subprocess.Process,
+    *,
+    argv: tuple[str, ...],
+) -> None:
+    """Kill one isolated process domain and bound direct-child reaping."""
+    cleanup_failed = False
+    direct_child_only_kill = False
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif os.name == "nt":
+        taskkill = _windows_taskkill_path()
+        if taskkill is None or not taskkill.is_file():
+            cleanup_failed = True
+        else:
+            with open(os.devnull, "wb") as sink:
+                try:
+                    tree_killer = await asyncio.create_subprocess_exec(
+                        os.fspath(taskkill),
+                        "/PID",
+                        str(process.pid),
+                        "/T",
+                        "/F",
+                        stdout=sink,
+                        stderr=sink,
+                    )
+                except OSError:
+                    cleanup_failed = True
+                else:
+                    try:
+                        try:
+                            await asyncio.wait_for(
+                                tree_killer.wait(),
+                                timeout=_POST_KILL_REAP_TIMEOUT_SECONDS,
+                            )
+                        except TimeoutError:
+                            cleanup_failed = True
+                            try:
+                                tree_killer.kill()
+                            except ProcessLookupError:
+                                pass
+                            try:
+                                await asyncio.wait_for(
+                                    tree_killer.wait(),
+                                    timeout=_POST_KILL_REAP_TIMEOUT_SECONDS,
+                                )
+                            except TimeoutError:
+                                pass
+                        if tree_killer.returncode != 0:
+                            cleanup_failed = True
+                    finally:
+                        if tree_killer.returncode is None:
+                            try:
+                                tree_killer.kill()
+                            except ProcessLookupError:
+                                pass
+        if cleanup_failed:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                else:
+                    direct_child_only_kill = process.returncode is None
+    else:
+        process.kill()
+    try:
+        await asyncio.wait_for(
+            process.wait(),
+            timeout=_POST_KILL_REAP_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as error:
+        raise CommandCleanupFailed(argv) from error
+    if cleanup_failed and direct_child_only_kill:
+        raise CommandCleanupFailed(argv)
 
 
 async def _execute(
@@ -112,7 +225,7 @@ async def _execute(
     cwd: Path | None,
     stdout: StreamMode | None,
     stderr: StreamMode | None,
-    timeout: float | None,
+    timeout: float,
 ) -> tuple[int, bytes | None, bytes | None]:
     """Execute one validated command with bounded stream-routing choices."""
     if stdout is MERGE_WITH_STDOUT:
@@ -122,11 +235,13 @@ async def _execute(
         with tempfile.TemporaryFile() if stderr is CAPTURE else nullcontext() as stderr_file:
             with open(os.devnull, "wb") if stdout is DISCARD else nullcontext() as stdout_null:
                 with open(os.devnull, "wb") if stderr is DISCARD else nullcontext() as stderr_null:
-                    stdout_target = stdout_file if stdout is CAPTURE else stdout_null
+                    stdout_target: int | IO[Any] | None = (
+                        stdout_file if stdout is CAPTURE else stdout_null
+                    )
                     if stderr is MERGE_WITH_STDOUT:
                         if stdout_target is None:
                             raise ValueError("stderr merging requires captured or discarded stdout")
-                        stderr_target = stdout_target
+                        stderr_target: int | IO[Any] | None = stdout_target
                     else:
                         stderr_target = stderr_file if stderr is CAPTURE else stderr_null
 
@@ -135,12 +250,12 @@ async def _execute(
                         cwd=os.fspath(cwd) if cwd is not None else None,
                         stdout=stdout_target,
                         stderr=stderr_target,
+                        start_new_session=os.name == "posix",
                     )
                     try:
                         await asyncio.wait_for(process.wait(), timeout=timeout)
                     except TimeoutError:
-                        process.kill()
-                        await process.wait()
+                        await _kill_process_domain_and_reap(process, argv=argv)
                         raise
 
                     captured_stdout = None
@@ -151,6 +266,8 @@ async def _execute(
                     if stderr_file is not None:
                         stderr_file.seek(0)
                         captured_stderr = stderr_file.read()
+                    if process.returncode is None:
+                        raise CommandError(f"command {argv[0]!r} exited without a status")
                     return process.returncode, captured_stdout, captured_stderr
 
 
@@ -162,9 +279,11 @@ def run_command(
     stdout: StreamMode | None = None,
     stderr: StreamMode | None = None,
     text: bool = False,
-    timeout: float | None = None,
+    timeout: float,
 ) -> CompletedCommand[str] | CompletedCommand[bytes]:
     """Run one validated argv without a shell or environment overrides."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("child command timeout must be finite and positive")
     directory = _working_directory(cwd)
     argv = _validated_argv(command, cwd=directory)
     returncode, captured_stdout, captured_stderr = asyncio.run(
@@ -178,9 +297,16 @@ def run_command(
     )
     if check and returncode != 0:
         raise CommandFailed(returncode, argv)
-    return CompletedCommand(
+    if text:
+        return CompletedCommand[str](
+            args=argv,
+            returncode=returncode,
+            stdout=cast(str | None, _decode(captured_stdout, text=True)),
+            stderr=cast(str | None, _decode(captured_stderr, text=True)),
+        )
+    return CompletedCommand[bytes](
         args=argv,
         returncode=returncode,
-        stdout=_decode(captured_stdout, text=text),
-        stderr=_decode(captured_stderr, text=text),
+        stdout=cast(bytes | None, _decode(captured_stdout, text=False)),
+        stderr=cast(bytes | None, _decode(captured_stderr, text=False)),
     )

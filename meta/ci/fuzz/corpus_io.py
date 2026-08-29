@@ -127,6 +127,7 @@ def target_inputs(
     target: str,
     *,
     errors: list[str] | None = None,
+    allow_identical_archive_duplicates: bool = False,
 ) -> list[FuzzInput]:
     """Return stable logical inputs from one target directory and optional archive."""
     root = role_root / target
@@ -160,11 +161,14 @@ def target_inputs(
         inputs.append(FuzzInput(path.name, data, path, False))
 
     packed = _archive_inputs(archive_path(role_root, target), errors=errors)
-    names = {case.name for case in inputs}
+    by_name = {case.name: case for case in inputs}
     for case in packed:
-        if case.name in names:
+        duplicate = by_name.get(case.name)
+        if duplicate is not None:
+            if allow_identical_archive_duplicates and duplicate.data == case.data:
+                continue
             _record_error(errors, f"duplicate loose and archived fuzz input: {root / case.name}")
             continue
-        names.add(case.name)
+        by_name[case.name] = case
         inputs.append(case)
     return sorted(inputs, key=lambda case: case.name)

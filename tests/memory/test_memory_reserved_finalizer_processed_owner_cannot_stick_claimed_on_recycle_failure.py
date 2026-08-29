@@ -14,6 +14,7 @@ import types
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -281,7 +282,7 @@ def test_temporary_storage_resize_does_not_hold_pool_condition_across_process_re
     def blocking_resize(*args, **kwargs):
         """Pause at the blocking resize synchronization point."""
         entered.set()
-        assert resume.wait(5)
+        assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "resize_capability", blocking_resize)
@@ -296,7 +297,7 @@ def test_temporary_storage_resize_does_not_hold_pool_condition_across_process_re
 
     thread = threading.Thread(target=worker)
     thread.start()
-    assert entered.wait(5)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     # Another lease must still be able to use the pool while filesystem/journal
     # work for the first lease is blocked outside the condition.
     second = pool.acquire(
@@ -305,8 +306,7 @@ def test_temporary_storage_resize_does_not_hold_pool_condition_across_process_re
         path=tempfile.gettempdir(),
     )
     resume.set()
-    thread.join(5)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert errors == []
     second.release()
     first.release()

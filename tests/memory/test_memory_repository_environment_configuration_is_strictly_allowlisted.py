@@ -110,12 +110,17 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     configured_names = {f"SCHEMA_SANITIZER_{name}" for name in configured_names}
     assert configured_names == allowed_names
     # YAML environment mappings are limited to composite-action input isolation,
-    # the final validation result handoff, and the untrusted-input-safe release
-    # preflight boundary. Keeping the expected file set exact detects expansion.
+    # exact dependency constraints, the final validation result handoff, and the
+    # untrusted-input-safe release preflight boundary. Keeping the expected file
+    # set exact detects expansion.
     assert sorted(yaml_env_blocks) == [
         ".github/actions/build-platform-wheel/action.yml",
+        ".github/actions/native-llvm-coverage/action.yml",
         ".github/actions/platform-sanitizer/action.yml",
+        ".github/actions/quality-validation/action.yml",
+        ".github/actions/source-distribution/action.yml",
         ".github/actions/test-platform-wheel/action.yml",
+        ".github/actions/thread-sanitizer/action.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/publish.yml",
     ]

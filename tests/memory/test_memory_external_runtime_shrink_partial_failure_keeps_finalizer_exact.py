@@ -13,6 +13,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+    wait_for_process_exit,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -83,11 +89,11 @@ def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> Non
         """Hold the ownership lock until the competing shrink arrives."""
         with runtime._lock:
             lock_held.set()
-            release_lock.wait(5)
+            wait_event_or_fail(release_lock)
 
     holder = threading.Thread(target=hold_lock)
     holder.start()
-    assert lock_held.wait(2)
+    assert lock_held.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     read_fd, write_fd = os.pipe()
     pid = os.fork()
@@ -109,12 +115,12 @@ def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> Non
 
     os.close(write_fd)
     try:
-        _, status = os.waitpid(pid, 0)
+        status = wait_for_process_exit(pid)
         message = os.read(read_fd, 4096).decode("utf-8", "replace")
     finally:
         os.close(read_fd)
         release_lock.set()
-        holder.join(2)
+        join_thread_or_fail(holder)
         runtime.close()
 
     assert os.waitstatus_to_exitcode(status) == 0

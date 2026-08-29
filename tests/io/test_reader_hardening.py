@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 import schema_sanitizer as ss
 
@@ -176,7 +177,7 @@ else:
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SCHEDULER_TIMEOUT_SECONDS,
         cwd=repo_root,
     )
 
@@ -777,7 +778,7 @@ else:
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SCHEDULER_TIMEOUT_SECONDS,
         cwd=repo_root,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
@@ -1174,7 +1175,7 @@ else:
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SCHEDULER_TIMEOUT_SECONDS,
         cwd=repo_root,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout

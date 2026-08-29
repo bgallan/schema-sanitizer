@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -50,7 +51,7 @@ def test_async_terminal_debt_has_exactly_one_concurrent_reaper() -> None:
             with self.lock:
                 self.calls += 1
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     owner = BlockingOwner()
     admission = scheduler._AsyncSchedulerAdmission(1, stage_admission=owner)
@@ -68,18 +69,16 @@ def test_async_terminal_debt_has_exactly_one_concurrent_reaper() -> None:
 
     first = threading.Thread(target=reap)
     first.start()
-    assert entered.wait(2.0)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second = threading.Thread(target=reap)
     second.start()
-    second.join(2.0)
-    assert not second.is_alive()
+    join_thread_or_fail(second)
     # The published debt is CLAIMED, so a second OS thread cannot run cleanup.
     assert results == [False]
     assert owner.calls == 1
 
     release.set()
-    first.join(2.0)
-    assert not first.is_alive()
+    join_thread_or_fail(first)
     assert not errors
     assert sorted(results) == [False, True]
     assert owner.calls == 1

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 
 def test_guardian_close_never_requeues_active_owner(
@@ -77,7 +77,7 @@ def test_guardian_close_never_requeues_active_owner(
     assert calls == 1
     assert peak == 1
     resume.set()
-    close_thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(close_thread)
     assert result == [True]
     assert calls == 1
 
@@ -95,7 +95,7 @@ def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
         def release(self) -> None:
             """Release the resource held by the lease test double."""
             release_entered.set()
-            assert release_resume.wait(2)
+            assert release_resume.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     lease = Lease()
 
@@ -115,8 +115,7 @@ def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
     assert not scheduler.close(deadline_seconds=0.03)
     assert scheduler.snapshot().retiring_workers == 1
     release_resume.set()
-    worker.join(2)
-    assert not worker.is_alive()
+    join_thread_or_fail(worker)
     assert scheduler.snapshot().retiring_workers == 0
 
 
@@ -222,7 +221,7 @@ def test_notifier_rearm_during_execution_is_not_lost(
     delivery = governor._availability_events[event]
     assert notifier.publish_one(delivery)
     assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while governor.snapshot().availability_callbacks and time.monotonic() < deadline:
         time.sleep(0.005)
     assert attempts == 2
@@ -302,7 +301,7 @@ def test_dispatcher_watchdog_tracks_real_active_call_age(
     def blocked() -> None:
         """Pause at the blocked synchronization point."""
         entered.set()
-        assert resume.wait(2)
+        assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     assert dispatcher.submit(blocked)
     assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)

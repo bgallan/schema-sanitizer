@@ -46,6 +46,7 @@ EXTRA_IMPORTS = {
         "pyarrow",
     ),
 }
+_ISOLATED_DIRECTORY = "downstream"
 
 
 def environment_python(environment: Path) -> Path:
@@ -67,23 +68,121 @@ def _command(arguments: list[str | Path]) -> str:
     )
 
 
+def _write_text_atomically(destination: Path, content: str) -> None:
+    """Replace one regular text output atomically and skip unchanged bytes."""
+    payload = content.encode("utf-8")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise ValueError(f"refusing symlinked command output: {destination}")
+    if destination.exists() and not destination.is_file():
+        raise ValueError(f"command output must be a regular file: {destination}")
+    if destination.is_file() and destination.read_bytes() == payload:
+        return
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _resolved_regular_file(path: Path, description: str) -> Path:
+    """Resolve one required regular non-symlink input file."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{description} does not exist as a regular file: {path}")
+    return path.resolve()
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    """Return whether two resolved locations contain or equal one another."""
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _validate_plan_paths(
+    *,
+    isolated_root: Path,
+    wheel: Path,
+    scripts: Path,
+    constraints: Path,
+    command_output: Path | None,
+) -> None:
+    """Reject cleanup-owned, input, script, and command locations that overlap."""
+    resolved_isolated = isolated_root.resolve()
+    inputs = {
+        "wheel": wheel.resolve(),
+        "scripts root": scripts.resolve(),
+        "constraints": constraints.resolve(),
+    }
+    for input_name, input_path in inputs.items():
+        if _paths_overlap(resolved_isolated, input_path):
+            raise ValueError(
+                f"downstream owned downstream root and {input_name} must be disjoint: "
+                f"{resolved_isolated} and {input_path}"
+            )
+    if command_output is None:
+        return
+    resolved_output = command_output.resolve()
+    if _paths_overlap(resolved_isolated, resolved_output):
+        raise ValueError(
+            "downstream owned downstream root and command output must be disjoint: "
+            f"{resolved_isolated} and {resolved_output}"
+        )
+    for input_name, input_path in inputs.items():
+        if _paths_overlap(resolved_output, input_path):
+            raise ValueError(
+                f"downstream command output and {input_name} must be disjoint: "
+                f"{resolved_output} and {input_path}"
+            )
+
+
 def shell_plan(
     wheel: Path,
     work_root: Path,
     scripts: Path,
     constraints: Path,
+    *,
+    command_output: Path | None = None,
 ) -> str:
     """Return one fail-fast Bash plan preserving per-extra isolation."""
+    if work_root.is_symlink():
+        raise ValueError(f"work root must be a regular directory: {work_root}")
+    isolated_root = work_root.resolve() / _ISOLATED_DIRECTORY
+    _validate_plan_paths(
+        isolated_root=isolated_root,
+        wheel=wheel,
+        scripts=scripts,
+        constraints=constraints,
+        command_output=command_output,
+    )
     work_root.mkdir(parents=True, exist_ok=True)
-    isolated_root = Path(
-        tempfile.mkdtemp(prefix="schema-sanitizer-downstream-", dir=work_root)
-    ).resolve()
+    work_root = work_root.resolve()
+    if not work_root.is_dir():
+        raise ValueError(f"work root must be a regular directory: {work_root}")
+    isolated_root = work_root / _ISOLATED_DIRECTORY
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
+        "umask 077",
         f"isolated_root={shlex.quote(_shell_path(isolated_root))}",
-        'cleanup_downstream() { rm -rf -- "${isolated_root}"; }',
+        "cleanup_downstream() {",
+        "  local status=$?",
+        "  local cleanup_status=0",
+        "  trap - EXIT",
+        '  rm -rf -- "${isolated_root}" || cleanup_status=$?',
+        "  if (( status != 0 )); then",
+        '    exit "${status}"',
+        "  fi",
+        '  exit "${cleanup_status}"',
+        "}",
         "trap cleanup_downstream EXIT",
+        'rm -rf -- "${isolated_root}"',
+        'mkdir -p -- "${isolated_root}"',
         'cd "${isolated_root}"',
     ]
 
@@ -92,7 +191,7 @@ def shell_plan(
         environment = isolated_root / name
         python = environment_python(environment)
         lines.append(_command([Path(sys.executable), "-m", "venv", environment]))
-        lines.append(_command([python, "-m", "pip", "install", "pip==26.1.2"]))
+        lines.append(_command([python, "-m", "pip", "install", "-c", constraints, "pip==26.2.1"]))
         return python
 
     consumer = create_environment("consumer")
@@ -150,23 +249,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    wheel = args.wheel.resolve()
-    scripts = args.scripts.resolve()
-    constraints = args.constraints.resolve()
-    if not wheel.is_file():
-        parser.error(f"wheel does not exist: {wheel}")
-    if not constraints.is_file():
-        parser.error(f"constraints do not exist: {constraints}")
-    for script in (scripts / "downstream_smoke.py", scripts / "downstream_typecheck.py"):
-        if not script.is_file():
-            parser.error(f"downstream script does not exist: {script}")
-
-    args.command_output.parent.mkdir(parents=True, exist_ok=True)
-    args.command_output.write_text(
-        shell_plan(wheel, args.work_root.resolve(), scripts, constraints),
-        encoding="utf-8",
-        newline="\n",
-    )
+    try:
+        wheel = _resolved_regular_file(args.wheel, "wheel")
+        constraints = _resolved_regular_file(args.constraints, "constraints")
+        if args.scripts.is_symlink() or not args.scripts.is_dir():
+            raise ValueError(f"scripts root is not a regular directory: {args.scripts}")
+        scripts = args.scripts.resolve()
+        for script in (scripts / "downstream_smoke.py", scripts / "downstream_typecheck.py"):
+            _resolved_regular_file(script, "downstream script")
+        plan = shell_plan(
+            wheel,
+            args.work_root,
+            scripts,
+            constraints,
+            command_output=args.command_output,
+        )
+        _write_text_atomically(args.command_output, plan)
+    except ValueError as error:
+        parser.error(str(error))
 
 
 if __name__ == "__main__":

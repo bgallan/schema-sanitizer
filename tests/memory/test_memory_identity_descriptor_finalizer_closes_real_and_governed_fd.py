@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -46,7 +47,7 @@ def test_identity_descriptor_finalizer_closes_real_and_governed_fd(
     # Finalization publishes this owner for bounded safe-point cleanup. Another
     # cleanup worker may already have claimed the slot, so GC completion does
     # not imply that the physical close has committed synchronously.
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if owner.descriptor_snapshot() is None and owner.fd_lease is None and lease._released:
             break
@@ -141,7 +142,7 @@ def test_successful_remote_result_retains_failed_permit_for_retry() -> None:
         shutdown_timeout_seconds=2.0,
     )
     future = coordinator.submit(lambda _context: asyncio.sleep(0, result="ok"))
-    assert future.result(timeout=2) == "ok"
+    assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == "ok"
     submission = future._schema_sanitizer_remote_submission
     assert submission.task_error is None
     assert isinstance(submission.permit_cleanup_error, OSError)
@@ -180,7 +181,7 @@ def test_late_quarantine_commit_keeps_post_close_worker_route(
     def blocked_replace(left: object, right: object, **kwargs: object) -> None:
         """Pause at the blocked replace synchronization point."""
         started.set()
-        assert proceed.wait(2)
+        assert proceed.wait(SCHEDULER_TIMEOUT_SECONDS)
         real_replace(left, right, **kwargs)
 
     ensured = threading.Event()
@@ -192,11 +193,11 @@ def test_late_quarantine_commit_keeps_post_close_worker_route(
         target=lambda: result.append(janitor.quarantine(source, is_dir=False, lease=lease))
     )
     thread.start()
-    assert started.wait(2)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     with janitor._condition:
         janitor._closed = True
     proceed.set()
-    thread.join(2)
+    join_thread_or_fail(thread)
     assert result == [True]
     assert ensured.is_set()
     assert len(janitor._pending) == 1
@@ -250,10 +251,10 @@ def test_cleanup_dispatcher_uses_teardown_reserve_when_public_envelope_is_full(
         callback_done.set()
 
     assert dispatcher.submit(cleanup, retained_bytes=1)
-    assert callback_done.wait(1)
+    assert callback_done.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert teardown_acquired.is_set()
     assert callback_thread != [caller_thread]
-    assert lease_released.wait(1)
+    assert lease_released.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_terminal_callback_diagnostics_are_bounded() -> None:

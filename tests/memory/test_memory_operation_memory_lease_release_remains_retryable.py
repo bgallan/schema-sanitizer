@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 
 class _RetryingMemoryOwner:
@@ -244,7 +245,7 @@ def test_temporary_governor_blocks_only_one_filesystem(
         """Pause one device after its registry lookup but before admission."""
         if device == 1:
             entered.set()
-            assert unblock.wait(timeout=2.0)
+            assert unblock.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         return original_reconcile(device, state)
 
     monkeypatch.setattr(governor, "filesystem", filesystem)
@@ -259,13 +260,12 @@ def test_temporary_governor_blocks_only_one_filesystem(
         )
     )
     worker.start()
-    assert entered.wait(timeout=1.0)
+    assert entered.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     second = governor.reserve_capability(1, path="b", label="independent-device")
     completed.append(second.device)
     unblock.set()
-    worker.join(timeout=2.0)
-    assert not worker.is_alive()
+    join_thread_or_fail(worker)
     assert completed == [2]
     assert len(first) == 1
 
@@ -622,7 +622,7 @@ def test_temporary_pool_admission_isolated_across_devices(
             device = 1 if str(path).endswith("a") else 2
             if device == 1:
                 entered.set()
-                assert unblock.wait(timeout=2.0)
+                assert unblock.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             return SimpleNamespace(
                 device=device,
                 reserved_bytes=amount,
@@ -640,13 +640,12 @@ def test_temporary_pool_admission_isolated_across_devices(
     acquired: list[Any] = []
     worker = threading.Thread(target=lambda: acquired.append(pool.acquire(1, label="a", path="a")))
     worker.start()
-    assert entered.wait(timeout=1.0)
+    assert entered.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     independent = pool.acquire(1, label="b", path="b")
     assert independent.reserved_bytes == 1
     unblock.set()
-    worker.join(timeout=2.0)
-    assert not worker.is_alive()
+    join_thread_or_fail(worker)
     assert len(acquired) == 1
 
     independent.release()
@@ -676,7 +675,7 @@ def test_temporary_pool_close_waits_for_started_admission(
         def reserve_capability(amount: int, **kwargs: object) -> object:
             """Signal reservation start, wait for release, and return its capability."""
             entered.set()
-            assert unblock.wait(timeout=2.0)
+            assert unblock.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             return SimpleNamespace(
                 device=1,
                 reserved_bytes=amount,
@@ -705,12 +704,12 @@ def test_temporary_pool_close_waits_for_started_admission(
         target=lambda: leases.append(pool.acquire(7, label="pending", path=tmp_path))
     )
     acquire_thread.start()
-    assert entered.wait(timeout=1.0)
+    assert entered.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     closed = threading.Event()
     close_thread = threading.Thread(target=lambda: (pool.close(), closed.set()))
     close_thread.start()
-    assert close_wait_entered.wait(timeout=2.0)
+    assert close_wait_entered.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     with pool._condition:
         assert pool._closed
         assert pool._pending_active_leases == 1
@@ -720,8 +719,8 @@ def test_temporary_pool_close_waits_for_started_admission(
         pool.acquire(1, label="late", path=tmp_path)
 
     unblock.set()
-    acquire_thread.join(timeout=2.0)
-    close_thread.join(timeout=2.0)
+    join_thread_or_fail(acquire_thread)
+    join_thread_or_fail(close_thread)
     assert closed.is_set()
     assert pool.diagnostics().close_outstanding_bytes == 7
     assert pool.diagnostics().close_active_leases == 1

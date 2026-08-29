@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import join_thread_or_fail
 
 _NATIVE_STUB_MODULES = (
     "schema_sanitizer.core_impl.native_options",
@@ -96,8 +97,7 @@ def test_parquet_telemetry_counts_are_atomic_under_threads() -> None:
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=5)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
 
     snapshot = telemetry.parquet_stream_factory_observability()
     assert snapshot["route_counts"] == {"native_parquet_stream": workers * iterations}

@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
+import signal
 import threading
 from pathlib import Path
 from time import monotonic, sleep
 from types import SimpleNamespace
 
+import _support.synchronization as synchronization
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
@@ -39,6 +42,87 @@ from schema_sanitizer.remote_impl.upload_policy import (
     read_upload_range,
     release_upload_payload,
 )
+
+
+def test_process_exit_fuse_never_falls_back_to_an_unbounded_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child resisting SIGKILL leaves the test bounded and diagnostically failed."""
+    wait_options: list[int] = []
+    signals: list[tuple[int, int]] = []
+    times = iter((0.0, 11.0, 11.0, 22.0))
+
+    def never_reaped(_pid: int, options: int) -> tuple[int, int]:
+        """Model a child that remains unreapable across both bounded phases."""
+        wait_options.append(options)
+        return 0, 0
+
+    monkeypatch.setattr(synchronization.os, "waitpid", never_reaped)
+    monkeypatch.setattr(
+        synchronization.os,
+        "kill",
+        lambda pid, signum: signals.append((pid, signum)),
+    )
+    monkeypatch.setattr(synchronization, "monotonic", lambda: next(times))
+
+    with pytest.raises(TimeoutError, match="could not be reaped"):
+        synchronization.wait_for_process_exit(12345)
+
+    assert signals == [(12345, getattr(signal, "SIGKILL", signal.SIGTERM))]
+    assert wait_options == [os.WNOHANG, os.WNOHANG]
+
+
+def test_synchronization_helpers_reject_missed_events_and_live_workers() -> None:
+    """Expected handshakes and worker shutdowns fail closed at their deadlock fuse."""
+    signal_event = threading.Event()
+    with pytest.raises(TimeoutError, match="event was not signaled"):
+        synchronization.wait_event_or_fail(signal_event, timeout=0)
+    signal_event.set()
+    synchronization.wait_event_or_fail(signal_event, timeout=0)
+
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait)
+    thread.start()
+    try:
+        with pytest.raises(TimeoutError, match="thread did not exit"):
+            synchronization.join_thread_or_fail(thread, timeout=0)
+    finally:
+        release.set()
+        synchronization.join_thread_or_fail(thread)
+
+    class StubbornProcess:
+        """Model a child requiring emergency termination and a final kill."""
+
+        def __init__(self) -> None:
+            """Initialize an alive fake process with observable cleanup calls."""
+            self.alive = True
+            self.joins: list[float | None] = []
+            self.terminations = 0
+            self.kills = 0
+
+        def join(self, timeout: float | None = None) -> None:
+            """Record one bounded reap attempt without exiting."""
+            self.joins.append(timeout)
+
+        def is_alive(self) -> bool:
+            """Report whether emergency cleanup has killed the fake process."""
+            return self.alive
+
+        def terminate(self) -> None:
+            """Record an ineffective graceful termination request."""
+            self.terminations += 1
+
+        def kill(self) -> None:
+            """Model a successful final kill request."""
+            self.kills += 1
+            self.alive = False
+
+    process = StubbornProcess()
+    with pytest.raises(TimeoutError, match="child did not exit"):
+        synchronization.join_process_or_fail(process, timeout=0)
+    assert process.joins == [0, 0, 0]
+    assert process.terminations == 1
+    assert process.kills == 1
 
 
 def test_operation_memory_lease_resize_racing_release_has_no_drift() -> None:
@@ -68,8 +152,7 @@ def test_operation_memory_lease_resize_racing_release_has_no_drift() -> None:
             thread.start()
         barrier.wait()
         for thread in threads:
-            thread.join(timeout=2)
-            assert not thread.is_alive()
+            join_thread_or_fail(thread)
         assert len(resize_errors) <= 1
         assert ledger.snapshot().reserved_bytes == 0
         ledger.close()
@@ -128,7 +211,7 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
     def reserve(capsule: object, size: int, stage: str) -> tuple[int, int, int]:
         """Pause the native reserve while the Python ledger lock is held."""
         entered.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         return original.operation_memory_ledger_reserve_snapshot(capsule, size, stage)
 
     ledger._native = SimpleNamespace(  # noqa: SLF001
@@ -152,8 +235,8 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
     assert not close_lock_acquired.is_set()
     assert not closed.is_set()
     release.set()
-    reserve_thread.join(timeout=2)
-    close_thread.join(timeout=2)
+    synchronization.join_thread_or_fail(reserve_thread)
+    synchronization.join_thread_or_fail(close_thread)
     assert close_lock_acquired.is_set()
     assert closed.is_set()
     ledger.release(1024)
@@ -298,7 +381,7 @@ def test_async_scheduler_surfaces_non_exception_failure_without_hanging() -> Non
             pass
 
     with pytest.raises(WorkerFatal, match="fatal worker"):
-        asyncio.run(asyncio.wait_for(run(), timeout=1))
+        asyncio.run(asyncio.wait_for(run(), timeout=SCHEDULER_TIMEOUT_SECONDS))
 
 
 def test_remote_close_forcibly_stops_cancellation_resistant_host_thread(
@@ -346,8 +429,7 @@ def test_remote_close_forcibly_stops_cancellation_resistant_host_thread(
     assert not release.is_set()
     release.set()
     coordinator.close()
-    coordinator._thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)  # noqa: SLF001
-    assert not coordinator._thread.is_alive()  # noqa: SLF001
+    join_thread_or_fail(coordinator._thread)  # noqa: SLF001
 
 
 def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
@@ -377,7 +459,7 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
             shutdown_timeout_seconds=0.01,
         )
     release.set()
-    deadline = monotonic() + 2.0
+    deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while monotonic() < deadline:
         if not any(
             thread.name == thread_name and thread.is_alive() for thread in threading.enumerate()

@@ -6,9 +6,135 @@ deterministic pipeline fixtures.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+_SOURCE_SHAPES = ("scalar", "nested")
+_PIPELINE_FORMATS = ("jsonl", "csv", "parquet")
+
+
+def benchmark_dimensions(
+    *,
+    rows: int,
+    memory_mib: int,
+    wide_columns: int,
+    nested_depth: int,
+    source_count: int,
+    parquet_compression: str,
+    cpu_quota: int | None,
+    warmups: int,
+    repeats: int,
+    selection: str,
+    pipeline_shape: str,
+    pipeline_format: str,
+) -> dict[str, int | str | None]:
+    """Return every requested semantic benchmark dimension in canonical form."""
+    return {
+        "rows": rows,
+        "memory_mib": memory_mib,
+        "wide_columns": wide_columns,
+        "nested_depth": nested_depth,
+        "source_count": source_count,
+        "parquet_compression": parquet_compression,
+        "cpu_quota": cpu_quota,
+        "warmups": warmups,
+        "repeats": repeats,
+        "selection": selection,
+        "pipeline_shape": pipeline_shape,
+        "pipeline_format": pipeline_format,
+    }
+
+
+def validate_benchmark_dimensions(
+    report: object,
+    expected: dict[str, int | str | None],
+) -> None:
+    """Require a child report to echo the exact requested dimension contract."""
+    actual = report.get("dimensions") if isinstance(report, dict) else None
+    try:
+        actual_canonical = json.dumps(actual, allow_nan=False, sort_keys=True)
+        expected_canonical = json.dumps(expected, allow_nan=False, sort_keys=True)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("benchmark report dimensions are not canonical JSON") from error
+    if actual_canonical != expected_canonical:
+        raise RuntimeError(
+            "benchmark dimension contract mismatch: "
+            f"expected={expected_canonical}, actual={actual_canonical}"
+        )
+
+
+def expected_benchmark_case_names(
+    selection: str,
+    *,
+    pipeline_shape: str = "all",
+    pipeline_format: str = "all",
+) -> tuple[str, ...]:
+    """Return the exact ordered case-name contract for one benchmark selection."""
+    if selection not in {"all", "pipeline", "parquet"}:
+        raise ValueError(f"unsupported benchmark selection: {selection}")
+    if pipeline_shape not in {"all", *_SOURCE_SHAPES}:
+        raise ValueError(f"unsupported pipeline shape: {pipeline_shape}")
+    if pipeline_format not in {"all", *_PIPELINE_FORMATS}:
+        raise ValueError(f"unsupported pipeline format: {pipeline_format}")
+
+    names: list[str] = []
+    if selection == "all":
+        names.extend(("inference_jsonl_scalar", "inference_jsonl_nested"))
+        names.extend(
+            f"output_{format_name}_{shape}"
+            for format_name in ("jsonl", "csv")
+            for shape in _SOURCE_SHAPES
+        )
+    if selection in {"all", "parquet"}:
+        names.extend(f"output_parquet_{shape}" for shape in ("scalar", "wide_scalar", "nested"))
+
+    source_shapes = _SOURCE_SHAPES if pipeline_shape == "all" else (pipeline_shape,)
+    requested_format = "parquet" if selection == "parquet" else pipeline_format
+    formats = _PIPELINE_FORMATS if requested_format == "all" else (requested_format,)
+    names.extend(
+        f"pipeline_{shape}_jsonl_to_{format_name}"
+        for shape in source_shapes
+        for format_name in formats
+    )
+    return tuple(names)
+
+
+def validate_benchmark_case_results(
+    cases: object,
+    *,
+    selection: str,
+    pipeline_shape: str = "all",
+    pipeline_format: str = "all",
+) -> dict[str, dict[str, Any]]:
+    """Return results that exactly match the case and strict-equivalence contract."""
+    if not isinstance(cases, dict):
+        raise RuntimeError("benchmark report cases must be an object")
+    for name, result in cases.items():
+        if not isinstance(name, str) or not isinstance(result, dict):
+            raise RuntimeError("benchmark case names and results must be objects")
+        equivalent = result.get("equivalent")
+        if type(equivalent) is not bool:
+            raise RuntimeError(f"{name}: benchmark equivalence must be a boolean")
+        if equivalent is not True:
+            raise RuntimeError(f"{name}: benchmark reported a cross-mode mismatch")
+
+    expected = set(
+        expected_benchmark_case_names(
+            selection,
+            pipeline_shape=pipeline_shape,
+            pipeline_format=pipeline_format,
+        )
+    )
+    actual = set(cases)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise RuntimeError(
+            f"benchmark case contract mismatch: missing={missing!r}, extra={extra!r}"
+        )
+    return cast(dict[str, dict[str, Any]], cases)
 
 
 def nested_value(index: int, depth: int) -> dict[str, Any]:

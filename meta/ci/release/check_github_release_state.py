@@ -22,6 +22,7 @@ _REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _RETRY_DELAYS_SECONDS = (1.0, 2.0)
 _MAX_SERVER_RETRY_DELAY_SECONDS = 30.0
+_MAX_RESPONSE_BYTES = 1024 * 1024
 _TRANSIENT_HTTP_STATUSES = {429, *range(500, 600)}
 
 
@@ -55,9 +56,11 @@ def _github_https_json(
         response = connection.getresponse()
         status = response.status
         response_headers = {name.lower(): value for name, value in response.getheaders()}
-        body = response.read()
+        body = response.read(_MAX_RESPONSE_BYTES + 1)
     finally:
         connection.close()
+    if len(body) > _MAX_RESPONSE_BYTES:
+        raise RuntimeError("GitHub response exceeded the byte limit")
     payload: object = json.loads(body) if status == 200 else None
     return status, response_headers, payload
 

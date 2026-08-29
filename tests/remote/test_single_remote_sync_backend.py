@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 
+from _support.synchronization import join_thread_or_fail
+
 from schema_sanitizer.remote_impl import sync_backend
 from schema_sanitizer.remote_impl.providers import azure_sync, gcs, gcs_sync, s3_sync
 from schema_sanitizer.remote_impl.sync_http import SyncHttpResult
@@ -61,7 +63,7 @@ def _object_server() -> Iterator[str]:
         yield f"http://localhost:{server.server_port}/object.jsonl"
     finally:
         server.shutdown()
-        thread.join(timeout=5)
+        join_thread_or_fail(thread)
         server.server_close()
 
 

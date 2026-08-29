@@ -5,14 +5,24 @@ runs:
   using: composite
   steps:
     - name: Install development and audit tools
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/quality.txt
       shell: bash
       run: |-
         set -euo pipefail
-        python -m pip install pip==26.1.2
+        rm -rf -- .work/build
+        python -m pip install pip==26.2.1
         python -m pip install -c meta/ci/requirements/quality.txt \
           '.[dev]' coverage==7.15.4 pip-audit==2.10.1 \
           bandit==1.9.4 tomli==2.4.1
     - name: Lint, format, and static typing
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt
+        VIRTUALENV_NO_PERIODIC_UPDATE: '1'
+        VIRTUALENV_PIP: 26.2.1
+        VIRTUALENV_SETUPTOOLS: 84.0.0
       shell: bash
       run: |-
         set -euo pipefail
@@ -28,69 +38,25 @@ runs:
         pre-commit run --all-files
     - name: Build dependency inputs and audit them
       shell: bash
-      run: |
-        python - <<'PY'
-        try:
-            import tomllib
-        except ModuleNotFoundError:
-            import tomli as tomllib
-        from pathlib import Path
-        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-        project = pyproject.get("project", {})
-        runtime = list(project.get("dependencies", []))
-        build = list(pyproject.get("build-system", {}).get("requires", []))
-        extras = [
-            requirement
-            for values in project.get("optional-dependencies", {}).values()
-            for requirement in values
-        ]
-        ci_tools = [
-            "abi3audit==0.0.26",
-            "actionlint-py==1.7.12.24",
-            "bandit==1.9.4",
-            "build==1.5.0",
-            "cibuildwheel==4.2.0",
-            "cmakelang==0.6.13",
-            "coverage==7.15.4",
-            "detect-secrets==1.5.0",
-            "mypy==1.19.1",
-            "packaging==26.3",
-            "pip-audit==2.10.1",
-            "shellcheck-py==0.11.0.1",
-            "shfmt-py==4.0.0",
-            "toml-sort==0.24.3",
-            "twine==7.0.0",
-            "yamlfix==1.18.0",
-            "zizmor==1.29.0",
-        ]
-        ci_constraints = [
-            requirement
-            for path in sorted(Path("meta/ci/requirements").glob("*.txt"))
-            for requirement in path.read_text(encoding="utf-8").splitlines()
-            if requirement and not requirement.startswith("#")
-        ]
-        audit_dir = Path(".work/audit")
-        audit_dir.mkdir(parents=True, exist_ok=True)
-        for name, requirements in (
-            ("runtime-requirements.txt", runtime),
-            (
-                "full-requirements.txt",
-                runtime + build + extras + ci_tools + ci_constraints,
-            ),
-        ):
-            (audit_dir / name).write_text(
-                "\n".join(dict.fromkeys(requirements)) + "\n",
-                encoding="utf-8",
-            )
-        PY
-        pip-audit -r .work/audit/runtime-requirements.txt --progress-spinner off
-        pip-audit -r .work/audit/full-requirements.txt --progress-spinner off
+      run: |-
+        set -euo pipefail
+        rm -rf -- .work/audit
+        mapfile -t audit_inputs < <(
+          python meta/ci/quality/build_dependency_audit_inputs.py \
+            --output-dir .work/audit
+        )
+        (( ${#audit_inputs[@]} > 0 ))
+        for requirements in "${audit_inputs[@]}"; do
+          pip-audit -r "${requirements}" --no-deps --disable-pip --strict \
+            --progress-spinner off
+        done
     - name: Static Python security scan
       shell: bash
       run: bandit -r src meta/ci -ll
     - name: Secret scan
       shell: bash
       run: |
+        set -euo pipefail
         detect-secrets scan \
           --no-verify \
           --exclude-files '^(\.git/|\.work/|dist/|\.venv/|fuzz/(corpus|regressions)/(csv|json|parquet|xml)/)' \
@@ -103,11 +69,16 @@ runs:
     - name: Collect contextual Python branch coverage
       shell: bash
       run: |-
+        set -euo pipefail
+        rm -rf -- .work/coverage coverage-python-html
+        rm -f -- coverage-python-summary.txt coverage-python.xml coverage-python.json
+        mkdir -p .work/coverage
         coverage erase
         for suite in regular adversarial integration; do
           python meta/ci/quality/run_coverage_suite.py python "${suite}"
         done
-        coverage combine
+        python meta/ci/quality/run_coverage_suite.py python --validate-inputs
+        coverage combine --strict
         coverage report --fail-under=44 | tee coverage-python-summary.txt
         coverage html --show-contexts -d coverage-python-html
         coverage xml -o coverage-python.xml

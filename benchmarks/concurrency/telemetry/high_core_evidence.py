@@ -220,6 +220,7 @@ def _run_json(command: list[str], *, output: Path | None = None) -> dict[str, An
         stdout=CAPTURE,
         stderr=CAPTURE,
         text=True,
+        timeout=14_400,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()

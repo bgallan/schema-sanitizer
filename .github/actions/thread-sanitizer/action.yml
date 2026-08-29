@@ -5,18 +5,26 @@ runs:
   using: composite
   steps:
     - name: Install GCC 14 and build dependencies
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
+        set -euo pipefail
         sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
           -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
         sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
           -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
           install -y gcc-14 g++-14
-        python -m pip install pip==26.1.2 ninja==1.13.0 cmake==4.3.4 \
+        gcc-14 -dumpfullversion -dumpversion | grep -Eq '^14([.]|$)'
+        g++-14 -dumpfullversion -dumpversion | grep -Eq '^14([.]|$)'
+        python -m pip install pip==26.2.1 ninja==1.13.0 cmake==4.3.4 \
           pytest==9.1.1 pyarrow==25.0.1
     - name: Configure and build the fully instrumented extension
       shell: bash
       run: |
+        set -euo pipefail
+        rm -rf -- .work/build/tsan .work/bin/python-tsan
         cmake -S . -B .work/build/tsan -G Ninja \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DCMAKE_C_COMPILER=gcc-14 \
@@ -51,29 +59,13 @@ runs:
           meta/ci/sanitizers/tsan_python_launcher.cc \
           -o .work/bin/python-tsan \
           "${python_embed_ldflags[@]}"
-    - name: Check capacity for complete TSan concurrency coverage
-      id: sanitizer_cpu_capacity
+    - name: Require capacity for complete TSan concurrency coverage
       shell: bash
-      run: |
+      run: |-
         set -euo pipefail
-        if capacity_message="$(
-          .work/build/tsan/schema_sanitizer_sanitized_ordered_executor \
-            --require-cpu-capacity 3 2>&1
-        )"; then
-          echo "sufficient=true" >> "${GITHUB_OUTPUT}"
-        else
-          probe_status=$?
-          if [[ "${probe_status}" -eq 1 && \
-                "${capacity_message}" =~ ^sanitizer\ runner\ exposes\ [0-9]+\ CPU\ credits\;\ at\ least\ 3\ are\ required\ for\ complete\ concurrency\ coverage$ ]]; then
-            echo "sufficient=false" >> "${GITHUB_OUTPUT}"
-            echo "::warning title=Sanitizer concurrency skipped::${capacity_message}; CPU-dependent concurrency steps will be skipped."
-          else
-            printf '%s\n' "${capacity_message}" >&2
-            exit "${probe_status}"
-          fi
-        fi
+        .work/build/tsan/schema_sanitizer_sanitized_ordered_executor \
+          --require-cpu-capacity 3
     - name: Run the executor and all full-extension TSan domains
-      if: steps.sanitizer_cpu_capacity.outputs.sufficient == 'true'
       shell: bash
       run: >-
         meta/ci/sanitizers/run_tsan_extension_suite.sh

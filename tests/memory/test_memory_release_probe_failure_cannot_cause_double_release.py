@@ -14,6 +14,7 @@ from time import monotonic, sleep
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
 def test_directory_uri_matching_rejects_infinite_duplicate_sources() -> None:
@@ -74,17 +75,17 @@ def test_partition_lookahead_thread_is_governed_and_drops_idle_task_graph(
         """Consume one argument without retaining it."""
 
     future = executor.submit(consume, payload)
-    assert future.result(timeout=1.0) is None
+    assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) is None
     del payload
     del future
-    deadline = monotonic() + 1.0
+    deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while retained() is not None and monotonic() < deadline:
         collect()
         sleep(0.01)
     assert retained() is None
 
     executor.shutdown(wait=True, cancel_futures=True)
-    assert lease.released.wait(1.0)
+    assert lease.released.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_remote_coordinator_governs_only_unreserved_host_threads(
@@ -105,7 +106,7 @@ def test_remote_coordinator_governs_only_unreserved_host_threads(
     standalone = module.RemoteIoCoordinator(shutdown_timeout_seconds=1.0)
     assert len(leases) == 1
     standalone.close()
-    assert leases[0].released.wait(1.0)
+    assert leases[0].released.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     borrowed = module.RemoteIoCoordinator(
         shutdown_timeout_seconds=1.0,

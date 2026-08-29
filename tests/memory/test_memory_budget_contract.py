@@ -233,6 +233,7 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         "tests/memory/test_memory_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure.py",
         "tests/memory/test_memory_resident_zero_is_authoritative_on_public_acquire.py",
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
+        "tests/quality/test_ci_workflow_topology.py",
         "tests/quality/test_distribution_archive_cleanliness.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }

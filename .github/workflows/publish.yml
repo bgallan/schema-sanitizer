@@ -13,6 +13,14 @@ on:
         type: string
 permissions:
   contents: read
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_INPUT: '1'
+  PIP_RETRIES: '3'
+  PIP_TIMEOUT: '30'
+  PYTHONHASHSEED: '0'
+  PYTHONUTF8: '1'
+  TZ: UTC
 concurrency:
   # PyPI accepts only one production publication at a time. A constant group
   # also prevents two differently typed version inputs from racing each other.
@@ -48,7 +56,8 @@ jobs:
             --github-event "${GITHUB_EVENT_PATH}" \
             --require-release-version \
             --require-publish-confirmation
-          python meta/ci/release/check_pypi_version.py
+          python meta/ci/release/check_pypi_version.py \
+            --allow-existing-for-recovery
           python meta/ci/release/check_github_release_state.py \
             --expected-main-sha "${GITHUB_SHA}"
 
@@ -58,40 +67,233 @@ jobs:
     needs: [preflight]
     uses: ./.github/workflows/ci.yml
 
-  # Keep the OIDC trust boundary repository-code-free: retrieve the validated,
-  # digest-checked artifact, reset only its exact path on a transport retry,
-  # and invoke PyPI's maintained publisher action.
-  publish:
-    name: publish validated distributions
+  # Repository code may compare PyPI with the validated manifest, but this job
+  # has no OIDC authority. It stages only absent, digest-matched distributions.
+  reconcile:
+    name: reconcile validated PyPI package state
     needs: [preflight, validation]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
-      id-token: write
+      contents: read
+    outputs:
+      missing_count: ${{ steps.reconcile_pypi_state.outputs['missing-count'] }}
+      published_count: ${{ steps.reconcile_pypi_state.outputs['published-count'] }}
+      publish_required: ${{ steps.reconcile_pypi_state.outputs['publish-required'] }}
+      status: ${{ steps.reconcile_pypi_state.outputs.status }}
     steps:
-      - name: Download the exact validated release set
-        id: download-release-distributions
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - name: Reset PyPI reconciliation paths
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- release pypi-publish
+          rm -f -- pypi-recovery-state.json
+      - id: download-release-for-reconciliation
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: release-distributions
           path: release
-      - name: Reset a partial release-artifact download
-        if: ${{ steps.download-release-distributions.outcome == 'failure' }}
+      - name: Reset a partial reconciliation download
+        id: reset-release-for-reconciliation
+        if: ${{ always() && steps.download-release-for-reconciliation.outcome == 'failure' }}
         shell: bash
         run: |-
           set -euo pipefail
-          if [[ -e release ]]; then
-            rm -rf -- release
-          fi
-      - name: Retry the exact validated release-set download
-        if: ${{ steps.download-release-distributions.outcome == 'failure' }}
+          rm -rf -- release
+      - name: Retry the exact release-set reconciliation download
+        if: ${{ always() && steps.download-release-for-reconciliation.outcome == 'failure' && steps.reset-release-for-reconciliation.outcome == 'success' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: release-distributions
           path: release
+      - name: Verify PyPI state and stage only missing packages
+        id: reconcile_pypi_state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/release/check_github_release_state.py \
+            --expected-main-sha "${GITHUB_SHA}"
+          python meta/ci/release/check_pypi_version.py \
+            --manifest release/release-manifest.json \
+            --packages-dir release/packages \
+            --publish-dir pypi-publish \
+            --state-output pypi-recovery-state.json \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Upload the exact missing-package set
+        id: upload-missing-packages
+        if: ${{ steps.reconcile_pypi_state.outputs['publish-required'] == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pypi-publish-distributions
+          path: pypi-publish/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the exact missing-package upload
+        if: ${{ always() && steps.upload-missing-packages.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pypi-publish-distributions
+          path: pypi-publish/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+
+  # Keep the OIDC trust boundary repository-code-free: retrieve the validated,
+  # manifest-reconciled missing set, reset only its exact path on a transport
+  # retry, and invoke PyPI's maintained publisher action.
+  publish:
+    name: publish missing validated distributions
+    needs: [reconcile]
+    if: ${{ needs.reconcile.outputs.publish_required == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the exact missing-package set
+        id: download-pypi-publish-distributions
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pypi-publish-distributions
+          path: pypi-publish
+      - name: Reset a partial missing-package download
+        if: ${{ steps.download-pypi-publish-distributions.outcome == 'failure' }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          if [[ -e pypi-publish ]]; then
+            rm -rf -- pypi-publish
+          fi
+      - name: Retry the exact missing-package download
+        if: ${{ steps.download-pypi-publish-distributions.outcome == 'failure' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pypi-publish-distributions
+          path: pypi-publish
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
-          packages-dir: release/packages/
+          packages-dir: pypi-publish/
+          skip-existing: true
           attestations: true
+
+  # Certify the immutable postcondition without OIDC. A failed publisher can be
+  # rerun safely: identical partial uploads are skipped, then every remote file
+  # and its publish attestation must match the original manifest identity.
+  verify:
+    name: verify complete PyPI release
+    needs: [reconcile, publish]
+    if: ${{ always() && needs.reconcile.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.13.15
+      - name: Install the exact attestation-verifier environment
+        shell: bash
+        run: |-
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=15s 180s \
+            python -m pip install --no-deps 'pip==26.2.1'
+          timeout --signal=TERM --kill-after=15s 600s \
+            python -m pip install --no-deps \
+              --requirement meta/ci/requirements/release-verification.txt
+          python -m pip check
+          python - <<'PY'
+          import pypi_attestations
+          if pypi_attestations.__version__ != "0.0.30":
+              raise SystemExit("unexpected pypi-attestations version")
+          PY
+      - name: Reset PyPI verification paths
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- release
+      - id: download-release-for-verification
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-distributions
+          path: release
+      - name: Reset a partial verification download
+        id: reset-release-for-verification
+        if: ${{ always() && steps.download-release-for-verification.outcome == 'failure' }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- release
+      - name: Retry the exact release-set verification download
+        if: ${{ always() && steps.download-release-for-verification.outcome == 'failure' && steps.reset-release-for-verification.outcome == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-distributions
+          path: release
+      - name: Require the complete manifest-matched PyPI release
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/release/check_pypi_version.py \
+            --manifest release/release-manifest.json \
+            --packages-dir release/packages \
+            --require-complete
+
+  # Always produce one unambiguous terminal status. Publication is required to
+  # succeed exactly when reconciliation staged files, and the no-OIDC verifier
+  # must certify the complete remote postcondition in both publication paths.
+  release-gate:
+    name: release terminal gate
+    needs: [reconcile, publish, verify]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require the exact release-state transition
+        env:
+          PUBLISH_REQUIRED: ${{ needs.reconcile.outputs.publish_required }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          RECONCILE_RESULT: ${{ needs.reconcile.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          if [[ "${RECONCILE_RESULT}" != "success" ]]; then
+            echo "Reconciliation did not succeed: ${RECONCILE_RESULT}" >&2
+            exit 1
+          fi
+          case "${PUBLISH_REQUIRED}" in
+            true) expected_publish_result=success ;;
+            false) expected_publish_result=skipped ;;
+            *)
+              echo "Invalid publish-required output: ${PUBLISH_REQUIRED}" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "${PUBLISH_RESULT}" != "${expected_publish_result}" ]]; then
+            echo "Publisher result ${PUBLISH_RESULT} != ${expected_publish_result}" >&2
+            exit 1
+          fi
+          if [[ "${VERIFY_RESULT}" != "success" ]]; then
+            echo "Post-publication verification did not succeed: ${VERIFY_RESULT}" >&2
+            exit 1
+          fi

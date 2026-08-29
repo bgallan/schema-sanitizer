@@ -11,6 +11,12 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+    wait_for_process_exit,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -416,11 +422,11 @@ def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork()
         """Hold the synchronization point until the competing path arrives."""
         with lease._lock:
             held.set()
-            release.wait(5)
+            wait_event_or_fail(release)
 
     thread = threading.Thread(target=hold)
     thread.start()
-    assert held.wait(2)
+    assert held.wait(SCHEDULER_TIMEOUT_SECONDS)
     read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid == 0:  # pragma: no cover
@@ -439,12 +445,12 @@ def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork()
 
     os.close(write_fd)
     try:
-        _, status = os.waitpid(pid, 0)
+        status = wait_for_process_exit(pid)
         message = os.read(read_fd, 4096).decode()
     finally:
         os.close(read_fd)
         release.set()
-        thread.join(2)
+        join_thread_or_fail(thread)
         lease.close()
     assert os.waitstatus_to_exitcode(status) == 0
     assert message.startswith("ok:")

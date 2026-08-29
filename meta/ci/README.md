@@ -15,7 +15,7 @@ workflow or configuration file.
 | [`fuzz/`](fuzz/) | Corpus integrity and bounded regression campaigns | `check_fuzz_corpus.py`, `run_fuzz_regressions.sh`, `run_fuzz_regressions.py` |
 | [`sanitizers/`](sanitizers/) | ASan/UBSan/TSan process launch and orchestration | CPython launchers and the TSan extension suite |
 | [`release/`](release/) | Distribution identity, downstream installation, provenance, and PyPI preflight | archive checker, release manifest, isolated consumer checks, version and remote-main checks |
-| [`requirements/`](requirements/) | Reproducible CI-only dependency sets and their cache identity | pinned platform-test adapters, quality tools, and isolated downstream extras |
+| [`requirements/`](requirements/) | Reproducible CI-only dependency sets and their cache identity | exact build, hook, platform-test, quality, downstream, and release-verification environments |
 
 The reader-limit evidence aggregator is a benchmark analysis tool rather than
 a CI gate and therefore lives at
@@ -45,8 +45,13 @@ downstream installer launches its smoke and type-check programs by path.
 Do not add compatibility wrappers at the `meta/ci` root. Update every
 versioned caller atomically when moving or renaming an entry point.
 
-CI package downloads use bounded pip retries and complete exact locks. Apt-owned
-toolchains add repository, connection, and dpkg-lock bounds. Release preflight
+CI package downloads use bounded pip retries and complete exact owner locks.
+`build-tools.txt` constrains ordinary and isolated builds, including
+cibuildwheel's container and test environment; `pre-commit-hooks.txt` constrains
+each independently bootstrapped hook environment. The dependency audit evaluates
+each real lock separately and statically rejects a declared project or CI tool
+without a compatible owner pin, rather than resolving a floating synthetic union.
+Apt-owned toolchains add repository, connection, and dpkg-lock bounds. Release preflight
 retries transport failures, HTTP 429, server errors, and HTTP 403 only with an
 official GitHub rate-limit header; its server-requested delay is capped at 30
 seconds per attempt, while semantic client errors fail immediately. Platform
@@ -56,7 +61,9 @@ exact partial destination. Intermediate wheels, the sdist, and the audited
 failed-job reruns possible without granting artifact-deletion permissions or
 modifying a completed run.
 The canonical sdist encodes the checked-out commit time through
-`SOURCE_DATE_EPOCH`, which its archive validator checks explicitly.
+`SOURCE_DATE_EPOCH`, which its archive validator checks explicitly. CI builds it
+twice from clean owned directories and requires byte-identical archives before
+downstream validation.
 
 ## Local checks
 

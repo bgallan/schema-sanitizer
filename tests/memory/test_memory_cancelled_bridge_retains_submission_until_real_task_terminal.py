@@ -16,7 +16,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 from benchmarks.concurrency.assets import load_probe
 
@@ -129,8 +133,7 @@ def test_claim_path_identity_does_not_block_on_fifo(tmp_path: Path) -> None:
 
     thread = Thread(target=claim)
     thread.start()
-    thread.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert not errors
     assert identities[0] is not None
     release_path_identity(identities[0])
@@ -222,7 +225,11 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
             def block() -> None:
                 """Signal session entry and wait until the loop may continue."""
                 block_started.set()
-                allow_loop.wait(SCHEDULER_TIMEOUT_SECONDS)
+                try:
+                    wait_event_or_fail(allow_loop)
+                except BaseException as exc:
+                    errors.append(exc)
+                    raise
 
             asyncio.get_running_loop().call_soon(block)
             return self
@@ -240,13 +247,12 @@ def test_session_entry_waits_for_acceptance_acknowledgement() -> None:
         assert block_started.wait(SCHEDULER_TIMEOUT_SECONDS)
         assert caller.is_alive()
         allow_loop.set()
-        caller.join(SCHEDULER_TIMEOUT_SECONDS)
-        assert not caller.is_alive()
+        join_thread_or_fail(caller)
         assert not errors
     finally:
         allow_loop.set()
         loop.call_soon_threadsafe(loop.stop)
-        loop_thread.join(SCHEDULER_TIMEOUT_SECONDS)
+        join_thread_or_fail(loop_thread)
         loop.close()
 
 
@@ -413,7 +419,7 @@ def test_janitor_retries_worker_start_without_external_activity(
     monkeypatch.setattr(module, "_RETRY_SECONDS", 0.01)
     lease = StorageLease()
     assert janitor.quarantine(source, is_dir=False, lease=lease)
-    assert lease.released.wait(2)
+    assert lease.released.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert calls >= 2
     snapshot = janitor.snapshot()
     assert snapshot.pending_artifacts == 0
@@ -434,7 +440,7 @@ def test_remote_coordinator_construction_runs_outside_resource_lock(
     def construct(*_args: Any, **_kwargs: Any) -> object:
         """Construct the resource through the controlled failure path."""
         entered.set()
-        assert allow.wait(2)
+        assert allow.wait(SCHEDULER_TIMEOUT_SECONDS)
         return sentinel
 
     monkeypatch.setattr(module, "RemoteIoCoordinator", construct)
@@ -456,7 +462,7 @@ def test_remote_coordinator_construction_runs_outside_resource_lock(
     assert owner._lock.acquire(timeout=0.1)
     owner._lock.release()
     allow.set()
-    builder.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(builder)
     assert results == [sentinel]
 
 
@@ -519,7 +525,11 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
             def block() -> None:
                 """Signal session entry and wait up to two seconds for the release gate."""
                 blocker_started.set()
-                allow_loop.wait(2)
+                try:
+                    wait_event_or_fail(allow_loop)
+                except BaseException as exc:
+                    errors.append(exc)
+                    raise
 
             asyncio.get_running_loop().call_soon(block)
             return self
@@ -541,8 +551,7 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
     try:
         caller.start()
         assert blocker_started.wait(SCHEDULER_TIMEOUT_SECONDS)
-        caller.join(SCHEDULER_TIMEOUT_SECONDS)
-        assert not caller.is_alive()
+        join_thread_or_fail(caller)
         assert len(errors) == 1
         assert isinstance(errors[0], TimeoutError)
         allow_loop.set()
@@ -550,7 +559,7 @@ def test_session_ack_timeout_revokes_transfer_and_self_closes() -> None:
     finally:
         allow_loop.set()
         loop.call_soon_threadsafe(loop.stop)
-        loop_thread.join(SCHEDULER_TIMEOUT_SECONDS)
+        join_thread_or_fail(loop_thread)
         loop.close()
 
 
@@ -740,8 +749,7 @@ def test_lookahead_timed_out_close_auto_resumes_after_last_admission(
     assert not owner._closed
 
     allow.set()
-    worker.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not worker.is_alive()
+    join_thread_or_fail(worker)
     assert results == [sentinel]
     assert owner._closed
     assert owner._submissions_inflight == 0
