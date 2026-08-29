@@ -153,14 +153,14 @@ sanitize::Status skip_value_at_depth(Cursor &c, std::size_t depth) {
 } // namespace
 
 sanitize::Status skip_object(Cursor &c) {
-  if (kMaxJsonNestingDepth == 0) {
+  if constexpr (kMaxJsonNestingDepth == 0) {
     return nesting_error(c);
   }
   return skip_object_at_depth(c, 1U);
 }
 
 sanitize::Status skip_array(Cursor &c) {
-  if (kMaxJsonNestingDepth == 0) {
+  if constexpr (kMaxJsonNestingDepth == 0) {
     return nesting_error(c);
   }
   return skip_array_at_depth(c, 1U);

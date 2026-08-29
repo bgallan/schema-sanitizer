@@ -72,17 +72,31 @@ runs:
           llvm-profdata-18 merge -sparse coverage-native/raw/${suite}/*.profraw \
             -o coverage-native/${suite}.profdata
           llvm-cov-18 report "${EXTENSION}" \
+            -compilation-dir="${GITHUB_WORKSPACE}" \
             -instr-profile=coverage-native/${suite}.profdata \
             > coverage-native/${suite}-summary.txt
         done
         llvm-profdata-18 merge -sparse coverage-native/raw/*/*.profraw \
           -o coverage-native/combined.profdata
-        llvm-cov-18 show "${EXTENSION}" \
+        render_diagnostics=coverage-native/llvm-cov-render.stderr
+        if ! llvm-cov-18 show "${EXTENSION}" \
+          -compilation-dir="${GITHUB_WORKSPACE}" \
           -instr-profile=coverage-native/combined.profdata \
           -format=html \
           -show-branches=count \
-          -output-dir=coverage-native/html
+          -output-dir=coverage-native/html \
+          2>"${render_diagnostics}"; then
+          cat "${render_diagnostics}" >&2
+          exit 1
+        fi
+        if [[ -s "${render_diagnostics}" ]]; then
+          cat "${render_diagnostics}" >&2
+          exit 1
+        fi
+        rm -- "${render_diagnostics}"
+        test -s coverage-native/html/index.html
         llvm-cov-18 report "${EXTENSION}" \
+          -compilation-dir="${GITHUB_WORKSPACE}" \
           -instr-profile=coverage-native/combined.profdata \
           > coverage-native/combined-summary.txt
         cat coverage-native/combined-summary.txt

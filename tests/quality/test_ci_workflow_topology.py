@@ -713,6 +713,8 @@ def test_action_pins_have_automated_review_and_semantic_security_gates() -> None
     assert r"files: ^\.github/workflows/.*\.ya?ml$" in precommit
     assert r"files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$" in precommit
     assert r"exclude: ^\.github/dependabot\.yml$" in precommit
+    assert "      - id: ruff-check\n" in precommit
+    assert "      - id: ruff\n" not in precommit
 
     remote_hooks = dict(
         re.findall(
@@ -1160,6 +1162,22 @@ def test_generated_ci_destinations_are_reset_before_their_first_write() -> None:
     )
     assert tsan.index("rm -rf -- .work/build/tsan") < tsan.index("cmake -S . -B .work/build/tsan")
     assert gate.index("rm -rf -- download dist release") < gate.index("actions/download-artifact@")
+
+
+def test_native_coverage_resolves_sources_and_rejects_incomplete_html() -> None:
+    """Reproducible source mappings must render completely or fail the native job."""
+    render = next(
+        step
+        for step in _step_bodies(_action("native-llvm-coverage"))
+        if "name: Render LLVM reports" in step
+    )
+
+    assert render.count('-compilation-dir="${GITHUB_WORKSPACE}"') == 3
+    assert "render_diagnostics=coverage-native/llvm-cov-render.stderr" in render
+    assert '2>"${render_diagnostics}"' in render
+    assert 'if [[ -s "${render_diagnostics}" ]]' in render
+    assert 'cat "${render_diagnostics}" >&2' in render
+    assert "test -s coverage-native/html/index.html" in render
 
 
 def test_quality_requirements_are_a_complete_exact_lock() -> None:
