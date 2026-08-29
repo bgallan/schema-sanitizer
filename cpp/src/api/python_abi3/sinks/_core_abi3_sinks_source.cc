@@ -1,9 +1,10 @@
 /*
- * Python ABI3 source-selected sink wrapper.
+ * Implements the Python ABI3 source-selected sink wrapper.
  *
  * This entry point chooses path, stream, or text handling from one native ABI
  * call so Python read/write orchestration can stay compact.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -21,6 +22,7 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Reports whether a Python metadata mapping contributes at least one column.
 bool metadata_object_has_items(PyObject *obj) {
   if (!obj || obj == Py_None) {
     return false;
@@ -33,6 +35,8 @@ bool metadata_object_has_items(PyObject *obj) {
   return size > 0;
 }
 
+/// Reports whether any Python metadata argument contributes generated stream
+/// columns.
 bool metadata_args_have_columns(PyObject *first_row_columns,
                                 PyObject *all_row_columns,
                                 PyObject *timestamp_columns) {
@@ -41,6 +45,7 @@ bool metadata_args_have_columns(PyObject *first_row_columns,
          metadata_object_has_items(timestamp_columns);
 }
 
+/// Wraps a native sink stream with the requested generated metadata columns.
 bool wrap_sink_stream_with_metadata(ArrowArrayStream **main_stream,
                                     PyObject *first_row_columns,
                                     PyObject *all_row_columns,
@@ -69,6 +74,7 @@ bool wrap_sink_stream_with_metadata(ArrowArrayStream **main_stream,
   return true;
 }
 
+/// Validates a native sink result, adds metadata, and packs its Python objects.
 PyObject *pack_sink_or_raise_with_metadata(
     sanitize::Result<NativeSinkOutput> result, PyObject *keepalive,
     PyObject *first_row_columns, PyObject *all_row_columns,
@@ -90,6 +96,7 @@ PyObject *pack_sink_or_raise_with_metadata(
 
 } // namespace
 
+/// Runs one Python path, stream, or text source through a native sink.
 PyObject *py_context_to_sink_from_source(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *sink_name = nullptr;

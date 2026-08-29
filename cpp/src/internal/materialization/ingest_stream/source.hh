@@ -1,4 +1,6 @@
 // Declares ingest Arrow C stream source construction helpers.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -18,7 +20,7 @@ class ExecutionContext;
 
 namespace sanitize::internal {
 
-// Creates an Arrow C stream source from a prepared ingest pipeline.
+/// Creates an Arrow C stream source from a prepared ingest pipeline.
 sanitize::Result<std::shared_ptr<sanitize::ExportBatchSource>>
 make_ingest_stream_source(std::string_view frontend_name,
                           FrontendHandle frontend,

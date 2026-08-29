@@ -1,4 +1,6 @@
 // Implements stable logical slots for column-partitioned materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_preparer_internal.hh"
 
@@ -15,6 +17,7 @@
 namespace sanitize::internal {
 namespace {
 
+/// Adds one column worker's ingest counters to the packet diagnostics.
 void merge_column_diagnostics(IngestDiagnostics *target,
                               const IngestDiagnostics &delta) noexcept {
   if (target) {

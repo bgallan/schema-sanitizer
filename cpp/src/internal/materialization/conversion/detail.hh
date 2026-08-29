@@ -11,19 +11,19 @@
 
 namespace sanitize::internal {
 
-// Records the first conversion error and returns it as an invalid status.
+/// Records the first conversion error and returns it as an invalid status.
 sanitize::Status set_conversion_error(ConvertCtx &ctx,
                                       const sanitize::ColumnPlan &plan,
                                       sanitize::DiagnosticCode code,
                                       std::string detail);
 
-// Converts a scalar ValueView into a typed materialization cell.
+/// Converts a scalar ValueView into a typed materialization cell.
 sanitize::Status convert_scalar(const sanitize::ColumnPlan &plan,
                                 sanitize::ValueView value, ConvertCtx &ctx,
                                 Cell *out);
 
-// Converts one scalar ValueView into non-owning direct append scratch when
-// possible, retaining owned text only for formatted coercion fallbacks.
+/// Converts one scalar into direct-append scratch, borrowing text whenever
+/// possible.
 sanitize::Status convert_direct_scalar(const sanitize::ColumnPlan &plan,
                                        sanitize::ValueView value,
                                        ConvertCtx &ctx, DirectScalarValue *out);

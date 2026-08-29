@@ -1,4 +1,10 @@
-/* Python ABI3 auto-registry path-source sink methods. */
+/*
+ * Implements Python ABI3 auto-registry path-source sink methods.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -16,6 +22,8 @@
 namespace core_abi3_internal {
 using namespace path_registry_detail;
 
+/// Probes path-source chunks, compiles their registry plan, and streams later
+/// chunks.
 PyObject *
 py_context_to_registry_sink_from_path_source_chunk_provider_auto_registry(
     PyObject *, PyObject *args) {
@@ -78,6 +86,8 @@ py_context_to_registry_sink_from_path_source_chunk_provider_auto_registry(
       first_row_columns, timestamp_columns);
 }
 
+/// Extends registry state from path-source chunks and streams under the new
+/// plan.
 PyObject *
 py_context_to_registry_sink_from_path_source_chunk_provider_auto_registry_state(
     PyObject *, PyObject *args) {
@@ -148,6 +158,8 @@ py_context_to_registry_sink_from_path_source_chunk_provider_auto_registry_state(
       first_row_columns, timestamp_columns);
 }
 
+/// Probes explicit path sources, compiles their registry plan, and streams
+/// them.
 PyObject *
 py_context_to_registry_sink_from_path_sources_auto_registry(PyObject *,
                                                             PyObject *args) {
@@ -225,6 +237,7 @@ py_context_to_registry_sink_from_path_sources_auto_registry(PyObject *,
   return pack_path_source_registry_stream(ctx_obj, std::move(state));
 }
 
+/// Extends registry state from explicit path sources before streaming them.
 PyObject *py_context_to_registry_sink_from_path_sources_auto_registry_state(
     PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;

@@ -1,4 +1,6 @@
 // Implements hardened XML row scanner lifecycle and row iteration.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/xml/row_scanner.hh"
 

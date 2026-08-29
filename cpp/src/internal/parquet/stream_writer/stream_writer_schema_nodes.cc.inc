@@ -1,7 +1,8 @@
-// Builds primitive and nested Parquet schema nodes.
+// Maps recursive Arrow schema fields to validated Parquet nodes and physical
+// leaf columns. This fragment is included by the consolidated writer to isolate
+// format-specific details.
 
-// Primitive Arrow-to-Parquet schema node conversion.
-
+/// Converts a supported primitive Arrow field into a Parquet leaf schema node.
 sanitize::Result<ParquetNode>
 primitive_node_from_field(const jsonl::JsonlField &field, std::string name) {
   ParquetNode node;
@@ -123,11 +124,11 @@ primitive_node_from_field(const jsonl::JsonlField &field, std::string name) {
 
 // Dictionary and nested Arrow-to-Parquet schema node conversion.
 
-// Converts one supported Arrow schema field into a recursive Parquet node.
+/// Converts one supported Arrow schema field into a recursive Parquet node.
 sanitize::Result<ParquetNode> node_from_field(const jsonl::JsonlField &field,
                                               std::string name);
 
-// Converts a supported Arrow dictionary field into a plain Parquet leaf.
+/// Converts a supported Arrow dictionary field into a plain Parquet leaf.
 sanitize::Result<ParquetNode>
 dictionary_node_from_field(const jsonl::JsonlField &field, std::string name) {
   if (field.children.size() != 1) {
@@ -149,7 +150,7 @@ dictionary_node_from_field(const jsonl::JsonlField &field, std::string name) {
   return value_node;
 }
 
-// Converts a supported Arrow struct field into a Parquet group node.
+/// Converts a supported Arrow struct field into a Parquet group node.
 sanitize::Result<ParquetNode>
 struct_node_from_field(const jsonl::JsonlField &field, std::string name) {
   ParquetNode node;
@@ -165,7 +166,7 @@ struct_node_from_field(const jsonl::JsonlField &field, std::string name) {
   return node;
 }
 
-// Converts a supported Arrow list field into a Parquet LIST node.
+/// Converts a supported Arrow list field into a Parquet LIST node.
 sanitize::Result<ParquetNode>
 list_node_from_field(const jsonl::JsonlField &field, std::string name) {
   if (field.children.size() != 1) {
@@ -185,7 +186,7 @@ list_node_from_field(const jsonl::JsonlField &field, std::string name) {
   return node;
 }
 
-// Converts a supported Arrow map field into a Parquet MAP node.
+/// Converts a supported Arrow map field into a Parquet MAP node.
 sanitize::Result<ParquetNode>
 map_node_from_field(const jsonl::JsonlField &field, std::string name) {
   if (field.children.size() != 1 ||
@@ -258,6 +259,8 @@ struct SchemaAnalysisFrame {
   bool exiting = false;
 };
 
+/// Validates the Arrow schema and builds the corresponding Parquet node and
+/// leaf-column model.
 std::vector<LeafColumn> analyze_schema(ParquetNode *root) {
   std::vector<LeafColumn> columns;
   std::vector<SchemaAnalysisFrame> pending;
@@ -347,7 +350,7 @@ std::vector<LeafColumn> analyze_schema(ParquetNode *root) {
   return columns;
 }
 
-// Parses and validates the root schema supported by this writer.
+/// Parses and validates the root schema supported by this writer.
 sanitize::Result<ParquetNode>
 parse_supported_root_schema(const ArrowSchema &schema) {
   SAN_ASSIGN_OR_RAISE(auto root_field, jsonl::parse_schema_field(schema));

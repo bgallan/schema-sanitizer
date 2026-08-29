@@ -1,4 +1,10 @@
-/* Arrow C stream coalescing schema support. */
+/*
+ * Implements Arrow C stream coalescing schema support.
+ *
+ * The phases validate schemas, append slices, and export one owned Arrow array
+ * under budget.
+ */
+
 #include "api/python_abi3/streaming/coalesce_stream_internal.hh"
 
 #include <algorithm>
@@ -16,6 +22,7 @@ constexpr std::int64_t kMaxArrowBatchRows = std::int64_t{1} << 24;
 constexpr std::int64_t kMaxArrowChildren = 65'536;
 constexpr std::size_t kMaxArrowValidationDepth = 128;
 
+/// Validates an Arrow logical range, null metadata, and configured slot bounds.
 sanitize::Status validate_logical_slice(const ArrowArray &array,
                                         std::int64_t offset,
                                         std::int64_t length,
@@ -53,6 +60,7 @@ sanitize::Status validate_logical_slice(const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Validates monotonic variable-width offsets and their configured byte bound.
 template <class Offset>
 sanitize::Result<std::pair<std::int64_t, std::int64_t>>
 validate_offsets(const ArrowArray &array, std::int64_t offset,
@@ -91,6 +99,7 @@ validate_offsets(const ArrowArray &array, std::int64_t offset,
       static_cast<std::int64_t>(first), static_cast<std::int64_t>(previous)};
 }
 
+/// Checks typed dictionary indices against the dictionary length.
 template <class Index>
 sanitize::Status
 validate_dictionary_indices_typed(const ArrowArray &array, std::int64_t offset,
@@ -128,6 +137,7 @@ validate_dictionary_indices_typed(const ArrowArray &array, std::int64_t offset,
   return sanitize::Status::OK();
 }
 
+/// Validates one Arrow array recursively against a coalescing specification.
 sanitize::Status
 validate_arrow_node_impl(const CoalesceNodeSpec &spec, const ArrowArray &array,
                          std::int64_t offset, std::int64_t length,
@@ -299,6 +309,7 @@ constexpr std::array<std::string_view, 2> kInteger16Formats{"s", "S"};
 constexpr std::array<std::string_view, 2> kInteger32Formats{"i", "I"};
 constexpr std::array<std::string_view, 2> kInteger64Formats{"l", "L"};
 
+/// Returns the byte width encoded by a supported Arrow integer format string.
 std::size_t integer_width_for_format(std::string_view format) noexcept {
   if (std::find(kInteger8Formats.cbegin(), kInteger8Formats.cend(), format) !=
       kInteger8Formats.cend()) {
@@ -319,6 +330,7 @@ std::size_t integer_width_for_format(std::string_view format) noexcept {
   return 0;
 }
 
+/// Returns the byte width for a supported fixed-width Arrow physical format.
 std::size_t fixed_width_for_format(std::string_view format) noexcept {
   if (const auto integer_width = integer_width_for_format(format);
       integer_width != 0) {
@@ -339,11 +351,13 @@ std::size_t fixed_width_for_format(std::string_view format) noexcept {
   return format == "tin" ? 16 : 0;
 }
 
+/// Returns the byte width and signedness of an Arrow dictionary index format.
 std::size_t
 dictionary_index_width_for_format(std::string_view format) noexcept {
   return integer_width_for_format(format);
 }
 
+/// Parses a supported Arrow layout into a recursive coalescing specification.
 bool parse_supported_schema_node(const ArrowSchema &schema,
                                  CoalesceNodeSpec *out, std::size_t depth = 0) {
   if (!out || depth > kMaxArrowValidationDepth) {
@@ -437,6 +451,7 @@ bool parse_supported_schema_node(const ArrowSchema &schema,
 
 } // namespace
 
+/// Applies recursive array validation to the requested logical slice.
 sanitize::Status validate_arrow_node(const CoalesceNodeSpec &spec,
                                      const ArrowArray &array,
                                      std::int64_t offset, std::int64_t length,
@@ -447,6 +462,8 @@ sanitize::Status validate_arrow_node(const CoalesceNodeSpec &spec,
                                   max_logical_slots, max_logical_buffer_bytes);
 }
 
+/// Reports whether every schema node uses a physical layout supported by
+/// coalescing.
 bool schema_supported(const ArrowSchema &schema, CoalesceNodeSpec *root) {
   if (!parse_supported_schema_node(schema, root)) {
     return false;

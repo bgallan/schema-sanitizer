@@ -1,4 +1,6 @@
 // Scans one JSON value from the current chunk position.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/json/scanner.hh"
 
@@ -14,10 +16,12 @@ namespace {
 
 constexpr std::size_t kWorkerFramingInlineDepth = 64;
 
+/// Returns the JSON framing delimiter expected after a worker-bounded value.
 [[nodiscard]] bool worker_frame_delimiter(char ch) noexcept {
   return json_scan::is_ws(ch) || ch == ',' || ch == ']' || ch == '}';
 }
 
+/// Finds the framing delimiter that terminates one worker-assigned JSON value.
 [[nodiscard]] std::optional<std::size_t>
 find_worker_framed_value_end(std::string_view data,
                              std::size_t start) noexcept {

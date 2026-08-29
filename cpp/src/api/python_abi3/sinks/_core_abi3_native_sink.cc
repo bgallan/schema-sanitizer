@@ -1,4 +1,6 @@
-// Runs Python ABI3 sink requests directly through the native C++ APIs.
+// Runs Python ABI3 sink requests directly through the native C++ APIs. The
+// bridge selects input adapters, applies registry policy, and returns owned
+// Arrow streams.
 
 #include "internal/abi/python_abi3/native_sink.hh"
 
@@ -16,17 +18,21 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Converts the active standard exception into a native invalid-status result.
 sanitize::Status exception_status(std::string_view where,
                                   const std::exception &error) {
   return sanitize::Status::IOError(where, ": ", error.what());
 }
 
+/// Represents a non-standard native exception without losing sink context.
 sanitize::Status unknown_exception_status(std::string_view where) {
   return sanitize::Status::IOError(where, ": unknown error");
 }
 
 } // namespace
 
+/// Packages an ingest stream and its inference diagnostics as native sink
+/// output.
 sanitize::Result<NativeSinkOutput>
 native_sink_from_ingest_stream(sanitize::IngestStream output) {
   try {
@@ -55,6 +61,8 @@ native_sink_from_ingest_stream(sanitize::IngestStream output) {
   }
 }
 
+/// Prepares a source and executes it into the requested native table or stream
+/// sink.
 sanitize::Result<NativeSinkOutput> native_sink_from_source(
     NativeContext *ctx, std::string_view sink_name,
     std::string_view frontend_name, sanitize::ChunkSourcePtr source,
@@ -102,6 +110,7 @@ sanitize::Result<NativeSinkOutput> native_sink_from_source(
   }
 }
 
+/// Accepts additive mode or strict mode backed by a canonical registry schema.
 sanitize::Status validate_registry_sink_mode(std::string_view schema_mode,
                                              std::string_view registry_json,
                                              std::string_view where) {
@@ -128,6 +137,8 @@ sanitize::Status validate_registry_sink_mode(std::string_view schema_mode,
       where, ": schema_mode must be 'strict' or 'additive'");
 }
 
+/// Builds the registry merge request from prepared options and an incoming
+/// logical schema.
 sanitize::SchemaRegistryMergeInput make_registry_merge_input(
     sanitize::LogicalSchema inferred_schema, std::string_view registry_json,
     std::string_view field_name_policy, std::string_view default_key_name,
@@ -148,12 +159,14 @@ sanitize::SchemaRegistryMergeInput make_registry_merge_input(
   return input;
 }
 
+/// Translates prepared options into the registry merge evolution policy.
 sanitize::SchemaEvolutionMode
 registry_schema_evolution_mode(std::string_view schema_mode) noexcept {
   return schema_mode == "strict" ? sanitize::SchemaEvolutionMode::kStrict
                                  : sanitize::SchemaEvolutionMode::kAdditive;
 }
 
+/// Applies registry evolution to a source before producing native sink output.
 sanitize::Result<NativeRegistrySinkOutput> native_registry_sink_from_source(
     NativeContext *ctx, std::string_view sink_name,
     std::string_view frontend_name, sanitize::ChunkSourcePtr source,

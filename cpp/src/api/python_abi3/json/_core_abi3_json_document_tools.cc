@@ -1,4 +1,10 @@
-/* Native parsed-JSON compaction helpers for Python ABI3 wrappers. */
+/*
+ * Implements native parsed-JSON compaction helpers for Python ABI3 wrappers.
+ *
+ * The routines preserve JSON value semantics while enforcing bounded native
+ * ownership and Python errors.
+ */
+
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
 #include "api/python_abi3/json/json_number_write.hh"
 
@@ -20,6 +26,8 @@ namespace {
 
 sanitize::Status append_json_value(std::string &out, sanitize::ValueView value);
 
+/// Rewrites a parsed JSON document into canonical compact text without changing
+/// values.
 sanitize::Result<std::string>
 compact_json_document_impl(std::string_view text) {
   std::pmr::monotonic_buffer_resource arena;
@@ -36,6 +44,7 @@ compact_json_document_impl(std::string_view text) {
   return compact;
 }
 
+/// Emits each element of a parsed JSON array as one canonical JSONL record.
 sanitize::Result<std::string>
 json_array_document_to_jsonl_impl(std::string_view text) {
   std::pmr::monotonic_buffer_resource arena;
@@ -66,6 +75,7 @@ json_array_document_to_jsonl_impl(std::string_view text) {
   return out;
 }
 
+/// Encodes an object recursively as compact JSON while preserving field order.
 sanitize::Status append_json_object(std::string &out,
                                     sanitize::ValueView value) {
   out.push_back('{');
@@ -84,6 +94,7 @@ sanitize::Status append_json_object(std::string &out,
   return sanitize::Status::OK();
 }
 
+/// Encodes an array recursively as compact JSON while preserving element order.
 sanitize::Status append_json_array(std::string &out,
                                    sanitize::ValueView value) {
   out.push_back('[');
@@ -100,6 +111,8 @@ sanitize::Status append_json_array(std::string &out,
   return sanitize::Status::OK();
 }
 
+/// Appends one parsed JSON value by dispatching to its concrete scalar or
+/// container encoder.
 sanitize::Status append_json_value(std::string &out,
                                    sanitize::ValueView value) {
   if (value.is_null()) {
@@ -123,6 +136,7 @@ sanitize::Status append_json_value(std::string &out,
 
 } // namespace
 
+/// Writes a double using stable JSON spelling, including non-finite values.
 void append_json_double(std::string &out, double value) {
   if (std::isnan(value)) {
     out += "NaN";

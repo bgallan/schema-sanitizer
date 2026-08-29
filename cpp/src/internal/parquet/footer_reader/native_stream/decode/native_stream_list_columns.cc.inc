@@ -1,6 +1,9 @@
-// Native Parquet decode owner: list columns.
+// Materializes simple repeated fixed-width columns as Arrow lists with offsets
+// and validity. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
 // ---- native_stream_decode_simple_list_fixed_width ----
+/// Materializes repeated fixed-width values into Arrow list-element buffers.
 sanitize::Status materialize_simple_list_fixed_width_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
@@ -100,6 +103,8 @@ sanitize::Status materialize_simple_list_fixed_width_column(
 }
 
 // ---- native_stream_decode_simple_list_boolean ----
+/// Materializes repeated bit-packed Boolean values into an Arrow element
+/// bitmap.
 sanitize::Status materialize_simple_list_boolean_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
@@ -192,6 +197,8 @@ sanitize::Status materialize_simple_list_boolean_column(
 }
 
 // ---- native_stream_decode_list_byte_stream_split ----
+/// Materializes repeated BYTE_STREAM_SPLIT values into fixed-width Arrow
+/// element buffers.
 sanitize::Status materialize_simple_list_byte_stream_split_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
@@ -307,6 +314,8 @@ sanitize::Status materialize_simple_list_byte_stream_split_column(
 }
 
 // ---- native_stream_decode_list_delta_binary ----
+/// Materializes repeated DELTA_BINARY_PACKED integers into fixed-width Arrow
+/// element buffers.
 sanitize::Status materialize_simple_list_delta_binary_packed_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,

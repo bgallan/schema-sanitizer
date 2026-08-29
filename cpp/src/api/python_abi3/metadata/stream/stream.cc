@@ -1,4 +1,7 @@
-// Construction, lifecycle, and Arrow C callbacks for metadata streams.
+// Implements metadata-stream construction, lifecycle management, and Arrow C
+// callbacks. The implementation accounts retained buffers before exposing
+// generated columns through Arrow C Data.
+
 #include "api/python_abi3/metadata/stream/stream.hh"
 
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
@@ -30,11 +33,14 @@ constexpr std::array<std::string_view, 4> kEtlColumnOrder{
 
 constexpr std::size_t kGeneratedColumnShellEstimateBytes = 256;
 
+/// Adds one estimate to the generated-metadata byte total with saturation.
 std::int64_t add_estimated_bytes(std::int64_t total,
                                  std::int64_t incoming) noexcept {
   return sanitize::internal::saturating_add_i64(total, incoming);
 }
 
+/// Estimates UTF-8 payload bytes selected by row-span metadata over the base
+/// length.
 std::int64_t estimate_row_span_data_bytes(const MetadataColumn &column,
                                           std::int64_t length) noexcept {
   std::size_t span_index = column.span_index;
@@ -65,6 +71,8 @@ std::int64_t estimate_row_span_data_bytes(const MetadataColumn &column,
   return total;
 }
 
+/// Estimates all generated metadata buffers before admitting the next base
+/// array.
 std::int64_t
 estimate_generated_metadata_bytes(const MetadataStreamState &stream_state,
                                   const ArrowArray &base,
@@ -109,10 +117,12 @@ estimate_generated_metadata_bytes(const MetadataStreamState &stream_state,
   return total;
 }
 
+/// Reports whether a child name denotes a generated ETL metadata column.
 bool is_etl_column(std::string_view name) noexcept {
   return std::ranges::find(kEtlColumnOrder, name) != kEtlColumnOrder.end();
 }
 
+/// Returns a base Arrow child name, or an empty view when the schema omits one.
 std::string_view base_child_name(const ArrowSchema &base,
                                  std::size_t index) noexcept {
   const ArrowSchema *child = base.children[index];
@@ -120,6 +130,7 @@ std::string_view base_child_name(const ArrowSchema &base,
                               : std::string_view{};
 }
 
+/// Closes the metadata stream idempotently while preserving its first failure.
 void close_metadata_stream(MetadataStreamState *state) noexcept {
   if (!state || state->closed) {
     return;
@@ -134,6 +145,8 @@ void close_metadata_stream(MetadataStreamState *state) noexcept {
                                &state->stream_capsule, &state->closed);
 }
 
+/// Exposes the most recent metadata stream failure through the Arrow C Stream
+/// callback.
 const char *metadata_stream_last_error(ArrowArrayStream *stream) {
   if (!stream) {
     return "invalid metadata stream";
@@ -144,6 +157,8 @@ const char *metadata_stream_last_error(ArrowArrayStream *stream) {
                : nullptr;
 }
 
+/// Releases the metadata stream callback state and clears all transferred Arrow
+/// ownership.
 void metadata_stream_release(ArrowArrayStream *stream) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -158,6 +173,8 @@ void metadata_stream_release(ArrowArrayStream *stream) {
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
 
+/// Exports the current schema through the metadata stream Arrow C Stream
+/// callback.
 int metadata_stream_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
   if (!stream || !stream->private_data) {
     return EINVAL;
@@ -170,6 +187,8 @@ int metadata_stream_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
       });
 }
 
+/// Appends generated columns to the next base array through the metadata stream
+/// callback.
 int metadata_stream_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   if (!stream || !stream->private_data) {
     return EINVAL;
@@ -180,6 +199,8 @@ int metadata_stream_get_next(ArrowArrayStream *stream, ArrowArray *out) {
       [&](ArrowArray *array) { return build_metadata_array(state, array); });
 }
 
+/// Appends metadata columns while preserving metadata stream ordering and null
+/// semantics.
 bool append_metadata_columns(PyObject *first_row_columns,
                              PyObject *all_row_columns,
                              PyObject *row_span_columns,
@@ -200,6 +221,7 @@ bool append_metadata_columns(PyObject *first_row_columns,
          append_timestamp_columns(timestamp_columns, columns);
 }
 
+/// Creates callback state that owns the base stream, columns, and memory pool.
 std::unique_ptr<MetadataStreamState>
 make_state(PyObject *first_row_columns, PyObject *all_row_columns,
            PyObject *row_span_columns, PyObject *timestamp_columns,
@@ -224,6 +246,7 @@ make_state(PyObject *first_row_columns, PyObject *all_row_columns,
   return state;
 }
 
+/// Allocates an Arrow C Stream whose callbacks own the prepared metadata state.
 ArrowArrayStream *make_stream(std::unique_ptr<MetadataStreamState> state) {
   auto *wrapped = new (std::nothrow) ArrowArrayStream();
   if (!wrapped) {
@@ -244,6 +267,8 @@ ArrowArrayStream *make_stream(std::unique_ptr<MetadataStreamState> state) {
 
 } // namespace
 
+/// Configures metadata stream budget from the operation memory budget before
+/// streaming begins.
 void configure_metadata_stream_budget(
     MetadataStreamState *stream_state,
     std::int64_t memory_limit_bytes) noexcept {
@@ -257,6 +282,7 @@ void configure_metadata_stream_budget(
   stream_state->max_logical_slots = budget.arrow_logical_slots;
 }
 
+/// Validates child names and builds canonical output-index mappings.
 sanitize::Status
 prepare_metadata_child_layout(MetadataStreamState *stream_state,
                               const ArrowSchema &base_schema) {
@@ -324,6 +350,8 @@ prepare_metadata_child_layout(MetadataStreamState *stream_state,
   return sanitize::Status::OK();
 }
 
+/// Rejects a generated batch whose estimated buffers exceed the metadata
+/// budget.
 sanitize::Status
 validate_generated_metadata_budget(const MetadataStreamState &stream_state,
                                    const ArrowArray &base,
@@ -345,6 +373,7 @@ validate_generated_metadata_budget(const MetadataStreamState &stream_state,
   return sanitize::Status::OK();
 }
 
+/// Validates base-array shape, logical range, and schema-child consistency.
 sanitize::Status
 validate_metadata_base_array(const MetadataStreamState &stream_state,
                              const ArrowArray &base) {
@@ -384,6 +413,7 @@ validate_metadata_base_array(const MetadataStreamState &stream_state,
   return sanitize::Status::OK();
 }
 
+/// Parses Python metadata columns and wraps the acquired Arrow stream.
 ArrowArrayStream *make_metadata_stream_wrapper(
     PyObject *stream_obj, PyObject *first_row_columns,
     PyObject *all_row_columns, PyObject *row_span_columns,
@@ -410,6 +440,8 @@ ArrowArrayStream *make_metadata_stream_wrapper(
   return make_stream(std::move(state));
 }
 
+/// Wraps an existing Arrow C stream with generated metadata columns and shared
+/// ownership.
 ArrowArrayStream *make_metadata_stream_wrapper_from_stream(
     ArrowArrayStream *inner, PyObject *first_row_columns,
     PyObject *all_row_columns, PyObject *row_span_columns,
@@ -428,6 +460,8 @@ ArrowArrayStream *make_metadata_stream_wrapper_from_stream(
   return make_stream(std::move(state));
 }
 
+/// Wraps an Arrow stream with generated metadata columns and preserves its
+/// keepalive.
 PyObject *py_metadata_stream_wrap(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *first_row_columns = nullptr;

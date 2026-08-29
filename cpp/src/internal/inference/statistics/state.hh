@@ -1,4 +1,6 @@
 // Declares inference shape and statistics state.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #pragma once
 
@@ -28,7 +30,8 @@ struct Shape {
 };
 
 struct StatsNode {
-  // Creates a node whose variable-size storage is owned by the inference arena.
+  /// Creates a node whose variable-size storage is owned by the inference
+  /// arena.
   explicit StatsNode(std::pmr::memory_resource *resource)
       : key_order(resource), children(resource), table(resource) {}
 
@@ -48,7 +51,7 @@ struct StatsNode {
     uint64_t hash = 0; // non-zero
   };
 
-  // Computes the open-addressing hash for an interned string id.
+  /// Computes the open-addressing hash for an interned string id.
   static uint64_t hash_strid(StrId x) noexcept {
     // 64-bit mix (SplitMix64 style). Reserve 0 as empty hash.
     auto z = static_cast<uint64_t>(x) + uint64_t{0x9e3779b97f4a7c15ull};
@@ -61,7 +64,7 @@ struct StatsNode {
   struct DispatchTable {
     static constexpr uint32_t kEmptySlot = std::numeric_limits<uint32_t>::max();
 
-    // Creates a dispatch table backed by the inference arena.
+    /// Creates a dispatch table backed by the inference arena.
     explicit DispatchTable(std::pmr::memory_resource *resource)
         : slots(resource) {}
 
@@ -69,10 +72,10 @@ struct StatsNode {
     uint32_t size = 0;
     std::pmr::vector<uint32_t> slots;
 
-    // Returns whether the feature is enabled.
+    /// Reports whether open-addressing slots have been initialized.
     [[nodiscard]] bool enabled() const noexcept { return !slots.empty(); }
 
-    // Finds a child node through an index into the canonical entries vector.
+    /// Finds a child node through an index into the canonical entries vector.
     [[nodiscard]] StatsNode *
     find(StrId key, uint64_t hash,
          const std::pmr::vector<ChildEntry> &entries) const noexcept {
@@ -90,12 +93,12 @@ struct StatsNode {
       }
     }
 
-    // Inserts the newest canonical child entry into the dispatch table.
+    /// Inserts the newest canonical child entry into the dispatch table.
     void insert(const std::pmr::vector<ChildEntry> &entries,
                 uint32_t entry_index);
-    // Rebuilds open-addressing slots from canonical child entries.
+    /// Rebuilds open-addressing slots from canonical child entries.
     void build_from(const std::pmr::vector<ChildEntry> &entries);
-    // Disables the optional dispatch acceleration without affecting children.
+    /// Disables the optional dispatch acceleration without affecting children.
     void disable() noexcept {
       mask = 0;
       size = 0;
@@ -108,7 +111,7 @@ struct StatsNode {
 
   StatsNode *elem = nullptr;
 
-  // Finds an existing named child node.
+  /// Finds an existing named child node.
   [[nodiscard]] StatsNode *find_child(StrId key) const noexcept {
     const uint64_t hash = hash_strid(key);
     if (table.enabled())
@@ -120,9 +123,9 @@ struct StatsNode {
     return nullptr;
   }
 
-  // Returns or creates the statistics node for a named child.
+  /// Returns or creates the statistics node for a named child.
   StatsNode *child(StrId key, std::pmr::monotonic_buffer_resource *arena);
-  // Returns or creates the statistics node for list elements.
+  /// Returns or creates the statistics node for list elements.
   StatsNode *list_elem(std::pmr::monotonic_buffer_resource *arena);
 };
 
@@ -145,22 +148,24 @@ struct InferenceContext {
   // Caches synthetic "<key>_flattened" interned ids for over-depth fields.
   std::pmr::unordered_map<StrId, StrId> flattened_key_cache;
 
-  // Creates an inference context using the supplied PMR upstream.
+  /// Creates an inference context using the supplied PMR upstream.
   explicit InferenceContext(
       std::pmr::memory_resource *upstream = std::pmr::get_default_resource());
+  /// Returns the polymorphic resource that owns this inference state's
+  /// allocations.
   [[nodiscard]] std::pmr::memory_resource *memory_resource() const noexcept {
     return const_cast<std::pmr::monotonic_buffer_resource *>(&arena);
   }
-  // Stores the per-run default key in the interner.
+  /// Stores the per-run default key in the interner.
   void set_default_key(std::string_view key);
 
-  // Ensures shape storage exists for a path id.
+  /// Ensures shape storage exists for a path id.
   void ensure_shape(PathId id) {
     if (id >= shapes.size())
       shapes.resize(static_cast<std::size_t>(id) + 1);
   }
 
-  // Returns the shape entry for a path, growing storage as needed.
+  /// Returns the shape entry for a path, growing storage as needed.
   Shape &shape(PathId id) {
     ensure_shape(id);
     return shapes[static_cast<std::size_t>(id)];

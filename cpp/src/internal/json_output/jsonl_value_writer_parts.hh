@@ -1,4 +1,6 @@
 // Declares private helper groups for Arrow value JSON serialization.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #pragma once
 
@@ -12,7 +14,7 @@
 
 namespace sanitize::internal::jsonl_stream_writer {
 
-// Appends primitive scalar Arrow values.
+/// Appends primitive scalar Arrow values.
 sanitize::Status append_int8_value(TextBuffer &out, const ArrowArray &array,
                                    int64_t row);
 sanitize::Status append_uint8_value(TextBuffer &out, const ArrowArray &array,
@@ -36,7 +38,7 @@ sanitize::Status append_float32_value(TextBuffer &out, const ArrowArray &array,
 sanitize::Status append_float64_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row);
 
-// Appends UTF-8 and binary-like Arrow values.
+/// Appends UTF-8 and binary-like Arrow values.
 sanitize::Status append_string32_value(TextBuffer &out, const ArrowArray &array,
                                        int64_t row);
 sanitize::Status append_string64_value(TextBuffer &out, const ArrowArray &array,
@@ -50,7 +52,7 @@ sanitize::Status append_fixed_size_binary_value(TextBuffer &out,
                                                 const ArrowArray &array,
                                                 int64_t row, bool quote = true);
 
-// Appends date, time, and timestamp Arrow values.
+/// Appends date, time, and timestamp Arrow values.
 sanitize::Status append_timestamp_value(TextBuffer &out,
                                         const ArrowArray &array, int64_t row,
                                         int64_t units_per_second,
@@ -67,7 +69,7 @@ sanitize::Status append_time64_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, int64_t units_per_second,
                                      bool quote = true);
 
-// Appends Arrow logical values that are rendered as JSON strings.
+/// Appends Arrow logical values that are rendered as JSON strings.
 sanitize::Status append_decimal_value(TextBuffer &out, const JsonlField &field,
                                       const ArrowArray &array, int64_t row,
                                       bool quote = true);
@@ -77,7 +79,7 @@ sanitize::Status append_duration_value(TextBuffer &out, const JsonlField &field,
 sanitize::Status append_interval_value(TextBuffer &out, const JsonlField &field,
                                        const ArrowArray &array, int64_t row);
 
-// Appends nested Arrow values.
+/// Appends nested Arrow values.
 sanitize::Status append_struct_value(TextBuffer &out, const JsonlField &field,
                                      const ArrowArray &array, int64_t row);
 sanitize::Status append_list32_value(TextBuffer &out, const JsonlField &field,

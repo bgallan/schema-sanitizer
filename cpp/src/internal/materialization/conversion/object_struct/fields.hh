@@ -1,4 +1,6 @@
 // Declares field lookup and strictness helpers for object STRUCT conversion.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 

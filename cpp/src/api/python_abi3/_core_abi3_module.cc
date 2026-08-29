@@ -1,4 +1,11 @@
-/* ABI3 module initializer, definition, and generated method table. */
+/*
+ * Defines the ABI3 module initializer, module definition, and generated method
+ * table.
+ *
+ * It binds the generated catalog to the limited Python API during extension
+ * import.
+ */
+
 #include "internal/abi/python_abi3/methods.hh"
 
 #include <array>
@@ -29,11 +36,13 @@ PyModuleDef kModule = {
     .m_free = nullptr,
 };
 
+/// Creates the stable-ABI Python module from the generated native method table.
 PyObject *create_module() noexcept { return PyModule_Create(&kModule); }
 
 } // namespace
 } // namespace core_abi3_internal
 
+/// Initializes and returns the `_core_abi3` extension module to Python.
 PyMODINIT_FUNC PyInit__core_abi3(void) {
   return core_abi3_internal::create_module();
 }

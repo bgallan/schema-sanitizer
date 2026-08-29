@@ -1,4 +1,6 @@
-// Adapts the project memory pool interface to std::pmr resources.
+// Adapts the project memory-pool interface to std::pmr resources. An
+// optional bounded exact-size cache recycles blocks without hiding
+// pool accounting.
 
 #include "internal/memory/pool_resource.hh"
 
@@ -19,6 +21,8 @@ namespace sanitize::internal {
 
 namespace {
 
+/// Allocates an aligned block directly from the configured native pool
+/// or throws.
 void *allocate_direct(void *pool_handle, std::size_t bytes,
                       std::size_t alignment) {
   if (bytes == 0) {
@@ -39,6 +43,7 @@ void *allocate_direct(void *pool_handle, std::size_t bytes,
   return out;
 }
 
+/// Returns a representable aligned block directly to its native pool.
 void deallocate_direct(void *pool_handle, void *pointer, std::size_t bytes,
                        std::size_t alignment) noexcept {
   if (!pointer ||
@@ -67,10 +72,12 @@ struct PoolResource::CacheState {
     State state = State::kEmpty;
   };
 
+  /// Creates a bounded exact-size cache over the supplied native pool.
   CacheState(void *handle, std::size_t maximum_cached_bytes)
       : pool_handle(handle),
         max_cached_bytes(std::max<std::size_t>(1, maximum_cached_bytes)) {}
 
+  /// Returns every active or cached block to the native pool.
   ~CacheState() {
     for (auto &entry : entries) {
       if (entry.state == State::kEmpty || !entry.pointer) {
@@ -82,6 +89,8 @@ struct PoolResource::CacheState {
     }
   }
 
+  /// Reuses an exact matching cached block before allocating from the
+  /// backing pool.
   void *allocate(std::size_t bytes, std::size_t alignment) {
     {
       std::lock_guard lock(mutex);
@@ -114,6 +123,7 @@ struct PoolResource::CacheState {
     return pointer;
   }
 
+  /// Caches an eligible exact-size block or returns it to the backing pool.
   bool deallocate(void *pointer, std::size_t bytes,
                   std::size_t alignment) noexcept {
     Entry released;

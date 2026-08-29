@@ -1,4 +1,7 @@
-// Derives every native resource limit from one per-operation memory budget.
+// Derives native pipeline resource limits from one per-operation memory
+// budget. Helpers normalize automatic limits and bound
+// timeout-based backpressure.
+
 #pragma once
 
 #include <algorithm>
@@ -15,11 +18,13 @@ inline constexpr std::int64_t kHardMaxMemoryLimitBytes =
 inline constexpr std::int64_t kAutomaticMemoryReserveBytes =
     256LL * 1024LL * 1024LL;
 
-// Returns a safe operation budget derived from currently available host and
-// container memory. Platform discovery lives out of line so every native
-// consumer shares one implementation.
+/// Returns a safe operation budget derived from available host and
+/// container memory. Platform discovery stays out of line so every native
+/// consumer shares one implementation.
 [[nodiscard]] std::int64_t automatic_memory_limit_bytes() noexcept;
 
+/// Reserves host headroom and clamps available memory into a safe
+/// operation limit.
 [[nodiscard]] constexpr std::int64_t
 automatic_memory_limit_from_available(std::int64_t available_bytes) noexcept {
   if (available_bytes <= 0) {
@@ -72,6 +77,8 @@ struct MemoryBudget {
   std::int64_t source_discovery_concurrency = 64;
 };
 
+/// Converts the asynchronous timeout budget into a bounded backpressure
+/// wait duration.
 [[nodiscard]] inline std::uint64_t
 backpressure_timeout_millis_from(const MemoryBudget &budget) noexcept {
   if (!(budget.async_timeout_seconds > 0.0)) {
@@ -82,6 +89,8 @@ backpressure_timeout_millis_from(const MemoryBudget &budget) noexcept {
       std::min(30'000.0, std::max(1'000.0, millis)));
 }
 
+/// Derives a longer end-to-end backpressure deadline from the
+/// operation timeout.
 [[nodiscard]] inline std::uint64_t
 backpressure_deadline_millis_from(const MemoryBudget &budget) noexcept {
   // The per-saturation timeout is deliberately capped at 30s, but the logical
@@ -96,6 +105,8 @@ backpressure_deadline_millis_from(const MemoryBudget &budget) noexcept {
       std::min(86'400'000.0, std::max(1'000.0, millis)));
 }
 
+/// Resolves automatic limits and clamps explicit limits to the
+/// supported range.
 [[nodiscard]] constexpr std::int64_t
 normalize_memory_limit_bytes(std::int64_t requested) noexcept {
   if (requested <= 0) {
@@ -107,6 +118,7 @@ normalize_memory_limit_bytes(std::int64_t requested) noexcept {
   return std::min(requested, kHardMaxMemoryLimitBytes);
 }
 
+/// Returns a clamped fraction of a positive byte budget without underflow.
 [[nodiscard]] constexpr std::int64_t
 bounded_fraction(std::int64_t total, std::int64_t divisor, std::int64_t maximum,
                  std::int64_t minimum = 1) noexcept {
@@ -114,6 +126,8 @@ bounded_fraction(std::int64_t total, std::int64_t divisor, std::int64_t maximum,
   return std::min(total, std::min(maximum, std::max(minimum, divided)));
 }
 
+/// Partitions one normalized operation limit among native pipeline
+/// resource caps.
 [[nodiscard]] constexpr MemoryBudget
 memory_budget_from_limit(std::int64_t requested) noexcept {
   MemoryBudget out;

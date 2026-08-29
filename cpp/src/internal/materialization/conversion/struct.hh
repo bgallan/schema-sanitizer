@@ -1,4 +1,6 @@
 // Declares STRUCT conversion helpers for Arrow C Data materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -6,7 +8,7 @@
 
 namespace sanitize::internal {
 
-// Converts object and scalar inputs into a struct cell.
+/// Converts object and scalar inputs into a struct cell.
 sanitize::Status convert_struct(const sanitize::ColumnPlan &plan,
                                 sanitize::ValueView value, ConvertCtx &ctx,
                                 Cell *out);

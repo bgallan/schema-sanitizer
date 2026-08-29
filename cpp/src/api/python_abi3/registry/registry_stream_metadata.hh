@@ -1,4 +1,6 @@
-// Metadata columns and result packing for registry-backed streams.
+// Declares generated metadata and result-packing helpers for registry-backed
+// streams. The interface carries compiled registry state alongside owned Arrow
+// C Stream results.
 
 #pragma once
 
@@ -30,7 +32,7 @@ void append_registry_first_row_columns(std::vector<MetadataColumn> *columns,
                                        const std::string &registry_json,
                                        const std::string &drifts_json);
 
-// Appends the items from a JSON array to an in-progress array body.
+/// Appends the items from a JSON array to an in-progress array body.
 void append_json_array_items(std::string *out, std::string_view array_json);
 
 std::vector<MetadataColumn> registry_child_metadata_columns(

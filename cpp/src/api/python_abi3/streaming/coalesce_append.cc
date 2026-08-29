@@ -1,4 +1,10 @@
-/* Arrow C stream coalescing append phase. */
+/*
+ * Implements the Arrow C stream coalescing append phase.
+ *
+ * The phases validate schemas, append slices, and export one owned Arrow array
+ * under budget.
+ */
+
 #include "api/python_abi3/streaming/coalesce_stream_internal.hh"
 
 #include <algorithm>
@@ -12,21 +18,25 @@
 namespace core_abi3_internal::coalesce_detail {
 namespace {
 
+/// Reads one bit from an Arrow bitmap using least-significant-bit ordering.
 bool bit_is_set(const std::uint8_t *bitmap, std::int64_t index) noexcept {
   return (bitmap[static_cast<std::size_t>(index >> 3)] &
           (static_cast<std::uint8_t>(1U) << (index & 7))) != 0;
 }
 
+/// Marks one Arrow bitmap slot as present without disturbing adjacent values.
 void set_bit(std::vector<std::uint8_t> *bitmap, std::int64_t index) {
   (*bitmap)[static_cast<std::size_t>(index >> 3)] |=
       static_cast<std::uint8_t>(1U) << (index & 7);
 }
 
+/// Marks one Arrow bitmap slot as null without disturbing adjacent values.
 void clear_bit(std::vector<std::uint8_t> *bitmap, std::int64_t index) {
   (*bitmap)[static_cast<std::size_t>(index >> 3)] &= static_cast<std::uint8_t>(
       ~(static_cast<std::uint8_t>(1U) << (index & 7)));
 }
 
+/// Validates one live array slice before appending it to coalesced output.
 sanitize::Status validate_slice(const ArraySlice &slice,
                                 std::string_view context) {
   if (!slice.array || !slice.array->release) {
@@ -42,6 +52,7 @@ sanitize::Status validate_slice(const ArraySlice &slice,
   return sanitize::Status::OK();
 }
 
+/// Reads a row's validity after applying the Arrow array and slice offsets.
 bool row_is_valid(const ArrowArray &array, std::int64_t logical_row) noexcept {
   if (array.null_count == 0 || !array.buffers || !array.buffers[0]) {
     return true;
@@ -50,6 +61,7 @@ bool row_is_valid(const ArrowArray &array, std::int64_t logical_row) noexcept {
   return bit_is_set(validity, array.offset + logical_row);
 }
 
+/// Appends validity bits while maintaining the accumulated null count.
 sanitize::Status append_validity(CoalescedNode *out, const ArraySlice &slice) {
   SAN_RETURN_NOT_OK(validate_slice(slice, "validity"));
   const std::int64_t start = out->array.length;
@@ -86,6 +98,8 @@ sanitize::Status append_validity(CoalescedNode *out, const ArraySlice &slice) {
   out->array.length = total;
   return sanitize::Status::OK();
 }
+
+/// Requires the batch child count to match the coalesced schema node.
 sanitize::Status ensure_child_count(const CoalesceNodeSpec &spec,
                                     const ArrowArray &array) {
   const std::int64_t expected = static_cast<std::int64_t>(spec.children.size());
@@ -100,6 +114,8 @@ sanitize::Status ensure_child_count(const CoalesceNodeSpec &spec,
   return sanitize::Status::OK();
 }
 
+/// Initializes coalesced child nodes and verifies their shape against the
+/// schema.
 sanitize::Status ensure_output_children(CoalescedNode *out,
                                         const CoalesceNodeSpec &spec) {
   if (out->children.empty() && !spec.children.empty()) {
@@ -112,6 +128,7 @@ sanitize::Status ensure_output_children(CoalescedNode *out,
   return sanitize::Status::OK();
 }
 
+/// Appends fixed-width values after extending the shared validity bitmap.
 sanitize::Status append_fixed_width(CoalescedNode *out, const ArraySlice &slice,
                                     std::size_t width) {
   SAN_RETURN_NOT_OK(append_validity(out, slice));
@@ -144,6 +161,7 @@ sanitize::Status append_fixed_width(CoalescedNode *out, const ArraySlice &slice,
   return sanitize::Status::OK();
 }
 
+/// Appends Boolean values into the coalesced bit-packed buffer.
 sanitize::Status append_bool(CoalescedNode *out, const ArraySlice &slice) {
   SAN_RETURN_NOT_OK(append_validity(out, slice));
   const std::int64_t total = out->array.length;
@@ -166,6 +184,8 @@ sanitize::Status append_bool(CoalescedNode *out, const ArraySlice &slice) {
   return sanitize::Status::OK();
 }
 
+/// Appends a variable-width slice while rebasing offsets into the output
+/// buffer.
 template <class Offset>
 sanitize::Status append_binary_like(CoalescedNode *out, const ArraySlice &slice,
                                     std::vector<Offset> *offsets_out) {
@@ -215,9 +235,13 @@ sanitize::Status append_binary_like(CoalescedNode *out, const ArraySlice &slice,
 }
 
 // ---- append_dictionary ----
+/// Extends a coalesced node by the requested number of type-correct null
+/// values.
 sanitize::Status append_nulls_node(const CoalesceNodeSpec &spec,
                                    CoalescedNode *out, std::int64_t length);
 
+/// Compares all buffers and descendants of two coalesced nodes for exact
+/// equality.
 bool coalesced_node_equals(const CoalesceNodeSpec &spec, const CoalescedNode &a,
                            const CoalescedNode &b) {
   if (a.array.length != b.array.length ||
@@ -246,6 +270,8 @@ bool coalesced_node_equals(const CoalesceNodeSpec &spec, const CoalescedNode &a,
   return true;
 }
 
+/// Appends dictionary indices after enforcing one stable dictionary across
+/// batches.
 sanitize::Status append_dictionary(const CoalesceNodeSpec &spec,
                                    CoalescedNode *out,
                                    const ArraySlice &slice) {
@@ -278,6 +304,8 @@ sanitize::Status append_dictionary(const CoalesceNodeSpec &spec,
 }
 
 // ---- append_nested ----
+/// Appends list-like rows while rebasing offsets and copying their child value
+/// range.
 template <class Offset>
 sanitize::Status append_list_like(const CoalesceNodeSpec &spec,
                                   CoalescedNode *out, const ArraySlice &slice,
@@ -329,6 +357,7 @@ sanitize::Status append_list_like(const CoalesceNodeSpec &spec,
   return sanitize::Status::OK();
 }
 
+/// Appends every struct child recursively while propagating parent nulls.
 sanitize::Status append_struct(const CoalesceNodeSpec &spec, CoalescedNode *out,
                                const ArraySlice &slice) {
   SAN_RETURN_NOT_OK(ensure_child_count(spec, *slice.array));
@@ -462,6 +491,7 @@ sanitize::Status append_nulls_node(const CoalesceNodeSpec &spec,
 
 } // namespace
 
+/// Appends one slice according to its recursive coalescing specification.
 sanitize::Status append_node(const CoalesceNodeSpec &spec, CoalescedNode *out,
                              const ArraySlice &slice) {
   SAN_RETURN_NOT_OK(validate_slice(slice, spec.format));

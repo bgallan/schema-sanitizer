@@ -1,4 +1,6 @@
 // Declares string-to-scalar coercion helpers for inference/materialization.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -21,13 +23,13 @@ inline constexpr uint32_t K_INT = 1u << 4;
 inline constexpr uint32_t K_FLOAT = 1u << 5;
 inline constexpr uint32_t K_STR = 1u << 6;
 
-// Returns whether one byte is ASCII whitespace.
+/// Returns whether one byte is ASCII whitespace.
 inline bool is_ascii_scalar_whitespace(char value) noexcept {
   return value == ' ' || value == '\t' || value == '\n' || value == '\r' ||
          value == '\f' || value == '\v';
 }
 
-// Returns a borrowed view with surrounding ASCII whitespace removed.
+/// Returns a borrowed view with surrounding ASCII whitespace removed.
 inline std::string_view
 trim_ascii_scalar_whitespace(std::string_view value) noexcept {
   while (!value.empty() && is_ascii_scalar_whitespace(value.front()))
@@ -37,8 +39,8 @@ trim_ascii_scalar_whitespace(std::string_view value) noexcept {
   return value;
 }
 
-// Tries strict parsing first, then retries once with surrounding whitespace
-// removed. The original string remains untouched when neither attempt matches.
+/// Tries strict string parsing, then retries once after trimming surrounding
+/// whitespace.
 template <typename Parse>
 inline bool parse_string_with_trim_retry(std::string_view value,
                                          Parse &&parse) noexcept {
@@ -54,6 +56,8 @@ inline bool parse_string_with_trim_retry(std::string_view value,
 
 // --- coercion helpers --------------------------------------------------------
 
+/// Parses a configured true or false token, optionally retrying after
+/// whitespace trimming.
 inline bool coerce_bool_from_string(std::string_view sv,
                                     const PreparedOptions &opts,
                                     bool *out) noexcept {
@@ -74,7 +78,8 @@ inline bool coerce_bool_from_string(std::string_view sv,
   });
 }
 
-// Coerces int64 from string.
+/// Parses a configured integer string, optionally retrying after whitespace
+/// trimming.
 inline bool coerce_int64_from_string(std::string_view sv,
                                      const PreparedOptions &opts,
                                      int64_t *out) noexcept {
@@ -85,7 +90,8 @@ inline bool coerce_int64_from_string(std::string_view sv,
   });
 }
 
-// Coerces float64 from string.
+/// Parses a configured floating string, optionally retrying after whitespace
+/// trimming.
 inline bool coerce_float64_from_string(std::string_view sv,
                                        const PreparedOptions &opts,
                                        double *out) noexcept {
@@ -98,7 +104,7 @@ inline bool coerce_float64_from_string(std::string_view sv,
   });
 }
 
-// Coerces timestamp ns from string.
+/// Parses a configured timestamp string into nanoseconds, with a trimmed retry.
 inline bool coerce_timestamp_ns_from_string(std::string_view sv,
                                             const PreparedOptions &opts,
                                             int64_t *out_ns) noexcept {
@@ -107,7 +113,7 @@ inline bool coerce_timestamp_ns_from_string(std::string_view sv,
   });
 }
 
-// Coerces date days from string.
+/// Parses a configured date string into epoch days, with a trimmed retry.
 inline bool coerce_date_days_from_string(std::string_view sv,
                                          const PreparedOptions &opts,
                                          int32_t *out_days) noexcept {
@@ -116,7 +122,7 @@ inline bool coerce_date_days_from_string(std::string_view sv,
   });
 }
 
-// Coerces time seconds from string.
+/// Parses a configured time string into seconds, with a trimmed retry.
 inline bool coerce_time_seconds_from_string(std::string_view sv,
                                             const PreparedOptions &opts,
                                             int32_t *out_sec) noexcept {
@@ -127,6 +133,7 @@ inline bool coerce_time_seconds_from_string(std::string_view sv,
 
 // --- inference helpers -------------------------------------------------------
 
+/// Infers the first configured scalar kind that accepts a string value.
 inline uint32_t
 infer_scalar_mask_from_string(std::string_view sv,
                               const PreparedOptions &opts) noexcept {

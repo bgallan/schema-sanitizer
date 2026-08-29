@@ -1,4 +1,6 @@
 // Builds field-name lookup metadata for compiled struct plans.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #pragma once
 

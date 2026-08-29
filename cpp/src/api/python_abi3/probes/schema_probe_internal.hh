@@ -1,4 +1,7 @@
-// Shared implementation contract for Python ABI3 schema-probe methods.
+// Declares shared implementation contract for Python ABI3 schema-probe methods.
+// The boundary packages inferred schemas and registry state while translating
+// failures into Python exceptions.
+
 #pragma once
 
 #include <memory>

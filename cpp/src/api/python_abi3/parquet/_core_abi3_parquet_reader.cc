@@ -1,9 +1,10 @@
 /*
- * Python ABI3 Parquet reader helpers.
+ * Implements Python ABI3 Parquet reader helpers.
  *
  * These entry points expose bounded native footer/page parsing and a guarded
  * flat-column Arrow C stream reader for supported Parquet files.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -18,6 +19,7 @@ namespace core_abi3_internal {
 
 namespace {
 
+/// Parses an optional Python sequence into validated Parquet projection names.
 bool parse_projected_columns(PyObject *columns_obj,
                              std::vector<std::string> *projected_columns) {
   if (!projected_columns || !columns_obj || columns_obj == Py_None) {
@@ -54,6 +56,7 @@ bool parse_projected_columns(PyObject *columns_obj,
 
 } // namespace
 
+/// Reads projected Parquet footer information and returns it as JSON text.
 PyObject *py_parquet_footer_info_json(PyObject *, PyObject *args) {
   PyObject *path_obj = nullptr;
   PyObject *columns_obj = nullptr;
@@ -91,6 +94,8 @@ PyObject *py_parquet_footer_info_json(PyObject *, PyObject *args) {
                                      static_cast<Py_ssize_t>(json.size()));
 }
 
+/// Computes bounded Parquet stream preflight details and returns them as JSON
+/// text.
 PyObject *py_parquet_stream_preflight_json(PyObject *, PyObject *args) {
   PyObject *path_obj = nullptr;
   PyObject *columns_obj = Py_None;
@@ -129,6 +134,7 @@ PyObject *py_parquet_stream_preflight_json(PyObject *, PyObject *args) {
                                      static_cast<Py_ssize_t>(json.size()));
 }
 
+/// Opens a projected Parquet file as an Arrow C stream with path keepalive.
 PyObject *py_parquet_stream_read(PyObject *, PyObject *args) {
   PyObject *path_obj = nullptr;
   PyObject *columns_obj = Py_None;

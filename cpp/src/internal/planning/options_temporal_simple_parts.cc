@@ -1,4 +1,6 @@
 // Implements cursor helpers for simple temporal regex fast paths.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #include "internal/planning/options_temporal_simple_parts.hh"
 

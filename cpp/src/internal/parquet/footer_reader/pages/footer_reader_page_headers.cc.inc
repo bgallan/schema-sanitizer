@@ -1,3 +1,8 @@
+// Parses compact-Thrift data, dictionary, and enclosing page headers with
+// structural validation. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Parses one compact-Thrift DataPageHeader into the common page record.
 sanitize::Result<PageHeaderInfo> read_data_page_header(CompactReader &reader,
                                                        PageHeaderInfo page) {
   std::int16_t last_field_id = 0;
@@ -56,6 +61,7 @@ sanitize::Result<PageHeaderInfo> read_data_page_header(CompactReader &reader,
   }
 }
 
+/// Parses one compact-Thrift DictionaryPageHeader into the common page record.
 sanitize::Result<PageHeaderInfo>
 read_dictionary_page_header(CompactReader &reader, PageHeaderInfo page) {
   page.is_dictionary_page = true;
@@ -106,6 +112,7 @@ read_dictionary_page_header(CompactReader &reader, PageHeaderInfo page) {
   }
 }
 
+/// Parses a complete compact-Thrift PageHeader from bounded bytes.
 sanitize::Result<PageHeaderInfo> read_page_header(std::string_view bytes) {
   CompactReader reader(bytes);
   PageHeaderInfo page;

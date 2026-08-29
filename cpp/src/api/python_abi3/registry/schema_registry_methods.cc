@@ -1,4 +1,6 @@
-// Python ABI3 schema-registry query and merge methods.
+// Implements Python ABI3 schema-registry query and merge methods. The routines
+// preserve source order and Arrow ownership while applying compiled registry
+// plans.
 
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -31,6 +33,7 @@ constexpr std::array<EmptyRegistryPayload, 3> kEmptyRegistryPayloads{{
      R"({"field_name_policy":"preserve","registry_version":1,"schema_generation":1,"variants":{}})"},
 }};
 
+/// Returns the canonical serialized representation of an empty schema registry.
 const EmptyRegistryPayload *empty_registry_payload(std::string_view policy) {
   const auto it = std::ranges::find_if(
       kEmptyRegistryPayloads, [policy](const EmptyRegistryPayload &candidate) {
@@ -41,6 +44,7 @@ const EmptyRegistryPayload *empty_registry_payload(std::string_view policy) {
 
 } // namespace
 
+/// Returns canonical empty registry JSON for the requested field-name policy.
 PyObject *py_schema_registry_empty(PyObject *, PyObject *args) {
   const char *field_name_policy = "lower_snake";
   if (!PyArg_ParseTuple(args, "|s:schema_registry_empty", &field_name_policy)) {
@@ -59,6 +63,7 @@ PyObject *py_schema_registry_empty(PyObject *, PyObject *args) {
       payload->json.data(), static_cast<Py_ssize_t>(payload->json.size()));
 }
 
+/// Extracts the logical-schema contract payload encoded by registry JSON.
 PyObject *py_schema_registry_contract_payload(PyObject *, PyObject *args) {
   const char *registry_json = nullptr;
   if (!PyArg_ParseTuple(args, "s:schema_registry_contract_payload",
@@ -97,6 +102,8 @@ PyObject *py_schema_registry_contract_payload(PyObject *, PyObject *args) {
                                    static_cast<Py_ssize_t>(payload.size()));
 }
 
+/// Merges an inferred schema into registry JSON and returns the updated
+/// registry result.
 PyObject *py_schema_registry_merge(PyObject *, PyObject *args) {
   PyObject *inferred_obj = nullptr;
   const char *registry_json = nullptr;

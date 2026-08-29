@@ -1,4 +1,7 @@
-// Internal round-robin candidate ordering for the operation task arena.
+// Implements round-robin worker candidate ordering for operation task
+// arenas. Normalized origins keep compact and wide lane selection
+// deterministic and fair.
+
 #pragma once
 
 #include <bit>
@@ -18,6 +21,7 @@ struct OrderedLaneCandidates final {
 struct NormalizedLaneOriginTag final {};
 inline constexpr NormalizedLaneOriginTag kNormalizedLaneOrigin{};
 
+/// Splits eligible lane bits at an already-normalized lane-relative origin.
 [[nodiscard]] constexpr OrderedLaneCandidates
 ordered_lane_candidates(std::uint64_t candidates, std::size_t begin,
                         std::size_t width, std::size_t start,
@@ -38,6 +42,7 @@ ordered_lane_candidates(std::uint64_t candidates, std::size_t begin,
   };
 }
 
+/// Normalizes a submission ticket before ordering eligible worker lanes.
 [[nodiscard]] constexpr OrderedLaneCandidates
 ordered_lane_candidates(std::uint64_t candidates, std::size_t begin,
                         std::size_t width, std::size_t ticket) noexcept {
@@ -46,10 +51,9 @@ ordered_lane_candidates(std::uint64_t candidates, std::size_t begin,
                                  kNormalizedLaneOrigin);
 }
 
-// Advance a previously normalized lane origin by a bounded delta. Callers use
-// delta == 1 or the precompiled half-lane alternative, so delta never exceeds
-// width. The overflow fallback preserves unsigned `(ticket + delta) % width`
-// semantics exactly at size_t wraparound.
+/// Advances a normalized lane origin by a delta that callers bound to `width`
+/// (one or the precompiled half-lane offset). On overflow, the fallback
+/// preserves unsigned `(ticket + delta) % width` semantics exactly.
 [[nodiscard]] constexpr std::size_t
 advance_normalized_lane_origin(std::size_t ticket, std::size_t origin,
                                std::size_t delta, std::size_t width) noexcept {
@@ -60,6 +64,7 @@ advance_normalized_lane_origin(std::size_t ticket, std::size_t origin,
   return advanced >= width ? advanced - width : advanced;
 }
 
+/// Returns the first in-range worker index from an ordered candidate set.
 [[nodiscard]] constexpr std::size_t
 first_ordered_lane_index(const OrderedLaneCandidates &ordered,
                          std::size_t begin, std::size_t end) noexcept {

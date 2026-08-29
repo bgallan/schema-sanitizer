@@ -1,4 +1,5 @@
-// Implements ABI3 Arrow stream capsule lifecycle helpers.
+// Implements ABI3 Arrow stream capsule lifecycle helpers. They centralize
+// capsule ownership and callback release rules for every Python-facing stream.
 
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 

@@ -1,4 +1,6 @@
 // Implements diagnostics for ordered columnar packet handoff.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_diagnostics.hh"
 
@@ -10,6 +12,8 @@
 namespace sanitize::internal {
 namespace {
 
+/// Adds diagnostic or sizing counters and clamps overflow to the destination
+/// maximum.
 [[nodiscard]] std::int64_t saturating_add(std::int64_t left,
                                           std::int64_t right) noexcept {
   const auto max = std::numeric_limits<std::int64_t>::max();
@@ -19,6 +23,8 @@ namespace {
   return right > max - left ? max : left + right;
 }
 
+/// Models vector-style retained capacity for a row count and fixed bytes per
+/// row.
 [[nodiscard]] std::int64_t
 projected_capacity_bytes(std::int64_t rows,
                          std::int64_t bytes_per_row) noexcept {
@@ -38,12 +44,15 @@ projected_capacity_bytes(std::int64_t rows,
 
 } // namespace
 
+/// Merges one completed packet's ingest counters into the operation totals.
 void ParallelBatchDiagnostics::merge(const IngestDiagnostics &delta) noexcept {
   if (target_) {
     target_->merge(delta);
   }
 }
 
+/// Commits accumulated direct-path diagnostics before parallel packet results
+/// are merged.
 void ParallelBatchDiagnostics::flush_direct() noexcept {
   if (target_ && direct_rows_ > 0) {
     target_->batches += 1;
@@ -56,6 +65,8 @@ void ParallelBatchDiagnostics::flush_direct() noexcept {
   direct_capacity_model_ = true;
 }
 
+/// Accounts for one serial direct-path result and detects logical batch
+/// boundaries.
 void ParallelBatchDiagnostics::record_direct(const ArrowArray *out,
                                              std::int64_t max_rows,
                                              std::int64_t max_bytes,
@@ -96,12 +107,14 @@ void ParallelBatchDiagnostics::record_direct(const ArrowArray *out,
   }
 }
 
+/// Records skipped rows in source order using saturating diagnostic counters.
 void ParallelBatchDiagnostics::record_skipped_rows(std::int64_t rows) noexcept {
   if (target_ && rows > 0) {
     target_->skipped_rows = saturating_add(target_->skipped_rows, rows);
   }
 }
 
+/// Accounts for one completed parallel Arrow batch.
 void ParallelBatchDiagnostics::record_finished(const ArrowArray *out) noexcept {
   if (!target_ || !out) {
     return;
@@ -110,6 +123,7 @@ void ParallelBatchDiagnostics::record_finished(const ArrowArray *out) noexcept {
   target_->materialized_rows += out->length;
 }
 
+/// Merges source-reader resource counters into the operation diagnostics.
 void ParallelBatchDiagnostics::merge_reader(
     const ReaderResourceDiagnostics &delta) const noexcept {
   if (target_) {
@@ -117,6 +131,7 @@ void ParallelBatchDiagnostics::merge_reader(
   }
 }
 
+/// Records cancellation in source order using saturating diagnostic counters.
 void ParallelBatchDiagnostics::record_cancellation(
     std::string_view reason) const noexcept {
   if (target_) {
@@ -124,6 +139,8 @@ void ParallelBatchDiagnostics::record_cancellation(
   }
 }
 
+/// Snapshots operation-level memory telemetry into the exported batch
+/// diagnostics.
 void ParallelBatchDiagnostics::capture_operation_memory() const noexcept {
   if (target_) {
     target_->capture_operation_memory();

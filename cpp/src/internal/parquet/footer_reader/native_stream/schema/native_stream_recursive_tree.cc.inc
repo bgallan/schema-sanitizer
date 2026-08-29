@@ -1,4 +1,6 @@
-// Iterative recursive-path construction, annotation, cloning, and merging.
+// Builds and validates the recursive native materialization tree from Parquet
+// schema paths. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
 struct NativeRecursiveTraversalState {
   std::size_t node_index = 0;
@@ -8,6 +10,8 @@ struct NativeRecursiveTraversalState {
   std::optional<std::size_t> struct_validity_repeated_layout_index;
 };
 
+/// Assigns native recursive repeated layout indexes from validated schema and
+/// page metadata for later materialization.
 bool assign_native_recursive_repeated_layout_indexes(
     NativeRecursiveMaterializationTree *tree) {
   if (!tree || !tree->valid || tree->root >= tree->nodes.size()) {
@@ -74,6 +78,8 @@ bool assign_native_recursive_repeated_layout_indexes(
   return true;
 }
 
+/// Builds native recursive materialization tree from validated Parquet metadata
+/// while preserving Arrow ownership and nesting contracts.
 NativeRecursiveMaterializationTree build_native_recursive_materialization_tree(
     const std::vector<std::string> &path, std::int16_t max_repetition_level,
     std::optional<std::size_t> leaf_column_index = std::nullopt,
@@ -167,6 +173,8 @@ NativeRecursiveMaterializationTree build_native_recursive_materialization_tree(
   return tree;
 }
 
+/// Copies one recursive layout node while clearing indexes that must be rebuilt
+/// in the destination.
 NativeRecursiveMaterializationNode
 clone_native_recursive_node(const NativeRecursiveMaterializationNode &source) {
   NativeRecursiveMaterializationNode clone = source;
@@ -179,6 +187,8 @@ clone_native_recursive_node(const NativeRecursiveMaterializationNode &source) {
   return clone;
 }
 
+/// Clones one recursive layout subtree and remaps all child indexes into the
+/// destination tree.
 sanitize::Result<std::size_t> clone_native_recursive_materialization_subtree(
     const NativeRecursiveMaterializationTree &source, std::size_t source_index,
     NativeRecursiveMaterializationTree *destination) {
@@ -234,6 +244,8 @@ sanitize::Result<std::size_t> clone_native_recursive_materialization_subtree(
   return cloned_indexes[source_index];
 }
 
+/// Reconciles compatible node metadata while rejecting conflicting levels or
+/// validity domains.
 sanitize::Status merge_native_recursive_materialization_node_properties(
     const NativeRecursiveMaterializationNode &source,
     NativeRecursiveMaterializationNode *destination) {
@@ -305,6 +317,8 @@ sanitize::Status merge_native_recursive_materialization_node_properties(
   return {};
 }
 
+/// Merges compatible recursive node properties without changing established
+/// child order.
 sanitize::Status merge_native_recursive_materialization_node(
     const NativeRecursiveMaterializationTree &source, std::size_t source_index,
     NativeRecursiveMaterializationTree *destination,
@@ -375,6 +389,8 @@ sanitize::Status merge_native_recursive_materialization_node(
   return {};
 }
 
+/// Merges a compatible recursive materialization tree into the accumulated
+/// output layout.
 sanitize::Status merge_native_recursive_materialization_tree(
     const NativeRecursiveMaterializationTree &source,
     NativeRecursiveMaterializationTree *destination) {

@@ -1,4 +1,6 @@
 // Parses ISO dates into Arrow date32-compatible day counts.
+// Calendar validation and civil-epoch conversion reject impossible dates and
+// results outside the signed date32 range.
 
 #include "sanitize/core/primitives.hh"
 
@@ -12,10 +14,12 @@ namespace sanitize {
 
 namespace {
 
+/// Returns whether the Gregorian year contains February 29.
 bool is_leap_year(int year) {
   return (year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0));
 }
 
+/// Returns the number of days in a valid Gregorian month, or zero otherwise.
 int days_in_month(int year, int month) {
   switch (month) {
   case 1:

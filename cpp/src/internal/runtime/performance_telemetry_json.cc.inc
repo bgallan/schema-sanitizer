@@ -1,4 +1,7 @@
-// Serializes exact operation telemetry, including worker-local shards.
+// Serializes finalized operation telemetry, including worker-local shards.
+// Stable field names expose phase, queue, memory, and bottleneck
+// measurements as JSON.
+
 std::string PerformanceTelemetry::ToJson() const {
   const auto finished_ns = finished_ns_.load(std::memory_order_acquire);
   const auto observed_end = finished_ns > 0 ? finished_ns : NowNs();

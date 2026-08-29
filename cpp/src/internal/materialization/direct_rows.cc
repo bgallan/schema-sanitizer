@@ -1,4 +1,6 @@
 // Implements direct raw-row materialization for the internal pipeline.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/direct_rows.hh"
 
@@ -24,10 +26,12 @@ namespace {
 
 class JsonDirectMaterializer final : public DirectMaterializer {
 public:
-  // Creates a direct JSON materializer with parser storage from the memory
-  // pool.
+  /// Initializes a direct JSON materializer with parser storage from the
+  /// operation pool.
   explicit JsonDirectMaterializer(PoolResource *pmr_pool) : doc_(pmr_pool) {}
 
+  /// Checks that a raw frontend row exposes the parser state required by its
+  /// declared row kind.
   [[nodiscard]] static sanitize::Status
   validate_frontend_row_contract(const RowRef &row) {
     if ((row.flags & std::to_underlying(RowFlags::kJsonObjectRequired)) == 0) {
@@ -44,7 +48,7 @@ public:
     return sanitize::Status::OK();
   }
 
-  // Converts one raw JSON row using worker-local parser scratch.
+  /// Converts one raw JSON row using worker-local parser scratch.
   sanitize::Result<PreparedRow>
   PrepareRaw(const sanitize::CompiledPlan &plan, const RowRef &row,
              const PreparedOptions &opts,
@@ -60,6 +64,8 @@ public:
                                  diagnostics);
   }
 
+  /// Validates the frontend row contract before appending one raw row to the
+  /// active batch builder.
   sanitize::Result<AppendRowResult>
   AppendRaw(BatchAppender *app, const RowRef &row, const PreparedOptions &opts,
             IngestDiagnostics *diagnostics) override {
@@ -80,11 +86,11 @@ private:
 
 class CsvDirectMaterializer final : public DirectMaterializer {
 public:
-  // Creates a direct CSV materializer with temporary parser arena storage.
+  /// Creates a direct CSV materializer with temporary parser arena storage.
   explicit CsvDirectMaterializer(PoolResource *pmr_pool)
       : arena_(pmr_pool ? pmr_pool->pool() : nullptr) {}
 
-  // Converts one raw CSV row using worker-local parser scratch.
+  /// Converts one raw CSV row using worker-local parser scratch.
   sanitize::Result<PreparedRow>
   PrepareRaw(const sanitize::CompiledPlan &plan, const RowRef &row,
              const PreparedOptions &opts,
@@ -106,7 +112,7 @@ private:
   std::vector<sanitize::FieldRef> fields_;
 };
 
-// Creates a frontend-specific direct row materializer.
+/// Creates a frontend-specific direct row materializer.
 template <typename DirectT>
 sanitize::Result<std::unique_ptr<DirectMaterializer>>
 make_frontend_direct_materializer(PoolResource *pmr_pool, const char *name) {

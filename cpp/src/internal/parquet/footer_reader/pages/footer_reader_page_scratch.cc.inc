@@ -1,7 +1,13 @@
+// Reuses bounded payload and decompression scratch while discarding excessive
+// retained capacity. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
 constexpr std::size_t kRetainedPagePayloadScratchBytes =
     8ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kRetainedPageHeaderScratchBytes = 64ULL * 1024ULL;
 
+/// Clears or release page scratch, securely wiping or releasing excess retained
+/// capacity when configured.
 void clear_or_release_page_scratch(std::string *value,
                                    std::size_t retained_capacity) noexcept {
   if (!value) {
@@ -29,12 +35,15 @@ struct PageVerificationScratch {
   std::uint64_t max_decompressed_bytes = kMaxDecompressedBytesPerRowGroup;
   std::uint64_t max_derived_bytes = kMaxDerivedBytesPerRowGroup;
 
+  /// Securely clears all compressed, decompressed, and header scratch buffers.
   ~PageVerificationScratch() {
     clear_or_release_page_scratch(&page_header_bytes, 0);
     clear_or_release_page_scratch(&compressed_payload, 0);
     clear_or_release_page_scratch(&decompressed_payload, 0);
   }
 
+  /// Returns page-verification scratch charges and prepares the guard for a new
+  /// page.
   void reset_budget() noexcept {
     clear_or_release_page_scratch(&page_header_bytes,
                                   kRetainedPageHeaderScratchBytes);
@@ -47,17 +56,23 @@ struct PageVerificationScratch {
     derived_bytes = 0;
   }
 
+  /// Clears compressed payload, securely wiping or releasing excess retained
+  /// capacity when configured.
   void retire_compressed_payload() noexcept {
     clear_or_release_page_scratch(&compressed_payload,
                                   kRetainedPagePayloadScratchBytes);
   }
 
+  /// Clears decompressed payload, securely wiping or releasing excess retained
+  /// capacity when configured.
   void retire_decompressed_payload() noexcept {
     clear_or_release_page_scratch(&decompressed_payload,
                                   kRetainedPagePayloadScratchBytes);
   }
 };
 
+/// Charges page verification budget to the active memory budget before
+/// allocating derived storage.
 sanitize::Status
 charge_page_verification_budget(PageVerificationScratch *scratch,
                                 std::size_t compressed,
@@ -97,6 +112,8 @@ charge_page_verification_budget(PageVerificationScratch *scratch,
   return {};
 }
 
+/// Charges page derived budget to the active memory budget before allocating
+/// derived storage.
 sanitize::Status charge_page_derived_budget(PageVerificationScratch *scratch,
                                             const PageHeaderInfo &page) {
   if (!scratch) {

@@ -1,4 +1,6 @@
 // Implements nested Arrow value JSON serialization helpers.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_value_writer_parts.hh"
 
@@ -14,6 +16,8 @@
 namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
+/// Returns the typed Arrow values buffer after verifying that the buffer
+/// pointer is available.
 template <typename T> const T *data_buffer(const ArrowArray &array) {
   if (!array.buffers || !array.buffers[1]) {
     return nullptr;
@@ -21,6 +25,8 @@ template <typename T> const T *data_buffer(const ArrowArray &array) {
   return static_cast<const T *>(array.buffers[1]);
 }
 
+/// Reads one signed or unsigned dictionary index using the field's declared
+/// physical width.
 std::optional<int64_t> dictionary_index_at(const ArrowArray &array,
                                            JsonlKind index_kind, int64_t row) {
   switch (index_kind) {
@@ -74,6 +80,7 @@ std::optional<int64_t> dictionary_index_at(const ArrowArray &array,
 }
 
 template <typename OffsetT>
+/// Serializes one variable-length list using its Arrow offset interval.
 sanitize::Status append_list_value(TextBuffer &out, const JsonlField &field,
                                    const ArrowArray &array, int64_t row) {
   if (field.children.size() != 1 || array.n_children != 1 || !array.children ||
@@ -123,16 +130,19 @@ sanitize::Status append_struct_value(TextBuffer &out, const JsonlField &field,
   return sanitize::Status::OK();
 }
 
+/// Serializes one Arrow list whose element bounds use 32-bit offsets.
 sanitize::Status append_list32_value(TextBuffer &out, const JsonlField &field,
                                      const ArrowArray &array, int64_t row) {
   return append_list_value<int32_t>(out, field, array, row);
 }
 
+/// Serializes one Arrow large-list whose element bounds use 64-bit offsets.
 sanitize::Status append_list64_value(TextBuffer &out, const JsonlField &field,
                                      const ArrowArray &array, int64_t row) {
   return append_list_value<int64_t>(out, field, array, row);
 }
 
+/// Serializes one fixed-size Arrow list from its computed child interval.
 sanitize::Status append_fixed_size_list_value(TextBuffer &out,
                                               const JsonlField &field,
                                               const ArrowArray &array,
@@ -156,6 +166,7 @@ sanitize::Status append_fixed_size_list_value(TextBuffer &out,
   return sanitize::Status::OK();
 }
 
+/// Resolves one Arrow dictionary index and serializes the referenced value.
 sanitize::Status append_dictionary_value(TextBuffer &out,
                                          const JsonlField &field,
                                          const ArrowArray &array, int64_t row) {

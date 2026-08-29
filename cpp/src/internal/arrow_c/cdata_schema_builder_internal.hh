@@ -1,4 +1,6 @@
-// Private helpers for Arrow C Data schema export.
+// Declares private helpers for Arrow C Data schema export. The implementation
+// preserves Arrow ownership and error contracts without depending on the Arrow
+// C++ library.
 
 #pragma once
 
@@ -18,22 +20,22 @@ struct ExportedSchemaState {
   std::string name;
 };
 
-// Owns field name/format strings for one ArrowSchema node.
+/// Owns field name/format strings for one ArrowSchema node.
 sanitize::Status assign_schema_state(ArrowSchema *out, std::string name,
                                      std::string format, const char *context);
 
-// Releases an exported ArrowSchema tree and its owned metadata.
+/// Releases an exported ArrowSchema tree and its owned metadata.
 void exported_schema_release(ArrowSchema *schema);
 
-// Allocates a nullable child-pointer array for an ArrowSchema.
+/// Allocates a nullable child-pointer array for an ArrowSchema.
 sanitize::Status allocate_child_slots(ArrowSchema *out, std::size_t child_count,
                                       const char *context);
 
-// Allocates and registers one child schema slot.
+/// Allocates and registers one child schema slot.
 sanitize::Result<ArrowSchema *>
 append_child_schema(ArrowSchema *out, std::size_t index, const char *context);
 
-// Builds one ArrowSchema node for a logical field.
+/// Builds one ArrowSchema node for a logical field.
 sanitize::Status build_schema_node(std::string name, bool nullable,
                                    const sanitize::LogicalType &logical_type,
                                    std::string_view format_override,

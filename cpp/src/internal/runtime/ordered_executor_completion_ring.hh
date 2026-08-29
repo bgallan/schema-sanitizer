@@ -1,4 +1,7 @@
 // Provides modulo-free bounded completion-ring cursors for ordered stages.
+// The producer reservation and consumer advancement protocols preserve
+// ordinal slots.
+
 #pragma once
 
 #include <cstddef>
@@ -18,9 +21,11 @@ template <class Packet> struct ScheduledOrdinalPacket final {
 // by OrderedExecutor's mutex, so a branch-based ring avoids repeated division.
 class CompletionRingCursor final {
 public:
+  /// Initializes producer and consumer cursors for a fixed-capacity ring.
   explicit CompletionRingCursor(std::size_t capacity) noexcept
       : capacity_(capacity) {}
 
+  /// Reserves the next producer slot and advances the submit cursor.
   [[nodiscard]] std::size_t ReserveSubmit() noexcept {
     const auto slot = next_submit_;
     if (++next_submit_ == capacity_) {
@@ -29,12 +34,16 @@ public:
     return slot;
   }
 
+  /// Returns the most recently reserved producer slot after
+  /// failed submission.
   void RollbackSubmit() noexcept {
     next_submit_ = next_submit_ == 0 ? capacity_ - 1 : next_submit_ - 1;
   }
 
+  /// Returns the ring slot containing the next required ordinal.
   [[nodiscard]] std::size_t NextTake() const noexcept { return next_take_; }
 
+  /// Advances the consumer cursor after taking one ordered completion.
   void AdvanceTake() noexcept {
     if (++next_take_ == capacity_) {
       next_take_ = 0;

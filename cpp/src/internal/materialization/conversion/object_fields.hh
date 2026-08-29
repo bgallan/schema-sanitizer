@@ -1,4 +1,6 @@
 // Declares snapshotted object-field lookup used by STRUCT conversion.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -19,11 +21,12 @@ struct ObjectFieldSnapshot {
   std::vector<sanitize::FieldRef> fields;
   std::vector<int32_t> child_field_indices;
 
-  // Materializes one object value and pre-resolves source keys to child fields.
+  /// Materializes one object value and pre-resolves source keys to child
+  /// fields.
   [[nodiscard]] Status build(ValueView object, const ColumnPlan &plan,
                              const sanitize::PreparedOptions &opts);
 
-  // Finds the value for one planned child after build() has completed.
+  /// Finds the value for one planned child after build() has completed.
   [[nodiscard]] bool find(std::size_t child_index, std::string_view key,
                           const sanitize::PreparedOptions &opts,
                           ValueView *out) const;

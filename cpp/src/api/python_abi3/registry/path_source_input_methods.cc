@@ -1,4 +1,10 @@
-/* Python ABI3 path-source input and non-registry sink methods. */
+/*
+ * Implements Python ABI3 path-source input and non-registry sink methods.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -19,6 +25,7 @@
 namespace core_abi3_internal {
 using namespace path_registry_detail;
 
+/// Reads one Python-backed source through a registry-aware native sink.
 PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *sink_name = nullptr;
@@ -143,6 +150,7 @@ PyObject *py_context_to_registry_sink_from_source(PyObject *, PyObject *args) {
   return nullptr;
 }
 
+/// Reads ordered path-source specifications through the selected native sink.
 PyObject *py_context_to_sink_from_path_sources(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *sink_name = nullptr;
@@ -200,6 +208,7 @@ PyObject *py_context_to_sink_from_path_sources(PyObject *, PyObject *args) {
   return pack_stream_and_diagnostics(ctx_obj, stream, diagnostics);
 }
 
+/// Streams path-source chunks from a Python provider through the selected sink.
 PyObject *py_context_to_sink_from_path_source_chunk_provider(PyObject *,
                                                              PyObject *args) {
   PyObject *ctx_obj = nullptr;

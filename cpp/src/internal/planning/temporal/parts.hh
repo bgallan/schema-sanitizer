@@ -1,4 +1,6 @@
 // Declares helper parsers for user-supplied temporal regex captures.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #pragma once
 
@@ -20,27 +22,27 @@ struct TemporalParts {
   int tz_offset_seconds = 0;
 };
 
-// Parses a bounded integer regex capture.
+/// Parses a bounded integer regex capture.
 bool parse_int_captured(std::string_view value, int *out);
 
-// Parses optional fractional nanoseconds from regex match group 7.
+/// Parses optional fractional nanoseconds from regex match group 7.
 bool parse_fraction_capture(
     const std::match_results<std::string_view::const_iterator> &matches,
     TemporalParts *parts);
 
-// Parses optional timezone offset from regex match group 8.
+/// Parses optional timezone offset from regex match group 8.
 bool parse_timezone_capture(
     const std::match_results<std::string_view::const_iterator> &matches,
     TemporalParts *parts);
 
-// Converts parsed temporal fields to Unix epoch nanoseconds.
+/// Converts parsed temporal fields to Unix epoch nanoseconds.
 bool parse_temporal_parts_to_timestamp(const TemporalParts &parts,
                                        int64_t *out_ns);
 
-// Converts a Gregorian date to days since the Unix epoch.
+/// Converts a Gregorian date to days since the Unix epoch.
 bool ymd_to_days(int year, int month, int day, int32_t *out_days);
 
-// Converts a wall-clock time to seconds since midnight.
+/// Converts a wall-clock time to seconds since midnight.
 bool hms_to_seconds(int hour, int minute, int second, int32_t *out_sec);
 
 } // namespace sanitize::internal

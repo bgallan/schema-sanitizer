@@ -1,4 +1,6 @@
 // Implements private row field lookup helpers for build conversion.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/batch_appender_internal.hh"
 

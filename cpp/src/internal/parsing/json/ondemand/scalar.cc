@@ -1,4 +1,6 @@
 // Implements scalar parsing for on-demand JSON ValueView values.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/ondemand/document.hh"
 

@@ -1,4 +1,6 @@
-// Shared native path-source helpers for Python ABI3 wrappers.
+// Declares native path-source plans, grouped inputs, and Python ABI3 helper
+// contracts. The data models preserve source order and explicit ownership
+// across multi-file operations.
 
 #pragma once
 
@@ -69,6 +71,8 @@ struct ParsedPathSources {
   std::vector<PathSourceSpec> owned;
   const std::vector<PathSourceSpec> *borrowed = nullptr;
 
+  /// Returns the referenced path-source descriptor after bounds validation by
+  /// the caller.
   [[nodiscard]] const std::vector<PathSourceSpec> &get() const noexcept {
     return borrowed ? *borrowed : owned;
   }

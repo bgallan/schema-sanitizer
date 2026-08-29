@@ -1,4 +1,10 @@
-/* Arrow-source registry provider parsing and schema merging. */
+/*
+ * Implements Arrow-source registry provider parsing and schema merging.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -31,6 +37,7 @@
 
 namespace core_abi3_internal::arrow_registry_detail {
 
+/// Copies a Python Unicode value into an owned native UTF-8 string.
 bool py_unicode_to_string(PyObject *obj, const char *name, std::string *out) {
   if (!PyUnicode_Check(obj)) {
     PyErr_Format(PyExc_TypeError, "%s must be strings", name);
@@ -45,6 +52,8 @@ bool py_unicode_to_string(PyObject *obj, const char *name, std::string *out) {
   return true;
 }
 
+/// Releases Python references retained by Arrow-source specifications under the
+/// GIL.
 void decref_arrow_sources(std::vector<ArrowSourceSpec> *sources) noexcept {
   if (!sources) {
     return;
@@ -55,6 +64,8 @@ void decref_arrow_sources(std::vector<ArrowSourceSpec> *sources) noexcept {
   }
   sources->clear();
 }
+
+/// Converts the active Python provider exception into a native registry status.
 sanitize::Status python_arrow_provider_error_status(const char *where) {
   PyObject *type = nullptr;
   PyObject *value = nullptr;
@@ -88,6 +99,8 @@ sanitize::Status python_arrow_provider_error_status(const char *where) {
   return sanitize::Status::Invalid(msg);
 }
 
+/// Closes the Arrow chunk provider idempotently without replacing a prior
+/// failure.
 void close_arrow_chunk_provider(NativeArrowSourcesStreamState *state) noexcept {
   if (!state || !state->chunk_provider) {
     return;
@@ -103,6 +116,8 @@ void close_arrow_chunk_provider(NativeArrowSourcesStreamState *state) noexcept {
   }
   Py_DECREF(provider);
 }
+
+/// Parses a nonempty Python sequence into owned Arrow-source specifications.
 bool parse_arrow_sources(PyObject *sources_obj,
                          std::vector<ArrowSourceSpec> *out) {
   if (!PySequence_Check(sources_obj) || PyUnicode_Check(sources_obj)) {
@@ -161,6 +176,7 @@ bool parse_arrow_sources(PyObject *sources_obj,
   return true;
 }
 
+/// Derives a logical schema from an Arrow schema protocol or frontend fallback.
 sanitize::Result<sanitize::LogicalSchema>
 arrow_source_logical_schema(PyObject *stream_obj,
                             const sanitize::PreparedOptionsPtr &prepared) {
@@ -197,6 +213,9 @@ arrow_source_logical_schema(PyObject *stream_obj,
   }
   return input_schema;
 }
+
+/// Loads the next Arrow-provider chunk and retains its Python ownership for
+/// streaming.
 sanitize::Status
 load_next_arrow_provider_chunk(NativeArrowSourcesStreamState *state) {
   if (!state || !state->chunk_provider || state->chunk_provider_exhausted) {
@@ -229,6 +248,8 @@ load_next_arrow_provider_chunk(NativeArrowSourcesStreamState *state) {
   return sanitize::Status::OK();
 }
 
+/// Reports whether the Python Arrow provider exposes a callable `next_sources`
+/// method.
 bool arrow_provider_has_next_sources(PyObject *provider_obj) {
   if (!PyObject_HasAttrString(provider_obj, "next_sources")) {
     PyErr_SetString(PyExc_TypeError,
@@ -238,6 +259,8 @@ bool arrow_provider_has_next_sources(PyObject *provider_obj) {
   return true;
 }
 
+/// Closes Python Arrow provider idempotently and preserves any prior
+/// schema-registry stream failure.
 void close_python_arrow_provider(PyObject *provider_obj) noexcept {
   if (!provider_obj) {
     return;
@@ -250,6 +273,8 @@ void close_python_arrow_provider(PyObject *provider_obj) noexcept {
   Py_DECREF(result);
 }
 
+/// Calls `next_sources` and parses the next Arrow group, treating `None` as
+/// exhaustion.
 bool parse_next_arrow_provider_sources(PyObject *provider_obj,
                                        std::vector<ArrowSourceSpec> *sources,
                                        bool *exhausted) {
@@ -272,7 +297,8 @@ bool parse_next_arrow_provider_sources(PyObject *provider_obj,
   Py_DECREF(result);
   return ok;
 }
-// Arrow provider chunk schema, metadata, passthrough, and ingest flow.
+/// Merges each Arrow source schema, then reconciles the combined schema with
+/// the supplied registry and optional prior contract.
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_arrow_source_schemas(NativeContext *ctx,
                            const std::vector<ArrowSourceSpec> &sources,
@@ -311,6 +337,8 @@ merge_arrow_source_schemas(NativeContext *ctx,
                          : sanitize::merge_schema_registry(merge_input);
 }
 
+/// Merges Arrow source provider schemas while preserving deterministic field
+/// order and diagnostics.
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_arrow_source_provider_schemas(
     NativeContext *ctx, PyObject *provider_obj,

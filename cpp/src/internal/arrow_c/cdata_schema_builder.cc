@@ -1,4 +1,6 @@
 // Builds Arrow C Data schemas from logical schema descriptions.
+// The implementation preserves Arrow ownership and error contracts without
+// depending on the Arrow C++ library.
 
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_schema_builder_internal.hh"

@@ -1,4 +1,10 @@
-/* Python ABI3 context and diagnostics wrappers. */
+/*
+ * Implements Python ABI3 context and diagnostics wrappers.
+ *
+ * The wrappers validate capsule identity and translate native state into stable
+ * Python values.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -18,16 +24,21 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Creates a Python Unicode value from a native UTF-8 string.
 PyObject *unicode_from_string(const std::string &value) {
   return PyUnicode_FromStringAndSize(value.data(),
                                      static_cast<Py_ssize_t>(value.size()));
 }
 
+/// Raises a Python runtime error with native operation context and exception
+/// text.
 void raise_native_exception(const char *where,
                             const std::exception &error) noexcept {
   PyErr_Format(PyExc_RuntimeError, "%s: %s", where, error.what());
 }
 
+/// Serializes context memory counters as the JSON payload consumed by Python
+/// diagnostics.
 std::string context_memory_stats_json(const NativeContext &context) {
   auto *pool = static_cast<sanitize::internal::MemoryPool *>(
       context.ctx->memory_pool_handle());
@@ -61,6 +72,8 @@ std::string context_memory_stats_json(const NativeContext &context) {
   return json;
 }
 
+/// Serializes ingestion diagnostics into the stable Python-facing JSON
+/// representation.
 std::string diagnostics_json(const NativeDiagnostics &diagnostics) {
   sanitize::IngestDiagnostics merged = *diagnostics.diagnostics;
   if (diagnostics.has_inference_snapshot) {
@@ -99,6 +112,8 @@ std::string diagnostics_json(const NativeDiagnostics &diagnostics) {
 
 } // namespace
 
+/// Creates an execution context with Python interrupt polling and returns its
+/// owning capsule.
 PyObject *py_context_new(PyObject *, PyObject *) {
   try {
     auto context = std::make_unique<NativeContext>();
@@ -115,6 +130,8 @@ PyObject *py_context_new(PyObject *, PyObject *) {
   return nullptr;
 }
 
+/// Serializes current context memory and reader-resource statistics as JSON
+/// text.
 PyObject *py_context_memory_stats_json(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:context_memory_stats_json", &ctx_obj)) {
@@ -137,6 +154,7 @@ PyObject *py_context_memory_stats_json(PyObject *, PyObject *args) {
   return nullptr;
 }
 
+/// Serializes the context performance telemetry snapshot as JSON text.
 PyObject *py_context_performance_stats_json(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:context_performance_stats_json", &ctx_obj)) {
@@ -160,6 +178,7 @@ PyObject *py_context_performance_stats_json(PyObject *, PyObject *args) {
   return nullptr;
 }
 
+/// Serializes the native diagnostics held by a Python capsule as JSON text.
 PyObject *py_diagnostics_json(PyObject *, PyObject *args) {
   PyObject *diagnostics_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:diagnostics_json", &diagnostics_obj)) {

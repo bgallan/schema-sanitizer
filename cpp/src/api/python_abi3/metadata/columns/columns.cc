@@ -1,4 +1,6 @@
 // Parses scalar, timestamp, and row-span metadata columns from Python objects.
+// The implementation accounts retained buffers before exposing generated
+// columns through Arrow C Data.
 
 #include "api/python_abi3/metadata/columns/api.hh"
 
@@ -12,6 +14,8 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Adds byte or item counts while clamping overflow to the representable
+/// maximum.
 std::size_t saturating_add(std::size_t left, std::size_t right) noexcept {
   if (right > std::numeric_limits<std::size_t>::max() - left) {
     return std::numeric_limits<std::size_t>::max();
@@ -19,6 +23,7 @@ std::size_t saturating_add(std::size_t left, std::size_t right) noexcept {
   return left + right;
 }
 
+/// Rejects an item-count increase that would exceed its supplied safety limit.
 bool ensure_item_budget(std::size_t current, std::size_t incoming,
                         std::size_t limit, const char *message) {
   if (current > limit || incoming > limit - current) {
@@ -28,6 +33,8 @@ bool ensure_item_budget(std::size_t current, std::size_t incoming,
   return true;
 }
 
+/// Calculates retained UTF-8 bytes for bounded metadata stream memory
+/// accounting.
 std::size_t retained_utf8_bytes(const std::vector<MetadataColumn> &columns) {
   std::size_t total = 0;
   for (const auto &column : columns) {
@@ -40,6 +47,7 @@ std::size_t retained_utf8_bytes(const std::vector<MetadataColumn> &columns) {
   return total;
 }
 
+/// Charges validated UTF-8 input bytes against the metadata safety limit.
 bool charge_utf8_bytes(std::size_t *retained, Py_ssize_t size) {
   if (!retained || size < 0) {
     PyErr_SetString(PyExc_OverflowError, "metadata UTF-8 size is invalid");
@@ -56,6 +64,7 @@ bool charge_utf8_bytes(std::size_t *retained, Py_ssize_t size) {
   return true;
 }
 
+/// Copies a Python Unicode value into a bounded native UTF-8 string.
 bool py_unicode_to_string(PyObject *obj, const char *name, std::string *out,
                           std::size_t *retained) {
   if (!PyUnicode_Check(obj)) {
@@ -72,6 +81,7 @@ bool py_unicode_to_string(PyObject *obj, const char *name, std::string *out,
   return true;
 }
 
+/// Parses a Python string or `None` into one scalar metadata column value.
 bool py_value_to_metadata_column(PyObject *value, const char *placement_name,
                                  MetadataColumn *column,
                                  std::size_t *retained) {
@@ -89,6 +99,7 @@ bool py_value_to_metadata_column(PyObject *value, const char *placement_name,
   return false;
 }
 
+/// Appends scalar metadata columns parsed from a bounded Python dictionary.
 bool append_utf8_columns_from_dict(PyObject *dict,
                                    MetadataColumnPlacement placement,
                                    const char *placement_name,
@@ -131,6 +142,7 @@ bool append_utf8_columns_from_dict(PyObject *dict,
   return true;
 }
 
+/// Parses a Python string or `None` into one row-span metadata value.
 bool py_value_to_metadata_span(PyObject *value, MetadataSpan *span,
                                std::size_t *retained) {
   if (value == Py_None) {
@@ -146,6 +158,7 @@ bool py_value_to_metadata_span(PyObject *value, MetadataSpan *span,
   return false;
 }
 
+/// Parses and validates one Python row-span metadata pair.
 bool py_span_to_metadata_span(PyObject *obj, MetadataSpan *span,
                               std::size_t *retained) {
   if (!PySequence_Check(obj) || PyUnicode_Check(obj)) {
@@ -190,18 +203,21 @@ bool py_span_to_metadata_span(PyObject *obj, MetadataSpan *span,
 
 } // namespace
 
+/// Appends metadata columns emitted only on the first row of a source.
 bool append_first_row_columns_from_dict(PyObject *dict,
                                         std::vector<MetadataColumn> *out) {
   return append_utf8_columns_from_dict(
       dict, MetadataColumnPlacement::FirstRowUtf8, "first-row", out);
 }
 
+/// Appends metadata columns repeated on every row of a source.
 bool append_all_row_columns_from_dict(PyObject *dict,
                                       std::vector<MetadataColumn> *out) {
   return append_utf8_columns_from_dict(
       dict, MetadataColumnPlacement::AllRowsUtf8, "all-row", out);
 }
 
+/// Appends bounded row-span metadata columns from a Python dictionary.
 bool append_row_span_columns_from_dict(PyObject *dict,
                                        std::vector<MetadataColumn> *out) {
   if (!PyDict_Check(dict)) {
@@ -272,6 +288,8 @@ bool append_row_span_columns_from_dict(PyObject *dict,
   return true;
 }
 
+/// Appends timestamp columns while preserving metadata stream ordering and null
+/// semantics.
 bool append_timestamp_columns(PyObject *columns,
                               std::vector<MetadataColumn> *out) {
   const bool fixed = PyDict_Check(columns);

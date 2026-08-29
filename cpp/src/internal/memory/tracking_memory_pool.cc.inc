@@ -1,7 +1,11 @@
-// Implements operation-scoped quota and allocation tracking.
+// Implements an operation-scoped quota wrapper over a parent memory pool.
+// It coordinates guarded allocations, external residents, and
+// shared ledgers.
 
 class TrackingMemoryPool final : public MemoryPool {
 public:
+  /// Wraps a parent pool with quota, registry, and
+  /// operation-ledger accounting.
   TrackingMemoryPool(std::shared_ptr<MemoryPool> parent, int64_t limit,
                      std::string backend_name, bool thread_safe_registry,
                      std::shared_ptr<OperationMemoryLedger> operation_ledger,
@@ -12,6 +16,8 @@ public:
         process_resident_governor_(process_resident_governor),
         live_allocations_(thread_safe_registry, limit) {}
 
+  /// Charges quota and ledgers before allocating guarded storage from the
+  /// parent pool.
   sanitize::Status Allocate(int64_t size, int64_t alignment,
                             uint8_t **out) override {
     if (!out) {
@@ -159,6 +165,8 @@ public:
     return sanitize::Status::OK();
   }
 
+  /// Validates ownership, updates quota accounting, and frees through the
+  /// parent pool.
   void Free(uint8_t *buffer, int64_t size,
             int64_t alignment) noexcept override {
     if (!buffer || !parent_) {
@@ -224,29 +232,38 @@ public:
     parent_->Free(upstream, upstream_size, upstream_alignment);
   }
 
+  /// Returns payload bytes currently owned by this tracking pool.
   [[nodiscard]] int64_t bytes_allocated() const override {
     return operation_ledger_ ? operation_ledger_->bytes_reserved()
                              : bytes_allocated_.load(std::memory_order_relaxed);
   }
+  /// Returns this pool's payload-byte high-water mark.
   [[nodiscard]] int64_t max_memory() const override {
     return operation_ledger_ ? operation_ledger_->peak_bytes_reserved()
                              : max_memory_.load(std::memory_order_relaxed);
   }
+  /// Returns this tracking pool's current live allocation count.
   [[nodiscard]] int64_t allocation_count() const override {
     return allocation_count_.load(std::memory_order_relaxed);
   }
+  /// Returns frees rejected because this pool lacked ownership metadata.
   [[nodiscard]] int64_t invalid_free_count() const override {
     return invalid_free_count_.load(std::memory_order_relaxed);
   }
+  /// Returns frees whose size disagreed with this pool's registry record.
   [[nodiscard]] int64_t size_mismatch_count() const override {
     return size_mismatch_count_.load(std::memory_order_relaxed);
   }
+  /// Returns allocations with corrupted trailing guards.
   [[nodiscard]] int64_t corruption_count() const override {
     return corruption_count_.load(std::memory_order_relaxed);
   }
+  /// Returns this tracking pool's current quota.
   [[nodiscard]] int64_t limit_bytes() const override {
     return limit_.load(std::memory_order_relaxed);
   }
+  /// Charges non-allocator resident bytes against pool and
+  /// operation quotas.
   sanitize::Status ReserveExternal(int64_t bytes,
                                    std::string_view stage) override {
     if (bytes < 0) {
@@ -293,6 +310,8 @@ public:
       }
     }
   }
+  /// Returns a non-allocator resident charge from pool and
+  /// operation quotas.
   void ReleaseExternal(int64_t bytes) noexcept override {
     if (bytes <= 0) {
       return;
@@ -307,18 +326,23 @@ public:
       }
     }
   }
+  /// Returns allocator and external bytes currently charged to this pool.
   [[nodiscard]] int64_t resident_bytes() const override {
     return charged_bytes_.load(std::memory_order_relaxed);
   }
+  /// Returns this pool's combined resident-byte high-water mark.
   [[nodiscard]] int64_t peak_resident_bytes() const override {
     return max_charged_bytes_.load(std::memory_order_relaxed);
   }
+  /// Replaces the tracking quota used for subsequent admissions.
   void SetLimit(int64_t limit) noexcept override {
     limit_.store(std::max<int64_t>(1, limit), std::memory_order_relaxed);
   }
+  /// Reports whether the parent pool wipes released payloads.
   [[nodiscard]] bool wipes_memory_on_free() const noexcept override {
     return secure_memory_cleanup_enabled();
   }
+  /// Returns the configured diagnostic name for this tracking pool.
   [[nodiscard]] std::string backend_name() const override {
     return backend_name_;
   }

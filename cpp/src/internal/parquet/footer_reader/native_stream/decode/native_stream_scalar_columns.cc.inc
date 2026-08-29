@@ -1,4 +1,9 @@
-// Native Parquet decode owner: scalar columns.
+// Validates and materializes supported scalar Parquet pages into fixed-width
+// Arrow columns. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Validates that a column has a decoded native plan and a supported flat
+/// physical layout.
 sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
   if (!native_plain_path_is_materializable(column.path_in_schema,
                                            column.max_repetition_level,
@@ -116,6 +121,7 @@ sanitize::Status validate_native_plain_column(const ColumnChunkInfo &column) {
   return {};
 }
 
+/// Copies a row window of PLAIN fixed-width values into Arrow storage.
 sanitize::Status materialize_fixed_width_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
@@ -199,6 +205,7 @@ sanitize::Status materialize_fixed_width_column(
   return {};
 }
 
+/// Packs a row window of PLAIN Boolean values and validity into Arrow bitmaps.
 sanitize::Status materialize_boolean_column(std::ifstream &file,
                                             const ColumnChunkInfo &column,
                                             const NativeFlatRowWindow &window,
@@ -283,6 +290,8 @@ sanitize::Status materialize_boolean_column(std::ifstream &file,
   return {};
 }
 
+/// Reconstructs a row window of DELTA_BINARY_PACKED integers into Arrow
+/// storage.
 sanitize::Status materialize_delta_binary_packed_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
@@ -395,6 +404,7 @@ sanitize::Status materialize_delta_binary_packed_column(
   return {};
 }
 
+/// Reassembles a row window of BYTE_STREAM_SPLIT values into Arrow storage.
 sanitize::Status materialize_byte_stream_split_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,

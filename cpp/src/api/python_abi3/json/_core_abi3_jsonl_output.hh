@@ -1,9 +1,10 @@
 /*
- * ABI3 JSONL output and batch encoding helpers.
+ * Declares the ABI3 JSONL output and batch encoding helpers.
  *
  * The Python method wrappers use these helpers so output adapters and Arrow
  * batch extraction stay outside the method dispatch translation unit.
  */
+
 #pragma once
 
 #include <Python.h>
@@ -15,17 +16,17 @@
 
 namespace core_abi3_internal {
 
-// Writes an Arrow C stream object to a Python path or output object.
+/// Writes an Arrow C stream object to a Python path or output object.
 sanitize::Result<sanitize::internal::jsonl_stream_writer::WriteStats>
 jsonl_write_stream_to_output(PyObject *stream_obj, PyObject *output_obj,
                              std::int64_t memory_limit_bytes,
                              sanitize::ThreadingMode threading_mode);
 
-// Appends one record batch's JSONL bytes to out.
+/// Appends one record batch's JSONL bytes to out.
 sanitize::Status jsonl_append_batch_bytes(PyObject *batch_obj, std::string *out,
                                           std::int64_t memory_limit_bytes);
 
-// Appends a Python sequence of record batches as JSONL bytes to out.
+/// Appends a Python sequence of record batches as JSONL bytes to out.
 sanitize::Status jsonl_append_batches_bytes(PyObject *batches_obj,
                                             std::string *out,
                                             std::int64_t memory_limit_bytes);

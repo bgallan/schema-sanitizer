@@ -1,4 +1,6 @@
 // Declares shared Python ABI3 extension helpers.
+// These definitions keep interpreter ownership and method-table details behind
+// the private extension boundary.
 
 #pragma once
 
@@ -37,6 +39,8 @@ enum class PythonSourceKind { kPath, kText, kStream, kUnknown };
 void release_arrow_stream(ArrowArrayStream *stream) noexcept;
 
 struct ArrowStreamDeleter {
+  /// Invokes the Arrow stream release callback when its owning smart pointer
+  /// leaves scope.
   void operator()(ArrowArrayStream *stream) const noexcept {
     release_arrow_stream(stream);
   }
@@ -44,6 +48,8 @@ struct ArrowStreamDeleter {
 
 using OwnedArrowStream = std::unique_ptr<ArrowArrayStream, ArrowStreamDeleter>;
 
+/// Wraps an Arrow stream in RAII ownership so its release callback runs exactly
+/// once.
 inline OwnedArrowStream own_arrow_stream(ArrowArrayStream *stream) noexcept {
   return OwnedArrowStream(stream);
 }
@@ -52,9 +58,15 @@ inline OwnedArrowStream own_arrow_stream(ArrowArrayStream *stream) noexcept {
 // exit path. Python callbacks reached by the native region acquire it locally.
 class ScopedGilRelease final {
 public:
+  /// Releases the Python GIL until this scope guard is destroyed.
   ScopedGilRelease() noexcept : state_(PyEval_SaveThread()) {}
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedGilRelease(const ScopedGilRelease &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedGilRelease &operator=(const ScopedGilRelease &) = delete;
+  /// Reacquires the Python GIL before control returns to Python-managed code.
   ~ScopedGilRelease() { PyEval_RestoreThread(state_); }
 
 private:
@@ -64,15 +76,23 @@ private:
 // Acquires the GIL for a callback that may run on an arena worker.
 class ScopedGilAcquire final {
 public:
+  /// Acquires the Python GIL for the lifetime of this scope guard.
   ScopedGilAcquire() noexcept : state_(PyGILState_Ensure()) {}
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedGilAcquire(const ScopedGilAcquire &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedGilAcquire &operator=(const ScopedGilAcquire &) = delete;
+  /// Releases the Python GIL state acquired by this callback scope.
   ~ScopedGilAcquire() { PyGILState_Release(state_); }
 
 private:
   PyGILState_STATE state_;
 };
 
+/// Releases the Python GIL while invoking the native callable, then reacquires
+/// it on return.
 template <class Callable> decltype(auto) call_without_gil(Callable &&callable) {
   ScopedGilRelease release;
   return std::forward<Callable>(callable)();
@@ -82,6 +102,8 @@ void raise_status_error(const sanitize::Status &status);
 PyObject *fsencode_path(PyObject *obj);
 int bytes_or_str_view(PyObject *obj, const char **out_ptr, Py_ssize_t *out_len);
 int tuple_set_item_steal(PyObject *tup, Py_ssize_t index, PyObject *item);
+/// Builds the Python diagnostics dictionary from native materialization
+/// counters.
 inline PyObject *materialization_stats_dict(long long rows_value,
                                             long long batches_value) {
   PyObject *dict = PyDict_New();

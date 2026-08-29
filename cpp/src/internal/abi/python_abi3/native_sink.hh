@@ -1,4 +1,6 @@
 // Owns direct C++ sink results used by the private Python ABI3 module.
+// These definitions keep interpreter ownership and method-table details behind
+// the private extension boundary.
 
 #pragma once
 

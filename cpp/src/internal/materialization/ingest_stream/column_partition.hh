@@ -1,4 +1,6 @@
 // Declares bounded column-partitioned packet materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 

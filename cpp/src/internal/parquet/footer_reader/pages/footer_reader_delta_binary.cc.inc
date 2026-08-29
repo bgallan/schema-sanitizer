@@ -1,5 +1,9 @@
-// Decodes and validates DELTA_BINARY_PACKED Parquet pages.
+// Parses DELTA_BINARY_PACKED blocks and reconstructs checked integer sequences
+// or page values. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
+/// Decodes a bounded DELTA_BINARY_PACKED stream and emits each reconstructed
+/// integer.
 template <class Emit>
 sanitize::Result<std::size_t>
 decode_delta_binary_packed_stream(std::string_view values,
@@ -125,6 +129,8 @@ decode_delta_binary_packed_stream(std::string_view values,
   return offset;
 }
 
+/// Reconstructs DELTA_BINARY_PACKED integers and produces bounded diagnostic
+/// previews.
 sanitize::Result<std::int32_t> decode_delta_binary_packed_values(
     std::string_view values, const ColumnChunkInfo &column,
     std::int32_t expected_values, std::vector<std::string> *preview) {
@@ -165,6 +171,7 @@ sanitize::Result<std::int32_t> decode_delta_binary_packed_values(
   return static_cast<std::int32_t>(decoded);
 }
 
+/// Locates and decodes the DELTA_BINARY_PACKED value section of one page.
 sanitize::Status decode_delta_binary_packed_page(std::string_view payload,
                                                  const ColumnChunkInfo &column,
                                                  PageHeaderInfo *page) {

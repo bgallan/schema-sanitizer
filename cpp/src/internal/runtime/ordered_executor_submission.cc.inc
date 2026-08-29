@@ -1,3 +1,9 @@
+// Implements shared-arena submission with bounded dispatch and
+// retained-memory accounting. Reserved completion slots roll back
+// coherently when admission fails.
+
+/// Reserves and submits high-core arena work, rolling admission back on
+/// failure.
 sanitize::Status submit_high_core_arena(Packet packet,
                                         std::size_t retained_bytes) {
   std::size_t completion_slot = 0;

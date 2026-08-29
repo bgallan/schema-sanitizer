@@ -1,4 +1,6 @@
 // Implements bounded Parquet footer parsing for native reader dispatch.
+// These definitions support the internal pipeline without expanding its public
+// interface.
 
 #include "internal/parquet/footer_reader/api.hh"
 

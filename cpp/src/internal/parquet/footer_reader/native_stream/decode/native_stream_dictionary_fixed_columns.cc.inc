@@ -1,6 +1,10 @@
-// Native Parquet decode owner: dictionary fixed columns.
+// Resolves dictionary indexes into fixed-width Arrow values for scalar and
+// repeated columns. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
 // ---- native_stream_decode_dictionary_fixed_width ----
+/// Resolves a flat dictionary-encoded fixed-width column into its Arrow
+/// representation.
 sanitize::Status materialize_dictionary_fixed_width_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
@@ -128,6 +132,8 @@ sanitize::Status materialize_dictionary_fixed_width_column(
 }
 
 // ---- native_stream_decode_simple_list_dictionary_fixed_width ----
+/// Resolves dictionary indices for a repeated fixed-width leaf into Arrow
+/// element buffers.
 sanitize::Status materialize_simple_list_dictionary_fixed_width_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,

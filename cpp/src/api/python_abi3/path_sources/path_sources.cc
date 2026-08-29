@@ -1,4 +1,6 @@
-// Shared native path-source helpers for Python ABI3 wrappers.
+// Implements path-source format selection, compatible grouping, and frontend
+// creation. The helpers inspect files under governed descriptors while
+// preserving source order.
 
 #include "api/python_abi3/path_sources/path_sources.hh"
 
@@ -27,6 +29,7 @@ namespace {
 constexpr std::array<std::string_view, 5> kDirectPathSourceFrontends = {
     "json", "jsonl", "json_array", "csv", "xml"};
 
+/// Sums known path sizes into a conservative bounded input-size hint.
 std::int64_t
 input_size_hint_from_paths(const std::vector<std::string> &paths) noexcept {
   std::uintmax_t total = 0;
@@ -46,30 +49,39 @@ input_size_hint_from_paths(const std::vector<std::string> &paths) noexcept {
   return static_cast<std::int64_t>(total);
 }
 
+/// Reports whether the configured frontend is JSON or JSONL.
 bool is_json_path_source(const PathSourceSpec &source) {
   return source.frontend == "json" || source.frontend == "jsonl";
 }
 
+/// Reports whether the configured frontend expects a JSON array document.
 bool is_json_array_path_source(const PathSourceSpec &source) {
   return source.frontend == "json_array";
 }
 
+/// Reports whether the source can bypass native text transcoding.
 bool is_utf8_text_encoding(std::string_view encoding) {
   return encoding == "utf-8";
 }
 
+/// Compares a path suffix with the requested extension without filesystem
+/// access.
 bool path_has_extension(const std::string &path, std::string_view extension) {
   return path.size() >= extension.size() &&
          path.compare(path.size() - extension.size(), extension.size(),
                       extension) == 0;
 }
 
+/// Identifies explicit JSONL sources and JSON sources carrying a `.jsonl`
+/// suffix.
 bool is_jsonl_path_source(const PathSourceSpec &source) {
   return source.frontend == "jsonl" ||
          (source.frontend == "json" &&
           path_has_extension(source.path, ".jsonl"));
 }
 
+/// Reads the first non-whitespace byte from a path under a governed descriptor
+/// lease.
 sanitize::Result<std::optional<char>>
 first_non_ws_byte(const std::string &path) {
   sanitize::internal::ProcessFdPermitLease fd_lease(1U);
@@ -94,6 +106,7 @@ first_non_ws_byte(const std::string &path) {
   return std::optional<char>{};
 }
 
+/// Reads the first non-whitespace byte after a leading JSON array delimiter.
 sanitize::Result<std::optional<char>>
 first_non_ws_byte_after_json_array_start(const std::string &path) {
   sanitize::internal::ProcessFdPermitLease fd_lease(1U);
@@ -127,6 +140,7 @@ first_non_ws_byte_after_json_array_start(const std::string &path) {
   return std::optional<char>{};
 }
 
+/// Reports whether a JSON source is JSONL-like rather than an array document.
 sanitize::Result<bool>
 json_source_can_stream_concat(const PathSourceSpec &source) {
   if (!is_json_path_source(source)) {
@@ -142,6 +156,8 @@ json_source_can_stream_concat(const PathSourceSpec &source) {
   return *first != '[';
 }
 
+/// Reports whether a JSON source begins with an array whose first value is an
+/// object.
 sanitize::Result<bool>
 json_source_is_groupable_array_document(const PathSourceSpec &source) {
   if (!is_json_path_source(source)) {
@@ -155,6 +171,7 @@ json_source_is_groupable_array_document(const PathSourceSpec &source) {
   return *first == '{';
 }
 
+/// Finds the exclusive end of the next compatible path-source group.
 sanitize::Result<std::size_t>
 json_path_source_group_end(const std::vector<PathSourceSpec> &sources,
                            std::size_t start) {
@@ -170,6 +187,7 @@ json_path_source_group_end(const std::vector<PathSourceSpec> &sources,
   return end;
 }
 
+/// Finds the exclusive end of the next compatible path-source group.
 sanitize::Result<std::size_t> json_array_document_path_source_group_end(
     const std::vector<PathSourceSpec> &sources, std::size_t start) {
   std::size_t end = start;
@@ -184,6 +202,7 @@ sanitize::Result<std::size_t> json_array_document_path_source_group_end(
   return end;
 }
 
+/// Finds the exclusive end of the next compatible path-source group.
 std::size_t
 csv_path_source_group_end(const std::vector<PathSourceSpec> &sources,
                           std::size_t start) {
@@ -194,6 +213,7 @@ csv_path_source_group_end(const std::vector<PathSourceSpec> &sources,
   return end;
 }
 
+/// Finds the exclusive end of the next compatible path-source group.
 std::size_t
 json_array_path_source_group_end(const std::vector<PathSourceSpec> &sources,
                                  std::size_t start) {
@@ -204,6 +224,8 @@ json_array_path_source_group_end(const std::vector<PathSourceSpec> &sources,
   return end;
 }
 
+/// Builds one grouped frontend input spanning a compatible ordered range of
+/// path sources.
 sanitize::Result<PathSourceInput>
 make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
                              const PathSourceGroupPlan &group,
@@ -261,6 +283,8 @@ make_path_source_group_input(const std::vector<PathSourceSpec> &sources,
 
 } // namespace
 
+/// Selects the format-specific frontend for the current path-source ingestion
+/// input.
 sanitize::Result<sanitize::FrontendHandle> path_source_frontend(
     PathSourceInput input, const sanitize::Options &options,
     std::shared_ptr<sanitize::internal::OperationTaskArena> task_arena) {
@@ -307,6 +331,8 @@ sanitize::Result<sanitize::FrontendHandle> path_source_frontend(
   return frontend;
 }
 
+/// Selects the format-specific frontend for the current path-source ingestion
+/// input.
 std::string_view path_source_materializer_frontend(std::string_view frontend) {
   if (frontend == "json_array_document") {
     return "json";
@@ -314,6 +340,8 @@ std::string_view path_source_materializer_frontend(std::string_view frontend) {
   return frontend;
 }
 
+/// Classifies JSON source failures that may be skipped without hiding resource
+/// errors.
 bool path_source_failure_is_skippable_json(const PathSourceSpec &source,
                                            const sanitize::Status &status) {
   if (source.frontend != "json" && source.frontend != "jsonl" &&
@@ -325,6 +353,7 @@ bool path_source_failure_is_skippable_json(const PathSourceSpec &source,
          message.contains("Invalid JSON file");
 }
 
+/// Accumulates reader and inference counters from one completed path source.
 void merge_path_source_diagnostics(sanitize::IngestDiagnostics &out,
                                    const sanitize::IngestDiagnostics &child) {
   out.inferred_rows += child.inferred_rows;
@@ -338,6 +367,8 @@ void merge_path_source_diagnostics(sanitize::IngestDiagnostics &out,
   out.skipped_rows += child.skipped_rows;
 }
 
+/// Builds the bounded input descriptor consumed by the path-source ingestion
+/// frontend.
 sanitize::Result<PathSourceInput>
 path_source_input(const sanitize::PreparedOptionsPtr &prepared,
                   const PathSourceSpec &source) {
@@ -366,6 +397,8 @@ path_source_input(const sanitize::PreparedOptionsPtr &prepared,
                                    source.frontend);
 }
 
+/// Advances to the next compatible path group and returns its format-specific
+/// plan.
 sanitize::Result<PathSourceGroupPlan>
 next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
                             std::size_t start, PathSourceGroupPurpose purpose,
@@ -433,6 +466,8 @@ next_path_source_group_plan(const std::vector<PathSourceSpec> &sources,
                              .source_file_in_inner = false};
 }
 
+/// Builds the bounded input descriptor consumed by the path-source ingestion
+/// frontend.
 sanitize::Result<PathSourceInput>
 path_source_group_input(const std::vector<PathSourceSpec> &sources,
                         const PathSourceGroupPlan &group,

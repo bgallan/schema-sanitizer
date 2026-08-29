@@ -23,6 +23,8 @@ struct LineSegment {
   std::string_view view;
 };
 
+/// Removes only the format-defined whitespace from JSON line end without
+/// allocating.
 [[nodiscard]] std::size_t trim_json_line_end(std::string_view view) noexcept {
   std::size_t end = view.size();
   while (end > 0 && is_ws(static_cast<unsigned char>(view[end - 1]))) {

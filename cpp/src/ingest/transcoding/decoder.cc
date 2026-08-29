@@ -1,4 +1,6 @@
-// Implements incremental Latin-1 and UTF-16 decoding to UTF-8.
+// Implements incremental Latin-1 and UTF-16 decoding to UTF-8. The
+// implementation preserves split code units and bounded buffers across
+// incremental source reads.
 
 #include "ingest/transcoding/decoder.hh"
 
@@ -8,6 +10,7 @@
 namespace sanitize::internal {
 namespace {
 
+/// Encodes one Unicode scalar using its shortest valid UTF-8 byte sequence.
 void append_utf8_codepoint(std::uint32_t codepoint, std::string *out) {
   if (codepoint <= 0x7f) {
     out->push_back(static_cast<char>(codepoint));
@@ -26,14 +29,17 @@ void append_utf8_codepoint(std::uint32_t codepoint, std::string *out) {
   }
 }
 
+/// Reports whether a UTF-16 code unit begins a surrogate pair.
 bool is_high_surrogate(std::uint16_t value) {
   return value >= 0xd800 && value <= 0xdbff;
 }
 
+/// Reports whether a UTF-16 code unit completes a surrogate pair.
 bool is_low_surrogate(std::uint16_t value) {
   return value >= 0xdc00 && value <= 0xdfff;
 }
 
+/// Computes the exact UTF-8 capacity required for a Latin-1 input chunk.
 sanitize::Result<std::size_t> latin1_output_size(std::string_view raw) {
   std::size_t non_ascii = 0;
   for (const unsigned char ch : raw) {
@@ -45,6 +51,7 @@ sanitize::Result<std::size_t> latin1_output_size(std::string_view raw) {
   return raw.size() + non_ascii;
 }
 
+/// Computes a bounded UTF-8 reservation for a UTF-16 input chunk.
 sanitize::Result<std::size_t>
 utf16_reserve_size(std::size_t raw_size, bool has_pending_byte,
                    bool has_pending_high_surrogate) {
@@ -62,11 +69,14 @@ utf16_reserve_size(std::size_t raw_size, bool has_pending_byte,
 
 } // namespace
 
+/// Initializes incremental decoder state for the selected canonical source
+/// encoding.
 TranscodingDecoder::TranscodingDecoder(TextEncoding encoding)
     : encoding_(encoding) {
   Reset();
 }
 
+/// Resets decoder state while preserving the configured source encoding.
 void TranscodingDecoder::Reset() {
   bom_checked_ = false;
   utf16_little_endian_ = encoding_ != TextEncoding::kUtf16BE;
@@ -74,6 +84,8 @@ void TranscodingDecoder::Reset() {
   pending_high_surrogate_.reset();
 }
 
+/// Chooses a raw input size that leaves enough room for worst-case UTF-8
+/// expansion.
 std::size_t TranscodingDecoder::raw_read_size(std::int64_t max_bytes) const {
   const auto max_stream =
       static_cast<std::int64_t>(std::numeric_limits<std::streamsize>::max());
@@ -85,6 +97,8 @@ std::size_t TranscodingDecoder::raw_read_size(std::int64_t max_bytes) const {
   return static_cast<std::size_t>(std::max<std::int64_t>(1, bounded / 2));
 }
 
+/// Incrementally transcodes canonical text input to UTF-8 while preserving
+/// split code units.
 sanitize::Result<std::string> TranscodingDecoder::Decode(std::string_view raw,
                                                          bool final) {
   if (encoding_ == TextEncoding::kLatin1) {

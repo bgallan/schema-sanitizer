@@ -1,3 +1,7 @@
+// Fuzzes DOM, streaming row, and frontend XML parsing under bounded resources.
+// Input bytes choose row-tag, error, threading, chunking, and memory policies
+// while a fixed plan makes materialization behavior reproducible.
+
 #include "frontends/builtin_frontends.hh"
 #include "internal/memory/memory_pool.hh"
 #include "internal/planning/plan_compile.hh"
@@ -20,6 +24,7 @@
 
 namespace {
 
+/// Returns the immutable two-column plan shared by XML fuzz iterations.
 const sanitize::CompiledPlan &fuzz_compiled_plan() {
   static const sanitize::CompiledPlan plan = [] {
     sanitize::LogicalSchema schema;
@@ -44,6 +49,7 @@ const sanitize::CompiledPlan &fuzz_compiled_plan() {
   return plan;
 }
 
+/// Derives a bounded operation memory limit from the fuzz input prefix.
 std::int64_t fuzz_memory_limit(const std::uint8_t *data, std::size_t size) {
   constexpr std::int64_t kMinimum = 64LL * 1024LL;
   constexpr std::int64_t kSpan = 8LL * 1024LL * 1024LL - kMinimum;
@@ -55,6 +61,7 @@ std::int64_t fuzz_memory_limit(const std::uint8_t *data, std::size_t size) {
   return kMinimum + static_cast<std::int64_t>(selector % kSpan);
 }
 
+/// Runs bounded XML frontend batches under input-selected policies.
 void consume_xml_frontend(const std::uint8_t *data, std::size_t size) {
   sanitize::Options options;
   options.memory_limit_bytes = fuzz_memory_limit(data, size);
@@ -99,6 +106,7 @@ void consume_xml_frontend(const std::uint8_t *data, std::size_t size) {
 
 } // namespace
 
+/// Exercises document, row-scanner, and frontend XML paths for one input.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size) {
   const std::string_view input(reinterpret_cast<const char *>(data), size);

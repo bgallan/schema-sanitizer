@@ -1,6 +1,10 @@
-// Native Parquet decode owner: scalar binary columns.
+// Materializes plain, delta-length, and delta-byte-array Parquet values into
+// Arrow binary arrays. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
 
 // ---- native_stream_decode_byte_array ----
+/// Materializes a flat PLAIN byte-array column into Arrow offsets, data, and
+/// validity buffers.
 sanitize::Status materialize_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,
@@ -94,6 +98,8 @@ sanitize::Status materialize_byte_array_column(
 }
 
 // ---- native_stream_decode_delta_length_byte_array ----
+/// Materializes a flat DELTA_LENGTH_BYTE_ARRAY column into Arrow binary
+/// buffers.
 sanitize::Status materialize_delta_length_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,

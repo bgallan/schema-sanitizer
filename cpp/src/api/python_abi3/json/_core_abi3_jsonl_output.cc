@@ -1,9 +1,10 @@
 /*
- * ABI3 JSONL output wrapper helpers.
+ * Implements ABI3 JSONL output wrapper helpers.
  *
  * This file parses Python-facing inputs and delegates concrete output handling
  * to the focused JSONL adapter translation unit.
  */
+
 #include "api/python_abi3/json/_core_abi3_jsonl_output.hh"
 
 #include "api/python_abi3/json/_core_abi3_jsonl_output_parts.hh"

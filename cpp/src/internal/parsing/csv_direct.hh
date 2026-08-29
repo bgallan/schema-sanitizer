@@ -1,4 +1,6 @@
 // Declares direct CSV materialization helpers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 

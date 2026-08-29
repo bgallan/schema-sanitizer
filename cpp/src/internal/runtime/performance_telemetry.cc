@@ -1,4 +1,7 @@
 // Implements operation-local phase, queue, worker, and memory telemetry.
+// Atomic aggregates and worker shards produce one finalized
+// bottleneck classification.
+
 #include "internal/runtime/performance_telemetry.hh"
 
 #include "internal/json_encoding/token_writer.hh"
@@ -75,6 +78,7 @@ constexpr std::array<std::string_view,
                      "output_pressure_serializations",
                      "output_estimate_expansion_bytes"};
 
+/// Raises an atomic telemetry maximum when the observed value is larger.
 void update_maximum(std::atomic<std::int64_t> *target,
                     std::int64_t value) noexcept {
   auto observed = target->load(std::memory_order_relaxed);
@@ -84,12 +88,14 @@ void update_maximum(std::atomic<std::int64_t> *target,
   }
 }
 
+/// Appends a named boolean to a JSON object with correct comma placement.
 void append_bool_field(std::string &out, bool &first, std::string_view key,
                        bool value) {
   append_key(out, first, key);
   out += value ? "true" : "false";
 }
 
+/// Appends a finite named floating-point value to a JSON object.
 void append_double_field(std::string &out, bool &first, std::string_view key,
                          double value) {
   append_key(out, first, key);
@@ -107,14 +113,18 @@ void append_double_field(std::string &out, bool &first, std::string_view key,
   out += stream.str();
 }
 
+/// Clamps a signed telemetry measurement to zero.
 std::int64_t nonnegative(std::int64_t value) noexcept {
   return std::max<std::int64_t>(0, value);
 }
 
+/// Converts an unsigned telemetry counter to a saturating signed snapshot.
 std::int64_t signed_snapshot(std::uint64_t value) noexcept {
   return std::bit_cast<std::int64_t>(value);
 }
 
+/// Computes a finite nonnegative telemetry ratio with a
+/// zero-denominator fallback.
 double ratio(std::int64_t numerator, std::int64_t denominator) noexcept {
   if (numerator <= 0 || denominator <= 0) {
     return 0.0;
@@ -129,6 +139,8 @@ struct Diagnosis final {
   bool memory_bandwidth_proven = false;
 };
 
+/// Classifies the operation bottleneck from phase, worker, and
+/// memory measurements.
 Diagnosis classify(std::int64_t stream_ns, std::int64_t frontend_ns,
                    std::int64_t coordinator_wait_ns,
                    std::int64_t arrow_terminal_ns, std::int64_t worker_run_ns,

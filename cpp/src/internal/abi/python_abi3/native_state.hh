@@ -1,4 +1,6 @@
 // Owns native state exposed through private Python ABI3 capsules.
+// These definitions keep interpreter ownership and method-table details behind
+// the private extension boundary.
 
 #pragma once
 

@@ -1,4 +1,6 @@
 // Defines debug-only assertion hooks for internal invariants.
+// The macros preserve diagnostic checks in development builds and compile away
+// without evaluating their conditions in release builds.
 
 #pragma once
 

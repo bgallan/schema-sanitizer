@@ -1,4 +1,6 @@
-// Implements JSON serialization for schema-registry documents.
+// Serializes complete schema-registry documents into canonical JSON.
+// Stable field order and explicit metadata preserve durable compatibility
+// across incremental merges and cross-language consumers.
 
 #include "schema_registry/schema_registry_internal.hh"
 

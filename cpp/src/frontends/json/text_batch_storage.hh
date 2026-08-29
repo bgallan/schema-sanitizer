@@ -1,4 +1,6 @@
-// Owns one JSON frontend batch and its optional validated token index.
+// Owns one JSON frontend batch and its optional validated token index. The
+// pipeline preserves source offsets and ownership while enforcing plan order
+// and memory bounds.
 
 #pragma once
 
@@ -22,6 +24,8 @@
 namespace sanitize::internal {
 
 struct JsonTextBatchStorage {
+
+  /// Creates pool-backed row, token, and owner storage for one JSON batch.
   JsonTextBatchStorage(std::shared_ptr<void> pool,
                        std::size_t arena_block_bytes)
       : pmr_pool(std::move(pool)), arena(pmr_pool.pool(), arena_block_bytes),
@@ -29,6 +33,8 @@ struct JsonTextBatchStorage {
         validated_tokens(&pmr_pool), validated_rows(&pmr_pool),
         keepalive(&pmr_pool) {}
 
+  /// Configures token index from the operation memory budget before streaming
+  /// begins.
   void configure_token_index(std::int64_t capacity,
                              std::size_t max_tokens) noexcept {
     max_validated_tokens = max_tokens;
@@ -42,6 +48,8 @@ struct JsonTextBatchStorage {
     }
   }
 
+  /// Retains a validated JSON row and any token index needed for deferred
+  /// materialization.
   [[nodiscard]] const JsonValidatedRowTokens *
   retain_validated_row(std::uint32_t field_offset,
                        std::uint32_t field_count) noexcept {
@@ -64,6 +72,8 @@ struct JsonTextBatchStorage {
     return &validated_rows.back();
   }
 
+  /// Finalizes validated rows and transfers completed ownership to JSON text
+  /// frontend.
   void finalize_validated_rows() noexcept {
     const auto *base = validated_tokens.data();
     for (auto &row : validated_rows) {
@@ -71,6 +81,7 @@ struct JsonTextBatchStorage {
     }
   }
 
+  /// Retains data owner so row views remain valid for the full batch lifetime.
   void keep_data_owner(const std::shared_ptr<const void> &owner) {
     if (!owner || owner.get() == last_data_owner_ptr) {
       return;
@@ -79,6 +90,8 @@ struct JsonTextBatchStorage {
     keepalive.push_back(owner);
   }
 
+  /// Retains the source-name owner so exported row views remain valid for the
+  /// batch lifetime.
   void keep_source_name(const std::shared_ptr<const std::string> &owner) {
     if (!owner || owner.get() == last_source_name_owner_ptr) {
       return;
@@ -87,6 +100,7 @@ struct JsonTextBatchStorage {
     keepalive.push_back(std::static_pointer_cast<const void>(owner));
   }
 
+  /// Resets batch storage and reserves deferred or materialized output rows.
   void prepare_output_rows(std::int64_t capacity, std::size_t max_tokens,
                            bool direct_raw, std::vector<RowRef> *rows) {
     if (direct_raw) {
@@ -98,6 +112,8 @@ struct JsonTextBatchStorage {
     arena.reset();
   }
 
+  /// Retains one raw JSON row with source offsets for deferred worker
+  /// validation.
   void append_deferred_raw(const TextSlice &slice, bool require_object_row,
                            std::vector<RowRef> *rows) {
     keep_data_owner(slice.owner);
@@ -114,6 +130,8 @@ struct JsonTextBatchStorage {
     });
   }
 
+  /// Finalizes output rows and transfers completed ownership to JSON text
+  /// frontend.
   void finish_output_rows(bool direct_raw, std::vector<RowRef> *rows) noexcept {
     if (!direct_raw) {
       finalize_validated_rows();

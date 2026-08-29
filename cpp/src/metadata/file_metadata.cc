@@ -1,4 +1,6 @@
-// Implements generated file metadata helpers shared by file sinks.
+// Implements generated per-file metadata shared by native file sinks.
+// Timestamp formatting and source-column construction use stable UTC and field
+// naming contracts before data reaches an output adapter.
 
 #include "sanitize/metadata/file_metadata.hh"
 

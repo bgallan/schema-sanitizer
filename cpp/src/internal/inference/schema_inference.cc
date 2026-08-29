@@ -1,4 +1,6 @@
 // Derives logical schemas from collected inference statistics.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/schema.hh"
 
@@ -18,7 +20,7 @@ namespace sanitize::internal {
 
 namespace {
 
-// Selects a logical scalar type from observed scalar kinds.
+/// Selects a logical scalar type from observed scalar kinds.
 sanitize::LogicalType scalar_type_from_mask(uint32_t mask) {
   if (mask == 0)
     return sanitize::LogicalType::Utf8();
@@ -45,15 +47,8 @@ sanitize::LogicalType scalar_type_from_mask(uint32_t mask) {
   return sanitize::LogicalType::Utf8();
 }
 
-// Fixed list inference policy:
-// - allow typed lists of scalars
-// - allow typed lists of structs
-// - reject arrays whose direct element is another array by falling back to
-//   list<string>
-// - repeated fields inside list-of-struct elements are allowed and infer their
-//   own list type
-// - scalar conflicts inside a list-of-struct resolve at that nested field, not
-//   by stringifying the whole parent list
+/// Reports whether unsupported direct list nesting requires a string element
+/// fallback.
 bool list_elem_requires_string_fallback(const StatsNode &st,
                                         bool direct_list_element = true) {
   // BigQuery and Arrow can represent list<struct<field: list<T>>>. The shape
@@ -74,7 +69,7 @@ bool list_elem_requires_string_fallback(const StatsNode &st,
   return false;
 }
 
-// Derives one logical type recursively from inference statistics.
+/// Derives one logical type recursively from inference statistics.
 sanitize::LogicalType type_from_stats(const InferenceContext &ctx,
                                       const StatsNode &st,
                                       const sanitize::PreparedOptions &opts) {

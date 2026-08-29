@@ -1,4 +1,10 @@
-/* Arrow C stream coalescing array finalization. */
+/*
+ * Implements Arrow C stream coalescing array finalization.
+ *
+ * The phases validate schemas, append slices, and export one owned Arrow array
+ * under budget.
+ */
+
 #include "api/python_abi3/streaming/coalesce_stream_internal.hh"
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
@@ -11,18 +17,24 @@
 namespace core_abi3_internal::coalesce_detail {
 namespace {
 
+/// Adds byte or item counts while clamping overflow to the representable
+/// maximum.
 std::size_t saturating_add(std::size_t left, std::size_t right) noexcept {
   return right > std::numeric_limits<std::size_t>::max() - left
              ? std::numeric_limits<std::size_t>::max()
              : left + right;
 }
 
+/// Multiplies byte or item counts while clamping overflow to the representable
+/// maximum.
 std::size_t saturating_multiply(std::size_t left, std::size_t right) noexcept {
   return left != 0 && right > std::numeric_limits<std::size_t>::max() / left
              ? std::numeric_limits<std::size_t>::max()
              : left * right;
 }
 
+/// Calculates recursively retained coalesced buffers for memory-budget
+/// accounting.
 std::size_t retained_bytes_impl(const CoalescedNode &node) noexcept {
   std::size_t total = node.validity.capacity();
   total = saturating_add(total, node.data.capacity());
@@ -44,6 +56,8 @@ std::size_t retained_bytes_impl(const CoalescedNode &node) noexcept {
   return total;
 }
 
+/// Calculates offset-buffer and payload bytes retained by a variable-width
+/// slice.
 template <class Offset>
 std::size_t variable_width_slice_bytes(const ArrowArray &array,
                                        const ArraySlice &slice) noexcept {
@@ -67,6 +81,7 @@ std::size_t variable_width_slice_bytes(const ArrowArray &array,
   return saturating_add(offsets_bytes, static_cast<std::size_t>(end - begin));
 }
 
+/// Estimates the retained bytes contributed by one Arrow array slice.
 std::size_t estimated_slice_bytes(const CoalesceNodeSpec &spec,
                                   const ArraySlice &slice,
                                   bool force_validity = false) noexcept {
@@ -175,6 +190,7 @@ std::size_t estimated_slice_bytes(const CoalesceNodeSpec &spec,
   return total;
 }
 
+/// Finds the largest row prefix whose retained bytes fit the coalescing budget.
 std::int64_t fitting_slice_rows_impl(const CoalesceNodeSpec &spec,
                                      const ArrowArray &array,
                                      std::int64_t offset, std::int64_t max_rows,
@@ -207,6 +223,7 @@ std::int64_t fitting_slice_rows_impl(const CoalesceNodeSpec &spec,
   return low;
 }
 
+/// Clears a coalesced child array through its installed Arrow release callback.
 void coalesced_child_release(ArrowArray *array) {
   if (!array || !array->release) {
     return;
@@ -214,6 +231,8 @@ void coalesced_child_release(ArrowArray *array) {
   sanitize::internal::cdata_stream::clear_array(array);
 }
 
+/// Releases the Arrow batch coalescer callback state and clears all transferred
+/// Arrow ownership.
 void coalesced_array_release(ArrowArray *array) {
   if (!array || !array->release) {
     return;
@@ -225,10 +244,13 @@ void coalesced_array_release(ArrowArray *array) {
 
 } // namespace
 
+/// Calculates retained bytes for bounded Arrow batch coalescer memory
+/// accounting.
 std::size_t retained_bytes(const CoalescedNode &node) {
   return retained_bytes_impl(node);
 }
 
+/// Finds the largest coalesced slice that fits both row and byte limits.
 std::int64_t fitting_slice_rows(const CoalesceNodeSpec &spec,
                                 const ArrowArray &array, std::int64_t offset,
                                 std::int64_t max_rows,
@@ -236,6 +258,7 @@ std::int64_t fitting_slice_rows(const CoalesceNodeSpec &spec,
   return fitting_slice_rows_impl(spec, array, offset, max_rows, max_bytes);
 }
 
+/// Finalizes one node and transfers its buffers into Arrow callback ownership.
 sanitize::Status finish_node(CoalescedNode *node, const CoalesceNodeSpec &spec,
                              bool root) {
   node->array.offset = 0;
@@ -322,6 +345,8 @@ sanitize::Status finish_node(CoalescedNode *node, const CoalesceNodeSpec &spec,
   return sanitize::Status::OK();
 }
 
+/// Finalizes coalesced buffers into an owned Arrow array with release
+/// callbacks.
 sanitize::Status
 export_coalesced_array(std::unique_ptr<CoalescedArrayState> state,
                        ArrowArray *out) {

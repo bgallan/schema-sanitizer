@@ -1,13 +1,20 @@
 // Batches task telemetry without sharing completion cache lines between
-// workers.
+// workers. Each worker publishes accumulated queue and run measurements in
+// coarse updates.
+
 class TaskTelemetryBatch final {
 public:
+  /// Selects a flush threshold for one worker's local
+  /// telemetry accumulator.
   TaskTelemetryBatch(PerformanceTelemetry *telemetry, std::size_t worker_index,
                      std::size_t worker_count) noexcept
       : telemetry_(telemetry), worker_index_(worker_index),
         flush_tasks_(worker_count > 8U ? 32U : 8U) {}
+  /// Flushes pending worker-local task measurements before destruction.
   ~TaskTelemetryBatch() { Flush(); }
 
+  /// Accumulates one task's queue and run measurements in
+  /// worker-local counters.
   void Record(TaskTelemetryKind kind, std::int64_t queue_wait_ns,
               std::int64_t run_ns) noexcept {
     if (!telemetry_) {
@@ -30,6 +37,8 @@ public:
     }
   }
 
+  /// Publishes accumulated task measurements to the shared
+  /// telemetry collector.
   void Flush() noexcept {
     if (!telemetry_ || pending_ == 0) {
       return;

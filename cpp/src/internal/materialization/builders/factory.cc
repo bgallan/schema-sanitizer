@@ -1,4 +1,6 @@
-// Root Arrow C Data builder and recursive builder factory.
+// Builds the root Arrow C Data builder and its recursive child builders. The
+// code converts validated rows into memory-accounted Arrow C Data batches for
+// ordered ingestion.
 
 #include "internal/materialization/builders/detail.hh"
 #include "internal/memory/size_math.hh"
@@ -16,7 +18,8 @@ using sanitize::ColumnPlan;
 using sanitize::LogicalKind;
 using sanitize::Status;
 
-// Creates builder.
+/// Recursively selects and constructs the builder hierarchy for one planned
+/// column.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
 make_builder(const ColumnPlan &plan,
              const std::shared_ptr<PoolResource> &pool) {
@@ -55,12 +58,12 @@ make_builder(const ColumnPlan &plan,
 
 class RootStructBuilder final : public ColumnBuilder {
 public:
-  // Creates a RootStructBuilder.
+  /// Takes ownership of root column builders and their shared allocation pool.
   RootStructBuilder(std::vector<std::unique_ptr<ColumnBuilder>> children,
                     std::shared_ptr<PoolResource> pool)
       : pool_(std::move(pool)), children_(std::move(children)) {}
 
-  // Resets the object state.
+  /// Clears the row count and every child column while retaining their storage.
   Status reset() override {
     length_ = 0;
     for (auto &child : children_)
@@ -68,6 +71,7 @@ public:
     return Status::OK();
   }
 
+  /// Forwards row and variable-byte capacity hints to every child column.
   Status reserve(int64_t rows, int64_t variable_bytes_per_column) override {
     for (auto &child : children_) {
       SAN_RETURN_NOT_OK(child->reserve(rows, variable_bytes_per_column));
@@ -75,7 +79,7 @@ public:
     return Status::OK();
   }
 
-  // Appends the object state.
+  /// Distributes one root row across child column builders in schema order.
   Status append(const Cell &cell) override {
     if (cell.children.size() != children_.size())
       return Status::Invalid("root cell child count mismatch");
@@ -85,6 +89,7 @@ public:
     return Status::OK();
   }
 
+  /// Distributes one preconverted row across the root struct's child builders.
   Status append_direct_row(std::span<const DirectScalarValue> values) override {
     if (values.size() != children_.size()) {
       return Status::Invalid("direct root scalar count mismatch");
@@ -96,7 +101,7 @@ public:
     return Status::OK();
   }
 
-  // Appends null.
+  /// Extends every root child with a null value and advances the row count.
   Status append_null() override {
     for (auto &child : children_)
       SAN_RETURN_NOT_OK(child->append_null());
@@ -104,6 +109,7 @@ public:
     return Status::OK();
   }
 
+  /// Imports each child of a validated root struct array in column order.
   Status append_array(const ArrowArray &array) override {
     if (array.length < 0 || array.offset < 0 || array.n_children < 0 ||
         static_cast<std::size_t>(array.n_children) != children_.size() ||
@@ -120,7 +126,7 @@ public:
     return Status::OK();
   }
 
-  // Finishes the current output.
+  /// Finalizes child columns into a non-nullable root struct Arrow array.
   Status finish(ArrowArray *out) override {
     auto payload = make_array_payload(pool_);
     if (!payload)
@@ -147,10 +153,10 @@ public:
     return Status::OK();
   }
 
-  // Returns the current row count.
+  /// Returns the current row count.
   [[nodiscard]] int64_t length() const noexcept override { return length_; }
 
-  // Returns the current byte usage.
+  /// Returns retained buffer capacity in bytes across all child builders.
   [[nodiscard]] int64_t bytes() const noexcept override {
     int64_t total = 0;
     for (const auto &child : children_) {

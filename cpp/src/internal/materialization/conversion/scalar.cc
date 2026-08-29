@@ -25,7 +25,7 @@ using sanitize::Status;
 using sanitize::ValueView;
 
 // clang-format off
-// Converts a value to a bool cell.
+/// Converts a Boolean or configured string into a Boolean cell.
 Status convert_bool_scalar(const ColumnPlan &plan, ValueView value,
                            ConvertCtx &ctx, Cell *cell) {
   if (value.is_bool()) {
@@ -46,7 +46,7 @@ Status convert_bool_scalar(const ColumnPlan &plan, ValueView value,
                               "expected bool for field '" + plan.name + "'");
 }
 
-// Converts a value to an int64 cell.
+/// Converts an integer or configured string into a signed 64-bit cell.
 Status convert_int64_scalar(const ColumnPlan &plan, ValueView value,
                             ConvertCtx &ctx, Cell *cell) {
   if (value.is_int()) {
@@ -67,7 +67,7 @@ Status convert_int64_scalar(const ColumnPlan &plan, ValueView value,
                               "expected int64 for field '" + plan.name + "'");
 }
 
-// Converts a value to a float64 cell.
+/// Converts a number or configured string into a double-precision cell.
 Status convert_float64_scalar(const ColumnPlan &plan, ValueView value,
                               ConvertCtx &ctx, Cell *cell) {
   if (value.is_float()) {
@@ -92,14 +92,13 @@ Status convert_float64_scalar(const ColumnPlan &plan, ValueView value,
   return set_conversion_error(ctx, plan, DiagnosticCode::kTypeMismatch,
                               "expected float64 for field '" + plan.name + "'");
 }
-// Returns whether a signed integer fits Arrow int32-style logical types.
+/// Returns whether a signed integer fits Arrow int32-style logical types.
 bool fits_int32(int64_t value) noexcept {
   return value >= std::numeric_limits<int32_t>::min() &&
          value <= std::numeric_limits<int32_t>::max();
 }
 
-// Returns the divisor that scales parsed nanoseconds to the configured output
-// timestamp unit.
+/// Returns the divisor that scales parsed nanoseconds to the configured timestamp unit.
 int64_t timestamp_precision_divisor(const PreparedOptions &opts) {
   const std::string &precision = opts.spec.timestamp_precision;
   if (precision == "TIMESTAMP_MILLIS")
@@ -109,7 +108,7 @@ int64_t timestamp_precision_divisor(const PreparedOptions &opts) {
   return 1;
 }
 
-// Converts a value to a timestamp cell in the configured output unit.
+/// Converts a value to a timestamp cell in the configured output unit.
 Status convert_timestamp_scalar(const ColumnPlan &plan, ValueView value,
                                 ConvertCtx &ctx, Cell *cell) {
   if (value.is_int()) {
@@ -132,7 +131,7 @@ Status convert_timestamp_scalar(const ColumnPlan &plan, ValueView value,
                                   "'");
 }
 
-// Converts a value to a date32 cell.
+/// Converts a value to a date32 cell.
 Status convert_date32_scalar(const ColumnPlan &plan, ValueView value,
                              ConvertCtx &ctx, Cell *cell) {
   if (value.is_int()) {
@@ -160,7 +159,7 @@ Status convert_date32_scalar(const ColumnPlan &plan, ValueView value,
                               "expected date32 for field '" + plan.name + "'");
 }
 
-// Converts a value to a time32[s] cell.
+/// Converts a value to a time32[s] cell.
 Status convert_time32_scalar(const ColumnPlan &plan, ValueView value,
                              ConvertCtx &ctx, Cell *cell) {
   if (value.is_int()) {
@@ -190,7 +189,7 @@ Status convert_time32_scalar(const ColumnPlan &plan, ValueView value,
 }
 // clang-format on
 
-// Converts scalar value kinds into a non-null cell.
+/// Converts scalar value kinds into a non-null cell.
 Status convert_scalar_cell(const ColumnPlan &plan, ValueView value,
                            ConvertCtx &ctx, Cell *cell) {
   switch (plan.logical_type.kind) {

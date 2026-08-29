@@ -1,4 +1,6 @@
-// Exercises the native ordinal executor for internal differential tests.
+// Exercises the native ordinal executor for internal differential tests. The
+// probes expose deterministic admission and completion behavior to the Python
+// test suite.
 
 #include "internal/abi/python_abi3/methods.hh"
 
@@ -45,6 +47,7 @@ using FdPermitLease = sanitize::internal::ProcessFdPermitLease;
 std::atomic<std::uint64_t> g_next_external_runtime_permit_receipt_id{1U};
 std::atomic<std::uint64_t> g_next_fd_permit_receipt_id{1U};
 
+/// Allocates a process-unique receipt id for capsule ownership checks.
 [[nodiscard]] std::uint64_t
 allocate_receipt_id(std::atomic<std::uint64_t> &counter) noexcept {
   auto current = counter.load(std::memory_order_relaxed);
@@ -66,6 +69,8 @@ struct ExternalRuntimePermitReceipt final {
   std::uint64_t generation = 1U;
   sanitize::internal::RuntimeProcessId owner_process = 0U;
 
+  /// Acquires external-runtime permits and records a process-scoped receipt
+  /// identity.
   ExternalRuntimePermitReceipt(std::size_t desired,
                                std::size_t minimum) noexcept
       : lease(desired, minimum),
@@ -73,6 +78,8 @@ struct ExternalRuntimePermitReceipt final {
             allocate_receipt_id(g_next_external_runtime_permit_receipt_id)),
         owner_process(sanitize::internal::current_runtime_process_id()) {}
 
+  /// Verifies that this receipt was created by the current operating-system
+  /// process.
   [[nodiscard]] bool owner_process_matches() const noexcept {
     return sanitize::internal::runtime_owner_process() &&
            owner_process == sanitize::internal::current_runtime_process_id();
@@ -85,6 +92,8 @@ struct FdPermitReceipt final {
   std::uint64_t generation = 1U;
   sanitize::internal::RuntimeProcessId owner_process = 0U;
 
+  /// Acquires file-descriptor permits and records a process-scoped receipt
+  /// identity.
   FdPermitReceipt(std::size_t desired, std::size_t minimum,
                   std::uint64_t timeout_millis) noexcept
       : lease(FdPermitLease::TryAcquireUpToWait(desired, minimum,
@@ -92,12 +101,15 @@ struct FdPermitReceipt final {
         receipt_id(allocate_receipt_id(g_next_fd_permit_receipt_id)),
         owner_process(sanitize::internal::current_runtime_process_id()) {}
 
+  /// Verifies that this receipt was created by the current operating-system
+  /// process.
   [[nodiscard]] bool owner_process_matches() const noexcept {
     return sanitize::internal::runtime_owner_process() &&
            owner_process == sanitize::internal::current_runtime_process_id();
   }
 };
 
+/// Finalizes and deletes the file-descriptor lease owned by a Python capsule.
 void destroy_fd_permit_lease_capsule(PyObject *capsule) {
   auto *receipt = static_cast<FdPermitReceipt *>(
       PyCapsule_GetPointer(capsule, kFdPermitLeaseCapsuleName));
@@ -108,6 +120,8 @@ void destroy_fd_permit_lease_capsule(PyObject *capsule) {
   delete receipt;
 }
 
+/// Recovers the effective file-descriptor permit lease and rejects incompatible
+/// Python state.
 bool resolve_fd_permit_lease(PyObject *capsule, FdPermitReceipt **out) {
   if (!out) {
     PyErr_SetString(PyExc_RuntimeError,
@@ -127,6 +141,7 @@ bool resolve_fd_permit_lease(PyObject *capsule, FdPermitReceipt **out) {
   return true;
 }
 
+/// Finalizes and deletes the external-runtime lease owned by a Python capsule.
 void destroy_external_runtime_permit_lease_capsule(PyObject *capsule) {
   auto *receipt = static_cast<ExternalRuntimePermitReceipt *>(
       PyCapsule_GetPointer(capsule, kExternalRuntimePermitLeaseCapsuleName));
@@ -137,6 +152,8 @@ void destroy_external_runtime_permit_lease_capsule(PyObject *capsule) {
   delete receipt;
 }
 
+/// Recovers the effective external runtime permit lease and rejects
+/// incompatible Python state.
 bool resolve_external_runtime_permit_lease(PyObject *capsule,
                                            ExternalRuntimePermitReceipt **out) {
   if (!out) {
@@ -157,7 +174,7 @@ bool resolve_external_runtime_permit_lease(PyObject *capsule,
   return true;
 }
 
-// Consumes one coordinator-visible outcome and records its ordered result.
+/// Consumes one coordinator-visible outcome and records its ordered result.
 bool append_probe_outcome(ProbeExecutor *executor,
                           std::vector<std::uint64_t> *ordinals,
                           std::vector<std::uint64_t> *values,
@@ -179,7 +196,7 @@ bool append_probe_outcome(ProbeExecutor *executor,
   return true;
 }
 
-// Packs one unsigned integer sequence into an owned Python tuple.
+/// Packs one unsigned integer sequence into an owned Python tuple.
 PyObject *pack_probe_sequence(const std::vector<std::uint64_t> &values) {
   PyObject *out = PyTuple_New(static_cast<Py_ssize_t>(values.size()));
   if (!out) {
@@ -199,7 +216,7 @@ PyObject *pack_probe_sequence(const std::vector<std::uint64_t> &values) {
 
 } // namespace
 
-// Runs a bounded native executor probe with forced out-of-order completion.
+/// Runs a bounded native executor probe with forced out-of-order completion.
 PyObject *py_ordered_executor_probe(PyObject *, PyObject *args) {
   int mode = 0;
   int requested_workers = 1;
@@ -338,7 +355,8 @@ PyObject *py_ordered_executor_probe(PyObject *, PyObject *args) {
   return out;
 }
 
-// Exercises two ordered stages on one operation-wide arena.
+/// Requests cleanup-reaper shutdown within the supplied timeout and reports
+/// success.
 PyObject *py_operation_task_arena_reaper_shutdown(PyObject *, PyObject *args) {
   unsigned long long timeout_millis = 0U;
   if (!PyArg_ParseTuple(args, "K:operation_task_arena_reaper_shutdown",
@@ -354,6 +372,7 @@ PyObject *py_operation_task_arena_reaper_shutdown(PyObject *, PyObject *args) {
   Py_RETURN_FALSE;
 }
 
+/// Returns the process-wide count of tracked physical worker threads.
 PyObject *py_process_physical_thread_count(PyObject *, PyObject *) {
   const auto count = sanitize::internal::process_physical_thread_count();
   if (!count) {
@@ -362,6 +381,7 @@ PyObject *py_process_physical_thread_count(PyObject *, PyObject *) {
   return PyLong_FromSize_t(*count);
 }
 
+/// Acquires process physical-thread permits and returns the granted amount.
 PyObject *py_process_physical_thread_permits_acquire(PyObject *,
                                                      PyObject *args) {
   unsigned long long desired = 0U;
@@ -383,6 +403,7 @@ PyObject *py_process_physical_thread_permits_acquire(PyObject *,
   return result;
 }
 
+/// Releases process physical-thread permits previously granted to the caller.
 PyObject *py_process_physical_thread_permits_release(PyObject *,
                                                      PyObject *args) {
   unsigned long long amount = 0U;
@@ -395,6 +416,8 @@ PyObject *py_process_physical_thread_permits_release(PyObject *,
   Py_RETURN_NONE;
 }
 
+/// Returns an external-runtime permit-lease capsule with its granted amount, or
+/// None below the requested minimum.
 PyObject *
 py_process_external_runtime_thread_permit_lease_acquire(PyObject *,
                                                         PyObject *args) {
@@ -448,6 +471,7 @@ py_process_external_runtime_thread_permit_lease_acquire(PyObject *,
   return result;
 }
 
+/// Shrinks an external-runtime thread lease after an optional generation check.
 PyObject *
 py_process_external_runtime_thread_permit_lease_resize(PyObject *,
                                                        PyObject *args) {
@@ -513,6 +537,7 @@ py_process_external_runtime_thread_permit_lease_resize(PyObject *,
   return out;
 }
 
+/// Returns an external-runtime lease identifier, generation, and permit amount.
 PyObject *
 py_process_external_runtime_thread_permit_lease_metadata(PyObject *,
                                                          PyObject *args) {
@@ -545,6 +570,7 @@ py_process_external_runtime_thread_permit_lease_metadata(PyObject *,
   return out;
 }
 
+/// Returns the permit amount currently held by an external-runtime lease.
 PyObject *
 py_process_external_runtime_thread_permit_lease_amount(PyObject *,
                                                        PyObject *args) {
@@ -573,6 +599,7 @@ py_process_external_runtime_thread_permit_lease_amount(PyObject *,
   return PyLong_FromSize_t(receipt->lease.amount());
 }
 
+/// Adds external resident threads to the process runtime accounting.
 PyObject *py_process_external_runtime_resident_threads_add(PyObject *,
                                                            PyObject *args) {
   unsigned long long amount = 0U;
@@ -585,6 +612,7 @@ PyObject *py_process_external_runtime_resident_threads_add(PyObject *,
   Py_RETURN_NONE;
 }
 
+/// Removes external resident threads from the process runtime accounting.
 PyObject *py_process_external_runtime_resident_threads_release(PyObject *,
                                                                PyObject *args) {
   unsigned long long amount = 0U;
@@ -598,6 +626,7 @@ PyObject *py_process_external_runtime_resident_threads_release(PyObject *,
   Py_RETURN_NONE;
 }
 
+/// Adds external threads to the process stack-reservation debt accounting.
 PyObject *py_process_external_runtime_stack_debt_threads_add(PyObject *,
                                                              PyObject *args) {
   unsigned long long amount = 0U;
@@ -610,6 +639,7 @@ PyObject *py_process_external_runtime_stack_debt_threads_add(PyObject *,
   Py_RETURN_NONE;
 }
 
+/// Removes external threads from the process stack-reservation debt accounting.
 PyObject *
 py_process_external_runtime_stack_debt_threads_release(PyObject *,
                                                        PyObject *args) {
@@ -624,6 +654,7 @@ py_process_external_runtime_stack_debt_threads_release(PyObject *,
   Py_RETURN_NONE;
 }
 
+/// Atomically updates external resident-thread and stack-debt accounting.
 PyObject *py_process_external_runtime_residency_update(PyObject *,
                                                        PyObject *args) {
   long long identity_delta = 0;
@@ -638,11 +669,14 @@ PyObject *py_process_external_runtime_residency_update(PyObject *,
   Py_RETURN_NONE;
 }
 
+/// Returns the configured process reservation estimate for one thread stack.
 PyObject *py_process_thread_stack_reservation_bytes(PyObject *, PyObject *) {
   return PyLong_FromUnsignedLongLong(
       sanitize::internal::process_thread_stack_reservation_bytes());
 }
 
+/// Waits for descriptor capacity and returns a lease capsule with its granted
+/// amount, or None below the requested minimum.
 PyObject *py_process_file_descriptor_permit_lease_acquire_wait(PyObject *,
                                                                PyObject *args) {
   unsigned long long desired = 0U;
@@ -696,6 +730,8 @@ PyObject *py_process_file_descriptor_permit_lease_acquire_wait(PyObject *,
   return result;
 }
 
+/// Shrinks a descriptor lease no lower than its open count after an optional
+/// generation check.
 PyObject *py_process_file_descriptor_permit_lease_resize(PyObject *,
                                                          PyObject *args) {
   PyObject *capsule = nullptr;
@@ -763,6 +799,7 @@ PyObject *py_process_file_descriptor_permit_lease_resize(PyObject *,
   return out;
 }
 
+/// Returns a descriptor lease identifier, generation, amount, and open count.
 PyObject *py_process_file_descriptor_permit_lease_metadata(PyObject *,
                                                            PyObject *args) {
   PyObject *capsule = nullptr;
@@ -794,6 +831,7 @@ PyObject *py_process_file_descriptor_permit_lease_metadata(PyObject *,
   return out;
 }
 
+/// Marks leased descriptor permits as physically opened.
 PyObject *py_process_file_descriptor_permit_lease_mark_opened(PyObject *,
                                                               PyObject *args) {
   PyObject *capsule = nullptr;
@@ -850,6 +888,7 @@ PyObject *py_process_file_descriptor_permit_lease_mark_opened(PyObject *,
   return out;
 }
 
+/// Marks leased descriptor permits as physically closed.
 PyObject *py_process_file_descriptor_permit_lease_mark_closed(PyObject *,
                                                               PyObject *args) {
   PyObject *capsule = nullptr;
@@ -907,6 +946,7 @@ PyObject *py_process_file_descriptor_permit_lease_mark_closed(PyObject *,
   return out;
 }
 
+/// Returns the permit amount currently held by a descriptor lease.
 PyObject *py_process_file_descriptor_permit_lease_amount(PyObject *,
                                                          PyObject *args) {
   PyObject *capsule = nullptr;
@@ -933,6 +973,7 @@ PyObject *py_process_file_descriptor_permit_lease_amount(PyObject *,
   return PyLong_FromSize_t(receipt->lease.amount());
 }
 
+/// Adds physically opened descriptors to the process-wide observed count.
 PyObject *py_process_file_descriptor_mark_opened(PyObject *, PyObject *args) {
   unsigned long long amount = 0U;
   if (!PyArg_ParseTuple(args, "K:process_file_descriptor_mark_opened",
@@ -944,6 +985,7 @@ PyObject *py_process_file_descriptor_mark_opened(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+/// Removes physically closed descriptors from the process-wide observed count.
 PyObject *py_process_file_descriptor_mark_closed(PyObject *, PyObject *args) {
   unsigned long long amount = 0U;
   if (!PyArg_ParseTuple(args, "K:process_file_descriptor_mark_closed",
@@ -955,6 +997,7 @@ PyObject *py_process_file_descriptor_mark_closed(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+/// Returns the process-wide count of observed open file descriptors.
 PyObject *py_process_file_descriptor_count(PyObject *, PyObject *) {
   const auto observed = sanitize::internal::process_file_descriptor_count();
   if (!observed) {
@@ -963,6 +1006,8 @@ PyObject *py_process_file_descriptor_count(PyObject *, PyObject *) {
   return PyLong_FromSize_t(*observed);
 }
 
+/// Returns descriptor permit usage, capacity, rejection, and protocol-debt
+/// statistics.
 PyObject *py_process_file_descriptor_permits_snapshot(PyObject *, PyObject *) {
   PyObject *out = PyTuple_New(6);
   if (!out) {
@@ -1000,16 +1045,19 @@ PyObject *py_process_file_descriptor_permits_snapshot(PyObject *, PyObject *) {
   return out;
 }
 
+/// Marks one process physical worker thread as running.
 PyObject *py_process_physical_thread_mark_running(PyObject *, PyObject *) {
   sanitize::internal::mark_process_physical_thread_running();
   Py_RETURN_NONE;
 }
 
+/// Marks one process physical worker thread as stopped.
 PyObject *py_process_physical_thread_mark_stopped(PyObject *, PyObject *) {
   sanitize::internal::mark_process_physical_thread_stopped();
   Py_RETURN_NONE;
 }
 
+/// Returns process task-arena worker, queue, and scheduling counters.
 PyObject *py_operation_task_arena_runtime_snapshot(PyObject *, PyObject *) {
   const auto snapshot =
       sanitize::internal::OperationTaskArena::RuntimeSnapshot();
@@ -1092,6 +1140,8 @@ PyObject *py_operation_task_arena_runtime_snapshot(PyObject *, PyObject *) {
   return out;
 }
 
+/// Runs a bounded multi-lane task-arena probe and returns scheduling
+/// observations.
 PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
   int requested_workers = 1;
   int upstream_workers = 1;
@@ -1285,6 +1335,7 @@ PyObject *py_operation_task_arena_probe(PyObject *, PyObject *args) {
   return result;
 }
 
+/// Exercises cross-lane task stealing and returns its completion invariants.
 PyObject *py_operation_task_arena_stealing_probe(PyObject *, PyObject *) {
   constexpr std::size_t kMaximumWorkerCount = 4U;
   const auto worker_count = std::min<std::size_t>(

@@ -1,3 +1,9 @@
+// Normalizes writer options, applies safety caps, and rejects unavailable
+// compression codecs. This fragment is included by the consolidated writer to
+// isolate format-specific details.
+
+/// Applies native Parquet defaults and hard caps to caller-provided writer
+/// options.
 WriterOptions normalized_writer_options(const WriterOptions &input) {
   WriterOptions out = input;
   if (out.compression.empty()) {
@@ -6,6 +12,8 @@ WriterOptions normalized_writer_options(const WriterOptions &input) {
   return out;
 }
 
+/// Reports whether any writer leaf requires definition or repetition-level
+/// encoding.
 bool parquet_columns_have_nested_levels(
     const std::vector<LeafColumn> &columns) noexcept {
   for (const auto &column : columns) {
@@ -16,6 +24,8 @@ bool parquet_columns_have_nested_levels(
   return false;
 }
 
+/// Derives a row-group byte limit that adapts to nesting while staying below
+/// the hard writer cap.
 std::int64_t
 adaptive_max_bytes_per_row_group(const std::vector<LeafColumn> &columns,
                                  std::int64_t configured_value) {
@@ -32,6 +42,8 @@ adaptive_max_bytes_per_row_group(const std::vector<LeafColumn> &columns,
   return std::max<std::int64_t>(adaptive, 1024LL * 1024LL);
 }
 
+/// Reduces row-group staging capacity so concurrent writer tasks remain within
+/// memory limits.
 std::int64_t parallel_safe_max_bytes_per_row_group(
     const WriterOptions &options,
     const sanitize::internal::MemoryBudget &budget,
@@ -58,6 +70,8 @@ std::int64_t parallel_safe_max_bytes_per_row_group(
   return std::min(target, parallel_cap);
 }
 
+/// Maps normalized writer options to the supported physical Parquet compression
+/// codec.
 sanitize::Result<CompressionCodec>
 compression_codec_from_options(const WriterOptions &options) {
   const std::string_view value(options.compression);
@@ -81,6 +95,7 @@ compression_codec_from_options(const WriterOptions &options) {
       "'; expected gzip, snappy, or uncompressed");
 }
 
+/// Returns the normalized GZIP level used by native Parquet compression.
 sanitize::Result<int> gzip_level_from_options(const WriterOptions &options) {
   if (options.gzip_level < -1 || options.gzip_level > 9) {
     return sanitize::Status::Invalid(

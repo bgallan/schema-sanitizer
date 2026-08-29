@@ -1,4 +1,8 @@
-// Writes a primitive schema element into the compact footer.
+// Emits compact-Thrift schema elements for primitive and group nodes in Parquet
+// order. This fragment is included by the consolidated writer to isolate
+// format-specific details.
+
+/// Writes one primitive Parquet schema element and its logical annotations.
 void write_primitive_schema_element(CompactWriter &writer,
                                     const ParquetNode &node) {
   writer.FieldI32(
@@ -51,7 +55,7 @@ void write_primitive_schema_element(CompactWriter &writer,
     });
   }
 }
-// Writes one schema element and all descendants in preorder.
+/// Writes one schema element and all descendants in preorder.
 void write_schema_elements(CompactWriter &, std::string &out,
                            const ParquetNode &node) {
   CompactWriter item(out);

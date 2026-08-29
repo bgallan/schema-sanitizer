@@ -1,4 +1,6 @@
-// Implements canonical schema JSON serialization for registry documents.
+// Implements canonical logical-schema JSON for registry documents.
+// Recursive field and type writers preserve stable key order and escaping so
+// equivalent schemas produce deterministic durable payloads.
 
 #include "schema_registry/schema_registry_json_schema_write.hh"
 

@@ -1,4 +1,6 @@
-// Owns execution-scoped allocator access and context lifetime state.
+// Owns execution-scoped allocator, interruption, and telemetry state.
+// It creates governed per-operation memory pools and publishes the latest
+// performance record without leaking synchronization details to callers.
 
 #include "sanitize/runtime/execution_context.hh"
 
@@ -14,6 +16,7 @@
 
 namespace sanitize {
 
+/// Initializes the context with a process-governed aggregate memory pool.
 ExecutionContext::ExecutionContext() {
   const auto process_capacity =
       sanitize::internal::memory_budget_from_limit(-1).total_bytes;
@@ -64,11 +67,13 @@ ExecutionContext::performance_telemetry() const {
   return telemetry_;
 }
 
+/// Replaces the callback used to observe host-language interruption.
 void ExecutionContext::set_interrupt_check(InterruptCheck check) {
   std::lock_guard lock(interrupt_mutex_);
   interrupt_check_ = std::move(check);
 }
 
+/// Invokes the configured interruption check or returns an OK status.
 sanitize::Status ExecutionContext::CheckInterrupt() const {
   InterruptCheck check;
   {

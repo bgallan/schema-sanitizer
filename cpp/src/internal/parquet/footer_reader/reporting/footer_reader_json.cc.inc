@@ -1,5 +1,9 @@
-// JSON helpers for public footer diagnostics.
+// Serializes parsed footer schema, column, page, and row-group metadata as
+// deterministic JSON. This fragment is included by the consolidated footer
+// reader inside its private namespace.
 
+/// Appends the parsed Parquet schema-element array to the footer diagnostics
+/// object.
 void append_footer_schema_elements_json(std::string &out, bool &first,
                                         const FooterInfo &info) {
   json_encoding::append_key(out, first, "schema_elements");
@@ -69,6 +73,8 @@ void append_footer_schema_elements_json(std::string &out, bool &first,
   }
   out.push_back(']');
 }
+/// Serializes one column chunk's physical metadata, statistics, and native
+/// decode plan.
 void append_footer_column_metadata_json(std::string &out, bool &column_first,
                                         const ColumnChunkInfo &column) {
   json_encoding::append_key(out, column_first, "path_in_schema");
@@ -226,6 +232,8 @@ void append_footer_column_metadata_json(std::string &out, bool &column_first,
   json_encoding::append_key(out, column_first, "repeated_level_layouts");
   append_repeated_level_layout_infos(out, column.repeated_level_layouts);
 }
+/// Serializes decoded page headers, sizes, levels, and value previews for one
+/// column.
 void append_footer_column_pages_json(std::string &out, bool &column_first,
                                      const ColumnChunkInfo &column) {
   json_encoding::append_key(out, column_first, "pages");
@@ -354,6 +362,7 @@ void append_footer_column_pages_json(std::string &out, bool &column_first,
   }
   out.push_back(']');
 }
+/// Serializes every footer row group and its projected column metadata.
 void append_footer_row_groups_json(std::string &out, bool &first,
                                    const FooterInfo &info) {
   json_encoding::append_key(out, first, "row_groups");

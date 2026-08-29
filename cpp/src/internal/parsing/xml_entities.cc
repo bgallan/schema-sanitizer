@@ -1,4 +1,6 @@
 // Implements strict, linear XML UTF-8 validation and entity decoding.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/xml_entities.hh"
 
@@ -11,23 +13,30 @@
 namespace sanitize::internal {
 namespace {
 
+/// Reports whether a Unicode code point is permitted by the supported XML 1.0
+/// repertoire.
 [[nodiscard]] constexpr bool is_xml_character(std::uint32_t cp) noexcept {
   return cp == 0x09U || cp == 0x0aU || cp == 0x0dU ||
          (cp >= 0x20U && cp <= 0xd7ffU) || (cp >= 0xe000U && cp <= 0xfffdU) ||
          (cp >= 0x10000U && cp <= 0x10ffffU);
 }
 
+/// Builds an XML character-repertoire error at the supplied absolute source
+/// offset.
 sanitize::Status invalid_character(std::size_t offset, std::uint32_t cp) {
   return sanitize::Status::Invalid(
       "XML parse error at byte ", offset,
       ": character is not permitted by XML 1.0 (code point ", cp, ")");
 }
 
+/// Builds a malformed UTF-8 diagnostic at the supplied absolute XML source
+/// offset.
 sanitize::Status invalid_utf8(std::size_t offset, std::string_view reason) {
   return sanitize::Status::Invalid("XML parse error at byte ", offset,
                                    ": invalid UTF-8: ", reason);
 }
 
+/// Encodes one validated Unicode code point into the destination UTF-8 buffer.
 void append_utf8(std::pmr::string *out, std::uint32_t cp) {
   if (cp <= 0x7fU) {
     out->push_back(static_cast<char>(cp));
@@ -46,6 +55,8 @@ void append_utf8(std::pmr::string *out, std::uint32_t cp) {
   }
 }
 
+/// Parses a decimal or hexadecimal XML character reference and validates its
+/// code point.
 sanitize::Result<std::uint32_t>
 parse_numeric_entity(std::string_view entity, std::size_t entity_offset) {
   const bool hexadecimal = entity.size() >= 2U && entity[0] == '#' &&
@@ -90,6 +101,8 @@ parse_numeric_entity(std::string_view entity, std::size_t entity_offset) {
   return code_point;
 }
 
+/// Validates and decodes XML entities in one pass, optionally emitting the
+/// expanded bytes.
 sanitize::Status decode_entities_impl(std::string_view text,
                                       std::size_t base_offset,
                                       std::pmr::string *out) {

@@ -1,4 +1,6 @@
 // Builds a logical schema and direct input plan from Arrow C schema nodes.
+// These routines keep Arrow schema interpretation and buffer ownership explicit
+// at the ABI boundary.
 
 #include "api/python_abi3/arrow_direct/schema/logical.hh"
 
@@ -15,6 +17,8 @@ constexpr std::int64_t kMaxArrowSchemaDepth = 64;
 constexpr std::int64_t kMaxArrowSchemaChildren = 65'536;
 constexpr std::int64_t kMaxArrowSchemaNodes = 1'000'000;
 
+/// Validates one Arrow schema subtree against depth, node, and child-count
+/// limits.
 sanitize::Status validate_arrow_schema_shape(const ArrowSchema *schema,
                                              std::int64_t depth,
                                              std::int64_t *nodes) {

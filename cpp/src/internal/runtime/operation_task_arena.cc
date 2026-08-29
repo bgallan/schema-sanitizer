@@ -1,4 +1,7 @@
-// Implements the operation-wide bounded native task arena.
+// Implements the operation-wide bounded native task arena. Process
+// governors, retained-memory backpressure, worker scheduling, and deferred
+// cleanup share explicit accounting and bounded shutdown paths.
+
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/memory/pool_resource.hh"
 #include "internal/runtime/atomic_worker_bitmap.hh"
@@ -112,6 +115,8 @@ std::mutex g_process_fd_wait_mutex;
 std::condition_variable g_process_fd_wait_cv;
 constexpr std::size_t kReaperThreadPermitCapacity = 2U;
 
+/// Copies a numeric environment override into stable local storage
+/// when present.
 [[nodiscard]] const char *
 ReadNumericEnvironmentVariable(const char *name,
                                std::array<char, 64> &storage) noexcept {
@@ -130,6 +135,8 @@ ReadNumericEnvironmentVariable(const char *name,
 #endif
 }
 
+/// Computes the process file-descriptor permit ceiling from environment and
+/// OS limits.
 [[nodiscard]] std::size_t ConfiguredProcessFdCapacity() noexcept {
   constexpr std::size_t kAbsoluteCap = 65536U;
   std::size_t capacity = 4096U;
@@ -163,6 +170,7 @@ ReadNumericEnvironmentVariable(const char *name,
   return capacity;
 }
 
+/// Counts file descriptors currently open by this process when observable.
 [[nodiscard]] std::optional<std::size_t> ProcessFileDescriptorCount() noexcept {
 #if defined(__linux__)
   DIR *directory = ::opendir("/proc/self/fd");
@@ -197,6 +205,8 @@ ReadNumericEnvironmentVariable(const char *name,
 #endif
 }
 
+/// Atomically acquires as many file-descriptor permits as possible above
+/// a minimum.
 [[nodiscard]] std::size_t
 TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
                                bool queued_waiter = false) noexcept {
@@ -262,6 +272,7 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
   return 0U;
 }
 
+/// Computes the configured process-wide native thread permit ceiling.
 [[nodiscard]] std::size_t ConfiguredProcessThreadCapacity() noexcept {
   constexpr std::size_t kAbsoluteCap = 512U;
   // Physical thread ownership is deliberately independent from runnable CPU
@@ -285,6 +296,8 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
   return std::min<std::size_t>(kAbsoluteCap, static_cast<std::size_t>(parsed));
 }
 
+/// Counts native threads currently belonging to this process
+/// when observable.
 [[nodiscard]] std::optional<std::size_t> ProcessPhysicalThreadCount() noexcept {
 #if defined(__linux__)
   DIR *directory = ::opendir("/proc/self/task");
@@ -341,6 +354,8 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
 #endif
 }
 
+/// Determines the virtual-memory reservation charged for one managed
+/// thread stack.
 [[nodiscard]] std::uint64_t ThreadStackReservationBytes() noexcept {
   constexpr std::uint64_t kDefault = 8ULL * 1024ULL * 1024ULL;
   std::array<char, 64> configured_storage{};
@@ -369,6 +384,7 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
   return kDefault;
 }
 
+/// Returns thread headroom imposed by the effective cgroup PID controller.
 [[nodiscard]] std::optional<std::size_t> ProcessPidThreadHeadroom() noexcept {
 #if defined(__linux__)
   using cgroup_view_detail::ValueState;
@@ -390,8 +406,8 @@ TryAcquireProcessFdPermitsUpTo(std::size_t desired, std::size_t minimum,
   return std::nullopt;
 }
 
-// Linux RLIMIT_NPROC is represented as per-UID headroom, not a process-local
-// absolute capacity.
+/// Returns Linux per-UID RLIMIT_NPROC headroom rather than an absolute
+/// process-local capacity.
 [[nodiscard]] std::optional<std::size_t>
 ProcessRlimitThreadHeadroom() noexcept {
 #if defined(__linux__)
@@ -482,6 +498,8 @@ ProcessRlimitThreadHeadroom() noexcept {
   return std::nullopt;
 }
 
+/// Limits additional managed threads by process memory and
+/// stack reservations.
 [[nodiscard]] std::optional<std::size_t>
 ManagedThreadMemoryCapacity(std::size_t current_permits,
                             std::size_t stack_reservations) noexcept {
@@ -558,6 +576,7 @@ ManagedThreadMemoryCapacity(std::size_t current_permits,
   return static_cast<std::size_t>(total);
 }
 
+/// Combines CPU, PID, rlimit, and stack headroom into a thread ceiling.
 [[nodiscard]] std::size_t NativePhysicalThreadCapacity() noexcept {
   constexpr std::size_t kAbsoluteCap = 512U;
   const auto configured = ConfiguredProcessThreadCapacity();
@@ -569,32 +588,43 @@ ManagedThreadMemoryCapacity(std::size_t current_permits,
 
 class ExternalRuntimeResidencyWriterGuard final {
 public:
+  /// Acquires exclusive access to the external-runtime residency ledger.
   ExternalRuntimeResidencyWriterGuard() noexcept {
     while (g_external_runtime_residency_writer.test_and_set(
         std::memory_order_acquire)) {
       std::this_thread::yield();
     }
   }
+  /// Disables copying the external-runtime residency writer guard.
   ExternalRuntimeResidencyWriterGuard(
       const ExternalRuntimeResidencyWriterGuard &) = delete;
+  /// Disables copy assignment for the external-runtime residency
+  /// writer guard.
   ExternalRuntimeResidencyWriterGuard &
   operator=(const ExternalRuntimeResidencyWriterGuard &) = delete;
+  /// Publishes completion of the external-runtime residency
+  /// ledger mutation.
   ~ExternalRuntimeResidencyWriterGuard() noexcept {
     g_external_runtime_residency_writer.clear(std::memory_order_release);
   }
 };
 
+/// Reports whether external-runtime thread residency accounting
+/// remains trustworthy.
 [[nodiscard]] bool ExternalRuntimeResidencyHealthy() noexcept {
   return !g_external_runtime_residency_corrupted.load(
       std::memory_order_acquire);
 }
 
+/// Closes external-runtime residency admission after an
+/// accounting violation.
 void QuarantineExternalRuntimeResidency() noexcept {
   g_external_runtime_residency_corrupted.store(true, std::memory_order_release);
   g_external_runtime_resident_protocol_violations.fetch_add(
       1U, std::memory_order_relaxed);
 }
 
+/// Marks the thread-permit ledger write epoch before a compound mutation.
 void BeginThreadPermitLedgerMutation() noexcept {
   g_process_thread_ledger_mutations_inflight.fetch_add(
       1U, std::memory_order_acq_rel);
@@ -602,6 +632,7 @@ void BeginThreadPermitLedgerMutation() noexcept {
                                                    std::memory_order_acq_rel);
 }
 
+/// Publishes completion of a compound thread-permit ledger mutation.
 void EndThreadPermitLedgerMutation() noexcept {
   // Publish a generation change before dropping the in-flight marker. A reader
   // that missed the short-lived writer still observes epoch_before !=
@@ -612,6 +643,7 @@ void EndThreadPermitLedgerMutation() noexcept {
       1U, std::memory_order_release);
 }
 
+/// Converts reserved thread domains into their stack-reservation count.
 [[nodiscard]] std::size_t
 ProcessThreadStackReservationCount(std::size_t total_reserved) noexcept {
   const auto managed_reserved =
@@ -635,6 +667,7 @@ ProcessThreadStackReservationCount(std::size_t total_reserved) noexcept {
   return std::max(total_reserved, modelled);
 }
 
+/// Recomputes usable thread capacity after current stack reservations.
 [[nodiscard]] std::size_t
 EffectiveProcessThreadCapacity(std::size_t total_reserved) noexcept {
   const auto configured_process_capacity = ConfiguredProcessThreadCapacity();
@@ -697,6 +730,8 @@ EffectiveProcessThreadCapacity(std::size_t total_reserved) noexcept {
   return effective_capacity;
 }
 
+/// Reserves a bounded permit range and commits it to the selected
+/// thread domain.
 template <typename CommitDomain>
 [[nodiscard]] std::size_t
 TryAcquireProcessThreadPermitsUpTo(std::size_t desired, std::size_t minimum,
@@ -746,6 +781,8 @@ TryAcquireProcessThreadPermitsUpTo(std::size_t desired, std::size_t minimum,
   return 0U;
 }
 
+/// Acquires physical-thread permits without exceeding effective
+/// process capacity.
 [[nodiscard]] std::size_t
 TryAcquireProcessPhysicalThreadPermitsUpTo(std::size_t desired,
                                            std::size_t minimum) noexcept {
@@ -763,6 +800,7 @@ TryAcquireProcessPhysicalThreadPermitsUpTo(std::size_t desired,
       });
 }
 
+/// Acquires permits for threads resident in an external runtime.
 [[nodiscard]] std::size_t TryAcquireProcessExternalRuntimeThreadPermitsUpTo(
     std::size_t desired, std::size_t minimum) noexcept {
   if (!runtime_owner_process()) {
@@ -775,6 +813,8 @@ TryAcquireProcessPhysicalThreadPermitsUpTo(std::size_t desired,
       });
 }
 
+/// Starts a native thread only after securing and transferring a
+/// physical-thread permit.
 template <class Function>
 [[nodiscard]] std::thread StartGovernedNativeThread(Function &&function) {
   ProcessPhysicalThreadPermitLease permit(1U);
@@ -790,6 +830,7 @@ template <class Function>
                       function = std::forward<Function>(function)]() mutable {
     g_managed_running_threads.fetch_add(1U, std::memory_order_acq_rel);
     struct RunningGuard final {
+      /// Retires the managed-running count and records any counter underflow.
       ~RunningGuard() {
         const auto previous =
             g_managed_running_threads.fetch_sub(1U, std::memory_order_acq_rel);
@@ -803,6 +844,7 @@ template <class Function>
   });
 }
 
+/// Reserves the dedicated permit used by the asynchronous cleanup reaper.
 bool TryAcquireReaperThreadPermit() noexcept {
   auto current = g_reaper_thread_permits.load(std::memory_order_acquire);
   while (current < kReaperThreadPermitCapacity) {
@@ -815,6 +857,8 @@ bool TryAcquireReaperThreadPermit() noexcept {
   return false;
 }
 
+/// Removes up to the requested amount from an atomic counter and returns
+/// the amount taken.
 [[nodiscard]] std::size_t SaturatingAtomicTake(std::atomic<std::size_t> &target,
                                                std::size_t amount) noexcept {
   auto current = target.load(std::memory_order_acquire);
@@ -831,6 +875,8 @@ bool TryAcquireReaperThreadPermit() noexcept {
   }
 }
 
+/// Debits a permit domain and quarantines accounting when the debit
+/// is incomplete.
 [[nodiscard]] std::size_t TakePermitDomainOrQuarantine(
     std::atomic<std::size_t> &target, std::size_t amount,
     std::atomic<bool> &corrupted,
@@ -863,11 +909,13 @@ bool TryAcquireReaperThreadPermit() noexcept {
   }
 }
 
+/// Subtracts from an atomic counter without allowing unsigned underflow.
 void SaturatingAtomicSubtract(std::atomic<std::size_t> &target,
                               std::size_t amount) noexcept {
   static_cast<void>(SaturatingAtomicTake(target, amount));
 }
 
+/// Returns the cleanup reaper's dedicated physical-thread permit.
 void ReleaseReaperThreadPermit() noexcept {
   SaturatingAtomicSubtract(g_reaper_thread_permits, 1U);
 }
@@ -879,6 +927,8 @@ struct ThreadPermitLedgerSnapshot final {
   bool stable = false;
 };
 
+/// Reads a stable cross-domain snapshot of the process
+/// thread-permit ledger.
 [[nodiscard]] ThreadPermitLedgerSnapshot
 ReadThreadPermitLedgerSnapshot() noexcept {
   ThreadPermitLedgerSnapshot out;
@@ -1203,6 +1253,7 @@ acquire_process_file_descriptor_permits(std::size_t desired,
   return granted;
 }
 
+/// Advances the descriptor wait queue past cancelled admission tickets.
 void SkipCancelledFdTicketsLocked() noexcept {
   for (;;) {
     const auto serving =
@@ -1218,6 +1269,7 @@ void SkipCancelledFdTicketsLocked() noexcept {
   }
 }
 
+/// Retires one descriptor waiter ticket and advances the serving cursor.
 void RetireFdTicketLocked(std::uint64_t ticket) noexcept {
   const auto serving =
       g_process_fd_serving_ticket.load(std::memory_order_acquire);
@@ -1231,6 +1283,7 @@ void RetireFdTicketLocked(std::uint64_t ticket) noexcept {
       .store(ticket + 1U, std::memory_order_release);
 }
 
+/// Reserves a bounded FIFO ticket for descriptor admission.
 bool TryReserveFdTicket(std::uint64_t *ticket_out) noexcept {
   if (ticket_out == nullptr) {
     return false;
@@ -1284,9 +1337,11 @@ std::size_t acquire_process_file_descriptor_permits_wait(
     return 0U;
   }
   struct WaiterGuard final {
+    /// Publishes one active process file-descriptor admission waiter.
     WaiterGuard() noexcept {
       g_process_fd_waiters.fetch_add(1U, std::memory_order_acq_rel);
     }
+    /// Retires this process file-descriptor admission waiter.
     ~WaiterGuard() {
       g_process_fd_waiters.fetch_sub(1U, std::memory_order_release);
     }
@@ -1443,6 +1498,7 @@ void mark_process_physical_thread_stopped() noexcept {
 }
 
 struct OperationTaskArena::DetachedMetrics final {
+  /// Preallocates timestamp slots for every worker that could detach.
   explicit DetachedMetrics(std::size_t worker_count)
       : slot_count(std::max<std::size_t>(1U, worker_count)),
         live_since_ns(new std::atomic<std::int64_t>[slot_count]) {
@@ -1459,6 +1515,7 @@ struct OperationTaskArena::DetachedMetrics final {
   std::atomic<std::size_t> reaper_queued_bytes{0U};
   std::atomic<std::size_t> reaper_active_bytes{0U};
 
+  /// Records a newly detached worker and returns its stable tracking slot.
   [[nodiscard]] std::size_t Register(std::int64_t since_ns) noexcept {
     const auto normalized = std::max<std::int64_t>(1, since_ns);
     for (std::size_t index = 0; index < slot_count; ++index) {
@@ -1473,6 +1530,7 @@ struct OperationTaskArena::DetachedMetrics final {
     }
     return 0U;
   }
+  /// Clears a detached worker's tracking slot after it exits.
   void Complete(std::size_t id) noexcept {
     if (id == 0U || id > slot_count) {
       return;
@@ -1483,6 +1541,7 @@ struct OperationTaskArena::DetachedMetrics final {
       SaturatingAtomicSubtract(g_detached_workers, 1U);
     }
   }
+  /// Counts workers that remain detached and running.
   [[nodiscard]] std::size_t Current() const noexcept {
     std::size_t current = 0U;
     for (std::size_t index = 0; index < slot_count; ++index) {
@@ -1491,6 +1550,7 @@ struct OperationTaskArena::DetachedMetrics final {
     }
     return current;
   }
+  /// Returns the earliest detach timestamp among workers still running.
   [[nodiscard]] std::int64_t OldestSinceNs() const noexcept {
     std::int64_t oldest = 0;
     for (std::size_t index = 0; index < slot_count; ++index) {
@@ -1506,6 +1566,7 @@ namespace {
 constexpr auto kArenaShutdownDrain = std::chrono::seconds(2);
 std::atomic<std::uint64_t> g_arena_generation{0};
 
+/// Allocates a nonzero generation identifier for a new task arena.
 [[nodiscard]] std::uint64_t NextArenaGeneration() noexcept {
   auto current = g_arena_generation.load(std::memory_order_relaxed);
   for (;;) {
@@ -1531,6 +1592,8 @@ public:
     std::size_t detached_id = 0U;
   };
 
+  /// Starts a governed worker and tracks its completion independently
+  /// of joins.
   template <class Function>
   explicit ArenaWorkerThread(Function &&function)
       : stop_source_(), completion_(std::make_shared<Completion>()) {
@@ -1558,9 +1621,12 @@ public:
         });
   }
 
+  /// Disables copying the governed arena worker thread.
   ArenaWorkerThread(const ArenaWorkerThread &) = delete;
+  /// Disables copy assignment for the governed arena worker thread.
   ArenaWorkerThread &operator=(const ArenaWorkerThread &) = delete;
 
+  /// Joins a stopped worker or safely detaches a still-running worker.
   ~ArenaWorkerThread() {
     if (thread_.joinable()) {
       stop_source_.request_stop();
@@ -1568,8 +1634,10 @@ public:
     }
   }
 
+  /// Requests cooperative cancellation of the governed worker thread.
   bool request_stop() noexcept { return stop_source_.request_stop(); }
 
+  /// Waits until the worker exits or the supplied deadline passes.
   [[nodiscard]] bool
   wait_until(std::chrono::steady_clock::time_point deadline) const noexcept {
     std::unique_lock lock(completion_->mutex);
@@ -1577,6 +1645,7 @@ public:
                                          [this] { return completion_->done; });
   }
 
+  /// Transfers exit tracking to detached-worker metrics before detaching.
   void mark_detached(
       const std::shared_ptr<OperationTaskArena::DetachedMetrics> &metrics,
       std::size_t detached_id) noexcept {
@@ -1594,12 +1663,14 @@ public:
     }
   }
 
+  /// Joins the governed worker after confirming it has stopped.
   void join() {
     if (thread_.joinable()) {
       thread_.join();
     }
   }
 
+  /// Detaches the native worker while preserving completion accounting.
   void detach() noexcept {
     if (thread_.joinable()) {
       thread_.detach();
@@ -1622,6 +1693,8 @@ struct OperationTaskArena::State final {
     std::int64_t queued_at_ns = 0;
     std::size_t retained_bytes = 256U;
   };
+  /// Derives bounded per-arena task capacity from worker count and
+  /// memory budget.
   static std::size_t QueueCapacity(
       std::size_t count,
       const std::shared_ptr<PerformanceTelemetry> &telemetry) noexcept {
@@ -1643,6 +1716,8 @@ struct OperationTaskArena::State final {
                 kEstimatedQueuedTaskBytes);
     return std::min(worker_bound, memory_bound);
   }
+  /// Derives retained-byte queue capacity from task capacity and
+  /// operation memory.
   static std::size_t QueueByteCapacity(
       std::size_t task_capacity,
       const std::shared_ptr<PerformanceTelemetry> &telemetry) noexcept {
@@ -1678,6 +1753,8 @@ struct OperationTaskArena::State final {
     // backpressure envelope.
     return std::max<std::size_t>(kDefaultCharge, memory_limit / 4U);
   }
+  /// Derives a fixed producer-waiter ticket capacity for
+  /// backpressure admission.
   static std::size_t ProducerWaiterCapacity(
       std::size_t count,
       const std::shared_ptr<PerformanceTelemetry> &telemetry) noexcept {
@@ -1759,9 +1836,11 @@ struct OperationTaskArena::State final {
     std::mutex start_mutex;
     std::unique_ptr<ArenaWorkerThread> worker;
 
+    /// Places one worker's task queues on the supplied PMR resource.
     explicit WorkerSlot(std::pmr::memory_resource *resource)
         : tasks(resource), abandoned_tasks(resource) {}
   };
+  /// Preallocates bounded scheduling state for one arena generation.
   explicit State(std::size_t count,
                  std::shared_ptr<PerformanceTelemetry> telemetry_owner,
                  std::uint64_t generation_value)
@@ -1843,6 +1922,8 @@ struct OperationTaskArena::State final {
   std::atomic<std::uint64_t> retained_epoch{0};
   std::mutex retained_wait_mutex;
   std::condition_variable retained_ready;
+  /// Publishes retained-memory availability and wakes bounded
+  /// producer waiters.
   void NotifyRetainedAvailability(bool wake_all = false) noexcept {
     // Serialize the epoch transition with the CV waiter's final recheck so a
     // release cannot land between that recheck and the atomic unlock+sleep.
@@ -1889,6 +1970,7 @@ struct OperationTaskArena::State final {
 
 namespace {
 
+/// Raises a pre-telemetry arena high-water mark when necessary.
 inline void UpdateEarlyPeak(std::atomic<std::size_t> &peak,
                             std::size_t value) noexcept {
   auto current = peak.load(std::memory_order_relaxed);
@@ -1898,6 +1980,8 @@ inline void UpdateEarlyPeak(std::atomic<std::size_t> &peak,
   }
 }
 
+/// Reserves queue-retained memory, waiting under the arena's
+/// backpressure policy.
 sanitize::Status AcquireRetainedSubmitCredit(
     const std::shared_ptr<OperationTaskArena::State> &state,
     std::size_t retained_bytes) {
@@ -2145,6 +2229,7 @@ sanitize::Status AcquireRetainedSubmitCredit(
 
 class ArenaCleanupReaper final {
 public:
+  /// Returns the process-wide asynchronous arena cleanup reaper.
   static ArenaCleanupReaper &Instance() noexcept {
     static ArenaCleanupReaper *instance =
         new (std::nothrow) ArenaCleanupReaper();
@@ -2161,6 +2246,8 @@ public:
     return instance != nullptr ? *instance : fallback;
   }
 
+  /// Reserves bounded reaper state capacity without eagerly starting
+  /// a worker.
   [[nodiscard]] bool
   Reserve(const std::shared_ptr<OperationTaskArena::State> &state,
           std::size_t /*maximum_bytes*/) noexcept {
@@ -2199,6 +2286,7 @@ public:
     return true;
   }
 
+  /// Reserves bounded reaper byte capacity for an arena's abandoned tasks.
   [[nodiscard]] bool
   ReserveQueuedBytes(const std::shared_ptr<OperationTaskArena::State> &state,
                      std::size_t bytes) noexcept {
@@ -2222,6 +2310,8 @@ public:
     }
   }
 
+  /// Returns unused queued-byte capacity from an arena's
+  /// reaper reservation.
   void
   ReleaseQueuedBytes(const std::shared_ptr<OperationTaskArena::State> &state,
                      std::size_t bytes) noexcept {
@@ -2233,6 +2323,7 @@ public:
     SaturatingAtomicSubtract(state->reaper_reserved_bytes, bytes);
   }
 
+  /// Releases all unused state and byte capacity reserved for an arena.
   void ReleaseReservation(
       const std::shared_ptr<OperationTaskArena::State> &state) noexcept {
     if (!state || !state->reaper_reserved) {
@@ -2251,6 +2342,7 @@ public:
     state->reaper_reserved = false;
   }
 
+  /// Starts one reaper lane after acquiring its governed thread permit.
   [[nodiscard]] bool EnsureLaneStarted(std::size_t index) noexcept {
     if (!enabled_ || index >= kLaneCount) {
       return false;
@@ -2279,6 +2371,8 @@ public:
     }
   }
 
+  /// Transfers a reserved arena state into its cleanup lane's
+  /// bounded queue.
   [[nodiscard]] bool
   Enqueue(const std::shared_ptr<OperationTaskArena::State> &state) noexcept {
     if (!state) {
@@ -2324,6 +2418,7 @@ public:
     return true;
   }
 
+  /// Parks a reserved arena until its cleanup lane can accept it.
   [[nodiscard]] bool
   Park(const std::shared_ptr<OperationTaskArena::State> &state) noexcept {
     if (!state || !state->reaper_reserved) {
@@ -2352,6 +2447,8 @@ public:
     return parked;
   }
 
+  /// Retains an arena in bounded terminal storage when cleanup
+  /// cannot proceed.
   [[nodiscard]] bool Terminalize(
       const std::shared_ptr<OperationTaskArena::State> &state) noexcept {
     if (!state || !state->reaper_reserved) {
@@ -2372,10 +2469,13 @@ public:
     return false;
   }
 
+  /// Returns the number of arena states waiting in parked storage.
   [[nodiscard]] std::size_t ParkedStates() const noexcept {
     return parked_states_.load(std::memory_order_acquire);
   }
 
+  /// Requests reaper-lane shutdown and joins workers within a
+  /// bounded interval.
   [[nodiscard]] bool ShutdownFor(std::uint64_t timeout_millis) noexcept {
     if (!enabled_) {
       return true;
@@ -2412,6 +2512,7 @@ public:
     return all_stopped;
   }
 
+  /// Drains all reaper state and then stops its lanes before a deadline.
   [[nodiscard]] bool
   DrainAndShutdownFor(std::uint64_t timeout_millis) noexcept {
     if (!enabled_) {
@@ -2450,6 +2551,8 @@ public:
     return false;
   }
 
+  /// Performs a bounded best-effort reaper shutdown during
+  /// process teardown.
   void Shutdown() noexcept {
     // Process teardown must never wait indefinitely for arbitrary capture
     // destructors.  The intentionally leaked singleton and OS process cleanup
@@ -2457,6 +2560,8 @@ public:
     (void)ShutdownFor(100U);
   }
 
+  /// Snapshots process thread, detached worker, and
+  /// cleanup-reaper diagnostics.
   [[nodiscard]] OperationTaskArenaRuntimeSnapshot Snapshot() noexcept {
     OperationTaskArenaRuntimeSnapshot out;
     out.live_arenas = g_live_arena_states.load(std::memory_order_acquire);
@@ -2535,6 +2640,7 @@ private:
   static constexpr std::size_t kMaxQueuedStates = 1024U;
   static constexpr std::size_t kMaxQueuedBytes = 1024U * 1024U * 1024U;
 
+  /// Maps an arena state to its stable cleanup-reaper lane.
   static std::size_t LaneIndex(OperationTaskArena::State *state) noexcept {
     return (reinterpret_cast<std::uintptr_t>(state) >> 6U) % kLaneCount;
   }
@@ -2558,9 +2664,11 @@ private:
     std::thread worker;
   };
 
+  /// Configures whether this cleanup-reaper instance may start workers.
   explicit ArenaCleanupReaper(bool enabled = true) noexcept
       : enabled_(enabled) {}
 
+  /// Atomically subtracts with a zero floor and records underflow attempts.
   static void
   SaturatingSubtract(std::atomic<std::size_t> &target, std::size_t amount,
                      std::atomic<std::size_t> &violations) noexcept {
@@ -2577,6 +2685,7 @@ private:
     }
   }
 
+  /// Drains one cleanup lane, releases retained bytes, and promotes overflow.
   void Run(std::size_t index) noexcept {
     auto &lane = lanes_[index];
     while (true) {
@@ -2655,6 +2764,7 @@ private:
     }
   }
 
+  /// Retries one parked state, preserving it or terminalizing on saturation.
   void PromoteParked(std::size_t index) noexcept {
     std::shared_ptr<OperationTaskArena::State> candidate;
     std::size_t slot_index = parked_.size();
@@ -2710,6 +2820,7 @@ private:
     }
   }
 
+  /// Retries one terminal state through the queue and parked overflow paths.
   void PromoteTerminal(std::size_t index) noexcept {
     std::shared_ptr<OperationTaskArena::State> candidate;
     {
@@ -2755,17 +2866,22 @@ private:
 
 class TeardownReservationGuard final {
 public:
+  /// Owns an arena cleanup reservation until it is committed or released.
   explicit TeardownReservationGuard(
       std::shared_ptr<OperationTaskArena::State> state) noexcept
       : state_(std::move(state)) {}
+  /// Disables copying the arena teardown reservation guard.
   TeardownReservationGuard(const TeardownReservationGuard &) = delete;
+  /// Disables copy assignment for the arena teardown reservation guard.
   TeardownReservationGuard &
   operator=(const TeardownReservationGuard &) = delete;
+  /// Releases an uncommitted cleanup reservation during stack unwinding.
   ~TeardownReservationGuard() noexcept {
     if (state_) {
       ArenaCleanupReaper::Instance().ReleaseReservation(state_);
     }
   }
+  /// Marks the teardown reservation as transferred to asynchronous cleanup.
   void Commit() noexcept { state_.reset(); }
 
 private:

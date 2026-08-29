@@ -1,4 +1,6 @@
 // Implements string and binary JSON serialization for Arrow values.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_value_writer_parts.hh"
 
@@ -12,6 +14,7 @@ namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
 template <typename OffsetT>
+/// Reads one offset-delimited Arrow string and emits escaped JSON text.
 sanitize::Status append_string_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   if (!array.buffers || !array.buffers[1] || !array.buffers[2]) {
@@ -31,6 +34,7 @@ sanitize::Status append_string_value(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Encodes arbitrary bytes as unquoted RFC 4648 base64 text.
 void append_base64(TextBuffer &out, std::string_view value) {
   static constexpr char kAlphabet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -62,6 +66,8 @@ void append_base64(TextBuffer &out, std::string_view value) {
 }
 
 template <typename OffsetT>
+/// Reads one offset-delimited Arrow binary value and emits optionally quoted
+/// base64.
 sanitize::Status append_binary_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, bool quote) {
   if (!array.buffers || !array.buffers[1] || !array.buffers[2]) {
@@ -93,21 +99,25 @@ sanitize::Status append_string32_value(TextBuffer &out, const ArrowArray &array,
   return append_string_value<int32_t>(out, array, row);
 }
 
+/// Serializes one large-string value using 64-bit Arrow offsets.
 sanitize::Status append_string64_value(TextBuffer &out, const ArrowArray &array,
                                        int64_t row) {
   return append_string_value<int64_t>(out, array, row);
 }
 
+/// Serializes one binary value using 32-bit Arrow offsets.
 sanitize::Status append_binary32_value(TextBuffer &out, const ArrowArray &array,
                                        int64_t row, bool quote) {
   return append_binary_value<int32_t>(out, array, row, quote);
 }
 
+/// Serializes one large-binary value using 64-bit Arrow offsets.
 sanitize::Status append_binary64_value(TextBuffer &out, const ArrowArray &array,
                                        int64_t row, bool quote) {
   return append_binary_value<int64_t>(out, array, row, quote);
 }
 
+/// Serializes one fixed-width binary slot as optionally quoted base64.
 sanitize::Status append_fixed_size_binary_value(TextBuffer &out,
                                                 const JsonlField &field,
                                                 const ArrowArray &array,

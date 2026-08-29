@@ -1,4 +1,7 @@
-// Validates logical Arrow C Data bounds before direct batch materialization.
+// Declares logical Arrow C Data validation before direct batch materialization.
+// The entry point checks an imported array against its parsed direct-ingestion
+// schema.
+
 #pragma once
 
 #include <cstdint>
@@ -10,9 +13,9 @@
 
 namespace core_abi3_internal {
 
-// Validates one record-batch root and all child logical ranges. Arrow C Data
-// does not expose physical allocation sizes, so this rejects malformed logical
-// metadata but cannot authenticate arbitrary raw pointers from hostile code.
+/// Validates a record-batch root and every child logical range.
+/// This rejects malformed logical metadata but cannot authenticate raw
+/// pointers.
 sanitize::Status
 validate_arrow_direct_batch(const ArrowArray &root,
                             const std::vector<ArrowInputNode> &fields,

@@ -1,3 +1,8 @@
+// Encodes bounded Snappy blocks and dispatches supported page-compression
+// codecs. This fragment is included by the consolidated writer to isolate
+// format-specific details.
+
+/// Appends an unsigned varint to a raw Snappy block.
 void append_snappy_varint(std::string &out, std::uint32_t value) {
   while (value >= 0x80U) {
     out.push_back(static_cast<char>((value & 0x7FU) | 0x80U));
@@ -6,6 +11,7 @@ void append_snappy_varint(std::string &out, std::uint32_t value) {
   out.push_back(static_cast<char>(value));
 }
 
+/// Encodes the tag and extended length for one Snappy literal.
 void append_snappy_literal_tag(std::string &out, std::uint32_t length) {
   const auto literal_length = length - 1U;
   if (literal_length < 60U) {
@@ -26,6 +32,7 @@ void append_snappy_literal_tag(std::string &out, std::uint32_t length) {
   }
 }
 
+/// Splits source bytes into bounded Snappy literal chunks.
 void append_snappy_literal(std::string &out, std::string_view payload,
                            std::size_t offset, std::size_t length) {
   while (length != 0) {
@@ -40,6 +47,7 @@ void append_snappy_literal(std::string &out, std::string_view payload,
   }
 }
 
+/// Emits bounded Snappy copy operations for a prior match offset.
 void append_snappy_copy(std::string &out, std::uint32_t offset,
                         std::size_t length) {
   while (length != 0) {
@@ -52,12 +60,14 @@ void append_snappy_copy(std::string &out, std::uint32_t offset,
   }
 }
 
+/// Loads a bounded little-endian word used by the Snappy match finder.
 std::uint32_t load_snappy_word(std::string_view payload, std::size_t offset) {
   std::uint32_t word = 0;
   std::memcpy(&word, payload.data() + offset, sizeof(word));
   return word;
 }
 
+/// Selects a power-of-two Snappy match table bounded by payload size.
 std::size_t snappy_hash_table_size(std::size_t payload_size) {
   std::size_t size = 256U;
   while (size < 16384U && size < payload_size) {
@@ -66,11 +76,13 @@ std::size_t snappy_hash_table_size(std::size_t payload_size) {
   return size;
 }
 
+/// Computes the bounded match-table bucket for one four-byte Snappy word.
 std::size_t snappy_hash(std::uint32_t word, std::size_t table_size) {
   const auto shift = static_cast<unsigned>(32U - std::countr_zero(table_size));
   return static_cast<std::size_t>((word * 0x1E35A7BDU) >> shift);
 }
 
+/// Encodes a page with the raw Snappy block format used by Parquet.
 sanitize::Result<std::string> snappy_encode_payload(std::string_view payload) {
   if (payload.size() >
       static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
@@ -133,6 +145,7 @@ sanitize::Result<std::string> snappy_encode_payload(std::string_view payload) {
   return out;
 }
 
+/// Compresses a page with the selected uncompressed, Snappy, or GZIP codec.
 sanitize::Result<std::string> compress_payload(std::string_view payload,
                                                CompressionCodec codec,
                                                int gzip_level) {

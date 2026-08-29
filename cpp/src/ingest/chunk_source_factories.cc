@@ -1,4 +1,6 @@
-// Implements public chunk-source factories and argument validation.
+// Implements public chunk-source factories and argument validation. The helpers
+// enforce memory and descriptor limits while preserving stable chunk-view
+// lifetimes.
 
 #include "ingest/chunk_source_detail.hh"
 
@@ -10,6 +12,8 @@
 namespace sanitize {
 namespace {
 
+/// Parses an encoding option and rejects spellings unsupported by native
+/// transcoding.
 sanitize::Result<internal::TextEncoding>
 validated_text_encoding(std::string_view encoding) {
   const auto parsed = internal::parse_text_encoding(encoding);
@@ -20,6 +24,7 @@ validated_text_encoding(std::string_view encoding) {
   return parsed;
 }
 
+/// Rejects an empty path list before constructing a multi-path source.
 sanitize::Status validate_paths(const std::vector<std::string> &paths,
                                 std::string_view operation) {
   if (paths.empty()) {
@@ -28,6 +33,7 @@ sanitize::Status validate_paths(const std::vector<std::string> &paths,
   return {};
 }
 
+/// Requires one stable source name for every input path.
 sanitize::Status
 validate_source_names(const std::vector<std::string> &paths,
                       const std::vector<std::string> &source_names,

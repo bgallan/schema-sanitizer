@@ -1,4 +1,6 @@
-// Manages Python ABI3 capsules for contexts, options, and streams.
+// Manages Python ABI3 capsules for contexts, options, and streams. The wrappers
+// validate capsule identity and translate native state into stable Python
+// values.
 
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
@@ -14,7 +16,8 @@
 namespace core_abi3_internal {
 namespace {
 
-// Raises runtime error.
+/// Raises Python RuntimeError with the supplied message or a stable ABI
+/// fallback.
 void raise_runtime_error(const char *msg) {
   if (!msg) {
     msg = "schema-sanitizer ABI3 runtime error";
@@ -28,7 +31,7 @@ constexpr const char *kPreparedOptionsCapsuleName =
     "schema_sanitizer.prepared_options";
 constexpr const char *kArrowStreamCapsuleName = "arrow_array_stream";
 
-// Releases the execution context owned by a Python capsule.
+/// Releases the execution context owned by a Python capsule.
 void context_capsule_destructor(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -42,7 +45,7 @@ void context_capsule_destructor(PyObject *capsule) {
   delete ctx;
 }
 
-// Releases diagnostics owned by a Python capsule.
+/// Releases diagnostics owned by a Python capsule.
 void diagnostics_capsule_destructor(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -56,7 +59,7 @@ void diagnostics_capsule_destructor(PyObject *capsule) {
   delete diagnostics;
 }
 
-// Releases prepared options owned by a Python capsule.
+/// Releases prepared options owned by a Python capsule.
 void prepared_options_capsule_destructor(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -77,7 +80,7 @@ struct StreamKeepAlive {
   PyObject *keepalive = nullptr;
 };
 
-// Releases an Arrow stream capsule and its Python keepalive reference.
+/// Releases an Arrow stream capsule and its Python keepalive reference.
 void stream_capsule_destructor(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -104,6 +107,8 @@ void stream_capsule_destructor(PyObject *capsule) {
 
 } // namespace
 
+/// Recovers context from its typed Python capsule and validates capsule
+/// identity.
 NativeContext *unwrap_context(PyObject *obj) {
   auto *ctx = static_cast<NativeContext *>(
       PyCapsule_GetPointer(obj, kContextCapsuleName));
@@ -113,6 +118,8 @@ NativeContext *unwrap_context(PyObject *obj) {
   return ctx;
 }
 
+/// Wraps context capsule for Python while retaining every native dependency it
+/// references.
 PyObject *wrap_context_capsule(NativeContext *ctx) {
   PyObject *cap = PyCapsule_New(static_cast<void *>(ctx), kContextCapsuleName,
                                 context_capsule_destructor);
@@ -125,6 +132,8 @@ PyObject *wrap_context_capsule(NativeContext *ctx) {
   return cap;
 }
 
+/// Recovers prepared options from its typed Python capsule and validates
+/// capsule identity.
 NativePreparedOptions *unwrap_prepared_options(PyObject *obj) {
   if (obj == Py_None) {
     return nullptr;
@@ -162,6 +171,8 @@ bool resolve_prepared_options(
   return true;
 }
 
+/// Recovers diagnostics from its typed Python capsule and validates capsule
+/// identity.
 NativeDiagnostics *unwrap_diagnostics(PyObject *obj) {
   auto *diagnostics = static_cast<NativeDiagnostics *>(
       PyCapsule_GetPointer(obj, kDiagnosticsCapsuleName));
@@ -171,6 +182,8 @@ NativeDiagnostics *unwrap_diagnostics(PyObject *obj) {
   return diagnostics;
 }
 
+/// Wraps prepared options capsule for Python while retaining every native
+/// dependency it references.
 PyObject *wrap_prepared_options_capsule(NativePreparedOptions *p) {
   PyObject *cap = PyCapsule_New(p, kPreparedOptionsCapsuleName,
                                 prepared_options_capsule_destructor);
@@ -183,6 +196,8 @@ PyObject *wrap_prepared_options_capsule(NativePreparedOptions *p) {
   return cap;
 }
 
+/// Wraps diagnostics capsule for Python while retaining every native dependency
+/// it references.
 PyObject *wrap_diagnostics_capsule(NativeDiagnostics *diagnostics) {
   PyObject *cap =
       PyCapsule_New(static_cast<void *>(diagnostics), kDiagnosticsCapsuleName,
@@ -196,6 +211,8 @@ PyObject *wrap_diagnostics_capsule(NativeDiagnostics *diagnostics) {
   return cap;
 }
 
+/// Wraps stream capsule with keepalive for Python while retaining every native
+/// dependency it references.
 PyObject *wrap_stream_capsule_with_keepalive(PyObject *keepalive_obj,
                                              ArrowArrayStream *stream) {
   if (!keepalive_obj || !stream) {
@@ -233,6 +250,7 @@ PyObject *wrap_stream_capsule_with_keepalive(PyObject *keepalive_obj,
   return cap;
 }
 
+/// Releases the Arrow stream and clears its transferred pointer before reuse.
 void release_arrow_stream(ArrowArrayStream *stream) noexcept {
   if (!stream || !sanitize::internal::runtime_owner_process()) {
     return;
@@ -241,6 +259,7 @@ void release_arrow_stream(ArrowArrayStream *stream) noexcept {
   delete stream;
 }
 
+/// Returns the process-wide immutable default prepared options instance.
 sanitize::Result<sanitize::PreparedOptionsPtr> default_prepared_options() {
   static const auto prepared = sanitize::prepare_options(sanitize::Options{});
   return prepared;

@@ -1,4 +1,6 @@
 // Implements construction and Arrow stream callbacks for ingestion.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/source.hh"
 
@@ -20,6 +22,8 @@
 namespace sanitize::internal {
 namespace {
 
+/// Builds runtime field metadata from the compiled root plan before stream
+/// callbacks begin.
 std::vector<RuntimeFieldLayout>
 derive_runtime_fields_from_plan(const sanitize::CompiledPlan &plan) {
   std::vector<RuntimeFieldLayout> fields;
@@ -36,6 +40,8 @@ derive_runtime_fields_from_plan(const sanitize::CompiledPlan &plan) {
 
 } // namespace
 
+/// Initializes the serial ingest stream around its reader, plan, and batch
+/// builder.
 IngestStreamSource::IngestStreamSource(IngestStreamInit init)
     : fields_(std::move(init.fields)), frontend_(std::move(init.frontend)),
       plan_keepalive_(std::move(init.plan)), opts_(std::move(init.opts)),
@@ -47,6 +53,8 @@ IngestStreamSource::IngestStreamSource(IngestStreamInit init)
       app_(std::move(init.app)), pool_keepalive_(std::move(init.pool)),
       direct_(std::move(init.direct)) {}
 
+/// Closes the serial ingest source and releases any batch still owned by the
+/// stream.
 IngestStreamSource::~IngestStreamSource() {
   if (diagnostics_) {
     diagnostics_->capture_operation_memory();
@@ -56,11 +64,15 @@ IngestStreamSource::~IngestStreamSource() {
   }
 }
 
+/// Exports a fresh Arrow schema for the stream without transferring the
+/// source's internal state.
 sanitize::Status IngestStreamSource::GetSchema(struct ArrowSchema *out) {
   return export_fields_as_struct_schema(fields_, out,
                                         opts_->spec.timestamp_precision);
 }
 
+/// Produces the next Arrow batch in source order, or a released array at end of
+/// stream.
 sanitize::Status IngestStreamSource::GetNext(struct ArrowArray *out) {
   PerformancePhaseScope stream_scope(telemetry_keepalive_,
                                      PerformancePhase::kStreamGetNext);
@@ -108,6 +120,8 @@ sanitize::Status IngestStreamSource::GetNext(struct ArrowArray *out) {
   }
 }
 
+/// Cancels outstanding work, releases stream resources, and makes subsequent
+/// callbacks harmless.
 sanitize::Status IngestStreamSource::Close() {
   if (!eof_ && diagnostics_) {
     diagnostics_->record_cancellation("consumer_close");

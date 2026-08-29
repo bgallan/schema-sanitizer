@@ -1,4 +1,6 @@
 // Discovers nested value shapes before scalar statistics are accumulated.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/scan.hh"
 
@@ -23,6 +25,8 @@ sanitize::Status scan_shapes_value(InferenceContext *ctx, const ValueView &v,
                                    IngestDiagnostics *diag, PathId path,
                                    DepthState depth, bool *out_has_evidence);
 
+/// Scans one object field for nested shape evidence under explicit depth and
+/// memory limits.
 sanitize::Status
 scan_shapes_object_field(InferenceContext *ctx, StrId key_id,
                          std::string_view key_sv, const ValueView &child,
@@ -48,6 +52,8 @@ scan_shapes_object_field(InferenceContext *ctx, StrId key_id,
                            out_has_evidence);
 }
 
+/// Scans shapes value with explicit depth and memory limits while accumulating
+/// source-ordered evidence.
 sanitize::Status scan_shapes_value(InferenceContext *ctx, const ValueView &v,
                                    const PreparedOptions &opts,
                                    IngestDiagnostics *diag, PathId path,

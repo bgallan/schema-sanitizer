@@ -1,5 +1,8 @@
-// ---- support ----
+// Explains whether footer metadata, encodings, compression, and schema shape
+// support native streaming. This fragment is included by the consolidated
+// footer reader inside its private implementation namespace.
 
+/// Joins a column's schema path for readiness diagnostics.
 std::string column_path_label(const ColumnChunkInfo &column) {
   if (column.path_in_schema.empty()) {
     return "<unknown>";
@@ -14,6 +17,7 @@ std::string column_path_label(const ColumnChunkInfo &column) {
   return out;
 }
 
+/// Reports whether a Parquet physical type has a bounded native Arrow decoder.
 bool supported_native_reader_physical_type(const ColumnChunkInfo &column) {
   if (!column.has_physical_type) {
     return false;
@@ -32,6 +36,8 @@ bool supported_native_reader_physical_type(const ColumnChunkInfo &column) {
   }
 }
 
+/// Adds readiness blocker with checked offsets, counts, and retained-capacity
+/// accounting.
 void add_readiness_blocker(NativeReadinessInfo *info, std::string blocker) {
   if (!info) {
     return;
@@ -47,6 +53,8 @@ native_plain_path_materializability_status(const std::vector<std::string> &path,
 
 // ---- empty_file ----
 
+/// Adds readiness blockers when an empty file's schema cannot produce an Arrow
+/// layout.
 void append_empty_file_readiness_blockers(const FooterInfo &info,
                                           NativeReadinessInfo *readiness) {
   if (!info.row_groups.empty() || info.num_rows != 0 ||
@@ -93,6 +101,8 @@ void append_empty_file_readiness_blockers(const FooterInfo &info,
 
 // ---- column ----
 
+/// Adds blockers for unsupported, incomplete, or inconsistent pages in one
+/// column chunk.
 void append_column_page_readiness_blockers(const ColumnChunkInfo &column,
                                            std::string_view label,
                                            NativeReadinessInfo *readiness) {
@@ -143,6 +153,8 @@ void append_column_page_readiness_blockers(const ColumnChunkInfo &column,
   }
 }
 
+/// Adds all native-reader blockers for one projected Parquet column to the
+/// diagnostics list.
 void append_column_readiness_blockers(const ColumnChunkInfo &column,
                                       NativeReadinessInfo *readiness) {
   const auto label = column_path_label(column);
@@ -198,6 +210,8 @@ void append_column_readiness_blockers(const ColumnChunkInfo &column,
 
 // ---- gate ----
 
+/// Evaluates native-reader readiness and optionally returns the planned output
+/// layout.
 NativeReadinessInfo native_reader_readiness(
     const FooterInfo &info,
     std::vector<NativeParquetOutputField> *planned_output_layout = nullptr,

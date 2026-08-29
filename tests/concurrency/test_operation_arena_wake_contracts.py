@@ -21,7 +21,7 @@ def test_wake_epoch_is_sampled_only_at_park_wake_boundaries() -> None:
     task_run = runtime.index(
         "queued.task(index - static_cast<std::size_t>(queued.lane_begin), stop);"
     )
-    loop_end = runtime.index("\n  }\n}\n[[nodiscard]] bool worker_already_started", task_run)
+    loop_end = runtime.index("[[nodiscard]] bool worker_already_started", task_run)
     assert "slot.wake_epoch.load" not in runtime[task_run:loop_end]
     park = runtime.index("// Refresh the generation exactly once at the park boundary")
     stop = runtime.index("activity.Stop();", park)

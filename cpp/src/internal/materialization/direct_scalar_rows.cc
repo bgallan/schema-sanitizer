@@ -1,4 +1,6 @@
 // Appends flat scalar rows directly into Arrow builders without owning text.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/batch_appender_internal.hh"
 #include "internal/materialization/conversion/detail.hh"

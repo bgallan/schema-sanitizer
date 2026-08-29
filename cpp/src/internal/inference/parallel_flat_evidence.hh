@@ -1,4 +1,7 @@
 // Declares flat packet-local inference helpers.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
+
 #pragma once
 
 #include "internal/inference/parallel_evidence.hh"

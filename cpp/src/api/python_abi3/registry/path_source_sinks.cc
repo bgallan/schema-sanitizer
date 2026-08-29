@@ -1,4 +1,10 @@
-/* Native path-source registry stream runtime. */
+/*
+ * Implements the native path-source registry stream runtime.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -37,6 +43,8 @@
 
 namespace core_abi3_internal::path_registry_detail {
 
+/// Releases resources retained by `NativePathSourcesStreamState` without
+/// propagating cleanup failures.
 NativePathSourcesStreamState::~NativePathSourcesStreamState() {
   close_chunk_provider(this);
   if (telemetry) {
@@ -44,6 +52,8 @@ NativePathSourcesStreamState::~NativePathSourcesStreamState() {
   }
 }
 
+/// Lazily creates the task arena and memory accounting for a path-source
+/// stream.
 sanitize::Status
 ensure_operation_task_arena(NativePathSourcesStreamState *state) {
   if (!state || !state->prepared) {
@@ -90,6 +100,8 @@ ensure_operation_task_arena(NativePathSourcesStreamState *state) {
   return sanitize::Status::OK();
 }
 
+/// Accumulates materialization counters and source failures into registry
+/// stream diagnostics.
 void merge_materialization_diagnostics(
     sanitize::IngestDiagnostics *target,
     const sanitize::IngestDiagnostics &child) noexcept {
@@ -98,6 +110,8 @@ void merge_materialization_diagnostics(
   }
 }
 
+/// Binds path source diagnostics to the active schema-registry stream state for
+/// later result packing.
 bool bind_path_source_diagnostics(NativePathSourcesStreamState *state,
                                   NativeDiagnostics *diagnostics) noexcept {
   if (!state || !diagnostics) {
@@ -119,6 +133,8 @@ bool bind_path_source_diagnostics(NativePathSourcesStreamState *state,
   return true;
 }
 
+/// Closes current source idempotently and preserves any prior schema-registry
+/// stream failure.
 void close_current_source(NativePathSourcesStreamState *state) noexcept {
   if (!state) {
     return;
@@ -134,6 +150,8 @@ void close_current_source(NativePathSourcesStreamState *state) noexcept {
   state->diagnostics = nullptr;
 }
 
+/// Materializes one path source under the compiled registry plan and retains
+/// its diagnostics.
 sanitize::Result<sanitize::IngestStream> ingest_path_source_with_registry_plan(
     NativePathSourcesStreamState *state, const PathSourceSpec &source,
     PathSourceInput input,
@@ -182,6 +200,7 @@ sanitize::Result<sanitize::IngestStream> ingest_path_source_with_registry_plan(
   return sanitize::ingest_to_stream(std::move(prepared));
 }
 
+/// Opens the next path source and initializes its registry-stream state.
 sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
   if (!state) {
     return sanitize::Status::Invalid("native path sources stream is closed");
@@ -295,27 +314,38 @@ sanitize::Status open_next_source(NativePathSourcesStreamState *state) {
   return sanitize::Status::OK();
 }
 
+/// Opens the next input and binds it to the active schema-registry stream
+/// state.
 sanitize::Status path_sources_open_next(void *state) {
   return open_next_source(static_cast<NativePathSourcesStreamState *>(state));
 }
 
+/// Closes the current input and finalizes its schema-registry stream
+/// diagnostics.
 void path_sources_close_current(void *state) noexcept {
   close_current_source(static_cast<NativePathSourcesStreamState *>(state));
 }
 
+/// Returns the metadata columns associated with the current schema-registry
+/// stream source.
 MetadataStreamState *path_sources_metadata(void *state) noexcept {
   auto *typed = static_cast<NativePathSourcesStreamState *>(state);
   return typed && typed->metadata ? typed->metadata.get() : nullptr;
 }
 
+/// Returns the error text retained by the current registry source state.
 std::string &path_sources_error(void *state) noexcept {
   return static_cast<NativePathSourcesStreamState *>(state)->last_error;
 }
 
+/// Reports whether the current source still owes its generated first metadata
+/// row.
 bool *path_sources_first_row_pending(void *state) noexcept {
   return &static_cast<NativePathSourcesStreamState *>(state)->first_row_pending;
 }
 
+/// Destroys the heap-owned schema-registry stream state after its final
+/// callback completes.
 void path_sources_destroy_state(void *state) noexcept {
   delete static_cast<NativePathSourcesStreamState *>(state);
 }
@@ -333,22 +363,31 @@ const NativeMultiSourceStreamOps kPathSourcesOps{
     .destroy_state = &path_sources_destroy_state,
 };
 
+/// Exposes the most recent schema-registry stream failure through the Arrow C
+/// Stream callback.
 const char *path_sources_last_error(ArrowArrayStream *stream) {
   return native_multi_source_last_error(stream, kPathSourcesOps);
 }
 
+/// Releases the schema-registry stream callback state and clears all
+/// transferred Arrow ownership.
 void path_sources_release(ArrowArrayStream *stream) {
   native_multi_source_release(stream, kPathSourcesOps);
 }
 
+/// Exports the current schema through the schema-registry stream Arrow C Stream
+/// callback.
 int path_sources_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
   return native_multi_source_get_schema(stream, out, kPathSourcesOps);
 }
 
+/// Produces the next array through the registry multi-source Arrow C Stream
+/// callback.
 int path_sources_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   return native_multi_source_get_next(stream, out, kPathSourcesOps);
 }
 
+/// Packages a path-source registry stream and diagnostics for Python.
 PyObject *pack_path_source_registry_stream(
     PyObject *keepalive, std::unique_ptr<NativePathSourcesStreamState> state,
     PyObject *chunk_provider) {
@@ -399,6 +438,8 @@ PyObject *pack_path_source_registry_stream(
       std::move(registry_plan));
 }
 
+/// Packages chunk provider registry stream as a Python result while
+/// transferring native ownership safely.
 PyObject *pack_chunk_provider_registry_stream(
     PyObject *ctx_obj, NativeContext *ctx, const char *sink_name,
     PyObject *stream_provider_obj,

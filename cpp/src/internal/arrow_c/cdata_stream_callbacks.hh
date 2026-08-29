@@ -1,4 +1,6 @@
 // Declares Arrow C Stream callback lifecycle and error handling.
+// The implementation preserves Arrow ownership and error contracts without
+// depending on the Arrow C++ library.
 
 #pragma once
 
@@ -11,38 +13,38 @@
 
 namespace sanitize::internal::cdata_stream {
 
-// Maps the active exception to a contextual status.
+/// Maps the active exception to a contextual status.
 sanitize::Status status_from_current_exception(const char *where);
-// Maps a status to the errno convention used by Arrow C Stream callbacks.
+/// Maps a status to the errno convention used by Arrow C Stream callbacks.
 int errno_for_status(const sanitize::Status &st) noexcept;
-// Preserves an inner Arrow C Stream error code and diagnostic as a Status.
+/// Preserves an inner Arrow C Stream error code and diagnostic as a Status.
 sanitize::Status status_from_stream_error(int error, ArrowArrayStream *stream,
                                           const char *where);
-// Releases an ArrowSchema while suppressing callback exceptions.
+/// Releases an ArrowSchema while suppressing callback exceptions.
 void release_schema_nothrow(ArrowSchema *schema) noexcept;
-// Releases an ArrowArray while suppressing callback exceptions.
+/// Releases an ArrowArray while suppressing callback exceptions.
 void release_array_nothrow(ArrowArray *array) noexcept;
-// Releases an ArrowArrayStream while suppressing callback exceptions.
+/// Releases an ArrowArrayStream while suppressing callback exceptions.
 void release_stream_nothrow(ArrowArrayStream *stream) noexcept;
-// Clears an ArrowSchema into the empty released state.
+/// Clears an ArrowSchema into the empty released state.
 void clear_schema(ArrowSchema *schema) noexcept;
-// Clears an ArrowArray into the empty released state.
+/// Clears an ArrowArray into the empty released state.
 void clear_array(ArrowArray *array) noexcept;
-// Returns a nullable C string for an Arrow C Stream last-error callback.
+/// Returns a nullable C string for an Arrow C Stream last-error callback.
 const char *last_error_ptr(const std::string &last_error) noexcept;
-// Clears an ArrowArrayStream into the empty released state.
+/// Clears an ArrowArrayStream into the empty released state.
 void clear_stream(ArrowArrayStream *stream) noexcept;
-// Stores a status message for last-error callbacks without throwing.
+/// Stores a status message for last-error callbacks without throwing.
 void set_last_error_nothrow(std::string &last_error,
                             const sanitize::Status &st) noexcept;
-// Reports a schema callback failure using Arrow C Stream errno conventions.
+/// Reports a schema callback failure using Arrow C Stream errno conventions.
 int fail_schema(ArrowSchema *out, std::string &last_error,
                 const sanitize::Status &st) noexcept;
-// Reports an array callback failure using Arrow C Stream errno conventions.
+/// Reports an array callback failure using Arrow C Stream errno conventions.
 int fail_array(ArrowArray *out, std::string &last_error,
                const sanitize::Status &st) noexcept;
 
-// Runs a schema callback with common null, cleanup, and exception handling.
+/// Runs a schema callback with common null, cleanup, and exception handling.
 template <typename Fn>
 inline int run_schema_callback(ArrowSchema *out, std::string &last_error,
                                const char *where, Fn &&fn) noexcept {
@@ -65,7 +67,7 @@ inline int run_schema_callback(ArrowSchema *out, std::string &last_error,
   return 0;
 }
 
-// Runs an array callback with common null, cleanup, and exception handling.
+/// Runs an array callback with common null, cleanup, and exception handling.
 template <typename Fn>
 inline int run_array_callback(ArrowArray *out, std::string &last_error,
                               const char *where, Fn &&fn) noexcept {

@@ -1,4 +1,6 @@
 // Compiles logical schemas into column plans and struct lookup metadata.
+// Recursive type planning fixes field order, conversions, and dispatch tables
+// before readers begin materializing data.
 
 #include "internal/planning/plan_compile.hh"
 
@@ -20,7 +22,7 @@
 
 namespace sanitize {
 
-// Compiles one logical field into recursive materialization metadata.
+/// Compiles one logical field into recursive materialization metadata.
 static ColumnPlan compile_column(CompiledPlan *plan,
                                  const sanitize::LogicalField &lf,
                                  detail::PathId parent_path,
@@ -63,7 +65,7 @@ static ColumnPlan compile_column(CompiledPlan *plan,
   return p;
 }
 
-// Precomputes version-family sibling indices for one sibling vector.
+/// Precomputes version-family sibling indices for one sibling vector.
 static void annotate_variant_siblings(std::vector<ColumnPlan> *columns) {
   if (!columns)
     return;

@@ -1,4 +1,6 @@
 // Implements value observation helpers shared by shape and statistics scans.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/value_observation.hh"
 

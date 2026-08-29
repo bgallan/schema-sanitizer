@@ -1,4 +1,7 @@
-// Native runtime probes used by Python integration and concurrency tests.
+// Implements native runtime probes for Python integration and concurrency
+// tests. The probes expose deterministic admission and completion behavior to
+// the Python test suite.
+
 #include "internal/abi/python_abi3/methods.hh"
 #include "internal/output/output_worker_admission.hh"
 #include "internal/runtime/execution_policy.hh"
@@ -32,12 +35,15 @@ using sanitize::internal::TaskTelemetryKind;
 
 constexpr TaskMemoryCharge kProbeTaskCharge{256U};
 
+/// Classifies whether probe backpressure permits a bounded retry.
 [[nodiscard]] bool
 retryable_probe_backpressure(const sanitize::Status &status) noexcept {
   return status.code() == sanitize::StatusCode::kOutOfMemory &&
          status.message().find("capacity exhausted") != std::string::npos;
 }
 
+/// Retries probe-task admission while backpressure remains transient and before
+/// the deadline.
 template <typename Callable>
 sanitize::Status
 submit_probe_task_until(OperationTaskArena &arena, const Callable &task,
@@ -55,6 +61,8 @@ submit_probe_task_until(OperationTaskArena &arena, const Callable &task,
   }
 }
 
+/// Retries probe-task admission while backpressure remains transient and before
+/// the deadline.
 template <typename Callable>
 sanitize::Status submit_probe_task_until(
     OperationTaskArena &arena, const Callable &task, std::size_t lane_width,
@@ -72,11 +80,13 @@ sanitize::Status submit_probe_task_until(
   }
 }
 
+/// Opens the probe gate and wakes every waiting task.
 void release_gate(std::atomic<bool> *gate) noexcept {
   gate->store(true, std::memory_order_release);
   gate->notify_all();
 }
 
+/// Waits until the probe gate opens or task cancellation is requested.
 bool wait_gate_or_stop(std::atomic<bool> *gate,
                        sanitize::internal::StopToken stop) {
   auto release_on_stop = [gate] { release_gate(gate); };
@@ -88,6 +98,7 @@ bool wait_gate_or_stop(std::atomic<bool> *gate,
   return !stop.stop_requested();
 }
 
+/// Polls the supplied predicate until it succeeds or the deadline expires.
 [[nodiscard]] bool wait_until(const std::atomic<std::size_t> &value,
                               std::size_t target,
                               std::chrono::steady_clock::time_point deadline) {
@@ -103,6 +114,7 @@ bool wait_gate_or_stop(std::atomic<bool> *gate,
 
 } // namespace
 
+/// Exercises concurrent task submission and reports completion invariants.
 PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
                                                           PyObject *args) {
   int requested_workers = 4;
@@ -224,6 +236,7 @@ PyObject *py_operation_task_arena_concurrent_submit_probe(PyObject *,
   return result;
 }
 
+/// Runs mixed-lane arena traffic and reports per-lane completion behavior.
 PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
   int requested_workers = 16;
   int rounds = 1000;
@@ -375,6 +388,7 @@ PyObject *py_operation_task_arena_mixed_lane_probe(PyObject *, PyObject *args) {
   return result;
 }
 
+/// Measures output-lane preference while upstream work is also queued.
 PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
                                                           PyObject *args) {
   int requested_workers = 16;
@@ -568,6 +582,7 @@ PyObject *py_operation_task_arena_output_preference_probe(PyObject *,
   return result;
 }
 
+/// Verifies that eligible workers can steal queued output-lane work.
 PyObject *py_operation_task_arena_output_steal_probe(PyObject *,
                                                      PyObject *args) {
   int requested_workers = 16;
@@ -769,6 +784,7 @@ namespace {
 using sanitize::internal::OperationTaskArena;
 using sanitize::internal::TaskArenaLane;
 
+/// Waits until an atomic counter reaches its target or the deadline expires.
 [[nodiscard]] bool
 wait_for_count(const std::atomic<std::size_t> &value, std::size_t target,
                std::chrono::steady_clock::time_point deadline) noexcept {
@@ -779,6 +795,8 @@ wait_for_count(const std::atomic<std::size_t> &value, std::size_t target,
   return value.load(std::memory_order_acquire) >= target;
 }
 
+/// Waits until the task arena has no queued or active work, or the deadline
+/// expires.
 [[nodiscard]] bool
 wait_for_arena_idle(const std::shared_ptr<OperationTaskArena> &arena,
                     std::chrono::steady_clock::time_point deadline) noexcept {
@@ -791,6 +809,7 @@ wait_for_arena_idle(const std::shared_ptr<OperationTaskArena> &arena,
 
 } // namespace
 
+/// Measures wake coalescing while bursts of arena tasks become runnable.
 PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
                                                         PyObject *args) {
   int requested_workers = 4;
@@ -972,6 +991,8 @@ PyObject *py_operation_task_arena_wake_coalescing_probe(PyObject *,
 // ---- cpu_governor_probe ----
 namespace core_abi3_internal {
 
+/// Exercises process CPU permits across competing tasks and reports
+/// concurrency.
 PyObject *py_process_cpu_governor_probe(PyObject *, PyObject *args) {
   int requested_tasks = 0;
   if (!PyArg_ParseTuple(args, "i:process_cpu_governor_probe",
@@ -1056,8 +1077,8 @@ using CancellationProbeExecutor =
 
 } // namespace
 
-// Verifies that cancelling one arena-backed stage stops its active packets
-// without shutting down the operation-wide arena or waiting for unrelated work.
+/// Verifies that cancelling one arena-backed stage stops its active packets.
+/// Cancellation leaves the operation arena and unrelated work running.
 PyObject *py_operation_task_arena_cancellation_probe(PyObject *, PyObject *) {
   auto arena_result = sanitize::internal::OperationTaskArena::Make(4);
   if (!arena_result.ok()) {
@@ -1149,6 +1170,7 @@ namespace {
 using CompletionProbeExecutor =
     sanitize::internal::OrderedExecutor<std::uint64_t, std::uint64_t>;
 
+/// Runs the completion-ring probe workload used to verify ordered publication.
 sanitize::Result<std::uint64_t>
 completion_probe_work(std::uint64_t value, std::size_t iterations,
                       sanitize::internal::StopToken stop) {
@@ -1164,6 +1186,7 @@ completion_probe_work(std::uint64_t value, std::size_t iterations,
   return result;
 }
 
+/// Consumes completion and validates the runtime probe result.
 bool consume_completion(CompletionProbeExecutor *executor,
                         std::uint64_t expected_ordinal,
                         std::uint64_t *checksum) {
@@ -1189,7 +1212,7 @@ bool consume_completion(CompletionProbeExecutor *executor,
 
 } // namespace
 
-// Returns elapsed time and invariants for a high-volume arena completion pass.
+/// Returns elapsed time and invariants for a high-volume arena completion pass.
 PyObject *py_ordered_executor_arena_completion_probe(PyObject *,
                                                      PyObject *args) {
   int requested_workers = 1;
@@ -1290,6 +1313,7 @@ PyObject *py_ordered_executor_arena_completion_probe(PyObject *,
 // ---- output_admission_probe ----
 namespace core_abi3_internal {
 
+/// Reports worker admission under full and constrained output-lane capacity.
 PyObject *py_output_worker_admission_probe(PyObject *, PyObject *args) {
   int full_admission = 0;
   if (!PyArg_ParseTuple(args, "p:output_worker_admission_probe",

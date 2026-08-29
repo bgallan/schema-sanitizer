@@ -1,4 +1,6 @@
 // Adapts CSV and JSON inputs into materialized Arrow rows.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "frontends/json/text_row_pipeline.hh"
 #include "internal/materialization/batch_appender_internal.hh"
@@ -26,10 +28,13 @@ constexpr std::size_t kRetainedDirectCsvCellCapacity = 4096;
 
 class CsvDirectScratchReset final {
 public:
+  /// Arms a scope guard that resets direct CSV parsing scratch on exit.
   CsvDirectScratchReset(BumpArena *arena,
                         std::vector<std::string_view> *cells) noexcept
       : arena_(arena), cells_(cells) {}
 
+  /// Clears retained CSV cell views and resets their per-row arena at scope
+  /// exit.
   ~CsvDirectScratchReset() noexcept {
     if (cells_) {
       cells_->clear();
@@ -49,8 +54,10 @@ private:
 
 class JsonDirectScratchReset final {
 public:
+  /// Arms a scope guard that resets direct JSON parsing scratch on exit.
   explicit JsonDirectScratchReset(JsonOnDemandDoc *doc) noexcept : doc_(doc) {}
 
+  /// Releases on-demand JSON arena storage accumulated for the current row.
   ~JsonDirectScratchReset() noexcept {
     if (doc_) {
       doc_->Reset();
@@ -61,6 +68,8 @@ private:
   JsonOnDemandDoc *doc_ = nullptr;
 };
 
+/// Reports whether a wide source row should be indexed once before root
+/// conversion.
 bool should_snapshot_root_fields(const sanitize::CompiledPlan &plan) noexcept {
   constexpr std::size_t kWideRootThreshold = 8;
   if (plan.columns.size() >= kWideRootThreshold) {
@@ -70,6 +79,7 @@ bool should_snapshot_root_fields(const sanitize::CompiledPlan &plan) noexcept {
                              &sanitize::ColumnPlan::has_variant_sibling);
 }
 
+/// Returns the row result selected by the configured conversion-error policy.
 PreparedRow result_for_policy(const PreparedOptions &opts,
                               sanitize::IngestDiagnostics *diag,
                               const CoerceError &err) {
@@ -99,6 +109,8 @@ PreparedRow result_for_policy(const PreparedOptions &opts,
 
 namespace {
 
+/// Converts materialized cells into typed cells while applying the configured
+/// error policy.
 sanitize::Result<std::optional<CoerceError>> convert_materialized_cells(
     const sanitize::CompiledPlan &plan, const sanitize::RowRef &row,
     const PreparedOptions &opts, sanitize::IngestDiagnostics *diagnostics,
@@ -201,6 +213,8 @@ sanitize::Result<std::optional<CoerceError>> convert_materialized_cells(
   return std::optional<CoerceError>{};
 }
 
+/// Returns the diagnostic retained by an error policy after row conversion
+/// completes.
 sanitize::Result<PreparedRow>
 prepared_error_for_policy(const PreparedOptions &opts,
                           sanitize::IngestDiagnostics *diagnostics,

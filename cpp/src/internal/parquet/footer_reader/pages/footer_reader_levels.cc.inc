@@ -1,3 +1,8 @@
+// Decodes Parquet definition and repetition levels into bounded validity and
+// layout buffers. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Initializes an all-valid or all-null bitmap for the expected value count.
 sanitize::Status initialize_validity_bitmap(std::int32_t expected_count,
                                             bool all_valid,
                                             std::vector<std::uint8_t> *bitmap) {
@@ -21,6 +26,8 @@ sanitize::Status initialize_validity_bitmap(std::int32_t expected_count,
   return {};
 }
 
+/// Sets validity bit in a prevalidated Arrow bitmap without touching adjacent
+/// bits.
 void set_validity_bit(std::vector<std::uint8_t> *bitmap, std::int32_t index,
                       bool valid) {
   if (!bitmap || index < 0) {
@@ -39,6 +46,8 @@ void set_validity_bit(std::vector<std::uint8_t> *bitmap, std::int32_t index,
         static_cast<std::uint8_t>((*bitmap)[byte_index] & ~mask);
   }
 }
+/// Reads one unsigned varint from the level stream and advances its bounded
+/// offset.
 sanitize::Result<std::uint64_t> read_varint_from(std::string_view data,
                                                  std::size_t *offset) {
   if (!offset) {
@@ -60,6 +69,7 @@ sanitize::Result<std::uint64_t> read_varint_from(std::string_view data,
   return sanitize::Status::Invalid("Parquet levels: invalid varint");
 }
 
+/// Reads one zigzag varint from the level stream and returns its signed value.
 sanitize::Result<std::int64_t> read_zigzag_varint_from(std::string_view data,
                                                        std::size_t *offset) {
   std::uint64_t raw = 0;
@@ -67,6 +77,8 @@ sanitize::Result<std::int64_t> read_zigzag_varint_from(std::string_view data,
   return unzigzag(raw);
 }
 
+/// Reads one little-endian bit-packed level value without crossing the supplied
+/// input span.
 sanitize::Result<std::uint64_t> read_bit_packed_u64(std::string_view data,
                                                     std::size_t bit_index,
                                                     std::uint8_t bit_width) {
@@ -90,6 +102,8 @@ sanitize::Result<std::uint64_t> read_bit_packed_u64(std::string_view data,
   return out;
 }
 
+/// Reads one little-endian bit-packed level without crossing the supplied byte
+/// span.
 sanitize::Result<std::int16_t> read_little_level_value(std::string_view data,
                                                        std::size_t *offset,
                                                        std::uint8_t bit_width) {
@@ -114,6 +128,8 @@ sanitize::Result<std::int16_t> read_little_level_value(std::string_view data,
   }
   return static_cast<std::int16_t>(value);
 }
+/// Charges level derived bytes to the active memory budget before allocating
+/// derived storage.
 sanitize::Status reserve_level_derived_bytes(
     std::int32_t expected_count, bool capture_validity_bitmap,
     bool capture_level_values, std::uint64_t max_derived_bytes,
@@ -151,6 +167,7 @@ sanitize::Status reserve_level_derived_bytes(
   return {};
 }
 
+/// Decodes an RLE/bit-packed level stream into bounded 16-bit values.
 sanitize::Result<LevelDecodeInfo>
 decode_level_stream(std::string_view payload, std::size_t *offset,
                     std::int16_t max_level, std::int32_t expected_count,

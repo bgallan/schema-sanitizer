@@ -1,4 +1,6 @@
 // Implements a native Parquet writer for Arrow C streams.
+// These definitions support the internal pipeline without expanding its public
+// interface.
 
 #include "internal/parquet/parquet_stream_writer.hh"
 

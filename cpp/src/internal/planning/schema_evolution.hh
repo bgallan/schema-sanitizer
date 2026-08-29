@@ -1,4 +1,6 @@
 // Declares schema-contract reconciliation for inferred schemas.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #pragma once
 
@@ -7,13 +9,13 @@
 
 namespace sanitize::internal {
 
-// Reorders fields recursively according to a field-ordering policy.
+/// Reorders fields recursively according to a field-ordering policy.
 sanitize::LogicalSchema
 reorder_schema_fields(const sanitize::LogicalSchema &schema,
                       const sanitize::LogicalSchema *base,
                       FieldOrderPolicy field_order);
 
-// Reconciles inferred fields against an optional schema contract.
+/// Reconciles inferred fields against an optional schema contract.
 sanitize::Result<sanitize::LogicalSchema>
 evolve_schema(const sanitize::LogicalSchema &base,
               const sanitize::LogicalSchema &inferred, SchemaEvolutionMode mode,

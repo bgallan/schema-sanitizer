@@ -1,4 +1,6 @@
-// Public contract for bounded native Parquet footer and stream reading.
+// Declares the public contract for bounded native Parquet footer and stream
+// reading. These definitions support the internal pipeline without expanding
+// its public interface.
 
 #pragma once
 

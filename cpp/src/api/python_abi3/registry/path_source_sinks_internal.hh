@@ -1,4 +1,7 @@
-// Shared state and operations for path-source registry sink methods.
+// Declares shared state and operations for path-source registry sink methods.
+// The routines preserve source order and Arrow ownership while applying
+// compiled registry plans.
+
 #pragma once
 
 #include <cstddef>

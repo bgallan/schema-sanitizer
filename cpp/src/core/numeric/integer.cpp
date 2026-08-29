@@ -1,4 +1,6 @@
-// Parses strict integer scalar text values.
+// Parses strict integer scalar text values with complete-consumption checks.
+// The parser accepts an optional sign, rejects non-ASCII digits, and reports
+// overflow without modifying the caller's output.
 
 #include "sanitize/core/primitives.hh"
 
@@ -11,6 +13,7 @@
 namespace sanitize {
 namespace {
 
+/// Returns whether one byte is an ASCII decimal digit.
 bool is_digit(char c) noexcept { return c >= '0' && c <= '9'; }
 
 } // namespace

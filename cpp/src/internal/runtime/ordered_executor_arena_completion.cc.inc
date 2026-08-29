@@ -1,3 +1,8 @@
+// Implements ordered completion consumption for shared-arena execution. The
+// single consumer waits on slot state and retires retained-memory leases
+// in order.
+
+/// Waits for and consumes the next ordinal from the shared completion ring.
 template <bool HighCore> sanitize::Result<Outcome> take_next_arena() {
   // TakeNext has one consumer, so worker publication stays outside the
   // coordinator mutex.
@@ -79,6 +84,7 @@ template <bool HighCore> sanitize::Result<Outcome> take_next_arena() {
   }
 }
 
+/// Closes an unused shared completion slot and wakes its waiters.
 void close_empty_arena_slot(std::uint64_t ordinal) noexcept {
   auto shared = arena_shared_;
   if (!shared) {
@@ -93,18 +99,22 @@ void close_empty_arena_slot(std::uint64_t ordinal) noexcept {
   }
 }
 
+/// Transitions every shared completion slot to the supplied terminal state.
 void terminalize_arena_slots_locked(ArenaSlotState terminal) noexcept {
   if (arena_shared_) {
     arena_shared_->Terminalize(terminal);
   }
 }
 
+/// Marks every shared completion slot cancelled while the executor is locked.
 void cancel_arena_slots_locked() noexcept {
   if (arena_shared_) {
     arena_shared_->Terminalize(ArenaSlotState::kCancelled);
   }
 }
 
+/// Marks shared publication fatal, closes executor admission, and wakes
+/// waiters.
 void fail_arena_publication() noexcept {
   if (arena_shared_) {
     arena_shared_->Fail();

@@ -1,4 +1,6 @@
 // Provides compact string interning for planning and inference state.
+// Stable owned storage deduplicates repeated names while returning views that
+// remain valid for the lifetime of the interning arena.
 
 #pragma once
 
@@ -20,7 +22,7 @@ using PathId = std::uint32_t;
 
 class StringInterner {
 public:
-  // Creates a StringInterner whose dynamic storage uses resource.
+  /// Creates a StringInterner whose dynamic storage uses resource.
   explicit StringInterner(
       std::pmr::memory_resource *resource = std::pmr::get_default_resource())
       : storage_(resource ? resource : std::pmr::get_default_resource()),
@@ -29,7 +31,7 @@ public:
     map_.emplace(std::string_view(storage_.back()), 0);
   }
 
-  // Interns a string and returns its stable identifier.
+  /// Interns a string and returns its stable identifier.
   StrId intern(std::string_view value) {
     if (const auto found = map_.find(value); found != map_.end()) {
       return found->second;
@@ -54,7 +56,7 @@ public:
     return id;
   }
 
-  // Returns the string for an interned identifier.
+  /// Returns the string for an interned identifier.
   [[nodiscard]] std::string_view str(StrId id) const noexcept {
     if (id >= storage_.size()) {
       return {};
@@ -71,7 +73,7 @@ private:
 
 class PathInterner {
 public:
-  // Creates a PathInterner whose dynamic storage uses resource.
+  /// Creates a PathInterner whose dynamic storage uses resource.
   explicit PathInterner(
       std::pmr::memory_resource *resource = std::pmr::get_default_resource())
       : nodes_(resource ? resource : std::pmr::get_default_resource()),
@@ -79,10 +81,10 @@ public:
     nodes_.push_back(Node{.parent = 0, .comp = 0});
   }
 
-  // Returns the root identifier.
+  /// Returns the root identifier.
   [[nodiscard]] static PathId root() noexcept { return 0; }
 
-  // Interns a child path and returns its stable identifier.
+  /// Interns a child path and returns its stable identifier.
   PathId child(PathId parent, StrId comp) {
     const std::uint64_t key = (static_cast<std::uint64_t>(parent) << 32U) |
                               static_cast<std::uint64_t>(comp);

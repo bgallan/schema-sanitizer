@@ -1,4 +1,10 @@
-/* Python-object JSON encoding helpers for ABI3 wrappers. */
+/*
+ * Implements Python-object JSON encoding helpers for ABI3 wrappers.
+ *
+ * The routines preserve JSON value semantics while enforcing bounded native
+ * ownership and Python errors.
+ */
+
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
 #include "api/python_abi3/json/json_number_write.hh"
 
@@ -16,6 +22,7 @@ namespace {
 sanitize::Status append_python_json_value_impl(std::string &out,
                                                PyObject *value, int depth);
 
+/// Encodes Python Unicode as an escaped JSON string.
 sanitize::Status append_python_unicode(std::string &out, PyObject *value) {
   Py_ssize_t size = 0;
   const char *text = PyUnicode_AsUTF8AndSize(value, &size);
@@ -29,6 +36,7 @@ sanitize::Status append_python_unicode(std::string &out, PyObject *value) {
   return sanitize::Status::OK();
 }
 
+/// Encodes a dictionary key as JSON text, stringifying non-Unicode keys first.
 sanitize::Status append_python_key(std::string &out, PyObject *key) {
   if (PyUnicode_Check(key)) {
     return append_python_unicode(out, key);
@@ -43,6 +51,7 @@ sanitize::Status append_python_key(std::string &out, PyObject *key) {
   return append_python_unicode(out, text);
 }
 
+/// Encodes a Python dictionary recursively in its iteration order.
 sanitize::Status append_python_dict(std::string &out, PyObject *value,
                                     int depth) {
   out.push_back('{');
@@ -63,6 +72,7 @@ sanitize::Status append_python_dict(std::string &out, PyObject *value,
   return sanitize::Status::OK();
 }
 
+/// Encodes a Python sequence recursively as a JSON array.
 sanitize::Status append_python_sequence(std::string &out, PyObject *value,
                                         int depth) {
   PyObject *sequence =
@@ -100,6 +110,8 @@ sanitize::Status append_python_sequence(std::string &out, PyObject *value,
   return sanitize::Status::OK();
 }
 
+/// Writes a Python integer in decimal form without narrowing arbitrary
+/// precision.
 sanitize::Status append_python_long(std::string &out, PyObject *value) {
   const long long raw = PyLong_AsLongLong(value);
   if (raw != -1 || !PyErr_Occurred()) {
@@ -132,6 +144,8 @@ sanitize::Status append_python_long(std::string &out, PyObject *value) {
   return sanitize::Status::OK();
 }
 
+/// Recursively encodes one Python value while preserving JSON object order and
+/// null semantics.
 sanitize::Status append_python_json_value_impl(std::string &out,
                                                PyObject *value, int depth) {
   if (depth > 1000) {
@@ -173,6 +187,7 @@ sanitize::Status append_python_json_value(std::string &out, PyObject *value,
   return append_python_json_value_impl(out, value, depth);
 }
 
+/// Encodes one supported Python row value as compact JSON bytes.
 PyObject *py_python_row_json_bytes(PyObject *, PyObject *args) {
   PyObject *row = nullptr;
   if (!PyArg_ParseTuple(args, "O:python_row_json_bytes", &row)) {

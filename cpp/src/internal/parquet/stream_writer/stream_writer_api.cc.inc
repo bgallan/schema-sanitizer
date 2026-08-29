@@ -1,5 +1,9 @@
+// Defines native writer entry points and retained footer-metadata budget
+// accounting. This fragment is included by the consolidated writer to isolate
+// format-specific implementation details.
+
 namespace {
-// Returns the Arrow stream error string when available.
+/// Returns the Arrow stream error string when available.
 std::string stream_error_message(ArrowArrayStream *stream,
                                  std::string_view fallback) {
   if (stream && stream->get_last_error) {
@@ -12,17 +16,20 @@ std::string stream_error_message(ArrowArrayStream *stream,
   return std::string(fallback);
 }
 
+/// Returns heap capacity retained by an optional Parquet metadata string.
 std::size_t retained_optional_string_bytes(
     const std::optional<std::string> &value) noexcept {
   return value ? value->capacity() : 0;
 }
 
+/// Measures retained capacities for one page's statistics and index metadata.
 std::size_t retained_page_metadata_bytes(const PageInfo &page) noexcept {
   auto total = retained_optional_string_bytes(page.min_value);
   return saturating_size_add(total,
                              retained_optional_string_bytes(page.max_value));
 }
 
+/// Measures retained capacities for all column metadata in one row group.
 std::size_t
 retained_row_group_metadata_bytes(const RowGroupInfo &row_group) noexcept {
   auto total =
@@ -42,6 +49,8 @@ retained_row_group_metadata_bytes(const RowGroupInfo &row_group) noexcept {
   return total;
 }
 
+/// Reports whether retaining additional footer metadata would exceed the
+/// writer's configured cap.
 bool metadata_budget_would_be_exceeded(std::size_t retained,
                                        std::size_t additional,
                                        std::size_t limit) noexcept {

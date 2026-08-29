@@ -1,4 +1,6 @@
-// Implements file-backed chunk sources with canonical text transcoding.
+// Implements file-backed chunk sources with canonical text transcoding. The
+// implementation preserves split code units and bounded buffers across
+// incremental source reads.
 
 #include "ingest/chunk_source_detail.hh"
 #include "ingest/transcoding/decoder.hh"
@@ -20,7 +22,10 @@ namespace {
 
 class SensitiveStringGuard {
 public:
+  /// Tracks a decoded buffer that may require secure erasure on scope exit.
   explicit SensitiveStringGuard(std::string *value) : value_(value) {}
+
+  /// Securely erases the tracked bytes when hardened memory cleanup is enabled.
   ~SensitiveStringGuard() {
     if (value_ && internal::secure_memory_cleanup_enabled() &&
         !value_->empty()) {
@@ -28,7 +33,10 @@ public:
     }
   }
 
+  /// Disables copying so a sensitive buffer has exactly one cleanup guard.
   SensitiveStringGuard(const SensitiveStringGuard &) = delete;
+
+  /// Disables copy assignment so cleanup responsibility cannot be duplicated.
   SensitiveStringGuard &operator=(const SensitiveStringGuard &) = delete;
 
 private:
@@ -37,6 +45,8 @@ private:
 
 class TranscodingFileChunkSource final : public ChunkSource {
 public:
+  /// Configures a bounded file source and decoder for the requested text
+  /// encoding.
   TranscodingFileChunkSource(std::string path, internal::TextEncoding encoding,
                              std::int64_t memory_limit_bytes)
       : path_(std::move(path)), decoder_(encoding),
@@ -44,10 +54,14 @@ public:
             internal::memory_budget_from_limit(memory_limit_bytes)
                 .materialized_input_bytes)) {}
 
+  /// Releases resources retained by `TranscodingFileChunkSource` without
+  /// propagating cleanup failures.
   ~TranscodingFileChunkSource() override {
     internal::close_stream_and_commit(input_, fd_lease_);
   }
 
+  /// Rewinds the text transcoding source to its initial input position and
+  /// clears per-pass state.
   sanitize::Status Reset() override {
     internal::close_stream_and_commit(input_, fd_lease_);
     if (input_.is_open()) {
@@ -65,6 +79,7 @@ public:
     return {};
   }
 
+  /// Returns the next decoded UTF-8 chunk and advances the raw-input cursor.
   sanitize::Result<Chunk> NextChunk(std::int64_t max_bytes) override {
     SAN_RETURN_NOT_OK(internal::validate_chunk_request(
         max_bytes, "TranscodingFileChunkSource"));
@@ -102,6 +117,8 @@ public:
     }
   }
 
+  /// Exposes the current text transcoding source bytes without extending their
+  /// documented lifetime.
   sanitize::Result<Chunk> View() override {
     if (!full_view_) {
       SAN_RETURN_NOT_OK(Reset());
@@ -127,6 +144,8 @@ public:
   }
 
 private:
+  /// Returns a bounded slice of pending UTF-8 bytes and advances the decoded
+  /// offset.
   sanitize::Result<Chunk> take_pending_chunk(std::int64_t max_bytes) {
     if (!pending_utf8_ || pending_utf8_pos_ >= pending_utf8_->size()) {
       return sanitize::Status::Invalid(
@@ -154,12 +173,15 @@ private:
     return chunk;
   }
 
+  /// Produces an empty end-of-input chunk at the current decoded offset.
   [[nodiscard]] Chunk empty_chunk() const {
     Chunk chunk;
     chunk.base_offset = utf8_pos_;
     return chunk;
   }
 
+  /// Lazily acquires a descriptor permit and opens the encoded source in binary
+  /// mode.
   sanitize::Status open_if_needed() {
     if (input_.is_open()) {
       return {};
@@ -196,6 +218,8 @@ private:
 
 namespace internal {
 
+/// Creates a file source that incrementally decodes non-UTF-8 input into
+/// canonical UTF-8.
 ChunkSourcePtr
 make_transcoding_file_chunk_source(std::string path, TextEncoding encoding,
                                    std::int64_t memory_limit_bytes) {

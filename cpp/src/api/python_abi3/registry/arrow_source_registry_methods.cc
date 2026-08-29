@@ -1,4 +1,10 @@
-/* Python ABI3 direct Arrow-source registry sink methods. */
+/*
+ * Implements Python ABI3 direct Arrow-source registry sink methods.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -17,6 +23,8 @@
 namespace core_abi3_internal {
 using namespace arrow_registry_detail;
 
+/// Merges direct Arrow sources into a registry plan and returns their ordered
+/// stream.
 PyObject *py_context_to_registry_sink_arrow_sources(PyObject *,
                                                     PyObject *args) {
   PyObject *ctx_obj = nullptr;
@@ -93,12 +101,15 @@ PyObject *py_context_to_registry_sink_arrow_sources(PyObject *,
   return pack_arrow_source_registry_stream(sources_obj, std::move(state));
 }
 
+/// Delegates auto-registry Arrow sources to the standard merge-and-stream
+/// route.
 PyObject *
 py_context_to_registry_sink_arrow_sources_auto_registry(PyObject *,
                                                         PyObject *args) {
   return py_context_to_registry_sink_arrow_sources(nullptr, args);
 }
 
+/// Streams direct Arrow sources under an existing compiled registry plan.
 PyObject *
 py_context_to_registry_sink_arrow_sources_registry_state(PyObject *,
                                                          PyObject *args) {
@@ -158,6 +169,8 @@ py_context_to_registry_sink_arrow_sources_registry_state(PyObject *,
   return pack_arrow_source_registry_stream(ctx_obj, std::move(state));
 }
 
+/// Extends compiled registry state from direct Arrow sources before streaming
+/// them.
 PyObject *
 py_context_to_registry_sink_arrow_sources_auto_registry_state(PyObject *,
                                                               PyObject *args) {

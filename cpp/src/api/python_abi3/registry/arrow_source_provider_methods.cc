@@ -1,4 +1,10 @@
-/* Python ABI3 Arrow-source provider registry sink methods. */
+/*
+ * Implements Python ABI3 Arrow-source provider registry sink methods.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -17,6 +23,7 @@
 namespace core_abi3_internal {
 using namespace arrow_registry_detail;
 
+/// Builds a lazy Arrow-provider stream governed by an existing registry plan.
 PyObject *
 py_context_to_registry_sink_arrow_source_chunk_provider_registry_state(
     PyObject *, PyObject *args) {
@@ -79,6 +86,8 @@ py_context_to_registry_sink_arrow_source_chunk_provider_registry_state(
                                            provider_obj);
 }
 
+/// Probes one Arrow provider and applies the resulting registry plan to
+/// another.
 PyObject *py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry(
     PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
@@ -149,6 +158,7 @@ PyObject *py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry(
       first_row_columns, timestamp_columns);
 }
 
+/// Extends registry state from one Arrow provider and applies it to another.
 PyObject *
 py_context_to_registry_sink_arrow_source_chunk_provider_auto_registry_state(
     PyObject *, PyObject *args) {

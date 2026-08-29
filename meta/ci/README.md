@@ -32,7 +32,10 @@ a CI gate and therefore lives at
   cleanup and fuzz-integrity gates.
 - [`CMakeLists.txt`](../../CMakeLists.txt) exposes
   `schema_sanitizer_check_cpp_documentation` as an optional developer target;
-  it is not a release-blocking CI lane.
+  its Clang AST audit validates maintained native file summaries and named
+  callables, but is not a release-blocking CI lane. Running it requires matching
+  `clang++`, `llvm-config`, and `libclang-cpp` development tools; run it on each
+  supported platform or configuration to cover conditional source branches.
 - [`pyproject.toml`](../../pyproject.toml) invokes the Parquet compression check
   from the wheel-test environment.
 

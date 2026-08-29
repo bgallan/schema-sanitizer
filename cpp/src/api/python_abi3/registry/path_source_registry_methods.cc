@@ -1,4 +1,10 @@
-/* Python ABI3 explicit-registry path-source sink methods. */
+/*
+ * Implements Python ABI3 explicit-registry path-source sink methods.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -16,6 +22,8 @@
 namespace core_abi3_internal {
 using namespace path_registry_detail;
 
+/// Builds a registry plan from JSON and streams ordered path sources through
+/// it.
 PyObject *py_context_to_registry_sink_from_path_sources(PyObject *,
                                                         PyObject *args) {
   PyObject *ctx_obj = nullptr;
@@ -73,6 +81,7 @@ PyObject *py_context_to_registry_sink_from_path_sources(PyObject *,
   return pack_path_source_registry_stream(ctx_obj, std::move(state));
 }
 
+/// Streams ordered path sources under an existing compiled registry plan.
 PyObject *
 py_context_to_registry_sink_from_path_sources_registry_state(PyObject *,
                                                              PyObject *args) {
@@ -128,6 +137,8 @@ py_context_to_registry_sink_from_path_sources_registry_state(PyObject *,
   return pack_path_source_registry_stream(ctx_obj, std::move(state));
 }
 
+/// Streams provider-supplied path chunks under an existing compiled registry
+/// plan.
 PyObject *
 py_context_to_registry_sink_from_path_source_chunk_provider_registry_state(
     PyObject *, PyObject *args) {

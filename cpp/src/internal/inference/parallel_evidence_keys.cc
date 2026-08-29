@@ -1,4 +1,6 @@
 // Implements compact packet-local inference key storage.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/parallel_evidence.hh"
 
@@ -22,6 +24,7 @@ InferenceEvidenceKeys::Hash(std::string_view value) const noexcept {
   return hash == 0U ? 1U : hash;
 }
 
+/// Returns a non-owning view of the interned key bytes at the requested index.
 std::string_view
 InferenceEvidenceKeys::View(std::uint32_t index) const noexcept {
   if (index >= entries_.size()) {
@@ -39,6 +42,8 @@ InferenceEvidenceKeys::View(std::uint32_t index) const noexcept {
   return std::string_view(bytes_.data() + offset, size);
 }
 
+/// Returns the stored key bytes for an interned identifier after bounds
+/// validation.
 StrId InferenceEvidenceKeys::Resolve(std::uint32_t index,
                                      StringInterner *strings) const {
   if (index >= entries_.size() || strings == nullptr) {
@@ -116,6 +121,8 @@ std::uint32_t InferenceEvidenceKeys::Find(std::string_view value,
   }
 }
 
+/// Returns a stable packet-local identifier for the key, reusing existing
+/// storage when possible.
 sanitize::Result<std::uint32_t>
 InferenceEvidenceKeys::Intern(std::string_view value) {
   const auto hash = Hash(value);

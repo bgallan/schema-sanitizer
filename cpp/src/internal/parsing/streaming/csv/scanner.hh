@@ -1,4 +1,6 @@
 // Declares the incremental CSV record scanner used by streaming frontends.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -41,10 +43,16 @@ private:
     std::string_view view;
   };
 
+  /// Releases retained record fragments and trims excessive vector capacity.
   void clear_segments() noexcept;
+  /// Ensures that the current chunk has unread bytes unless input is exhausted.
   sanitize::Status ensure_chunk();
+  /// Fetches the next bounded chunk and records its end-of-input offset.
   sanitize::Status refill();
+  /// Consumes an LF deferred from a CRLF pair split across chunks.
   void consume_pending_lf() noexcept;
+  /// Advances to the first byte of the next record, reporting clean end of
+  /// input.
   sanitize::Result<bool> prepare_record_start();
 
   friend class CsvRecordSpanScanner;

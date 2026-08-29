@@ -1,4 +1,6 @@
 // Declares the complete internal Python ABI3 method catalogue.
+// These definitions keep interpreter ownership and method-table details behind
+// the private extension boundary.
 
 #pragma once
 

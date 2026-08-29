@@ -1,9 +1,11 @@
 /*
- * Python ABI3 helper for validating local XML directory row tags.
+ * Implements the Python ABI3 helper that validates local XML directory row
+ * tags.
  *
  * Root scanning, contextual errors, and the Python entry point live together
  * because they form one directory-validation operation with no other callers.
  */
+
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
 #include "internal/abi/python_abi3/methods.hh"
 #include "internal/parsing/xml/token_match.hh"
@@ -18,6 +20,7 @@ namespace {
 
 namespace xml_scan = sanitize::internal::xml_tokens;
 
+/// Decodes a filesystem path into a printable value for contextual XML errors.
 std::string path_display(PyObject *path_obj) {
   PyObject *path_text = PyObject_Str(path_obj);
   if (!path_text) {
@@ -34,6 +37,7 @@ std::string path_display(PyObject *path_obj) {
   return std::string(data, static_cast<std::size_t>(size));
 }
 
+/// Raises a Python `ValueError` containing the XML path and validation message.
 bool raise_xml_error(PyObject *path_obj, std::string_view message) {
   std::string out = "Invalid XML file";
   const std::string path = path_display(path_obj);
@@ -47,6 +51,7 @@ bool raise_xml_error(PyObject *path_obj, std::string_view message) {
   return false;
 }
 
+/// Scans the XML prolog and returns the document root element name.
 bool xml_root_tag_name(std::string_view text, PyObject *path_obj,
                        std::string *out) {
   out->clear();
@@ -95,6 +100,7 @@ bool xml_root_tag_name(std::string_view text, PyObject *path_obj,
   return true;
 }
 
+/// Parses optional Python Unicode into a native XML option string.
 bool unicode_or_none_to_string(PyObject *obj, std::string *out) {
   out->clear();
   if (obj == Py_None) {
@@ -109,6 +115,7 @@ bool unicode_or_none_to_string(PyObject *obj, std::string *out) {
   return true;
 }
 
+/// Validates an XML file's root element against the expected folder schema.
 bool validate_xml_file_root(PyObject *path_obj, long long memory_limit_bytes,
                             std::string *raw, std::string *effective) {
   if (!read_local_file_bytes(path_obj, memory_limit_bytes, raw)) {
@@ -138,6 +145,7 @@ bool validate_xml_file_root(PyObject *path_obj, long long memory_limit_bytes,
 
 } // namespace
 
+/// Validates XML root tags across paths and returns the effective row tag.
 PyObject *py_xml_folder_effective_row_tag(PyObject *, PyObject *args) {
   PyObject *paths_obj = nullptr;
   PyObject *requested_obj = nullptr;

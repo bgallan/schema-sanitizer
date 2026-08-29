@@ -1,4 +1,6 @@
 // Implements bounded flat packet-local inference helpers.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/parallel_flat_evidence.hh"
 
@@ -7,6 +9,7 @@
 namespace sanitize::internal {
 namespace {
 
+/// Merges one field's scalar-kind mask into bounded flat packet storage.
 sanitize::Status append_mask(InferenceEvidencePacket *packet,
                              std::string_view key,
                              std::uint32_t scalar_kind_mask,
@@ -57,6 +60,7 @@ struct FlatJsonRootContext {
   sanitize::internal::StopToken stop;
 };
 
+/// Converts one flat JSON field to scalar evidence for the current packet.
 sanitize::Status append_json_field(void *raw, std::string_view key,
                                    JsonOnDemandDoc::FlatValue value) {
   auto *context = static_cast<FlatJsonRootContext *>(raw);
@@ -101,6 +105,7 @@ sanitize::Status append_json_field(void *raw, std::string_view key,
 
 } // namespace
 
+/// Converts one flat materialized value to scalar evidence for the named field.
 sanitize::Status append_flat_inference_value(
     InferenceEvidencePacket *packet, std::string_view key,
     const ValueView &value, const PreparedOptions &opts,
@@ -142,6 +147,7 @@ sanitize::Status append_flat_inference_value(
                      packet_memory_limit);
 }
 
+/// Scans one flat JSON object into the packet's bounded scalar-evidence table.
 sanitize::Status append_flat_json_inference_row(
     JsonOnDemandDoc *document, std::string_view raw, std::size_t base_offset,
     InferenceEvidencePacket *packet, const PreparedOptions &opts,

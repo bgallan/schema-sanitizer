@@ -1,4 +1,6 @@
-// Shared private helpers for Arrow C Data array builders.
+// Declares shared private helpers for Arrow C Data array builders. The code
+// converts validated rows into memory-accounted Arrow C Data batches for
+// ordered ingestion.
 
 #pragma once
 
@@ -19,6 +21,8 @@
 namespace sanitize::internal {
 
 struct ArrayPayload {
+  /// Initializes Arrow array payload ownership around the supplied private
+  /// allocation state.
   explicit ArrayPayload(std::shared_ptr<PoolResource> pool)
       : pool_keepalive(std::move(pool)), buffers(pool_keepalive.get()),
         validity(pool_keepalive.get()), bit_data(pool_keepalive.get()),
@@ -38,7 +42,7 @@ struct ArrayPayload {
   std::pmr::vector<ArrowArray *> children;
 };
 
-// Destroys array payload.
+/// Releases child Arrow arrays before deleting their owning payload.
 inline void destroy_array_payload(ArrayPayload *payload) noexcept {
   if (!payload)
     return;
@@ -52,7 +56,7 @@ inline void destroy_array_payload(ArrayPayload *payload) noexcept {
 }
 
 struct ArrayPayloadDeleter {
-  // Invokes the callable.
+  /// Releases child Arrow arrays and deletes an unfinished array payload.
   void operator()(ArrayPayload *payload) const noexcept {
     destroy_array_payload(payload);
   }
@@ -60,7 +64,7 @@ struct ArrayPayloadDeleter {
 
 using ArrayPayloadPtr = std::unique_ptr<ArrayPayload, ArrayPayloadDeleter>;
 
-// Creates array payload.
+/// Allocates a memory-accounted Arrow payload while retaining its pool.
 inline ArrayPayloadPtr
 make_array_payload(const std::shared_ptr<PoolResource> &pool) noexcept {
   if (!pool) {
@@ -69,7 +73,7 @@ make_array_payload(const std::shared_ptr<PoolResource> &pool) noexcept {
   return ArrayPayloadPtr(new (std::nothrow) ArrayPayload(pool));
 }
 
-// Performs the array release operation.
+/// Releases an exported array payload and clears every Arrow C Data field.
 inline void array_release(ArrowArray *array) {
   if (!array || !array->release)
     return;
@@ -86,7 +90,7 @@ inline void array_release(ArrowArray *array) {
   array->release = nullptr;
 }
 
-// Performs the finish child array operation.
+/// Finalizes a child builder into a newly allocated Arrow array slot.
 inline sanitize::Status finish_child_array(ColumnBuilder *builder,
                                            ArrowArray **slot,
                                            const char *oom_message) {
@@ -108,10 +112,12 @@ inline sanitize::Status finish_child_array(ColumnBuilder *builder,
 
 class BaseBuilder : public ColumnBuilder {
 public:
+  /// Initializes shared builder state for one compiled field and its
+  /// memory-accounted Arrow buffers.
   explicit BaseBuilder(std::shared_ptr<PoolResource> pool)
       : pool_(std::move(pool)), validity_(pool_.get()) {}
 
-  // Resets row counts, validity bits, and builder-specific values.
+  /// Resets row counts, validity bits, and builder-specific values.
   sanitize::Status reset() override {
     length_ = 0;
     null_count_ = 0;
@@ -119,15 +125,15 @@ public:
     return reset_values();
   }
 
-  // Returns the number of appended rows.
+  /// Returns the number of appended rows.
   [[nodiscard]] int64_t length() const noexcept override { return length_; }
 
 protected:
-  // Resets values owned by a concrete builder.
+  /// Resets values owned by a concrete builder.
   virtual sanitize::Status reset_values() = 0;
 
-  // Appends one validity bit and advances the row count. Null-free columns
-  // deliberately keep no bitmap; Arrow treats a null buffer as all-valid.
+  /// Appends one validity bit and advances the row count, eliding all-valid
+  /// bitmaps.
   void push_validity(bool valid) {
     const auto byte_index = static_cast<std::size_t>(length_ >> 3);
     const auto bit_mask = static_cast<uint8_t>(1u << (length_ & 7));
@@ -150,9 +156,8 @@ protected:
     ++length_;
   }
 
-  // Appends validity bits from one Arrow array. The caller must append the
-  // corresponding physical values before or after this call without changing
-  // length_.
+  /// Appends validity bits from an Arrow array slice without copying physical
+  /// values.
   sanitize::Status append_array_validity(const ArrowArray &array) {
     if (array.length < 0 || array.offset < 0) {
       return sanitize::Status::Invalid(
@@ -173,7 +178,7 @@ protected:
     return sanitize::Status::OK();
   }
 
-  // Returns the validity bitmap when the array contains nulls.
+  /// Returns the validity bitmap when the array contains nulls.
   static const void *validity_buffer(const ArrayPayload *payload,
                                      int64_t null_count) noexcept {
     return (payload && null_count > 0 && !payload->validity.empty())
@@ -181,7 +186,7 @@ protected:
                : nullptr;
   }
 
-  // Initializes ArrowArray fields shared by all concrete builders.
+  /// Initializes ArrowArray fields shared by all concrete builders.
   void init_common(ArrowArray *out, ArrayPayload *payload,
                    int64_t n_buffers) const {
     std::memset(out, 0, sizeof(*out));
@@ -205,23 +210,23 @@ protected:
 };
 
 template <typename BuilderT, typename... Args>
-// Creates column builder.
+/// Allocates a concrete column builder without throwing on allocation failure.
 std::unique_ptr<ColumnBuilder> make_column_builder(Args &&...args) {
   return std::unique_ptr<ColumnBuilder>(
       new (std::nothrow) BuilderT(std::forward<Args>(args)...));
 }
 
-// Creates scalar builder.
+/// Selects a physical scalar builder for the requested logical kind.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
 make_scalar_builder(sanitize::LogicalKind kind,
                     const std::shared_ptr<PoolResource> &pool);
 
-// Creates struct builder.
+/// Constructs a struct builder that owns the supplied child builders.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
 make_struct_builder(std::vector<std::unique_ptr<ColumnBuilder>> children,
                     const std::shared_ptr<PoolResource> &pool);
 
-// Creates list builder.
+/// Constructs a list builder around its element builder.
 sanitize::Result<std::unique_ptr<ColumnBuilder>>
 make_list_builder(std::unique_ptr<ColumnBuilder> child,
                   const std::shared_ptr<PoolResource> &pool);

@@ -326,7 +326,9 @@ def test_cpp_retention_traits_sum_source_and_output_and_rollback_private_cursor(
     assert "AdditionalInlineOwnedBytes(value.rows)" in source
     assert "AdditionalInlineOwnedBytes(value.nodes)" in source
     private = source[
-        source.index("retained-byte charge exceeds private") : source.index("// Stop accepting")
+        source.index("retained-byte charge exceeds private") : source.index(
+            "sanitize::Status FinishSubmission()"
+        )
     ]
     assert private.index("try {") < private.index("ScheduledPacket scheduled")
     assert "completion_ring_.RollbackSubmit();" in private

@@ -1,4 +1,6 @@
 // Implements record-level CSV quote and newline scanning.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/csv/record_span_internal.hh"
 
@@ -14,6 +16,8 @@ constexpr std::size_t kCsvVectorScanMinimum = 1024;
 constexpr std::size_t kCsvDenseQuoteGap = 16;
 constexpr unsigned kCsvDenseQuoteRun = 4;
 
+/// Finds the next requested byte using the platform-optimized bounded search
+/// primitive.
 [[nodiscard]] std::size_t find_byte(std::string_view input, std::size_t begin,
                                     char needle) noexcept {
   if (begin >= input.size()) {
@@ -26,6 +30,7 @@ constexpr unsigned kCsvDenseQuoteRun = 4;
                : std::string_view::npos;
 }
 
+/// Finds the next CR or LF byte without scanning beyond the current CSV chunk.
 [[nodiscard]] std::size_t find_line_break(std::string_view input,
                                           std::size_t begin) noexcept {
   const auto lf = find_byte(input, begin, '\n');
@@ -35,6 +40,8 @@ constexpr unsigned kCsvDenseQuoteRun = 4;
 
 } // namespace
 
+/// Initializes quote and line-boundary state for incremental CSV record
+/// scanning.
 CsvRecordSpanScanner::CsvRecordSpanScanner(CsvStreamingScanner &scanner,
                                            BumpArena *arena)
     : scanner_(scanner), arena_(arena), record_start_pos_(scanner.pos_),
@@ -48,6 +55,8 @@ CsvRecordSpanScanner::CsvRecordSpanScanner(CsvStreamingScanner &scanner,
   scanner_.segments_.clear();
 }
 
+/// Advances the record scanner through one bounded chunk and reports the next
+/// complete record span.
 sanitize::Result<TextSlice> CsvRecordSpanScanner::scan() {
   const char *line_break_data = nullptr;
   std::size_t next_line_break = std::string_view::npos;
@@ -253,6 +262,8 @@ sanitize::Status CsvRecordSpanScanner::handle_quote() {
   return sanitize::Status::OK();
 }
 
+/// Finds one complete CSV record while carrying quote state across bounded
+/// input chunks.
 sanitize::Result<TextSlice> scan_csv_record_span(CsvStreamingScanner &scanner,
                                                  BumpArena *arena) {
   CsvRecordSpanScanner record_scanner(scanner, arena);

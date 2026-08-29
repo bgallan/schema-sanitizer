@@ -1,4 +1,6 @@
 // Materializes object-like inputs into STRUCT cells.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/conversion/object_struct/api.hh"
 

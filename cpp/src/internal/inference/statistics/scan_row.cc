@@ -1,4 +1,6 @@
 // Updates top-level inference statistics for one materialized row.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/scan.hh"
 

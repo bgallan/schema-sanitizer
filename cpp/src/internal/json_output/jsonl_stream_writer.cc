@@ -1,4 +1,6 @@
 // Implements JSON Lines serialization for Arrow C streams.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_stream_writer.hh"
 
@@ -28,6 +30,7 @@ constexpr std::size_t kWideFlatJsonlFieldThreshold = 24;
 constexpr std::size_t kHighCoreWideFlatJsonlFieldLimit = 96;
 constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
 
+/// Reports whether an Arrow field kind requires recursive JSON serialization.
 [[nodiscard]] bool is_nested_output_kind(JsonlKind kind) noexcept {
   switch (kind) {
   case JsonlKind::kStruct:
@@ -42,6 +45,8 @@ constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
   }
 }
 
+/// Reports whether any field in the output schema requires recursive JSON
+/// serialization.
 [[nodiscard]] bool has_nested_output(const JsonlField &field) noexcept {
   return std::any_of(field.children.begin(), field.children.end(),
                      [](const JsonlField &child) {
@@ -50,6 +55,8 @@ constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
                      });
 }
 
+/// Reports whether schema width reaches the flat-output parallelization
+/// threshold.
 [[nodiscard]] bool is_wide_flat_schema(const JsonlField &root) noexcept {
   return root.kind == JsonlKind::kStruct &&
          root.children.size() >= kWideFlatJsonlFieldThreshold &&
@@ -59,6 +66,7 @@ constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
                       });
 }
 
+/// Reports whether a wide flat schema contains only fixed-cost JSON scalars.
 [[nodiscard]] bool is_wide_fixed_flat_schema(const JsonlField &root) noexcept {
   return is_wide_flat_schema(root) &&
          std::all_of(
@@ -69,6 +77,7 @@ constexpr std::int64_t kNestedJsonlWorkItemsPerWorker = 16;
              });
 }
 
+/// Derives JSON output worker admission for wide variable-cost schemas.
 [[nodiscard]] constexpr std::int64_t
 wide_flat_worker_ceiling_for(std::int64_t operation_workers) noexcept {
   const auto half_arena = std::max<std::int64_t>(
@@ -83,6 +92,7 @@ static_assert(wide_flat_worker_ceiling_for(16) == 8);
 static_assert(wide_flat_worker_ceiling_for(32) == 16);
 static_assert(wide_flat_worker_ceiling_for(64) == 32);
 
+/// Derives JSON output worker admission for wide fixed-cost schemas.
 [[nodiscard]] constexpr std::int64_t
 wide_fixed_worker_ceiling_for(std::int64_t operation_workers,
                               std::size_t field_count) noexcept {
@@ -98,6 +108,8 @@ static_assert(wide_fixed_worker_ceiling_for(32, 128) == 8);
 static_assert(wide_fixed_worker_ceiling_for(64, 64) == 32);
 static_assert(wide_fixed_worker_ceiling_for(64, 128) == 16);
 
+/// Reports whether schema width justifies scaling fixed-cost JSON worker
+/// admission.
 [[nodiscard]] constexpr bool
 should_scale_wide_fixed_output(bool wide_fixed_flat,
                                std::int64_t operation_workers) noexcept {
@@ -110,12 +122,15 @@ static_assert(!should_scale_wide_fixed_output(false, 16));
 
 class JsonlRowEstimator final {
 public:
+  /// Builds the JSON Lines row-size estimator for the root Arrow schema.
   explicit JsonlRowEstimator(const JsonlField &root) noexcept
       : root_(&root),
         fixed_row_estimate_(
             text_output_estimator::estimate_wide_fixed_jsonl_row_upper_bound(
                 root)) {}
 
+  /// Refreshes per-batch estimator state before rows are partitioned among
+  /// output workers.
   void prepare(const ArrowArray &array) noexcept {
     use_fixed_estimate_ =
         fixed_row_estimate_ > 0 &&
@@ -123,6 +138,8 @@ public:
                                                                    array);
   }
 
+  /// Returns a capped encoded-size estimate for one Arrow row in the selected
+  /// text format.
   [[nodiscard]] std::int64_t operator()(const ArrowArray &array,
                                         std::int64_t row,
                                         std::int64_t cap) const noexcept {
@@ -139,6 +156,8 @@ private:
   bool use_fixed_estimate_ = false;
 };
 
+/// Clears output buffer, securely wiping or releasing excess retained capacity
+/// when configured.
 void clear_output_buffer(TextBuffer &buffer) noexcept {
   if (secure_memory_cleanup_enabled() && !buffer.empty()) {
     secure_zero_memory(buffer.data(), buffer.size());
@@ -153,20 +172,29 @@ void clear_output_buffer(TextBuffer &buffer) noexcept {
 
 class ScopedStringWipe final {
 public:
+  /// Arms a scope guard that securely wipes encoded output bytes on exit.
   explicit ScopedStringWipe(TextBuffer *value) noexcept : value_(value) {}
+  /// Securely wipes the guarded output bytes at scope exit when cleanup is
+  /// enabled.
   ~ScopedStringWipe() {
     if (value_ && secure_memory_cleanup_enabled() && !value_->empty()) {
       secure_zero_memory(value_->data(), value_->size());
     }
   }
 
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedStringWipe(const ScopedStringWipe &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedStringWipe &operator=(const ScopedStringWipe &) = delete;
 
 private:
   TextBuffer *value_;
 };
 
+/// Writes the complete JSON Lines staging buffer and clears it only after
+/// output succeeds.
 sanitize::Status flush_buffer(Output &out_file, TextBuffer &buffer) {
   if (buffer.empty()) {
     return sanitize::Status::OK();
@@ -176,6 +204,8 @@ sanitize::Status flush_buffer(Output &out_file, TextBuffer &buffer) {
   return status;
 }
 
+/// Flushes JSON Lines staging once it reaches the bounded retained-buffer
+/// threshold.
 sanitize::Status flush_buffer_if_large(Output &out_file, TextBuffer &buffer) {
   if (buffer.size() < kFlushThresholdBytes) {
     return sanitize::Status::OK();
@@ -183,6 +213,8 @@ sanitize::Status flush_buffer_if_large(Output &out_file, TextBuffer &buffer) {
   return flush_buffer(out_file, buffer);
 }
 
+/// Serializes a contiguous Arrow row interval into the worker-local JSON Lines
+/// buffer.
 sanitize::Status
 append_rows_jsonl(const JsonlField &root, const ArrowArray &array,
                   std::int64_t first_row, std::int64_t row_count,
@@ -218,6 +250,8 @@ append_rows_jsonl(const JsonlField &root, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Encodes one Arrow batch through bounded parallel preparation and ordered
+/// JSON Lines output.
 sanitize::Status write_batch_jsonl(Output &out_file, const JsonlField &root,
                                    const ArrowArray &array,
                                    const ArrayValidationLimits &limits) {

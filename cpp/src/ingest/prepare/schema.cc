@@ -1,4 +1,6 @@
-// Resolves the final logical schema used by prepared ingestion.
+// Resolves the final logical schema used by prepared ingestion. The phases
+// combine inferred or supplied schemas with options before compiling the
+// execution plan.
 
 #include "ingest/prepare/prepare_internal.hh"
 

@@ -1,4 +1,6 @@
 // Parses ISO timestamps into nanoseconds since the Unix epoch.
+// It composes strict date and time parsing with bounded fractional seconds,
+// explicit timezone offsets, and overflow-safe epoch arithmetic.
 
 #include "sanitize/core/primitives.hh"
 
@@ -13,6 +15,7 @@ namespace sanitize {
 
 namespace {
 
+/// Parses an optional fractional second and normalizes it to nanoseconds.
 bool parse_fractional_nanoseconds(std::string_view s, std::size_t *pos,
                                   int64_t *out_ns) {
   *out_ns = 0;
@@ -39,6 +42,7 @@ bool parse_fractional_nanoseconds(std::string_view s, std::size_t *pos,
   return true;
 }
 
+/// Parses an optional UTC marker or signed hours-and-minutes offset.
 bool parse_timezone_offset(std::string_view s, std::size_t *pos,
                            int64_t *out_seconds) {
   *out_seconds = 0;
@@ -69,6 +73,7 @@ bool parse_timezone_offset(std::string_view s, std::size_t *pos,
   return true;
 }
 
+/// Combines civil fields and a timezone offset without overflowing nanoseconds.
 bool combine_timestamp_nanoseconds(int32_t days, int32_t seconds,
                                    int64_t fraction_ns,
                                    int64_t timezone_offset_seconds,

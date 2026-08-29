@@ -1,4 +1,6 @@
-// Python-owned path-source plan parsing and capsule lifetime.
+// Implements Python-owned path-source plan parsing and capsule lifetime
+// management. The helpers preserve source order, format grouping, and bounded
+// ownership across multi-file operations.
 
 #include "api/python_abi3/path_sources/path_sources.hh"
 
@@ -35,6 +37,7 @@ struct PathSourcePlanCapsule {
   std::vector<PathSourceSpec> sources;
 };
 
+/// Deletes the native payload owned by the corresponding Python capsule.
 void path_source_plan_capsule_destructor(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -48,6 +51,8 @@ void path_source_plan_capsule_destructor(PyObject *capsule) {
   delete plan;
 }
 
+/// Recovers a path-source plan from its typed Python capsule and validates
+/// capsule identity.
 PathSourcePlanCapsule *unwrap_path_source_plan(PyObject *obj) {
   if (!PyCapsule_CheckExact(obj)) {
     return nullptr;
@@ -56,6 +61,7 @@ PathSourcePlanCapsule *unwrap_path_source_plan(PyObject *obj) {
       PyCapsule_GetPointer(obj, kPathSourcePlanCapsuleName));
 }
 
+/// Copies one Python Unicode field into a native path-source string.
 bool py_path_source_text(PyObject *obj, const char *name, std::string *out) {
   if (!PyUnicode_Check(obj)) {
     PyErr_Format(PyExc_TypeError, "%s must be a string", name);
@@ -70,6 +76,7 @@ bool py_path_source_text(PyObject *obj, const char *name, std::string *out) {
   return true;
 }
 
+/// Encodes a Python path-like object into native filesystem bytes.
 bool py_path_to_string(PyObject *obj, std::string *out) {
   PyObject *encoded = fsencode_path(obj);
   if (!encoded) {
@@ -87,6 +94,7 @@ bool py_path_to_string(PyObject *obj, std::string *out) {
   return true;
 }
 
+/// Rejects readable path sources larger than the configured memory limit.
 sanitize::Status
 validate_path_source_sizes(const std::vector<PathSourceSpec> &sources,
                            long long memory_limit_bytes,
@@ -124,6 +132,7 @@ validate_path_source_sizes(const std::vector<PathSourceSpec> &sources,
 }
 } // namespace
 
+/// Parses owned path-source specifications from a capsule or Python sequence.
 bool parse_path_sources(PyObject *sources_obj,
                         std::vector<PathSourceSpec> *out) {
   if (PyCapsule_CheckExact(sources_obj)) {
@@ -194,6 +203,8 @@ bool parse_path_sources(PyObject *sources_obj,
   return true;
 }
 
+/// Borrows capsule-backed path sources or parses an owned sequence when
+/// necessary.
 bool parse_path_sources_view(PyObject *sources_obj, ParsedPathSources *out) {
   out->borrowed = nullptr;
   out->owned.clear();
@@ -212,6 +223,8 @@ bool parse_path_sources_view(PyObject *sources_obj, ParsedPathSources *out) {
   return parse_path_sources(sources_obj, &out->owned);
 }
 
+/// Validates Python path-source specifications and returns a reusable bounded
+/// plan capsule.
 PyObject *py_path_source_plan_create(PyObject *, PyObject *args) {
   PyObject *sources_obj = nullptr;
   long long memory_limit_bytes = -1;

@@ -1,4 +1,6 @@
 // Scans nested JSON token spans without materializing parsed values.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/ondemand/scan.hh"
 
@@ -17,17 +19,22 @@ enum class ContainerSeparator : uint8_t {
   kDone,
 };
 
+/// Builds a JSON parse failure at the supplied absolute byte offset.
 sanitize::Status parse_error_at(const Cursor &c, std::string_view message) {
   return sanitize::Status::Invalid(message, std::to_string(c.offset()));
 }
 
 sanitize::Status skip_value_at_depth(Cursor &c, std::size_t depth);
 
+/// Builds a JSON parse error that identifies the configured nesting limit and
+/// source offset.
 sanitize::Status nesting_error(const Cursor &c) {
   return parse_error_at(
       c, "JSON parse error: nesting exceeds safety limit 512 at byte ");
 }
 
+/// Skips object member after validating lengths, nesting, and remaining input
+/// bytes.
 sanitize::Status skip_object_member(Cursor &c, std::size_t depth) {
   if (c.p >= c.end || *c.p != '"') {
     return parse_error_at(c, "JSON parse error: expected string key at byte ");
@@ -41,6 +48,8 @@ sanitize::Status skip_object_member(Cursor &c, std::size_t depth) {
   return sanitize::Status::OK();
 }
 
+/// Consumes object separator from the bounded cursor or reports its exact
+/// source offset.
 sanitize::Result<ContainerSeparator> consume_object_separator(Cursor &c) {
   if (c.p >= c.end) {
     return parse_error_at(c, "JSON parse error: unterminated object at byte ");
@@ -57,6 +66,8 @@ sanitize::Result<ContainerSeparator> consume_object_separator(Cursor &c) {
   return parse_error_at(c, "JSON parse error: expected ',' or '}' at byte ");
 }
 
+/// Skips object at depth after validating lengths, nesting, and remaining input
+/// bytes.
 sanitize::Status skip_object_at_depth(Cursor &c, std::size_t depth) {
   SAN_RETURN_NOT_OK(expect(c, '{'));
   skip_ws(c);
@@ -83,6 +94,8 @@ sanitize::Status skip_object_at_depth(Cursor &c, std::size_t depth) {
   }
 }
 
+/// Skips array at depth after validating lengths, nesting, and remaining input
+/// bytes.
 sanitize::Status skip_array_at_depth(Cursor &c, std::size_t depth) {
   SAN_RETURN_NOT_OK(expect(c, '['));
   skip_ws(c);
@@ -109,6 +122,8 @@ sanitize::Status skip_array_at_depth(Cursor &c, std::size_t depth) {
   }
 }
 
+/// Skips value at depth after validating lengths, nesting, and remaining input
+/// bytes.
 sanitize::Status skip_value_at_depth(Cursor &c, std::size_t depth) {
   skip_ws(c);
   if (c.p >= c.end) {

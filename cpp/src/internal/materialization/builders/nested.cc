@@ -1,4 +1,6 @@
 // Builds nested Arrow C Data arrays for struct and list cells.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/builders/detail.hh"
 #include "internal/memory/size_math.hh"
@@ -22,12 +24,12 @@ using sanitize::Status;
 
 class StructBuilder final : public BaseBuilder {
 public:
-  // Creates a StructBuilder.
+  /// Takes ownership of struct child builders and shared validity storage.
   StructBuilder(std::vector<std::unique_ptr<ColumnBuilder>> children,
                 std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)), children_(std::move(children)) {}
 
-  // Resets the object state.
+  /// Clears struct validity and every child while retaining their storage.
   Status reset() override {
     SAN_RETURN_NOT_OK(BaseBuilder::reset());
     for (auto &child : children_)
@@ -35,7 +37,7 @@ public:
     return Status::OK();
   }
 
-  // Appends the object state.
+  /// Appends one struct validity bit and its child cells in schema order.
   Status append(const Cell &cell) override {
     if (cell.is_null)
       return append_null();
@@ -47,7 +49,7 @@ public:
     return Status::OK();
   }
 
-  // Appends null.
+  /// Appends a null struct and aligned null entries to every child column.
   Status append_null() override {
     push_validity(false);
     for (auto &child : children_)
@@ -55,7 +57,7 @@ public:
     return Status::OK();
   }
 
-  // Finishes the current output.
+  /// Finalizes validity and child columns into a struct Arrow array.
   Status finish(ArrowArray *out) override {
     auto payload = make_array_payload(pool_);
     if (!payload)
@@ -74,7 +76,7 @@ public:
     return Status::OK();
   }
 
-  // Returns the current byte usage.
+  /// Returns retained buffer capacity in bytes for validity and child builders.
   [[nodiscard]] int64_t bytes() const noexcept override {
     auto total = saturating_size_to_i64(validity_.capacity());
     for (const auto &child : children_) {
@@ -84,7 +86,7 @@ public:
   }
 
 protected:
-  // Resets values.
+  /// Performs no extra reset because StructBuilder::reset clears every child.
   Status reset_values() override { return Status::OK(); }
 
 private:
@@ -93,7 +95,7 @@ private:
 
 class ListBuilder final : public BaseBuilder {
 public:
-  // Creates a ListBuilder.
+  /// Takes ownership of an element builder and initializes the zero offset.
   ListBuilder(std::unique_ptr<ColumnBuilder> child,
               std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)), child_(std::move(child)),
@@ -101,7 +103,7 @@ public:
     offsets_.push_back(0);
   }
 
-  // Resets the object state.
+  /// Restores the zero offset and clears child values and validity.
   Status reset() override {
     SAN_RETURN_NOT_OK(BaseBuilder::reset());
     offsets_.clear();
@@ -111,7 +113,7 @@ public:
     return Status::OK();
   }
 
-  // Appends the object state.
+  /// Appends one list's elements, terminal offset, and validity bit.
   Status append(const Cell &cell) override {
     if (cell.is_null)
       return append_null();
@@ -126,14 +128,14 @@ public:
     return Status::OK();
   }
 
-  // Appends null.
+  /// Appends a null list by repeating the previous child offset.
   Status append_null() override {
     offsets_.push_back(offsets_.empty() ? 0 : offsets_.back());
     push_validity(false);
     return Status::OK();
   }
 
-  // Finishes the current output.
+  /// Finalizes offsets, validity, and element values into a list Arrow array.
   Status finish(ArrowArray *out) override {
     auto payload = make_array_payload(pool_);
     if (!payload)
@@ -152,7 +154,8 @@ public:
     return Status::OK();
   }
 
-  // Returns the current byte usage.
+  /// Returns retained buffer capacity in bytes for list metadata and child
+  /// values.
   [[nodiscard]] int64_t bytes() const noexcept override {
     auto total = saturating_size_to_i64(validity_.capacity());
     total = saturating_add_i64(
@@ -161,7 +164,8 @@ public:
   }
 
 protected:
-  // Resets values.
+  /// Performs no extra reset because ListBuilder::reset clears offsets and
+  /// child values.
   Status reset_values() override { return Status::OK(); }
 
 private:

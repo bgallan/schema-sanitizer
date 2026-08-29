@@ -1,4 +1,6 @@
 // Converts public ValueView inputs into typed in-memory cells.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/batch_appender_internal.hh"
 #include "internal/materialization/conversion/detail.hh"
@@ -17,7 +19,7 @@ using sanitize::LogicalKind;
 using sanitize::Status;
 using sanitize::ValueView;
 
-// Converts arrays and scalar fallbacks into a typed list cell.
+/// Converts arrays and scalar fallbacks into a typed list cell.
 Status convert_list(const ColumnPlan &plan, ValueView value, ConvertCtx &ctx,
                     Cell *out) {
   if (!out)

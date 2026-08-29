@@ -1,4 +1,6 @@
-// Implements logical streams composed from multiple local paths.
+// Implements logical streams composed from multiple local paths. The helpers
+// enforce memory and descriptor limits while preserving stable chunk-view
+// lifetimes.
 
 #include "ingest/chunk_source_detail.hh"
 #include "internal/memory/memory_budget.hh"
@@ -20,6 +22,8 @@ constexpr std::int64_t kMaterializationReadBytes = 1024 * 1024;
 
 class MultiPathChunkSource final : public ChunkSource {
 public:
+  /// Initializes ordered traversal over validated paths and their stable source
+  /// names.
   MultiPathChunkSource(std::vector<std::string> paths,
                        std::vector<std::string> source_names,
                        std::string separator, internal::TextEncoding encoding,
@@ -37,6 +41,7 @@ public:
     }
   }
 
+  /// Rewinds every path source and clears grouped traversal state.
   sanitize::Status Reset() override {
     current_.reset();
     current_source_name_.reset();
@@ -49,6 +54,7 @@ public:
     return {};
   }
 
+  /// Returns the next path chunk or separator with a cumulative source offset.
   sanitize::Result<Chunk> NextChunk(std::int64_t max_bytes) override {
     SAN_RETURN_NOT_OK(
         internal::validate_chunk_request(max_bytes, "MultiPathChunkSource"));
@@ -101,6 +107,7 @@ public:
     }
   }
 
+  /// Materializes all path inputs joined by the configured separator.
   sanitize::Result<Chunk> View() override {
     if (!full_view_) {
       auto bytes = std::make_shared<std::string>();
@@ -137,6 +144,8 @@ public:
   }
 
 private:
+  /// Returns the next bounded separator slice and advances the cumulative
+  /// offset.
   sanitize::Result<Chunk> take_separator_chunk(std::int64_t max_bytes) {
     const auto available = separator_->size() - separator_pos_;
     const auto take =
@@ -158,6 +167,8 @@ private:
     return chunk;
   }
 
+  /// Creates a raw or transcoding child source according to the configured
+  /// encoding.
   sanitize::Result<ChunkSourcePtr>
   make_child_source(const std::string &path) const {
     if (encoding_ == internal::TextEncoding::kUtf8) {
@@ -187,6 +198,8 @@ private:
 
 namespace internal {
 
+/// Creates an ordered multi-path source after validating path and source-name
+/// cardinality.
 ChunkSourcePtr
 make_multi_path_chunk_source(std::vector<std::string> paths,
                              std::vector<std::string> source_names,

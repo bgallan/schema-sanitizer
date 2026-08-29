@@ -1,4 +1,6 @@
-// Exercises the bounded ordinal executor under ThreadSanitizer.
+// Exercises bounded executors and shared runtime governors under ThreadSanitizer.
+// Repeated rounds cover ordering, failure selection, work stealing, cancellation,
+// backpressure, shutdown, descriptor accounting, telemetry, and retained memory.
 
 #include "internal/memory/memory_budget.hh"
 #include "internal/memory/memory_pool.hh"
@@ -55,10 +57,14 @@ static_assert(sanitize::internal::KnownRetainedByteValue(7.0) == 0U);
 
 class ProbeWatchdog final {
 public:
+  /// Starts a watchdog that terminates a stalled named probe round.
   ProbeWatchdog(const char *probe, std::size_t round)
       : probe_(probe), round_(round), thread_([this] { Run(); }) {}
+  /// Prevents copying the watchdog's owned thread and synchronization state.
   ProbeWatchdog(const ProbeWatchdog &) = delete;
+  /// Prevents copy-assignment of the watchdog's owned thread.
   ProbeWatchdog &operator=(const ProbeWatchdog &) = delete;
+  /// Marks the probe complete and joins the watchdog thread.
   ~ProbeWatchdog() {
     {
       std::lock_guard lock(mutex_);
@@ -69,6 +75,7 @@ public:
   }
 
 private:
+  /// Waits for completion or terminates the process after the probe deadline.
   void Run() noexcept {
     std::unique_lock lock(mutex_);
     if (ready_.wait_for(lock, std::chrono::seconds(30),
@@ -88,11 +95,13 @@ private:
   std::thread thread_;
 };
 
+/// Publishes a gate transition and wakes every atomic waiter.
 void release_gate(std::atomic<bool> *gate) noexcept {
   gate->store(true, std::memory_order_release);
   gate->notify_all();
 }
 
+/// Waits for a gate while allowing cancellation to release blocked waiters.
 bool wait_gate_or_stop(std::atomic<bool> *gate,
                        sanitize::internal::StopToken stop) {
   auto release = [gate] { release_gate(gate); };
@@ -104,6 +113,7 @@ bool wait_gate_or_stop(std::atomic<bool> *gate,
   return !stop.stop_requested();
 }
 
+/// Blocks until cancellation requests stop for the current probe task.
 void wait_for_stop(sanitize::internal::StopToken stop) {
   std::atomic<bool> stopped{stop.stop_requested()};
   auto release = [&stopped] { release_gate(&stopped); };
@@ -114,6 +124,7 @@ void wait_for_stop(sanitize::internal::StopToken stop) {
   }
 }
 
+/// Polls a predicate cooperatively until success or the watchdog deadline.
 template <typename Predicate>
 bool wait_until_or_watchdog(Predicate predicate,
                             std::chrono::steady_clock::time_point deadline) {
@@ -123,6 +134,7 @@ bool wait_until_or_watchdog(Predicate predicate,
   return predicate();
 }
 
+/// Verifies ordered successful execution and bounded in-flight admission.
 bool run_ordered_success_round() {
   std::atomic<std::size_t> active{0};
   auto made = Executor::Make(
@@ -185,6 +197,7 @@ bool run_ordered_success_round() {
   return active.load(std::memory_order_relaxed) == 0;
 }
 
+/// Verifies that the earliest ordinal failure becomes authoritative.
 bool run_earliest_failure_round() {
   if (sanitize::internal::available_cpu_capacity() < 2) {
     std::cerr << "sanitizer probe skipped: case=earliest_failure reason="
@@ -252,6 +265,7 @@ bool run_earliest_failure_round() {
   }
 }
 
+/// Verifies multiple executors sharing one bounded operation arena.
 bool run_shared_operation_arena_round() {
   constexpr std::size_t max_worker_count = 8U;
   const auto detected_capacity = sanitize::internal::available_cpu_capacity();
@@ -360,6 +374,7 @@ bool run_shared_operation_arena_round() {
 
 #include "ordered_executor_tsan_completion.cc.inc"
 
+/// Verifies backlog-driven worker admission and deterministic completion.
 bool run_backlog_driven_admission_round() {
   constexpr std::size_t max_worker_count = 8U;
   constexpr std::size_t sequential_tasks = 32U;
@@ -460,6 +475,7 @@ bool run_backlog_driven_admission_round() {
   return valid;
 }
 
+/// Verifies compatible tasks can be stolen without violating lane ownership.
 bool run_lane_work_stealing_round() {
   constexpr std::size_t max_worker_count = 4U;
   const auto detected_capacity = sanitize::internal::available_cpu_capacity();
@@ -568,6 +584,7 @@ bool run_lane_work_stealing_round() {
   return valid;
 }
 
+/// Verifies stage cancellation drains queued and active work exactly once.
 bool run_arena_stage_cancellation_round() {
   auto arena_result = sanitize::internal::OperationTaskArena::Make(8);
   if (!arena_result.ok()) {
@@ -645,6 +662,7 @@ bool run_arena_stage_cancellation_round() {
 }
 
 
+/// Verifies the arena rejects work beyond its exact queue capacity.
 bool run_arena_queue_capacity_round() {
   auto limited_telemetry =
       std::make_shared<sanitize::internal::PerformanceTelemetry>(
@@ -689,6 +707,7 @@ bool run_arena_queue_capacity_round() {
   return queued <= capacity && accepted <= capacity + 2U && rejected > 0U;
 }
 
+/// Verifies descriptor permits track physical opens and closes under contention.
 bool run_process_fd_governor_round() {
 #if defined(__linux__)
   const char *previous_raw = std::getenv("SCHEMA_SANITIZER_MAX_OPEN_FILES");
@@ -741,6 +760,7 @@ bool run_process_fd_governor_round() {
 #endif
 }
 
+/// Verifies backpressure respects its deadline without leaking work.
 bool run_arena_backpressure_deadline_round() {
   auto made = sanitize::internal::OperationTaskArena::Make(2U);
   if (!made.ok()) {
@@ -819,6 +839,7 @@ bool run_arena_backpressure_deadline_round() {
   return observed;
 }
 
+/// Verifies heterogeneous task charges remain bounded under backpressure.
 bool run_arena_heterogeneous_backpressure_round() {
   if (sanitize::internal::available_cpu_capacity() < 2) {
     std::cerr << "sanitizer probe skipped: case=arena_heterogeneous_backpressure "
@@ -933,6 +954,7 @@ bool run_arena_heterogeneous_backpressure_round() {
 }
 
 
+/// Verifies sustained backpressure cannot starve an admissible task.
 bool run_arena_backpressure_starvation_round() {
   if (sanitize::internal::available_cpu_capacity() < 3) {
     std::cerr << "sanitizer probe skipped: case=arena_backpressure_starvation "
@@ -1146,6 +1168,7 @@ bool run_arena_backpressure_starvation_round() {
   return passed;
 }
 
+/// Verifies shutdown reports a noncooperative external worker without hanging.
 bool run_noncooperative_external_shutdown_round() {
   auto arena_result = sanitize::internal::OperationTaskArena::Make(2);
   if (!arena_result.ok()) {
@@ -1198,6 +1221,7 @@ bool run_noncooperative_external_shutdown_round() {
   return !drained && repeated_drained == drained;
 }
 
+/// Verifies concurrent callers can request arena shutdown safely.
 bool run_arena_concurrent_shutdown_round() {
   auto made = sanitize::internal::OperationTaskArena::Make(8U);
   if (!made.ok()) {
@@ -1250,6 +1274,7 @@ bool run_arena_concurrent_shutdown_round() {
          arena->ReserveSubmissionTicket(plan) == 0U;
 }
 
+/// Verifies shutdown remains bounded with noncooperative queued work.
 bool run_arena_noncooperative_shutdown_round() {
   auto made = sanitize::internal::OperationTaskArena::Make(2U);
   if (!made.ok()) {
@@ -1296,6 +1321,7 @@ bool run_arena_noncooperative_shutdown_round() {
 #include "ordered_executor_tsan_telemetry.cc.inc"
 #include "ordered_executor_tsan_csv_projection.cc.inc"
 
+/// Verifies resident accounting across concurrent operation pools.
 bool run_process_resident_pool_round() {
   constexpr std::int64_t payload_capacity = 1 << 20;
   constexpr std::int64_t charge = 4096;
@@ -1350,6 +1376,7 @@ bool run_process_resident_pool_round() {
   return !pool->ReserveExternal(payload_capacity + 1, "limit_probe").ok();
 }
 
+/// Verifies cancellation preserves ordered results and exact cleanup.
 bool run_cancellation_round() {
   std::atomic<std::size_t> active{0};
   auto made =
@@ -1390,6 +1417,7 @@ bool run_cancellation_round() {
 
 } // namespace
 
+/// Repeats every sanitizer probe round under an optional iteration count.
 int main(int argc, char **argv) {
   std::size_t rounds = 100U;
   std::string_view selected_case{};

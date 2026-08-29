@@ -1,9 +1,10 @@
 /*
- * Python ABI3 registry-backed Arrow stream sink wrapper.
+ * Implements the Python ABI3 registry-backed Arrow stream-sink wrapper.
  *
  * This file keeps direct Arrow registry orchestration separate from the text,
  * path, and reader registry sink wrappers.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -17,7 +18,7 @@
 #include "internal/abi/python_abi3/native_sink.hh"
 namespace core_abi3_internal {
 
-// Converts a Python Arrow C stream through registry-backed native sinks.
+/// Converts a Python Arrow C stream through registry-backed native sinks.
 PyObject *py_context_to_registry_sink_arrow_stream(PyObject *, PyObject *args) {
   static constexpr const char *kWhere = "context_to_registry_sink_arrow_stream";
 

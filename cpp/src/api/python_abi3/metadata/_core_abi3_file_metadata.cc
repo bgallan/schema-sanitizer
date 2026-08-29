@@ -1,9 +1,10 @@
 /*
- * Python ABI3 generated file-metadata wrapper.
+ * Implements the Python ABI3 generated-file-metadata wrapper.
  *
  * This file exposes native generation of per-file metadata columns used by all
  * streaming file sinks.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -15,7 +16,7 @@
 namespace core_abi3_internal {
 namespace {
 
-// Adds one string pair to a Python dictionary.
+/// Adds one string pair to a Python dictionary.
 int dict_set_string_pair(PyObject *dict, const std::string &key,
                          const std::string &value) {
   PyObject *py_key = PyUnicode_FromStringAndSize(
@@ -38,6 +39,7 @@ int dict_set_string_pair(PyObject *dict, const std::string &key,
 
 } // namespace
 
+/// Generates the native metadata column values for one filesystem path.
 PyObject *py_file_metadata_columns(PyObject *, PyObject *args) {
   PyObject *input_path_obj = nullptr;
 

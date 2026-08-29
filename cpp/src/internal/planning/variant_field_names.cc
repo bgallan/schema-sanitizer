@@ -1,4 +1,6 @@
 // Implements helpers for hybrid schema-registry versioned field names.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #include "internal/planning/variant_field_names.hh"
 

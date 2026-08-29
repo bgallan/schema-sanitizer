@@ -1,9 +1,10 @@
 /*
- * Python ABI3 wrapper for compacting in-memory JSON bytes.
+ * Implements the Python ABI3 wrapper for compacting in-memory JSON bytes.
  *
  * This small translation unit keeps the memory-input JSON ABI entry point
  * separate from shared JSON value encoders and local-file compaction wrappers.
  */
+
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
 
 #include <memory>
@@ -12,6 +13,8 @@
 
 namespace core_abi3_internal {
 
+/// Validates and compacts one in-memory JSON document into canonical UTF-8
+/// bytes.
 PyObject *py_json_compact_bytes(PyObject *, PyObject *args) {
   PyObject *input_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:json_compact_bytes", &input_obj)) {
@@ -36,6 +39,7 @@ PyObject *py_json_compact_bytes(PyObject *, PyObject *args) {
       compact_value.data(), static_cast<Py_ssize_t>(compact_value.size()));
 }
 
+/// Converts a top-level JSON array of objects into compact JSON Lines bytes.
 PyObject *py_json_array_to_jsonl_bytes(PyObject *, PyObject *args) {
   PyObject *input_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:json_array_to_jsonl_bytes", &input_obj)) {

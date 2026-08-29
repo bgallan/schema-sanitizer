@@ -1,4 +1,6 @@
-// Implements JSON serialization for schema-registry drift events.
+// Serializes schema-registry drift events into canonical JSON.
+// Each event retains its source path, output name, type transition, and
+// detection timestamp without exposing transient merge state.
 
 #include "schema_registry/schema_registry_internal.hh"
 

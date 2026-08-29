@@ -1,3 +1,7 @@
+// Defines the native writer's schema, page, row-group, output, and checked-size
+// model. This fragment is included by the consolidated writer to isolate
+// format-specific implementation details.
+
 namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
 constexpr std::string_view kUnsupportedPrefix =
@@ -17,12 +21,15 @@ constexpr std::int64_t kHardMaxFooterMetadataBytes =
 constexpr std::size_t kMaxDictionaryCandidateEntries = 262'144;
 constexpr std::size_t kMaxDictionaryCandidateScratchBytes = 64U * 1024U * 1024U;
 
+/// Adds two byte sizes and clamps overflow to the largest representable size.
 std::size_t saturating_size_add(std::size_t left, std::size_t right) noexcept {
   return right > std::numeric_limits<std::size_t>::max() - left
              ? std::numeric_limits<std::size_t>::max()
              : left + right;
 }
 
+/// Multiplies two byte sizes and clamps overflow to the largest representable
+/// size.
 std::size_t saturating_size_multiply(std::size_t left,
                                      std::size_t right) noexcept {
   if (left == 0 || right == 0) {
@@ -176,10 +183,10 @@ struct RowGroupInfo {
 
 class CountingOutput {
 public:
-  // Wraps an output target and tracks bytes written through it.
+  /// Wraps an output target and tracks bytes written through it.
   explicit CountingOutput(Output &out) : out_(out) {}
 
-  // Writes bytes and advances the logical file offset.
+  /// Writes bytes and advances the logical file offset.
   sanitize::Status Write(std::string_view data) {
     if (data.size() > static_cast<std::size_t>(
                           std::numeric_limits<std::int64_t>::max()) ||
@@ -193,10 +200,10 @@ public:
     return sanitize::Status::OK();
   }
 
-  // Flushes the wrapped target.
+  /// Flushes the wrapped target.
   sanitize::Status Flush() { return out_.Flush(); }
 
-  // Returns the current logical file offset.
+  /// Returns the current logical file offset.
   [[nodiscard]] std::int64_t offset() const noexcept { return offset_; }
 
 private:

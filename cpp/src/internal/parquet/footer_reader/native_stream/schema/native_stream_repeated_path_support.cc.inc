@@ -1,5 +1,6 @@
-// Recursive path support validation and repeated-level helpers.
-// Included directly by footer_reader.cc.
+// Validates recursive Parquet paths and derives repeated-level helpers for
+// native list materialization. This fragment is included by footer_reader.cc
+// inside its private namespace.
 
 struct NativeRecursiveSupportValidationFrame {
   std::size_t node_index = 0;
@@ -9,6 +10,8 @@ struct NativeRecursiveSupportValidationFrame {
   std::optional<std::size_t> expected_struct_validity_repeated_layout_index;
 };
 
+/// Verifies recursive node topology and repeated-layout assignments before
+/// materialization.
 sanitize::Status validate_native_recursive_materialization_tree_supported(
     const NativeRecursiveMaterializationTree &tree) {
   if (!tree.valid || tree.root >= tree.nodes.size()) {
@@ -119,6 +122,8 @@ sanitize::Status validate_native_recursive_materialization_tree_supported(
   return {};
 }
 
+/// Plans native recursive path iteratively while enforcing supported nesting
+/// and bounded resources.
 NativeRecursivePathPlan
 plan_native_recursive_path(const std::vector<std::string> &path,
                            std::int16_t max_repetition_level,
@@ -145,6 +150,8 @@ plan_native_recursive_path(const std::vector<std::string> &path,
   return plan;
 }
 
+/// Returns the precise blocker preventing a projected Parquet path from native
+/// materialization.
 sanitize::Status
 native_plain_path_materializability_status(const std::vector<std::string> &path,
                                            std::int16_t max_repetition_level,
@@ -154,6 +161,8 @@ native_plain_path_materializability_status(const std::vector<std::string> &path,
       .materializability_status;
 }
 
+/// Reports whether a projected plain Parquet path has no native materialization
+/// blocker.
 bool native_plain_path_is_materializable(const std::vector<std::string> &path,
                                          std::int16_t max_repetition_level,
                                          bool top_level_required) {
@@ -162,6 +171,8 @@ bool native_plain_path_is_materializable(const std::vector<std::string> &path,
       .ok();
 }
 
+/// Reports whether a projected leaf belongs to a supported repeated
+/// native-reader path.
 bool is_native_repeated_path_leaf(const ColumnChunkInfo &column) {
   return column.max_repetition_level > 0 &&
          native_plain_path_is_materializable(column.path_in_schema,
@@ -169,6 +180,8 @@ bool is_native_repeated_path_leaf(const ColumnChunkInfo &column) {
                                              column.top_level_required);
 }
 
+/// Derives list, element, and leaf definition levels from a repeated Parquet
+/// schema path.
 std::vector<std::int16_t>
 generic_list_defined_levels_from_path(const ColumnChunkInfo &column) {
   std::vector<std::int16_t> levels;
@@ -193,6 +206,8 @@ generic_list_defined_levels_from_path(const ColumnChunkInfo &column) {
   return levels;
 }
 
+/// Returns the checked number of materialized leaf values implied by
+/// repeated-level metadata.
 std::int64_t list_leaf_value_count(const ColumnChunkInfo &column) {
   if (!column.repeated_level_layouts.empty()) {
     const auto &deepest_layout = column.repeated_level_layouts.back();
@@ -203,6 +218,8 @@ std::int64_t list_leaf_value_count(const ColumnChunkInfo &column) {
   return -1;
 }
 
+/// Reports whether repeated-level counts fit the native list materialization
+/// model.
 bool list_leaf_value_count_is_materializable(const ColumnChunkInfo &column) {
   const auto element_count = list_leaf_value_count(column);
   return element_count >= 0 &&
@@ -210,6 +227,7 @@ bool list_leaf_value_count_is_materializable(const ColumnChunkInfo &column) {
                               std::numeric_limits<std::int32_t>::max());
 }
 
+/// Returns the definition level at which a repeated leaf's parent is present.
 std::int16_t
 list_leaf_value_parent_defined_level(const ColumnChunkInfo &column) {
   const auto generic_levels = generic_list_defined_levels_from_path(column);
@@ -219,6 +237,8 @@ list_leaf_value_parent_defined_level(const ColumnChunkInfo &column) {
   return column.top_level_required ? std::int16_t{0} : std::int16_t{1};
 }
 
+/// Allocates or extends the bounded validity bitmap for a repeated-level
+/// layout.
 sanitize::Status
 ensure_repeated_layout_validity_capacity(RepeatedLevelLayoutInfo *layout) {
   if (!layout || layout->row_count <= 0) {
@@ -239,6 +259,7 @@ ensure_repeated_layout_validity_capacity(RepeatedLevelLayoutInfo *layout) {
   return {};
 }
 
+/// Increments a repeated-layout counter and rejects 32-bit overflow.
 sanitize::Status increment_i32_counter(std::int32_t *counter,
                                        std::string_view what) {
   if (!counter || *counter == std::numeric_limits<std::int32_t>::max()) {

@@ -1,3 +1,9 @@
+// Allocates recursive Arrow struct, list, and map shells and fills their
+// container validity. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Builds one struct node's validity bitmap in its row, list-element, or
+/// map-entry domain.
 sanitize::Result<NativeRecursiveStructValidity>
 materialize_native_recursive_struct_validity_for_node(
     const RowGroupInfo &row_group, const ColumnChunkInfo &layout_column,
@@ -48,6 +54,8 @@ materialize_native_recursive_struct_validity_for_node(
       "native Parquet reader: recursive struct validity context is invalid");
 }
 
+/// Selects recursive struct layout column for node deterministically from
+/// supported layout and resource candidates.
 sanitize::Result<const ColumnChunkInfo *>
 select_recursive_struct_layout_column_for_node(
     const RowGroupInfo &row_group,
@@ -63,6 +71,8 @@ select_recursive_struct_layout_column_for_node(
                                                  struct_node_index);
 }
 
+/// Builds one list node's Arrow shell and recursively materializes its element
+/// child.
 sanitize::Result<ArrowArray *> materialize_native_recursive_list_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree, std::size_t list_node_index,

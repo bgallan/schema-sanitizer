@@ -1,4 +1,6 @@
-// Parquet page and index metadata used by the bounded footer reader.
+// Declares Parquet page and index metadata used by the bounded footer reader.
+// These definitions support the internal pipeline without expanding its public
+// interface.
 
 #pragma once
 
@@ -21,6 +23,8 @@ enum class NativeValueBufferKind : std::uint8_t {
   byte_stream_split,
 };
 
+/// Returns a stable diagnostic name for a native Parquet value-buffer
+/// representation.
 constexpr std::string_view
 native_value_buffer_kind_name(NativeValueBufferKind kind) noexcept {
   switch (kind) {

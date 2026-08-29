@@ -1,4 +1,6 @@
-// Helpers for plan-ordered JSON row materialization.
+// Declares helpers for plan-ordered JSON row materialization. The pipeline
+// preserves source offsets and ownership while enforcing plan order and memory
+// bounds.
 
 #pragma once
 
@@ -19,14 +21,17 @@ namespace sanitize::internal {
 class JsonOnDemandDoc;
 
 struct PlanOrderedRowScratch {
+
+  /// Creates pool-backed seen-field scratch space for plan-ordered row
+  /// emission.
   explicit PlanOrderedRowScratch(std::pmr::memory_resource *resource)
       : planned_seen(resource) {}
 
   std::pmr::vector<std::uint8_t> planned_seen;
 };
 
-// Discards speculative fields from the current row and returns ownership of
-// parsing to the established worker-local raw JSON materializer.
+/// Discards speculative fields and marks the current row for raw
+/// materialization.
 inline void rewrite_current_row_as_raw(FlatRowBatch *batch) noexcept {
   if (!batch) {
     return;

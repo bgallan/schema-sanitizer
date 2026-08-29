@@ -1,4 +1,7 @@
-// Canonical ABI3 method catalogue. Intentionally included more than once.
+// Defines the canonical ABI3 method catalogue, which is intentionally included
+// more than once. Each inclusion expands the same authoritative method list for
+// a different binding purpose.
+
 #ifndef SCHEMA_SANITIZER_ABI3_METHOD
 #error "Define SCHEMA_SANITIZER_ABI3_METHOD before including this catalogue"
 #endif

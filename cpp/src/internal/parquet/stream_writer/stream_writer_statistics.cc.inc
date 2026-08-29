@@ -1,4 +1,9 @@
+// Computes encoded Parquet minima and maxima with physical- and logical-type
+// ordering rules. This fragment is included by the consolidated writer to
+// isolate format-specific details.
+
 template <class T>
+/// Computes encoded minimum and maximum values from a fixed-width page buffer.
 std::optional<std::pair<std::string, std::string>>
 fixed_width_min_max(std::string_view values) {
   if (values.empty() || values.size() % sizeof(T) != 0) {
@@ -23,6 +28,8 @@ fixed_width_min_max(std::string_view values) {
                                              std::move(max_bytes)};
 }
 
+/// Orders floating values for Parquet statistics, including deterministic
+/// signed-zero handling.
 template <class T> bool floating_less_for_stats(T left, T right) {
   if (left < right) {
     return true;
@@ -35,6 +42,7 @@ template <class T> bool floating_less_for_stats(T left, T right) {
 }
 
 template <class T>
+/// Computes floating-point Parquet statistics while ignoring NaN values.
 std::optional<std::pair<std::string, std::string>>
 floating_min_max(std::string_view values) {
   if (values.empty() || values.size() % sizeof(T) != 0) {
@@ -71,6 +79,8 @@ floating_min_max(std::string_view values) {
                                              std::move(max_bytes)};
 }
 
+/// Returns encoded Boolean minimum and maximum values for a nonempty Parquet
+/// page.
 std::optional<std::pair<std::string, std::string>>
 boolean_min_max(const std::vector<bool> &values) {
   if (values.empty()) {
@@ -90,6 +100,8 @@ boolean_min_max(const std::vector<bool> &values) {
                                              std::move(max_bytes)};
 }
 
+/// Compares two's-complement big-endian decimal bytes using signed numeric
+/// order.
 bool signed_big_endian_bytes_less(std::string_view left,
                                   std::string_view right) {
   const bool left_negative =
@@ -106,6 +118,8 @@ bool signed_big_endian_bytes_less(std::string_view left,
                                       });
 }
 
+/// Computes fixed-length byte-array statistics using signed decimal ordering
+/// when required.
 std::optional<std::pair<std::string, std::string>>
 fixed_len_byte_array_min_max(std::string_view values, std::int32_t byte_width) {
   if (byte_width <= 0 || values.empty() ||
@@ -126,6 +140,8 @@ fixed_len_byte_array_min_max(std::string_view values, std::int32_t byte_width) {
                                              std::string(max_value)};
 }
 
+/// Reads one little-endian 32-bit value from an encoded byte-array length
+/// prefix.
 std::uint32_t read_u32_le(std::string_view data, std::size_t offset) {
   static_assert(std::endian::native == std::endian::little ||
                 std::endian::native == std::endian::big);
@@ -137,6 +153,8 @@ std::uint32_t read_u32_le(std::string_view data, std::size_t offset) {
   return value;
 }
 
+/// Orders encoded byte-array values by their logical payload rather than their
+/// length prefixes.
 bool byte_array_less(std::string_view left, std::string_view right) {
   return std::lexicographical_compare(left.begin(), left.end(), right.begin(),
                                       right.end(), [](char lhs, char rhs) {
@@ -145,6 +163,7 @@ bool byte_array_less(std::string_view left, std::string_view right) {
                                       });
 }
 
+/// Computes lexicographic statistics for fixed-size binary Parquet values.
 std::optional<std::pair<std::string, std::string>>
 fixed_size_binary_min_max(std::string_view values, std::int32_t byte_width) {
   if (byte_width <= 0 || values.empty() ||
@@ -165,6 +184,8 @@ fixed_size_binary_min_max(std::string_view values, std::int32_t byte_width) {
                                              std::string(max_value)};
 }
 
+/// Reports whether a writer leaf uses variable- or fixed-length byte-array
+/// storage.
 bool is_byte_array_kind(jsonl::JsonlKind kind) {
   return kind == jsonl::JsonlKind::kString ||
          kind == jsonl::JsonlKind::kLargeString ||
@@ -172,6 +193,8 @@ bool is_byte_array_kind(jsonl::JsonlKind kind) {
          kind == jsonl::JsonlKind::kLargeBinary;
 }
 
+/// Returns the byte width of fixed-size dictionary values, when the schema
+/// provides one.
 std::optional<std::size_t> fixed_dictionary_value_width(const ParquetNode &node,
                                                         jsonl::JsonlKind kind) {
   switch (kind) {
@@ -207,6 +230,8 @@ std::optional<std::size_t> fixed_dictionary_value_width(const ParquetNode &node,
   }
 }
 
+/// Computes logical minimum and maximum byte-array payloads for Parquet
+/// statistics.
 std::optional<std::pair<std::string, std::string>>
 byte_array_min_max(std::string_view values) {
   std::optional<std::string_view> min_value;
@@ -231,6 +256,8 @@ byte_array_min_max(std::string_view values) {
   return std::pair<std::string, std::string>{std::string(*min_value),
                                              std::string(*max_value)};
 }
+/// Computes Parquet-compatible encoded statistics for the selected physical and
+/// logical type.
 std::optional<std::pair<std::string, std::string>>
 encoded_min_max_for_column(const LeafColumn &column,
                            const ColumnPageData &page_data) {

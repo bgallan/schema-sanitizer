@@ -1,3 +1,9 @@
+// Reassembles BYTE_STREAM_SPLIT lanes into fixed-width values and bounded
+// diagnostic previews. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Returns the physical width supported by BYTE_STREAM_SPLIT, or no value for
+/// other types.
 std::optional<std::int32_t>
 byte_stream_split_width(const ColumnChunkInfo &column) {
   if (!column.has_physical_type) {
@@ -12,6 +18,8 @@ byte_stream_split_width(const ColumnChunkInfo &column) {
   return std::nullopt;
 }
 
+/// Builds a bounded diagnostic representation of byte stream split values
+/// without retaining full page data.
 std::vector<std::string> preview_byte_stream_split_values(
     std::string_view values, const ColumnChunkInfo &column,
     std::int32_t expected_values, std::int32_t width) {
@@ -38,6 +46,8 @@ std::vector<std::string> preview_byte_stream_split_values(
   return out;
 }
 
+/// Reassembles one BYTE_STREAM_SPLIT page and records its decoded values and
+/// preview.
 sanitize::Status decode_byte_stream_split_page(std::string_view payload,
                                                const ColumnChunkInfo &column,
                                                PageHeaderInfo *page) {

@@ -1,5 +1,9 @@
-// Decodes DELTA_LENGTH_BYTE_ARRAY data pages.
+// Reconstructs DELTA_LENGTH_BYTE_ARRAY lengths and slices their concatenated
+// value payload. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
+/// Decodes one DELTA_LENGTH_BYTE_ARRAY page into diagnostic and materialization
+/// values.
 sanitize::Status
 decode_delta_length_byte_array_page(std::string_view payload,
                                     const ColumnChunkInfo &column,

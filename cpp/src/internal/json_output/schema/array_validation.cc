@@ -1,4 +1,6 @@
 // Validates Arrow C arrays before the JSONL writer dereferences their buffers.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/schema/model.hh"
 #include "internal/memory/memory_budget.hh"
@@ -16,6 +18,8 @@ namespace {
 constexpr std::int64_t kMaxArrowBatchRows = std::int64_t{1} << 24;
 constexpr std::size_t kMaxArrowValidationDepth = 64;
 
+/// Computes an Arrow array slice's exclusive logical index with overflow
+/// checks.
 sanitize::Status checked_logical_end(const ArrowArray &array,
                                      std::int64_t offset, std::int64_t length,
                                      std::int64_t *absolute_begin,
@@ -48,6 +52,8 @@ sanitize::Status checked_logical_end(const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Rejects a logical slot endpoint whose fixed-width byte range exceeds
+/// configured limits.
 sanitize::Status validate_byte_endpoint(std::int64_t slots, std::size_t width,
                                         std::string_view context,
                                         const ArrayValidationLimits &limits) {
@@ -65,6 +71,8 @@ sanitize::Status validate_byte_endpoint(std::int64_t slots, std::size_t width,
   return sanitize::Status::OK();
 }
 
+/// Returns the byte width of an Arrow field whose values use fixed-size
+/// physical storage.
 std::size_t fixed_width_bytes(const JsonlField &field) noexcept {
   switch (field.kind) {
   case JsonlKind::kInt8:
@@ -113,12 +121,15 @@ std::size_t fixed_width_bytes(const JsonlField &field) noexcept {
   }
 }
 
+/// Returns the byte width of a supported Arrow dictionary index type.
 std::size_t dictionary_index_width(JsonlKind kind) noexcept {
   JsonlField index_field;
   index_field.kind = kind;
   return fixed_width_bytes(index_field);
 }
 
+/// Returns the Arrow buffer count required for the selected native writer field
+/// kind.
 std::int64_t expected_buffers(const JsonlField &field) noexcept {
   switch (field.kind) {
   case JsonlKind::kStruct:
@@ -139,6 +150,8 @@ std::int64_t expected_buffers(const JsonlField &field) noexcept {
   }
 }
 
+/// Validates slice bounds, buffer shape, null metadata, and validity-bitmap
+/// size.
 sanitize::Status validate_common(const JsonlField &field,
                                  const ArrowArray &array, std::int64_t offset,
                                  std::int64_t length,
@@ -175,6 +188,8 @@ sanitize::Status validate_common(const JsonlField &field,
 }
 
 template <class Offset>
+/// Validates an Arrow offset interval and returns its first and final data
+/// positions.
 sanitize::Result<std::pair<std::int64_t, std::int64_t>>
 validate_offsets(const ArrowArray &array, std::int64_t absolute_begin,
                  std::int64_t absolute_end, std::string_view context,
@@ -221,6 +236,8 @@ validate_offsets(const ArrowArray &array, std::int64_t absolute_begin,
 }
 
 template <class Index>
+/// Verifies that every non-null dictionary index refers to an existing
+/// dictionary value.
 sanitize::Status validate_dictionary_indices(const ArrowArray &array,
                                              std::int64_t absolute_begin,
                                              std::int64_t length,
@@ -259,6 +276,8 @@ sanitize::Status validate_dictionary_indices(const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Recursively validates an Arrow array slice and any dictionary or nested
+/// children.
 sanitize::Status
 validate_array_slice_impl(const JsonlField &field, const ArrowArray &array,
                           std::int64_t offset, std::int64_t length,

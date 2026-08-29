@@ -1,4 +1,6 @@
 // Implements one-parse, disjoint-column packet ownership and Arrow reparenting.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/column_partition.hh"
 
@@ -23,6 +25,8 @@ constexpr std::size_t kMinimumPartitionColumns = 128;
 constexpr std::size_t kMinimumColumnsPerGroup = 2;
 constexpr std::size_t kMaximumColumnGroups = 8;
 
+/// Returns the relative materialization weight used to balance one planned
+/// Arrow column.
 [[nodiscard]] constexpr std::size_t
 column_conversion_cost(const sanitize::ColumnPlan &column) noexcept {
   switch (column.logical_type.kind) {
@@ -45,12 +49,14 @@ column_conversion_cost(const sanitize::ColumnPlan &column) noexcept {
   return 1;
 }
 
+/// Adds partition costs and clamps overflow to the balancing score maximum.
 [[nodiscard]] constexpr std::size_t
 saturating_add_cost(std::size_t left, std::size_t right) noexcept {
   const auto max = std::numeric_limits<std::size_t>::max();
   return right > max - left ? max : left + right;
 }
 
+/// Sums planned conversion cost across a candidate contiguous column partition.
 [[nodiscard]] std::size_t range_cost(std::span<const std::size_t> prefix,
                                      std::size_t first,
                                      std::size_t end) noexcept {
@@ -60,11 +66,14 @@ saturating_add_cost(std::size_t left, std::size_t right) noexcept {
   return prefix[end] - prefix[first];
 }
 
+/// Returns a candidate column range's absolute cost difference from the
+/// balancing target.
 [[nodiscard]] std::size_t distance_from_target(std::size_t value,
                                                std::size_t target) noexcept {
   return value >= target ? value - target : target - value;
 }
 
+/// Reports whether a planned column has no nested child materialization work.
 [[nodiscard]] bool
 is_scalar_column(const sanitize::ColumnPlan &column) noexcept {
   const auto kind = column.logical_type.kind;
@@ -73,6 +82,7 @@ is_scalar_column(const sanitize::ColumnPlan &column) noexcept {
          kind != sanitize::LogicalKind::kList;
 }
 
+/// Reports whether fixed-width scalar work dominates a column-partition plan.
 [[nodiscard]] bool
 is_fixed_width_dominant(const sanitize::CompiledPlan &plan) noexcept {
   const auto utf8_columns = static_cast<std::size_t>(std::count_if(
@@ -82,6 +92,8 @@ is_fixed_width_dominant(const sanitize::CompiledPlan &plan) noexcept {
   return utf8_columns * 4 < plan.columns.size();
 }
 
+/// Builds the canonical strict-schema error for an unexpected or missing source
+/// field.
 [[nodiscard]] ColumnPartitionFailure strict_failure(std::size_t row_index,
                                                     std::string field) {
   ColumnPartitionFailure failure;
@@ -96,10 +108,13 @@ is_fixed_width_dominant(const sanitize::CompiledPlan &plan) noexcept {
 
 } // namespace
 
+/// Captures one validated row and the column range assigned to a partition
+/// worker.
 ColumnPartitionInput::ColumnPartitionInput(
     std::shared_ptr<PoolResource> input_resource)
     : resource(std::move(input_resource)), field_indices(resource.get()) {}
 
+/// Returns the source-field indexes mapped to one planned column partition.
 std::span<const std::int32_t>
 ColumnPartitionInput::row_field_indices(std::size_t row_index) const noexcept {
   if (column_count == 0 || row_index >= owned.rows.size()) {
@@ -114,6 +129,8 @@ ColumnPartitionInput::row_field_indices(std::size_t row_index) const noexcept {
                                        column_count);
 }
 
+/// Reports whether a compiled field is safe to materialize in an independent
+/// column range.
 bool is_column_partition_candidate(
     const sanitize::CompiledPlan &plan) noexcept {
   return plan.columns.size() >= kMinimumPartitionColumns &&
@@ -121,12 +138,16 @@ bool is_column_partition_candidate(
          std::ranges::all_of(plan.columns, &is_scalar_column);
 }
 
+/// Reports whether operation settings permit the column-partitioned
+/// materialization path.
 bool column_partition_enabled(const sanitize::CompiledPlan &plan,
                               const sanitize::PreparedOptions &opts) noexcept {
   return opts.spec.on_error == sanitize::OnErrorPolicy::kStop &&
          is_column_partition_candidate(plan);
 }
 
+/// Reports whether plan width, row count, and worker policy justify column
+/// partitioning.
 bool should_use_column_partition(const sanitize::CompiledPlan &plan,
                                  const sanitize::PreparedOptions &opts,
                                  std::int64_t effective_workers,
@@ -148,6 +169,7 @@ bool should_use_column_partition(const sanitize::CompiledPlan &plan,
   return micro_by_rows || micro_by_bytes;
 }
 
+/// Derives the bounded row window assigned to one column-partition packet.
 std::size_t column_partition_packet_window(std::size_t worker_count,
                                            std::size_t group_count) noexcept {
   const auto groups = std::max<std::size_t>(1, group_count);
@@ -156,6 +178,8 @@ std::size_t column_partition_packet_window(std::size_t worker_count,
   return workers >= 16 ? 2 : std::min<std::size_t>(2, packets);
 }
 
+/// Balances contiguous planned columns into stable worker ranges by conversion
+/// cost.
 sanitize::Result<std::vector<ColumnPartitionRange>>
 make_column_partition_ranges(const sanitize::CompiledPlan &plan,
                              std::size_t worker_count) {
@@ -237,6 +261,7 @@ make_column_partition_ranges(const sanitize::CompiledPlan &plan,
   return ranges;
 }
 
+/// Builds a bounded subplan containing only one partition's root fields.
 sanitize::Result<std::shared_ptr<const sanitize::CompiledPlan>>
 make_column_partition_plan(const sanitize::CompiledPlan &plan,
                            const ColumnPartitionRange &range) {
@@ -272,6 +297,7 @@ make_column_partition_plan(const sanitize::CompiledPlan &plan,
   }
 }
 
+/// Captures one source row and token state for disjoint column-range workers.
 sanitize::Result<std::shared_ptr<const ColumnPartitionInput>>
 make_column_partition_input(OwnedRowPacket &&owned,
                             const sanitize::CompiledPlan &plan,
@@ -370,6 +396,8 @@ make_column_partition_input(OwnedRowPacket &&owned,
   return std::shared_ptr<const ColumnPartitionInput>(std::move(input));
 }
 
+/// Reparents disjoint worker arrays into one root array in logical column
+/// order.
 sanitize::Status merge_column_partition_arrays(
     std::span<std::shared_ptr<sanitize::CArrayGuard>> groups,
     const std::shared_ptr<PoolResource> &pool, ArrowArray *out) {
@@ -450,6 +478,7 @@ sanitize::Status merge_column_partition_arrays(
   return sanitize::Status::OK();
 }
 
+/// Orders partition failures by source row and then by stable column range.
 bool column_partition_failure_precedes(
     const ColumnPartitionFailure &candidate,
     const ColumnPartitionFailure &current) noexcept {

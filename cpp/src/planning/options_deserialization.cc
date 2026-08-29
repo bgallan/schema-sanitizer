@@ -1,4 +1,7 @@
-// Stable SZOPT envelope validation and deserialization entry point.
+// Validates and deserializes the stable SZOPT option envelope.
+// The entry point checks framing and version contracts before delegating the
+// payload to typed field decoders and final option preparation.
+
 #include "sanitize/options/options_io.hh"
 
 #include <cstddef>

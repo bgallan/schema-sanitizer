@@ -1,4 +1,6 @@
 // Implements version-family value routing for row materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/conversion/variants.hh"
 
@@ -7,7 +9,7 @@
 namespace sanitize::internal {
 namespace {
 
-// Scores how directly one scalar value fits a planned scalar type.
+/// Scores how directly one scalar value fits a planned scalar type.
 int scalar_compatibility_score(const sanitize::ColumnPlan &plan,
                                sanitize::ValueView value,
                                const sanitize::PreparedOptions &opts) noexcept {
@@ -91,7 +93,7 @@ int scalar_compatibility_score(const sanitize::ColumnPlan &plan,
   return 0;
 }
 
-// Chooses one deterministic destination from a field version family.
+/// Chooses one deterministic destination from a field version family.
 template <typename GetSibling>
 const sanitize::ColumnPlan *
 preferred_variant(const sanitize::ColumnPlan &column, sanitize::ValueView value,

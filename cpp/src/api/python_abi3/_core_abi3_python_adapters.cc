@@ -1,9 +1,10 @@
 /*
- * Python ABI3 error, path, buffer, and signal adapters.
+ * Implements Python ABI3 error, path, buffer, and signal adapters.
  *
  * This file provides shared error translation and Python value adapters used by
  * ABI3 binding entry points.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -13,6 +14,7 @@
 
 namespace core_abi3_internal {
 
+/// Translates a failed native status into the corresponding Python exception.
 void raise_status_error(const sanitize::Status &status) {
   if (PyErr_Occurred()) {
     return;
@@ -38,8 +40,8 @@ void raise_status_error(const sanitize::Status &status) {
                code, message.c_str());
 }
 
-// Convert a Python path-like object to filesystem-encoded bytes.
-// Returns a new reference to a PyBytes object on success.
+/// Converts a Python path-like object to filesystem-encoded bytes.
+/// Returns a new reference to a PyBytes object on success.
 PyObject *fsencode_path(PyObject *obj) {
   // PyUnicode_FSConverter handles str, bytes, and os.PathLike.
   PyObject *out = nullptr;
@@ -50,13 +52,8 @@ PyObject *fsencode_path(PyObject *obj) {
   return out;
 }
 
-// Extract a (ptr,len) view from a bytes-or-str object.
-//
-// Accepted surface:
-// - bytes: used as-is
-// - str: UTF-8 view
-//
-// Returns 1 on success, 0 on error (with an exception set).
+/// Exposes bytes as-is or a string's UTF-8 storage through a pointer and
+/// length. Returns 1 on success or 0 with a Python exception set.
 int bytes_or_str_view(PyObject *obj, const char **out_ptr,
                       Py_ssize_t *out_len) {
   if (!out_ptr || !out_len) {
@@ -90,8 +87,9 @@ int bytes_or_str_view(PyObject *obj, const char **out_ptr,
   return 0;
 }
 
-// Set tuple item using limited-API function and steal the incoming reference
-// on success. On failure, decref item and leave an exception set.
+/// Sets a tuple item through the limited API and steals its reference on
+/// success. On failure, decrements the item reference and leaves a Python
+/// exception set.
 int tuple_set_item_steal(PyObject *tup, Py_ssize_t index, PyObject *item) {
   if (!item)
     return 0;
@@ -102,13 +100,8 @@ int tuple_set_item_steal(PyObject *tup, Py_ssize_t index, PyObject *item) {
   return 1;
 }
 
-// Read-only bytes-like view for options bytes.
-//
-// This intentionally materializes a bytes object via PyBytes_FromObject so the
-// caller owns a stable view independent from the source object.
-//
-// Returns 1 on success, 0 on error (with an exception set). The caller owns
-// a new reference in out_owner and must Py_DECREF it when done.
+/// Materializes a bytes-like object and exposes its stable read-only storage.
+/// Returns 1 with a new reference in `out_owner`, or 0 with an exception set.
 int readonly_buffer_view(PyObject *obj, const std::uint8_t **out_ptr,
                          Py_ssize_t *out_len, PyObject **out_owner) {
   if (!out_ptr || !out_len || !out_owner) {
@@ -141,8 +134,12 @@ int readonly_buffer_view(PyObject *obj, const std::uint8_t **out_ptr,
   return 1;
 }
 
+/// Polls Python signal state from native work and translates interruptions into
+/// status.
 bool check_python_signals() { return PyErr_CheckSignals() == 0; }
 
+/// Attaches Python signal polling to the execution context used by native
+/// operations.
 void install_python_interrupt_check(NativeContext *ctx) {
   if (!ctx || !ctx->ctx) {
     return;

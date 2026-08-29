@@ -1,4 +1,10 @@
-/* Python ABI3 Arrow-source registry probe methods. */
+/*
+ * Implements Python ABI3 Arrow-source registry probe methods.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -18,6 +24,8 @@
 namespace core_abi3_internal {
 using namespace arrow_registry_detail;
 
+/// Merges ordered Arrow-source schemas into registry JSON and packs probe
+/// diagnostics.
 PyObject *py_context_registry_probe_from_arrow_sources(PyObject *,
                                                        PyObject *args) {
   PyObject *ctx_obj = nullptr;
@@ -72,6 +80,7 @@ PyObject *py_context_registry_probe_from_arrow_sources(PyObject *,
   return pack_registry_probe(merged, diagnostics);
 }
 
+/// Merges Arrow-source schemas against an existing compiled registry state.
 PyObject *
 py_context_registry_probe_from_arrow_sources_registry_state(PyObject *,
                                                             PyObject *args) {

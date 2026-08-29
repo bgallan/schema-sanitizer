@@ -1,5 +1,9 @@
-// ---- struct_rows ----
+// Builds struct, list, and map validity and offset layouts from repeated-level
+// windows. This fragment is included by the consolidated footer reader inside
+// its private implementation namespace.
 
+/// Builds row-level struct validity at one definition level and returns the
+/// null count.
 sanitize::Result<std::int64_t> materialize_struct_validity_at_definition_level(
     const ColumnChunkInfo &column, const NativeFlatRowWindow &window,
     std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
@@ -75,6 +79,8 @@ struct NativeRecursiveMapEntryLevelContext {
   std::int16_t entry_repetition_level = 1;
 };
 
+/// Finds the definition and repetition levels that identify present map
+/// entries.
 sanitize::Result<NativeRecursiveMapEntryLevelContext>
 native_recursive_map_entry_level_context(const ColumnChunkInfo &column,
                                          std::size_t map_layout_index) {
@@ -89,6 +95,7 @@ native_recursive_map_entry_level_context(const ColumnChunkInfo &column,
       static_cast<std::int16_t>(map_layout_index + 1)};
 }
 
+/// Derives map-entry struct validity from definition and repetition levels.
 sanitize::Result<std::int64_t> materialize_map_entry_struct_validity_at_levels(
     const ColumnChunkInfo &column,
     NativeRecursiveMapEntryLevelContext entry_levels,
@@ -161,6 +168,8 @@ sanitize::Result<std::int64_t> materialize_map_entry_struct_validity_at_levels(
 
 // ---- list_elements ----
 
+/// Builds validity for struct elements inside a list and returns their null
+/// count.
 sanitize::Result<std::int64_t>
 materialize_list_struct_child_validity_at_definition_level(
     const ColumnChunkInfo &column, std::size_t list_layout_index,
@@ -258,6 +267,8 @@ struct NativeRecursiveListArrayLayout {
   NativeRepeatedLevelLayoutWindow repeated_layout;
 };
 
+/// Slices a map column's repeated-level layout to the requested flat row
+/// window.
 sanitize::Result<NativeRecursiveMapArrayLayout>
 native_recursive_map_array_layout(const ColumnChunkInfo &column,
                                   std::size_t layout_index,
@@ -267,6 +278,8 @@ native_recursive_map_array_layout(const ColumnChunkInfo &column,
   return NativeRecursiveMapArrayLayout{std::move(layout)};
 }
 
+/// Slices a list column's repeated-level layout to the requested flat row
+/// window.
 sanitize::Result<NativeRecursiveListArrayLayout>
 native_recursive_list_array_layout(const ColumnChunkInfo &column,
                                    std::size_t layout_index,
@@ -276,6 +289,8 @@ native_recursive_list_array_layout(const ColumnChunkInfo &column,
   return NativeRecursiveListArrayLayout{std::move(layout)};
 }
 
+/// Configures native recursive list array buffers and child pointers under the
+/// Arrow C Data ownership contract.
 sanitize::Status configure_native_recursive_list_array(
     NativeParquetListArray *list_array,
     const NativeRepeatedLevelLayoutWindow &layout, ArrowArray *child) {
@@ -289,6 +304,8 @@ struct NativeRecursiveStructValidity {
   std::int64_t null_count = 0;
 };
 
+/// Slices map-entry struct validity to the elements selected by a flat row
+/// window.
 sanitize::Result<NativeRecursiveStructValidity>
 materialize_native_recursive_map_value_struct_validity(
     const ColumnChunkInfo &column, std::size_t map_layout_index,
@@ -312,6 +329,8 @@ materialize_native_recursive_map_value_struct_validity(
   return NativeRecursiveStructValidity{range.count, null_count};
 }
 
+/// Slices list-element struct validity to the elements selected by a flat row
+/// window.
 sanitize::Result<NativeRecursiveStructValidity>
 materialize_native_recursive_list_element_struct_validity(
     const ColumnChunkInfo &column, std::size_t list_layout_index,

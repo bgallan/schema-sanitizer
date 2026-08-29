@@ -1,4 +1,6 @@
-// Path-source schema probing and registry merge orchestration.
+// Implements path-source schema probing and registry merge orchestration. The
+// helpers preserve source order, format grouping, and bounded ownership across
+// multi-file operations.
 
 #include "api/python_abi3/path_sources/path_sources.hh"
 
@@ -27,6 +29,7 @@
 
 namespace core_abi3_internal {
 
+/// Builds and prepares the format-specific frontend for one path source.
 sanitize::Result<sanitize::PreparedIngest>
 prepare_path_source_ingest(NativeContext *ctx,
                            const sanitize::PreparedOptionsPtr &prepared,
@@ -44,11 +47,16 @@ prepare_path_source_ingest(NativeContext *ctx,
 }
 
 namespace {
+
+/// Retries a failed grouped JSON probe per file only for skippable source
+/// errors.
 bool json_group_failure_should_retry_per_source(
     const sanitize::Status &status) {
   return status.message().contains("trailing characters after top-level array");
 }
 
+/// Builds and prepares one frontend over a validated range of compatible path
+/// sources.
 sanitize::Result<sanitize::PreparedIngest>
 prepare_path_source_group_ingest(NativeContext *ctx,
                                  const sanitize::PreparedOptionsPtr &prepared,
@@ -82,6 +90,8 @@ prepare_path_source_group_ingest(NativeContext *ctx,
 
 } // namespace
 
+/// Merges path source schemas while preserving deterministic field order and
+/// diagnostics.
 sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
     NativeContext *ctx, const std::vector<PathSourceSpec> &sources,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,

@@ -1,4 +1,7 @@
-// Shared state and operations for Arrow-source registry sink methods.
+// Declares shared state and operations for Arrow-source registry sink methods.
+// The routines preserve source order and Arrow ownership while applying
+// compiled registry plans.
+
 #pragma once
 
 #include <cstddef>
@@ -36,9 +39,16 @@ namespace core_abi3_internal::arrow_registry_detail {
 
 class GilGuard {
 public:
+  /// Acquires the Python GIL for the duration of a native registry callback.
   GilGuard() : state_(PyGILState_Ensure()) {}
+
+  /// Disables copying so the acquired GIL state is released exactly once.
   GilGuard(const GilGuard &) = delete;
+
+  /// Disables copy assignment so GIL ownership cannot be duplicated.
   GilGuard &operator=(const GilGuard &) = delete;
+
+  /// Restores the Python thread state captured when the guard was created.
   ~GilGuard() { PyGILState_Release(state_); }
 
 private:

@@ -1,4 +1,6 @@
-// Defines prepared ingest and stream result ownership types.
+// Defines prepared-ingest state and stream-result ownership types.
+// Move-only handles keep compiled plans, frontends, execution resources, and
+// Arrow C stream releases authoritative across pipeline handoffs.
 
 #pragma once
 

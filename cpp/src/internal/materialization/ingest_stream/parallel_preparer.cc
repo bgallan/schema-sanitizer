@@ -1,4 +1,6 @@
 // Implements worker-local packet preparation and parser arenas.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_preparer_internal.hh"
 
@@ -21,6 +23,8 @@ namespace sanitize::internal {
 
 namespace {
 
+/// Reports whether every planned root field can use direct scalar
+/// materialization.
 [[nodiscard]] bool is_flat_scalar_plan(const CompiledPlan &plan) noexcept {
   return std::none_of(
       plan.columns.begin(), plan.columns.end(), [](const auto &column) {
@@ -29,6 +33,7 @@ namespace {
       });
 }
 
+/// Adds one prepared packet's ingest counters to the caller diagnostics.
 void merge_packet_diagnostics(IngestDiagnostics *target,
                               const IngestDiagnostics &delta) noexcept {
   if (target) {
@@ -38,6 +43,8 @@ void merge_packet_diagnostics(IngestDiagnostics *target,
 
 } // namespace
 
+/// Validates dependencies and constructs the worker-local preparer with
+/// budgeted parser state.
 sanitize::Result<std::shared_ptr<ParallelRowPreparer>>
 ParallelRowPreparer::Make(std::string_view frontend_name,
                           std::shared_ptr<const CompiledPlan> plan,
@@ -123,6 +130,8 @@ ParallelRowPreparer::Make(std::string_view frontend_name,
   return preparer;
 }
 
+/// Releases worker-local parser arenas and builders used for packet
+/// preparation.
 ParallelRowPreparer::~ParallelRowPreparer() = default;
 
 sanitize::Result<PreparedRowsPacket>

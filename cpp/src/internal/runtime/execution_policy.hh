@@ -1,4 +1,7 @@
-// Derives one immutable execution policy from mode, memory, and host CPUs.
+// Derives one immutable execution policy from mode, memory, and visible
+// CPUs. The policy consistently bounds workers, queue widths, and
+// retained-byte caps.
+
 #pragma once
 
 #include "internal/memory/memory_budget.hh"
@@ -49,10 +52,13 @@ struct ExecutionPolicy {
       ExecutionFallbackReason::kSingleRequested;
 };
 
+/// Returns available CPU capacity as a bounded worker-count value.
 [[nodiscard]] inline std::int64_t available_cpu_count() noexcept {
   return available_cpu_capacity();
 }
 
+/// Derives worker counts and memory partitions using a caller-supplied
+/// CPU capacity.
 [[nodiscard]] constexpr ExecutionPolicy
 execution_policy_from(sanitize::ThreadingMode mode,
                       std::int64_t requested_memory_limit,
@@ -124,10 +130,9 @@ execution_policy_from(sanitize::ThreadingMode mode,
   return out;
 }
 
-// Narrows one stage without changing its aggregate worker-arena budget. This
-// keeps stage-specific worker ceilings from accidentally increasing memory
-// while allowing fewer workers to retain the per-worker headroom that was
-// already reserved by the host-wide policy.
+/// Narrows one stage without increasing its aggregate worker-arena budget.
+/// Fewer workers retain the per-worker headroom already reserved by the
+/// host-wide policy, so stage ceilings cannot increase memory.
 [[nodiscard]] constexpr ExecutionPolicy execution_policy_with_worker_ceiling(
     const ExecutionPolicy &policy, std::int64_t worker_ceiling,
     std::int64_t queue_slots_per_worker = 2) noexcept {
@@ -180,6 +185,8 @@ execution_policy_from(sanitize::ThreadingMode mode,
   return out;
 }
 
+/// Derives worker counts from current CPU capacity and
+/// process-memory headroom.
 [[nodiscard]] inline ExecutionPolicy
 execution_policy_from(sanitize::ThreadingMode mode,
                       std::int64_t requested_memory_limit) noexcept {
@@ -196,10 +203,9 @@ execution_policy_from(sanitize::ThreadingMode mode,
   return execution_policy_with_worker_ceiling(policy, headroom_workers);
 }
 
-// Narrows a stage to the amount of independent work currently available. A
-// one-item stage remains strictly inline even when the operation arena exposes
-// more CPUs. Aggregate worker-arena memory is preserved while queue/reorder
-// windows shrink with the useful worker count.
+/// Narrows a stage to its independent work items; a one-item stage remains
+/// strictly inline even when the operation arena exposes more CPUs. Aggregate
+/// worker-arena memory stays fixed while queue and reorder windows shrink.
 [[nodiscard]] constexpr ExecutionPolicy execution_policy_for_work_items(
     const ExecutionPolicy &policy, std::int64_t work_items,
     std::int64_t minimum_items_per_worker = 1,

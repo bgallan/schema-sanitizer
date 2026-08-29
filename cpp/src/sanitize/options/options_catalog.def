@@ -1,4 +1,7 @@
-// Single source of truth for sanitize::Options fields.
+// Defines the macro-driven source of truth for every sanitize::Options field.
+// Repeated inclusion generates native storage, defaults, catalogs, and bindings
+// from one stable public option inventory.
+
 //
 // Include this file multiple times with a macro definition:
 //

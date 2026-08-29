@@ -1,10 +1,12 @@
 /*
- * Python ABI3 sink wrapper entry points.
+ * Implements Python ABI3 sink wrapper entry points.
  *
  * This file converts Python Arrow C Stream inputs into native context-to-sink
- * calls and wraps the resulting Arrow C Stream capsules. Text/path/reader
- * inputs are handled by the source-selected wrapper.
+ * calls and wraps the resulting Arrow C Stream capsules.
+ *
+ * Text/path/reader inputs are handled by the source-selected wrapper.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -18,6 +20,8 @@
 
 namespace core_abi3_internal {
 
+/// Runs a Python Arrow stream through a native sink and packs stream
+/// diagnostics.
 PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *sink_name = nullptr;

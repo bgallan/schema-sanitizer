@@ -1,4 +1,6 @@
-// Provides stable field-name hash helpers used by planning and lookup.
+// Provides stable field-name hashes used by planning and lookup tables.
+// Fixed algorithms keep serialized plans and in-memory dispatch keys consistent
+// across processes and compiler implementations.
 
 #pragma once
 
@@ -7,12 +9,13 @@
 
 namespace sanitize::detail {
 
-// Returns the ASCII lowercase form of a byte.
+/// Returns the ASCII lowercase form of a byte.
 static inline unsigned char ascii_lower(unsigned char c) noexcept {
   return (c >= 'A' && c <= 'Z') ? static_cast<unsigned char>(c + 32) : c;
 }
 
-// FNV-1a 64-bit. Reserve 0 as an empty sentinel.
+/// Computes a 64-bit FNV-1a hash, remapping zero because it is reserved as
+/// empty.
 static inline uint64_t hash_key64(std::string_view s) noexcept {
   uint64_t h = 14695981039346656037ull;
   for (unsigned char c : s) {
@@ -22,7 +25,7 @@ static inline uint64_t hash_key64(std::string_view s) noexcept {
   return h == 0 ? 1ull : h;
 }
 
-// Case-folded (ASCII) hash used for boolean token matching without allocating.
+/// Computes an ASCII-case-folded FNV-1a hash without allocating.
 static inline uint64_t hash_key64_casefold(std::string_view s) noexcept {
   uint64_t h = 14695981039346656037ull;
   for (unsigned char c : s) {

@@ -1,3 +1,7 @@
+// Fuzzes bounded CSV scanning, cell parsing, and frontend materialization.
+// Input bytes select delimiters, policies, threading, chunking, and memory limits
+// while a fixed compiled plan keeps result traversal deterministic.
+
 #include "frontends/builtin_frontends.hh"
 #include "internal/memory/arena.hh"
 #include "internal/memory/memory_pool.hh"
@@ -21,6 +25,7 @@
 
 namespace {
 
+/// Returns the immutable two-column plan shared by CSV fuzz iterations.
 const sanitize::CompiledPlan &fuzz_compiled_plan() {
   static const sanitize::CompiledPlan plan = [] {
     sanitize::LogicalSchema schema;
@@ -45,6 +50,7 @@ const sanitize::CompiledPlan &fuzz_compiled_plan() {
   return plan;
 }
 
+/// Verifies the exact accepted and rejected CSV cell-count boundary once.
 void verify_csv_cell_limit_boundary() {
   static const bool verified = [] {
     sanitize::internal::BumpArena arena(nullptr, 4096U);
@@ -70,6 +76,7 @@ void verify_csv_cell_limit_boundary() {
   (void)verified;
 }
 
+/// Derives a bounded operation memory limit from the fuzz input prefix.
 std::int64_t fuzz_memory_limit(const std::uint8_t *data, std::size_t size) {
   constexpr std::int64_t kMinimum = 64LL * 1024LL;
   constexpr std::int64_t kSpan = 8LL * 1024LL * 1024LL - kMinimum;
@@ -81,6 +88,7 @@ std::int64_t fuzz_memory_limit(const std::uint8_t *data, std::size_t size) {
   return kMinimum + static_cast<std::int64_t>(selector % kSpan);
 }
 
+/// Runs bounded CSV frontend batches under input-selected policies.
 void consume_csv_frontend(const std::uint8_t *data, std::size_t size,
                           char delimiter) {
   sanitize::Options options;
@@ -127,6 +135,7 @@ void consume_csv_frontend(const std::uint8_t *data, std::size_t size,
 
 } // namespace
 
+/// Exercises CSV scanners, parsers, and frontend materialization for one input.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size) {
   verify_csv_cell_limit_boundary();

@@ -1,4 +1,7 @@
 // Defines compact immutable packet-local evidence for parallel inference.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
+
 #pragma once
 
 #include "internal/inference/statistics/state.hh"
@@ -29,6 +32,7 @@ namespace sanitize::internal {
 // avoid one allocator node per distinct key.
 class InferenceEvidenceKeys final {
 public:
+  /// Initializes packet-local key storage with the operation memory resource.
   explicit InferenceEvidenceKeys(std::pmr::memory_resource *resource)
       : bytes_(resource), entries_(resource), slots_(resource) {}
 
@@ -36,6 +40,7 @@ public:
   [[nodiscard]] std::string_view View(std::uint32_t index) const noexcept;
   [[nodiscard]] StrId Resolve(std::uint32_t index,
                               StringInterner *strings) const;
+  /// Returns the number of packet-local keys currently stored by the interner.
   [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
 
 private:
@@ -46,10 +51,15 @@ private:
     mutable StrId resolved_id = std::numeric_limits<StrId>::max();
   };
 
+  /// Grows and rebuilds the open-addressed slot table for the required key
+  /// count.
   sanitize::Status EnsureCapacity(std::size_t required_entries);
+  /// Inserts one entry index into an open-addressed slot table.
   void InsertSlot(std::pmr::vector<std::uint32_t> *slots,
                   std::uint32_t entry_index) const noexcept;
+  /// Returns a stable nonzero 32-bit hash for borrowed key bytes.
   [[nodiscard]] std::uint32_t Hash(std::string_view value) const noexcept;
+  /// Finds a matching key entry or returns the sentinel index when absent.
   [[nodiscard]] std::uint32_t Find(std::string_view value,
                                    std::uint32_t hash) const noexcept;
 
@@ -69,13 +79,20 @@ struct InferenceEvidenceNode {
     kFlattened,
   };
 
+  /// Accepts a PMR argument for uniform construction of compact evidence nodes.
   explicit InferenceEvidenceNode(std::pmr::memory_resource *) noexcept {}
 
+  /// Transfers the node's compact evidence fields from another node.
   InferenceEvidenceNode(InferenceEvidenceNode &&) noexcept = default;
+  /// Replaces this node with another node's compact evidence fields.
   InferenceEvidenceNode &operator=(InferenceEvidenceNode &&) noexcept = default;
+  /// Keeps evidence nodes move-only for storage inside inference packets.
   InferenceEvidenceNode(const InferenceEvidenceNode &) = delete;
+  /// Keeps evidence nodes move-only for storage inside inference packets.
   InferenceEvidenceNode &operator=(const InferenceEvidenceNode &) = delete;
 
+  /// Reports whether the evidence node represents an observed empty object or
+  /// array.
   [[nodiscard]] bool empty_container(std::size_t index) const noexcept {
     return (kind == Kind::kObject || kind == Kind::kArray) &&
            subtree_end == index + 1;
@@ -107,14 +124,19 @@ inline constexpr std::size_t kMaxFlatInferenceFields = 512;
 inline constexpr std::size_t kInlineFlatInferenceKeyBytes = 64;
 
 struct FlatInferenceField {
+  /// Returns the evidence node's packet-local field-name bytes.
   [[nodiscard]] std::string_view key() const noexcept {
     return std::string_view(key_bytes.data(), key_size);
   }
 
+  /// Compares the stored key with caller bytes without allocating a temporary
+  /// string.
   [[nodiscard]] bool matches(std::string_view value) const noexcept {
     return key() == value;
   }
 
+  /// Copies a short field name into inline packet storage, declining oversized
+  /// keys without mutation.
   [[nodiscard]] bool assign_key(std::string_view value) noexcept {
     if (value.size() > key_bytes.size()) {
       return false;
@@ -130,6 +152,8 @@ struct FlatInferenceField {
 };
 
 struct FlatInferenceOverflow {
+  /// Creates overflow storage that preserves evidence beyond the flat fast-path
+  /// capacity.
   FlatInferenceOverflow(std::shared_ptr<MemoryPool> pool,
                         std::shared_ptr<PoolResource> resource)
       : memory_pool(std::move(pool)), arena(std::move(resource)),
@@ -141,6 +165,8 @@ struct FlatInferenceOverflow {
 };
 
 struct FlatInferenceStorage {
+  /// Provides storage for a flat field, creating the budgeted overflow arena
+  /// when needed.
   sanitize::Status ensure_field(std::size_t index,
                                 const std::shared_ptr<MemoryPool> &parent_pool,
                                 std::int64_t packet_memory_limit) {
@@ -173,12 +199,16 @@ struct FlatInferenceStorage {
     return sanitize::Status::OK();
   }
 
+  /// Returns the requested evidence field, preserving constness for read-only
+  /// callers.
   [[nodiscard]] FlatInferenceField &field(std::size_t index) noexcept {
     return index < inline_fields.size()
                ? inline_fields[index]
                : overflow->fields[index - inline_fields.size()];
   }
 
+  /// Returns the requested evidence field, preserving constness for read-only
+  /// callers.
   [[nodiscard]] const FlatInferenceField &
   field(std::size_t index) const noexcept {
     return index < inline_fields.size()
@@ -194,20 +224,30 @@ struct FlatInferenceStorage {
 // Owns either bounded flat evidence or generic rows/nodes. Narrow flat storage
 // is fixed-size; wide overflow and generic nodes use packet-local tracked PMR.
 struct InferenceEvidencePacket {
+  /// Creates an unbound packet whose PMR vectors use the null memory resource.
   InferenceEvidencePacket()
       : keys(std::pmr::null_memory_resource()),
         rows(std::pmr::null_memory_resource()),
         nodes(std::pmr::null_memory_resource()) {}
 
+  /// Binds packet-owned PMR vectors to the supplied tracked pool resource.
   InferenceEvidencePacket(std::shared_ptr<MemoryPool> pool,
                           std::shared_ptr<PoolResource> resource)
       : memory_pool(std::move(pool)), arena(std::move(resource)),
         keys(arena.get()), rows(arena.get()), nodes(arena.get()) {}
 
+  /// Transfers owned buffers and reservations while leaving the source safe to
+  /// destroy.
   InferenceEvidencePacket(InferenceEvidencePacket &&) noexcept = default;
+  /// Transfers owned buffers and reservations while leaving the source safe to
+  /// destroy.
   InferenceEvidencePacket &
   operator=(InferenceEvidencePacket &&) noexcept = default;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   InferenceEvidencePacket(const InferenceEvidencePacket &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   InferenceEvidencePacket &operator=(const InferenceEvidencePacket &) = delete;
 
   std::shared_ptr<MemoryPool> memory_pool;
@@ -239,15 +279,19 @@ public:
 private:
   struct WorkerState;
 
+  /// Binds frontend parsing and packet limits to worker-local inference state.
   ParallelInferenceEvidenceBuilder(std::string frontend_name,
                                    const PreparedOptions *opts,
                                    std::shared_ptr<MemoryPool> parent_pool,
                                    std::int64_t packet_memory_limit);
 
+  /// Appends one row's nested evidence and records its packet span and source
+  /// size.
   sanitize::Status append_row(const RowRef &row, WorkerState *worker,
                               InferenceEvidencePacket *packet,
                               sanitize::internal::StopToken stop) const;
 
+  /// Collects one row into the packet's flat scalar-evidence representation.
   sanitize::Status append_flat_row(const RowRef &row, WorkerState *worker,
                                    InferenceEvidencePacket *packet,
                                    sanitize::internal::StopToken stop) const;
@@ -260,7 +304,7 @@ private:
   std::vector<std::unique_ptr<WorkerState>> workers_;
 };
 
-// Applies one compact evidence row in shape-then-statistics order.
+/// Applies one compact evidence row in shape-then-statistics order.
 sanitize::Status reduce_inference_evidence_row(
     InferenceContext *ctx, const InferenceEvidencePacket &packet,
     const InferenceEvidenceRow &row, const PreparedOptions &opts,

@@ -1,7 +1,10 @@
-// Implements bounded live-allocation ownership tracking without allocation-time
-// metadata growth. One process-wide bank owns preallocated chained-hash indexes
-// and free lists; Allocate/Free only mutate existing slots.
+// Implements bounded live-allocation ownership tracking without
+// allocation-time metadata growth. One process-wide bank owns preallocated
+// chained-hash indexes and free lists; Allocate/Free only mutate existing
+// slots. Aggregate counters expose capacity, occupancy, collision, and
+// rejection behavior.
 
+/// Reports whether guarded live-allocation ownership tracking is active.
 bool hardened_allocation_registry_enabled() noexcept { return true; }
 
 struct LiveAllocationRecord {
@@ -26,6 +29,7 @@ constexpr std::int64_t kMaximumGlobalRegistryMetadataBytes =
     64LL * 1024LL * 1024LL;
 constexpr std::int64_t kMinimumGlobalRegistryMetadataBytes = 512LL * 1024LL;
 
+/// Reads the effective cgroup memory hard limit for registry sizing.
 std::int64_t current_cgroup_memory_hard_limit_bytes() noexcept {
 #if defined(__linux__)
   using cgroup_view_detail::ValueState;
@@ -53,6 +57,7 @@ std::int64_t current_cgroup_memory_hard_limit_bytes() noexcept {
 #endif
 }
 
+/// Returns the monotonic cap on process-wide allocation-registry metadata.
 std::int64_t registry_metadata_limit_bytes() noexcept {
   // The bank may only shrink after startup.  A lower orchestrator memory.max
   // therefore blocks future metadata reservations without making existing
@@ -80,6 +85,7 @@ std::int64_t registry_metadata_limit_bytes() noexcept {
   return current;
 }
 
+/// Raises an atomic signed high-water mark to include the supplied value.
 void update_atomic_peak(std::atomic<std::int64_t> *peak,
                         std::int64_t value) noexcept {
   auto observed = peak->load(std::memory_order_relaxed);
@@ -102,6 +108,7 @@ constexpr std::uint32_t kNoGlobalRegistrySlot =
 static_assert((kGlobalRegistryShardCount & (kGlobalRegistryShardCount - 1U)) ==
               0U);
 
+/// Returns a steady-clock timestamp for allocation-registry maintenance.
 [[nodiscard]] std::int64_t registry_monotonic_now_ns() noexcept {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -118,6 +125,7 @@ struct GlobalAllocationSlot final {
   std::uint32_t free_next_or_origin = kNoGlobalRegistrySlot;
 };
 
+/// Computes fixed metadata consumed by the process-wide registry bank.
 [[nodiscard]] constexpr std::int64_t
 global_registry_fixed_overhead_bytes() noexcept {
   // Dynamic slot and bucket arrays are charged per record below. This is the
@@ -148,6 +156,8 @@ struct GlobalRegistryBank final {
   std::size_t capacity = 0U;
   std::int64_t metadata_bytes = 0;
 
+  /// Preallocates sharded allocation records within the registry
+  /// metadata cap.
   GlobalRegistryBank() noexcept {
     const auto limit = registry_metadata_limit_bytes();
     const auto fixed_overhead = global_registry_fixed_overhead_bytes();
@@ -210,6 +220,8 @@ struct GlobalRegistryBank final {
         static_cast<std::int64_t>(capacity), std::memory_order_release);
   }
 
+  /// Returns record slots usable by each registry shard after
+  /// sentinel reservation.
   [[nodiscard]] std::size_t usable_slots_per_shard() noexcept {
     if (!slots || !bucket_heads || slots_per_shard == 0U) {
       return 0U;
@@ -259,6 +271,7 @@ struct GlobalRegistryBank final {
     return usable;
   }
 
+  /// Returns the lazily cached usable record capacity per shard.
   [[nodiscard]] std::size_t cached_usable_slots() const noexcept {
     return cached_usable_slots_per_shard.load(std::memory_order_acquire);
   }
@@ -269,49 +282,63 @@ static_assert(
         static_cast<std::size_t>(global_registry_fixed_overhead_bytes()),
     "registry metadata accounting must include padding and fixed state");
 
+/// Returns the lazily initialized process-wide allocation registry bank.
 GlobalRegistryBank &global_registry_bank() noexcept {
   static GlobalRegistryBank bank;
   return bank;
 }
 } // namespace
 
+/// Returns metadata bytes currently committed by the
+/// live-allocation registry.
 std::int64_t live_allocation_registry_metadata_bytes() noexcept {
   return global_registry_bank().metadata_bytes;
 }
 
+/// Returns the registry metadata high-water mark in bytes.
 [[maybe_unused]] std::int64_t
 peak_live_allocation_registry_metadata_bytes() noexcept {
   (void)global_registry_bank();
   return g_peak_live_registry_metadata_bytes.load(std::memory_order_relaxed);
 }
 
+/// Returns the number of allocation records available across
+/// registry shards.
 [[maybe_unused]] std::int64_t
 live_allocation_registry_capacity_records() noexcept {
   return static_cast<std::int64_t>(global_registry_bank().capacity);
 }
 
+/// Returns the number of allocations currently registered as live.
 [[maybe_unused]] std::int64_t live_allocation_registry_entries() noexcept {
   return g_live_registry_entries.load(std::memory_order_relaxed);
 }
 
+/// Returns registrations rejected because bounded registry capacity
+/// was exhausted.
 [[maybe_unused]] std::uint64_t live_allocation_registry_rejections() noexcept {
   return g_live_registry_rejections.load(std::memory_order_relaxed);
 }
 
+/// Returns metadata bytes reserved for the registry's fixed capacity.
 std::int64_t live_allocation_registry_metadata_capacity_bytes() noexcept {
   return global_registry_bank().metadata_bytes;
 }
 
+/// Returns hash probes that advanced beyond an allocation's primary slot.
 [[maybe_unused]] std::uint64_t
 live_allocation_registry_secondary_probes() noexcept {
   return g_live_registry_secondary_probes.load(std::memory_order_relaxed);
 }
 
+/// Returns registrations rejected after bounded collision probing failed.
 [[maybe_unused]] std::uint64_t
 live_allocation_registry_collision_rejections() noexcept {
   return g_live_registry_collision_rejections.load(std::memory_order_relaxed);
 }
 
+/// Returns the highest live-record occupancy observed in any
+/// registry shard.
 [[maybe_unused]] std::int64_t
 live_allocation_registry_max_shard_occupancy() noexcept {
   return g_live_registry_max_shard_occupancy.load(std::memory_order_relaxed);
@@ -319,6 +346,8 @@ live_allocation_registry_max_shard_occupancy() noexcept {
 
 class LiveAllocationRegistry {
 public:
+  /// Binds allocation tracking to a fixed process-wide registry
+  /// shard budget.
   explicit LiveAllocationRegistry(bool /*thread_safe*/ = true,
                                   std::int64_t budget_bytes = -1)
       : owner_token_(reinterpret_cast<std::uintptr_t>(this)) {
@@ -333,14 +362,21 @@ public:
     record_limit_ = std::max<std::size_t>(1U, target);
   }
 
+  /// Purges this pool owner's live registry records before destruction.
   ~LiveAllocationRegistry() { purge_owner(); }
 
+  /// Disables copying the bounded live-allocation registry.
   LiveAllocationRegistry(const LiveAllocationRegistry &) = delete;
+  /// Disables copy assignment for the bounded live-allocation registry.
   LiveAllocationRegistry &operator=(const LiveAllocationRegistry &) = delete;
 
+  /// Returns metadata bytes charged for this registry's fixed slot budget.
   [[nodiscard]] std::int64_t metadata_bytes() const noexcept { return 0; }
+  /// Returns the maximum live records this registry can hold.
   [[nodiscard]] std::size_t capacity() const noexcept { return record_limit_; }
 
+  /// Registers allocation ownership in a bounded shard without
+  /// allocating metadata.
   bool register_allocation(std::uint8_t *buffer,
                            LiveAllocationRecord record) noexcept {
     if (!hardened_allocation_registry_enabled()) {
@@ -393,6 +429,8 @@ public:
     return inserted;
   }
 
+  /// Atomically removes and returns ownership metadata for a
+  /// live allocation.
   bool claim_allocation(std::uint8_t *buffer,
                         LiveAllocationRecord *record) noexcept {
     if (!hardened_allocation_registry_enabled()) {
@@ -424,12 +462,14 @@ public:
 private:
   enum class InsertResult : std::uint8_t { kInserted, kDuplicate, kFull };
 
+  /// Publishes one live registration and raises the global occupancy peak.
   static void observe_registration() noexcept {
     const auto current =
         g_live_registry_entries.fetch_add(1, std::memory_order_relaxed) + 1;
     update_atomic_peak(&g_peak_live_registry_entries, current);
   }
 
+  /// Atomically reserves one record within this pool owner's fixed limit.
   [[nodiscard]] bool reserve_owner_entry() noexcept {
     auto current = live_entries_.load(std::memory_order_relaxed);
     const auto limit = static_cast<std::int64_t>(record_limit_);
@@ -443,6 +483,7 @@ private:
     return false;
   }
 
+  /// Hashes a buffer address to its primary registry shard.
   [[nodiscard]] static std::size_t
   shard_index(const std::uint8_t *buffer) noexcept {
     const auto address = reinterpret_cast<std::uintptr_t>(buffer);
@@ -450,6 +491,7 @@ private:
     return static_cast<std::size_t>(mixed) & (kGlobalRegistryShardCount - 1U);
   }
 
+  /// Hashes a buffer address to a shard distinct from its primary shard.
   [[nodiscard]] static std::size_t
   secondary_shard_index(const std::uint8_t *buffer,
                         std::size_t primary) noexcept {
@@ -463,11 +505,13 @@ private:
     return secondary;
   }
 
+  /// Returns the first allocation slot belonging to one registry shard.
   static GlobalAllocationSlot *shard_begin(GlobalRegistryBank &bank,
                                            std::size_t shard) noexcept {
     return bank.slots.get() + shard * bank.slots_per_shard;
   }
 
+  /// Hashes a buffer address to a bucket within the selected shard.
   [[nodiscard]] static std::size_t bucket_index(const GlobalRegistryBank &bank,
                                                 const std::uint8_t *buffer,
                                                 std::size_t shard) noexcept {
@@ -485,6 +529,7 @@ private:
            static_cast<std::size_t>(mixed % bank.slots_per_shard);
   }
 
+  /// Finds this owner's matching buffer slot within one registry shard.
   [[nodiscard]] std::uint32_t
   find_slot_index(GlobalRegistryBank &bank, std::size_t shard,
                   std::uint8_t *buffer) const noexcept {
@@ -501,6 +546,7 @@ private:
     return kNoGlobalRegistrySlot;
   }
 
+  /// Reports whether a primary shard has entries stored in secondary shards.
   [[nodiscard]] bool
   redirected_to_secondary(const GlobalRegistryBank &bank,
                           std::size_t primary) const noexcept {
@@ -508,6 +554,7 @@ private:
            0U;
   }
 
+  /// Retires unusable suffix slots and reports whether a free slot remains.
   [[nodiscard]] static bool has_usable_free_slot(GlobalRegistryBank &bank,
                                                  std::size_t usable,
                                                  std::size_t shard) noexcept {
@@ -525,6 +572,7 @@ private:
     return head != kNoGlobalRegistrySlot;
   }
 
+  /// Removes and returns one usable slot from a shard's free list.
   [[nodiscard]] static std::uint32_t
   pop_usable_free_slot(GlobalRegistryBank &bank, std::size_t usable,
                        std::size_t shard) noexcept {
@@ -539,6 +587,7 @@ private:
     return index;
   }
 
+  /// Returns an eligible slot to its shard's free list.
   static void return_free_slot(GlobalRegistryBank &bank, std::size_t shard,
                                std::uint32_t index) noexcept {
     if (static_cast<std::size_t>(index) >= bank.cached_usable_slots()) {
@@ -549,6 +598,7 @@ private:
     bank.free_heads[shard] = index;
   }
 
+  /// Populates a slot, links it into its bucket, and publishes registration.
   void link_slot(GlobalRegistryBank &bank, std::size_t shard,
                  std::size_t origin_shard, std::uint32_t index,
                  std::uint8_t *buffer, LiveAllocationRecord record) noexcept {
@@ -566,6 +616,7 @@ private:
     observe_registration();
   }
 
+  /// Inserts a unique record into its primary shard when capacity permits.
   InsertResult register_in_primary(GlobalRegistryBank &bank, std::size_t usable,
                                    std::size_t primary, std::uint8_t *buffer,
                                    LiveAllocationRecord record) noexcept {
@@ -586,6 +637,7 @@ private:
     return InsertResult::kInserted;
   }
 
+  /// Inserts into either eligible shard and records secondary redirection.
   InsertResult register_in_two_shards(GlobalRegistryBank &bank,
                                       std::size_t usable, std::size_t primary,
                                       std::size_t secondary,
@@ -616,6 +668,7 @@ private:
     return InsertResult::kInserted;
   }
 
+  /// Claims and unlinks this owner's matching record from one shard.
   bool claim_in_one_shard(GlobalRegistryBank &bank, std::size_t shard,
                           std::uint8_t *buffer,
                           LiveAllocationRecord *record) noexcept {
@@ -647,6 +700,7 @@ private:
     return false;
   }
 
+  /// Unlinks a populated slot from its shard bucket without clearing it.
   static bool unlink_slot(GlobalRegistryBank &bank, std::size_t shard,
                           std::uint32_t index) noexcept {
     auto *begin = shard_begin(bank, shard);
@@ -666,6 +720,7 @@ private:
     return false;
   }
 
+  /// Removes every live registry record owned by this pool instance.
   void purge_owner() noexcept {
     auto outstanding = live_entries_.exchange(0, std::memory_order_acq_rel);
     if (outstanding <= 0) {

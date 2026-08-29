@@ -1,4 +1,6 @@
 // Implements planned field matching for source keys.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #include "internal/planning/planned_name_matcher.hh"
 
@@ -16,7 +18,7 @@ constexpr std::string_view kPreservePolicy = "preserve";
 constexpr std::string_view kFlattenedSuffix = "_flattened";
 constexpr std::string_view kSanitizedFlattenedSuffix = "flattened";
 
-// Finds a planned field with the exact sanitized base form of a dirty key.
+/// Finds a planned field with the exact sanitized base form of a dirty key.
 const sanitize::FieldIndex *
 find_sanitized_base(const sanitize::StructLayout &layout, std::string_view key,
                     std::string_view field_name_policy) noexcept {
@@ -35,14 +37,14 @@ find_sanitized_base(const sanitize::StructLayout &layout, std::string_view key,
   return layout.find(base, sanitize::detail::hash_key64(base));
 }
 
-// Probes one candidate output name directly in the compiled layout.
+/// Probes one candidate output name directly in the compiled layout.
 const sanitize::FieldIndex *
 find_candidate(const sanitize::StructLayout &layout,
                std::string_view candidate) noexcept {
   return layout.find(candidate, sanitize::detail::hash_key64(candidate));
 }
 
-// Probes flattened variants for one candidate unflattened output name.
+/// Probes flattened variants for one candidate unflattened output name.
 const sanitize::FieldIndex *
 find_flattened_candidate(const sanitize::StructLayout &layout,
                          std::string_view candidate) noexcept {
@@ -59,9 +61,8 @@ find_flattened_candidate(const sanitize::StructLayout &layout,
   return find_candidate(layout, flattened);
 }
 
-// Probes collision-suffixed and flattened output candidates without scanning
-// the full planned layout. Collision suffixes depend on the dirty source key,
-// so this tiny fixed candidate set must be generated at lookup time.
+/// Probes generated collision and flattening candidates without scanning the
+/// full layout.
 const sanitize::FieldIndex *
 find_generated_candidates(const sanitize::StructLayout &layout,
                           std::string_view key,

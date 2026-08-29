@@ -1,3 +1,7 @@
+// Fuzzes on-demand and streaming JSON parsing plus frontend materialization.
+// Bounded recursive walks, chunk sizes, policies, and operation limits exercise
+// scalar and nested inputs without allowing one corpus item to run unbounded.
+
 #include "frontends/builtin_frontends.hh"
 #include "internal/memory/arena.hh"
 #include "internal/memory/memory_pool.hh"
@@ -21,6 +25,7 @@
 
 namespace {
 
+/// Returns the immutable two-column plan shared by JSON fuzz iterations.
 const sanitize::CompiledPlan &fuzz_compiled_plan() {
   static const sanitize::CompiledPlan plan = [] {
     sanitize::LogicalSchema schema;
@@ -45,6 +50,7 @@ const sanitize::CompiledPlan &fuzz_compiled_plan() {
   return plan;
 }
 
+/// Recursively visits a parsed value while enforcing the JSON depth ceiling.
 sanitize::Status walk_value(sanitize::ValueView value, std::size_t depth) {
   if (depth > sanitize::internal::json_scan::kMaxJsonNestingDepth) {
     return sanitize::Status::Invalid("JSON fuzz walk exceeded depth limit");
@@ -74,7 +80,7 @@ sanitize::Status walk_value(sanitize::ValueView value, std::size_t depth) {
   return sanitize::Status::OK();
 }
 
-
+/// Derives a bounded operation memory limit from the fuzz input prefix.
 std::int64_t fuzz_memory_limit(const std::uint8_t *data, std::size_t size) {
   constexpr std::int64_t kMinimum = 64LL * 1024LL;
   constexpr std::int64_t kSpan = 8LL * 1024LL * 1024LL - kMinimum;
@@ -86,6 +92,7 @@ std::int64_t fuzz_memory_limit(const std::uint8_t *data, std::size_t size) {
   return kMinimum + static_cast<std::int64_t>(selector % kSpan);
 }
 
+/// Runs a selected JSON frontend and bounded materialization loop.
 void consume_json_frontend(const std::uint8_t *data, std::size_t size) {
   sanitize::Options options;
   options.memory_limit_bytes = fuzz_memory_limit(data, size);
@@ -145,6 +152,7 @@ void consume_json_frontend(const std::uint8_t *data, std::size_t size) {
   }
 }
 
+/// Parses one slice, traverses any valid value, and resets retained parser state.
 void parse_and_walk(sanitize::internal::JsonOnDemandDoc *document,
                     std::string_view input, std::size_t base_offset = 0) {
   document->Reset();
@@ -157,6 +165,7 @@ void parse_and_walk(sanitize::internal::JsonOnDemandDoc *document,
 
 } // namespace
 
+/// Exercises on-demand, streaming, and frontend JSON paths for one input.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size) {
   const std::string_view input(reinterpret_cast<const char *>(data), size);

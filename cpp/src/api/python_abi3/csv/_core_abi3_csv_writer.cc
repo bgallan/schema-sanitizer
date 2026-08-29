@@ -1,10 +1,12 @@
 /*
- * Python ABI3 CSV stream writer wrapper.
+ * Implements the Python ABI3 CSV stream-writer wrapper.
  *
- * This file exposes native CSV writing for Arrow C streams. Metadata wrapping
- * and local-path normalization stay in Python; the native side only consumes
- * an Arrow C stream and writes a local CSV file.
+ * This file exposes native CSV writing for Arrow C streams.
+ *
+ * Metadata wrapping and local-path normalization stay in Python; the native
+ * side only consumes an Arrow C stream and writes a local CSV file.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -28,7 +30,7 @@ namespace csv = sanitize::internal::csv_stream_writer;
 
 class FileCsvOutput final : public csv::Output {
 public:
-  // Opens a local output path.
+  /// Opens a local output path.
   explicit FileCsvOutput(std::string path) : fd_lease_(1U) {
     if (fd_lease_) {
       out_.open(std::move(path),
@@ -39,14 +41,16 @@ public:
     }
   }
 
+  /// Releases resources retained by `FileCsvOutput` without propagating cleanup
+  /// failures.
   ~FileCsvOutput() override {
     sanitize::internal::close_stream_and_commit(out_, fd_lease_);
   }
 
-  // Returns whether the file opened correctly.
+  /// Returns whether the file opened correctly.
   [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
 
-  // Writes bytes to the file.
+  /// Writes bytes to the file.
   sanitize::Status Write(std::string_view data) override {
     out_.write(data.data(), static_cast<std::streamsize>(data.size()));
     if (!out_) {
@@ -55,7 +59,7 @@ public:
     return sanitize::Status::OK();
   }
 
-  // Flushes the file.
+  /// Flushes the file.
   sanitize::Status Flush() override {
     out_.flush();
     if (!out_) {
@@ -69,6 +73,7 @@ private:
   std::ofstream out_;
 };
 
+/// Writes a validated Arrow C stream as CSV to a local path.
 sanitize::Result<csv::WriteStats>
 csv_write_stream_to_path(PyObject *stream_obj, std::string path,
                          std::int64_t memory_limit_bytes,
@@ -91,6 +96,7 @@ csv_write_stream_to_path(PyObject *stream_obj, std::string path,
   });
 }
 
+/// Acquires a Python Arrow stream and writes it as CSV to a local path.
 sanitize::Result<csv::WriteStats>
 csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
                                std::int64_t memory_limit_bytes,
@@ -107,6 +113,7 @@ csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
 
 } // namespace
 
+/// Writes a Python Arrow stream to a CSV path and returns row and batch counts.
 PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
@@ -141,6 +148,8 @@ PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
   return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
+/// Adds generated metadata columns, writes the Arrow stream as CSV, and returns
+/// counts.
 PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
@@ -188,6 +197,7 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
   return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
+/// Reports whether the native CSV writer supports a supplied PyArrow schema.
 PyObject *py_csv_schema_supported(PyObject *, PyObject *args) {
   PyObject *schema_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:csv_schema_supported", &schema_obj)) {

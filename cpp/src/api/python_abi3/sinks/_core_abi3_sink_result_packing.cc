@@ -1,9 +1,10 @@
 /*
- * Python ABI3 sink result packing and cleanup.
+ * Implements Python ABI3 sink result packing and cleanup.
  *
  * This file owns result packing and cleanup helpers shared by normal and
  * registry-backed sink wrapper entry points.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -13,7 +14,8 @@
 namespace core_abi3_internal {
 namespace {
 
-// Wraps optional stream.
+/// Returns None for a null stream or an Arrow stream capsule retaining its
+/// keepalive.
 PyObject *wrap_optional_stream(PyObject *keepalive, ArrowArrayStream *stream) {
   if (!stream) {
     Py_INCREF(Py_None);
@@ -24,14 +26,14 @@ PyObject *wrap_optional_stream(PyObject *keepalive, ArrowArrayStream *stream) {
 
 } // namespace
 
-// Releases native stream and diagnostics handles after a failed sink call.
+/// Releases native stream and diagnostics handles after a failed sink call.
 void release_sink_outputs(ArrowArrayStream *main_stream,
                           NativeDiagnostics *diagnostics) {
   release_arrow_stream(main_stream);
   delete diagnostics;
 }
 
-// Packs a normal sink result into the Python ABI tuple shape.
+/// Packs a normal sink result into the Python ABI tuple shape.
 PyObject *pack_stream_and_diagnostics(PyObject *keepalive,
                                       ArrowArrayStream *main_stream,
                                       NativeDiagnostics *diagnostics) {
@@ -65,8 +67,8 @@ PyObject *pack_stream_and_diagnostics(PyObject *keepalive,
   return tup;
 }
 
-// Packs a registry-backed sink result into the fixed Python ABI tuple shape.
-// The sixth slot receives a borrowed native registry state or None.
+/// Packs a registry-backed sink result into the fixed Python ABI tuple shape.
+/// The sixth slot receives a borrowed native registry state or `None`.
 PyObject *pack_registry_stream_result(PyObject *keepalive,
                                       ArrowArrayStream *main_stream,
                                       NativeDiagnostics *diagnostics,

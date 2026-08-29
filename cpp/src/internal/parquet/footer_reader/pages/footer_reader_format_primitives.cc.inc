@@ -1,3 +1,6 @@
+// Provides endian decoding, bounded previews, plain-value formatting, and Arrow
+// buffer sizing. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
 constexpr std::string_view kParquetMagic = "PAR1";
 constexpr std::int32_t kCompressionUncompressed = 0;
@@ -73,6 +76,7 @@ constexpr std::int64_t kHardMaxNativeReaderBufferBytes =
 constexpr std::int64_t kDefaultNativeReaderMaxBatchRows = 65'536;
 constexpr std::int64_t kHardMaxNativeReaderBatchRows = 1024 * 1024;
 
+/// Returns the active cap for diagnostic values derived from Parquet metadata.
 std::size_t metadata_materialization_limit(std::size_t input_bytes) noexcept {
   std::size_t scaled = kMaxMaterializedMetadataBytes;
   if (input_bytes <=
@@ -83,6 +87,8 @@ std::size_t metadata_materialization_limit(std::size_t input_bytes) noexcept {
                   std::max(kMinMaterializedMetadataBytes, scaled));
 }
 
+/// Reads one little-endian 32-bit integer from a previously bounds-checked byte
+/// position.
 std::uint32_t read_u32_le(const char *ptr) {
   return static_cast<std::uint32_t>(static_cast<unsigned char>(ptr[0])) |
          (static_cast<std::uint32_t>(static_cast<unsigned char>(ptr[1]))
@@ -93,10 +99,13 @@ std::uint32_t read_u32_le(const char *ptr) {
           << 24U);
 }
 
+/// Decodes a compact-Thrift zigzag integer into its signed value.
 std::int64_t unzigzag(std::uint64_t value) {
   return static_cast<std::int64_t>((value >> 1U) ^ (~(value & 1U) + 1U));
 }
 
+/// Builds a bounded diagnostic representation of bytes without retaining full
+/// page data.
 std::string preview_bytes(std::string_view value) {
   if (value.size() <= kMaxValuePreviewBytes) {
     return std::string(value);
@@ -106,6 +115,7 @@ std::string preview_bytes(std::string_view value) {
   return out;
 }
 
+/// Hex-encodes every input byte without truncation.
 std::string hex_bytes(std::string_view value) {
   constexpr std::string_view digits = "0123456789abcdef";
   std::string out;
@@ -118,6 +128,7 @@ std::string hex_bytes(std::string_view value) {
   return out;
 }
 
+/// Builds a bounded hexadecimal preview without retaining the complete input.
 std::string hex_bytes_preview(const std::vector<std::uint8_t> &value) {
   constexpr std::size_t kMaxHexPreviewBytes = 32;
   const auto size = std::min(value.size(), kMaxHexPreviewBytes);
@@ -130,6 +141,8 @@ std::string hex_bytes_preview(const std::vector<std::uint8_t> &value) {
 }
 
 template <class T>
+/// Copies one previously bounds-checked PLAIN fixed-width value from its byte
+/// offset.
 T read_plain_value(std::string_view values, std::size_t offset) {
   T out{};
   std::memcpy(&out, values.data() + offset, sizeof(T));
@@ -180,6 +193,8 @@ struct LogicalTypeReadInfo {
   std::int32_t decimal_precision = 0;
 };
 
+/// Returns the number of bits required to encode a Parquet definition or
+/// repetition level.
 std::uint8_t level_bit_width(std::int16_t max_level) {
   std::uint8_t width = 0;
   while ((std::int16_t{1} << width) <= max_level) {
@@ -188,6 +203,7 @@ std::uint8_t level_bit_width(std::int16_t max_level) {
   return width;
 }
 
+/// Converts a nonnegative item count and width to a checked 32-bit byte count.
 sanitize::Result<std::int32_t> checked_i32_byte_count(std::int64_t bytes,
                                                       std::string_view what) {
   if (bytes < 0 || bytes > std::numeric_limits<std::int32_t>::max()) {
@@ -197,6 +213,7 @@ sanitize::Result<std::int32_t> checked_i32_byte_count(std::int64_t bytes,
   return static_cast<std::int32_t>(bytes);
 }
 
+/// Calculates the checked byte size of an Arrow 32-bit offset buffer.
 sanitize::Result<std::int32_t>
 arrow_i32_offset_buffer_bytes(std::int32_t value_count) {
   if (value_count < 0) {
@@ -208,6 +225,7 @@ arrow_i32_offset_buffer_bytes(std::int32_t value_count) {
   return checked_i32_byte_count(bytes, "offset buffer");
 }
 
+/// Calculates a checked fixed-width Arrow value-buffer size.
 sanitize::Result<std::int32_t>
 arrow_fixed_width_value_buffer_bytes(std::int32_t row_count, std::int32_t width,
                                      std::string_view what) {
@@ -220,6 +238,7 @@ arrow_fixed_width_value_buffer_bytes(std::int32_t row_count, std::int32_t width,
                                 what);
 }
 
+/// Calculates the packed bitmap size for a Boolean Arrow value buffer.
 sanitize::Result<std::int32_t>
 arrow_boolean_value_buffer_bytes(std::int32_t row_count) {
   if (row_count < 0) {
@@ -231,8 +250,8 @@ arrow_boolean_value_buffer_bytes(std::int32_t row_count) {
                                 "boolean value buffer");
 }
 
-// Included by footer_reader.cc inside its implementation namespace.
-
+/// Tests one validity bit, treating negative indexes as invalid and absent
+/// bytes as valid.
 bool validity_bit_is_set(const std::vector<std::uint8_t> &bitmap,
                          std::int64_t index) {
   if (index < 0) {
@@ -246,6 +265,8 @@ bool validity_bit_is_set(const std::vector<std::uint8_t> &bitmap,
   return (bitmap[byte_index] & mask) != 0;
 }
 
+/// Sets output validity bit in a prevalidated Arrow bitmap without touching
+/// adjacent bits.
 void set_output_validity_bit(std::vector<std::uint8_t> *bitmap,
                              std::int64_t index) {
   if (!bitmap || index < 0) {
@@ -259,6 +280,8 @@ void set_output_validity_bit(std::vector<std::uint8_t> *bitmap,
       (*bitmap)[byte_index] | static_cast<std::uint8_t>(1U << (index % 8)));
 }
 
+/// Reads one bit-packed Parquet value after the caller has validated its byte
+/// range.
 bool bit_stream_value_is_set(std::string_view values, std::int32_t index) {
   if (index < 0) {
     return false;

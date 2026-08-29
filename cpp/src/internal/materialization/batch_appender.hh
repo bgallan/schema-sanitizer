@@ -1,6 +1,5 @@
-// Internal Arrow C Data batch builders and row appenders.
-//
-// This module is intentionally private to the native implementation. It keeps
+// Declares the internal Arrow C Data batch builders and row appenders. This
+// module is intentionally private to the native implementation. It keeps
 // materialization independent from Arrow C++ while exposing a compact API to
 // the stream layer and direct JSON/CSV frontends.
 
@@ -49,7 +48,7 @@ struct Cell {
   std::vector<Cell> children;
   std::vector<Cell> elements;
 
-  // Creates a null materialization cell for one logical kind.
+  /// Creates a null materialization cell for one logical kind.
   static Cell Null(sanitize::LogicalKind kind) {
     Cell cell;
     cell.is_null = true;
@@ -72,48 +71,49 @@ struct PreparedRow {
 
 class BatchAppender;
 struct BatchAppenderDeleter {
-  // Invokes the callable.
+  /// Deletes an owned batch appender.
   void operator()(BatchAppender *app) const noexcept;
 };
 using BatchAppenderPtr = std::unique_ptr<BatchAppender, BatchAppenderDeleter>;
 
-// Creates batch appender.
+/// Allocates and initializes a batch appender for the compiled plan.
 sanitize::Result<BatchAppenderPtr>
 make_batch_appender(const sanitize::CompiledPlan &plan,
                     std::shared_ptr<PoolResource> pool);
 
-// Performs the batch appender reset operation.
+/// Clears the current batch while retaining reusable builder storage.
 sanitize::Status batch_appender_reset(BatchAppender *app);
-// Performs the batch appender length operation.
+/// Returns the number of rows currently held by an appender, or zero for null.
 int64_t batch_appender_length(const BatchAppender *app) noexcept;
-// Performs the batch appender bytes operation.
+/// Returns retained builder-buffer capacity in bytes, or zero for null.
 int64_t batch_appender_bytes(const BatchAppender *app) noexcept;
-// Reserves predictable storage for one scalar packet.
+/// Reserves predictable storage for one scalar packet.
 sanitize::Status batch_appender_reserve(BatchAppender *app, int64_t rows,
                                         int64_t source_bytes);
-// Performs the batch appender finish operation.
+/// Finalizes the current batch into an initialized Arrow array.
 sanitize::Status batch_appender_finish(BatchAppender *app, ArrowArray *out);
-// Appends a compatible Arrow struct array into the current batch.
+/// Appends a compatible Arrow struct array into the current batch.
 sanitize::Status batch_appender_append_array(BatchAppender *app,
                                              const ArrowArray *array);
 
-// Converts one row into immutable coordinator-owned cells without touching an
-// Arrow builder.
+/// Converts one row into immutable coordinator-owned cells without mutating an
+/// Arrow builder.
 sanitize::Result<PreparedRow>
 prepare_row(const sanitize::CompiledPlan &plan, const sanitize::RowRef &row,
             const sanitize::PreparedOptions &opts,
             sanitize::IngestDiagnostics *diagnostics);
 
-// Commits one prepared row into the single-owner Arrow batch appender.
+/// Commits one prepared row into the single-owner Arrow batch appender.
 sanitize::Status append_prepared_row(BatchAppender *app, PreparedRow row);
 
-// Appends row.
+/// Converts one logical row under the compiled plan and applies its append or
+/// skip action.
 sanitize::Result<AppendRowResult>
 append_row(BatchAppender *app, const sanitize::RowRef &row,
            const sanitize::PreparedOptions &opts,
            sanitize::IngestDiagnostics *diagnostics);
 
-// Converts one raw JSON row into coordinator-owned cells.
+/// Converts one raw JSON row into coordinator-owned cells.
 sanitize::Result<PreparedRow>
 prepare_row_json_text(const sanitize::CompiledPlan &plan, JsonOnDemandDoc *doc,
                       std::vector<sanitize::FieldRef> *fields,
@@ -122,7 +122,7 @@ prepare_row_json_text(const sanitize::CompiledPlan &plan, JsonOnDemandDoc *doc,
                       const sanitize::PreparedOptions &opts,
                       sanitize::IngestDiagnostics *diagnostics);
 
-// Appends row json text.
+/// Parses, converts, and conditionally appends one raw JSON row.
 sanitize::Result<AppendRowResult>
 append_row_json_text(BatchAppender *app, JsonOnDemandDoc *doc,
                      std::string_view raw, std::size_t base_offset,
@@ -130,7 +130,7 @@ append_row_json_text(BatchAppender *app, JsonOnDemandDoc *doc,
                      const sanitize::PreparedOptions &opts,
                      sanitize::IngestDiagnostics *diagnostics);
 
-// Converts a syntax-validated JSON object through its immutable field spans.
+/// Converts a syntax-validated JSON object through its immutable field spans.
 sanitize::Result<PreparedRow> prepare_row_json_tokens(
     const sanitize::CompiledPlan &plan, JsonOnDemandDoc *doc,
     std::vector<sanitize::FieldRef> *fields, std::string_view raw,
@@ -138,7 +138,7 @@ sanitize::Result<PreparedRow> prepare_row_json_tokens(
     const JsonValidatedRowTokens &tokens, const sanitize::PreparedOptions &opts,
     sanitize::IngestDiagnostics *diagnostics);
 
-// Appends a syntax-validated JSON object through its immutable field spans.
+/// Appends a syntax-validated JSON object through its immutable field spans.
 sanitize::Result<AppendRowResult> append_row_json_tokens(
     BatchAppender *app, JsonOnDemandDoc *doc, std::string_view raw,
     std::size_t base_offset, std::string_view source_file,
@@ -146,7 +146,7 @@ sanitize::Result<AppendRowResult> append_row_json_tokens(
     const sanitize::PreparedOptions &opts,
     sanitize::IngestDiagnostics *diagnostics);
 
-// Converts one raw CSV row into coordinator-owned cells.
+/// Converts one raw CSV row into coordinator-owned cells.
 sanitize::Result<PreparedRow> prepare_row_csv_text(
     const sanitize::CompiledPlan &plan, const CsvDirectContext &ctx,
     BumpArena *arena, std::vector<std::string_view> *cells,
@@ -155,7 +155,7 @@ sanitize::Result<PreparedRow> prepare_row_csv_text(
     const sanitize::PreparedOptions &opts,
     sanitize::IngestDiagnostics *diagnostics);
 
-// Appends row csv text.
+/// Parses, converts, and conditionally appends one raw CSV record.
 sanitize::Result<AppendRowResult>
 append_row_csv_text(BatchAppender *app, const CsvDirectContext &ctx,
                     BumpArena *arena, std::vector<std::string_view> *cells,

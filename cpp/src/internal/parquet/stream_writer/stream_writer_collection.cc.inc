@@ -1,11 +1,17 @@
-// Collects Arrow values into one Parquet leaf-column staging buffer at a time.
+// Collects Arrow values and nested levels into bounded Parquet leaf-page
+// staging buffers. This fragment is included by the consolidated writer to
+// isolate format-specific implementation details.
 
+/// Reports whether a leaf index falls within a schema node's contiguous leaf
+/// range.
 bool leaf_belongs_to_subtree(const ParquetNode &node,
                              std::size_t target_leaf) noexcept {
   return target_leaf >= node.first_leaf_index &&
          target_leaf < node.first_leaf_index + node.leaf_count;
 }
 
+/// Appends definition-level null markers for every leaf below an absent nested
+/// value.
 void emit_nulls_for_subtree(const ParquetNode &node, std::size_t target_leaf,
                             ColumnPageData *page, std::int16_t definition_level,
                             std::int16_t repetition_level) {
@@ -28,6 +34,8 @@ collect_node_for_leaf(const ParquetNode &node, const ArrowArray &array,
                       ColumnPageData *page, std::int16_t definition_level,
                       std::int16_t repetition_level);
 
+/// Recurses into one list element while preserving its definition and
+/// repetition levels.
 sanitize::Status collect_list_element_for_leaf(
     const ParquetNode &element, const ArrowArray &values, std::int64_t row,
     std::size_t target_leaf, ColumnPageData *page,
@@ -36,6 +44,8 @@ sanitize::Status collect_list_element_for_leaf(
                                definition_level, repetition_level);
 }
 
+/// Traverses the Arrow node containing a target leaf and stages that leaf's
+/// values and levels.
 sanitize::Status
 collect_node_for_leaf(const ParquetNode &node, const ArrowArray &array,
                       std::int64_t row, std::size_t target_leaf,
@@ -207,6 +217,8 @@ collect_node_for_leaf(const ParquetNode &node, const ArrowArray &array,
       "native Parquet writer: target leaf is not reachable from schema root");
 }
 
+/// Encodes bool values plain using the selected Parquet representation and
+/// bounded caller-owned storage.
 void encode_bool_values_plain(std::string *out,
                               const std::vector<bool> &values) {
   std::uint8_t byte = 0;
@@ -227,6 +239,8 @@ void encode_bool_values_plain(std::string *out,
   }
 }
 
+/// Returns retained bytes for values and levels in one logical Parquet page
+/// staging buffer.
 std::size_t
 logical_column_page_data_bytes(const ColumnPageData &page_data) noexcept {
   const auto bool_bytes = (page_data.bool_values.size() + 7U) / 8U;
@@ -243,6 +257,8 @@ logical_column_page_data_bytes(const ColumnPageData &page_data) noexcept {
   return page_data.values.size() + bool_bytes + level_bytes;
 }
 
+/// Selects a row-group size that respects row, byte, and retained-metadata
+/// limits.
 sanitize::Result<std::int64_t> determine_bounded_row_group_count(
     const ParquetNode &root, const std::vector<LeafColumn> &leafs,
     const ArrowArray &array, std::int64_t row_offset, std::int64_t max_rows,
@@ -307,6 +323,7 @@ sanitize::Result<std::int64_t> determine_bounded_row_group_count(
   return candidate_rows;
 }
 
+/// Stages one row interval's values and levels for a physical Parquet leaf.
 sanitize::Result<ColumnPageData>
 collect_column_page_data(const ParquetNode &root, const LeafColumn &leaf,
                          const ArrowArray &array, std::int64_t row_offset,

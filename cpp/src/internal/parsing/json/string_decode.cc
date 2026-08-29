@@ -1,4 +1,6 @@
 // Decodes escaped JSON string slices into arena-provided output buffers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/string_decode.hh"
 
@@ -25,25 +27,25 @@ struct DecodeContext {
   const DecodeErrors *errors = nullptr;
 };
 
-// Builds a JSON string parse error with an absolute byte offset.
+/// Builds a JSON string parse error with an absolute byte offset.
 sanitize::Status parse_error(std::string_view msg, std::size_t offset) {
   return sanitize::Status::Invalid(std::string(msg), " at byte ",
                                    std::to_string(offset));
 }
 
-// Returns the input byte offset for the decoder cursor.
+/// Returns the input byte offset for the decoder cursor.
 std::size_t byte_offset(const DecodeContext &ctx) {
   return ctx.base_offset +
          static_cast<std::size_t>(ctx.p - ctx.full_text.data());
 }
 
-// Builds a JSON string parse error at the current decoder cursor.
+/// Builds a JSON string parse error at the current decoder cursor.
 sanitize::Status parse_error_at_cursor(const DecodeContext &ctx,
                                        std::string_view msg) {
   return parse_error(msg, byte_offset(ctx));
 }
 
-// Appends one simple JSON escape sequence.
+/// Appends one simple JSON escape sequence.
 sanitize::Status append_simple_escape(char esc, DecodeContext *ctx) {
   switch (esc) {
   case '"':
@@ -75,7 +77,7 @@ sanitize::Status append_simple_escape(char esc, DecodeContext *ctx) {
   }
 }
 
-// Reads a four-hex-digit Unicode code unit and advances the cursor.
+/// Reads a four-hex-digit Unicode code unit and advances the cursor.
 sanitize::Result<uint32_t> read_hex_quad(DecodeContext *ctx,
                                          std::string_view invalid_message) {
   int h0 = json_scan::hex_val(ctx->p[0]), h1 = json_scan::hex_val(ctx->p[1]);
@@ -88,7 +90,7 @@ sanitize::Result<uint32_t> read_hex_quad(DecodeContext *ctx,
   return value;
 }
 
-// Reads and validates a low-surrogate escape after a high surrogate.
+/// Reads and validates a low-surrogate escape after a high surrogate.
 sanitize::Result<uint32_t> read_low_surrogate(DecodeContext *ctx) {
   if (ctx->p + 6 > ctx->end || ctx->p[0] != '\\' || ctx->p[1] != 'u') {
     return parse_error_at_cursor(*ctx, ctx->errors->missing_low_surrogate);
@@ -103,7 +105,7 @@ sanitize::Result<uint32_t> read_low_surrogate(DecodeContext *ctx) {
   return low;
 }
 
-// Decodes one \uXXXX escape and appends its UTF-8 bytes.
+/// Decodes one \uXXXX escape and appends its UTF-8 bytes.
 sanitize::Status append_unicode_escape(DecodeContext *ctx) {
   if (ctx->p + 4 > ctx->end) {
     return parse_error_at_cursor(*ctx, ctx->errors->incomplete_unicode_escape);
@@ -122,7 +124,7 @@ sanitize::Status append_unicode_escape(DecodeContext *ctx) {
   return sanitize::Status::OK();
 }
 
-// Decodes one JSON escape sequence and appends the resulting bytes.
+/// Decodes one JSON escape sequence and appends the resulting bytes.
 sanitize::Status append_escape(DecodeContext *ctx) {
   if (ctx->p >= ctx->end) {
     return parse_error_at_cursor(*ctx, ctx->errors->truncated_escape);

@@ -1,3 +1,9 @@
+// Seeks to page headers and payloads, validates file ranges, and verifies
+// optional CRC checksums. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Reads one bounded page header at an absolute file offset without consuming
+/// its payload.
 sanitize::Result<PageHeaderInfo> read_page_header_at(std::ifstream &file,
                                                      std::uint64_t offset,
                                                      std::uint64_t limit,
@@ -59,6 +65,8 @@ sanitize::Result<PageHeaderInfo> read_page_header_at(std::ifstream &file,
   return page;
 }
 
+/// Computes the unsigned CRC32 checksum used to verify one Parquet page
+/// payload.
 std::uint32_t parquet_page_crc32(std::string_view payload) noexcept {
   std::uint32_t crc = 0xFFFFFFFFU;
   for (const auto byte : payload) {
@@ -72,6 +80,7 @@ std::uint32_t parquet_page_crc32(std::string_view payload) noexcept {
   return ~crc;
 }
 
+/// Verifies a page payload against its optional unsigned CRC32 checksum.
 sanitize::Status
 validate_parquet_page_checksum(const PageHeaderInfo &page,
                                std::string_view compressed_payload) {
@@ -87,6 +96,7 @@ validate_parquet_page_checksum(const PageHeaderInfo &page,
   return {};
 }
 
+/// Reads an exact page payload into caller storage and rejects truncated input.
 sanitize::Status read_exact_payload_into(std::ifstream &file,
                                          std::int64_t offset, std::int32_t size,
                                          std::string *out) {
@@ -123,6 +133,8 @@ sanitize::Status read_exact_payload_into(std::ifstream &file,
   return {};
 }
 
+/// Reads an exact file range into owned storage and rejects truncation or
+/// invalid offsets.
 sanitize::Result<std::string> read_exact_payload(std::ifstream &file,
                                                  std::int64_t offset,
                                                  std::int32_t size) {
@@ -131,6 +143,8 @@ sanitize::Result<std::string> read_exact_payload(std::ifstream &file,
   return payload;
 }
 
+/// Returns capacity still available for values derived while verifying a
+/// Parquet page.
 std::uint64_t
 remaining_page_derived_budget(const PageVerificationScratch &scratch) noexcept {
   return scratch.derived_bytes >= scratch.max_derived_bytes
@@ -138,6 +152,8 @@ remaining_page_derived_budget(const PageVerificationScratch &scratch) noexcept {
              : scratch.max_derived_bytes - scratch.derived_bytes;
 }
 
+/// Verifies a Parquet page's checksum and compressed-size bounds before
+/// decoding.
 sanitize::Status verify_page_payload(std::ifstream &file,
                                      const ColumnChunkInfo &column,
                                      PageHeaderInfo *page,
@@ -256,6 +272,7 @@ sanitize::Status verify_page_payload(std::ifstream &file,
   return {};
 }
 
+/// Scans and verifies every dictionary and data page within one column chunk.
 sanitize::Status read_page_headers_for_column(std::ifstream &file,
                                               ColumnChunkInfo *column,
                                               PageVerificationScratch *scratch,
@@ -339,6 +356,8 @@ sanitize::Status read_page_headers_for_column(std::ifstream &file,
   return {};
 }
 
+/// Scans page headers and optional payload diagnostics for all projected column
+/// chunks.
 sanitize::Status read_page_headers(
     std::ifstream &file, FooterInfo *info,
     std::size_t max_page_bytes = kMaxPayloadVerificationBytes,

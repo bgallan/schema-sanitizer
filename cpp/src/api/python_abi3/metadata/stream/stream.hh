@@ -1,4 +1,7 @@
-// Arrow C stream wrapper that appends generated metadata columns.
+// Declares the Arrow C stream wrapper that appends generated metadata columns.
+// The implementation accounts retained buffers before exposing generated
+// columns through Arrow C Data.
+
 #pragma once
 
 #include "api/python_abi3/metadata/columns/api.hh"

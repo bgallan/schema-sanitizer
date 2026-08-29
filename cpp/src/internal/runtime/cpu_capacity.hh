@@ -1,5 +1,7 @@
-// Detects the CPU capacity visible to the current process without
-// configuration.
+// Detects CPU capacity visible to the current process without
+// configuration. Hardware, affinity, and cached cgroup quotas combine into
+// one positive bound.
+
 #pragma once
 
 #include <algorithm>
@@ -34,6 +36,8 @@ namespace cpu_capacity_detail {
 
 inline constinit std::atomic<std::int64_t> g_hardware_count{0};
 
+/// Returns the platform's online hardware-thread count with a safe minimum
+/// of one.
 [[nodiscard]] inline std::int64_t hardware_count() noexcept {
   const auto cached = g_hardware_count.load(std::memory_order_acquire);
   if (cached > 0) {
@@ -50,6 +54,8 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
 
 #if defined(__linux__)
 
+/// Counts CPUs permitted by the current process affinity mask
+/// when supported.
 [[nodiscard]] inline std::int64_t affinity_count() noexcept {
   cpu_set_t affinity;
   CPU_ZERO(&affinity);
@@ -60,6 +66,8 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
   return count <= 0 ? 1 : static_cast<std::int64_t>(count);
 }
 
+/// Reads one complete small text file while reporting an absent
+/// path separately.
 [[nodiscard]] inline bool read_line(const char *path, char *buffer,
                                     std::size_t capacity,
                                     bool *missing = nullptr) noexcept {
@@ -88,6 +96,7 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
   return read && complete && !input_error && close_status == 0;
 }
 
+/// Parses a strictly positive signed integer from trimmed text.
 [[nodiscard]] inline bool parse_positive(std::string_view text,
                                          std::int64_t &value) noexcept {
   while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
@@ -103,6 +112,7 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
   return parsed.ec == std::errc{} && parsed.ptr == last && value > 0;
 }
 
+/// Converts a cgroup quota and period into rounded-up CPU capacity.
 [[nodiscard]] inline std::int64_t quota_capacity(std::int64_t quota,
                                                  std::int64_t period) noexcept {
   if (quota <= 0 || period <= 0) {
@@ -111,6 +121,7 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
   return std::max<std::int64_t>(1, (quota + period - 1) / period);
 }
 
+/// Reads CPU capacity from the effective cgroup v2 cpu.max hierarchy.
 [[nodiscard]] inline std::int64_t cgroup_v2_capacity() noexcept {
   char current[4096]{};
   char mountpoint[4096]{};
@@ -163,6 +174,7 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
   return effective;
 }
 
+/// Reads a complete signed integer from a small controller file.
 [[nodiscard]] inline bool read_integer(const char *path,
                                        std::int64_t &value) noexcept {
   char line[128]{};
@@ -172,6 +184,7 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
   return parse_positive(std::string_view(line), value);
 }
 
+/// Reads CPU capacity from the effective cgroup v1 quota hierarchy.
 [[nodiscard]] inline std::int64_t cgroup_v1_capacity() noexcept {
   char current[4096]{};
   char mountpoint[4096]{};
@@ -218,12 +231,15 @@ inline constinit std::atomic<std::int64_t> g_hardware_count{0};
 
 constexpr std::int64_t kCgroupCapacityRefreshPeriodNs = 250'000'000LL;
 
+/// Returns the current steady-clock time in nanoseconds.
 [[nodiscard]] inline std::int64_t monotonic_now_ns() noexcept {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
 
+/// Computes the next cgroup-capacity refresh deadline with
+/// saturating arithmetic.
 [[nodiscard]] constexpr std::int64_t
 next_cgroup_refresh_after(std::int64_t now) noexcept {
   const auto maximum = std::numeric_limits<std::int64_t>::max();
@@ -232,6 +248,7 @@ next_cgroup_refresh_after(std::int64_t now) noexcept {
              : now + kCgroupCapacityRefreshPeriodNs;
 }
 
+/// Samples whichever cgroup CPU controller version constrains the process.
 [[nodiscard]] inline std::int64_t sample_cgroup_capacity() noexcept {
   const auto version = cgroup_view_detail::current_version("cpu");
   if (version == 2) {
@@ -259,6 +276,7 @@ static_assert(std::atomic<std::int64_t>::is_always_lock_free &&
 // inherited in its locked state if another thread forks during first use.
 inline constinit CgroupCapacityCache g_cgroup_capacity_cache{};
 
+/// Returns a periodically refreshed cgroup CPU-capacity sample.
 [[nodiscard]] inline std::int64_t cached_cgroup_capacity() noexcept {
   auto &cache = g_cgroup_capacity_cache;
   const auto now = monotonic_now_ns();
@@ -296,6 +314,8 @@ inline constinit CgroupCapacityCache g_cgroup_capacity_cache{};
   return sampled;
 }
 
+/// Combines hardware, affinity, and cgroup limits into visible
+/// CPU capacity.
 [[nodiscard]] inline std::int64_t platform_count() noexcept {
   return std::max<std::int64_t>(1, std::min({hardware_count(), affinity_count(),
                                              cached_cgroup_capacity()}));
@@ -303,6 +323,8 @@ inline constinit CgroupCapacityCache g_cgroup_capacity_cache{};
 
 #elif defined(_WIN32)
 
+/// Combines Windows process affinity and processor-group counts into visible
+/// CPU capacity.
 [[nodiscard]] inline std::int64_t platform_count() noexcept {
   DWORD_PTR process_mask = 0;
   DWORD_PTR system_mask = 0;
@@ -320,6 +342,7 @@ inline constinit CgroupCapacityCache g_cgroup_capacity_cache{};
 
 #elif defined(__APPLE__)
 
+/// Reads active macOS CPUs and falls back to the configured hardware count.
 [[nodiscard]] inline std::int64_t platform_count() noexcept {
   std::int32_t count = 0;
   std::size_t size = sizeof(count);
@@ -337,6 +360,7 @@ inline constinit CgroupCapacityCache g_cgroup_capacity_cache{};
 
 #else
 
+/// Uses the portable hardware-thread count when no platform probe is available.
 [[nodiscard]] inline std::int64_t platform_count() noexcept {
   return hardware_count();
 }
@@ -345,6 +369,8 @@ inline constinit CgroupCapacityCache g_cgroup_capacity_cache{};
 
 } // namespace cpu_capacity_detail
 
+/// Returns the positive CPU capacity currently available to
+/// native execution.
 [[nodiscard]] inline std::int64_t available_cpu_capacity() noexcept {
   return cpu_capacity_detail::platform_count();
 }

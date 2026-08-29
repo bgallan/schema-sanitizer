@@ -1,4 +1,6 @@
 // Implements CSV serialization for Arrow C streams.
+// The writer validates Arrow inputs and escapes records while preserving stream
+// ownership and diagnostics.
 
 #include "internal/csv/csv_stream_writer.hh"
 
@@ -30,6 +32,8 @@ namespace jsonl = sanitize::internal::jsonl_stream_writer;
 // Both policies scale with the operation worker count without a fixed ceiling.
 inline constexpr std::int64_t kMinimumCsvOutputWorkers = 4;
 
+/// Derives the CSV preparation worker ceiling from operation parallelism and
+/// schema cost.
 [[nodiscard]] constexpr std::int64_t
 csv_worker_ceiling_for(std::int64_t operation_workers,
                        bool wide_fixed) noexcept {
@@ -49,24 +53,34 @@ static_assert(csv_worker_ceiling_for(64, false) == 8);
 
 class CsvRowEstimator final {
 public:
+  /// Builds the fixed-versus-dynamic CSV sizing plan for the root Arrow schema.
   explicit CsvRowEstimator(const jsonl::JsonlField &root)
       : root_(&root),
         plan_(text_output_estimator::make_csv_fixed_estimate_plan(root)) {}
 
+  /// Refreshes per-batch estimator state before rows are partitioned among
+  /// output workers.
   void prepare(const ArrowArray &) noexcept {}
 
+  /// Reports whether this schema can safely use the high-core fixed-cost output
+  /// path.
   [[nodiscard]] bool high_core_eligible() const noexcept {
     return plan_.eligible;
   }
 
+  /// Returns the number of schema fields with constant-cost CSV output
+  /// estimates.
   [[nodiscard]] std::size_t fixed_field_count() const noexcept {
     return plan_.fixed_fields;
   }
 
+  /// Returns the number of fields that require per-row output-size sampling.
   [[nodiscard]] std::size_t dynamic_field_count() const noexcept {
     return plan_.dynamic_fields.size();
   }
 
+  /// Returns a capped encoded-size estimate for one Arrow row in the selected
+  /// text format.
   [[nodiscard]] std::int64_t operator()(const ArrowArray &array,
                                         std::int64_t row,
                                         std::int64_t cap) const noexcept {
@@ -81,6 +95,8 @@ private:
 
 constexpr std::size_t kMaxRetainedOutputBytes = 4U << 20;
 
+/// Clears decode buffer, securely wiping or releasing excess retained capacity
+/// when configured.
 void clear_decode_buffer(std::vector<char> &buffer) noexcept {
   if (secure_memory_cleanup_enabled() && !buffer.empty()) {
     secure_zero_memory(buffer.data(), buffer.size());
@@ -95,14 +111,21 @@ void clear_decode_buffer(std::vector<char> &buffer) noexcept {
 
 class ScopedStringWipe final {
 public:
+  /// Arms a scope guard that securely wipes encoded output bytes on exit.
   explicit ScopedStringWipe(TextBuffer *value) noexcept : value_(value) {}
+  /// Securely wipes the guarded output bytes at scope exit when cleanup is
+  /// enabled.
   ~ScopedStringWipe() {
     if (value_ && secure_memory_cleanup_enabled() && !value_->empty()) {
       secure_zero_memory(value_->data(), value_->size());
     }
   }
 
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedStringWipe(const ScopedStringWipe &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedStringWipe &operator=(const ScopedStringWipe &) = delete;
 
 private:
@@ -111,15 +134,22 @@ private:
 
 class ScopedDecodeBufferClear final {
 public:
+  /// Arms a scope guard that clears sensitive decode scratch on exit.
   explicit ScopedDecodeBufferClear(std::vector<char> *value) noexcept
       : value_(value) {}
+  /// Clears sensitive decoded bytes and drops excess retained capacity at scope
+  /// exit.
   ~ScopedDecodeBufferClear() {
     if (value_) {
       clear_decode_buffer(*value_);
     }
   }
 
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedDecodeBufferClear(const ScopedDecodeBufferClear &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   ScopedDecodeBufferClear &operator=(const ScopedDecodeBufferClear &) = delete;
 
 private:
@@ -139,10 +169,14 @@ constexpr json_string_decode::DecodeErrors kCsvJsonDecodeErrors{
     .invalid_escape = "CSV writer: invalid JSON string escape",
 };
 
+/// Reports whether a cell must be quoted to preserve CSV delimiters, line
+/// breaks, or quotes.
 bool needs_csv_quotes(std::string_view value) {
   return value.find_first_of(",\"\r\n") != std::string_view::npos;
 }
 
+/// Appends one CSV field, adding outer quotes and doubling embedded quotes when
+/// required.
 void append_csv_escaped(TextBuffer &out, std::string_view value) {
   if (!needs_csv_quotes(value)) {
     out.append(value);
@@ -159,16 +193,21 @@ void append_csv_escaped(TextBuffer &out, std::string_view value) {
   out.push_back('"');
 }
 
+/// Reports whether serialized JSON bytes form a quoted string that can be
+/// decoded as a CSV cell.
 bool is_json_string_literal(std::string_view value) {
   return value.size() >= 2 && value.front() == '"' && value.back() == '"';
 }
 
+/// Reads one bit from a non-null Arrow validity bitmap.
 [[nodiscard]] bool validity_bit_is_set(const std::uint8_t *bitmap,
                                        std::int64_t index) noexcept {
   return (bitmap[index >> 3] & static_cast<std::uint8_t>(1U << (index & 7))) !=
          0U;
 }
 
+/// Tests Arrow validity at the logical index, treating an absent bitmap as all
+/// valid.
 [[nodiscard]] bool array_is_null(const ArrowArray &array,
                                  std::int64_t row) noexcept {
   if (array.null_count == 0 || !array.buffers || !array.buffers[0]) {
@@ -178,6 +217,8 @@ bool is_json_string_literal(std::string_view value) {
   return !validity_bit_is_set(bitmap, array.offset + row);
 }
 
+/// Reports whether an Arrow scalar can bypass JSON formatting in the CSV
+/// writer.
 [[nodiscard]] bool is_direct_csv_scalar(jsonl::JsonlKind kind) noexcept {
   switch (kind) {
   case jsonl::JsonlKind::kBool:
@@ -198,6 +239,7 @@ bool is_json_string_literal(std::string_view value) {
   }
 }
 
+/// Formats one supported Arrow logical scalar directly into a CSV field.
 sanitize::Status
 append_direct_csv_logical_scalar(TextBuffer &out,
                                  const jsonl::JsonlField &field,
@@ -237,6 +279,8 @@ append_direct_csv_logical_scalar(TextBuffer &out,
   }
 }
 
+/// Reports whether an Arrow logical scalar has a direct, allocation-free CSV
+/// formatter.
 [[nodiscard]] bool
 is_direct_csv_logical_scalar(jsonl::JsonlKind kind) noexcept {
   switch (kind) {
@@ -261,6 +305,7 @@ is_direct_csv_logical_scalar(jsonl::JsonlKind kind) noexcept {
 }
 
 template <class Offset>
+/// Appends a decoded string as a correctly quoted and escaped CSV field.
 sanitize::Status append_csv_string(TextBuffer &out, const ArrowArray &array,
                                    std::int64_t row) {
   if (!array.buffers || !array.buffers[1]) {
@@ -287,6 +332,7 @@ sanitize::Status append_csv_string(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Converts one serialized JSON scalar to its CSV field representation.
 sanitize::Status append_csv_cell_from_json(TextBuffer &out,
                                            std::string_view json_value,
                                            std::vector<char> *decode_buffer) {
@@ -307,6 +353,8 @@ sanitize::Status append_csv_cell_from_json(TextBuffer &out,
   return sanitize::Status::OK();
 }
 
+/// Formats one Arrow value as a CSV cell through the direct or JSON fallback
+/// path.
 sanitize::Status append_csv_cell(TextBuffer &out,
                                  const jsonl::JsonlField &field,
                                  const ArrowArray &array, std::int64_t row,
@@ -333,6 +381,7 @@ sanitize::Status append_csv_cell(TextBuffer &out,
   return append_csv_cell_from_json(out, json_value, decode_buffer);
 }
 
+/// Writes one CSV header record from the escaped root field names.
 sanitize::Status write_header(Output &out_file, const jsonl::JsonlField &root) {
   TextBuffer buffer;
   ScopedStringWipe buffer_wipe(&buffer);
@@ -346,6 +395,7 @@ sanitize::Status write_header(Output &out_file, const jsonl::JsonlField &root) {
   return out_file.Write(buffer);
 }
 
+/// Serializes a contiguous Arrow row interval into the worker-local CSV buffer.
 sanitize::Status append_rows_csv(const jsonl::JsonlField &root,
                                  const ArrowArray &array,
                                  std::int64_t first_row, std::int64_t row_count,

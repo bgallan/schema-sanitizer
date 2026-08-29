@@ -1,4 +1,6 @@
 // Implements buffering and arena materialization for multi-chunk CSV records.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/csv/record_span_internal.hh"
 

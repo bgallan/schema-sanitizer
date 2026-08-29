@@ -1,3 +1,9 @@
+// Implements dedicated ordered-executor worker startup and shutdown.
+// Physical thread permits, stop requests, and joins follow
+// process-wide governance.
+
+/// Starts governed dedicated workers unless execution is inline or
+/// arena-backed.
 sanitize::Status start_workers() {
   if (inline_mode() || arena_) {
     return sanitize::Status::OK();
@@ -15,6 +21,7 @@ sanitize::Status start_workers() {
                                 sanitize::internal::StopToken stop) mutable {
         mark_process_physical_thread_running();
         struct PhysicalThreadRunningGuard final {
+          /// Records that this governed physical worker has stopped.
           ~PhysicalThreadRunningGuard() noexcept {
             mark_process_physical_thread_stopped();
           }

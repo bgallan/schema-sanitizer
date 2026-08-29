@@ -1,4 +1,6 @@
-// Shared Arrow C stream callbacks for registry-backed multi-source streams.
+// Implements Arrow C Stream callbacks shared by registry-backed multi-source
+// adapters. The callbacks forward child schemas and batches while preserving
+// source order and errors.
 
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
@@ -12,6 +14,8 @@
 
 namespace core_abi3_internal {
 
+/// Exposes the most recent schema-registry stream failure through the Arrow C
+/// Stream callback.
 const char *
 native_multi_source_last_error(ArrowArrayStream *stream,
                                const NativeMultiSourceStreamOps &ops) {
@@ -26,6 +30,8 @@ native_multi_source_last_error(ArrowArrayStream *stream,
       ops.last_error(stream->private_data));
 }
 
+/// Releases the schema-registry stream callback state and clears all
+/// transferred Arrow ownership.
 void native_multi_source_release(ArrowArrayStream *stream,
                                  const NativeMultiSourceStreamOps &ops) {
   if (!sanitize::internal::runtime_owner_process()) {
@@ -45,6 +51,8 @@ void native_multi_source_release(ArrowArrayStream *stream,
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
 
+/// Exports the current schema through the schema-registry stream Arrow C Stream
+/// callback.
 int native_multi_source_get_schema(ArrowArrayStream *stream, ArrowSchema *out,
                                    const NativeMultiSourceStreamOps &ops) {
   if (!stream || !out || !stream->private_data || !ops.last_error ||
@@ -72,6 +80,8 @@ int native_multi_source_get_schema(ArrowArrayStream *stream, ArrowSchema *out,
       });
 }
 
+/// Produces the next array through the registry multi-source Arrow C Stream
+/// callback.
 int native_multi_source_get_next(ArrowArrayStream *stream, ArrowArray *out,
                                  const NativeMultiSourceStreamOps &ops) {
   if (!stream || !out || !stream->private_data || !ops.last_error ||

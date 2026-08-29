@@ -1,6 +1,10 @@
 /*
  * Owns CSV nested-column Arrow C Stream rewriting and its Python wrapper.
+ *
+ * It preserves row nullability while converting nested top-level values into
+ * JSON text columns.
  */
+
 #include "api/python_abi3/csv/nested_stream/state.hh"
 
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
@@ -26,11 +30,14 @@ namespace {
 constexpr std::int64_t kMaxCsvNestedColumns = 65'536;
 constexpr std::int64_t kMaxCsvNestedRows = std::int64_t{1} << 24;
 
+/// Reads one bit from a non-null Arrow validity bitmap.
 bool validity_bit_is_set(const std::uint8_t *bitmap, std::int64_t index) {
   return (bitmap[index >> 3] & static_cast<std::uint8_t>(1u << (index & 7))) !=
          0;
 }
 
+/// Determines nullness for one logical Arrow array position after applying its
+/// offset.
 bool array_is_null(const ArrowArray &array, std::int64_t row) {
   if (array.null_count == 0 || !array.buffers || !array.buffers[0]) {
     return false;
@@ -39,25 +46,32 @@ bool array_is_null(const ArrowArray &array, std::int64_t row) {
   return !validity_bit_is_set(bitmap, array.offset + row);
 }
 
+/// Marks one Arrow validity slot null while preserving neighboring row states.
 void clear_validity_bit(std::vector<std::uint8_t> *validity,
                         std::int64_t index) {
   (*validity)[static_cast<std::size_t>(index >> 3)] &=
       static_cast<std::uint8_t>(~(1u << (index & 7)));
 }
 
+/// Reports whether a logical JSON kind requires nested-value encoding for CSV.
 bool is_nested_kind(jsonl::JsonlKind kind) {
   return kind == jsonl::JsonlKind::kStruct || kind == jsonl::JsonlKind::kList ||
          kind == jsonl::JsonlKind::kLargeList || kind == jsonl::JsonlKind::kMap;
 }
 
+/// Releases any Arrow schema callback and restores the structure to an empty
+/// state.
 void clear_schema(ArrowSchema *schema) noexcept {
   sanitize::internal::cdata_stream::clear_schema(schema);
 }
 
+/// Releases any Arrow array callback and restores the structure to an empty
+/// state.
 void clear_array(ArrowArray *array) noexcept {
   sanitize::internal::cdata_stream::clear_array(array);
 }
 
+/// Clears a CSV child schema through its installed Arrow release callback.
 void csv_nested_schema_child_release(ArrowSchema *schema) {
   if (!schema || !schema->release) {
     return;
@@ -65,6 +79,7 @@ void csv_nested_schema_child_release(ArrowSchema *schema) {
   clear_schema(schema);
 }
 
+/// Clears a CSV child array through its installed Arrow release callback.
 void csv_nested_array_child_release(ArrowArray *array) {
   if (!array || !array->release) {
     return;
@@ -72,6 +87,8 @@ void csv_nested_array_child_release(ArrowArray *array) {
   clear_array(array);
 }
 
+/// Releases the CSV ABI adapter callback state and clears all transferred Arrow
+/// ownership.
 void csv_nested_schema_release(ArrowSchema *schema) {
   if (!schema || !schema->release) {
     return;
@@ -81,6 +98,8 @@ void csv_nested_schema_release(ArrowSchema *schema) {
   clear_schema(schema);
 }
 
+/// Releases the CSV ABI adapter callback state and clears all transferred Arrow
+/// ownership.
 void csv_nested_array_release(ArrowArray *array) {
   if (!array || !array->release) {
     return;
@@ -90,6 +109,8 @@ void csv_nested_array_release(ArrowArray *array) {
   clear_array(array);
 }
 
+/// Loads the base schema and records which CSV columns require nested
+/// serialization.
 sanitize::Status load_csv_nested_schema(CsvNestedStreamState *stream_state,
                                         ArrowSchema *base_schema) {
   stream_state->columns.clear();
@@ -126,6 +147,8 @@ sanitize::Status load_csv_nested_schema(CsvNestedStreamState *stream_state,
   return sanitize::Status::OK();
 }
 
+/// Replaces nested schema children with UTF-8 fields while preserving scalar
+/// children.
 sanitize::Status append_schema_children(CsvNestedStreamState *stream_state,
                                         CsvNestedSchemaState *schema_state) {
   ArrowSchema &base = schema_state->base.value();
@@ -157,6 +180,8 @@ sanitize::Status append_schema_children(CsvNestedStreamState *stream_state,
   return sanitize::Status::OK();
 }
 
+/// Serializes one nested Arrow column into bounded UTF-8 offsets and payload
+/// buffers.
 sanitize::Status build_nested_utf8_array(CsvNestedUtf8Array *out,
                                          const jsonl::JsonlField &field,
                                          const ArrowArray &array,
@@ -224,6 +249,7 @@ sanitize::Status build_nested_utf8_array(CsvNestedUtf8Array *out,
 
 } // namespace
 
+/// Closes stream idempotently and preserves any prior CSV ABI adapter failure.
 void close_stream(CsvNestedStreamState *state) noexcept {
   if (!state) {
     return;
@@ -232,6 +258,7 @@ void close_stream(CsvNestedStreamState *state) noexcept {
                                &state->stream_capsule, &state->closed);
 }
 
+/// Exposes the nested CSV stream callback error buffer to Arrow consumers.
 const char *last_error(ArrowArrayStream *stream) {
   if (!stream) {
     return "invalid CSV nested stream";
@@ -242,6 +269,8 @@ const char *last_error(ArrowArrayStream *stream) {
                : nullptr;
 }
 
+/// Releases the CSV ABI adapter callback state and clears all transferred Arrow
+/// ownership.
 void release_stream(ArrowArrayStream *stream) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -256,6 +285,8 @@ void release_stream(ArrowArrayStream *stream) {
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
 
+/// Exports the current schema through the CSV ABI adapter Arrow C Stream
+/// callback.
 int get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
   if (!stream) {
     return EINVAL;
@@ -301,6 +332,7 @@ int get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
       });
 }
 
+/// Produces the next Arrow C array through the CSV ABI adapter stream callback.
 int get_next(ArrowArrayStream *stream, ArrowArray *out) {
   if (!stream) {
     return EINVAL;
@@ -396,6 +428,7 @@ int get_next(ArrowArrayStream *stream, ArrowArray *out) {
 
 namespace core_abi3_internal {
 
+/// Wraps an Arrow stream so nested top-level values become JSON text columns.
 PyObject *py_csv_nested_stream_wrap(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   long long memory_limit_bytes = -1;

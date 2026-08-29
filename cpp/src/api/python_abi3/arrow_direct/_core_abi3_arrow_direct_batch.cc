@@ -1,4 +1,6 @@
-// Builds internal RowBatch views from Arrow C Data batches.
+// Builds internal RowBatch views from Arrow C Data batches. These routines keep
+// Arrow schema interpretation and buffer ownership explicit at the ABI
+// boundary.
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_batch.hh"
 
@@ -15,6 +17,8 @@ namespace {
 
 constexpr std::size_t kMaxArrowDirectFieldRefs = 100'000'000;
 
+/// Converts an Arrow child count to `size_t` after rejecting negative or
+/// oversized values.
 sanitize::Result<std::size_t> checked_field_ref_count(int64_t row_count,
                                                       std::size_t field_count) {
   if (row_count < 0) {

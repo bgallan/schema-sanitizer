@@ -1,4 +1,5 @@
-// Declares ABI3 Arrow stream capsule lifecycle helpers.
+// Declares ABI3 Arrow stream capsule lifecycle helpers. They centralize capsule
+// ownership and callback release rules for every Python-facing stream.
 
 #pragma once
 
@@ -10,7 +11,7 @@
 
 namespace core_abi3_internal {
 
-// Returns the Python capsule name used by Arrow C stream exports.
+/// Returns the Python capsule name used by Arrow C stream exports.
 const char *arrow_stream_capsule_name() noexcept;
 
 // Releases a Python object while holding the GIL.

@@ -1,4 +1,6 @@
 // Implements hardened XML markup parsing and row-boundary transitions.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/xml/row_scanner.hh"
 
@@ -13,6 +15,8 @@ namespace {
 
 namespace xml_scan = xml_tokens;
 
+/// Reports whether buffered XML markup is a prefix of the requested delimiter
+/// token.
 [[nodiscard]] bool is_token_prefix(std::string_view available,
                                    std::string_view token) noexcept {
   return available.size() < token.size() && token.starts_with(available);

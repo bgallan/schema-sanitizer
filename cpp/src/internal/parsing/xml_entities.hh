@@ -1,4 +1,6 @@
 // Declares hardened XML UTF-8 validation and entity decoding helpers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 

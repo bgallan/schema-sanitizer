@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from schema_sanitizer import pipeline
@@ -218,15 +220,17 @@ def test_python_source_has_docstrings() -> None:
     assert failures == {}
 
 
-def test_cpp_source_has_file_header_comments() -> None:
-    """Require each native source and header file to start with a comment."""
-    failures = [
-        path.relative_to(ROOT).as_posix()
-        for path in sorted((ROOT / "cpp/src").rglob("*"))
-        if path.suffix in {".cc", ".cpp", ".def", ".hh"}
-        and not path.read_text(encoding="utf-8").splitlines()[0].lstrip().startswith(("//", "/*"))
-    ]
-    assert failures == []
+def test_cpp_source_has_file_summaries() -> None:
+    """Require generous summaries at the top of every maintained native file."""
+    checker = ROOT / "meta" / "ci" / "native" / "check_cpp_documentation.py"
+    completed = subprocess.run(
+        [sys.executable, str(checker), "--source-only"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_msvc_translation_units_compile_in_four_bounded_processes() -> None:

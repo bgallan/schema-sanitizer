@@ -1,4 +1,5 @@
-// Declares private ingestion preparation phases.
+// Declares private ingestion preparation phases. The phases combine inferred or
+// supplied schemas with options before compiling the execution plan.
 
 #pragma once
 
@@ -18,7 +19,7 @@ class ExecutionContext;
 
 namespace ingest_internal {
 
-// Infers one logical schema by consuming frontend batches.
+/// Infers one logical schema by consuming frontend batches.
 sanitize::Result<LogicalSchema> infer_schema_from_frontend(
     std::string_view frontend_name, FrontendHandle &frontend,
     const PreparedOptions &opts, IngestDiagnostics *diagnostics,
@@ -26,7 +27,7 @@ sanitize::Result<LogicalSchema> infer_schema_from_frontend(
     std::shared_ptr<void> operation_memory_pool,
     std::shared_ptr<internal::OperationTaskArena> task_arena);
 
-// Resolves the final logical schema from a contract and inferred schema.
+/// Resolves the final logical schema from a contract and inferred schema.
 sanitize::Result<LogicalSchema>
 resolve_ingest_logical_schema(const PreparedOptions &opts,
                               const LogicalSchema &inferred_schema);

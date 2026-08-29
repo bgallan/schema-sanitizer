@@ -1,3 +1,9 @@
+// Decodes PLAIN byte-array and fixed-width page values with exact bounds and
+// output accounting. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Decodes length-prefixed PLAIN byte arrays into raw values and bounded
+/// previews.
 sanitize::Result<std::int32_t> decode_plain_byte_array_values(
     std::string_view values, std::int32_t expected_values,
     std::vector<std::string> *preview, std::vector<std::string> *raw_values,
@@ -54,6 +60,7 @@ sanitize::Result<std::int32_t> decode_plain_byte_array_values(
   return decoded;
 }
 
+/// Decodes the PLAIN value section according to the column's physical type.
 sanitize::Result<PlainValueDecodeInfo>
 decode_plain_value_payload(std::string_view values,
                            const ColumnChunkInfo &column,
@@ -127,6 +134,7 @@ decode_plain_value_payload(std::string_view values,
   return info;
 }
 
+/// Locates and decodes the PLAIN value section of one data page.
 sanitize::Status decode_plain_values(std::string_view payload,
                                      const ColumnChunkInfo &column,
                                      PageHeaderInfo *page) {

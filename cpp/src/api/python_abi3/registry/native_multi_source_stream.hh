@@ -1,4 +1,6 @@
-// Shared Arrow C stream callbacks for registry-backed multi-source streams.
+// Declares shared Arrow C Stream callbacks for registry-backed multi-source
+// state. Callers provide source-opening hooks while this interface standardizes
+// ordered output.
 
 #pragma once
 

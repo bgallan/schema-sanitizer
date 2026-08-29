@@ -1,4 +1,6 @@
-// Deterministic mutation runner for compilers without libFuzzer.
+// Runs deterministic corpus mutation when libFuzzer is unavailable.
+// Command-line limits bound input length, per-case time, and resident memory
+// while stable seeding makes every standalone campaign reproducible.
 
 #include <algorithm>
 #include <charconv>
@@ -25,6 +27,7 @@
 #include <unistd.h>
 #endif
 
+/// Invokes the format-specific fuzz target linked into this runner.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size);
 
@@ -39,6 +42,7 @@ struct Options {
   std::vector<std::filesystem::path> corpus_paths;
 };
 
+/// Parses an unsigned decimal option with complete input consumption.
 [[nodiscard]] bool parse_unsigned(std::string_view text,
                                   std::uint64_t &value) noexcept {
   const auto *first = text.data();
@@ -47,6 +51,7 @@ struct Options {
   return parsed.ec == std::errc{} && parsed.ptr == last;
 }
 
+/// Parses standalone campaign limits and ordered corpus paths.
 [[nodiscard]] Options parse_options(int argc, char **argv) {
   Options options;
   for (int index = 1; index < argc; ++index) {
@@ -101,6 +106,7 @@ struct Options {
   return options;
 }
 
+/// Returns current resident bytes when the host exposes a supported probe.
 [[nodiscard]] std::uint64_t resident_bytes() noexcept {
 #if defined(__linux__)
   std::ifstream statm("/proc/self/statm");
@@ -127,6 +133,7 @@ struct Options {
 #endif
 }
 
+/// Reads at most the configured byte limit from one corpus file.
 [[nodiscard]] std::vector<std::uint8_t>
 read_file(const std::filesystem::path &path, std::size_t max_length) {
   std::ifstream input(path, std::ios::binary);
@@ -143,6 +150,7 @@ read_file(const std::filesystem::path &path, std::size_t max_length) {
   return bytes;
 }
 
+/// Loads a stable, deduplicated corpus from configured files and directories.
 [[nodiscard]] std::vector<std::vector<std::uint8_t>>
 load_corpus(const Options &options) {
   std::vector<std::filesystem::path> files;
@@ -181,6 +189,7 @@ load_corpus(const Options &options) {
   return corpus;
 }
 
+/// Selects a uniform valid index, returning zero for an empty range.
 [[nodiscard]] std::size_t random_index(std::mt19937_64 &random,
                                        std::size_t size) {
   if (size == 0U) {
@@ -189,6 +198,7 @@ load_corpus(const Options &options) {
   return std::uniform_int_distribution<std::size_t>(0U, size - 1U)(random);
 }
 
+/// Applies one bounded deterministic mutation selected from the operation set.
 void mutate(std::vector<std::uint8_t> &bytes,
             std::span<const std::vector<std::uint8_t>> corpus,
             std::size_t max_length, std::mt19937_64 &random) {
@@ -271,6 +281,7 @@ void mutate(std::vector<std::uint8_t> &bytes,
 
 } // namespace
 
+/// Runs the configured standalone fuzz campaign and enforces resource guards.
 int main(int argc, char **argv) {
   try {
     const auto options = parse_options(argc, argv);

@@ -1,3 +1,9 @@
+// Converts decoded fixed-width Parquet values into the required Arrow physical
+// representation. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Copies fixed width physical to Arrow with bounds checks and the required
+/// Arrow physical representation.
 sanitize::Status copy_fixed_width_physical_to_arrow(
     std::uint8_t *target, const char *source, const ColumnChunkInfo &column,
     std::int32_t physical_width, std::int32_t arrow_width) {
@@ -48,6 +54,8 @@ sanitize::Status copy_fixed_width_physical_to_arrow(
   return {};
 }
 
+/// Builds a bounded diagnostic representation of plain boolean values without
+/// retaining full page data.
 std::vector<std::string> preview_plain_boolean_values(std::string_view values,
                                                       std::int32_t count) {
   std::vector<std::string> out;
@@ -63,6 +71,8 @@ std::vector<std::string> preview_plain_boolean_values(std::string_view values,
   return out;
 }
 
+/// Builds a bounded diagnostic representation of plain fixed values without
+/// retaining full page data.
 std::vector<std::string>
 preview_plain_fixed_values(std::string_view values,
                            const ColumnChunkInfo &column,

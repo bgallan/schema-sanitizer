@@ -1,4 +1,6 @@
-// Implements Arrow C Data value extraction for the direct frontend.
+// Implements Arrow C Data value extraction for the direct frontend. These
+// routines keep Arrow schema interpretation and buffer ownership explicit at
+// the ABI boundary.
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
@@ -29,13 +31,15 @@ struct MonthDayNanoInterval {
   int64_t nanoseconds = 0;
 };
 
-// Stores a temporary string for the lifetime of the current batch.
+/// Stores a temporary string for the lifetime of the current batch.
 std::string_view append_stored_string(ArrowBatchStorage *storage,
                                       std::string value) {
   storage->strings.push_back(std::move(value));
   return storage->strings.back();
 }
 
+/// Reads a variable-width Arrow value and optionally retains its base64
+/// representation.
 template <typename OffsetT>
 sanitize::ValueView string_like_value(const ArrowArray *array, int64_t row,
                                       ArrowBatchStorage *storage, bool base64) {
@@ -58,6 +62,8 @@ sanitize::ValueView string_like_value(const ArrowArray *array, int64_t row,
       append_stored_string(storage, base64_encode(value)));
 }
 
+/// Reads one integer using the Arrow node's resolved signedness and storage
+/// width.
 sanitize::ValueView integer_value(const ArrowArray *array, int64_t row,
                                   ArrowStorageKind storage_kind) {
   switch (storage_kind) {
@@ -80,6 +86,7 @@ sanitize::ValueView integer_value(const ArrowArray *array, int64_t row,
   }
 }
 
+/// Reads a dictionary index at a validated logical Arrow position.
 std::optional<int64_t> dictionary_index_at(const ArrowArray *array,
                                            ArrowStorageKind storage_kind,
                                            int64_t row) {
@@ -103,6 +110,8 @@ std::optional<int64_t> dictionary_index_at(const ArrowArray *array,
   }
 }
 
+/// Converts a time value into the canonical text representation used by
+/// ingestion.
 std::string time_value_to_string(const ArrowArray *array, int64_t row,
                                  ArrowStorageKind storage_kind) {
   if (storage_kind == ArrowStorageKind::kTimeMilliseconds) {
@@ -115,6 +124,8 @@ std::string time_value_to_string(const ArrowArray *array, int64_t row,
   return format_time_fraction(value, 1000000000LL);
 }
 
+/// Converts a duration value into the canonical text representation used by
+/// ingestion.
 std::string duration_value_to_string(int64_t value,
                                      ArrowStorageKind storage_kind) {
   std::string out = std::to_string(value);
@@ -137,6 +148,8 @@ std::string duration_value_to_string(int64_t value,
   return out;
 }
 
+/// Converts an interval value into the canonical text representation used by
+/// ingestion.
 std::string interval_value_to_string(const ArrowArray *array, int64_t row,
                                      ArrowStorageKind storage_kind) {
   if (storage_kind == ArrowStorageKind::kIntervalMonths) {
@@ -158,6 +171,8 @@ std::string interval_value_to_string(const ArrowArray *array, int64_t row,
                                            value.nanoseconds);
 }
 
+/// Visits each logical object child in Arrow order and propagates callback
+/// failures.
 sanitize::Status object_for_each(const void *self, void *ctx,
                                  sanitize::ValueView::ObjectEachFn fn) {
   const auto *ref = static_cast<const ArrowValueRef *>(self);
@@ -178,6 +193,8 @@ sanitize::Status object_for_each(const void *self, void *ctx,
   return sanitize::Status::OK();
 }
 
+/// Visits each logical array child in Arrow order and propagates callback
+/// failures.
 template <typename OffsetT>
 sanitize::Status array_for_each_offset(const ArrowValueRef *ref, void *ctx,
                                        sanitize::ValueView::ArrayEachFn fn) {
@@ -204,6 +221,8 @@ sanitize::Status array_for_each_offset(const ArrowValueRef *ref, void *ctx,
   return sanitize::Status::OK();
 }
 
+/// Visits each logical array child in Arrow order and propagates callback
+/// failures.
 sanitize::Status
 array_for_each_fixed_size(const ArrowValueRef *ref, void *ctx,
                           sanitize::ValueView::ArrayEachFn fn) {
@@ -225,6 +244,8 @@ array_for_each_fixed_size(const ArrowValueRef *ref, void *ctx,
   return sanitize::Status::OK();
 }
 
+/// Visits each logical array child in Arrow order and propagates callback
+/// failures.
 sanitize::Status array_for_each(const void *self, void *ctx,
                                 sanitize::ValueView::ArrayEachFn fn) {
   const auto *ref = static_cast<const ArrowValueRef *>(self);
@@ -250,6 +271,8 @@ const sanitize::ValueView::ArrayVTable kArrayVTable{
 
 } // namespace
 
+/// Releases resources retained by `ArrowArrayStorage` without propagating
+/// cleanup failures.
 ArrowArrayStorage::~ArrowArrayStorage() {
   sanitize::internal::cdata_stream::release_array_nothrow(&array);
   sanitize::internal::cdata_stream::clear_array(&array);
@@ -265,6 +288,8 @@ const ArrowValueRef *store_value_ref(ArrowBatchStorage *storage,
 
 namespace {
 
+/// Reports whether materialization must retain the source array beyond the
+/// callback.
 bool value_requires_stable_ref(const ArrowInputNode *node) {
   if (!node) {
     return false;

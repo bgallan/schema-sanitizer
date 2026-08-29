@@ -1,4 +1,6 @@
-// Implements JSON parsing and serialization for schema-registry documents.
+// Parses canonical schemas from bounded schema-registry JSON documents.
+// Recursive node, depth, field-count, and payload budgets fail closed before
+// malformed registry state can become a native logical schema.
 
 #include "schema_registry/schema_registry_internal.hh"
 
@@ -21,6 +23,7 @@ namespace {
 struct RegistrySchemaBudget {
   std::uint32_t remaining_nodes = internal::options_io::kMaxLogicalSchemaNodes;
 
+  /// Charges one schema node or rejects an exhausted parsing budget.
   Status consume_node() {
     if (remaining_nodes == 0) {
       return Status::Invalid(
@@ -31,6 +34,7 @@ struct RegistrySchemaBudget {
   }
 };
 
+/// Returns an optional named member after validating the containing object.
 Result<std::optional<ValueView>> object_member(ValueView object,
                                                std::string_view member) {
   if (!object.is_object()) {
@@ -47,6 +51,7 @@ Result<std::optional<ValueView>> object_member(ValueView object,
   return out;
 }
 
+/// Returns a required object member with a context-rich validation error.
 Result<ValueView> required_object_member(ValueView object,
                                          std::string_view member,
                                          std::string_view context) {
@@ -58,10 +63,12 @@ Result<ValueView> required_object_member(ValueView object,
   return *value;
 }
 
+/// Decodes one bounded logical type from a canonical registry node.
 Result<LogicalType>
 logical_type_from_registry_node(ValueView node, std::uint32_t depth,
                                 RegistrySchemaBudget *budget);
 
+/// Decodes one named, nullable logical field from a registry node.
 Result<LogicalField>
 logical_field_from_registry_node(ValueView node, std::uint32_t depth,
                                  RegistrySchemaBudget *budget) {
@@ -108,6 +115,7 @@ logical_field_from_registry_node(ValueView node, std::uint32_t depth,
   return field;
 }
 
+/// Decodes a bounded array of logical fields for a schema or struct type.
 Result<std::vector<LogicalField>> logical_fields_from_registry_array(
     ValueView fields_value, std::string_view context, std::uint32_t depth,
     RegistrySchemaBudget *budget) {
@@ -136,6 +144,7 @@ Result<std::vector<LogicalField>> logical_fields_from_registry_array(
   return fields;
 }
 
+/// Recursively decodes scalar, list, and struct logical types under budget.
 Result<LogicalType>
 logical_type_from_registry_node(ValueView node, std::uint32_t depth,
                                 RegistrySchemaBudget *budget) {

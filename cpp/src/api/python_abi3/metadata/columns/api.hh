@@ -1,4 +1,6 @@
-// Declares Python metadata-column models and parsing entry points.
+// Declares Python metadata-column models and parsing entry points. The
+// implementation accounts retained buffers before exposing generated columns
+// through Arrow C Data.
 
 #pragma once
 
@@ -48,7 +50,8 @@ bool append_row_span_columns_from_dict(PyObject *dict,
                                        std::vector<MetadataColumn> *out);
 bool append_timestamp_columns(PyObject *columns,
                               std::vector<MetadataColumn> *out);
-// Parses the two metadata groups shared by registry entry points in order.
+/// Parses and appends first-row and timestamp registry metadata to their
+/// outputs.
 bool append_registry_metadata_columns(
     PyObject *first_row_columns, PyObject *timestamp_columns,
     std::vector<MetadataColumn> *first_row_out,

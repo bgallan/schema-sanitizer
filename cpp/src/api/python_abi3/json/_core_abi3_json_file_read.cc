@@ -1,4 +1,6 @@
-// Local file byte reading helper for Python ABI3 JSON utilities.
+// Implements the local-file byte reader used by Python ABI3 JSON utilities. The
+// routines preserve JSON value semantics while enforcing bounded native
+// ownership and Python errors.
 
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
 #include "internal/runtime/process_fd_governor.hh"

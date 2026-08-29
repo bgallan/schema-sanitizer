@@ -1,4 +1,6 @@
-// Internal construction helpers for ingestion chunk sources.
+// Declares the internal construction helpers for ingestion chunk sources. The
+// helpers enforce memory and descriptor limits while preserving stable
+// chunk-view lifetimes.
 
 #pragma once
 
@@ -14,13 +16,13 @@ namespace sanitize::internal {
 inline constexpr std::int64_t kMaxChunkRequestBytes =
     std::int64_t{256} * 1024 * 1024;
 
-// Rejects chunk requests that could turn one caller mistake into a single
-// enormous allocation.
+/// Rejects nonpositive or oversized chunk requests before allocation.
 sanitize::Status validate_chunk_request(std::int64_t max_bytes,
                                         std::string_view operation);
 
-// Validates current + additional without overflowing before a full input view
-// grows.
+/// Validates materialized-input growth without overflowing the size
+/// calculation. Rejects a resulting size that exceeds the configured input
+/// limit.
 sanitize::Status validate_materialized_input_growth(std::string_view operation,
                                                     std::string_view source,
                                                     std::uint64_t current,

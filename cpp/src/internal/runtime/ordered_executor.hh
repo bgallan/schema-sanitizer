@@ -1,4 +1,7 @@
-// Provides bounded inline and worker-pool execution with ordinal commit order.
+// Provides bounded inline, worker-pool, and shared-arena execution with
+// ordinal commit order. Completion rings and retained-byte charges bound
+// work in flight.
+
 #pragma once
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/ordered_executor_completion_ring.hh"
@@ -26,10 +29,10 @@
 #include <vector>
 namespace sanitize::internal {
 
-// Estimate queue-retained ownership without touching the operation memory
-// ledger.  These bytes are a backpressure signal only: buffers may already be
-// physically charged by an OperationMemoryLedger/PMR resource and charging
-// them again here would double-account resident memory.
+/// Extracts a nonnegative integral retained-byte hint, or zero for other
+/// value types. Estimates drive backpressure only and must not charge the
+/// memory ledger because buffers may already be charged through PMR or an
+/// operation ledger, which would double-account resident memory.
 template <class Value>
 [[nodiscard]] constexpr std::size_t
 KnownRetainedByteValue(const Value &value) noexcept {
@@ -50,6 +53,8 @@ template <class Value>
 [[nodiscard]] std::size_t
 EstimateQueueRetainedBytes(const Value &value) noexcept;
 
+/// Adds retained-byte estimates while saturating at the
+/// unknown-value sentinel.
 [[nodiscard]] constexpr std::size_t
 SaturatingRetainedAdd(std::size_t left, std::size_t right) noexcept {
   return right > std::numeric_limits<std::size_t>::max() - left
@@ -57,6 +62,7 @@ SaturatingRetainedAdd(std::size_t left, std::size_t right) noexcept {
              : left + right;
 }
 
+/// Estimates bytes owned beyond a value object's inline storage.
 template <class Value>
 [[nodiscard]] std::size_t
 AdditionalInlineOwnedBytes(const Value &value) noexcept {
@@ -64,6 +70,8 @@ AdditionalInlineOwnedBytes(const Value &value) noexcept {
   return total > sizeof(Value) ? total - sizeof(Value) : 0U;
 }
 
+/// Estimates retained bytes charged while a value waits in an
+/// executor queue.
 template <class Value>
 [[nodiscard]] std::size_t
 EstimateQueueRetainedBytes(const Value &value) noexcept {
@@ -209,6 +217,8 @@ private:
   };
 
   struct ArenaSharedState final {
+    /// Preallocates completion slots and execution shards for
+    /// shared-arena work.
     explicit ArenaSharedState(std::size_t capacity, std::size_t shards,
                               Worker worker_fn,
                               std::shared_ptr<OperationTaskArena> arena_owner)
@@ -232,10 +242,12 @@ private:
     std::atomic<bool> completion_waiter{false};
     std::atomic<bool> drain_timed_out{false};
 
+    /// Increments the scheduled-work count for an external execution shard.
     void Schedule(std::size_t shard) noexcept {
       scheduled[shard].fetch_add(1U, std::memory_order_relaxed);
     }
 
+    /// Marks one scheduled packet finished and wakes shard drain waiters.
     void Finish(std::size_t shard) noexcept {
       completed[shard].fetch_add(1U, std::memory_order_release);
       // Shutdown is rare. Keep the normal completion path lock-free unless a
@@ -248,6 +260,7 @@ private:
       }
     }
 
+    /// Reports whether every externally scheduled packet has finished.
     [[nodiscard]] bool AllScheduledFinished() const noexcept {
       std::size_t scheduled_total = 0U;
       std::size_t completed_total = 0U;
@@ -261,6 +274,7 @@ private:
       return completed_total >= scheduled_total;
     }
 
+    /// Waits until all scheduled packets finish or the deadline expires.
     [[nodiscard]] bool
     WaitUntil(std::chrono::steady_clock::time_point deadline) noexcept {
       if (AllScheduledFinished()) {
@@ -283,6 +297,8 @@ private:
       return finished;
     }
 
+    /// Executes a packet and converts cancellation or exceptions into an
+    /// ordered outcome.
     Outcome ExecutePacket(Packet packet, std::size_t worker_index,
                           sanitize::internal::StopToken stop) noexcept {
       const auto ordinal = packet.ordinal;
@@ -310,6 +326,7 @@ private:
       }
     }
 
+    /// Transitions every completion slot to a terminal state exactly once.
     void Terminalize(ArenaSlotState terminal) noexcept {
       std::lock_guard outcomes_lock(slots_mutex);
       for (auto &slot : slots) {
@@ -337,12 +354,16 @@ private:
       }
     }
 
+    /// Marks the shared executor state fatally failed and
+    /// closes publication.
     void Fail() noexcept {
       terminal_flags.fetch_or(kArenaTerminalFatalBit,
                               std::memory_order_release);
       Terminalize(ArenaSlotState::kFatal);
     }
 
+    /// Cancels shared executor work and publishes cancellation to
+    /// completion waiters.
     void Cancel() noexcept {
       stop_source.request_stop();
       terminal_flags.fetch_or(kArenaTerminalCancelledBit,
@@ -350,6 +371,7 @@ private:
       Terminalize(ArenaSlotState::kCancelled);
     }
 
+    /// Publishes one ordinal outcome into its reserved completion slot.
     void Publish(Outcome outcome, std::size_t completion_slot,
                  std::size_t input_retained_bytes) noexcept {
       auto &slot = slots[completion_slot];
@@ -409,6 +431,8 @@ private:
       slot.state.notify_one();
     }
 
+    /// Runs an externally leased packet and completes its
+    /// shard reservation.
     void ExecuteExternal(ScheduledPacket scheduled_packet,
                          std::size_t worker_index,
                          sanitize::internal::StopToken arena_stop) noexcept {
@@ -429,17 +453,28 @@ private:
 
   class ExternalLease final {
   public:
+    /// Owns one scheduled external shard until completion or destruction.
     ExternalLease(std::shared_ptr<ArenaSharedState> owner,
                   std::size_t shard) noexcept
         : owner_(std::move(owner)), shard_(shard) {}
+    /// Disables copying the external ordered-executor shard lease.
     ExternalLease(const ExternalLease &) = delete;
+    /// Disables copy assignment for the external ordered-executor
+    /// shard lease.
     ExternalLease &operator=(const ExternalLease &) = delete;
+    /// Transfers ownership from another external ordered-executor
+    /// shard lease.
     ExternalLease(ExternalLease &&other) noexcept
         : owner_(std::move(other.owner_)), shard_(other.shard_) {}
+    /// Disables move assignment for the external ordered-executor
+    /// shard lease.
     ExternalLease &operator=(ExternalLease &&) = delete;
+    /// Marks the external shard complete if ownership was not transferred.
     ~ExternalLease() { Complete(); }
 
+    /// Returns the completion shard reserved for external execution.
     [[nodiscard]] std::size_t shard() const noexcept { return shard_; }
+    /// Finishes the external shard reservation exactly once.
     void Complete() noexcept {
       if (owner_) {
         owner_->Finish(shard_);
@@ -453,7 +488,8 @@ private:
   };
 
 public:
-  // One worker is strictly inline and creates no helper thread or process.
+  /// Creates a bounded executor, using strict caller-thread execution for
+  /// one worker and starting governed workers otherwise.
   static sanitize::Result<std::unique_ptr<OrderedExecutor>>
   Make(std::size_t worker_count, std::size_t task_queue_capacity,
        std::size_t reorder_capacity, Worker worker,
@@ -482,16 +518,20 @@ public:
     return executor;
   }
 
+  /// Disables copying the ordinal-preserving bounded executor.
   OrderedExecutor(const OrderedExecutor &) = delete;
+  /// Disables copy assignment for the ordinal-preserving bounded executor.
   OrderedExecutor &operator=(const OrderedExecutor &) = delete;
 
+  /// Cancels outstanding work and performs bounded worker shutdown.
   ~OrderedExecutor() { (void)shutdown(); }
-  // Submit contiguous ordinals; consume once the dispatch window is full.
+  /// Submits the next contiguous ordinal using an estimated payload charge.
   sanitize::Status Submit(Packet packet) {
     const auto retained_bytes = EstimateQueueRetainedBytes(packet.payload);
     return SubmitCharged(std::move(packet), retained_bytes);
   }
 
+  /// Submits an ordinal packet with an explicit retained-memory charge.
   sanitize::Status SubmitCharged(Packet packet, std::size_t retained_bytes) {
     retained_bytes = std::max<std::size_t>(1U, retained_bytes);
     // Above eight arena workers, reserve directly at the authoritative
@@ -685,7 +725,8 @@ public:
     task_ready_.notify_one();
     return sanitize::Status::OK();
   }
-  // Stop accepting after all work has been queued.
+  /// Stops admission after all work is queued while preserving
+  /// ordered results.
   sanitize::Status FinishSubmission() {
     bool close_waiting_arena_slot = false;
     std::uint64_t close_ordinal = 0;
@@ -713,7 +754,8 @@ public:
     result_ready_.notify_all();
     return sanitize::Status::OK();
   }
-  // Return the next ordinal; failures remain ordered behind earlier results.
+  /// Returns the next ordinal outcome, keeping failures behind
+  /// earlier results.
   sanitize::Result<Outcome> TakeNext() {
     if (uses_arena_completion_slots()) {
       if (worker_count_ > 8U) {
@@ -755,8 +797,7 @@ public:
     task_space_.notify_all();
     return outcome;
   }
-  // Cancels queued/later work and requests cooperative stop from active
-  // workers.
+  /// Cancels queued work and requests cooperative stop from active workers.
   void Cancel() noexcept {
     if (arena_shared_) {
       arena_shared_->stop_source.request_stop();
@@ -802,33 +843,38 @@ public:
     }
     notify_all();
   }
-  // Cancel and drain external arena tasks, reporting whether every scheduled
-  // completion lease retired before the bounded safety deadline. This is an
-  // internal lifecycle primitive; repeated calls preserve the first result.
+  /// Cancels and drains external arena work within a bounded deadline,
+  /// preserving the first shutdown result across repeated calls.
   [[nodiscard]] bool Shutdown() noexcept { return shutdown(); }
-  // True only for the strict caller-thread path.
+  /// Reports whether execution stays strictly on the caller thread.
   [[nodiscard]] bool inline_mode() const noexcept {
     return worker_count_ == 1 && (!arena_ || arena_->inline_mode());
   }
 
+  /// Returns the executor's configured logical worker count.
   [[nodiscard]] std::size_t worker_count() const noexcept {
     return worker_count_;
   }
 
+  /// Reports whether bounded shutdown left external arena work running.
   [[nodiscard]] bool external_drain_timed_out() const noexcept {
     return arena_shared_ &&
            arena_shared_->drain_timed_out.load(std::memory_order_acquire);
   }
 
+  /// Returns the maximum submitted-but-unconsumed ordinal window.
   [[nodiscard]] std::size_t dispatch_window() const noexcept {
     return reorder_capacity_;
   }
 
+  /// Returns ordinal packets submitted but not yet consumed.
   [[nodiscard]] std::size_t in_flight() const noexcept {
     return in_flight_.load(std::memory_order_acquire);
   }
 
 private:
+  /// Reads in-flight work with relaxed ordering while `mutex_` serializes
+  /// every writer.
   [[nodiscard]] std::size_t in_flight_locked() const noexcept {
     // All internal decisions using this helper own mutex_. That mutex orders
     // every in-flight writer, so an acquire barrier is redundant. Public
@@ -837,26 +883,26 @@ private:
     return in_flight_.load(std::memory_order_relaxed);
   }
 
-  // Above eight workers, Submit already owns the executor mutex in one
-  // authoritative coordinator transaction. All in-flight writers are therefore
-  // serialized, so publishing the increment with load+store avoids a locked
-  // atomic RMW while preserving the lock-free acquire snapshot used by callers.
+  /// Above eight workers, Submit already owns the executor mutex in one
+  /// authoritative coordinator transaction. All in-flight writers are
+  /// serialized, so publishing with load and store avoids a locked atomic RMW
+  /// while preserving the lock-free acquire snapshot used by callers.
   void increment_high_core_in_flight_locked() noexcept {
     const auto current = in_flight_.load(std::memory_order_relaxed);
     in_flight_.store(current + 1U, std::memory_order_release);
   }
 
-  // The high-core arena consumer also owns mutex_ while advancing the ordered
-  // completion cursor. Every writer of in_flight_ is serialized by that mutex,
-  // so the >8-worker path can publish the decrement with a single store instead
-  // of a locked atomic read-modify-write. Smaller executors use fetch_sub to
-  // avoid the extra branch on their short stages.
+  /// The high-core arena consumer owns `mutex_` while advancing the ordered
+  /// completion cursor. It publishes a single-store decrement because all
+  /// writers are serialized; smaller executors use `fetch_sub` to avoid an
+  /// extra branch on short stages.
   void decrement_high_core_in_flight_locked() noexcept {
     const auto current = in_flight_.load(std::memory_order_relaxed);
     in_flight_.store(current - 1U, std::memory_order_release);
   }
 
 #include "internal/runtime/ordered_executor_arena_completion.cc.inc"
+  /// Initializes bounded queues, arena completion state, and lane tickets.
   OrderedExecutor(std::size_t worker_count, std::size_t task_queue_capacity,
                   std::size_t reorder_capacity, Worker worker,
                   std::shared_ptr<OperationTaskArena> arena, TaskArenaLane lane,
@@ -907,6 +953,7 @@ private:
 
 #include "internal/runtime/ordered_executor_execution.cc.inc"
 #include "internal/runtime/ordered_executor_submission.cc.inc"
+  /// Reserves completion shards round-robin under the executor mutex.
   [[nodiscard]] std::size_t
   reserve_external_completion_shard_locked() noexcept {
     const auto shard = next_external_completion_shard_;
@@ -917,6 +964,7 @@ private:
     return shard;
   }
 
+  /// Executes private-queue packets and publishes their outcomes in order.
   void worker_loop(std::size_t worker_index,
                    sanitize::internal::StopToken stop) noexcept {
     try {
@@ -1012,16 +1060,20 @@ private:
       notify_all();
     }
   }
+  /// Maps an ordinal to its bounded private completion slot.
   [[nodiscard]] std::size_t slot_index(std::uint64_t ordinal) const noexcept {
     return static_cast<std::size_t>(ordinal % reorder_capacity_);
   }
+  /// Reports whether completions reside in the shared arena ring.
   [[nodiscard]] bool uses_arena_completion_slots() const noexcept {
     return arena_ && !arena_->inline_mode();
   }
+  /// Reports whether the next private completion has its expected ordinal.
   [[nodiscard]] bool next_outcome_ready_locked() const noexcept {
     const auto &slot = completed_[completion_ring_.NextTake()];
     return slot && slot->ordinal == next_take_ordinal_;
   }
+  /// Stores one private outcome while transferring its bounded retained bytes.
   bool store_outcome_locked(Outcome outcome, std::size_t completion_slot,
                             std::size_t output_retained,
                             std::size_t input_retained_bytes = 0U) noexcept {
@@ -1058,11 +1110,13 @@ private:
         std::max(peak_private_retained_bytes_, private_retained_bytes_);
     return true;
   }
+  /// Wakes task producers, workers, and ordered-result consumers.
   void notify_all() noexcept {
     task_ready_.notify_all();
     task_space_.notify_all();
     result_ready_.notify_all();
   }
+  /// Cancels once, drains shared work within bounds, and joins owned workers.
   [[nodiscard]] bool shutdown() noexcept {
     if (shutdown_complete_) {
       return shutdown_drained_;

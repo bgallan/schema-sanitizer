@@ -1,4 +1,9 @@
-// Encodes the Parquet file footer for all written row groups.
+// Encodes the complete Parquet footer from schema nodes and committed row-group
+// metadata. This fragment is included by the consolidated writer to isolate
+// format-specific implementation details.
+
+/// Encodes file metadata for the schema, row groups, row count, and compression
+/// codec.
 std::string encode_footer(const ParquetNode &root,
                           const std::vector<LeafColumn> &columns,
                           const std::vector<RowGroupInfo> &row_groups,

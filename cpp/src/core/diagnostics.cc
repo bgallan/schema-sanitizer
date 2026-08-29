@@ -1,4 +1,7 @@
-// Maps diagnostic codes to stable text identifiers.
+// Collects bounded ingestion diagnostics and serializes them with stable names.
+// The implementation merges reader, memory, and cancellation state without
+// allowing diagnostic failures or counter overflow to replace operation
+// results.
 
 #include "sanitize/core/diagnostics.hh"
 
@@ -12,6 +15,7 @@
 namespace sanitize {
 namespace {
 
+/// Adds a nonnegative counter delta without overflowing the signed total.
 [[nodiscard]] int64_t saturating_add(int64_t left, int64_t right) noexcept {
   if (right <= 0) {
     return left;
@@ -22,6 +26,7 @@ namespace {
 
 } // namespace
 
+/// Merges reader counters while retaining maxima and saturating totals.
 void ReaderResourceDiagnostics::merge(
     const ReaderResourceDiagnostics &other) noexcept {
   parser_max_depth = std::max(parser_max_depth, other.parser_max_depth);
@@ -40,6 +45,7 @@ void IngestDiagnostics::bind_operation_memory_pool(
   capture_operation_memory();
 }
 
+/// Refreshes live and peak memory diagnostics from the bound operation pool.
 void IngestDiagnostics::capture_operation_memory() const noexcept {
   const auto pool = operation_memory_pool_.lock();
   if (!pool) {
@@ -57,11 +63,13 @@ void IngestDiagnostics::capture_operation_memory() const noexcept {
   operation_memory_limit_bytes = pool->limit_bytes();
 }
 
+/// Applies one reader-resource delta to the aggregate diagnostics.
 void IngestDiagnostics::merge_reader(
     const ReaderResourceDiagnostics &delta) noexcept {
   reader.merge(delta);
 }
 
+/// Combines an operation snapshot into this aggregate without throwing.
 void IngestDiagnostics::merge(const IngestDiagnostics &other) noexcept {
   inferred_rows = saturating_add(inferred_rows, other.inferred_rows);
   inferred_bytes = saturating_add(inferred_bytes, other.inferred_bytes);
@@ -92,6 +100,7 @@ void IngestDiagnostics::merge(const IngestDiagnostics &other) noexcept {
   }
 }
 
+/// Records a cancellation count and preserves the first available reason.
 void IngestDiagnostics::record_cancellation(std::string_view reason) noexcept {
   cancellations = saturating_add(cancellations, 1);
   if (cancellation_reason.empty()) {

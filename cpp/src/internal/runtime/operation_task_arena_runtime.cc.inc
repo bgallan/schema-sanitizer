@@ -1,12 +1,18 @@
-// Internal scheduling, admission, and worker-loop helpers.
+// Implements task-arena scheduling, admission, and worker-loop mechanics.
+// Local dequeue, compatible stealing, worker startup, and memory transfer
+// stay bounded.
+
+/// Returns the compact bit corresponding to one worker index below 64.
 [[nodiscard]] constexpr std::uint64_t worker_bit(std::size_t index) noexcept {
   return std::uint64_t{1} << index;
 }
+/// Builds the worker-bit mask for a half-open lane range.
 [[nodiscard]] constexpr std::uint64_t lane_mask(std::size_t begin,
                                                 std::size_t end) noexcept {
   const auto width = end - begin;
   return ((std::uint64_t{1} << width) - 1U) << begin;
 }
+/// Claims an eligible unstarted worker using submission-lane ordering.
 [[nodiscard]] std::size_t reserve_unstarted_worker(
     const std::shared_ptr<OperationTaskArena::State> &state, std::size_t begin,
     std::size_t end, std::uint64_t allowed, std::size_t lane_origin) noexcept {
@@ -41,6 +47,7 @@
     }
   }
 }
+/// Combines the visibility shards selected by a prepared submission plan.
 [[nodiscard]] std::uint64_t queue_visibility_snapshot(
     const std::shared_ptr<OperationTaskArena::State> &state,
     const TaskArenaSubmissionPlan &plan) noexcept {
@@ -57,6 +64,7 @@
   }
   return snapshot & plan.allowed_mask();
 }
+/// Loads fixed visibility domains before applying an explicit worker mask.
 template <bool Sharded>
 [[nodiscard]] std::uint64_t queue_visibility_snapshot(
     const std::shared_ptr<OperationTaskArena::State> &state,
@@ -89,6 +97,8 @@ template <bool Sharded>
   }
   return snapshot & allowed;
 }
+/// Selects a compatible already-started idle worker for the
+/// submission plan.
 [[nodiscard]] std::size_t
 idle_started_worker(const std::shared_ptr<OperationTaskArena::State> &state,
                     std::size_t begin, std::size_t end, std::size_t width,
@@ -149,6 +159,7 @@ idle_started_worker(const std::shared_ptr<OperationTaskArena::State> &state,
   }
   return end;
 }
+/// Publishes a worker queue as nonempty to scheduler bitmaps.
 void mark_nonempty(const std::shared_ptr<OperationTaskArena::State> &state,
                    std::size_t index) noexcept {
   if (state->scalable_scan) {
@@ -158,6 +169,7 @@ void mark_nonempty(const std::shared_ptr<OperationTaskArena::State> &state,
   state->slots[index]->visibility->nonempty_mask.fetch_or(
       worker_bit(index), std::memory_order_release);
 }
+/// Removes an empty worker queue from scheduler visibility bitmaps.
 void mark_empty(const std::shared_ptr<OperationTaskArena::State> &state,
                 std::size_t index) noexcept {
   if (state->scalable_scan) {
@@ -167,6 +179,7 @@ void mark_empty(const std::shared_ptr<OperationTaskArena::State> &state,
   state->slots[index]->visibility->nonempty_mask.fetch_and(
       ~worker_bit(index), std::memory_order_release);
 }
+/// Raises an atomic high-water mark when the observed value is larger.
 [[nodiscard]] bool update_peak(std::atomic<std::size_t> *peak,
                                std::size_t value) noexcept {
   auto observed = peak->load(std::memory_order_relaxed);
@@ -178,11 +191,13 @@ void mark_empty(const std::shared_ptr<OperationTaskArena::State> &state,
   }
   return false;
 }
+/// Checks whether a queued task may execute on the selected worker.
 [[nodiscard]] bool
 compatible(const OperationTaskArena::State::QueuedTask &queued,
            std::size_t index) noexcept {
   return index >= queued.lane_begin && index < queued.lane_end;
 }
+/// Identifies tasks that should retain a dedicated high-core output lane.
 [[nodiscard]] bool dedicated_high_output(
     const OperationTaskArena::State::QueuedTask &queued,
     const std::shared_ptr<OperationTaskArena::State> &state) noexcept {
@@ -190,17 +205,21 @@ compatible(const OperationTaskArena::State::QueuedTask &queued,
   return queued.lane_end == state->worker_count &&
          queued.lane_begin >= high_begin;
 }
+/// Identifies output work eligible for bounded low-core preference.
 [[nodiscard]] bool bounded_low_core_output(
     const OperationTaskArena::State::QueuedTask &queued,
     const std::shared_ptr<OperationTaskArena::State> &state) noexcept {
   return queued.telemetry_kind == TaskTelemetryKind::kOutput &&
          dedicated_high_output(queued, state);
 }
+/// Checks whether a queue is shallow enough for
+/// output-preference scheduling.
 [[nodiscard]] bool
 output_preference_queue_is_bounded(std::size_t queue_size) noexcept {
   // Deep mixed queues cost more steals; high-core remains unrestricted.
   return queue_size <= 4U;
 }
+/// Refreshes a worker's cached shallow output-preference state.
 void refresh_shallow_output_preference(
     const std::shared_ptr<OperationTaskArena::State> &state,
     OperationTaskArena::State::WorkerSlot &slot) noexcept {
@@ -213,6 +232,8 @@ void refresh_shallow_output_preference(
                                    slot.tasks.size() <= 4U;
 }
 #include "internal/runtime/operation_task_telemetry.cc.inc"
+/// Dequeues compatible work from a worker's local queue with
+/// optional preference.
 template <bool PreferDedicatedOutput>
 bool take_local(const std::shared_ptr<OperationTaskArena::State> &state,
                 std::size_t index, bool allow_preference, bool *preference_used,
@@ -315,6 +336,7 @@ bool take_local(const std::shared_ptr<OperationTaskArena::State> &state,
   }
   return true;
 }
+/// Steals compatible work from another visible worker queue.
 template <bool PreferDedicatedOutput>
 bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
                       std::size_t index, bool allow_preference,
@@ -523,6 +545,7 @@ bool steal_compatible(const std::shared_ptr<OperationTaskArena::State> &state,
   }
   return false;
 }
+/// Obtains the next local or stolen task available to a worker.
 template <bool PreferDedicatedOutput>
 bool take_task(const std::shared_ptr<OperationTaskArena::State> &state,
                std::size_t index, bool allow_preference, bool *preference_used,
@@ -536,17 +559,21 @@ bool take_task(const std::shared_ptr<OperationTaskArena::State> &state,
 }
 class WorkerActivityStreak final {
 public:
+  /// Binds activity tracking to one arena worker.
   WorkerActivityStreak(const std::shared_ptr<OperationTaskArena::State> &state,
                        std::size_t index) noexcept
       : state_(state), index_(index) {}
+  /// Flushes an unfinished worker activity streak when the scope exits.
   ~WorkerActivityStreak() { Stop(); }
 
+  /// Publishes that this worker is actively searching queues for work.
   void AdvertiseDequeue() noexcept {
     if (!active_) {
       state_->slots[index_]->running.store(true, std::memory_order_release);
     }
   }
 
+  /// Begins or extends the worker's active telemetry streak.
   void Start() noexcept {
     if (active_) {
       return;
@@ -575,6 +602,7 @@ public:
     active_ = true;
   }
 
+  /// Closes the active streak and records its duration once.
   void Stop() noexcept {
     // Publish the park boundary before retiring the active streak. The normal
     // park path owns the slot mutex, so a producer may select this idle slot
@@ -601,6 +629,7 @@ thread_local ActiveRetainedCharge *g_active_retained_charge = nullptr;
 
 class ActiveRetainedCharge final {
 public:
+  /// Moves task bytes into active accounting for this scope's lifetime.
   ActiveRetainedCharge(
       const std::shared_ptr<OperationTaskArena::State> &state,
       std::size_t bytes,
@@ -613,8 +642,11 @@ public:
     (void)update_peak(&state_->peak_active_bytes, active);
     g_active_retained_charge = this;
   }
+  /// Disables copying the active-task retained-memory charge.
   ActiveRetainedCharge(const ActiveRetainedCharge &) = delete;
+  /// Disables copy assignment for the active-task retained-memory charge.
   ActiveRetainedCharge &operator=(const ActiveRetainedCharge &) = delete;
+  /// Retires active retained bytes unless ownership moved to a completion.
   ~ActiveRetainedCharge() noexcept {
     if (task_to_clear_ != nullptr) {
       *task_to_clear_ = OperationTaskArena::Task{};
@@ -627,6 +659,8 @@ public:
     g_active_retained_charge = previous_;
   }
 
+  /// Transfers active retained credit into a completion charge without
+  /// double accounting.
   [[nodiscard]] bool TryTransfer(OperationTaskArena::State *state,
                                  std::size_t active_credit,
                                  std::size_t completion_bytes) noexcept {
@@ -667,6 +701,7 @@ private:
   bool transferred_ = false;
 };
 
+/// Runs one arena worker's dequeue, execution, and shutdown loop.
 template <bool PreferDedicatedOutput, bool CheckGlobalStopping>
 void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
                  std::size_t index, StopToken stop) noexcept {
@@ -789,6 +824,8 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
     }
   }
 }
+/// Reports whether a target worker is already available
+/// without synchronization.
 [[nodiscard]] bool worker_already_started_fast_path(
     const std::shared_ptr<OperationTaskArena::State> &state,
     std::size_t index) noexcept {
@@ -804,6 +841,8 @@ void worker_loop(const std::shared_ptr<OperationTaskArena::State> &state,
           worker_bit(index)) != 0U;
 }
 
+/// Starts a reserved arena worker exactly once and publishes
+/// its availability.
 sanitize::Status
 ensure_worker_started(const std::shared_ptr<OperationTaskArena::State> &state,
                       std::size_t index, bool reserved_by_caller) {

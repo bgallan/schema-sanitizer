@@ -1,4 +1,6 @@
 // Declares ingestion row-stream materialization to Arrow C Streams.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -23,7 +25,7 @@ class ExecutionContext;
 
 namespace sanitize::internal {
 
-// Creates the Arrow C Stream that materializes rows from a prepared frontend.
+/// Creates the Arrow C Stream that materializes rows from a prepared frontend.
 sanitize::Result<sanitize::UniqueCStream>
 make_ingest_c_stream(const std::string &frontend_name, FrontendHandle frontend,
                      std::shared_ptr<const CompiledPlan> plan,

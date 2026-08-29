@@ -1,3 +1,8 @@
+// Exercises completion-slot reuse after ordered executor results are consumed.
+// The probe requires stable ordinals, correct values, an empty arena, and a
+// worker population no larger than the configured shared capacity.
+
+/// Verifies completion-ring slots and arena workers are reusable after draining.
 bool run_arena_completion_reuse_round() {
   constexpr std::size_t worker_count = 16U;
   constexpr std::size_t capacity = 32U;

@@ -1,4 +1,6 @@
 // Implements snapshotted object-field lookup for wide STRUCT conversion.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/conversion/object_fields.hh"
 

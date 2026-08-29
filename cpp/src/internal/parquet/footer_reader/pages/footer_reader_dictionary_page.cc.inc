@@ -1,3 +1,9 @@
+// Decodes dictionary-page values and records the typed dictionary state used by
+// data pages. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Resolves an RLE_DICTIONARY data page through the previously decoded
+/// dictionary.
 sanitize::Status decode_rle_dictionary_page(
     std::string_view payload, const ColumnChunkInfo &column,
     const DictionaryPageState *dictionary, PageHeaderInfo *page) {

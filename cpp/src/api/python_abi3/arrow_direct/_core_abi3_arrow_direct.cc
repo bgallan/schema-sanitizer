@@ -1,10 +1,11 @@
 /*
- * Python ABI3 orchestration for direct Arrow C Stream ingestion.
+ * Implements Python ABI3 orchestration for direct Arrow C Stream ingestion.
  *
  * Schema parsing, scalar formatting, and Arrow value extraction live in
  * adjacent modules so this file stays focused on Python capsules, frontend
  * lifecycle, and ingest stream wiring.
  */
+
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_batch.hh"
@@ -41,7 +42,7 @@ namespace {
 // Owns one Arrow C stream capsule and exposes it as a row frontend.
 class ArrowDirectFrontend final {
 public:
-  // Retains the Python capsule/keepalive objects for stream lifetime.
+  /// Retains the Python capsule/keepalive objects for stream lifetime.
   ArrowDirectFrontend(ArrowArrayStream *stream, PyObject *capsule,
                       PyObject *keepalive, std::vector<ArrowInputNode> fields,
                       std::int64_t memory_limit_bytes)
@@ -50,7 +51,7 @@ public:
     Py_XINCREF(keepalive_);
   }
 
-  // Releases foreign batches before dropping the Python stream keepalive.
+  /// Releases foreign batches before dropping the Python stream keepalive.
   ~ArrowDirectFrontend() {
     pending_.reset();
     pending_offset_ = 0;
@@ -61,7 +62,7 @@ public:
     stream_ = nullptr;
   }
 
-  // Reads at most capacity rows while retaining foreign buffers zero-copy.
+  /// Reads at most capacity rows while retaining foreign buffers zero-copy.
   sanitize::Result<sanitize::RowBatch> next_batch(int64_t capacity) {
     sanitize::RowBatch out;
     if (done_ || capacity <= 0) {
@@ -125,14 +126,15 @@ public:
     return batch;
   }
 
-  // Marks the frontend exhausted and releases any pending foreign batch.
+  /// Marks the frontend exhausted and releases any pending foreign batch.
   void reset() noexcept {
     pending_.reset();
     pending_offset_ = 0;
     done_ = true;
   }
 
-  // Direct Arrow rows already expose stable field references.
+  /// Accepts a compiled plan as an intentional no-op because direct rows
+  /// already expose stable field references.
   void set_plan(const sanitize::CompiledPlan *) noexcept {}
 
 private:
@@ -146,19 +148,26 @@ private:
   bool done_ = false;
 };
 
+/// Rewinds the direct Arrow ingestion to its initial input position and clears
+/// per-pass state.
 void arrow_reset(void *self) noexcept {
   static_cast<ArrowDirectFrontend *>(self)->reset();
 }
 
+/// Reads and materializes the next bounded row batch from the direct Arrow
+/// ingestion.
 sanitize::Result<sanitize::RowBatch> arrow_next_batch(void *self,
                                                       int64_t capacity) {
   return static_cast<ArrowDirectFrontend *>(self)->next_batch(capacity);
 }
 
+/// Forwards the compiled plan through the direct Arrow frontend callback table.
 void arrow_set_plan(void *self, const sanitize::CompiledPlan *plan) noexcept {
   static_cast<ArrowDirectFrontend *>(self)->set_plan(plan);
 }
 
+/// Destroys the heap-owned direct Arrow ingestion state after its final
+/// callback completes.
 void arrow_destroy(void *self) noexcept {
   delete static_cast<ArrowDirectFrontend *>(self);
 }

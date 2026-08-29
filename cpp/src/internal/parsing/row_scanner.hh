@@ -1,4 +1,6 @@
 // Defines scanned text slices shared by streaming scanners.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -24,7 +26,7 @@ struct TextSlice {
   bool has_source_index = false;
 };
 
-// Creates a text slice with optional backing storage ownership.
+/// Creates a text slice with optional backing storage ownership.
 inline TextSlice make_text_slice(
     std::string_view view, std::size_t base_offset,
     const std::shared_ptr<const void> &owner = {},
@@ -42,7 +44,7 @@ inline TextSlice make_text_slice(
   };
 }
 
-// Returns whether a byte is JSON/CSV whitespace.
+/// Returns whether a byte is JSON/CSV whitespace.
 inline bool is_ws(unsigned char c) noexcept {
   return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }

@@ -1,4 +1,6 @@
 // Implements inference depth-limit helpers.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/depth.hh"
 
@@ -8,6 +10,8 @@
 namespace sanitize::internal {
 namespace {
 
+/// Reports whether descending one more level would exceed the configured
+/// inference depth.
 bool exceeds_depth_limit(const ValueView &v, const PreparedOptions &opts,
                          DepthState depth) {
   if (v.is_array()) {

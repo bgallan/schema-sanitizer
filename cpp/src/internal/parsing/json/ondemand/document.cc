@@ -1,4 +1,6 @@
 // Implements on-demand JSON document lifetime, cursor, and span helpers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/ondemand/document.hh"
 

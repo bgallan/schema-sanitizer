@@ -1,4 +1,6 @@
 // Implements integer Arrow value JSON serialization.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_value_writer_parts.hh"
 
@@ -11,6 +13,8 @@
 namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
+/// Returns the typed Arrow values buffer after verifying that the buffer
+/// pointer is available.
 template <typename T> const T *data_buffer(const ArrowArray &array) {
   if (!array.buffers || !array.buffers[1]) {
     return nullptr;
@@ -28,6 +32,8 @@ inline constexpr std::array<char, 200> kDecimalDigitPairs = [] {
 }();
 
 template <typename UInt>
+/// Emits an unsigned integer with a two-digit lookup table and no temporary
+/// string.
 void append_unsigned_decimal(TextBuffer &out, UInt value) {
   static_assert(std::is_unsigned_v<UInt>);
   std::array<char, 32> buffer{};
@@ -52,6 +58,7 @@ void append_unsigned_decimal(TextBuffer &out, UInt value) {
 }
 
 template <typename T>
+/// Reads one signed Arrow integer and emits its decimal representation.
 sanitize::Status append_signed(TextBuffer &out, const ArrowArray &array,
                                int64_t row) {
   const T *values = data_buffer<T>(array);
@@ -70,6 +77,7 @@ sanitize::Status append_signed(TextBuffer &out, const ArrowArray &array,
 }
 
 template <typename T>
+/// Reads one unsigned Arrow integer and emits its decimal representation.
 sanitize::Status append_unsigned(TextBuffer &out, const ArrowArray &array,
                                  int64_t row) {
   const T *values = data_buffer<T>(array);
@@ -88,36 +96,43 @@ sanitize::Status append_int8_value(TextBuffer &out, const ArrowArray &array,
   return append_signed<int8_t>(out, array, row);
 }
 
+/// Serializes one unsigned 8-bit Arrow value as a JSON integer.
 sanitize::Status append_uint8_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_unsigned<uint8_t>(out, array, row);
 }
 
+/// Serializes one signed 16-bit Arrow value as a JSON integer.
 sanitize::Status append_int16_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_signed<int16_t>(out, array, row);
 }
 
+/// Serializes one unsigned 16-bit Arrow value as a JSON integer.
 sanitize::Status append_uint16_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   return append_unsigned<uint16_t>(out, array, row);
 }
 
+/// Serializes one signed 32-bit Arrow value as a JSON integer.
 sanitize::Status append_int32_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_signed<int32_t>(out, array, row);
 }
 
+/// Serializes one unsigned 32-bit Arrow value as a JSON integer.
 sanitize::Status append_uint32_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   return append_unsigned<uint32_t>(out, array, row);
 }
 
+/// Serializes one signed 64-bit Arrow value as a JSON integer.
 sanitize::Status append_int64_value(TextBuffer &out, const ArrowArray &array,
                                     int64_t row) {
   return append_signed<int64_t>(out, array, row);
 }
 
+/// Serializes one unsigned 64-bit Arrow value as a JSON integer.
 sanitize::Status append_uint64_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row) {
   return append_unsigned<uint64_t>(out, array, row);

@@ -1,4 +1,6 @@
-// Declares the XML frontend state shared by lifecycle and batching units.
+// Declares the XML frontend state shared by lifecycle and batching units. It
+// frames XML rows, records parser diagnostics, and returns budget-owned batches
+// in source order.
 
 #pragma once
 
@@ -24,6 +26,8 @@
 namespace sanitize::internal::xml_frontend_detail {
 
 struct BatchStorage final : public sanitize::RowBatchReleaser {
+
+  /// Creates pool-backed XML rows and retains parsed chunks until row release.
   BatchStorage(std::shared_ptr<void> pool,
                std::shared_ptr<PoolResource> xml_resource,
                std::size_t arena_block_bytes)
@@ -41,6 +45,8 @@ struct BatchStorage final : public sanitize::RowBatchReleaser {
   std::pmr::vector<XmlNodePtr> nodes;
   ReaderResourceDiagnostics reader_diagnostics;
 
+  /// Releases a completed XML row range and reclaims its retained parse
+  /// storage.
   void ReleaseRows(std::size_t begin, std::size_t count) noexcept override {
     if (begin >= nodes.size()) {
       return;
@@ -64,15 +70,31 @@ public:
   sanitize::Result<RowBatch> next_batch(int64_t capacity);
 
 private:
+  /// Allocates parser state and either opens a row scanner or parses the full
+  /// document.
   sanitize::Status ensure_initialized();
+
+  /// Obtains the full XML input as a stable view or a bounded pooled copy.
   sanitize::Result<std::string_view> read_source_text();
+
+  /// Parses the complete document, builds its value model, and selects output
+  /// rows.
   sanitize::Status parse_once();
+
+  /// Selects the parsed document root as the whole-document output row.
   void select_rows();
+
+  /// Parses streamed row fragments concurrently and appends results in source
+  /// order.
   sanitize::Status
   append_streamed_rows_parallel(BatchStorage *storage,
                                 std::span<const std::string_view> row_texts,
                                 std::span<const std::size_t> base_offsets);
+
+  /// Appends an XML object's named fields to the current flat row.
   void append_object_fields(BatchStorage *storage, const XmlNode *node) const;
+
+  /// Appends one XML node as object fields or a fallback-keyed scalar value.
   void append_row(BatchStorage *storage, const XmlNode *node,
                   std::string_view raw, std::size_t base_offset) const;
 

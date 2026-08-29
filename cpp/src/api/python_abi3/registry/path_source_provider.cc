@@ -1,4 +1,11 @@
-/* Path-source provider parsing, metadata packing, and schema probing. */
+/*
+ * Implements path-source provider parsing, metadata packing, and schema
+ * probing.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -29,12 +36,15 @@
 
 namespace core_abi3_internal::path_registry_detail {
 
+/// Releases registry outputs and clears transferred ownership to prevent reuse.
 void release_registry_outputs(PyRegistrySinkOutputs *outputs) {
   release_sink_outputs(outputs->main_stream, outputs->diagnostics);
   outputs->main_stream = nullptr;
   outputs->diagnostics = nullptr;
 }
 
+/// Reports whether Python arguments request generated registry metadata
+/// columns.
 bool registry_metadata_requested(PyObject *first_row_columns,
                                  PyObject *all_row_columns,
                                  PyObject *row_span_columns,
@@ -43,6 +53,8 @@ bool registry_metadata_requested(PyObject *first_row_columns,
          timestamp_columns;
 }
 
+/// Builds metadata columns emitted only for the first row of each registry
+/// source.
 PyObject *registry_first_row_columns(PyObject *first_row_columns,
                                      std::string_view registry_json,
                                      std::string_view drifts_json) {
@@ -69,6 +81,7 @@ PyObject *registry_first_row_columns(PyObject *first_row_columns,
   return merged;
 }
 
+/// Wraps a registry result stream with requested metadata and registry columns.
 bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
                                         PyObject *first_row_columns,
                                         PyObject *all_row_columns,
@@ -98,6 +111,8 @@ bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
   return true;
 }
 
+/// Validates a native registry result, adds metadata, and packs its Python
+/// result.
 PyObject *pack_registry_or_raise_with_metadata(
     sanitize::Result<NativeRegistrySinkOutput> result, PyObject *keepalive,
     PyObject *first_row_columns, PyObject *all_row_columns,
@@ -127,10 +142,13 @@ PyObject *pack_registry_or_raise_with_metadata(
                                      outputs.conversion_timestamp, nullptr);
 }
 
+/// Reports whether a parsed provider chunk contains no path sources.
 bool path_source_input_empty(const PathSourceInput &input) noexcept {
   return !input.chunk_source && input.paths.empty();
 }
 
+/// Derives generated metadata columns for one child of the schema-registry
+/// stream.
 std::vector<MetadataColumn>
 metadata_columns_for_child(const NativePathSourcesStreamState *state,
                            const PathSourceSpec &source,
@@ -141,6 +159,8 @@ metadata_columns_for_child(const NativePathSourcesStreamState *state,
       state->source_file_column && !source_file_in_inner);
 }
 
+/// Formats the current path-source failure with its source and registry
+/// context.
 std::string path_source_error_message(const PathSourceSpec &source,
                                       const std::string &message) {
   if (source.source_file.empty() || message.contains(source.source_file)) {
@@ -149,6 +169,7 @@ std::string path_source_error_message(const PathSourceSpec &source,
   return "Invalid source file " + source.source_file + ": " + message;
 }
 
+/// Converts the active Python provider exception into a native registry status.
 sanitize::Status python_provider_error_status(const char *where) {
   PyObject *type = nullptr;
   PyObject *value = nullptr;
@@ -183,6 +204,8 @@ sanitize::Status python_provider_error_status(const char *where) {
   return sanitize::Status::Invalid(msg);
 }
 
+/// Closes chunk provider idempotently and preserves any prior schema-registry
+/// stream failure.
 void close_chunk_provider(NativePathSourcesStreamState *state) noexcept {
   if (!state || !state->chunk_provider) {
     return;
@@ -200,6 +223,7 @@ void close_chunk_provider(NativePathSourcesStreamState *state) noexcept {
   PyGILState_Release(gil);
 }
 
+/// Loads the next provider chunk and retains it for registry streaming.
 sanitize::Status load_next_provider_chunk(NativePathSourcesStreamState *state) {
   if (!state || !state->chunk_provider || state->chunk_provider_exhausted) {
     return sanitize::Status::OK();
@@ -238,6 +262,8 @@ sanitize::Status load_next_provider_chunk(NativePathSourcesStreamState *state) {
   return sanitize::Status::OK();
 }
 
+/// Reports whether the Python provider exposes a callable `next_sources`
+/// method.
 bool provider_has_next_sources(PyObject *provider_obj) {
   if (!PyObject_HasAttrString(provider_obj, "next_sources")) {
     PyErr_SetString(PyExc_TypeError,
@@ -247,6 +273,8 @@ bool provider_has_next_sources(PyObject *provider_obj) {
   return true;
 }
 
+/// Closes Python provider idempotently and preserves any prior schema-registry
+/// stream failure.
 void close_python_provider(PyObject *provider_obj) noexcept {
   if (!provider_obj) {
     return;
@@ -259,6 +287,8 @@ void close_python_provider(PyObject *provider_obj) noexcept {
   Py_DECREF(result);
 }
 
+/// Calls `next_sources` and parses the next path group, treating `None` as
+/// exhaustion.
 bool parse_next_provider_sources(PyObject *provider_obj,
                                  std::vector<PathSourceSpec> *sources,
                                  bool *exhausted) {
@@ -282,6 +312,8 @@ bool parse_next_provider_sources(PyObject *provider_obj,
   return ok;
 }
 
+/// Merges path source provider schemas while preserving deterministic field
+/// order and diagnostics.
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_path_source_provider_schemas(
     NativeContext *ctx, PyObject *provider_obj,

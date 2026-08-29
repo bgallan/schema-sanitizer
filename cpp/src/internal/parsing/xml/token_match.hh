@@ -1,4 +1,6 @@
-// Shared XML safety limits, whitespace, name validation, and token matching.
+// Declares shared XML safety limits, whitespace, name validation, and token
+// matching. The parser validates bounded input while preserving offsets,
+// zero-copy views, and deterministic diagnostics.
 
 #pragma once
 

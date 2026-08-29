@@ -1,4 +1,6 @@
 // Implements worker-side source-ordered JSONL validation and token handoff.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_json_validation.hh"
 
@@ -18,12 +20,16 @@ namespace sanitize::internal {
 namespace {
 
 struct ValidatedPacketStorage final {
+  /// Initializes ownership for validated row tokens retained by a worker
+  /// packet.
   ValidatedPacketStorage(std::shared_ptr<void> operation_pool,
                          std::shared_ptr<const void> source_owner_value)
       : source_owner(std::move(source_owner_value)),
         resource(std::move(operation_pool)), tokens(&resource),
         rows(&resource) {}
 
+  /// Moves validated rows and token ownership into the completed packet after
+  /// worker preparation succeeds.
   void finalize() noexcept {
     const auto *base = tokens.data();
     for (auto &row : rows) {
@@ -42,6 +48,8 @@ constexpr auto kTokenFlag = std::to_underlying(RowFlags::kJsonValidatedTokens);
 constexpr auto kPlanOrderedTokenFlag =
     std::to_underlying(RowFlags::kJsonPlanOrderedTokens);
 
+/// Checks whether a JSON packet can retain validated fields in compiled-plan
+/// order.
 [[nodiscard]] bool
 plan_order_token_candidate(const sanitize::CompiledPlan &plan) noexcept {
   for (const auto &column : plan.columns) {

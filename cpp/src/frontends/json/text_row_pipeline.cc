@@ -1,4 +1,7 @@
-// Implements JSON row-mode selection and validated top-level token handoff.
+// Implements JSON row-mode selection and validated top-level token handoff. The
+// pipeline preserves source offsets and ownership while enforcing plan order
+// and memory bounds.
+
 #include "frontends/json/text_row_pipeline.hh"
 
 #include "internal/materialization/ingest_stream/column_partition.hh"
@@ -22,6 +25,7 @@ struct ValidationContext {
   std::size_t fields = 0;
 };
 
+/// Counts one object field and rejects rows beyond the structural limit.
 sanitize::Status count_field(void *raw_ctx, std::string_view, uint64_t,
                              ValueView) {
   auto *ctx = static_cast<ValidationContext *>(raw_ctx);
@@ -34,6 +38,7 @@ sanitize::Status count_field(void *raw_ctx, std::string_view, uint64_t,
   return sanitize::Status::OK();
 }
 
+/// Removes leading ASCII whitespace without allocating a replacement string.
 std::string_view trim_leading_ws(std::string_view value) noexcept {
   while (!value.empty() && is_ws(static_cast<unsigned char>(value.front()))) {
     value.remove_prefix(1);
@@ -41,6 +46,7 @@ std::string_view trim_leading_ws(std::string_view value) noexcept {
   return value;
 }
 
+/// Rejects non-whitespace trailing content after the top-level JSON value.
 sanitize::Status require_root_end(json_scan::Cursor &cursor) {
   json_scan::skip_ws(cursor);
   if (cursor.p != cursor.end) {
@@ -51,6 +57,8 @@ sanitize::Status require_root_end(json_scan::Cursor &cursor) {
   return sanitize::Status::OK();
 }
 
+/// Creates an invalid status that prefixes the parser message with its absolute
+/// byte offset.
 sanitize::Status prefixed_error(std::size_t base_offset,
                                 std::string_view message) {
   return sanitize::Status::Invalid(
@@ -59,6 +67,8 @@ sanitize::Status prefixed_error(std::size_t base_offset,
       std::string(message));
 }
 
+/// Validates one object with the canonical JSON text frontend scanner and token
+/// limits.
 sanitize::Status canonical_object_validation(JsonOnDemandDoc *doc,
                                              std::string_view raw,
                                              std::size_t base_offset) {
@@ -70,6 +80,8 @@ sanitize::Status canonical_object_validation(JsonOnDemandDoc *doc,
   return status;
 }
 
+/// Scans object tokens into validated JSON text frontend evidence without
+/// losing source context.
 sanitize::Status
 scan_object_tokens(std::string_view raw, std::size_t base_offset,
                    std::pmr::vector<JsonValidatedFieldToken> *tokens,
@@ -199,6 +211,8 @@ bool json_error_exceeds_hard_safety_limit(
          message.find("exceeds internal safety limit") != std::string::npos;
 }
 
+/// Reports whether resolved execution policy enables parallel JSON row
+/// validation.
 bool parallel_json_row_frontend_enabled(
     const sanitize::Options &options) noexcept {
   return options.threading_mode == sanitize::ThreadingMode::kMulti &&
@@ -207,6 +221,8 @@ bool parallel_json_row_frontend_enabled(
                  .effective_workers > 1;
 }
 
+/// Recovers the effective JSON text row policy and rejects incompatible Python
+/// state.
 JsonTextRowPolicy resolve_json_text_row_policy(
     const sanitize::CompiledPlan *plan, bool line_delimited, bool stop_on_error,
     bool direct_rows, bool parallel_rows,

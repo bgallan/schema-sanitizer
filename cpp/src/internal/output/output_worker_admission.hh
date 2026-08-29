@@ -1,4 +1,7 @@
 // Derives bounded text-output worker admission across Arrow batches.
+// The helpers bound parallel text encoding memory while committing prepared
+// fragments in source order.
+
 #pragma once
 
 #include "internal/runtime/execution_policy.hh"
@@ -13,6 +16,8 @@ struct OutputAdmissionState final {
   std::int64_t accumulated_work_items = 0;
 };
 
+/// Adds sampled output work estimates while clamping overflow at the admission
+/// cap.
 [[nodiscard]] constexpr std::int64_t
 saturated_work_item_sum(std::int64_t left, std::int64_t right) noexcept {
   const auto maximum = std::numeric_limits<std::int64_t>::max();
@@ -23,6 +28,8 @@ saturated_work_item_sum(std::int64_t left, std::int64_t right) noexcept {
              : positive_left + positive_right;
 }
 
+/// Selects output admission deterministically from supported layout and
+/// resource candidates.
 [[nodiscard]] constexpr ExecutionPolicy select_output_admission(
     const ExecutionPolicy &base_policy, std::int64_t work_items,
     std::int64_t accumulated_items_per_worker,
@@ -56,6 +63,8 @@ saturated_work_item_sum(std::int64_t left, std::int64_t right) noexcept {
       1);
 }
 
+/// Reports whether fixed estimates are insufficient to admit bounded
+/// text-output workers.
 [[nodiscard]] constexpr bool
 output_admission_requires_sampling(bool full_worker_admission) noexcept {
   return !full_worker_admission;

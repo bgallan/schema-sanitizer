@@ -1,4 +1,6 @@
 // Implements single-pass flat JSON object classification for inference.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/ondemand/document.hh"
 
@@ -11,6 +13,8 @@
 namespace sanitize::internal {
 namespace {
 
+/// Checks whether an already validated JSON integer token lies within signed
+/// 64-bit range.
 [[nodiscard]] bool integer_token_fits_int64(std::string_view token) noexcept {
   const bool negative = !token.empty() && token.front() == '-';
   if (negative) {

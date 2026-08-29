@@ -1,4 +1,6 @@
 // Implements Arrow binary text formatting helpers.
+// These routines provide deterministic representations shared by the native
+// JSON and CSV output paths.
 
 #include "internal/arrow_text/formatters.hh"
 

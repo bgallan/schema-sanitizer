@@ -1,4 +1,5 @@
-// Provides overflow-safe retained-memory accounting helpers.
+// Provides overflow-safe retained-memory accounting helpers. Conversions
+// and additions saturate at signed byte-counter limits instead of wrapping.
 
 #pragma once
 
@@ -8,7 +9,7 @@
 
 namespace sanitize::internal {
 
-// Converts a size_t byte count to int64_t, saturating instead of wrapping.
+/// Converts a size_t byte count to int64_t, saturating instead of wrapping.
 [[nodiscard]] constexpr std::int64_t
 saturating_size_to_i64(std::size_t value) noexcept {
   constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
@@ -18,7 +19,7 @@ saturating_size_to_i64(std::size_t value) noexcept {
   return static_cast<std::int64_t>(value);
 }
 
-// Adds non-negative byte counts, saturating at INT64_MAX.
+/// Adds nonnegative byte counts, saturating at INT64_MAX.
 [[nodiscard]] constexpr std::int64_t
 saturating_add_i64(std::int64_t left, std::int64_t right) noexcept {
   constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
@@ -28,7 +29,8 @@ saturating_add_i64(std::int64_t left, std::int64_t right) noexcept {
   return left + right;
 }
 
-// Converts an element capacity to bytes without overflowing size_t or int64_t.
+/// Converts an element capacity to bytes without overflowing size_t
+/// or int64_t.
 [[nodiscard]] constexpr std::int64_t
 saturating_capacity_bytes(std::size_t count, std::size_t width) noexcept {
   constexpr auto kMax = std::numeric_limits<std::int64_t>::max();

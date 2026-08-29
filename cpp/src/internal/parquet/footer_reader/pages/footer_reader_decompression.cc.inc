@@ -1,4 +1,10 @@
+// Decompresses supported GZIP and Snappy page payloads into exactly sized
+// caller-owned storage. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
 #if defined(SCHEMA_SANITIZER_HAS_ZLIB)
+/// Inflates a GZIP page into caller storage and verifies the exact advertised
+/// size.
 sanitize::Status gzip_decompress_payload_into(std::string_view payload,
                                               std::int32_t expected,
                                               std::string *out) {
@@ -44,6 +50,7 @@ sanitize::Status gzip_decompress_payload_into(std::string_view payload,
 }
 #endif
 
+/// Reads the bounded varint that prefixes a raw Snappy block's output length.
 sanitize::Result<std::uint32_t> read_snappy_varint(std::string_view payload,
                                                    std::size_t *offset) {
   if (!offset) {
@@ -68,6 +75,7 @@ sanitize::Result<std::uint32_t> read_snappy_varint(std::string_view payload,
       "Parquet page payload: invalid snappy length");
 }
 
+/// Decodes a Snappy literal tag and any following length bytes.
 sanitize::Result<std::uint32_t>
 read_snappy_literal_length(std::uint8_t tag, std::string_view payload,
                            std::size_t *offset) {
@@ -94,6 +102,8 @@ read_snappy_literal_length(std::uint8_t tag, std::string_view payload,
   return literal_length + 1U;
 }
 
+/// Expands one Snappy back-reference while rejecting invalid offsets and output
+/// overflow.
 sanitize::Status snappy_copy(std::string *out, std::uint32_t offset,
                              std::uint32_t length, std::size_t expected_size) {
   if (!out) {
@@ -115,6 +125,7 @@ sanitize::Status snappy_copy(std::string *out, std::uint32_t offset,
   return {};
 }
 
+/// Decodes a Snappy page and verifies both framing and advertised output size.
 sanitize::Status snappy_decompress_payload_into(std::string_view payload,
                                                 std::int32_t expected,
                                                 std::string *out) {

@@ -1,4 +1,11 @@
-/* Arrow C stream batch coalescing wrapper and Python entry point. */
+/*
+ * Implements the Arrow C stream batch-coalescing wrapper and Python entry
+ * point.
+ *
+ * The phases validate schemas, append slices, and export one owned Arrow array
+ * under budget.
+ */
+
 #include "api/python_abi3/streaming/coalesce_stream_internal.hh"
 
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
@@ -22,11 +29,13 @@ namespace core_abi3_internal::coalesce_detail {
 
 namespace {
 
+/// Transfers an Arrow array structure and clears the source release callback.
 void move_array(ArrowArray *source, ArrowArray *destination) noexcept {
   *destination = *source;
   sanitize::internal::cdata_stream::clear_array(source);
 }
 
+/// Releases pending array and clears transferred ownership to prevent reuse.
 void release_pending_array(CoalesceStreamState *state) noexcept {
   if (!state) {
     return;
@@ -37,6 +46,7 @@ void release_pending_array(CoalesceStreamState *state) noexcept {
   state->pending_offset = 0;
 }
 
+/// Loads and validates the next nonempty input batch when none is pending.
 sanitize::Status ensure_pending_batch(CoalesceStreamState *state) {
   if (!state || !state->inner) {
     return sanitize::Status::Invalid("coalescing stream has no inner stream");
@@ -70,6 +80,7 @@ sanitize::Status ensure_pending_batch(CoalesceStreamState *state) {
 
 } // namespace
 
+/// Releases coalesce stream and clears transferred ownership to prevent reuse.
 void release_coalesce_stream(CoalesceStreamState *state) noexcept {
   if (!state || state->closed) {
     return;
@@ -79,6 +90,8 @@ void release_coalesce_stream(CoalesceStreamState *state) noexcept {
                                &state->stream_capsule, &state->closed);
 }
 
+/// Exposes the most recent Arrow batch coalescer failure through the Arrow C
+/// Stream callback.
 const char *coalesce_last_error(ArrowArrayStream *stream) {
   if (!stream) {
     return "invalid coalescing stream";
@@ -89,6 +102,8 @@ const char *coalesce_last_error(ArrowArrayStream *stream) {
                : nullptr;
 }
 
+/// Releases the Arrow batch coalescer callback state and clears all transferred
+/// Arrow ownership.
 void coalesce_release(ArrowArrayStream *stream) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -103,6 +118,7 @@ void coalesce_release(ArrowArrayStream *stream) {
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
 
+/// Exports the coalesced schema through the Arrow C Stream callback.
 int coalesce_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
   if (!stream) {
     return EINVAL;
@@ -123,6 +139,8 @@ int coalesce_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
       });
 }
 
+/// Produces the next Arrow C array through the Arrow batch coalescer stream
+/// callback.
 int coalesce_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   if (!stream) {
     return EINVAL;
@@ -201,6 +219,7 @@ int coalesce_get_next(ArrowArrayStream *stream, ArrowArray *out) {
 
 namespace core_abi3_internal {
 
+/// Wraps an Arrow stream to coalesce adjacent batches within a memory budget.
 PyObject *py_coalescing_stream_wrap(PyObject *, PyObject *args) {
   using namespace coalesce_detail;
   PyObject *stream_obj = nullptr;

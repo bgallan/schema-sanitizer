@@ -1,4 +1,6 @@
 // Declares Python ABI3 capsule ownership and sink-result packing helpers.
+// These definitions keep interpreter ownership and method-table details behind
+// the private extension boundary.
 
 #pragma once
 
@@ -20,7 +22,7 @@ struct NativePreparedOptions;
 NativeContext *unwrap_context(PyObject *obj);
 PyObject *wrap_context_capsule(NativeContext *ctx);
 NativePreparedOptions *unwrap_prepared_options(PyObject *obj);
-// Resolves None to the shared default options or unwraps a prepared capsule.
+/// Resolves None to the shared default options or unwraps a prepared capsule.
 bool resolve_prepared_options(
     PyObject *obj,
     std::shared_ptr<const sanitize::PreparedOptions> *out_prepared);
