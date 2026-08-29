@@ -171,4 +171,4 @@ def parquet_direct_registry_sink(
             raise
         log_native_parquet_reader_fallback()
         close_parquet_direct_stream_factory(stream_factory)
-        return ParquetDirectOutcome(None, "pyarrow_registry_unavailable")
+        return ParquetDirectOutcome(None, "native_registry_arrow_stream_error")

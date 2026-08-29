@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, MutableMapping
 from contextlib import suppress
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from ..adapters.pyarrow import streams as _pyarrow_streams
@@ -54,11 +55,20 @@ _DIAGNOSTIC_INT_KEYS = (
     "errors",
     "soft_errors",
 )
-_DIAGNOSTIC_STRING_KEYS = ("file_output_route", "file_metadata_route")
+_DIAGNOSTIC_STRING_KEYS = (
+    "input_source_route",
+    "input_plan_route",
+    "parquet_input_route",
+    "parquet_input_fallback_reason",
+    "file_output_route",
+    "file_metadata_route",
+)
 
 
 def diagnostics_raw_json(raw: Any) -> str:
     """Return a JSON representation of raw diagnostics."""
+    if isinstance(raw, Mapping):
+        return json.dumps(dict(raw), separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     fn = getattr(raw, "to_json", None)
     if callable(fn):
         return str(fn())
@@ -89,6 +99,8 @@ def diagnostics_target(raw: Any) -> Any:
 def diagnostics_payload(raw: Any) -> dict[str, Any]:
     """Parse raw diagnostics into a dictionary."""
     diag = diagnostics_target(raw)
+    if isinstance(diag, Mapping):
+        return dict(diag)
     if diag is not None:
         try:
             cached = object.__getattribute__(diag, "_obj")
@@ -106,6 +118,9 @@ def patch_diagnostics_values(raw: Any, values: dict[str, Any]) -> None:
     """Patch live and serialized diagnostics values."""
     diag = diagnostics_target(raw)
     if diag is None:
+        return
+    if isinstance(diag, MutableMapping):
+        diag.update(values)
         return
 
     ensure_obj = getattr(diag, "_ensure_obj", None)
@@ -128,6 +143,39 @@ def patch_diagnostics_values(raw: Any, values: dict[str, Any]) -> None:
 
     obj.update(values)
     diag._diag_json = json.dumps(obj, separators=(",", ":"), sort_keys=True, default=str)
+
+
+def patch_input_route_diagnostics(
+    raw: Any,
+    *,
+    source_route: str | None = None,
+    plan_route: str | None = None,
+    parquet_route: str | None = None,
+    parquet_fallback_reason: str | None = None,
+) -> None:
+    """Attach successful input-route decisions to one operation's diagnostics."""
+    routes = {
+        key: value
+        for key, value in (
+            ("input_source_route", source_route),
+            ("input_plan_route", plan_route),
+            ("parquet_input_route", parquet_route),
+            ("parquet_input_fallback_reason", parquet_fallback_reason),
+        )
+        if value
+    }
+    if not routes:
+        return
+    try:
+        if diagnostics_target(raw) is None and raw is not None:
+            try:
+                setattr(raw, "diagnostics", SimpleNamespace())
+            except Exception:
+                return
+        patch_diagnostics_values(raw, routes)
+    except Exception:
+        # Optional diagnostics cannot invalidate a successfully selected route.
+        return
 
 
 def increment_diagnostics_counter(raw: Any, key: str, delta: int) -> None:
@@ -190,7 +238,11 @@ class DiagnosticsAccessMixin:
     @property
     def stats(self) -> dict[str, Any]:
         """Return normalized ingestion statistics."""
-        return diagnostics_stats(getattr(self._raw, "diagnostics", None))
+        raw = getattr(self, "_raw", None)
+        diagnostics = getattr(raw, "diagnostics", None)
+        if diagnostics is None:
+            diagnostics = getattr(self, "_diagnostics", None)
+        return diagnostics_stats(diagnostics)
 
 
 class ClosableContextManagerMixin:
@@ -309,6 +361,10 @@ class Stream(DiagnosticsAccessMixin, ClosableContextManagerMixin, Iterator):
         self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
         self._pid = os.getpid()
         self._raw = raw
+        try:
+            self._diagnostics = getattr(raw, "diagnostics", None)
+        except Exception:
+            self._diagnostics = None
         self._keepalive: Any = None
         self._close_on_exhaustion = False
         self._exhausted = False

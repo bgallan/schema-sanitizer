@@ -261,7 +261,10 @@ def test_iter_batches_keeps_the_memory_lease_until_close(
         multi_threading=True,
         memory_limit_bytes=64 * 1024 * 1024,
     )
+    retained_stats: dict[str, object] | None = None
     try:
+        assert stream.stats["input_source_route"] == "path"
+        assert stream.stats["materialized_rows"] == 0
         stream_resources = stream._keepalive
         payload_owner = stream_resources._payload_owner
         assert payload_owner.memory_lease.reserved_bytes > 0
@@ -274,6 +277,8 @@ def test_iter_batches_keeps_the_memory_lease_until_close(
         assert waiting == 0
         assert first_rows + sum(batch.num_rows for batch in stream) == 2
         assert list(stream) == []
+        retained_stats = stream.stats
+        assert retained_stats["input_source_route"] == "path"
         assert stream_resources._payload_owner is None
         assert payload_owner.memory_lease is None
         assert payload_owner.control_ticket is None
@@ -282,6 +287,9 @@ def test_iter_batches_keeps_the_memory_lease_until_close(
         assert waiting == 0
     finally:
         stream.close()
+
+    assert retained_stats is not None
+    assert stream.stats == retained_stats
 
     _capacity, leased, waiting = _governor_stats()
     assert leased == 0

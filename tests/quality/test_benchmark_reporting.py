@@ -650,6 +650,51 @@ def test_retained_benchmark_evidence_is_valid_json() -> None:
         json.loads(path.read_text(encoding="utf-8"))
 
 
+def test_quality_benchmark_harness_smoke_command() -> None:
+    """The quality action's exact ingestion smoke workload completes end to end."""
+    completed = run_command(
+        [
+            sys.executable,
+            "-m",
+            "benchmarks.ingestion.cli",
+            "--rows",
+            "8",
+            "--width",
+            "2",
+            "--repeats",
+            "1",
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=CAPTURE,
+        stderr=CAPTURE,
+        text=True,
+        timeout=120,
+    )
+
+    assert isinstance(completed.stdout, str)
+    assert completed.stderr == ""
+    lines = {line.split(":", 1)[0]: line for line in completed.stdout.splitlines()}
+    assert "input_source_route=path" in lines["to_pyarrow jsonl"]
+    for label in (
+        "to_pyarrow json directory",
+        "to_pyarrow json directory many files",
+        "to_pyarrow xml directory",
+    ):
+        assert "input_source_route=path_sources" in lines[label]
+        assert "input_plan_route=native_manifest_paths" in lines[label]
+    assert "parquet_input_route=" not in lines["to_pyarrow jsonl"]
+    for label in ("to_jsonl", "to_csv"):
+        assert "input_source_route=path" in lines[label]
+    for label in (
+        "to_jsonl parquet direct",
+        "to_jsonl parquet direct wide",
+        "to_jsonl registry parquet direct",
+    ):
+        assert "parquet_input_route=native_registry" in lines[label]
+        assert "file_output_route=native_direct" in lines[label]
+
+
 def test_time_call_records_median_p95_sizes_and_warmups(tmp_path: Path) -> None:
     """Record robust timings, sizes, repeats, and warmup counts."""
     calls = 0

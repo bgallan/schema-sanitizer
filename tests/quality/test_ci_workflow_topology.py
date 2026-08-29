@@ -67,6 +67,17 @@ _BUILD_PLATFORMS = _table(
     macOS ARM64 | macos-15 | macos-arm64 | macos-arm64 | arm64
     """,
 )
+_TEST_SHARDS = ("concurrency", "memory-parquet", "io-pipeline")
+_TEST_PLATFORM_JOBS = tuple(
+    {
+        "job-id": f"platform-tests-{platform['platform-name'].replace('_', '-')}",
+        "runner": platform["runner"],
+        "platform-name": platform["platform-name"],
+        "artifact": platform["artifact"],
+        "minimum-cpu-capacity": ("3" if platform["platform-name"] == "macos-arm64" else "4"),
+    }
+    for platform in _BUILD_PLATFORMS
+)
 _PLATFORM_LOCK_NAMES = frozenset(
     """
     aiohappyeyeballs aiohttp aiosignal attrs duckdb frozenlist idna iniconfig multidict numpy
@@ -189,6 +200,25 @@ def _matrix_includes(workflow: str, job_id: str) -> tuple[dict[str, str], ...]:
     )
 
 
+def _matrix_axis(workflow: str, job_id: str, key: str) -> tuple[str, ...]:
+    """Return one inline scalar axis from a job matrix."""
+    body = _job_body(workflow, job_id)
+    match = re.search(rf"^        {re.escape(key)}: \[([^]]+)\]$", body, re.MULTILINE)
+    assert match is not None, f"missing matrix axis {key!r} in {job_id!r}"
+    return tuple(value.strip().strip("'\"") for value in match.group(1).split(","))
+
+
+def _job_needs(workflow: str, job_id: str) -> tuple[str, ...]:
+    """Return one job's inline or block dependency list."""
+    body = _job_body(workflow, job_id)
+    inline = re.search(r"^    needs: \[([^]]+)\]$", body, re.MULTILINE)
+    if inline is not None:
+        return tuple(value.strip() for value in inline.group(1).split(","))
+    block = re.search(r"^    needs:\n((?:      - [a-z0-9-]+\n)+)", body, re.MULTILINE)
+    assert block is not None, f"missing needs list in {job_id!r}"
+    return tuple(re.findall(r"^      - ([a-z0-9-]+)$", block.group(1), re.MULTILINE))
+
+
 def _step_bodies(workflow: str) -> tuple[str, ...]:
     """Return top-level step bodies without requiring a YAML dependency."""
     starts = tuple(re.finditer(r"^(?: {4}| {6})- (?:name|uses):", workflow, re.MULTILINE))
@@ -196,6 +226,75 @@ def _step_bodies(workflow: str) -> tuple[str, ...]:
         workflow[match.start() : starts[index + 1].start() if index + 1 < len(starts) else None]
         for index, match in enumerate(starts)
     )
+
+
+def _yaml_mapping_block(source: str, key: str, indent: int) -> str:
+    """Return one indentation-delimited YAML mapping body."""
+    prefix = " " * indent
+    match = re.search(rf"^{prefix}{re.escape(key)}:\s*(?:#.*)?$", source, re.MULTILINE)
+    if match is None:
+        return ""
+    lines: list[str] = []
+    for line in source[match.end() :].splitlines(keepends=True):
+        content = line.lstrip(" ")
+        if content.strip() and len(line) - len(content) <= indent:
+            break
+        lines.append(line)
+    return "".join(lines)
+
+
+def _no_isolation_constraint_violations(definitions: dict[str, str]) -> tuple[str, ...]:
+    """Find every scope that can leak a build constraint into a non-isolated build."""
+    constraint = "PIP_BUILD_CONSTRAINT"
+    violations: set[str] = set()
+    workflows = {
+        path: source
+        for path, source in definitions.items()
+        if path.startswith(".github/workflows/")
+    }
+    actions = {
+        path: source
+        for path, source in definitions.items()
+        if path.startswith(".github/actions/") and path.endswith("/action.yml")
+    }
+
+    for path, source in definitions.items():
+        if re.search(r"\bGITHUB_ENV\b", source, re.IGNORECASE):
+            violations.add(f"{path}: persistent GITHUB_ENV mutation is forbidden")
+
+    for action_path, action in actions.items():
+        no_isolation_steps = tuple(
+            step for step in _step_bodies(action) if "--no-build-isolation" in step
+        )
+        if not no_isolation_steps:
+            continue
+        for step in no_isolation_steps:
+            if constraint in step:
+                violations.add(f"{action_path}: non-isolated step sets {constraint}")
+
+        action_ref = f"./{action_path.removesuffix('/action.yml')}"
+        callers = 0
+        for workflow_path, workflow in workflows.items():
+            workflow_env = _yaml_mapping_block(_workflow_preamble(workflow), "env", 0)
+            for job_id in _job_ids(workflow):
+                job = _job_body(workflow, job_id)
+                invocation_steps = tuple(step for step in _step_bodies(job) if action_ref in step)
+                if not invocation_steps:
+                    continue
+                callers += len(invocation_steps)
+                if constraint in workflow_env:
+                    violations.add(f"{workflow_path}: workflow env leaks into {action_ref}")
+                if constraint in _yaml_mapping_block(job, "env", 4):
+                    violations.add(f"{workflow_path}:{job_id}: job env leaks into {action_ref}")
+                for step in invocation_steps:
+                    if constraint in step:
+                        violations.add(
+                            f"{workflow_path}:{job_id}: invocation env leaks into {action_ref}"
+                        )
+        if callers == 0:
+            violations.add(f"{action_path}: non-isolated action has no workflow caller")
+
+    return tuple(sorted(violations))
 
 
 def _with_value(step: str, key: str) -> str:
@@ -544,7 +643,7 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
     local_refs = [ref for ref in refs if ref.startswith("./")]
     assert local_refs.count("./.github/workflows/ci.yml") == 1
     assert local_refs.count("./.github/actions/build-platform-wheel") == 1
-    assert local_refs.count("./.github/actions/test-platform-wheel") == 1
+    assert local_refs.count("./.github/actions/test-platform-wheel") == 4
     for name in VALIDATION_ACTIONS:
         assert local_refs.count(f"./.github/actions/{name}") == 1
     assert set(local_refs) == {
@@ -825,19 +924,23 @@ def test_native_linkage_certification_fails_without_an_inspection_tool() -> None
     )
 
 
-def test_validation_has_three_matrices_and_one_terminal_gate() -> None:
-    """All validation work belongs to three matrices and one stable final job."""
+def test_validation_has_six_matrices_and_one_terminal_gate() -> None:
+    """All validation work belongs to six matrices and one stable final job."""
     ci = _workflow("ci.yml")
     assert _job_ids(ci) == {
         "platform-wheel-builds",
-        "platform-tests",
+        *(platform["job-id"] for platform in _TEST_PLATFORM_JOBS),
         "validation-matrix",
         "validation-gate",
     }
     gate = _job_body(ci, "validation-gate")
     assert "if: always()" in gate or "if: ${{ always() }}" in gate
-    assert "needs: [platform-wheel-builds, platform-tests, validation-matrix]" in gate
-    assert ci.count("      matrix:") == 3
+    assert _job_needs(ci, "validation-gate") == (
+        "platform-wheel-builds",
+        *(platform["job-id"] for platform in _TEST_PLATFORM_JOBS),
+        "validation-matrix",
+    )
+    assert ci.count("      matrix:") == 6
     assert "python-version: [" not in ci
     assert "uses: ./.github/workflows/" not in ci
 
@@ -920,10 +1023,6 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
         for requirement in test_requirements
         if not requirement.startswith("pip==")
     )
-    test_platforms = tuple(
-        {key: value for key, value in platform.items() if key != "arch"}
-        for platform in _BUILD_PLATFORMS
-    )
     build = _job_body(ci, "platform-wheel-builds")
 
     assert _matrix_includes(ci, "platform-wheel-builds") == _BUILD_PLATFORMS
@@ -935,26 +1034,22 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert "artifact: ${{ matrix.artifact }}" in build
     assert "arch: ${{ matrix.arch }}" in build
 
-    tests = _job_body(ci, "platform-tests")
-    expected_test_rows = tuple(
-        {
-            **platform,
-            "minimum-cpu-capacity": ("3" if platform["platform-name"] == "macos-arm64" else "4"),
-            "shard": shard,
-        }
-        for shard in ("concurrency", "memory-parquet", "io-pipeline")
-        for platform in test_platforms
-    )
-    assert _matrix_includes(ci, "platform-tests") == expected_test_rows
-    assert "name: tests / ${{ matrix.shard }} / ${{ matrix['display-name'] }}" in tests
-    assert "needs: [platform-wheel-builds]" in tests
-    assert "runs-on: ${{ matrix.runner }}" in tests
-    assert "fail-fast: false" in tests
-    assert tests.count("uses: ./.github/actions/test-platform-wheel") == 1
-    assert "platform-name: ${{ matrix['platform-name'] }}" in tests
-    assert "artifact: ${{ matrix.artifact }}" in tests
-    assert "minimum-cpu-capacity: ${{ matrix['minimum-cpu-capacity'] }}" in tests
-    assert "shard: ${{ matrix.shard }}" in tests
+    for platform in _TEST_PLATFORM_JOBS:
+        job_id = platform["job-id"]
+        tests = _job_body(ci, job_id)
+        assert not re.search(r"^    name:", tests, re.MULTILINE)
+        assert "if: ${{ !cancelled() }}" in tests
+        assert _job_needs(ci, job_id) == ("platform-wheel-builds",)
+        assert f"runs-on: {platform['runner']}" in tests
+        assert "fail-fast: false" in tests
+        assert _matrix_axis(ci, job_id, "shard") == _TEST_SHARDS
+        assert tests.count("uses: ./.github/actions/test-platform-wheel") == 1
+        assert f"platform-name: {platform['platform-name']}" in tests
+        assert f"artifact: {platform['artifact']}" in tests
+        assert f"minimum-cpu-capacity: {platform['minimum-cpu-capacity']}" in tests
+        assert "shard: ${{ matrix.shard }}" in tests
+        assert "matrix['display-name']" not in tests
+    assert ci.count("uses: ./.github/actions/test-platform-wheel") == 4
 
 
 def test_composite_actions_reject_unknown_platform_and_sanitizer_tuples() -> None:
@@ -1060,14 +1155,26 @@ def test_every_installer_uses_its_exact_runtime_and_build_owner_lock() -> None:
     gate = _job_body(_workflow("ci.yml"), "validation-gate")
     host_build = "${{ github.workspace }}/meta/ci/requirements/build-tools.txt"
 
-    for owner in (source, native, sanitizer, tsan, gate):
+    for owner in (source, sanitizer, tsan, gate):
         assert f"PIP_BUILD_CONSTRAINT: {host_build}" in owner
         assert f"PIP_CONSTRAINT: {host_build}" in owner
+    native_prerequisites = next(
+        step for step in _step_bodies(native) if "Install native coverage prerequisites" in step
+    )
+    native_build = next(
+        step for step in _step_bodies(native) if "Build and install instrumented package" in step
+    )
+    assert f"PIP_BUILD_CONSTRAINT: {host_build}" in native_prerequisites
+    assert f"PIP_CONSTRAINT: {host_build}" in native_prerequisites
+    assert f"PIP_BUILD_CONSTRAINT: {host_build}" not in native_build
+    assert f"PIP_CONSTRAINT: {host_build}" in native_build
+    assert native.index(native_prerequisites) < native.index(native_build)
     assert f"PIP_BUILD_CONSTRAINT: {host_build}" in build
     assert f"PIP_CONSTRAINT: {host_build}" in build
-    assert "CIBW_ENVIRONMENT: >-" in build
-    assert 'PIP_BUILD_CONSTRAINT="$GITHUB_WORKSPACE/meta/ci/requirements/build-tools.txt"' in build
-    assert 'PIP_CONSTRAINT="$GITHUB_WORKSPACE/meta/ci/requirements/build-tools.txt"' in build
+    wheel_build = next(step for step in _step_bodies(build) if "python -m cibuildwheel" in step)
+    assert f"PIP_BUILD_CONSTRAINT: {host_build}" in wheel_build
+    assert f"PIP_CONSTRAINT: {host_build}" in wheel_build
+    assert "CIBW_ENVIRONMENT: >-" not in build
     linux_environment = build.split("CIBW_ENVIRONMENT_LINUX: >-", 1)[1].split(
         "        # cibuildwheel Linux", 1
     )[0]
@@ -1095,6 +1202,90 @@ def test_every_installer_uses_its_exact_runtime_and_build_owner_lock() -> None:
     assert (
         "PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/platform-tests.txt" in tests
     )
+
+
+def test_no_build_isolation_never_receives_a_build_constraint() -> None:
+    """No direct, inherited, or persistent scope can poison non-isolated pip builds."""
+    definitions = {
+        path.relative_to(ROOT).as_posix(): definition for path, definition in _ci_yaml_definitions()
+    }
+    owners = {
+        path
+        for path, definition in definitions.items()
+        if any("--no-build-isolation" in step for step in _step_bodies(definition))
+    }
+
+    assert owners == {
+        ".github/actions/native-llvm-coverage/action.yml",
+        ".github/actions/platform-sanitizer/action.yml",
+    }
+    assert _no_isolation_constraint_violations(definitions) == ()
+
+
+def test_no_build_isolation_constraint_guard_detects_every_inherited_scope() -> None:
+    """Mutation cases prove the non-isolated build guard cannot pass by lucky placement."""
+    definitions = {
+        path.relative_to(ROOT).as_posix(): definition for path, definition in _ci_yaml_definitions()
+    }
+    action_path = ".github/actions/native-llvm-coverage/action.yml"
+    workflow_path = ".github/workflows/ci.yml"
+    mutations = (
+        (
+            action_path,
+            "    - name: Build and install instrumented package\n      env:\n",
+            "    - name: Build and install instrumented package\n"
+            "      env:\n"
+            "        PIP_BUILD_CONSTRAINT: /tmp/build.txt\n",
+        ),
+        (
+            action_path,
+            "        set -euo pipefail\n        rm -rf -- coverage-native .work/build\n",
+            "        set -euo pipefail\n"
+            "        export PIP_BUILD_CONSTRAINT=/tmp/build.txt\n"
+            "        rm -rf -- coverage-native .work/build\n",
+        ),
+        (
+            workflow_path,
+            "env:\n  # All Python package downloads",
+            "env:\n  PIP_BUILD_CONSTRAINT: /tmp/build.txt\n  # All Python package downloads",
+        ),
+        (
+            workflow_path,
+            "  validation-matrix:\n    name:",
+            "  validation-matrix:\n    env:\n      PIP_BUILD_CONSTRAINT: /tmp/build.txt\n    name:",
+        ),
+        (
+            workflow_path,
+            "      - if: matrix.task == 'native-llvm-coverage'\n"
+            "        uses: ./.github/actions/native-llvm-coverage\n",
+            "      - if: matrix.task == 'native-llvm-coverage'\n"
+            "        uses: ./.github/actions/native-llvm-coverage\n"
+            "        env:\n"
+            "          PIP_BUILD_CONSTRAINT: /tmp/build.txt\n",
+        ),
+        (
+            workflow_path,
+            '          set -euo pipefail\n          case "${VALIDATION_TASK}" in\n',
+            "          set -euo pipefail\n"
+            "          echo 'PIP_BUILD_CONSTRAINT=/tmp/build.txt' >> \"$GITHUB_ENV\"\n"
+            '          case "${VALIDATION_TASK}" in\n',
+        ),
+    )
+    for path, original, replacement in mutations:
+        mutated = dict(definitions)
+        assert mutated[path].count(original) == 1
+        mutated[path] = mutated[path].replace(original, replacement, 1)
+        assert _no_isolation_constraint_violations(mutated)
+
+    unrelated = dict(definitions)
+    needle = "  platform-wheel-builds:\n    name:"
+    assert unrelated[workflow_path].count(needle) == 1
+    unrelated[workflow_path] = unrelated[workflow_path].replace(
+        needle,
+        "  platform-wheel-builds:\n    env:\n      PIP_BUILD_CONSTRAINT: /tmp/build.txt\n    name:",
+        1,
+    )
+    assert _no_isolation_constraint_violations(unrelated) == ()
 
 
 def test_release_verifier_requirements_are_a_complete_exact_compatible_lock() -> None:
@@ -1289,22 +1480,29 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
     for domains in shard_domains.values():
         for domain in domains:
             assert functional.count(f"tests/{domain}") == 1
-    tests = _job_body(ci, "platform-tests")
-    rows = _matrix_includes(ci, "platform-tests")
-    for shard in shard_domains:
-        assert sum(row["shard"] == shard for row in rows) == 4
-    assert len({(row["platform-name"], row["shard"]) for row in rows}) == 12
-    assert "fail-fast: false" in tests
+    cells = {
+        (platform["platform-name"], shard)
+        for platform in _TEST_PLATFORM_JOBS
+        for shard in _matrix_axis(ci, platform["job-id"], "shard")
+    }
+    assert cells == {
+        (platform["platform-name"], shard)
+        for platform in _TEST_PLATFORM_JOBS
+        for shard in shard_domains
+    }
+    assert len(cells) == 12
+    for platform in _TEST_PLATFORM_JOBS:
+        tests = _job_body(ci, platform["job-id"])
+        assert "fail-fast: false" in tests
+        assert "if: ${{ !cancelled() }}" in tests
 
 
 def test_concurrency_shards_fail_closed_at_explicit_platform_cpu_minima() -> None:
     """Three four-core platforms cover those contracts while ARM64 guarantees three cores."""
-    rows = tuple(
-        row
-        for row in _matrix_includes(_workflow("ci.yml"), "platform-tests")
-        if row["shard"] == "concurrency"
-    )
-    minima = {row["platform-name"]: row["minimum-cpu-capacity"] for row in rows}
+    minima = {
+        platform["platform-name"]: platform["minimum-cpu-capacity"]
+        for platform in _TEST_PLATFORM_JOBS
+    }
     preflight = next(
         step
         for step in _step_bodies(_action("test-platform-wheel"))
@@ -1330,20 +1528,30 @@ def test_concurrency_shards_fail_closed_at_explicit_platform_cpu_minima() -> Non
 
 
 def test_validation_matrix_and_terminal_gate_have_exact_dependencies() -> None:
-    """One test matrix consumes builds and one final job joins every matrix."""
+    """Four test matrices consume builds and one final job joins every matrix."""
     ci = _workflow("ci.yml")
-    tests = _job_body(ci, "platform-tests")
     gate = _job_body(ci, "validation-gate")
-    assert "needs: [platform-wheel-builds]" in tests
-    assert tests.count("needs:") == 1
-    assert "needs: [platform-wheel-builds, platform-tests, validation-matrix]" in gate
+    for platform in _TEST_PLATFORM_JOBS:
+        job_id = platform["job-id"]
+        tests = _job_body(ci, job_id)
+        assert _job_needs(ci, job_id) == ("platform-wheel-builds",)
+        assert tests.count("needs:") == 1
+        assert "if: ${{ !cancelled() }}" in tests
+    assert _job_needs(ci, "validation-gate") == (
+        "platform-wheel-builds",
+        *(platform["job-id"] for platform in _TEST_PLATFORM_JOBS),
+        "validation-matrix",
+    )
     assert gate.count("needs:") == 1
-    expected_results = {
-        "WHEEL_BUILDS_RESULT": "platform-wheel-builds",
-        "PLATFORM_TESTS_RESULT": "platform-tests",
-        "VALIDATION_MATRIX_RESULT": "validation-matrix",
-    }
-    for variable, job_id in expected_results.items():
+    expected_results = (
+        ("WHEEL_BUILDS_RESULT", "platform-wheel-builds"),
+        ("PLATFORM_TESTS_LINUX_X86_64_RESULT", "platform-tests-linux-x86-64"),
+        ("PLATFORM_TESTS_WINDOWS_AMD64_RESULT", "platform-tests-windows-amd64"),
+        ("PLATFORM_TESTS_MACOS_X86_64_RESULT", "platform-tests-macos-x86-64"),
+        ("PLATFORM_TESTS_MACOS_ARM64_RESULT", "platform-tests-macos-arm64"),
+        ("VALIDATION_MATRIX_RESULT", "validation-matrix"),
+    )
+    for variable, job_id in expected_results:
         assert f"{variable}: ${{{{ needs.{job_id}.result }}}}" in gate
         assert f'"${{{variable}}}"' in gate
     assert gate.count(".result }}") == len(expected_results)
@@ -1800,9 +2008,12 @@ def test_macos_native_baseline_matches_concurrency_runtime_requirements() -> Non
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     ci = _workflow("ci.yml")
+    build_action = _action("build-platform-wheel")
 
     assert 'CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "11.0"' in cmake
     assert "MACOSX_DEPLOYMENT_TARGET:" not in ci
+    assert "MACOSX_DEPLOYMENT_TARGET" not in build_action
+    assert "CIBW_ENVIRONMENT: >-" not in build_action
     assert (
         pyproject["tool"]["cibuildwheel"]["macos"]["environment"]["MACOSX_DEPLOYMENT_TARGET"]
         == "11.0"
@@ -1961,7 +2172,11 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     for version in ("3.12.11", "3.13.15", "3.14.3"):
         assert f"python-version: {version}" in build_action
     assert build_action.count("python -I meta/ci/release/downstream_smoke.py") == 3
-    assert "needs: [platform-wheel-builds, platform-tests, validation-matrix]" in distribution
+    assert _job_needs(ci, "validation-gate") == (
+        "platform-wheel-builds",
+        *(platform["job-id"] for platform in _TEST_PLATFORM_JOBS),
+        "validation-matrix",
+    )
     assert source_distribution.count("python -m build --sdist") == 2
     assert 'cmp -- "${first[0]}" "${second[0]}"' in source_distribution
     assert "check_downstream_install.sh" in source_distribution

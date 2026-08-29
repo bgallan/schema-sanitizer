@@ -28,7 +28,7 @@ from .output_diagnostics import patch_file_output_diagnostics
 from .parquet.direct_routes import parquet_direct_sink
 from .parquet.replay_stream import make_replayable_parquet_stream
 from .results import Result
-from .streams import Stream
+from .streams import Stream, patch_input_route_diagnostics
 
 
 def close_sink_output_or_stream(sink_out: Any, stream: Any = None) -> None:
@@ -325,7 +325,7 @@ def _try_write_direct_parquet_to_file(
     direct_raw = direct_outcome.raw
     if direct_raw is None:
         return None
-    return write_raw_stream_to_file(
+    result = write_raw_stream_to_file(
         direct_raw,
         out_path,
         writer=writer,
@@ -339,6 +339,12 @@ def _try_write_direct_parquet_to_file(
         memory_limit_bytes=memory_limit_bytes,
         threading_mode=threading_mode,
     )
+    patch_input_route_diagnostics(
+        result._raw,
+        source_route="arrow",
+        parquet_route=direct_outcome.route,
+    )
+    return result
 
 
 def write_with_file_output(

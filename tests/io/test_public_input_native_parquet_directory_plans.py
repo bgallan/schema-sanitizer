@@ -110,6 +110,8 @@ def test_parquet_directory_source_file_tracks_each_child(tmp_path: Path) -> None
         str((folder / "a.parquet").resolve()),
         str((folder / "b.parquet").resolve()),
     ]
+    assert result.stats["parquet_input_route"] == "native_registry_source_plan"
+    assert result.stats["parquet_input_fallback_reason"] == ""
 
 
 def test_parquet_directory_source_file_is_native_tracked(tmp_path: Path) -> None:
@@ -157,6 +159,8 @@ def test_parquet_directory_writer_source_file_does_not_precount_rows(
     assert result.stats["inferred_rows"] == 3
     assert result.stats["materialized_rows"] == 3
     assert result.stats["batches"] >= 1
+    assert result.stats["parquet_input_route"] == "native_registry_source_plan"
+    assert result.stats["parquet_input_fallback_reason"] == ""
 
 
 def test_parquet_directory_writer_uses_arrow_source_auto_registry(

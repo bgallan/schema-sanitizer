@@ -98,6 +98,8 @@ def test_csv_directory_writer_source_file_does_not_precount_rows(tmp_path: Path)
     assert result.stats["inferred_rows"] == 2
     assert result.stats["materialized_rows"] == 2
     assert result.stats["batches"] >= 1
+    assert result.stats["input_source_route"] == "path_sources"
+    assert result.stats["input_plan_route"] == "native_manifest_paths"
 
 
 def test_jsonl_directory_file_writer_reports_nonzero_stats(tmp_path: Path) -> None:
@@ -119,6 +121,8 @@ def test_jsonl_directory_file_writer_reports_nonzero_stats(tmp_path: Path) -> No
     assert result.stats["inferred_rows"] == 3
     assert result.stats["materialized_rows"] == 3
     assert result.stats["batches"] >= 1
+    assert result.stats["input_source_route"] == "path_sources"
+    assert result.stats["input_plan_route"] == "native_manifest_paths"
 
 
 def test_csv_directory_file_writer_reports_logical_row_stats(tmp_path: Path) -> None:
@@ -134,6 +138,8 @@ def test_csv_directory_file_writer_reports_logical_row_stats(tmp_path: Path) -> 
     assert result.stats["inferred_rows"] == 2
     assert result.stats["materialized_rows"] == 2
     assert result.stats["batches"] >= 1
+    assert result.stats["input_source_route"] == "path_sources"
+    assert result.stats["input_plan_route"] == "native_manifest_paths"
 
 
 def test_registry_directory_analysis_and_writer_share_source_plan_opener(
@@ -330,6 +336,8 @@ def test_xml_directory_source_file_tracks_each_child(tmp_path: Path) -> None:
         str((folder / "a.xml").resolve()),
         str((folder / "b.xml").resolve()),
     ]
+    assert result.stats["input_source_route"] == "path_sources"
+    assert result.stats["input_plan_route"] == "native_manifest_paths"
 
 
 def test_xml_directory_does_not_wrap_child_files(tmp_path: Path) -> None:

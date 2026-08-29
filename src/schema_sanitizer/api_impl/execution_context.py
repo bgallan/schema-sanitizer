@@ -61,7 +61,7 @@ from .results import (
 from .source_plan.attached import source_plan_from_data
 from .source_plan.remote import RemotePathSourceChunkProvider
 from .source_plan.remote_cleanup import take_prefetched_chunks
-from .streams import ArrowCStream
+from .streams import ArrowCStream, patch_input_route_diagnostics
 
 
 def operation_context_for_source_plan(
@@ -181,6 +181,13 @@ def _open_source_plan_sink_stream_or_none(
     include_source_file: bool,
 ) -> Any | None:
     """Open a plain stream sink from the canonical native source plan."""
+    if plan.kind == SEQUENCE:
+        flattened = _flatten_path_source_sequence_or_none(plan)
+        if flattened is None:
+            return None
+        plan = flattened
+
+    raw: Any | None = None
     if plan.kind == PATH_SOURCES:
         raw = raw_context.to_sink_path_sources(
             sink,
@@ -190,9 +197,7 @@ def _open_source_plan_sink_stream_or_none(
             first_row_columns={},
             timestamp_columns=(),
         )
-        return raw
-
-    if plan.kind == REMOTE_CHUNKS:
+    elif plan.kind == REMOTE_CHUNKS:
         retained_chunks, remaining_start = take_prefetched_chunks(plan.payload)
         provider = RemotePathSourceChunkProvider(
             retained_chunks=retained_chunks,
@@ -208,24 +213,18 @@ def _open_source_plan_sink_stream_or_none(
                 first_row_columns={},
                 timestamp_columns=(),
             )
-            return raw
         except BaseException as exc:
             _cleanup_with_note(
                 exc, provider, label="remote source provider cleanup failed", method="close_all"
             )
             raise
-
-    if plan.kind == SEQUENCE:
-        flattened = _flatten_path_source_sequence_or_none(plan)
-        if flattened is not None:
-            return _open_source_plan_sink_stream_or_none(
-                raw_context,
-                flattened,
-                call_options,
-                sink=sink,
-                include_source_file=include_source_file,
-            )
-    return None
+    if raw is not None:
+        patch_input_route_diagnostics(
+            raw,
+            source_route=plan.kind,
+            plan_route=plan.route_name,
+        )
+    return raw
 
 
 def execution_context_to_sink(
@@ -389,7 +388,14 @@ def execution_context_to_sink(
                 )
             raise
         if raw is not None:
+            patch_input_route_diagnostics(
+                raw,
+                source_route="arrow",
+                parquet_route=direct_outcome.route,
+            )
             output = SinkResult(raw)
+            output._input_source_route = "arrow"
+            output._parquet_input_route = direct_outcome.route
             if keepalive is not None:
                 object.__setattr__(output, "_keepalive", keepalive)
             return output
@@ -444,6 +450,7 @@ def execution_context_to_sink(
             )
         raise
 
+    patch_input_route_diagnostics(raw, source_route=source_name)
     output = SinkResult(raw)
     if keepalive is not None:
         if hasattr(raw, "__arrow_c_stream__"):
@@ -487,6 +494,11 @@ def execution_context_to_table(
             raise translate_core_error(error) from error
         with suppress(Exception):
             patch_table_diagnostics(output.raw, result, table, source_rows=source_rows)
+        patch_input_route_diagnostics(
+            result._raw,
+            source_route=getattr(output, "_input_source_route", None),
+            parquet_route=getattr(output, "_parquet_input_route", None),
+        )
     finally:
         _close_suppressing_errors(output.raw)
         if keepalive is not None:

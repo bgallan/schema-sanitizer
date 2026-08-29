@@ -19,7 +19,7 @@ runs:
         clang-18 -dumpversion | grep -Eq '^18([.]|$)'
         llvm-profdata-18 --version | grep -Eq 'LLVM version 18([.]|$)'
         llvm-cov-18 --version | grep -Eq 'LLVM version 18([.]|$)'
-    - name: Install instrumented package
+    - name: Install native coverage prerequisites
       env:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
@@ -29,6 +29,12 @@ runs:
         python -m pip install pip==26.2.1 ninja==1.13.0 cmake==4.3.4 \
           scikit-build-core==0.11.6
         python -m pip install pytest==9.1.1 pyarrow==25.0.1 polars==1.43.2
+    - name: Build and install instrumented package
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+      shell: bash
+      run: |
+        set -euo pipefail
         rm -rf -- coverage-native .work/build
         mkdir -p coverage-native/raw
         python -m pip install --no-build-isolation -v \

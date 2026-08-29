@@ -112,6 +112,9 @@ def test_read_parquet_retries_pyarrow_after_native_reader_failure(
     result = read_test_parquet(path)
 
     assert result.clean_data.to_pylist() == sample_table(pa).to_pylist()
+    assert result.stats["parquet_input_route"] == "pyarrow"
+    assert result.stats["input_source_route"] == "arrow"
+    assert result.stats["input_plan_route"] == ""
     assert "retrying input with PyArrow" in caplog.text
 
 
@@ -136,7 +139,7 @@ def test_to_parquet_retries_pyarrow_after_native_reader_failure(
     monkeypatch.setattr(parquet_direct_routes, "call_core", fail_native_reader)
     caplog.set_level(logging.ERROR, logger="schema_sanitizer.api_impl.parquet.direct_routes")
 
-    ss.to_parquet(
+    result = ss.to_parquet(
         path,
         out,
         input_format="parquet",
@@ -152,7 +155,41 @@ def test_to_parquet_retries_pyarrow_after_native_reader_failure(
     ]
     assert "schema_registry" in rows[0]
     assert "schema_drifts" in rows[0]
+    assert result.stats["input_source_route"] == "arrow"
+    assert result.stats["parquet_input_route"] == "arrow_factory"
+    assert result.stats["parquet_input_fallback_reason"] == "native_registry_arrow_stream_error"
     assert "retrying input with PyArrow" in caplog.text
+
+
+@_requires_pyarrow
+def test_public_analytical_parquet_fallback_reports_success_and_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
+) -> None:
+    """Public analytical fallback separates its successful route from the failed attempt."""
+    from schema_sanitizer.api_impl.parquet import direct_routes as parquet_direct_routes
+
+    path = tmp_path / "data.parquet"
+    pq.write_table(sample_table(pa), path)
+
+    def fail_native_registry_stream(*_args: object, **_kwargs: object) -> object:
+        """Simulate a native registry Arrow-stream failure."""
+        raise RuntimeError("native registry Arrow-stream failure")
+
+    monkeypatch.setattr(parquet_direct_routes, "call_core", fail_native_registry_stream)
+
+    result = ss.to_pyarrow(path, input_format="parquet")
+
+    generated = {"schema_registry", "schema_drifts", "source_file", "ingestion_timestamp"}
+    assert [
+        {key: value for key, value in row.items() if key not in generated}
+        for row in result.clean_data.to_pylist()
+    ] == sample_table(pa).to_pylist()
+    assert result.stats["input_source_route"] == "parquet_arrow_sources"
+    assert result.stats["input_plan_route"] == "native_parquet_arrow_sources"
+    assert result.stats["parquet_input_route"] == "native_registry_source_plan"
+    assert result.stats["parquet_input_fallback_reason"] == "native_registry_arrow_stream_error"
 
 
 @_requires_pyarrow

@@ -47,7 +47,7 @@ from ..results import (
     convert_arrow_stream_output,
 )
 from ..stream_output import write_raw_stream_to_file
-from ..streams import Stream
+from ..streams import Stream, patch_input_route_diagnostics
 from .remote import RemotePathSourceChunkProvider
 from .remote_cleanup import take_prefetched_chunks
 
@@ -308,6 +308,7 @@ def open_source_plan_registry_stream(
         "timestamp_columns": timestamp_columns,
         "native_registry_state": native_registry_state,
     }
+    opened: OpenedSourcePlanRegistryStream | None
     if plan.kind == PATH_SOURCES:
         raw = _open_path_sources_auto_registry_stream(
             raw_context,
@@ -315,18 +316,29 @@ def open_source_plan_registry_stream(
             call_options,
             **common,
         )
-        return _opened_raw_registry_stream(raw)
-    if plan.kind == REMOTE_CHUNKS:
-        return _open_remote_registry_stream(raw_context, plan, call_options, **common)
-    if plan.kind == PARQUET_ARROW_SOURCES:
+        opened = _opened_raw_registry_stream(raw)
+    elif plan.kind == REMOTE_CHUNKS:
+        opened = _open_remote_registry_stream(raw_context, plan, call_options, **common)
+    elif plan.kind == PARQUET_ARROW_SOURCES:
         raw = parquet_multisource_registry_sink_raw_or_none(
             raw_context,
             plan.payload,
             call_options,
             **common,
         )
-        return None if raw is None else _opened_raw_registry_stream(raw)
-    return None
+        opened = None if raw is None else _opened_raw_registry_stream(raw)
+    else:
+        opened = None
+    if opened is not None:
+        patch_input_route_diagnostics(
+            opened.diagnostics,
+            source_route=plan.kind,
+            plan_route=plan.route_name,
+            parquet_route=(
+                "native_registry_source_plan" if plan.kind == PARQUET_ARROW_SOURCES else None
+            ),
+        )
+    return opened
 
 
 def _result_from_opened(opened: OpenedSourcePlanRegistryStream, owner: Any) -> Result:

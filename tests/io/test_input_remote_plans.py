@@ -1030,6 +1030,17 @@ def test_remote_registry_stream_uses_current_native_auto_provider(monkeypatch) -
 
     assert opened.schema_registry_json == '{"auto":true}'
     assert opened.native_registry_state == "auto-state"
+    assert opened.diagnostics == {
+        "route": "auto-provider",
+        "input_source_route": "remote_chunks",
+        "input_plan_route": "remote_native_manifest_chunks",
+    }
+    from schema_sanitizer.api_impl.streams import diagnostics_stats
+
+    assert diagnostics_stats(opened.diagnostics)["input_source_route"] == "remote_chunks"
+    assert (
+        diagnostics_stats(opened.diagnostics)["input_plan_route"] == "remote_native_manifest_chunks"
+    )
     assert raw_context.auto_calls == 1
     assert len(native_chunks) == 2
     assert events == [
@@ -1665,6 +1676,38 @@ def test_source_plan_plain_stream_uses_native_path_source_payload() -> None:
 
     assert raw == "raw-stream"
     assert captured_sources == [native_payload]
+
+
+def test_input_route_diagnostics_never_break_foreign_stream_wrappers() -> None:
+    """Optional route evidence tolerates diagnostic access and mutation failures."""
+    from schema_sanitizer.api_impl.streams import patch_input_route_diagnostics
+
+    class RejectingAccess:
+        """Expose a diagnostic property that rejects access."""
+
+        @property
+        def diagnostics(self) -> object:
+            """Reject diagnostic access like a hostile foreign wrapper."""
+            raise RuntimeError("diagnostics unavailable")
+
+    class RejectingMutation:
+        """Reject diagnostic attribute mutation."""
+
+        def __setattr__(self, _name: str, _value: object) -> None:
+            """Reject every attempted diagnostic mutation."""
+            raise RuntimeError("diagnostics are read-only")
+
+    class RejectingUpdate(dict[str, object]):
+        """Reject updates to a mapping-backed diagnostic carrier."""
+
+        def update(self, *args: object, **kwargs: object) -> None:
+            """Reject every attempted mapping update."""
+            del args, kwargs
+            raise RuntimeError("diagnostic mapping is read-only")
+
+    patch_input_route_diagnostics(RejectingAccess(), source_route="path")
+    patch_input_route_diagnostics(RejectingMutation(), source_route="path")
+    patch_input_route_diagnostics(RejectingUpdate(), source_route="path")
 
 
 def test_remote_source_plan_stream_uses_native_chunk_provider(monkeypatch) -> None:

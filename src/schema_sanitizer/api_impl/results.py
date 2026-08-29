@@ -595,6 +595,8 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
         self._raw = raw
         self._table: Any | None = None
         self._stream: Stream | None = None
+        self._input_source_route: str | None = None
+        self._parquet_input_route: str | None = None
 
     def _retire_finalizer_slot(self) -> None:
         """Retire the finalizer escrow slot owned by this sink result."""

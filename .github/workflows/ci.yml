@@ -65,98 +65,84 @@ jobs:
           artifact: ${{ matrix.artifact }}
           arch: ${{ matrix.arch }}
 
-  # Twelve independent cells keep all platform/shard pairs visible while
-  # collecting them under one thematic test owner.
-  platform-tests:
-    name: tests / ${{ matrix.shard }} / ${{ matrix['display-name'] }}
+  # Four one-axis matrices keep every platform/shard pair independently named.
+  # Failed wheel builds do not suppress tests for the platform artifacts that
+  # were produced; cancellation still prevents new test work from starting.
+  platform-tests-linux-x86-64:
+    if: ${{ !cancelled() }}
     needs: [platform-wheel-builds]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - display-name: Linux x86-64
-            runner: ubuntu-24.04
-            platform-name: linux-x86_64
-            artifact: linux
-            minimum-cpu-capacity: 4
-            shard: concurrency
-          - display-name: Windows AMD64
-            runner: windows-2025
-            platform-name: windows-amd64
-            artifact: windows
-            minimum-cpu-capacity: 4
-            shard: concurrency
-          - display-name: macOS x86-64
-            runner: macos-15-intel
-            platform-name: macos-x86_64
-            artifact: macos-x86_64
-            minimum-cpu-capacity: 4
-            shard: concurrency
-          - display-name: macOS ARM64
-            runner: macos-15
-            platform-name: macos-arm64
-            artifact: macos-arm64
-            minimum-cpu-capacity: 3
-            shard: concurrency
-          - display-name: Linux x86-64
-            runner: ubuntu-24.04
-            platform-name: linux-x86_64
-            artifact: linux
-            minimum-cpu-capacity: 4
-            shard: memory-parquet
-          - display-name: Windows AMD64
-            runner: windows-2025
-            platform-name: windows-amd64
-            artifact: windows
-            minimum-cpu-capacity: 4
-            shard: memory-parquet
-          - display-name: macOS x86-64
-            runner: macos-15-intel
-            platform-name: macos-x86_64
-            artifact: macos-x86_64
-            minimum-cpu-capacity: 4
-            shard: memory-parquet
-          - display-name: macOS ARM64
-            runner: macos-15
-            platform-name: macos-arm64
-            artifact: macos-arm64
-            minimum-cpu-capacity: 3
-            shard: memory-parquet
-          - display-name: Linux x86-64
-            runner: ubuntu-24.04
-            platform-name: linux-x86_64
-            artifact: linux
-            minimum-cpu-capacity: 4
-            shard: io-pipeline
-          - display-name: Windows AMD64
-            runner: windows-2025
-            platform-name: windows-amd64
-            artifact: windows
-            minimum-cpu-capacity: 4
-            shard: io-pipeline
-          - display-name: macOS x86-64
-            runner: macos-15-intel
-            platform-name: macos-x86_64
-            artifact: macos-x86_64
-            minimum-cpu-capacity: 4
-            shard: io-pipeline
-          - display-name: macOS ARM64
-            runner: macos-15
-            platform-name: macos-arm64
-            artifact: macos-arm64
-            minimum-cpu-capacity: 3
-            shard: io-pipeline
+        shard: [concurrency, memory-parquet, io-pipeline]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/test-platform-wheel
         with:
-          platform-name: ${{ matrix['platform-name'] }}
-          artifact: ${{ matrix.artifact }}
-          minimum-cpu-capacity: ${{ matrix['minimum-cpu-capacity'] }}
+          platform-name: linux-x86_64
+          artifact: linux
+          minimum-cpu-capacity: 4
+          shard: ${{ matrix.shard }}
+  platform-tests-windows-amd64:
+    if: ${{ !cancelled() }}
+    needs: [platform-wheel-builds]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [concurrency, memory-parquet, io-pipeline]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: windows-amd64
+          artifact: windows
+          minimum-cpu-capacity: 4
+          shard: ${{ matrix.shard }}
+  platform-tests-macos-x86-64:
+    if: ${{ !cancelled() }}
+    needs: [platform-wheel-builds]
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [concurrency, memory-parquet, io-pipeline]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: macos-x86_64
+          artifact: macos-x86_64
+          minimum-cpu-capacity: 4
+          shard: ${{ matrix.shard }}
+  platform-tests-macos-arm64:
+    if: ${{ !cancelled() }}
+    needs: [platform-wheel-builds]
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [concurrency, memory-parquet, io-pipeline]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: macos-arm64
+          artifact: macos-arm64
+          minimum-cpu-capacity: 3
           shard: ${{ matrix.shard }}
 
   # Source, quality, coverage, and sanitizer workloads are one heterogeneous
@@ -261,21 +247,33 @@ jobs:
   validation-gate:
     name: validation gate
     if: always()
-    needs: [platform-wheel-builds, platform-tests, validation-matrix]
+    needs:
+      - platform-wheel-builds
+      - platform-tests-linux-x86-64
+      - platform-tests-windows-amd64
+      - platform-tests-macos-x86-64
+      - platform-tests-macos-arm64
+      - validation-matrix
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Require every validation matrix to succeed
         env:
           WHEEL_BUILDS_RESULT: ${{ needs.platform-wheel-builds.result }}
-          PLATFORM_TESTS_RESULT: ${{ needs.platform-tests.result }}
+          PLATFORM_TESTS_LINUX_X86_64_RESULT: ${{ needs.platform-tests-linux-x86-64.result }}
+          PLATFORM_TESTS_WINDOWS_AMD64_RESULT: ${{ needs.platform-tests-windows-amd64.result }}
+          PLATFORM_TESTS_MACOS_X86_64_RESULT: ${{ needs.platform-tests-macos-x86-64.result }}
+          PLATFORM_TESTS_MACOS_ARM64_RESULT: ${{ needs.platform-tests-macos-arm64.result }}
           VALIDATION_MATRIX_RESULT: ${{ needs.validation-matrix.result }}
         shell: bash
         run: |-
           set -euo pipefail
           for result in \
             "${WHEEL_BUILDS_RESULT}" \
-            "${PLATFORM_TESTS_RESULT}" \
+            "${PLATFORM_TESTS_LINUX_X86_64_RESULT}" \
+            "${PLATFORM_TESTS_WINDOWS_AMD64_RESULT}" \
+            "${PLATFORM_TESTS_MACOS_X86_64_RESULT}" \
+            "${PLATFORM_TESTS_MACOS_ARM64_RESULT}" \
             "${VALIDATION_MATRIX_RESULT}"; do
             if [[ "${result}" != "success" ]]; then
               echo "A validation matrix ended with ${result}" >&2

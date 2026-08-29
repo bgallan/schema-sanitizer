@@ -43,6 +43,7 @@ from .results import Result
 from .source_plan.attached import source_plan_from_data
 from .source_plan.registry import write_source_plan_registry_to_file
 from .stream_output import write_raw_stream_to_file
+from .streams import patch_input_route_diagnostics
 
 
 def write_registry_raw_stream_to_file(
@@ -137,10 +138,12 @@ def _try_write_direct_parquet_registry_to_file(
         schema_mode=schema_mode,
     )
     raw = direct_outcome.raw
+    parquet_route = direct_outcome.route
+    parquet_fallback_reason: str | None = None
     fallback_registry_json: str | None = None
     fallback_drifts_json: str | None = None
     if raw is None:
-        if direct_outcome.route != "pyarrow_registry_unavailable":
+        if direct_outcome.route != "native_registry_arrow_stream_error":
             return None
         factory_outcome = parquet_direct_stream_factory(
             data,
@@ -151,9 +154,11 @@ def _try_write_direct_parquet_registry_to_file(
         raw = factory_outcome.raw
         if raw is None:
             return None
+        parquet_route = "arrow_factory"
+        parquet_fallback_reason = direct_outcome.route
         fallback_registry_json = schema_registry_json
         fallback_drifts_json = "[]"
-    return write_registry_raw_stream_to_file(
+    result = write_registry_raw_stream_to_file(
         raw,
         out_path,
         writer=writer,
@@ -169,6 +174,13 @@ def _try_write_direct_parquet_registry_to_file(
         memory_limit_bytes=memory_limit_bytes,
         threading_mode=threading_mode,
     )
+    patch_input_route_diagnostics(
+        result._raw,
+        source_route="arrow",
+        parquet_route=parquet_route,
+        parquet_fallback_reason=parquet_fallback_reason,
+    )
+    return result
 
 
 def _write_registry_file(
@@ -265,6 +277,7 @@ def _write_registry_file(
             row_span_columns=row_span_columns or {},
             timestamp_columns=timestamp_columns,
         )
+        patch_input_route_diagnostics(raw, source_route=source)
         return write_registry_raw_stream_to_file(
             raw,
             out_path,
@@ -299,6 +312,7 @@ def _write_registry_file(
             timestamp_columns=timestamp_columns,
             error_context=reader_error_context(plan.format, plan.source, plan.data),
         )
+        patch_input_route_diagnostics(raw, source_route=plan.source)
         return write_registry_raw_stream_to_file(
             raw,
             out_path,

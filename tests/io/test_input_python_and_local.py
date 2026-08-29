@@ -251,6 +251,83 @@ def test_read_json_folder_uses_native_path_sources(tmp_path, require_native: Non
     result = read_test_json_folder(folder)
 
     assert result.clean_data.to_pylist() == [{"id": 1}, {"id": 2}]
+    assert result.stats["input_source_route"] == "path_sources"
+    assert result.stats["input_plan_route"] == "native_manifest_paths"
+
+
+def test_input_route_diagnostics_are_owned_by_each_result(
+    tmp_path: Path, require_native: None
+) -> None:
+    """A later directory read cannot overwrite an earlier JSONL result's routes."""
+    pytest.importorskip("pyarrow")
+    jsonl_path = tmp_path / "events.jsonl"
+    jsonl_path.write_text('{"id":1}\n', encoding="utf-8")
+    folder = tmp_path / "events"
+    folder.mkdir()
+    (folder / "a.json").write_text('{"id":2}', encoding="utf-8")
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    parquet_path = tmp_path / "events.parquet"
+    pq.write_table(pa.table({"id": [3]}), parquet_path)
+
+    jsonl_result = ss.to_pyarrow(jsonl_path, input_format="jsonl")
+    directory_result = ss.to_pyarrow(folder, input_format="json", input_mode="directory")
+    parquet_result = ss.to_jsonl(
+        parquet_path,
+        tmp_path / "parquet.jsonl",
+        input_format="parquet",
+    )
+
+    assert jsonl_result.stats["input_source_route"] == "path"
+    assert jsonl_result.stats["input_plan_route"] == ""
+    assert jsonl_result.stats["parquet_input_route"] == ""
+    assert directory_result.stats["input_source_route"] == "path_sources"
+    assert directory_result.stats["input_plan_route"] == "native_manifest_paths"
+    assert directory_result.stats["parquet_input_route"] == ""
+    assert parquet_result.stats["input_source_route"] == "arrow"
+    assert parquet_result.stats["parquet_input_route"] == "native_registry"
+
+
+@pytest.mark.parametrize(
+    ("writer_name", "suffix"),
+    (("to_jsonl", ".jsonl"), ("to_csv", ".csv"), ("to_parquet", ".parquet")),
+)
+def test_single_file_writers_report_their_result_owned_input_route(
+    tmp_path: Path,
+    require_native: None,
+    writer_name: str,
+    suffix: str,
+) -> None:
+    """Every normal public writer reports its successful input source on its result."""
+    source = tmp_path / "events.jsonl"
+    source.write_text('{"id":1}\n', encoding="utf-8")
+
+    result = getattr(ss, writer_name)(
+        source,
+        tmp_path / f"output{suffix}",
+        input_format="jsonl",
+    )
+
+    assert result.stats["input_source_route"] == "path"
+    assert result.stats["input_plan_route"] == ""
+    assert result.stats["parquet_input_route"] == ""
+    assert result.stats["parquet_input_fallback_reason"] == ""
+
+
+def test_python_row_writer_reports_its_result_owned_input_route(
+    tmp_path: Path, require_native: None
+) -> None:
+    """A Python-row writer reports its selected source without global state."""
+    result = ss.to_jsonl(
+        [{"id": 1}],
+        tmp_path / "output.jsonl",
+        input_format="python",
+    )
+
+    assert result.stats["input_source_route"] == "python"
+    assert result.stats["input_plan_route"] == ""
+    assert result.stats["parquet_input_route"] == ""
+    assert result.stats["parquet_input_fallback_reason"] == ""
 
 
 def test_folder_listing_accepts_suffixes_without_leading_dot(tmp_path) -> None:

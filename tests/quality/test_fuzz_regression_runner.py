@@ -388,17 +388,17 @@ def test_standalone_mutation_stream_matches_its_cross_library_golden(
     assert outputs[0] == [
         "61626364",
         "61636364",
-        "196173628e64",
+        "196173628e64",  # pragma: allowlist secret
         "6161426462636464",
         "6161626343646243646263646162",
         "",
         "",
-        "82da207ee5a99c896263641b",
+        "82da207ee5a99c896263641b",  # pragma: allowlist secret
         "616263",
-        "0197422d497f8d4301",
+        "0197422d497f8d4301",  # pragma: allowlist secret
         "6162636446",
         "71524c63",
-        "907507bee6df9861",
+        "907507bee6df9861",  # pragma: allowlist secret
         "",
         "85148a5c85c5c6d6",
         "b34ebaaaf8",

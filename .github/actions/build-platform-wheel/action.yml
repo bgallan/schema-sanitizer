@@ -64,11 +64,11 @@ runs:
     - name: Build and test the CPython 3.11 ABI3 wheel
       env:
         CIBW_ARCH: ${{ inputs.arch }}
-        # Host builds receive host-absolute constraints. The Linux override
-        # uses cibuildwheel's copied-project path inside its OCI container.
-        CIBW_ENVIRONMENT: >-
-          PIP_BUILD_CONSTRAINT="$GITHUB_WORKSPACE/meta/ci/requirements/build-tools.txt"
-          PIP_CONSTRAINT="$GITHUB_WORKSPACE/meta/ci/requirements/build-tools.txt"
+        # macOS and Windows inherit these host-absolute constraints without
+        # overriding platform-specific cibuildwheel configuration. Linux uses
+        # cibuildwheel's copied-project path inside its OCI container.
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         CIBW_ENVIRONMENT_LINUX: >-
           PIP_BUILD_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt
           PIP_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt

@@ -10,13 +10,7 @@ from pathlib import Path
 
 import schema_sanitizer as ss
 from benchmarks.ingestion.fixtures import write_jsonl, write_parquet
-from benchmarks.ingestion.route_details import (
-    csv_nested_route_detail,
-    join_route_details,
-    jsonl_route_detail,
-    metadata_route_detail,
-    parquet_direct_route_detail,
-)
+from benchmarks.ingestion.route_details import result_route_details
 from benchmarks.ingestion.timing import time_call
 
 
@@ -39,7 +33,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             repeats,
             input_bytes=jsonl_path,
             output_bytes=output_path,
-            describe=lambda _result: jsonl_route_detail(),
+            describe=result_route_details,
         )
 
     if case in {"all", "write-csv"}:
@@ -59,7 +53,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             repeats,
             input_bytes=jsonl_path,
             output_bytes=output_path,
-            describe=lambda _result: f"{metadata_route_detail()} {csv_nested_route_detail()}",
+            describe=result_route_details,
         )
 
     if case in {"all", "parquet-jsonl", "parquet-jsonl-direct"}:
@@ -79,9 +73,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             repeats,
             input_bytes=parquet_path,
             output_bytes=output_path,
-            describe=lambda _result: join_route_details(
-                parquet_direct_route_detail(), jsonl_route_detail()
-            ),
+            describe=result_route_details,
         )
 
     if case in {"all", "parquet-jsonl-wide"}:
@@ -101,9 +93,7 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             repeats,
             input_bytes=parquet_path,
             output_bytes=output_path,
-            describe=lambda _result: join_route_details(
-                parquet_direct_route_detail(), jsonl_route_detail()
-            ),
+            describe=result_route_details,
         )
 
     if case in {"all", "registry-parquet-jsonl"}:
@@ -128,7 +118,5 @@ def run_write_cases(root: Path, rows: int, width: int, repeats: int, case: str) 
             repeats,
             input_bytes=parquet_path,
             output_bytes=output_path,
-            describe=lambda _result: join_route_details(
-                parquet_direct_route_detail(), jsonl_route_detail()
-            ),
+            describe=result_route_details,
         )

@@ -35,8 +35,8 @@ flowchart LR
     REUSE --> VALIDATION
     VALIDATION --> BUILDS[platform-wheel-builds<br/>four-platform matrix]
     VALIDATION --> OWNERS[validation-matrix<br/>eight thematic workloads]
-    BUILDS --> BARRIER[All four wheels complete<br/>slowest-build barrier]
-    BARRIER --> TESTS[platform-tests<br/>twelve platform x shard entries]
+    BUILDS --> BARRIER[All four wheel cells finish<br/>slowest-build barrier]
+    BARRIER --> TESTS[four platform-test matrices<br/>three shards each]
     BUILDS --> GATE[validation-gate<br/>release assembly]
     TESTS --> GATE
     OWNERS --> GATE
@@ -60,14 +60,14 @@ flowchart LR
 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) | `pull_request`, `push` to `main`, and `workflow_call` | Defines all build, test, security, coverage, packaging, and evidence jobs. | Uploads GitHub run artifacts only. |
 | [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) | `workflow_dispatch` only | Rejects an invalid request, calls `ci.yml` once, reconciles the validated manifest with PyPI, publishes only missing files, verifies the complete remote digest and provenance set, and emits one terminal release status. | Always targets production PyPI after canonical validation. |
 
-The canonical graph has three matrices and one terminal job:
+The canonical graph has six matrices and one terminal job:
 
 | Job | Matrix entries | Dependency | Shared contract |
 |---|---:|---|---|
 | `platform-wheel-builds` | 4 platforms | None | Build, audit, smoke, and upload one wheel for each release target. |
-| `platform-tests` | 12 platform-by-shard entries | Complete wheel matrix | Run the three exhaustive functional shards against all four installed wheels. |
+| `platform-tests-PLATFORM` | 4 matrices × 3 shards | Complete wheel matrix | Run the three exhaustive functional shards against each fixed platform wheel. |
 | `validation-matrix` | 8 thematic workloads | None | Run quality, source packaging, native coverage, TSan, and four platform-sanitizer entries in parallel. |
-| `validation-gate` | 1 terminal job | All three matrices | Require exact success, assemble and validate the release set, create its manifest, and upload the canonical reconciliation artifact. |
+| `validation-gate` | 1 terminal job | All six matrices | Require exact success, assemble and validate the release set, create its manifest, and upload the canonical reconciliation artifact. |
 
 The source-distribution workload is an independent entry in
 `validation-matrix`. It builds and validates the sdist while wheel and test work
@@ -78,7 +78,7 @@ The validation matrix uses an explicit include list rather than an implicit
 Cartesian product because its workloads need different runners, Python
 versions, timeouts, and sanitizer settings. Five repository-owned composite
 actions contain the workload implementations; conditions select exactly one
-of them for each task label. `fail-fast: false` on all three matrices preserves
+of them for each task label. `fail-fast: false` on all six matrices preserves
 independent failure evidence. The four intermediate wheel artifact names include
 their platform, so concurrently running entries cannot overwrite one another.
 
@@ -106,16 +106,16 @@ group, regardless of their `release_version`. PyPI production publication is
 therefore globally serialized, and a newer dispatch never cancels an active
 attempt.
 
-Three matrix jobs own all validation work. The single terminal
-`validation-gate` has direct `needs` edges to all three, rejects every aggregate
+Six matrix jobs own all validation work. The single terminal
+`validation-gate` has direct `needs` edges to all six, rejects every aggregate
 result other than `success`, and only then assembles the release artifact:
 
 | Owner | Contract |
 |---|---|
 | `platform-wheel-builds` | Builds the four release wheels once, with one exact artifact name per platform. |
-| `platform-tests` | Expands the Cartesian product of four platforms and three functional shards into 12 independent entries. |
+| `platform-tests-PLATFORM` | Four fixed-platform jobs each expand the same three functional shards, producing 12 independent entries. |
 | `validation-matrix` | Dispatches eight explicitly declared workloads: quality, source distribution and downstream packaging, native LLVM coverage, GCC ThreadSanitizer, and four platform sanitizers. |
-| `validation-gate` | Checks the three aggregate results, downloads the four wheels and validated sdist, validates the exact five-file release set, creates its manifest, and uploads `release-distributions`. |
+| `validation-gate` | Checks all six aggregate results, downloads the four wheels and validated sdist, validates the exact five-file release set, creates its manifest, and uploads `release-distributions`. |
 
 Repository rules for `main` must require the `CI / validation gate` status. Its
 stable identity keeps branch protection independent of matrix expansion and job
@@ -182,9 +182,9 @@ executes the installed public conversion smoke on
 exact 3.12, 3.13, and 3.14 patches, and every platform loads it on the exact
 3.14 patch. `platform-wheel-builds` defines the runner,
 release platform, cibuildwheel architecture, and wheel artifact identifier once
-for each of the four targets. `platform-tests` lists the exact
-12-entry product of those four platforms and the `concurrency`,
-`memory-parquet`, and `io-pipeline` shards. Every matrix uses
+for each of the four targets. Four `platform-tests-PLATFORM` jobs list the exact
+12-entry product of those platforms and the `concurrency`, `memory-parquet`,
+and `io-pipeline` shards as fixed-platform matrices. Every matrix uses
 `fail-fast: false`, preserving evidence from companion entries when one fails.
 Both workflows fix `PYTHONHASHSEED=0`, enable Python UTF-8 mode, and use UTC;
 the Linux wheel build passes all three controls into its cibuildwheel container.
@@ -192,16 +192,24 @@ They deliberately avoid a global `LC_ALL` value because no single UTF-8 locale
 name is portable across all Windows and macOS runners.
 
 GitHub Actions resolves `needs` at job granularity, not separately for each
-matrix entry. Consequently, the 12-entry test matrix starts only after all
-entries in `platform-wheel-builds` finish. Any platform build that finishes
-early therefore waits at an explicit slowest-build barrier instead of starting
-its tests as soon as its own artifact exists. This scheduling cost is accepted
-deliberately: the workflow has one build contract and one exhaustive test
-contract, and all 12 test entries become runnable together after the barrier.
-If any wheel entry fails, GitHub skips the dependent test matrix rather than
-running entries for the successful platforms. The always-run `validation-gate`
-observes that skipped state and fails before release assembly, so the stable
-gate cannot accidentally pass.
+matrix entry. Consequently, the four test matrices start only after all entries
+in `platform-wheel-builds` finish. Any platform build that finishes early
+therefore waits at an explicit slowest-build barrier instead of starting its
+tests as soon as its own artifact exists. This scheduling cost is accepted
+deliberately: the workflow has one build contract and four fixed-platform test
+contracts, and all 12 test entries become runnable together after the barrier.
+
+Each test job uses `if: ${{ !cancelled() }}`. A failed wheel cell therefore
+does not prevent matrix expansion: the three shards for platforms with a valid
+artifact still execute, while the failed platform's shards fail closed when
+their exact artifact remains unavailable after the bounded clean retry. A
+cancelled workflow starts no new test work. The four jobs deliberately omit a
+dynamic job-level `name`; GitHub can append the shard to their static job IDs
+for expanded cells, and a pre-expansion cancellation still displays a static
+identifier instead of an unevaluated matrix expression. The always-run
+`validation-gate` independently requires the wheel matrix and all four test
+matrix aggregates to be `success`, so neither missing tests nor a failed build
+can permit release assembly.
 
 The functional suite has the same exhaustive, disjoint three-way split on all
 four platforms:
@@ -218,8 +226,8 @@ oversubscribing a single runner's native concurrency tests. Three shards incur
 one more checkout, Python setup, dependency installation, and hosted runner per
 platform than the previous two-way split, but reduce the slowest functional
 path and run the normal suite concurrently with the benchmark and certificate
-workloads. Each test entry downloads only the wheel selected by its platform
-fields. The shared dependency on `platform-wheel-builds` intentionally
+workloads. Each test entry downloads only the wheel fixed by its owning
+platform job. The shared dependency on `platform-wheel-builds` intentionally
 introduces the slowest-build barrier described above; it does not serialize the
 12 entries after they become runnable.
 
@@ -300,7 +308,7 @@ The `source-distribution` task in `validation-matrix` starts independently of
 the wheel builds: it checks the source archive, rebuilds exactly one wheel from
 it, and validates that wheel as an isolated downstream consumer. The terminal
 `validation-gate` waits for that task together with every other matrix entry,
-verifies that all three matrices succeeded, and only then validates the
+verifies that all six matrices succeeded, and only then validates the
 five-file release set and creates the publication manifest. A failed source or
 unrelated validation entry therefore prevents assembly.
 
@@ -353,7 +361,7 @@ corresponding possibly partial destination.
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
-| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 7 days | The three matching shard entries in `platform-tests`, `validation-gate`, and delayed reruns. |
+| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 7 days | The three shard entries in the matching `platform-tests-PLATFORM` job, `validation-gate`, and delayed reruns. |
 | `source-distribution` | One validated intermediate sdist. | 7 days | `validation-gate` and delayed reruns. |
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 7 days | PyPI reconciliation and external audit. |
 | `pypi-publish-distributions` | Only manifest-matched files absent from PyPI. | 7 days | The code-free OIDC publisher; omitted when PyPI already has the complete matching set. |
@@ -556,7 +564,7 @@ before the expensive reusable validation; it never trusts an existing release
 until the newly built manifest can be compared after validation.
 
 After preflight, the workflow invokes the complete reusable `ci.yml`: the same
-three matrices and terminal `validation-gate` used by pull requests and pushes
+six matrices and terminal `validation-gate` used by pull requests and pushes
 to `main`. When that gate succeeds, the non-OIDC reconciliation job compares
 PyPI with the validated manifest. A complete matching release ends without a
 publisher job; otherwise the privileged job publishes only the staged missing
@@ -568,7 +576,7 @@ currently no GitHub Environment approval pause. Before dispatching, the
 operator should retain and audit after the run:
 
 - the dispatch actor, commit, requested version, run ID, and attempt;
-- all three aggregate matrix results and the final `validation-gate` result;
+- all six aggregate matrix results and the final `validation-gate` result;
 - that `release-distributions` contains five packages and one manifest;
 - that the manifest project, version, commit, run provenance, filenames, sizes,
   and SHA-256 digests match the candidate.
@@ -686,7 +694,7 @@ configuration because the toolchains and runners are platform-specific.
 
 - Keep exactly `ci.yml` and `publish.yml`. Add release-blocking checks to
   `ci.yml`, never as a reduced or duplicated implementation in `publish.yml`.
-- Keep all three matrices as direct dependencies of `validation-gate`, and keep
+- Keep all six matrices as direct dependencies of `validation-gate`, and keep
   its visible `CI / validation gate` status as the required `main` check.
 - Do not use `pull_request_target` for repository code from forks and do not
   grant `id-token: write` outside the final publication job.
@@ -696,9 +704,9 @@ configuration because the toolchains and runners are platform-specific.
   `release-distributions` by exact name, compare it with PyPI, and stage only
   digest-matched missing files. The OIDC publisher must consume only that named
   staged artifact and must not rebuild, mutate, or wildcard-select packages.
-- Keep the three shards in the 12-entry test matrix disjoint and exhaustive,
-  and preserve the same four platform definitions as the wheel matrix. Its
-  job-level dependency on the complete wheel matrix is an intentional
+- Keep the three shards in the four fixed-platform test matrices disjoint and
+  exhaustive, and preserve the same four platform definitions as the wheel
+  matrix. Their job-level dependency on the complete wheel matrix is an intentional
   slowest-build barrier; reassess its runtime cost before changing the topology.
 - Treat 44 percent as a baseline. Extend contextual risk tests and raise the
   floor when coverage improves; do not optimize the metric by excluding
@@ -717,6 +725,6 @@ For a compact external audit, verify that there are two workflow files, only
 `publish.yml` has `workflow_dispatch`, and `ci.yml` owns the three safe
 validation triggers. Every external `uses` reference must be a full commit SHA,
 only the final publish job has OIDC authority, `validation-gate` must depend
-directly on all three matrices, reconciliation must consume the named validated
+directly on all six matrices, reconciliation must consume the named validated
 release artifact, and publication must consume only the conditional named
 seven-day missing-package artifact.

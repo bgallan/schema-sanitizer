@@ -24,6 +24,7 @@ from .source_plan.registry import (
     OpenedSourcePlanRegistryStream,
     open_source_plan_registry_stream,
 )
+from .streams import patch_input_route_diagnostics
 
 
 def open_single_source_registry_stream(
@@ -50,6 +51,11 @@ def open_single_source_registry_stream(
         )
         raw = direct_outcome.raw
         if raw is not None:
+            patch_input_route_diagnostics(
+                raw,
+                source_route="arrow",
+                parquet_route=direct_outcome.route,
+            )
             observe_successful_input_runtime_stage("parquet")
             return OpenedSourcePlanRegistryStream(
                 stream=None,
@@ -84,6 +90,12 @@ def open_single_source_registry_stream(
         if opened is None:
             fallback.close()
             raise unsupported_direct_parquet_ingestion()
+        patch_input_route_diagnostics(
+            opened.diagnostics,
+            parquet_fallback_reason=(
+                direct_outcome.route if direct_outcome.route != "none" else None
+            ),
+        )
         opened.close_items.append(fallback)
         observe_successful_input_runtime_stage("parquet")
         return opened
@@ -102,6 +114,7 @@ def open_single_source_registry_stream(
             row_span_columns={},
             timestamp_columns={INGESTION_TIMESTAMP_COLUMN: ingestion_timestamp_micros},
         )
+        patch_input_route_diagnostics(raw, source_route=prepared_input.source)
         observe_successful_input_runtime_stage("python")
         return OpenedSourcePlanRegistryStream(
             stream=None,
@@ -143,6 +156,7 @@ def open_single_source_registry_stream(
             prepared_input.data,
         ),
     )
+    patch_input_route_diagnostics(raw, source_route=prepared_input.source)
     observe_successful_input_runtime_stage(prepared_input.public_format or prepared_input.format)
     return OpenedSourcePlanRegistryStream(
         stream=None,
